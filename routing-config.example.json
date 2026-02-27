@@ -1,0 +1,85 @@
+{
+  "models": [
+    {
+      "id": "gpt-4o-mini",
+      "type": "openai",
+      "costTier": "cheap",
+      "strengths": ["simple-qa", "classification", "extraction", "summarization"],
+      "maxTokens": 16000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "gpt-4o",
+      "type": "openai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "creative-writing", "complex-qa", "vision"],
+      "maxTokens": 128000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "claude-3.5-sonnet",
+      "type": "claude",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "long-context", "technical-writing"],
+      "maxTokens": 200000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "gpt-4.1",
+      "type": "openai",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-math", "research", "advanced-coding"],
+      "maxTokens": 128000,
+      "reasoning": true,
+      "enabled": true
+    },
+    {
+      "id": "claude-4-sonnet",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research"],
+      "maxTokens": 200000,
+      "reasoning": true,
+      "enabled": true
+    }
+  ],
+  "rules": [
+    {
+      "name": "force-claude-for-long-context",
+      "description": "Use Claude for prompts longer than 10000 characters",
+      "condition": {
+        "minLength": 10000
+      },
+      "modelId": "claude-3.5-sonnet",
+      "priority": 100
+    },
+    {
+      "name": "cheap-for-simple",
+      "description": "Always use cheap models for simple QA",
+      "condition": {
+        "taskTypes": ["simple-qa"],
+        "maxComplexity": "simple"
+      },
+      "modelId": "gpt-4o-mini",
+      "priority": 50
+    },
+    {
+      "name": "reasoning-for-math",
+      "description": "Use reasoning models for math problems",
+      "condition": {
+        "keywords": ["prove", "derive", "equation", "theorem", "calculus", "integral"]
+      },
+      "requiresReasoning": true,
+      "priority": 80
+    }
+  ],
+  "preferences": {
+    "defaultCostTier": "medium",
+    "preferCheapWhenPossible": false,
+    "maxCostPerRequest": null,
+    "fallbackModel": "gpt-4o"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "SAP Bot Orchestrator",
+  "description": "Intelligent LLM orchestrator for SAP AI Core",
+  "stack": {
+    "language": "TypeScript",
+    "framework": "Node.js",
+    "versions": {
+      "node": "22.x"
+    }
+  },
+  "infrastructure": {
+    "platform": "docker",
+    "containerization": "docker"
+  },
+  "quality": {
+    "requireLinting": true,
+    "requireTypes": true,
+    "noTODOs": true
+  },
+  "style": {
+    "indentation": "spaces",
+    "indentSize": 2,
+    "lineLength": 100,
+    "namingConventions": {
+      "variables": "camelCase",
+      "functions": "camelCase",
+      "classes": "PascalCase",
+      "constants": "UPPER_SNAKE_CASE"
+    }
+  },
+  "architectureInvariants": [
+    "Use TypeScript strict mode for all new code"
+  ],
+  "constraints": [],
+  "externalDependencies": [],
+  "createdAt": 1772173798403,
+  "updatedAt": 1772173828808
+}
