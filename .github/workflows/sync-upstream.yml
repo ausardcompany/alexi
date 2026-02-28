@@ -560,7 +560,7 @@ jobs:
       - name: Update last-sync-commits.json
         if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Get current branch and pull latest
           CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
