@@ -8,7 +8,14 @@
   "scripts": {
     "dev": "tsx src/cli/program.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/cli/program.js"
+    "start": "node dist/cli/program.js",
+    "typecheck": "tsc --noEmit",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "tsc-files --noEmit"
+    ]
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -24,8 +31,13 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.4.2",
+    "@commitlint/config-conventional": "^20.4.2",
     "@types/node": "^25.3.2",
     "@types/react": "^19.2.14",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.3.0",
+    "tsc-files": "^1.1.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
