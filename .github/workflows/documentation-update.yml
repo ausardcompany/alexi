@@ -1,0 +1,647 @@
+name: Documentation Update
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull Request number'
+        required: true
+        type: number
+      force_full_regeneration:
+        description: 'Force full documentation regeneration'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate-documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Determine PR number
+        id: pr_number
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUM="${{ github.event.pull_request.number }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUM="${{ inputs.pr_number }}"
+          else
+            echo "No PR number available"
+            exit 1
+          fi
+          echo "pr_number=$PR_NUM" >> $GITHUB_OUTPUT
+          echo "PR number: $PR_NUM"
+      
+      - name: Get PR branch name
+        id: pr_data
+        run: |
+          PR_BRANCH=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')
+          echo "branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+          echo "PR branch: $PR_BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr_number.outputs.pr_number }}
+      
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr_data.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Fetch base branch
+        run: |
+          # Try main first, fall back to master
+          git fetch origin main:main 2>/dev/null || git fetch origin master:master
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Install Kilo CLI
+        run: |
+          echo "Installing Kilo CLI..."
+          npm install -g @kilocode/cli
+          kilo --version
+      
+      - name: Verify Kilo CLI installation
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+        run: |
+          echo "Verifying Kilo CLI and SAP AI Core configuration..."
+          echo "[OK] Kilo version: $(kilo --version)"
+          echo "[OK] SAP AI Core credentials configured via environment variables"
+          echo "     Resource Group: $AICORE_RESOURCE_GROUP"
+          echo "     Service Key: [configured]"
+      
+      - name: Analyze changed files
+        id: analyze
+        run: |
+          echo "## Changed Files Analysis" > analysis.md
+          echo "" >> analysis.md
+          
+          # Determine base branch
+          if git show-ref --quiet refs/heads/main; then
+            BASE_BRANCH="main"
+          else
+            BASE_BRANCH="master"
+          fi
+          
+          # Find the last documentation commit by bot
+          LAST_DOC_COMMIT=$(git log --oneline --grep="docs: auto-generate documentation \[skip ci\]" -1 --format="%H" 2>/dev/null || echo "")
+          
+          if [ -n "$LAST_DOC_COMMIT" ]; then
+            echo "[INFO] Found previous documentation commit: ${LAST_DOC_COMMIT:0:7}"
+            LAST_CODE_COMMIT=$(git rev-parse "${LAST_DOC_COMMIT}^1" 2>/dev/null || echo "$BASE_BRANCH")
+            CHANGED_FILES=$(git diff --name-only "$LAST_CODE_COMMIT"...HEAD -- ':!docs/' ':!CHANGELOG.md' ':!*.md' 2>/dev/null || git diff --name-only "$BASE_BRANCH"...HEAD)
+            echo "[INFO] Analyzing changes since last doc generation"
+            echo "last_doc_commit=$LAST_DOC_COMMIT" >> $GITHUB_OUTPUT
+          else
+            echo "[INFO] No previous documentation commit found, analyzing all changes"
+            CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH"...HEAD)
+            echo "last_doc_commit=" >> $GITHUB_OUTPUT
+          fi
+          
+          # Filter out documentation files from changed files
+          CHANGED_FILES=$(echo "$CHANGED_FILES" | grep -v -E '^(docs/|CHANGELOG\.md$|README\.md$|.*\.md$)' || echo "")
+          
+          # Check if there are any code changes
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "[OK] No code changes detected since last documentation generation"
+            echo "has_code_changes=false" >> $GITHUB_OUTPUT
+            echo "has_code_changes=false" >> analysis.md
+          else
+            echo "has_code_changes=true" >> $GITHUB_OUTPUT
+            echo "has_code_changes=true" >> analysis.md
+          fi
+          
+          echo "### Changed Files" >> analysis.md
+          echo '```' >> analysis.md
+          echo "$CHANGED_FILES" >> analysis.md
+          echo '```' >> analysis.md
+          echo "" >> analysis.md
+          
+          # Analyze file types for TypeScript/Node.js project
+          TS_CHANGED=false
+          CLI_CHANGED=false
+          ROUTING_CHANGED=false
+          PROVIDERS_CHANGED=false
+          CORE_CHANGED=false
+          TESTS_CHANGED=false
+          CONFIG_CHANGED=false
+          WORKFLOWS_CHANGED=false
+          SCRIPTS_CHANGED=false
+          
+          if echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx)$'; then
+            TS_CHANGED=true
+            echo "[CHANGED] TypeScript files" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE 'src/cli/'; then
+            CLI_CHANGED=true
+            echo "[CHANGED] CLI module (commands, program)" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE 'src/(router|routing)/'; then
+            ROUTING_CHANGED=true
+            echo "[CHANGED] Routing module (router, classifier)" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE 'src/providers/'; then
+            PROVIDERS_CHANGED=true
+            echo "[CHANGED] Provider module (OpenAI, Claude, Bedrock)" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE 'src/(core|orchestrator)/'; then
+            CORE_CHANGED=true
+            echo "[CHANGED] Core orchestration" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE '(test|spec)\.(ts|tsx)$|__tests__/|tests/'; then
+            TESTS_CHANGED=true
+            echo "[CHANGED] Tests" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE '(package\.json|tsconfig\.json|\.env\.example|routing-config)'; then
+            CONFIG_CHANGED=true
+            echo "[CHANGED] Configuration files" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE '\.github/workflows/'; then
+            WORKFLOWS_CHANGED=true
+            echo "[CHANGED] GitHub workflows" >> analysis.md
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -qE 'scripts/'; then
+            SCRIPTS_CHANGED=true
+            echo "[CHANGED] Scripts" >> analysis.md
+          fi
+          
+          # Set outputs
+          echo "ts_changed=$TS_CHANGED" >> $GITHUB_OUTPUT
+          echo "cli_changed=$CLI_CHANGED" >> $GITHUB_OUTPUT
+          echo "routing_changed=$ROUTING_CHANGED" >> $GITHUB_OUTPUT
+          echo "providers_changed=$PROVIDERS_CHANGED" >> $GITHUB_OUTPUT
+          echo "core_changed=$CORE_CHANGED" >> $GITHUB_OUTPUT
+          echo "tests_changed=$TESTS_CHANGED" >> $GITHUB_OUTPUT
+          echo "config_changed=$CONFIG_CHANGED" >> $GITHUB_OUTPUT
+          echo "workflows_changed=$WORKFLOWS_CHANGED" >> $GITHUB_OUTPUT
+          echo "scripts_changed=$SCRIPTS_CHANGED" >> $GITHUB_OUTPUT
+          
+          cat analysis.md
+      
+      - name: Check if documentation update needed
+        id: check_needed
+        run: |
+          if [ "${{ steps.analyze.outputs.has_code_changes }}" = "false" ] && [ "${{ steps.force_flag.outputs.force }}" = "false" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "[SKIP] No code changes detected, skipping documentation update"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "[OK] Code changes detected, will update documentation"
+          fi
+      
+      - name: Determine force regeneration
+        id: force_flag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_full_regeneration }}" = "true" ]; then
+            echo "force=true" >> $GITHUB_OUTPUT
+          else
+            echo "force=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Determine documentation scope
+        if: steps.check_needed.outputs.skip != 'true'
+        id: scope
+        run: |
+          echo "## Documentation Scope" > scope.md
+          echo "" >> scope.md
+          
+          DOCS_TO_UPDATE=""
+          
+          # Determine which docs need updating based on changes
+          if [ "${{ steps.analyze.outputs.cli_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.core_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/ARCHITECTURE.md docs/API.md"
+            echo "- ARCHITECTURE.md (core component changes)" >> scope.md
+            echo "- API.md (CLI commands, APIs)" >> scope.md
+          fi
+          
+          if [ "${{ steps.analyze.outputs.routing_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/ROUTING.md"
+            echo "- ROUTING.md (routing system documentation)" >> scope.md
+          fi
+          
+          if [ "${{ steps.analyze.outputs.providers_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/PROVIDERS.md"
+            echo "- PROVIDERS.md (provider integration documentation)" >> scope.md
+          fi
+          
+          if [ "${{ steps.analyze.outputs.config_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/CONFIGURATION.md"
+            echo "- CONFIGURATION.md (configuration and settings)" >> scope.md
+          fi
+          
+          if [ "${{ steps.analyze.outputs.tests_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/TESTING.md"
+            echo "- TESTING.md (testing guide)" >> scope.md
+          fi
+          
+          if [ "${{ steps.analyze.outputs.workflows_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.scripts_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+            DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/AUTOMATION.md"
+            echo "- AUTOMATION.md (workflows and automation)" >> scope.md
+          fi
+          
+          # Always update CHANGELOG and CONTRIBUTING
+          DOCS_TO_UPDATE="$DOCS_TO_UPDATE CHANGELOG.md docs/CONTRIBUTING.md"
+          echo "- CHANGELOG.md (always generated)" >> scope.md
+          echo "- CONTRIBUTING.md (contribution guidelines)" >> scope.md
+          
+          echo "" >> scope.md
+          echo "docs_to_update=$DOCS_TO_UPDATE" >> $GITHUB_OUTPUT
+          
+          cat scope.md
+      
+      - name: Get commit messages
+        if: steps.check_needed.outputs.skip != 'true'
+        id: commits
+        run: |
+          echo "## Recent Commits" > commits.md
+          echo "" >> commits.md
+          echo '```' >> commits.md
+          
+          # Determine base branch
+          if git show-ref --quiet refs/heads/main; then
+            BASE_BRANCH="main"
+          else
+            BASE_BRANCH="master"
+          fi
+          
+          # Get commits since last doc commit or all
+          if [ -n "${{ steps.analyze.outputs.last_doc_commit }}" ]; then
+            LAST_CODE_COMMIT=$(git rev-parse "${{ steps.analyze.outputs.last_doc_commit }}^1" 2>/dev/null || echo "$BASE_BRANCH")
+            git log --oneline "$LAST_CODE_COMMIT"...HEAD -- ':!docs/' ':!CHANGELOG.md' >> commits.md || git log --oneline "$BASE_BRANCH"...HEAD >> commits.md
+          else
+            git log --oneline "$BASE_BRANCH"...HEAD >> commits.md
+          fi
+          echo '```' >> commits.md
+          
+          cat commits.md
+      
+      - name: Generate code diff summary
+        if: steps.check_needed.outputs.skip != 'true'
+        id: diff
+        run: |
+          echo "## Code Changes Summary" > diff.md
+          echo "" >> diff.md
+          
+          # Determine base branch
+          if git show-ref --quiet refs/heads/main; then
+            BASE_BRANCH="main"
+          else
+            BASE_BRANCH="master"
+          fi
+          
+          # Get diff stats - only code changes since last doc commit
+          if [ -n "${{ steps.analyze.outputs.last_doc_commit }}" ]; then
+            LAST_CODE_COMMIT=$(git rev-parse "${{ steps.analyze.outputs.last_doc_commit }}^1" 2>/dev/null || echo "$BASE_BRANCH")
+            DIFF_BASE="$LAST_CODE_COMMIT"
+          else
+            DIFF_BASE="$BASE_BRANCH"
+          fi
+          
+          echo "### Statistics" >> diff.md
+          echo '```' >> diff.md
+          git diff --stat "$DIFF_BASE"...HEAD -- ':!docs/' ':!CHANGELOG.md' ':!*.md' >> diff.md
+          echo '```' >> diff.md
+          echo "" >> diff.md
+          
+          # Get key changes for TypeScript files
+          if [ "${{ steps.analyze.outputs.ts_changed }}" = "true" ]; then
+            echo "### TypeScript Changes Preview" >> diff.md
+            echo '```typescript' >> diff.md
+            git diff "$DIFF_BASE"...HEAD -- '*.ts' '*.tsx' | head -100 >> diff.md
+            echo '```' >> diff.md
+          fi
+          
+          # Get key changes for JSON files (config, package.json)
+          if [ "${{ steps.analyze.outputs.config_changed }}" = "true" ]; then
+            echo "### Configuration Changes Preview" >> diff.md
+            echo '```json' >> diff.md
+            git diff "$DIFF_BASE"...HEAD -- '*.json' | head -100 >> diff.md
+            echo '```' >> diff.md
+          fi
+          
+          # Get key changes for YAML files (workflows)
+          if [ "${{ steps.analyze.outputs.workflows_changed }}" = "true" ]; then
+            echo "### Workflow Changes Preview" >> diff.md
+            echo '```yaml' >> diff.md
+            git diff "$DIFF_BASE"...HEAD -- '*.yml' '*.yaml' | head -100 >> diff.md
+            echo '```' >> diff.md
+          fi
+          
+          cat diff.md
+      
+      - name: Build Kilo prompt from templates
+        if: steps.check_needed.outputs.skip != 'true'
+        id: prompt
+        run: |
+          echo "Building Kilo prompt from modular templates..."
+          
+          # Verify all required template files exist
+          TEMPLATES_DIR=".github/templates"
+          REQUIRED_TEMPLATES=(
+            "$TEMPLATES_DIR/01-header.md"
+            "$TEMPLATES_DIR/02-changed-files-header.md"
+            "$TEMPLATES_DIR/03-commits-header.md"
+            "$TEMPLATES_DIR/04-diff-header.md"
+            "$TEMPLATES_DIR/05-scope-header.md"
+            "$TEMPLATES_DIR/06-requirements.md"
+            "$TEMPLATES_DIR/07-conditional/changelog-contributing.md"
+            "$TEMPLATES_DIR/08-footer.md"
+          )
+          
+          for template in "${REQUIRED_TEMPLATES[@]}"; do
+            if [ ! -f "$template" ]; then
+              echo "ERROR: Required template file missing: $template"
+              exit 1
+            fi
+          done
+          
+          echo "[OK] All required template files exist"
+          
+          # Start building prompt from templates
+          cat "$TEMPLATES_DIR/01-header.md" > kilo-prompt.md
+          
+          # Add changed files section
+          cat "$TEMPLATES_DIR/02-changed-files-header.md" >> kilo-prompt.md
+          cat analysis.md >> kilo-prompt.md
+          echo "" >> kilo-prompt.md
+          
+          # Add commits section
+          cat "$TEMPLATES_DIR/03-commits-header.md" >> kilo-prompt.md
+          cat commits.md >> kilo-prompt.md
+          echo "" >> kilo-prompt.md
+          
+          # Add diff section
+          cat "$TEMPLATES_DIR/04-diff-header.md" >> kilo-prompt.md
+          cat diff.md >> kilo-prompt.md
+          echo "" >> kilo-prompt.md
+          
+          # Add scope section
+          cat "$TEMPLATES_DIR/05-scope-header.md" >> kilo-prompt.md
+          cat scope.md >> kilo-prompt.md
+          echo "" >> kilo-prompt.md
+          
+          # Add general requirements
+          cat "$TEMPLATES_DIR/06-requirements.md" >> kilo-prompt.md
+          
+          # Add conditional sections based on changed modules
+          if [ "${{ steps.analyze.outputs.cli_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.core_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/architecture-api.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/architecture-api.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          if [ "${{ steps.analyze.outputs.routing_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/routing.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/routing.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          if [ "${{ steps.analyze.outputs.providers_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/providers.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/providers.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          if [ "${{ steps.analyze.outputs.config_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/configuration.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/configuration.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          if [ "${{ steps.analyze.outputs.tests_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/testing.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/testing.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          if [ "${{ steps.analyze.outputs.workflows_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.scripts_changed }}" = "true" ]; then
+            if [ -f "$TEMPLATES_DIR/07-conditional/automation.md" ]; then
+              cat "$TEMPLATES_DIR/07-conditional/automation.md" >> kilo-prompt.md
+            fi
+          fi
+          
+          # Always add CHANGELOG and CONTRIBUTING instructions
+          cat "$TEMPLATES_DIR/07-conditional/changelog-contributing.md" >> kilo-prompt.md
+          
+          # Add footer
+          cat "$TEMPLATES_DIR/08-footer.md" >> kilo-prompt.md
+          
+          echo "[OK] Kilo prompt built from templates"
+          echo "Prompt size: $(wc -l < kilo-prompt.md) lines"
+          cat kilo-prompt.md
+      
+      - name: Prepare documentation directories
+        if: steps.check_needed.outputs.skip != 'true'
+        run: |
+          # Create docs directory if it doesn't exist
+          mkdir -p docs
+          echo "[OK] Documentation directories prepared"
+      
+      - name: Run Kilo documentation generation
+        if: steps.check_needed.outputs.skip != 'true'
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+        id: kilo
+        continue-on-error: true
+        run: |
+          echo "Running Kilo CLI with SAP AI Core (Claude 4.5 Sonnet)..."
+          
+          # Run Kilo with the prompt
+          kilo run \
+            --model "sap-ai-core/anthropic--claude-4.5-sonnet" \
+            --auto \
+            -f kilo-prompt.md \
+            -- "Execute the documentation generation task in the attached file" \
+            > kilo-output.log 2>&1
+          
+          KILO_EXIT_CODE=$?
+          
+          echo "exit_code=$KILO_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $KILO_EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Kilo completed successfully"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[ERROR] Kilo failed with exit code $KILO_EXIT_CODE"
+          fi
+          
+          # Show output (last 100 lines to avoid overwhelming logs)
+          echo "=== Kilo Output (last 100 lines) ==="
+          tail -100 kilo-output.log
+          
+          # Show full output as artifact
+          echo "=== Full output available in artifacts ==="
+      
+      - name: Commit and push documentation changes
+        if: steps.check_needed.outputs.skip != 'true' && steps.kilo.outputs.success == 'true'
+        run: |
+          # Check if there are changes
+          if git diff --quiet; then
+            echo "No documentation changes to commit"
+            exit 0
+          fi
+          
+          # Add all documentation files (only if they exist)
+          git add docs/ CHANGELOG.md || true
+          [ -f README.md ] && git add README.md || true
+          
+          # Check if there's anything staged
+          if git diff --cached --quiet; then
+            echo "No documentation changes staged"
+            exit 0
+          fi
+          
+          # Commit with skip ci flag
+          git commit -m "docs: auto-generate documentation [skip ci]"
+          
+          # Push to PR branch
+          git push origin "${{ steps.pr_data.outputs.branch }}"
+          
+          echo "[OK] Documentation changes committed and pushed"
+      
+      - name: Post skip comment
+        if: steps.check_needed.outputs.skip == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr_number.outputs.pr_number }},
+              body: '## Documentation Update Skipped\n\nNo code changes detected since the last documentation generation. The documentation is already up to date.\n\n---\nGenerated by [Kilo CLI](https://kilo.ai)'
+            });
+      
+      - name: Post success comment
+        if: steps.check_needed.outputs.skip != 'true' && steps.kilo.outputs.success == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            let comment = '## Documentation Auto-Generated Successfully\n\n';
+            comment += 'Documentation has been automatically generated using **Kilo CLI** with **Claude 4.5 Sonnet** (SAP AI Core).\n\n';
+            
+            // Add scope
+            if (fs.existsSync('scope.md')) {
+              comment += fs.readFileSync('scope.md', 'utf8') + '\n\n';
+            }
+            
+            // Add changed files
+            if (fs.existsSync('analysis.md')) {
+              comment += '### Analysis\n\n';
+              comment += fs.readFileSync('analysis.md', 'utf8') + '\n\n';
+            }
+            
+            comment += '### Next Steps\n\n';
+            comment += '1. Review the generated documentation\n';
+            comment += '2. Check Mermaid diagrams render correctly\n';
+            comment += '3. Verify all changes are accurate\n';
+            comment += '4. Merge this PR if documentation looks good\n\n';
+            comment += '---\n';
+            comment += 'Generated by [Kilo CLI](https://kilo.ai) with Claude 4.5 Sonnet\n';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr_number.outputs.pr_number }},
+              body: comment
+            });
+      
+      - name: Post failure comment
+        if: steps.check_needed.outputs.skip != 'true' && steps.kilo.outputs.success == 'false'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            let comment = '## Documentation Auto-Generation Failed\n\n';
+            comment += 'Kilo CLI encountered an error while generating documentation.\n\n';
+            
+            comment += '### Error Details\n\n';
+            if (fs.existsSync('kilo-output.log')) {
+              const log = fs.readFileSync('kilo-output.log', 'utf8');
+              comment += '```\n' + log.slice(-2000) + '\n```\n\n';
+            }
+            
+            comment += '### Manual Documentation Checklist\n\n';
+            
+            if ('${{ steps.analyze.outputs.cli_changed }}' === 'true' || '${{ steps.analyze.outputs.core_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/ARCHITECTURE.md`\n';
+              comment += '- [ ] Update `docs/API.md`\n';
+              comment += '- [ ] Add/update Mermaid diagrams (minimum 3)\n';
+            }
+            
+            if ('${{ steps.analyze.outputs.routing_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/ROUTING.md`\n';
+            }
+            
+            if ('${{ steps.analyze.outputs.providers_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/PROVIDERS.md`\n';
+            }
+            
+            if ('${{ steps.analyze.outputs.config_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/CONFIGURATION.md`\n';
+            }
+            
+            if ('${{ steps.analyze.outputs.tests_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/TESTING.md`\n';
+            }
+            
+            if ('${{ steps.analyze.outputs.workflows_changed }}' === 'true' || '${{ steps.analyze.outputs.scripts_changed }}' === 'true') {
+              comment += '- [ ] Update `docs/AUTOMATION.md`\n';
+            }
+            
+            comment += '- [ ] Update `CHANGELOG.md` (root directory)\n';
+            comment += '- [ ] Update `docs/CONTRIBUTING.md`\n\n';
+            
+            comment += '---\n';
+            comment += 'You can retry by running the workflow again or update documentation manually.\n';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr_number.outputs.pr_number }},
+              body: comment
+            });
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation-generation-artifacts
+          path: |
+            analysis.md
+            scope.md
+            commits.md
+            diff.md
+            kilo-prompt.md
+            kilo-output.log
+          retention-days: 30
