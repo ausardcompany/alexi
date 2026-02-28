@@ -27,6 +27,32 @@ Intelligent LLM orchestrator for SAP AI Core with automatic model routing, multi
 - Keyword-based and complexity-based matching
 - Hot-reloadable configuration
 
+## Installation
+
+### Via Homebrew (Recommended)
+
+For macOS/Linux users with access to the ausardcompany private tap:
+
+```bash
+# Add the private tap (requires GitHub authentication)
+brew tap ausardcompany/tap git@github.com:ausardcompany/homebrew-tap.git
+
+# Install
+brew install sap-bot-orchestrator
+
+# Use the CLI
+sap-bot chat -m "Hello!"
+```
+
+### From Source
+
+```bash
+git clone git@github.com:ausardcompany/sap-bot-orchestrator.git
+cd sap-bot-orchestrator
+npm install
+npm run build
+```
+
 ## Quick Start
 
 ### 1. Install Dependencies

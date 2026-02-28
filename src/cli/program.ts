@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * SAP Bot Orchestrator CLI - Main entry point
  * 

@@ -1,10 +1,12 @@
 {
   "name": "sap-bot-orchestrator",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Bot orchestrator based on OpenClaw with SAP AI Core provider support (native or proxy)",
   "main": "dist/index.js",
+  "bin": {
+    "sap-bot": "dist/cli/program.js"
+  },
   "scripts": {
     "dev": "tsx src/cli/program.ts",
     "build": "tsc -p tsconfig.json",
