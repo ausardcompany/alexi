@@ -547,8 +547,10 @@ jobs:
           
           git commit -m "$COMMIT_MSG"
           
-          # Push directly to main
-          git push origin main
+          # Push to current branch (could be main or master)
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "Current branch: $CURRENT_BRANCH"
+          git push origin "$CURRENT_BRANCH"
           
           # Get commit SHA for output
           COMMIT_SHA=$(git rev-parse HEAD)
@@ -558,11 +560,11 @@ jobs:
       - name: Update last-sync-commits.json
         if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
         run: |
-          # Switch back to main branch
-          git checkout main
-          git pull origin main
+          # Get current branch and pull latest
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git pull origin "$CURRENT_BRANCH"
           
           # Ensure directory exists
           mkdir -p .github
