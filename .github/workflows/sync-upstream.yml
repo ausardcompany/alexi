@@ -1,0 +1,515 @@
+name: Sync Upstream Changes
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only analyze changes, do not create PR'
+        type: boolean
+        default: false
+      force_sync:
+        description: 'Sync even if no changes detected'
+        type: boolean
+        default: false
+
+env:
+  KILOCODE_REPO: ausard/kilocode
+  KILOCODE_UPSTREAM: Kilo-Org/kilocode
+  OPENCODE_REPO: ausard/opencode
+  OPENCODE_UPSTREAM: anomalyco/opencode
+  ORCHESTRATOR_REPO: ausard/sap-bot-orchestrator
+
+jobs:
+  sync-forks:
+    name: Sync Fork Repositories
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync kilocode fork
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Syncing ${{ env.KILOCODE_REPO }} from ${{ env.KILOCODE_UPSTREAM }}..."
+          gh repo sync ${{ env.KILOCODE_REPO }} --source ${{ env.KILOCODE_UPSTREAM }} --branch main || {
+            echo "::warning::Failed to sync kilocode, it may already be up to date"
+          }
+
+      - name: Sync opencode fork
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Syncing ${{ env.OPENCODE_REPO }} from ${{ env.OPENCODE_UPSTREAM }}..."
+          gh repo sync ${{ env.OPENCODE_REPO }} --source ${{ env.OPENCODE_UPSTREAM }} --branch main || {
+            echo "::warning::Failed to sync opencode, it may already be up to date"
+          }
+
+  analyze-and-update:
+    name: Analyze Changes and Update Orchestrator
+    needs: sync-forks
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check-changes.outputs.has_changes }}
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
+    steps:
+      - name: Checkout sap-bot-orchestrator
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Clone kilocode repository
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Cloning ${{ env.KILOCODE_REPO }}..."
+          git clone --depth 100 "https://x-access-token:${GH_TOKEN}@github.com/${{ env.KILOCODE_REPO }}.git" ../kilocode
+
+      - name: Clone opencode repository
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Cloning ${{ env.OPENCODE_REPO }}..."
+          git clone --depth 100 "https://x-access-token:${GH_TOKEN}@github.com/${{ env.OPENCODE_REPO }}.git" ../opencode
+
+      - name: Read previous sync commits
+        id: prev-commits
+        run: |
+          SYNC_FILE=".github/last-sync-commits.json"
+          
+          if [ -f "$SYNC_FILE" ]; then
+            echo "Found previous sync commits file"
+            PREV_KILOCODE=$(jq -r '.kilocode // "none"' "$SYNC_FILE")
+            PREV_OPENCODE=$(jq -r '.opencode // "none"' "$SYNC_FILE")
+          else
+            echo "No previous sync commits file found, will analyze all changes"
+            PREV_KILOCODE="none"
+            PREV_OPENCODE="none"
+          fi
+          
+          echo "prev_kilocode=$PREV_KILOCODE" >> $GITHUB_OUTPUT
+          echo "prev_opencode=$PREV_OPENCODE" >> $GITHUB_OUTPUT
+          echo "Previous kilocode commit: $PREV_KILOCODE"
+          echo "Previous opencode commit: $PREV_OPENCODE"
+
+      - name: Get current HEAD commits
+        id: current-commits
+        run: |
+          CURRENT_KILOCODE=$(git -C ../kilocode rev-parse HEAD)
+          CURRENT_OPENCODE=$(git -C ../opencode rev-parse HEAD)
+          
+          echo "current_kilocode=$CURRENT_KILOCODE" >> $GITHUB_OUTPUT
+          echo "current_opencode=$CURRENT_OPENCODE" >> $GITHUB_OUTPUT
+          echo "Current kilocode commit: $CURRENT_KILOCODE"
+          echo "Current opencode commit: $CURRENT_OPENCODE"
+
+      - name: Generate diff report
+        id: diff-report
+        run: |
+          mkdir -p .github/reports
+          DIFF_FILE=".github/reports/diff-report-$(date +%Y-%m-%d).md"
+          echo "diff_file=$DIFF_FILE" >> $GITHUB_OUTPUT
+          
+          # Run the diff report script if it exists, otherwise generate inline
+          if [ -x "scripts/generate-diff-report.sh" ]; then
+            ./scripts/generate-diff-report.sh \
+              --kilocode-dir ../kilocode \
+              --opencode-dir ../opencode \
+              --prev-kilocode "${{ steps.prev-commits.outputs.prev_kilocode }}" \
+              --prev-opencode "${{ steps.prev-commits.outputs.prev_opencode }}" \
+              --output "$DIFF_FILE"
+          else
+            echo "Generating diff report inline..."
+            
+            cat > "$DIFF_FILE" << 'HEADER'
+          # Upstream Changes Diff Report
+          
+          Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Summary
+          
+          HEADER
+            
+            # Kilocode changes
+            echo "## Kilocode Changes" >> "$DIFF_FILE"
+            echo "" >> "$DIFF_FILE"
+            
+            if [ "${{ steps.prev-commits.outputs.prev_kilocode }}" != "none" ]; then
+              cd ../kilocode
+              if git cat-file -t "${{ steps.prev-commits.outputs.prev_kilocode }}" >/dev/null 2>&1; then
+                echo "### Commits since last sync" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git log --oneline "${{ steps.prev-commits.outputs.prev_kilocode }}..HEAD" >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No new commits" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo "" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                
+                echo "### Changed files" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git diff --stat "${{ steps.prev-commits.outputs.prev_kilocode }}..HEAD" >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No file changes" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo "" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                
+                echo "### Detailed diff" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```diff' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git diff "${{ steps.prev-commits.outputs.prev_kilocode }}..HEAD" -- '*.ts' '*.tsx' '*.js' '*.json' >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No diff available" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+              else
+                echo "Previous commit not found in history, showing recent commits" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git log --oneline -20 >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+              fi
+              cd "$GITHUB_WORKSPACE"
+            else
+              echo "No previous sync - first time analysis" >> "$DIFF_FILE"
+              echo '```' >> "$DIFF_FILE"
+              git -C ../kilocode log --oneline -20 >> "$DIFF_FILE"
+              echo '```' >> "$DIFF_FILE"
+            fi
+            
+            echo "" >> "$DIFF_FILE"
+            
+            # Opencode changes
+            echo "## Opencode Changes" >> "$DIFF_FILE"
+            echo "" >> "$DIFF_FILE"
+            
+            if [ "${{ steps.prev-commits.outputs.prev_opencode }}" != "none" ]; then
+              cd ../opencode
+              if git cat-file -t "${{ steps.prev-commits.outputs.prev_opencode }}" >/dev/null 2>&1; then
+                echo "### Commits since last sync" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git log --oneline "${{ steps.prev-commits.outputs.prev_opencode }}..HEAD" >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No new commits" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo "" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                
+                echo "### Changed files" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git diff --stat "${{ steps.prev-commits.outputs.prev_opencode }}..HEAD" >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No file changes" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo "" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                
+                echo "### Detailed diff" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```diff' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git diff "${{ steps.prev-commits.outputs.prev_opencode }}..HEAD" -- '*.ts' '*.tsx' '*.js' '*.json' >> "$GITHUB_WORKSPACE/$DIFF_FILE" 2>/dev/null || echo "No diff available" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+              else
+                echo "Previous commit not found in history, showing recent commits" >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                git log --oneline -20 >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+                echo '```' >> "$GITHUB_WORKSPACE/$DIFF_FILE"
+              fi
+              cd "$GITHUB_WORKSPACE"
+            else
+              echo "No previous sync - first time analysis" >> "$DIFF_FILE"
+              echo '```' >> "$DIFF_FILE"
+              git -C ../opencode log --oneline -20 >> "$DIFF_FILE"
+              echo '```' >> "$DIFF_FILE"
+            fi
+          fi
+          
+          echo "Diff report generated at: $DIFF_FILE"
+          cat "$DIFF_FILE"
+
+      - name: Check for meaningful changes
+        id: check-changes
+        run: |
+          PREV_KILO="${{ steps.prev-commits.outputs.prev_kilocode }}"
+          CURR_KILO="${{ steps.current-commits.outputs.current_kilocode }}"
+          PREV_OPEN="${{ steps.prev-commits.outputs.prev_opencode }}"
+          CURR_OPEN="${{ steps.current-commits.outputs.current_opencode }}"
+          FORCE_SYNC="${{ inputs.force_sync }}"
+          
+          HAS_CHANGES="false"
+          
+          if [ "$FORCE_SYNC" == "true" ]; then
+            echo "Force sync enabled, proceeding with analysis"
+            HAS_CHANGES="true"
+          elif [ "$PREV_KILO" == "none" ] || [ "$PREV_OPEN" == "none" ]; then
+            echo "First time sync, proceeding with analysis"
+            HAS_CHANGES="true"
+          elif [ "$PREV_KILO" != "$CURR_KILO" ] || [ "$PREV_OPEN" != "$CURR_OPEN" ]; then
+            echo "Changes detected in upstream repositories"
+            HAS_CHANGES="true"
+          else
+            echo "No changes detected in upstream repositories"
+          fi
+          
+          echo "has_changes=$HAS_CHANGES" >> $GITHUB_OUTPUT
+
+      - name: Exit if no changes
+        if: steps.check-changes.outputs.has_changes == 'false'
+        run: |
+          echo "No changes detected and force_sync is not enabled. Exiting."
+          exit 0
+
+      - name: Setup Node.js
+        if: steps.check-changes.outputs.has_changes == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Kilo CLI
+        if: steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          npm install -g @anthropics/claude-code || npm install -g kilo-code || {
+            echo "::warning::Could not install Kilo CLI globally, will use npx"
+          }
+
+      - name: Configure SAP AI Core environment
+        if: steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          # Export SAP AI Core configuration for Kilo CLI
+          echo "ANTHROPIC_BASE_URL=${{ secrets.SAP_AI_CORE_URL }}" >> $GITHUB_ENV
+          echo "SAP_AI_CORE_CLIENT_ID=${{ secrets.SAP_AI_CORE_CLIENT_ID }}" >> $GITHUB_ENV
+          echo "SAP_AI_CORE_CLIENT_SECRET=${{ secrets.SAP_AI_CORE_CLIENT_SECRET }}" >> $GITHUB_ENV
+          echo "SAP_AI_CORE_TOKEN_URL=${{ secrets.SAP_AI_CORE_TOKEN_URL }}" >> $GITHUB_ENV
+          echo "SAP_AI_CORE_RESOURCE_GROUP=${{ secrets.SAP_AI_CORE_RESOURCE_GROUP }}" >> $GITHUB_ENV
+
+      - name: Run Kilo analysis
+        if: steps.check-changes.outputs.has_changes == 'true'
+        id: kilo-analysis
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.SAP_AI_CORE_URL }}
+          SAP_AI_CORE_CLIENT_ID: ${{ secrets.SAP_AI_CORE_CLIENT_ID }}
+          SAP_AI_CORE_CLIENT_SECRET: ${{ secrets.SAP_AI_CORE_CLIENT_SECRET }}
+          SAP_AI_CORE_TOKEN_URL: ${{ secrets.SAP_AI_CORE_TOKEN_URL }}
+          SAP_AI_CORE_RESOURCE_GROUP: ${{ secrets.SAP_AI_CORE_RESOURCE_GROUP }}
+        run: |
+          DIFF_FILE="${{ steps.diff-report.outputs.diff_file }}"
+          
+          # Create the Kilo prompt
+          KILO_PROMPT=$(cat << 'PROMPT_EOF'
+          You are analyzing upstream changes from kilocode and opencode repositories to update the sap-bot-orchestrator project.
+
+          ## Instructions
+
+          1. Read the diff report from: $DIFF_FILE
+          2. Analyze the changes in both kilocode and opencode repositories
+          3. Update corresponding files in sap-bot-orchestrator based on this mapping:
+             - Tool system changes -> src/tool/
+             - Agent system changes -> src/agent/
+             - Permission system changes -> src/permission/
+             - Event bus changes -> src/bus/
+             - Core orchestration changes -> src/core/
+
+          4. Important considerations:
+             - Maintain compatibility with SAP AI Core integration
+             - Preserve existing SAP-specific customizations
+             - Follow the existing code style and patterns in this repository
+             - Only make changes that are necessary and beneficial
+             - Do not break existing functionality
+
+          5. After making changes, create a file at .github/reports/changes-summary.md with:
+             - List of files modified
+             - Summary of each change and why it was made
+             - Any potential breaking changes or things to test
+
+          Please analyze the diff report and make the necessary updates to keep sap-bot-orchestrator in sync with upstream improvements.
+          PROMPT_EOF
+          )
+          
+          # Replace placeholder with actual path
+          KILO_PROMPT="${KILO_PROMPT//\$DIFF_FILE/$DIFF_FILE}"
+          
+          # Try different CLI names
+          if command -v kilo &> /dev/null; then
+            echo "$KILO_PROMPT" | kilo --print --dangerously-skip-permissions
+          elif command -v claude &> /dev/null; then
+            echo "$KILO_PROMPT" | claude --print --dangerously-skip-permissions
+          else
+            echo "$KILO_PROMPT" | npx -y kilo-code --print --dangerously-skip-permissions || \
+            echo "$KILO_PROMPT" | npx -y @anthropics/claude-code --print --dangerously-skip-permissions
+          fi
+
+      - name: Check for kilo changes
+        if: steps.check-changes.outputs.has_changes == 'true'
+        id: kilo-changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "kilo_made_changes=true" >> $GITHUB_OUTPUT
+            echo "Kilo made the following changes:"
+            git status --short
+            git diff --stat
+          else
+            echo "kilo_made_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes were made by Kilo"
+          fi
+
+      - name: Output proposed changes (dry run)
+        if: inputs.dry_run == true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        run: |
+          echo "=== DRY RUN MODE ==="
+          echo ""
+          echo "The following changes would be made:"
+          echo ""
+          git diff
+          echo ""
+          echo "Changed files:"
+          git status --short
+          echo ""
+          echo "=== END DRY RUN ==="
+
+      - name: Create sync branch
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        id: create-branch
+        run: |
+          BRANCH_NAME="sync/upstream-$(date +%Y-%m-%d)"
+          
+          # Check if branch already exists and add suffix if needed
+          COUNTER=1
+          ORIGINAL_BRANCH="$BRANCH_NAME"
+          while git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; do
+            BRANCH_NAME="${ORIGINAL_BRANCH}-${COUNTER}"
+            COUNTER=$((COUNTER + 1))
+          done
+          
+          git checkout -b "$BRANCH_NAME"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Created branch: $BRANCH_NAME"
+
+      - name: Commit changes
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage all changes
+          git add -A
+          
+          # Create detailed commit message
+          COMMIT_MSG=$(cat << EOF
+          feat: sync upstream changes ($(date +%Y-%m-%d))
+
+          Synchronized changes from upstream repositories:
+          - kilocode: ${{ steps.prev-commits.outputs.prev_kilocode }} -> ${{ steps.current-commits.outputs.current_kilocode }}
+          - opencode: ${{ steps.prev-commits.outputs.prev_opencode }} -> ${{ steps.current-commits.outputs.current_opencode }}
+
+          Changes analyzed and applied by Kilo CLI to maintain compatibility
+          with SAP AI Core integration.
+
+          See .github/reports/changes-summary.md for detailed change log.
+          EOF
+          )
+          
+          git commit -m "$COMMIT_MSG"
+
+      - name: Push branch
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          git push -u origin "${{ steps.create-branch.outputs.branch_name }}"
+
+      - name: Create Pull Request
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # Generate PR body
+          CHANGED_FILES=$(git diff --name-only HEAD~1)
+          DIFF_SUMMARY=""
+          
+          if [ -f ".github/reports/changes-summary.md" ]; then
+            DIFF_SUMMARY=$(cat .github/reports/changes-summary.md)
+          fi
+          
+          PR_URL=$(gh pr create \
+            --title "feat: sync upstream changes ($(date +%Y-%m-%d))" \
+            --body "$(cat << 'EOF'
+          ## Summary
+
+          This PR synchronizes changes from upstream repositories:
+
+          | Repository | Previous | Current |
+          |------------|----------|---------|
+          | kilocode | `${{ steps.prev-commits.outputs.prev_kilocode }}` | `${{ steps.current-commits.outputs.current_kilocode }}` |
+          | opencode | `${{ steps.prev-commits.outputs.prev_opencode }}` | `${{ steps.current-commits.outputs.current_opencode }}` |
+
+          ## Changed Files
+
+          $(echo "$CHANGED_FILES" | sed 's/^/- /')
+
+          ## Changes Summary
+
+          $DIFF_SUMMARY
+
+          ## Testing Instructions
+
+          1. Check out this branch locally
+          2. Run the test suite: `npm test`
+          3. Verify SAP AI Core integration still works
+          4. Review each changed file for compatibility
+
+          ## Checklist
+
+          - [ ] Tests pass
+          - [ ] SAP AI Core integration verified
+          - [ ] No breaking changes introduced
+          - [ ] Documentation updated if needed
+
+          ---
+          *This PR was automatically generated by the sync-upstream workflow.*
+          EOF
+          )" \
+            --base main \
+            --head "${{ steps.create-branch.outputs.branch_name }}")
+          
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "Created PR: $PR_URL"
+
+      - name: Update last-sync-commits.json
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # Switch back to main branch
+          git checkout main
+          git pull origin main
+          
+          # Ensure directory exists
+          mkdir -p .github
+          
+          # Update the sync commits file
+          cat > .github/last-sync-commits.json << EOF
+          {
+            "kilocode": "${{ steps.current-commits.outputs.current_kilocode }}",
+            "opencode": "${{ steps.current-commits.outputs.current_opencode }}",
+            "last_sync": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "workflow_run": "${{ github.run_id }}"
+          }
+          EOF
+          
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .github/last-sync-commits.json
+          git commit -m "chore: update last-sync-commits.json [skip ci]" || {
+            echo "No changes to commit"
+            exit 0
+          }
+          git push origin main
+
+      - name: Summary
+        run: |
+          echo "## Sync Upstream Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Force Sync | ${{ inputs.force_sync }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Changes Detected | ${{ steps.check-changes.outputs.has_changes }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kilo Made Changes | ${{ steps.kilo-changes.outputs.kilo_made_changes }} |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.create-pr.outputs.pr_url }}" != "" ]; then
+            echo "| PR Created | ${{ steps.create-pr.outputs.pr_url }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Commit References" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | Previous | Current |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|----------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| kilocode | \`${{ steps.prev-commits.outputs.prev_kilocode }}\` | \`${{ steps.current-commits.outputs.current_kilocode }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| opencode | \`${{ steps.prev-commits.outputs.prev_opencode }}\` | \`${{ steps.current-commits.outputs.current_opencode }}\` |" >> $GITHUB_STEP_SUMMARY

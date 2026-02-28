@@ -1,0 +1,19 @@
+{
+  "kilocode": {
+    "last_synced_commit": null,
+    "last_synced_at": null,
+    "upstream": "Kilo-Org/kilocode",
+    "fork": "ausard/kilocode"
+  },
+  "opencode": {
+    "last_synced_commit": null,
+    "last_synced_at": null,
+    "upstream": "anomalyco/opencode",
+    "fork": "ausard/opencode"
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "created_at": "2026-02-28T00:00:00Z",
+    "description": "Tracks last synced commits from upstream repositories"
+  }
+}
