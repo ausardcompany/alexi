@@ -42,14 +42,22 @@ export class ClaudeNativeProvider {
         const token = await this.getToken();
         const apiUrl = this.serviceKey.serviceurls.AI_API_URL;
         const url = `${apiUrl}/v2/inference/deployments/${this.deploymentId}/converse`;
-        // Convert to Bedrock format
-        const bedrockMessages = messages.map(m => ({
+        // Extract system messages and convert to Bedrock format
+        // Bedrock Converse API only allows 'user' | 'assistant' roles in messages
+        // System prompts must be passed via separate 'system' field
+        const systemMessages = messages.filter(m => m.role === 'system');
+        const chatMessages = messages.filter(m => m.role !== 'system');
+        const bedrockMessages = chatMessages.map(m => ({
             role: m.role,
             content: [{ text: m.content }]
         }));
         const requestBody = {
             messages: bedrockMessages
         };
+        // Add system prompt if present
+        if (systemMessages.length > 0) {
+            requestBody.system = systemMessages.map(m => ({ text: m.content }));
+        }
         const response = await fetch(url, {
             method: 'POST',
             headers: {
@@ -85,14 +93,22 @@ export class ClaudeNativeProvider {
         const token = await this.getToken();
         const apiUrl = this.serviceKey.serviceurls.AI_API_URL;
         const url = `${apiUrl}/v2/inference/deployments/${this.deploymentId}/converse-stream`;
-        // Convert to Bedrock format
-        const bedrockMessages = messages.map(m => ({
+        // Extract system messages and convert to Bedrock format
+        // Bedrock Converse API only allows 'user' | 'assistant' roles in messages
+        // System prompts must be passed via separate 'system' field
+        const systemMessages = messages.filter(m => m.role === 'system');
+        const chatMessages = messages.filter(m => m.role !== 'system');
+        const bedrockMessages = chatMessages.map(m => ({
             role: m.role,
             content: [{ text: m.content }]
         }));
         const requestBody = {
             messages: bedrockMessages
         };
+        // Add system prompt if present
+        if (systemMessages.length > 0) {
+            requestBody.system = systemMessages.map(m => ({ text: m.content }));
+        }
         const response = await fetch(url, {
             method: 'POST',
             headers: {
