@@ -11,8 +11,14 @@
     "upstream": "anomalyco/opencode",
     "fork": "ausard/opencode"
   },
+  "claude-code": {
+    "last_synced_commit": "cd4956871a56b07d9d2a6cb538fae109d04c9d57",
+    "last_synced_at": "2026-02-28T12:00:00Z",
+    "upstream": "anthropics/claude-code",
+    "fork": "direct-clone"
+  },
   "metadata": {
-    "version": "1.0.0",
+    "version": "1.1.0",
     "created_at": "2026-02-28T00:00:00Z",
     "description": "Tracks last synced commits from upstream repositories"
   }

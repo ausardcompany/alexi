@@ -19,6 +19,7 @@ env:
   KILOCODE_UPSTREAM: Kilo-Org/kilocode
   OPENCODE_REPO: ausard/opencode
   OPENCODE_UPSTREAM: anomalyco/opencode
+  CLAUDE_CODE_UPSTREAM: anthropics/claude-code
   ORCHESTRATOR_REPO: ausard/sap-bot-orchestrator
 
 jobs:
@@ -72,6 +73,11 @@ jobs:
           echo "Cloning ${{ env.OPENCODE_REPO }}..."
           git clone --depth 100 "https://x-access-token:${GH_TOKEN}@github.com/${{ env.OPENCODE_REPO }}.git" ../opencode
 
+      - name: Clone claude-code repository
+        run: |
+          echo "Cloning ${{ env.CLAUDE_CODE_UPSTREAM }}..."
+          git clone --depth 100 "https://github.com/${{ env.CLAUDE_CODE_UPSTREAM }}.git" ../claude-code
+
       - name: Read previous sync commits
         id: prev-commits
         run: |
@@ -79,29 +85,37 @@ jobs:
           
           if [ -f "$SYNC_FILE" ]; then
             echo "Found previous sync commits file"
-            PREV_KILOCODE=$(jq -r '.kilocode // "none"' "$SYNC_FILE")
-            PREV_OPENCODE=$(jq -r '.opencode // "none"' "$SYNC_FILE")
+            # Handle both flat and nested JSON formats
+            PREV_KILOCODE=$(jq -r 'if .kilocode | type == "object" then .kilocode.last_synced_commit else .kilocode end // "none"' "$SYNC_FILE")
+            PREV_OPENCODE=$(jq -r 'if .opencode | type == "object" then .opencode.last_synced_commit else .opencode end // "none"' "$SYNC_FILE")
+            PREV_CLAUDE_CODE=$(jq -r 'if .["claude-code"] | type == "object" then .["claude-code"].last_synced_commit else .["claude-code"] end // "none"' "$SYNC_FILE")
           else
             echo "No previous sync commits file found, will analyze all changes"
             PREV_KILOCODE="none"
             PREV_OPENCODE="none"
+            PREV_CLAUDE_CODE="none"
           fi
           
           echo "prev_kilocode=$PREV_KILOCODE" >> $GITHUB_OUTPUT
           echo "prev_opencode=$PREV_OPENCODE" >> $GITHUB_OUTPUT
+          echo "prev_claude_code=$PREV_CLAUDE_CODE" >> $GITHUB_OUTPUT
           echo "Previous kilocode commit: $PREV_KILOCODE"
           echo "Previous opencode commit: $PREV_OPENCODE"
+          echo "Previous claude-code commit: $PREV_CLAUDE_CODE"
 
       - name: Get current HEAD commits
         id: current-commits
         run: |
           CURRENT_KILOCODE=$(git -C ../kilocode rev-parse HEAD)
           CURRENT_OPENCODE=$(git -C ../opencode rev-parse HEAD)
+          CURRENT_CLAUDE_CODE=$(git -C ../claude-code rev-parse HEAD)
           
           echo "current_kilocode=$CURRENT_KILOCODE" >> $GITHUB_OUTPUT
           echo "current_opencode=$CURRENT_OPENCODE" >> $GITHUB_OUTPUT
+          echo "current_claude_code=$CURRENT_CLAUDE_CODE" >> $GITHUB_OUTPUT
           echo "Current kilocode commit: $CURRENT_KILOCODE"
           echo "Current opencode commit: $CURRENT_OPENCODE"
+          echo "Current claude-code commit: $CURRENT_CLAUDE_CODE"
 
       - name: Generate diff report
         id: diff-report
@@ -213,21 +227,23 @@ jobs:
       - name: Check for meaningful changes
         id: check-changes
         run: |
-          PREV_KILO="${{ steps.prev-commits.outputs.prev_kilocode }}"
-          CURR_KILO="${{ steps.current-commits.outputs.current_kilocode }}"
-          PREV_OPEN="${{ steps.prev-commits.outputs.prev_opencode }}"
-          CURR_OPEN="${{ steps.current-commits.outputs.current_opencode }}"
-          FORCE_SYNC="${{ inputs.force_sync }}"
+          PREV_KILO="${​{ steps.prev-commits.outputs.prev_kilocode }}"
+          CURR_KILO="${​{ steps.current-commits.outputs.current_kilocode }}"
+          PREV_OPEN="${​{ steps.prev-commits.outputs.prev_opencode }}"
+          CURR_OPEN="${​{ steps.current-commits.outputs.current_opencode }}"
+          PREV_CLAUDE="${​{ steps.prev-commits.outputs.prev_claude_code }}"
+          CURR_CLAUDE="${​{ steps.current-commits.outputs.current_claude_code }}"
+          FORCE_SYNC="${​{ inputs.force_sync }}"
           
           HAS_CHANGES="false"
           
           if [ "$FORCE_SYNC" == "true" ]; then
             echo "Force sync enabled, proceeding with analysis"
             HAS_CHANGES="true"
-          elif [ "$PREV_KILO" == "none" ] || [ "$PREV_OPEN" == "none" ]; then
+          elif [ "$PREV_KILO" == "none" ] || [ "$PREV_OPEN" == "none" ] || [ "$PREV_CLAUDE" == "none" ]; then
             echo "First time sync, proceeding with analysis"
             HAS_CHANGES="true"
-          elif [ "$PREV_KILO" != "$CURR_KILO" ] || [ "$PREV_OPEN" != "$CURR_OPEN" ]; then
+          elif [ "$PREV_KILO" != "$CURR_KILO" ] || [ "$PREV_OPEN" != "$CURR_OPEN" ] || [ "$PREV_CLAUDE" != "$CURR_CLAUDE" ]; then
             echo "Changes detected in upstream repositories"
             HAS_CHANGES="true"
           else
@@ -272,12 +288,15 @@ jobs:
           
           # Create the Kilo prompt
           KILO_PROMPT=$(cat << 'PROMPT_EOF'
-          You are analyzing upstream changes from kilocode and opencode repositories to update the sap-bot-orchestrator project.
+          You are analyzing upstream changes from three AI coding assistant repositories to update the sap-bot-orchestrator project:
+          - **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
+          - **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant
+          - **claude-code** (anthropics/claude-code) - Anthropic's Claude Code CLI
 
           ## Instructions
 
           1. Read the diff report from: $DIFF_FILE
-          2. Analyze the changes in both kilocode and opencode repositories
+          2. Analyze the changes in all three repositories (kilocode, opencode, claude-code)
           3. Update corresponding files in sap-bot-orchestrator based on this mapping:
              - Tool system changes -> src/tool/
              - Agent system changes -> src/agent/
@@ -291,6 +310,7 @@ jobs:
              - Follow the existing code style and patterns in this repository
              - Only make changes that are necessary and beneficial
              - Do not break existing functionality
+             - Prioritize: security fixes > bug fixes > features
 
           5. After making changes, create a file at .github/reports/changes-summary.md with:
              - List of files modified
@@ -374,8 +394,9 @@ jobs:
           feat: sync upstream changes ($(date +%Y-%m-%d))
 
           Synchronized changes from upstream repositories:
-          - kilocode: ${{ steps.prev-commits.outputs.prev_kilocode }} -> ${{ steps.current-commits.outputs.current_kilocode }}
-          - opencode: ${{ steps.prev-commits.outputs.prev_opencode }} -> ${{ steps.current-commits.outputs.current_opencode }}
+          - kilocode: ${​{ steps.prev-commits.outputs.prev_kilocode }} -> ${​{ steps.current-commits.outputs.current_kilocode }}
+          - opencode: ${​{ steps.prev-commits.outputs.prev_opencode }} -> ${​{ steps.current-commits.outputs.current_opencode }}
+          - claude-code: ${​{ steps.prev-commits.outputs.prev_claude_code }} -> ${​{ steps.current-commits.outputs.current_claude_code }}
 
           Changes analyzed and applied by Kilo CLI to maintain compatibility
           with SAP AI Core integration.
@@ -416,8 +437,9 @@ jobs:
 
           | Repository | Previous | Current |
           |------------|----------|---------|
-          | kilocode | `${{ steps.prev-commits.outputs.prev_kilocode }}` | `${{ steps.current-commits.outputs.current_kilocode }}` |
-          | opencode | `${{ steps.prev-commits.outputs.prev_opencode }}` | `${{ steps.current-commits.outputs.current_opencode }}` |
+          | kilocode | `${​{ steps.prev-commits.outputs.prev_kilocode }}` | `${​{ steps.current-commits.outputs.current_kilocode }}` |
+          | opencode | `${​{ steps.prev-commits.outputs.prev_opencode }}` | `${​{ steps.current-commits.outputs.current_opencode }}` |
+          | claude-code | `${​{ steps.prev-commits.outputs.prev_claude_code }}` | `${​{ steps.current-commits.outputs.current_claude_code }}` |
 
           ## Changed Files
 
@@ -451,6 +473,37 @@ jobs:
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "Created PR: $PR_URL"
 
+      - name: Auto-merge Pull Request
+        if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
+        env:
+          GH_TOKEN: ${​{ secrets.GH_PAT }}
+        run: |
+          PR_URL="${{ steps.create-pr.outputs.pr_url }}"
+          
+          if [ -n "$PR_URL" ]; then
+            echo "Enabling auto-merge for PR: $PR_URL"
+            
+            # Extract PR number from URL
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+            
+            # Enable auto-merge (squash)
+            gh pr merge "$PR_NUMBER" --auto --squash --delete-branch || {
+              echo "Auto-merge not available, attempting direct merge..."
+              
+              # Wait a moment for PR checks to initialize
+              sleep 10
+              
+              # Try direct merge
+              gh pr merge "$PR_NUMBER" --squash --delete-branch || {
+                echo "::warning::Could not auto-merge PR. Manual merge required: $PR_URL"
+              }
+            }
+            
+            echo "PR merge initiated successfully"
+          else
+            echo "::warning::No PR URL found, skipping auto-merge"
+          fi
+
       - name: Update last-sync-commits.json
         if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
         env:
@@ -463,13 +516,33 @@ jobs:
           # Ensure directory exists
           mkdir -p .github
           
-          # Update the sync commits file
+          # Update the sync commits file with nested format
+          SYNCED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           cat > .github/last-sync-commits.json << EOF
           {
-            "kilocode": "${{ steps.current-commits.outputs.current_kilocode }}",
-            "opencode": "${{ steps.current-commits.outputs.current_opencode }}",
-            "last_sync": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "workflow_run": "${{ github.run_id }}"
+            "kilocode": {
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_kilocode }}",
+              "last_synced_at": "$SYNCED_AT",
+              "upstream": "Kilo-Org/kilocode",
+              "fork": "ausard/kilocode"
+            },
+            "opencode": {
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_opencode }}",
+              "last_synced_at": "$SYNCED_AT",
+              "upstream": "anomalyco/opencode",
+              "fork": "ausard/opencode"
+            },
+            "claude-code": {
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_claude_code }}",
+              "last_synced_at": "$SYNCED_AT",
+              "upstream": "anthropics/claude-code",
+              "fork": "direct-clone"
+            },
+            "metadata": {
+              "version": "1.1.0",
+              "workflow_run": "${​{ github.run_id }}",
+              "description": "Tracks last synced commits from upstream repositories"
+            }
           }
           EOF
           
@@ -506,3 +579,4 @@ jobs:
           echo "|------------|----------|---------|" >> $GITHUB_STEP_SUMMARY
           echo "| kilocode | \`${{ steps.prev-commits.outputs.prev_kilocode }}\` | \`${{ steps.current-commits.outputs.current_kilocode }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| opencode | \`${{ steps.prev-commits.outputs.prev_opencode }}\` | \`${{ steps.current-commits.outputs.current_opencode }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| claude-code | \`${{ steps.prev-commits.outputs.prev_claude_code }}\` | \`${{ steps.current-commits.outputs.current_claude_code }}\` |" >> $GITHUB_STEP_SUMMARY

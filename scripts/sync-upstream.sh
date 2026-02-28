@@ -46,9 +46,10 @@ VERBOSE=false
 AUTO_YES=false
 
 # Repository configurations (simple arrays to avoid associative array issues)
-REPO_NAMES=("kilocode" "opencode")
+REPO_NAMES=("kilocode" "opencode" "claude-code")
 REPO_KILOCODE_FULL="ausard/kilocode"
 REPO_OPENCODE_FULL="ausard/opencode"
+REPO_CLAUDE_CODE_FULL="anthropics/claude-code"  # Direct from Anthropic (no fork due to EMU restrictions)
 
 # Get full repo name for a given repo name
 get_repo_full() {
@@ -56,6 +57,7 @@ get_repo_full() {
     case "$repo_name" in
         kilocode) echo "$REPO_KILOCODE_FULL" ;;
         opencode) echo "$REPO_OPENCODE_FULL" ;;
+        claude-code) echo "$REPO_CLAUDE_CODE_FULL" ;;
         *) echo "" ;;
     esac
 }
@@ -424,9 +426,13 @@ has_changes() {
 build_analysis_prompt() {
     local kilocode_diff="$1"
     local opencode_diff="$2"
+    local claude_code_diff="$3"
     
     cat << 'PROMPT_EOF'
-You are analyzing upstream changes from kilocode and opencode repositories to identify updates that should be applied to the sap-bot-orchestrator project.
+You are analyzing upstream changes from three AI coding assistant repositories to identify updates that should be applied to the sap-bot-orchestrator project:
+- **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
+- **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant  
+- **claude-code** (anthropics/claude-code) - Anthropic's Claude Code CLI
 
 ## Task
 Review the diff reports below and identify:
@@ -460,10 +466,21 @@ PROMPT_EOF
     
     cat << 'PROMPT_EOF'
 
+### Claude-Code Changes (Anthropic)
+PROMPT_EOF
+    
+    if [[ -f "$claude_code_diff" ]]; then
+        cat "$claude_code_diff"
+    else
+        echo "No diff report available"
+    fi
+    
+    cat << 'PROMPT_EOF'
+
 ## Instructions
-1. Analyze the changes above
+1. Analyze the changes above from all three upstream repositories
 2. Identify which changes are relevant to sap-bot-orchestrator
-3. Suggest specific updates to apply
+3. Suggest specific updates to apply (prioritize security fixes, then bug fixes, then features)
 4. Highlight any breaking changes or potential issues
 5. Provide a summary of recommended actions
 
@@ -567,22 +584,47 @@ show_pending_changes() {
 # Arguments:
 #   $1 - Kilocode commit
 #   $2 - Opencode commit
+#   $3 - Claude-code commit
 #######################################
 update_last_sync_commits() {
     local kilocode_commit="$1"
     local opencode_commit="$2"
+    local claude_code_commit="$3"
     
     log_info "Updating last sync commits..."
     
     # Ensure .github directory exists
     mkdir -p "$(dirname "$LAST_SYNC_FILE")"
     
-    # Write JSON file
+    local synced_at
+    synced_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    
+    # Write JSON file with nested structure
     cat > "$LAST_SYNC_FILE" << EOF
 {
-  "kilocode": "${kilocode_commit}",
-  "opencode": "${opencode_commit}",
-  "syncedAt": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  "kilocode": {
+    "last_synced_commit": "${kilocode_commit}",
+    "last_synced_at": "${synced_at}",
+    "upstream": "Kilo-Org/kilocode",
+    "fork": "ausard/kilocode"
+  },
+  "opencode": {
+    "last_synced_commit": "${opencode_commit}",
+    "last_synced_at": "${synced_at}",
+    "upstream": "anomalyco/opencode",
+    "fork": "ausard/opencode"
+  },
+  "claude-code": {
+    "last_synced_commit": "${claude_code_commit}",
+    "last_synced_at": "${synced_at}",
+    "upstream": "anthropics/claude-code",
+    "fork": "direct-clone"
+  },
+  "metadata": {
+    "version": "1.1.0",
+    "created_at": "2026-02-28T00:00:00Z",
+    "description": "Tracks last synced commits from upstream repositories"
+  }
 }
 EOF
     
@@ -645,6 +687,7 @@ main() {
     log_info "Step 1/7: Preparing repositories..."
     clone_or_update_repo "kilocode" "ausard/kilocode"
     clone_or_update_repo "opencode" "ausard/opencode"
+    clone_or_update_repo "claude-code" "anthropics/claude-code"
     echo ""
     
     # Step 3: Sync forks with upstream (unless --skip-sync)
@@ -652,6 +695,11 @@ main() {
         log_info "Step 2/7: Syncing forks with upstream..."
         sync_fork_with_upstream "kilocode"
         sync_fork_with_upstream "opencode"
+        # claude-code is direct clone from Anthropic, just fetch latest
+        log_info "Fetching latest claude-code from Anthropic..."
+        pushd "${REPOS_DIR}/claude-code" > /dev/null
+        git fetch origin && git pull origin main --ff-only 2>/dev/null || git pull origin master --ff-only 2>/dev/null || log_warn "Could not pull claude-code updates"
+        popd > /dev/null
         echo ""
     else
         log_info "Step 2/7: Skipping fork sync (--skip-sync)"
@@ -665,13 +713,16 @@ main() {
     
     local last_kilocode_commit=""
     local last_opencode_commit=""
+    local last_claude_code_commit=""
     
     if [[ "$last_sync_data" != "{}" ]]; then
         # Handle both flat format (kilocode: "commit") and nested format (kilocode: {last_synced_commit: "commit"})
         last_kilocode_commit=$(echo "$last_sync_data" | jq -r 'if .kilocode | type == "object" then .kilocode.last_synced_commit else .kilocode end // empty')
         last_opencode_commit=$(echo "$last_sync_data" | jq -r 'if .opencode | type == "object" then .opencode.last_synced_commit else .opencode end // empty')
+        last_claude_code_commit=$(echo "$last_sync_data" | jq -r 'if .["claude-code"] | type == "object" then .["claude-code"].last_synced_commit else .["claude-code"] end // empty')
         log_verbose "Last kilocode commit: ${last_kilocode_commit:-none}"
         log_verbose "Last opencode commit: ${last_opencode_commit:-none}"
+        log_verbose "Last claude-code commit: ${last_claude_code_commit:-none}"
     else
         log_info "No previous sync data found"
     fi
@@ -680,24 +731,30 @@ main() {
     # Get current commits
     local current_kilocode_commit
     local current_opencode_commit
+    local current_claude_code_commit
     current_kilocode_commit=$(get_current_commit "${REPOS_DIR}/kilocode")
     current_opencode_commit=$(get_current_commit "${REPOS_DIR}/opencode")
+    current_claude_code_commit=$(get_current_commit "${REPOS_DIR}/claude-code")
     
     log_verbose "Current kilocode commit: ${current_kilocode_commit}"
     log_verbose "Current opencode commit: ${current_opencode_commit}"
+    log_verbose "Current claude-code commit: ${current_claude_code_commit}"
     
     # Step 5: Generate diff reports
     log_info "Step 4/7: Generating diff reports..."
     local kilocode_diff
     local opencode_diff
+    local claude_code_diff
     kilocode_diff=$(generate_diff_report "kilocode" "$last_kilocode_commit" "$current_kilocode_commit")
     opencode_diff=$(generate_diff_report "opencode" "$last_opencode_commit" "$current_opencode_commit")
+    claude_code_diff=$(generate_diff_report "claude-code" "$last_claude_code_commit" "$current_claude_code_commit")
     echo ""
     
     # Step 6: Check if there are changes
     log_info "Step 5/7: Checking for changes..."
     local has_kilocode_changes=false
     local has_opencode_changes=false
+    local has_claude_code_changes=false
     
     if has_changes "kilocode" "$last_kilocode_commit" "$current_kilocode_commit"; then
         has_kilocode_changes=true
@@ -712,13 +769,20 @@ main() {
     else
         log_info "No new changes in opencode"
     fi
+    
+    if has_changes "claude-code" "$last_claude_code_commit" "$current_claude_code_commit"; then
+        has_claude_code_changes=true
+        log_info "Claude-code has new changes"
+    else
+        log_info "No new changes in claude-code"
+    fi
     echo ""
     
-    if [[ "$has_kilocode_changes" == false ]] && [[ "$has_opencode_changes" == false ]]; then
+    if [[ "$has_kilocode_changes" == false ]] && [[ "$has_opencode_changes" == false ]] && [[ "$has_claude_code_changes" == false ]]; then
         log_success "No new upstream changes to process"
         
         # Clean up diff files
-        rm -f "$kilocode_diff" "$opencode_diff" 2>/dev/null || true
+        rm -f "$kilocode_diff" "$opencode_diff" "$claude_code_diff" 2>/dev/null || true
         
         exit 0
     fi
@@ -737,7 +801,7 @@ main() {
     # Step 8: Run Kilo analysis
     log_info "Step 7/7: Running Kilo AI analysis..."
     local prompt
-    prompt=$(build_analysis_prompt "$kilocode_diff" "$opencode_diff")
+    prompt=$(build_analysis_prompt "$kilocode_diff" "$opencode_diff" "$claude_code_diff")
     
     local analysis_result
     analysis_result=$(run_kilo_analysis "$prompt") || {
@@ -763,6 +827,7 @@ main() {
         log_info "Diff reports saved to:"
         echo "  - ${kilocode_diff}"
         echo "  - ${opencode_diff}"
+        echo "  - ${claude_code_diff}"
         exit 0
     fi
     
@@ -779,7 +844,7 @@ main() {
         popd > /dev/null
         
         # Update last sync commits
-        update_last_sync_commits "$current_kilocode_commit" "$current_opencode_commit"
+        update_last_sync_commits "$current_kilocode_commit" "$current_opencode_commit" "$current_claude_code_commit"
         
         log_success "Sync completed successfully!"
         echo ""
@@ -792,11 +857,12 @@ main() {
         log_info "You can review the diff reports at:"
         echo "  - ${kilocode_diff}"
         echo "  - ${opencode_diff}"
+        echo "  - ${claude_code_diff}"
     fi
     
     # Clean up diff files
     if confirm_action "Remove diff report files?"; then
-        rm -f "$kilocode_diff" "$opencode_diff"
+        rm -f "$kilocode_diff" "$opencode_diff" "$claude_code_diff"
         log_success "Diff files cleaned up"
     fi
 }
