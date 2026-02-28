@@ -608,7 +608,7 @@ jobs:
             echo "No changes to commit"
             exit 0
           }
-          git push origin main
+          git push origin "$CURRENT_BRANCH"
 
       - name: Summary
         run: |
