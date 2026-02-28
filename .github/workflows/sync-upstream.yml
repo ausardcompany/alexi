@@ -141,8 +141,8 @@ jobs:
             ./scripts/generate-diff-report.sh \
               --kilocode-dir ../kilocode \
               --opencode-dir ../opencode \
-              --prev-kilocode "${{ steps.prev-commits.outputs.prev_kilocode }}" \
-              --prev-opencode "${{ steps.prev-commits.outputs.prev_opencode }}" \
+              --last-sync ".github/last-sync-commits.json" \
+              --format markdown \
               --output "$DIFF_FILE"
           else
             echo "Generating diff report inline..."
