@@ -238,13 +238,60 @@ get_category_pattern() {
 # =============================================================================
 
 # Parse JSON value using basic tools (no jq dependency)
+# Handles flat key-value pairs like: "key": "value"
 parse_json_value() {
     local json="$1"
     local key="$2"
     echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed 's/.*: *"\([^"]*\)"/\1/' | head -1
 }
 
+# Extract nested object from JSON (returns content between { })
+# For input like: "repo": { ... }, extracts the inner content
+parse_json_nested_object() {
+    local json="$1"
+    local key="$2"
+    # Match "key": { ... } and extract the braced content
+    # Uses awk to handle nested braces properly
+    echo "$json" | awk -v key="\"$key\"" '
+    BEGIN { found=0; depth=0; result="" }
+    {
+        line = $0
+        if (!found) {
+            # Look for the key
+            idx = index(line, key)
+            if (idx > 0) {
+                # Find the opening brace after the key
+                rest = substr(line, idx + length(key))
+                if (match(rest, /:[[:space:]]*\{/)) {
+                    found = 1
+                    # Start after the opening brace
+                    rest = substr(rest, RSTART + RLENGTH)
+                    depth = 1
+                    line = rest
+                }
+            }
+        }
+        if (found) {
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1)
+                if (c == "{") depth++
+                else if (c == "}") {
+                    depth--
+                    if (depth == 0) {
+                        print result
+                        exit
+                    }
+                }
+                if (depth > 0) result = result c
+            }
+            if (depth > 0) result = result "\n"
+        }
+    }
+    '
+}
+
 # Read last sync commits from JSON file
+# Handles nested JSON structure like: {"repo": {"last_synced_commit": "hash", ...}}
 read_last_sync_commits() {
     local sync_file="$1"
     local repo="$2"
@@ -256,7 +303,18 @@ read_last_sync_commits() {
     
     local content
     content=$(cat "$sync_file")
-    parse_json_value "$content" "$repo"
+    
+    # First, try to extract nested object for the repo
+    local repo_object
+    repo_object=$(parse_json_nested_object "$content" "$repo")
+    
+    if [[ -n "$repo_object" ]]; then
+        # Extract last_synced_commit from the nested object
+        parse_json_value "$repo_object" "last_synced_commit"
+    else
+        # Fallback: try flat structure (for backwards compatibility)
+        parse_json_value "$content" "$repo"
+    fi
 }
 
 # =============================================================================
