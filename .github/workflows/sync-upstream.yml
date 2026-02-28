@@ -286,66 +286,200 @@ jobs:
           echo "[OK] sap-bot-orchestrator CLI built successfully"
           node dist/cli/program.js --help
 
-      - name: Create analysis prompt file
+      # =================================================================
+      # TWO-STAGE UPDATE PROCESS
+      # Stage 1: Planning with Opus (detailed analysis and plan creation)
+      # Stage 2: Execution with Sonnet (apply the plan)
+      # =================================================================
+
+      - name: Create planning prompt
         if: steps.check-changes.outputs.has_changes == 'true'
         run: |
           DIFF_FILE="${{ steps.diff-report.outputs.diff_file }}"
           mkdir -p .github/prompts
-          cat > .github/prompts/sync-analysis.md << EOF
-          You are analyzing upstream changes from three AI coding assistant repositories to update the sap-bot-orchestrator project:
+          
+          # Create planning prompt with diff report embedded
+          cat > .github/prompts/planning-prompt.md << 'PLANNING_EOF'
+          # Planning Task: Analyze Upstream Changes for SAP Bot Orchestrator
+
+          You are a senior software architect analyzing upstream changes from three AI coding assistant repositories:
           - **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
-          - **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant
+          - **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant  
           - **claude-code** (anthropics/claude-code) - Anthropic's Claude Code CLI
 
           ## Diff Report
 
-          $(cat "$DIFF_FILE")
-
-          ## Instructions
-
-          1. Analyze the changes shown above in all three repositories
-          2. Update corresponding files in sap-bot-orchestrator based on this mapping:
-             - Tool system changes -> src/tool/
-             - Agent system changes -> src/agent/
-             - Permission system changes -> src/permission/
-             - Event bus changes -> src/bus/
-             - Core orchestration changes -> src/core/
-
-          3. Important considerations:
-             - Maintain compatibility with SAP AI Core integration
-             - Preserve existing SAP-specific customizations
-             - Follow the existing code style and patterns in this repository
-             - Only make changes that are necessary and beneficial
-             - Do not break existing functionality
-             - Prioritize: security fixes > bug fixes > features
-
-          4. After making changes, create a file at .github/reports/changes-summary.md with:
-             - List of files modified
-             - Summary of each change and why it was made
-             - Any potential breaking changes or things to test
-
-          Please analyze the diff report and make the necessary updates to keep sap-bot-orchestrator in sync with upstream improvements.
-          EOF
+          PLANNING_EOF
           
-          echo "[OK] Analysis prompt saved to .github/prompts/sync-analysis.md"
-          echo "Prompt size: $(wc -l < .github/prompts/sync-analysis.md) lines"
+          # Append the actual diff report
+          cat "$DIFF_FILE" >> .github/prompts/planning-prompt.md
+          
+          # Append instructions
+          cat >> .github/prompts/planning-prompt.md << 'PLANNING_INSTRUCTIONS'
 
-      - name: Run self-analysis with own CLI
+          ## Your Task
+
+          Create a **detailed update plan** for sap-bot-orchestrator based on the changes above.
+
+          ### File Mapping
+          - Tool system changes → `src/tool/`
+          - Agent system changes → `src/agent/`
+          - Permission system changes → `src/permission/`
+          - Event bus changes → `src/bus/`
+          - Core orchestration changes → `src/core/`
+          - Provider changes → `src/providers/`
+          - Router changes → `src/router/`
+          - CLI changes → `src/cli/`
+
+          ### For Each Change, Provide:
+          1. **File path** to modify (or create)
+          2. **Function/class** to change
+          3. **Code snippet** showing the exact change (before/after or new code)
+          4. **Priority**: critical | high | medium | low
+          5. **Reasoning**: Why this change is needed
+
+          ### Important Considerations
+          - Maintain compatibility with SAP AI Core integration
+          - Preserve existing SAP-specific customizations
+          - Follow existing code style and patterns
+          - Prioritize: security fixes > bug fixes > features > refactoring
+          - Do NOT include changes that would break existing functionality
+
+          ### Output Format
+
+          ```markdown
+          # Update Plan for SAP Bot Orchestrator
+
+          Generated: [date]
+          Based on upstream commits: [list commits analyzed]
+
+          ## Summary
+          - Total changes planned: X
+          - Critical: X | High: X | Medium: X | Low: X
+
+          ## Changes
+
+          ### 1. [Brief description]
+          **File**: `src/path/to/file.ts`
+          **Priority**: high
+          **Type**: feature | bugfix | security | refactor
+          **Reason**: [Why this change is needed]
+
+          **Current code** (if modifying):
+          ```typescript
+          // existing code
+          ```
+
+          **New code**:
+          ```typescript
+          // code to add or replace with
+          ```
+
+          ### 2. [Next change...]
+          ...
+
+          ## Testing Recommendations
+          - [What to test after applying these changes]
+
+          ## Potential Risks
+          - [Any breaking changes or risks to be aware of]
+          ```
+
+          Output ONLY the plan in the format above. No conversational text.
+          PLANNING_INSTRUCTIONS
+          
+          echo "[OK] Planning prompt created at .github/prompts/planning-prompt.md"
+          echo "Prompt size: $(wc -c < .github/prompts/planning-prompt.md) bytes"
+
+      - name: Generate update plan (Opus)
         if: steps.check-changes.outputs.has_changes == 'true'
-        id: self-analysis
+        id: plan
         env:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
         run: |
-          echo "Running self-analysis with sap-bot-orchestrator CLI..."
+          PLAN_FILE=".github/reports/update-plan-$(date +%Y-%m-%d).md"
+          mkdir -p .github/reports
+          echo "plan_file=$PLAN_FILE" >> $GITHUB_OUTPUT
           
-          # Read the prompt from file and use own CLI with auto-routing
-          PROMPT=$(cat .github/prompts/sync-analysis.md)
+          echo "=== Stage 1: Generating update plan with Claude 4.5 Opus ==="
+          echo "This may take a few minutes..."
           
           node dist/cli/program.js chat \
-            --message "$PROMPT" \
-            --auto-route \
-            --system "You are an expert software engineer analyzing upstream changes and making code updates. Output only the analysis and changes, no conversational text."
+            --message "$(cat .github/prompts/planning-prompt.md)" \
+            --model "anthropic--claude-4.5-opus" \
+            --system "You are a senior software architect. Analyze upstream changes and create a detailed, actionable update plan with code snippets. Output ONLY the plan in markdown format. Be thorough and precise." \
+            > "$PLAN_FILE"
+          
+          echo ""
+          echo "=== Plan generated at: $PLAN_FILE ==="
+          echo "Plan size: $(wc -l < "$PLAN_FILE") lines"
+          echo ""
+          echo "--- Plan Preview (first 50 lines) ---"
+          head -50 "$PLAN_FILE"
+          echo "--- End Preview ---"
+
+      - name: Create execution prompt
+        if: steps.check-changes.outputs.has_changes == 'true'
+        run: |
+          PLAN_FILE="${{ steps.plan.outputs.plan_file }}"
+          
+          cat > .github/prompts/execution-prompt.md << 'EXEC_HEADER'
+          # Execution Task: Apply Update Plan to SAP Bot Orchestrator
+
+          You are an expert software developer. Your task is to execute the update plan below precisely.
+
+          ## Update Plan to Execute
+
+          EXEC_HEADER
+          
+          # Append the generated plan
+          cat "$PLAN_FILE" >> .github/prompts/execution-prompt.md
+          
+          # Append execution instructions
+          cat >> .github/prompts/execution-prompt.md << 'EXEC_INSTRUCTIONS'
+
+          ## Execution Instructions
+
+          1. **Execute each change** in the plan above in order of priority (critical → high → medium → low)
+          2. **Make exact code changes** as specified in the plan
+          3. **Maintain SAP AI Core compatibility** - do not break existing integrations
+          4. **Follow existing code style** in this repository
+          5. **Create changes summary** at `.github/reports/changes-summary.md` with:
+             - List of files modified
+             - Summary of each change made
+             - Any issues encountered
+
+          ## Important
+
+          - Do NOT skip any items in the plan
+          - Do NOT add extra changes not in the plan
+          - Do NOT ask questions - just execute
+          - If a file doesn't exist, create it
+          - If code context is unclear, use your best judgment based on the plan
+
+          Execute the entire plan now.
+          EXEC_INSTRUCTIONS
+          
+          echo "[OK] Execution prompt created at .github/prompts/execution-prompt.md"
+          echo "Prompt size: $(wc -c < .github/prompts/execution-prompt.md) bytes"
+
+      - name: Execute update plan (Sonnet)
+        if: steps.check-changes.outputs.has_changes == 'true'
+        id: execute
+        env:
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+        run: |
+          echo "=== Stage 2: Executing update plan with Claude 4.5 Sonnet ==="
+          
+          node dist/cli/program.js chat \
+            --message "$(cat .github/prompts/execution-prompt.md)" \
+            --model "anthropic--claude-4.5-sonnet" \
+            --system "You are an expert software developer. Execute the update plan precisely. Make all file changes as specified. Output a brief summary of what was done."
+          
+          echo ""
+          echo "=== Execution complete ==="
 
       - name: Check for bot changes
         if: steps.check-changes.outputs.has_changes == 'true'
@@ -574,15 +708,32 @@ jobs:
         run: |
           echo "## Sync Upstream Workflow Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Workflow Parameters" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Dry Run | ${{ inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Force Sync | ${{ inputs.force_sync }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Changes Detected | ${{ steps.check-changes.outputs.has_changes }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Kilo Made Changes | ${{ steps.kilo-changes.outputs.kilo_made_changes }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bot Made Changes | ${{ steps.kilo-changes.outputs.kilo_made_changes }} |" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.create-pr.outputs.pr_url }}" != "" ]; then
             echo "| PR Created | ${{ steps.create-pr.outputs.pr_url }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Two-Stage Update Process" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Model | Purpose |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1. Planning | \`anthropic--claude-4.5-opus\` | Analyze changes, create detailed plan |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2. Execution | \`anthropic--claude-4.5-sonnet\` | Execute plan, apply code changes |" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "${{ steps.plan.outputs.plan_file }}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Generated Plan" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Plan file: \`${{ steps.plan.outputs.plan_file }}\`" >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
