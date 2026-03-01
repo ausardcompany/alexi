@@ -6,6 +6,7 @@
 import { getProviderForModel, getDefaultModel, type StreamChunk } from '../providers/index.js';
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
+import { getCostTracker } from './costTracker.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -109,6 +110,17 @@ export async function* streamChat(
     options.sessionManager.addMessage('assistant', fullText, {
       output: finalUsage?.completion_tokens,
     });
+  }
+
+  // Record cost for this API call
+  if (finalUsage?.prompt_tokens || finalUsage?.completion_tokens) {
+    const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+    getCostTracker().recordUsage(
+      modelId,
+      finalUsage.prompt_tokens ?? 0,
+      finalUsage.completion_tokens ?? 0,
+      sessionId
+    );
   }
 
   return {

@@ -18,6 +18,8 @@ import { getStageManager, type ConversationStage } from '../core/stageManager.js
 import { getPermissionManager, defaultRules } from '../permission/index.js';
 import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp/index.js';
 import { getDoctor } from '../doctor/index.js';
+import { getCostTracker } from '../core/costTracker.js';
+import { getMemoryManager } from '../core/memory.js';
 
 export interface InteractiveOptions {
   model?: string;
@@ -166,6 +168,39 @@ function printHelp(): void {
   );
   console.log(
     c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback')
+  );
+  console.log();
+  console.log(c('cyan', '  Cost & Memory:'));
+  console.log();
+  console.log(
+    c('yellow', '  /cost') + c('gray', '              - Show cost summary for current session')
+  );
+  console.log(
+    c('yellow', '  /cost today') + c('gray', '        - Show today\'s cost summary')
+  );
+  console.log(
+    c('yellow', '  /cost month') + c('gray', '        - Show this month\'s cost summary')
+  );
+  console.log(
+    c('yellow', '  /cost all') + c('gray', '          - Show all-time cost summary')
+  );
+  console.log(
+    c('yellow', '  /cost export') + c('gray', '       - Export cost history to CSV')
+  );
+  console.log(
+    c('yellow', '  /remember <text>') + c('gray', '   - Save a memory (use #tags for categorization)')
+  );
+  console.log(
+    c('yellow', '  /memory') + c('gray', '            - List all memories')
+  );
+  console.log(
+    c('yellow', '  /memory search <q>') + c('gray', ' - Search memories by text or tag')
+  );
+  console.log(
+    c('yellow', '  /memory stats') + c('gray', '      - Show memory statistics')
+  );
+  console.log(
+    c('yellow', '  /memory export') + c('gray', '     - Export memories to JSON')
   );
   console.log();
 }
@@ -802,6 +837,186 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         state.sessionManager.createSession(state.currentModel);
         console.log(c('green', `\n  Cleared ${count} messages from history\n`));
       }
+      return true;
+    }
+
+    case 'cost': {
+      const costTracker = getCostTracker();
+      const subCmd = args[0]?.toLowerCase();
+
+      if (!subCmd || subCmd === 'today') {
+        const summary = costTracker.getTodaySummary();
+        console.log(c('cyan', '\n  Today\'s API Costs:\n'));
+        if (summary.callCount === 0) {
+          console.log(c('yellow', '    No API calls recorded today'));
+        } else {
+          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(c('gray', `    API Calls:     ${summary.callCount}`));
+          console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
+          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+        }
+        console.log();
+      } else if (subCmd === 'month') {
+        const summary = costTracker.getMonthSummary();
+        console.log(c('cyan', '\n  This Month\'s API Costs:\n'));
+        if (summary.callCount === 0) {
+          console.log(c('yellow', '    No API calls recorded this month'));
+        } else {
+          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(c('gray', `    API Calls:     ${summary.callCount}`));
+          console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
+          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+          console.log();
+          console.log(c('cyan', '    By Model:'));
+          for (const [model, data] of Object.entries(summary.byModel)) {
+            console.log(c('gray', `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`));
+          }
+        }
+        console.log();
+      } else if (subCmd === 'all') {
+        const summary = costTracker.getAllTimeSummary();
+        console.log(c('cyan', '\n  All-Time API Costs:\n'));
+        if (summary.callCount === 0) {
+          console.log(c('yellow', '    No API calls recorded'));
+        } else {
+          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(c('gray', `    API Calls:     ${summary.callCount}`));
+          console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
+          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+          console.log();
+          console.log(c('cyan', '    By Model:'));
+          for (const [model, data] of Object.entries(summary.byModel)) {
+            console.log(c('gray', `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`));
+          }
+          console.log();
+          console.log(c('cyan', '    Recent Days:'));
+          const dates = Object.entries(summary.byDate).slice(-7);
+          for (const [date, cost] of dates) {
+            console.log(c('gray', `      ${date}: ${costTracker.formatCost(cost)}`));
+          }
+        }
+        console.log();
+      } else if (subCmd === 'clear') {
+        costTracker.clearHistory();
+        console.log(c('green', '\n  Cost history cleared\n'));
+      } else if (subCmd === 'export') {
+        const csv = costTracker.exportToCsv();
+        const exportPath = path.join(os.homedir(), '.alexi', 'cost-export.csv');
+        fs.writeFileSync(exportPath, csv);
+        console.log(c('green', `\n  Cost history exported to: ${exportPath}\n`));
+      } else {
+        console.log(c('yellow', '\n  Usage: /cost [today|month|all|clear|export]\n'));
+      }
+      return true;
+    }
+
+    case 'memory': {
+      const memoryManager = getMemoryManager();
+      const subCmd = args[0]?.toLowerCase();
+
+      if (!subCmd || subCmd === 'list') {
+        const memories = memoryManager.search({ limit: 10, sortBy: 'updated' });
+        console.log(c('cyan', '\n  Stored Memories:\n'));
+        if (memories.length === 0) {
+          console.log(c('yellow', '    No memories stored'));
+          console.log(c('dim', '    Use /remember <text> to add a memory'));
+        } else {
+          for (const m of memories) {
+            const date = new Date(m.updated).toLocaleDateString();
+            const preview = m.content.slice(0, 60) + (m.content.length > 60 ? '...' : '');
+            const tags = m.tags?.length ? c('dim', ` [${m.tags.join(', ')}]`) : '';
+            console.log(c('gray', `    ${c('yellow', m.id.slice(0, 6))} ${preview}${tags}`));
+            console.log(c('dim', `         Updated: ${date}`));
+          }
+          const stats = memoryManager.getStats();
+          if (stats.count > 10) {
+            console.log(c('dim', `\n    ... and ${stats.count - 10} more memories`));
+          }
+        }
+        console.log();
+      } else if (subCmd === 'search' && args[1]) {
+        const query = args.slice(1).join(' ');
+        const memories = memoryManager.search({ query, limit: 10 });
+        console.log(c('cyan', `\n  Search Results for "${query}":\n`));
+        if (memories.length === 0) {
+          console.log(c('yellow', '    No matching memories found'));
+        } else {
+          for (const m of memories) {
+            const preview = m.content.slice(0, 60) + (m.content.length > 60 ? '...' : '');
+            console.log(c('gray', `    ${c('yellow', m.id.slice(0, 6))} ${preview}`));
+          }
+        }
+        console.log();
+      } else if (subCmd === 'delete' && args[1]) {
+        const id = args[1];
+        // Try to find memory by partial ID
+        const memories = memoryManager.getAll();
+        const match = memories.find((m) => m.id.startsWith(id));
+        if (match) {
+          memoryManager.delete(match.id);
+          console.log(c('green', `\n  Deleted memory: ${match.id.slice(0, 6)}\n`));
+        } else {
+          console.log(c('red', `\n  Memory not found: ${id}\n`));
+        }
+      } else if (subCmd === 'clear') {
+        const count = memoryManager.clearAll();
+        console.log(c('green', `\n  Cleared ${count} memories\n`));
+      } else if (subCmd === 'stats') {
+        const stats = memoryManager.getStats();
+        console.log(c('cyan', '\n  Memory Statistics:\n'));
+        console.log(c('gray', `    Total Memories: ${stats.count}`));
+        console.log(c('gray', `    Total Size:     ${(stats.totalSize / 1024).toFixed(1)} KB`));
+        if (stats.tags.length > 0) {
+          console.log(c('gray', `    Tags:           ${stats.tags.join(', ')}`));
+        }
+        if (stats.oldest) {
+          console.log(c('gray', `    Oldest:         ${new Date(stats.oldest).toLocaleDateString()}`));
+        }
+        if (stats.newest) {
+          console.log(c('gray', `    Newest:         ${new Date(stats.newest).toLocaleDateString()}`));
+        }
+        console.log();
+      } else if (subCmd === 'export') {
+        const json = memoryManager.exportToJson();
+        const exportPath = path.join(os.homedir(), '.alexi', 'memories-export.json');
+        fs.writeFileSync(exportPath, json);
+        console.log(c('green', `\n  Memories exported to: ${exportPath}\n`));
+      } else {
+        console.log(c('yellow', '\n  Usage: /memory [list|search <query>|delete <id>|clear|stats|export]\n'));
+      }
+      return true;
+    }
+
+    case 'remember': {
+      if (args.length === 0) {
+        console.log(c('yellow', '\n  Usage: /remember <text to remember> [#tag1 #tag2]\n'));
+        console.log(c('dim', '  Example: /remember User prefers TypeScript #preferences'));
+        return true;
+      }
+
+      const memoryManager = getMemoryManager();
+
+      // Parse content and tags
+      const fullText = args.join(' ');
+      const tagMatches = fullText.match(/#\w+/g) || [];
+      const tags = tagMatches.map((t) => t.slice(1));
+      const content = fullText.replace(/#\w+/g, '').trim();
+
+      if (!content) {
+        console.log(c('red', '\n  Memory content cannot be empty\n'));
+        return true;
+      }
+
+      const entry = memoryManager.add(content, {
+        tags: tags.length > 0 ? tags : undefined,
+        source: state.sessionManager.getCurrentSession()?.metadata.id,
+      });
+
+      console.log(c('green', `\n  Memory saved: ${entry.id.slice(0, 6)}`));
+      if (tags.length > 0) {
+        console.log(c('dim', `  Tags: ${tags.join(', ')}`));
+      }
+      console.log();
       return true;
     }
 

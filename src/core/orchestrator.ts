@@ -1,6 +1,7 @@
 import { getProviderForModel, getDefaultModel } from '../providers/index.js';
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
+import { getCostTracker } from './costTracker.js';
 
 export async function sendChat(
   message: string,
@@ -76,6 +77,17 @@ export async function sendChat(
     options.sessionManager.addMessage('assistant', responseText, {
       output: usage?.completion_tokens,
     });
+  }
+
+  // Record cost for this API call
+  if (usage?.prompt_tokens || usage?.completion_tokens) {
+    const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+    getCostTracker().recordUsage(
+      modelId,
+      usage.prompt_tokens ?? 0,
+      usage.completion_tokens ?? 0,
+      sessionId
+    );
   }
 
   return {
