@@ -66,6 +66,7 @@ export const OUR_FEATURES = {
     'notebook',
     'skill',
     'question',
+    'diagnostics',
   ],
   providers: ['sap-ai-core'],
   commands: [

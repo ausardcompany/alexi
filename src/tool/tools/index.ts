@@ -23,6 +23,7 @@ import { skillTool } from './skill.js';
 import { definitionsTool } from './definitions.js';
 import { notebookReadTool, notebookEditTool } from './notebook.js';
 import { browserTool } from './browser.js';
+import { diagnosticsTool } from './diagnostics.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -45,6 +46,7 @@ export const builtInTools = [
   notebookReadTool,
   notebookEditTool,
   browserTool,
+  diagnosticsTool,
 ] as const;
 
 /**
@@ -78,6 +80,7 @@ export {
   notebookReadTool,
   notebookEditTool,
   browserTool,
+  diagnosticsTool,
 };
 
 // Re-export UI utilities from specific tools
