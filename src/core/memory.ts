@@ -294,6 +294,21 @@ export class MemoryManager {
   }
 
   /**
+   * List all memories (alias for getAll)
+   */
+  list(): MemoryEntry[] {
+    return this.getAll();
+  }
+
+  /**
+   * Import a single memory with preserved ID (for data restore)
+   */
+  importMemory(entry: MemoryEntry): void {
+    this.memories.set(entry.id, entry);
+    this.saveMemories();
+  }
+
+  /**
    * Prune oldest low-priority memories
    */
   private pruneOldest(): void {

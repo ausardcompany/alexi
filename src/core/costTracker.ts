@@ -396,6 +396,28 @@ export class CostTracker {
 
     return [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
   }
+
+  /**
+   * Get all usage records
+   */
+  getRecords(): UsageRecord[] {
+    return [...this.records];
+  }
+
+  /**
+   * Import a usage record (for data restore)
+   */
+  importRecord(record: UsageRecord): void {
+    this.records.push(record);
+    // Don't auto-save on each import - caller should handle batch saves
+  }
+
+  /**
+   * Save records (for use after batch imports)
+   */
+  async save(): Promise<void> {
+    await this.saveRecords();
+  }
 }
 
 // ============ Singleton Instance ============

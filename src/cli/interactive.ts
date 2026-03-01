@@ -20,6 +20,11 @@ import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp
 import { getDoctor } from '../doctor/index.js';
 import { getCostTracker } from '../core/costTracker.js';
 import { getMemoryManager } from '../core/memory.js';
+import { getDataExporter } from '../core/dataExporter.js';
+import { getStatsManager } from '../core/stats.js';
+import { getAliasManager } from '../core/aliases.js';
+import { getSnippetManager } from '../core/snippets.js';
+import { getTemplateManager } from '../core/templates.js';
 
 export interface InteractiveOptions {
   model?: string;
@@ -203,13 +208,56 @@ function printHelp(): void {
     c('yellow', '  /memory export') + c('gray', '     - Export memories to JSON')
   );
   console.log();
+  console.log(c('cyan', '  Data & Export:'));
+  console.log();
+  console.log(
+    c('yellow', '  /export [file]') + c('gray', '     - Export all data to file (JSON/MD/CSV)')
+  );
+  console.log(
+    c('yellow', '  /import <file>') + c('gray', '     - Import data from file')
+  );
+  console.log(
+    c('yellow', '  /stats') + c('gray', '             - Show overall usage statistics')
+  );
+  console.log();
+  console.log(c('cyan', '  Aliases & Templates:'));
+  console.log();
+  console.log(
+    c('yellow', '  /alias') + c('gray', '             - List all command aliases')
+  );
+  console.log(
+    c('yellow', '  /alias <n> <cmd>') + c('gray', '   - Create alias (e.g., /alias gpt /model gpt-4o)')
+  );
+  console.log(
+    c('yellow', '  /alias delete <n>') + c('gray', '  - Delete an alias')
+  );
+  console.log(
+    c('yellow', '  /snippet') + c('gray', '           - List saved code snippets')
+  );
+  console.log(
+    c('yellow', '  /snippet add <n>') + c('gray', '   - Add snippet (prompts for code)')
+  );
+  console.log(
+    c('yellow', '  /snippet use <n>') + c('gray', '   - Copy snippet to use in message')
+  );
+  console.log(
+    c('yellow', '  /template') + c('gray', '          - List message templates')
+  );
+  console.log(
+    c('yellow', '  /template use <n>') + c('gray', '  - Apply a template')
+  );
+  console.log();
 }
 
 /**
  * Handle slash commands
  */
 async function handleCommand(input: string, state: ReplState): Promise<boolean> {
-  const parts = input.slice(1).split(/\s+/);
+  // Resolve aliases first
+  const aliasManager = getAliasManager();
+  const resolvedInput = aliasManager.resolve(input);
+  
+  const parts = resolvedInput.slice(1).split(/\\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
 
@@ -989,7 +1037,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
 
     case 'remember': {
       if (args.length === 0) {
-        console.log(c('yellow', '\n  Usage: /remember <text to remember> [#tag1 #tag2]\n'));
+        console.log(c('yellow', '\\n  Usage: /remember <text to remember> [#tag1 #tag2]\\n'));
         console.log(c('dim', '  Example: /remember User prefers TypeScript #preferences'));
         return true;
       }
@@ -998,12 +1046,12 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
 
       // Parse content and tags
       const fullText = args.join(' ');
-      const tagMatches = fullText.match(/#\w+/g) || [];
+      const tagMatches = fullText.match(/#\\w+/g) || [];
       const tags = tagMatches.map((t) => t.slice(1));
-      const content = fullText.replace(/#\w+/g, '').trim();
+      const content = fullText.replace(/#\\w+/g, '').trim();
 
       if (!content) {
-        console.log(c('red', '\n  Memory content cannot be empty\n'));
+        console.log(c('red', '\\n  Memory content cannot be empty\\n'));
         return true;
       }
 
@@ -1012,11 +1060,297 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         source: state.sessionManager.getCurrentSession()?.metadata.id,
       });
 
-      console.log(c('green', `\n  Memory saved: ${entry.id.slice(0, 6)}`));
+      console.log(c('green', `\\n  Memory saved: ${entry.id.slice(0, 6)}`));
       if (tags.length > 0) {
         console.log(c('dim', `  Tags: ${tags.join(', ')}`));
       }
       console.log();
+      return true;
+    }
+
+    // ============ Phase 3 Commands: Export/Import, Stats, Aliases, Snippets, Templates ============
+
+    case 'export': {
+      const exporter = getDataExporter();
+      const filePath = args[0] || path.join(os.homedir(), '.alexi', `export-${Date.now()}.json`);
+      
+      try {
+        await exporter.exportToFile(filePath);
+        console.log(c('green', `\\n  Data exported to: ${filePath}\\n`));
+      } catch (err) {
+        console.log(c('red', `\\n  Export failed: ${err instanceof Error ? err.message : String(err)}\\n`));
+      }
+      return true;
+    }
+
+    case 'import': {
+      if (!args[0]) {
+        console.log(c('yellow', '\\n  Usage: /import <file-path>\\n'));
+        return true;
+      }
+
+      const exporter = getDataExporter();
+      const result = await exporter.importFromFile(args[0]);
+      
+      if (result.success) {
+        console.log(c('green', '\\n  Import successful:'));
+        console.log(c('gray', `    Sessions: ${result.imported.sessions}`));
+        console.log(c('gray', `    Memories: ${result.imported.memories}`));
+        console.log(c('gray', `    Cost records: ${result.imported.costs}`));
+        console.log(c('gray', `    Config: ${result.imported.config ? 'yes' : 'no'}`));
+      } else {
+        console.log(c('red', '\\n  Import failed:'));
+        for (const err of result.errors) {
+          console.log(c('red', `    ${err}`));
+        }
+      }
+      console.log();
+      return true;
+    }
+
+    case 'stats': {
+      const statsManager = getStatsManager();
+      const stats = statsManager.getOverallStats();
+      
+      console.log(c('cyan', '\\n  Overall Statistics:\\n'));
+      
+      // Sessions
+      console.log(c('yellow', '  Sessions:'));
+      console.log(c('gray', `    Total:            ${stats.sessions.totalSessions}`));
+      console.log(c('gray', `    Total Messages:   ${stats.sessions.totalMessages}`));
+      console.log(c('gray', `    Avg per Session:  ${stats.sessions.avgMessagesPerSession}`));
+      if (stats.sessions.mostUsedModel) {
+        console.log(c('gray', `    Favorite Model:   ${stats.sessions.mostUsedModel}`));
+      }
+      if (stats.sessions.oldestSession) {
+        const duration = statsManager.formatDuration(stats.sessions.oldestSession);
+        console.log(c('gray', `    History:          ${duration}`));
+      }
+      console.log();
+      
+      // Costs
+      console.log(c('yellow', '  Costs:'));
+      console.log(c('gray', `    Total Spent:      $${stats.costs.totalCost.toFixed(4)}`));
+      console.log(c('gray', `    API Calls:        ${stats.costs.callCount}`));
+      console.log(c('gray', `    Input Tokens:     ${stats.costs.totalInputTokens.toLocaleString()}`));
+      console.log(c('gray', `    Output Tokens:    ${stats.costs.totalOutputTokens.toLocaleString()}`));
+      console.log();
+      
+      // Memories
+      console.log(c('yellow', '  Memories:'));
+      console.log(c('gray', `    Stored:           ${stats.memories.count}`));
+      console.log(c('gray', `    Total Size:       ${(stats.memories.totalSize / 1024).toFixed(1)} KB`));
+      if (stats.memories.tags.length > 0) {
+        console.log(c('gray', `    Tags:             ${stats.memories.tags.slice(0, 5).join(', ')}${stats.memories.tags.length > 5 ? '...' : ''}`));
+      }
+      console.log();
+      
+      // System
+      console.log(c('yellow', '  System:'));
+      console.log(c('gray', `    Data Directory:   ${stats.system.dataDir}`));
+      console.log(c('gray', `    Data Size:        ${statsManager.formatBytes(stats.system.dataDirSize)}`));
+      console.log();
+      return true;
+    }
+
+    case 'alias': {
+      const aliasManager = getAliasManager();
+      const subCmd = args[0]?.toLowerCase();
+      
+      if (!subCmd) {
+        // List all aliases
+        const aliases = aliasManager.list();
+        console.log(c('cyan', '\\n  Command Aliases:\\n'));
+        if (aliases.length === 0) {
+          console.log(c('yellow', '    No aliases defined'));
+        } else {
+          for (const alias of aliases) {
+            console.log(c('yellow', `    /${alias.name}`) + c('gray', ` → ${alias.command}`));
+            if (alias.description) {
+              console.log(c('dim', `         ${alias.description}`));
+            }
+          }
+        }
+        console.log(c('dim', '\\n    Use /alias <name> <command> to create an alias'));
+        console.log();
+      } else if (subCmd === 'delete' && args[1]) {
+        const deleted = aliasManager.delete(args[1]);
+        if (deleted) {
+          console.log(c('green', `\\n  Deleted alias: ${args[1]}\\n`));
+        } else {
+          console.log(c('red', `\\n  Alias not found: ${args[1]}\\n`));
+        }
+      } else if (subCmd === 'reset') {
+        aliasManager.resetToDefaults();
+        console.log(c('green', '\\n  Aliases reset to defaults\\n'));
+      } else if (args[1]) {
+        // Create alias: /alias name command
+        const name = args[0];
+        const command = args.slice(1).join(' ');
+        try {
+          const alias = aliasManager.set(name, command);
+          console.log(c('green', `\\n  Created alias: /${alias.name} → ${alias.command}\\n`));
+        } catch (err) {
+          console.log(c('red', `\\n  ${err instanceof Error ? err.message : String(err)}\\n`));
+        }
+      } else {
+        console.log(c('yellow', '\\n  Usage: /alias [<name> <command>|delete <name>|reset]\\n'));
+      }
+      return true;
+    }
+
+    case 'snippet': {
+      const snippetManager = getSnippetManager();
+      const subCmd = args[0]?.toLowerCase();
+      
+      if (!subCmd || subCmd === 'list') {
+        const snippets = snippetManager.list().slice(0, 10);
+        console.log(c('cyan', '\\n  Code Snippets:\\n'));
+        if (snippets.length === 0) {
+          console.log(c('yellow', '    No snippets saved'));
+          console.log(c('dim', '    Use /snippet add <name> to add a snippet'));
+        } else {
+          for (const s of snippets) {
+            console.log(c('yellow', `    ${s.name}`) + c('dim', ` (${s.language})`));
+            const preview = s.code.split('\\n')[0].slice(0, 50);
+            console.log(c('gray', `      ${preview}${s.code.length > 50 ? '...' : ''}`));
+          }
+        }
+        console.log();
+      } else if (subCmd === 'add' && args[1]) {
+        const name = args[1];
+        console.log(c('cyan', `\\n  Adding snippet: ${name}`));
+        console.log(c('dim', '  Enter code (end with a line containing only "---"):'));
+        console.log();
+        // Note: Multi-line input requires a different approach in the REPL
+        // For now, we'll provide a simpler single-line approach
+        console.log(c('yellow', '  For multi-line snippets, use: /snippet import <file>'));
+        console.log();
+      } else if (subCmd === 'use' && args[1]) {
+        const snippet = snippetManager.use(args[1]);
+        if (snippet) {
+          console.log(c('cyan', `\\n  Snippet: ${snippet.name}\\n`));
+          console.log(c('gray', '```' + snippet.language));
+          console.log(snippet.code);
+          console.log(c('gray', '```\\n'));
+        } else {
+          console.log(c('red', `\\n  Snippet not found: ${args[1]}\\n`));
+        }
+      } else if (subCmd === 'delete' && args[1]) {
+        const snippet = snippetManager.get(args[1]);
+        if (snippet && snippetManager.delete(snippet.id)) {
+          console.log(c('green', `\\n  Deleted snippet: ${args[1]}\\n`));
+        } else {
+          console.log(c('red', `\\n  Snippet not found: ${args[1]}\\n`));
+        }
+      } else if (subCmd === 'search' && args[1]) {
+        const results = snippetManager.search({ query: args.slice(1).join(' ') });
+        console.log(c('cyan', `\\n  Search Results:\\n`));
+        if (results.length === 0) {
+          console.log(c('yellow', '    No matching snippets'));
+        } else {
+          for (const s of results.slice(0, 10)) {
+            console.log(c('yellow', `    ${s.name}`) + c('dim', ` (${s.language})`));
+          }
+        }
+        console.log();
+      } else {
+        console.log(c('yellow', '\\n  Usage: /snippet [list|add <name>|use <name>|delete <name>|search <query>]\\n'));
+      }
+      return true;
+    }
+
+    case 'template': {
+      const templateManager = getTemplateManager();
+      const subCmd = args[0]?.toLowerCase();
+      
+      if (!subCmd || subCmd === 'list') {
+        const templates = templateManager.list();
+        console.log(c('cyan', '\\n  Message Templates:\\n'));
+        if (templates.length === 0) {
+          console.log(c('yellow', '    No templates defined'));
+        } else {
+          const categories = templateManager.getCategories();
+          for (const category of categories) {
+            const catTemplates = templates.filter(t => t.category === category);
+            console.log(c('yellow', `  ${category}:`));
+            for (const t of catTemplates) {
+              console.log(c('gray', `    /${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : ''));
+              if (t.variables.length > 0) {
+                console.log(c('dim', `      Variables: ${t.variables.join(', ')}`));
+              }
+            }
+          }
+          // Templates without category
+          const uncategorized = templates.filter(t => !t.category);
+          if (uncategorized.length > 0) {
+            console.log(c('yellow', '  Other:'));
+            for (const t of uncategorized) {
+              console.log(c('gray', `    ${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : ''));
+            }
+          }
+        }
+        console.log();
+      } else if (subCmd === 'use' && args[1]) {
+        const template = templateManager.get(args[1]);
+        if (!template) {
+          console.log(c('red', `\\n  Template not found: ${args[1]}\\n`));
+          return true;
+        }
+        
+        if (template.variables.length === 0) {
+          // No variables needed, show the template
+          console.log(c('cyan', `\\n  Template: ${template.name}\\n`));
+          console.log(template.content);
+          console.log();
+        } else {
+          // Show template with placeholders
+          console.log(c('cyan', `\\n  Template: ${template.name}`));
+          console.log(c('dim', `  Variables needed: ${template.variables.join(', ')}\\n`));
+          console.log(c('gray', template.content));
+          console.log();
+          console.log(c('dim', '  To apply: Send message with format:'));
+          console.log(c('dim', `  /t ${template.name} var1=value1 var2=value2\\n`));
+        }
+      } else if (subCmd === 'reset') {
+        templateManager.resetToDefaults();
+        console.log(c('green', '\\n  Templates reset to defaults\\n'));
+      } else {
+        console.log(c('yellow', '\\n  Usage: /template [list|use <name>|reset]\\n'));
+      }
+      return true;
+    }
+
+    case 't': {
+      // Shorthand for template apply: /t template-name var1=value1 var2=value2
+      const templateManager = getTemplateManager();
+      
+      if (!args[0]) {
+        console.log(c('yellow', '\\n  Usage: /t <template-name> [var1=value1 var2=value2 ...]\\n'));
+        return true;
+      }
+
+      const template = templateManager.get(args[0]);
+      if (!template) {
+        console.log(c('red', `\\n  Template not found: ${args[0]}\\n`));
+        return true;
+      }
+
+      // Parse variables from args
+      const variables: Record<string, string> = {};
+      for (const arg of args.slice(1)) {
+        const [key, ...valueParts] = arg.split('=');
+        if (key && valueParts.length > 0) {
+          variables[key] = valueParts.join('=');
+        }
+      }
+
+      const result = templateManager.apply(args[0], variables);
+      if (result) {
+        console.log(c('cyan', `\\n  Applied template: ${template.name}\\n`));
+        console.log(result);
+        console.log();
+      }
       return true;
     }
 
