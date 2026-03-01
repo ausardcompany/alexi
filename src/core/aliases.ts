@@ -30,9 +30,21 @@ export interface AliasManagerOptions {
 export const DEFAULT_ALIASES: Omit<CommandAlias, 'created'>[] = [
   { name: 'gpt4', command: '/model gpt-4o', description: 'Switch to GPT-4o' },
   { name: 'gpt4m', command: '/model gpt-4o-mini', description: 'Switch to GPT-4o Mini' },
-  { name: 'claude', command: '/model anthropic--claude-4.5-sonnet', description: 'Switch to Claude 4.5 Sonnet' },
-  { name: 'opus', command: '/model anthropic--claude-4.5-opus', description: 'Switch to Claude 4.5 Opus' },
-  { name: 'haiku', command: '/model anthropic--claude-4.5-haiku', description: 'Switch to Claude 4.5 Haiku' },
+  {
+    name: 'claude',
+    command: '/model anthropic--claude-4.5-sonnet',
+    description: 'Switch to Claude 4.5 Sonnet',
+  },
+  {
+    name: 'opus',
+    command: '/model anthropic--claude-4.5-opus',
+    description: 'Switch to Claude 4.5 Opus',
+  },
+  {
+    name: 'haiku',
+    command: '/model anthropic--claude-4.5-haiku',
+    description: 'Switch to Claude 4.5 Haiku',
+  },
   { name: 'new', command: '/session new', description: 'Start a new session' },
   { name: 'clr', command: '/clear', description: 'Clear screen' },
   { name: 'ctx', command: '/context', description: 'Show context usage' },
@@ -165,7 +177,7 @@ export class AliasManager {
     try {
       const data = JSON.parse(json);
       const aliases = Array.isArray(data) ? data : data.aliases || [];
-      
+
       let imported = 0;
       for (const alias of aliases) {
         if (alias.name && alias.command) {

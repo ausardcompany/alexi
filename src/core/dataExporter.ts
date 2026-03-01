@@ -131,7 +131,7 @@ export class DataExporter {
       return sessions;
     }
 
-    const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
 
     for (const file of files) {
       try {
@@ -177,7 +177,7 @@ export class DataExporter {
    */
   private exportConfig(): Record<string, unknown> {
     const configPath = path.join(this.dataDir, 'config.json');
-    
+
     if (fs.existsSync(configPath)) {
       try {
         const content = fs.readFileSync(configPath, 'utf-8');
@@ -195,7 +195,7 @@ export class DataExporter {
    */
   async exportToFile(filePath: string, options: ExportOptions = {}): Promise<void> {
     const format = options.format || this.detectFormat(filePath);
-    
+
     switch (format) {
       case 'json':
         await this.exportJsonFile(filePath, options);
@@ -242,7 +242,7 @@ export class DataExporter {
    */
   private dataToMarkdown(data: ExportedData): string {
     const lines: string[] = [];
-    
+
     lines.push('# Alexi Export');
     lines.push('');
     lines.push(`Exported: ${new Date(data.metadata.exportedAt).toISOString()}`);
@@ -253,7 +253,7 @@ export class DataExporter {
     if (data.sessions && data.sessions.length > 0) {
       lines.push('## Sessions');
       lines.push('');
-      
+
       for (const session of data.sessions) {
         lines.push(`### Session: ${session.metadata.title || session.metadata.id.slice(0, 8)}`);
         lines.push('');
@@ -262,7 +262,7 @@ export class DataExporter {
         lines.push(`- **Messages:** ${session.metadata.messageCount}`);
         lines.push(`- **Tokens:** ${session.metadata.totalTokens}`);
         lines.push('');
-        
+
         for (const msg of session.messages) {
           lines.push(`**${msg.role.toUpperCase()}:**`);
           lines.push('');
@@ -278,7 +278,7 @@ export class DataExporter {
     if (data.memories && data.memories.length > 0) {
       lines.push('## Memories');
       lines.push('');
-      
+
       for (const memory of data.memories) {
         lines.push(`### ${memory.id}`);
         lines.push('');
@@ -295,11 +295,11 @@ export class DataExporter {
     if (data.costs && data.costs.length > 0) {
       lines.push('## Cost Summary');
       lines.push('');
-      
+
       const totalCost = data.costs.reduce((sum, r) => sum + r.cost, 0);
       const totalInput = data.costs.reduce((sum, r) => sum + r.inputTokens, 0);
       const totalOutput = data.costs.reduce((sum, r) => sum + r.outputTokens, 0);
-      
+
       lines.push(`- **Total Cost:** $${totalCost.toFixed(4)}`);
       lines.push(`- **Total Input Tokens:** ${totalInput.toLocaleString()}`);
       lines.push(`- **Total Output Tokens:** ${totalOutput.toLocaleString()}`);
@@ -315,11 +315,11 @@ export class DataExporter {
    */
   private dataToCsv(data: ExportedData): string {
     const lines: string[] = [];
-    
+
     // Cost records CSV
     if (data.costs && data.costs.length > 0) {
       lines.push('timestamp,date,sessionId,modelId,inputTokens,outputTokens,cost');
-      
+
       for (const record of data.costs) {
         const date = new Date(record.timestamp).toISOString();
         const row = [
@@ -361,7 +361,7 @@ export class DataExporter {
    */
   async importFromJson(data: ExportedData, options: ImportOptions = {}): Promise<ImportResult> {
     const { mode = 'merge', skipExisting = true } = options;
-    
+
     const result: ImportResult = {
       success: true,
       imported: {
@@ -431,14 +431,14 @@ export class DataExporter {
     skipExisting: boolean
   ): Promise<number> {
     const sessionsDir = path.join(this.dataDir, 'sessions');
-    
+
     if (!fs.existsSync(sessionsDir)) {
       fs.mkdirSync(sessionsDir, { recursive: true });
     }
 
     // If replace mode, clear existing sessions
     if (mode === 'replace') {
-      const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+      const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
       for (const file of files) {
         fs.unlinkSync(path.join(sessionsDir, file));
       }
@@ -447,7 +447,7 @@ export class DataExporter {
     let imported = 0;
     for (const session of sessions) {
       const sessionPath = path.join(sessionsDir, `${session.metadata.id}.json`);
-      
+
       if (skipExisting && fs.existsSync(sessionPath)) {
         continue;
       }
@@ -468,7 +468,7 @@ export class DataExporter {
     skipExisting: boolean
   ): Promise<number> {
     const memoryManager = getMemoryManager();
-    
+
     // If replace mode, clear existing memories
     if (mode === 'replace') {
       const existing = memoryManager.list();
@@ -503,7 +503,7 @@ export class DataExporter {
    */
   private async importCosts(records: UsageRecord[], mode: 'merge' | 'replace'): Promise<number> {
     const costTracker = getCostTracker();
-    
+
     if (mode === 'replace') {
       costTracker.clearHistory();
     }
@@ -522,9 +522,12 @@ export class DataExporter {
   /**
    * Import configuration
    */
-  private async importConfig(config: Record<string, unknown>, mode: 'merge' | 'replace'): Promise<void> {
+  private async importConfig(
+    config: Record<string, unknown>,
+    mode: 'merge' | 'replace'
+  ): Promise<void> {
     const configPath = path.join(this.dataDir, 'config.json');
-    
+
     let finalConfig: Record<string, unknown> = {};
 
     if (mode === 'merge' && fs.existsSync(configPath)) {

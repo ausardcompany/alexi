@@ -55,7 +55,7 @@ export const DEFAULT_TEMPLATES: Omit<MessageTemplate, 'id' | 'created' | 'usageC
   {
     name: 'fix-error',
     content:
-      'I\'m getting this error:\n\n```\n{{error}}\n```\n\nHere\'s the relevant code:\n\n```{{language}}\n{{code}}\n```\n\nHow can I fix this?',
+      "I'm getting this error:\n\n```\n{{error}}\n```\n\nHere's the relevant code:\n\n```{{language}}\n{{code}}\n```\n\nHow can I fix this?",
     description: 'Ask for help fixing an error',
     category: 'debug',
     variables: ['error', 'language', 'code'],
@@ -117,7 +117,11 @@ export class TemplateManager {
   /**
    * Add a new template
    */
-  add(name: string, content: string, options: { description?: string; category?: string } = {}): MessageTemplate {
+  add(
+    name: string,
+    content: string,
+    options: { description?: string; category?: string } = {}
+  ): MessageTemplate {
     const id = nanoid(10);
     const variables = this.extractVariables(content);
 

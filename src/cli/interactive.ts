@@ -135,117 +135,61 @@ function printHelp(): void {
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
   console.log();
-  console.log(
-    c('yellow', '  /config') + c('gray', '            - Show current configuration')
-  );
-  console.log(
-    c('yellow', '  /config path') + c('gray', '       - Show config file paths')
-  );
-  console.log(
-    c('yellow', '  /config set <k> <v>') + c('gray', '- Set a configuration value')
-  );
-  console.log(
-    c('yellow', '  /permissions') + c('gray', '       - List permission rules')
-  );
+  console.log(c('yellow', '  /config') + c('gray', '            - Show current configuration'));
+  console.log(c('yellow', '  /config path') + c('gray', '       - Show config file paths'));
+  console.log(c('yellow', '  /config set <k> <v>') + c('gray', '- Set a configuration value'));
+  console.log(c('yellow', '  /permissions') + c('gray', '       - List permission rules'));
   console.log(
     c('yellow', '  /permissions reset') + c('gray', ' - Clear session permission grants')
   );
-  console.log(
-    c('yellow', '  /mcp') + c('gray', '               - List MCP servers')
-  );
-  console.log(
-    c('yellow', '  /mcp connect <name>') + c('gray', '- Connect to MCP server')
-  );
-  console.log(
-    c('yellow', '  /mcp disconnect <n>') + c('gray', '- Disconnect from MCP server')
-  );
-  console.log(
-    c('yellow', '  /mcp status') + c('gray', '        - Show MCP connection status')
-  );
-  console.log(
-    c('yellow', '  /think [on|off]') + c('gray', '    - Toggle extended thinking mode')
-  );
-  console.log(
-    c('yellow', '  /doctor') + c('gray', '            - Run environment health checks')
-  );
-  console.log(
-    c('yellow', '  /clear-history') + c('gray', '     - Clear conversation history')
-  );
-  console.log(
-    c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback')
-  );
+  console.log(c('yellow', '  /mcp') + c('gray', '               - List MCP servers'));
+  console.log(c('yellow', '  /mcp connect <name>') + c('gray', '- Connect to MCP server'));
+  console.log(c('yellow', '  /mcp disconnect <n>') + c('gray', '- Disconnect from MCP server'));
+  console.log(c('yellow', '  /mcp status') + c('gray', '        - Show MCP connection status'));
+  console.log(c('yellow', '  /think [on|off]') + c('gray', '    - Toggle extended thinking mode'));
+  console.log(c('yellow', '  /doctor') + c('gray', '            - Run environment health checks'));
+  console.log(c('yellow', '  /clear-history') + c('gray', '     - Clear conversation history'));
+  console.log(c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback'));
   console.log();
   console.log(c('cyan', '  Cost & Memory:'));
   console.log();
   console.log(
     c('yellow', '  /cost') + c('gray', '              - Show cost summary for current session')
   );
+  console.log(c('yellow', '  /cost today') + c('gray', "        - Show today's cost summary"));
+  console.log(c('yellow', '  /cost month') + c('gray', "        - Show this month's cost summary"));
+  console.log(c('yellow', '  /cost all') + c('gray', '          - Show all-time cost summary'));
+  console.log(c('yellow', '  /cost export') + c('gray', '       - Export cost history to CSV'));
   console.log(
-    c('yellow', '  /cost today') + c('gray', '        - Show today\'s cost summary')
+    c('yellow', '  /remember <text>') +
+      c('gray', '   - Save a memory (use #tags for categorization)')
   );
-  console.log(
-    c('yellow', '  /cost month') + c('gray', '        - Show this month\'s cost summary')
-  );
-  console.log(
-    c('yellow', '  /cost all') + c('gray', '          - Show all-time cost summary')
-  );
-  console.log(
-    c('yellow', '  /cost export') + c('gray', '       - Export cost history to CSV')
-  );
-  console.log(
-    c('yellow', '  /remember <text>') + c('gray', '   - Save a memory (use #tags for categorization)')
-  );
-  console.log(
-    c('yellow', '  /memory') + c('gray', '            - List all memories')
-  );
-  console.log(
-    c('yellow', '  /memory search <q>') + c('gray', ' - Search memories by text or tag')
-  );
-  console.log(
-    c('yellow', '  /memory stats') + c('gray', '      - Show memory statistics')
-  );
-  console.log(
-    c('yellow', '  /memory export') + c('gray', '     - Export memories to JSON')
-  );
+  console.log(c('yellow', '  /memory') + c('gray', '            - List all memories'));
+  console.log(c('yellow', '  /memory search <q>') + c('gray', ' - Search memories by text or tag'));
+  console.log(c('yellow', '  /memory stats') + c('gray', '      - Show memory statistics'));
+  console.log(c('yellow', '  /memory export') + c('gray', '     - Export memories to JSON'));
   console.log();
   console.log(c('cyan', '  Data & Export:'));
   console.log();
   console.log(
     c('yellow', '  /export [file]') + c('gray', '     - Export all data to file (JSON/MD/CSV)')
   );
-  console.log(
-    c('yellow', '  /import <file>') + c('gray', '     - Import data from file')
-  );
-  console.log(
-    c('yellow', '  /stats') + c('gray', '             - Show overall usage statistics')
-  );
+  console.log(c('yellow', '  /import <file>') + c('gray', '     - Import data from file'));
+  console.log(c('yellow', '  /stats') + c('gray', '             - Show overall usage statistics'));
   console.log();
   console.log(c('cyan', '  Aliases & Templates:'));
   console.log();
+  console.log(c('yellow', '  /alias') + c('gray', '             - List all command aliases'));
   console.log(
-    c('yellow', '  /alias') + c('gray', '             - List all command aliases')
+    c('yellow', '  /alias <n> <cmd>') +
+      c('gray', '   - Create alias (e.g., /alias gpt /model gpt-4o)')
   );
-  console.log(
-    c('yellow', '  /alias <n> <cmd>') + c('gray', '   - Create alias (e.g., /alias gpt /model gpt-4o)')
-  );
-  console.log(
-    c('yellow', '  /alias delete <n>') + c('gray', '  - Delete an alias')
-  );
-  console.log(
-    c('yellow', '  /snippet') + c('gray', '           - List saved code snippets')
-  );
-  console.log(
-    c('yellow', '  /snippet add <n>') + c('gray', '   - Add snippet (prompts for code)')
-  );
-  console.log(
-    c('yellow', '  /snippet use <n>') + c('gray', '   - Copy snippet to use in message')
-  );
-  console.log(
-    c('yellow', '  /template') + c('gray', '          - List message templates')
-  );
-  console.log(
-    c('yellow', '  /template use <n>') + c('gray', '  - Apply a template')
-  );
+  console.log(c('yellow', '  /alias delete <n>') + c('gray', '  - Delete an alias'));
+  console.log(c('yellow', '  /snippet') + c('gray', '           - List saved code snippets'));
+  console.log(c('yellow', '  /snippet add <n>') + c('gray', '   - Add snippet (prompts for code)'));
+  console.log(c('yellow', '  /snippet use <n>') + c('gray', '   - Copy snippet to use in message'));
+  console.log(c('yellow', '  /template') + c('gray', '          - List message templates'));
+  console.log(c('yellow', '  /template use <n>') + c('gray', '  - Apply a template'));
   console.log();
 }
 
@@ -256,7 +200,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
   // Resolve aliases first
   const aliasManager = getAliasManager();
   const resolvedInput = aliasManager.resolve(input);
-  
+
   const parts = resolvedInput.slice(1).split(/\\s+/);
   const cmd = parts[0].toLowerCase();
   const args = parts.slice(1);
@@ -272,7 +216,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'q':
       console.log(c('gray', '\n  Goodbye!\n'));
       process.exit(0);
-      break; // eslint-disable-line no-fallthrough
+      break;
 
     case 'model':
       if (args.length === 0) {
@@ -744,7 +688,10 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
                 const statusIcon = isConnected ? c('green', '●') : c('red', '○');
                 const enabledStr = server.enabled ? '' : c('dim', ' (disabled)');
                 console.log(
-                  c('gray', `    ${statusIcon} ${server.name}: ${server.command || 'unknown'}${enabledStr}`)
+                  c(
+                    'gray',
+                    `    ${statusIcon} ${server.name}: ${server.command || 'unknown'}${enabledStr}`
+                  )
                 );
               }
             }
@@ -767,7 +714,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           } else {
             const result = await mcpManager.connect(serverConfig);
             if (result.status === 'connected') {
-              console.log(c('green', `  Connected to ${serverName} (${result.tools.length} tools)\n`));
+              console.log(
+                c('green', `  Connected to ${serverName} (${result.tools.length} tools)\n`)
+              );
             } else {
               console.log(c('red', `  Connection failed: ${result.error || 'unknown error'}\n`));
             }
@@ -796,7 +745,12 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
                 : server.status === 'connecting'
                   ? c('yellow', '◐')
                   : c('red', '○');
-            console.log(c('gray', `    ${statusIcon} ${server.name} (${server.tools} tools) - ${server.status}`));
+            console.log(
+              c(
+                'gray',
+                `    ${statusIcon} ${server.name} (${server.tools} tools) - ${server.status}`
+              )
+            );
             if (server.error) {
               console.log(c('dim', `        Error: ${server.error}`));
             }
@@ -804,7 +758,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         }
         console.log();
       } else {
-        console.log(c('yellow', '\n  Usage: /mcp [list|connect <name>|disconnect <name>|status]\n'));
+        console.log(
+          c('yellow', '\n  Usage: /mcp [list|connect <name>|disconnect <name>|status]\n')
+        );
       }
       return true;
     }
@@ -894,30 +850,43 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
 
       if (!subCmd || subCmd === 'today') {
         const summary = costTracker.getTodaySummary();
-        console.log(c('cyan', '\n  Today\'s API Costs:\n'));
+        console.log(c('cyan', "\n  Today's API Costs:\n"));
         if (summary.callCount === 0) {
           console.log(c('yellow', '    No API calls recorded today'));
         } else {
-          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(
+            c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`)
+          );
           console.log(c('gray', `    API Calls:     ${summary.callCount}`));
           console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
-          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+          console.log(
+            c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`)
+          );
         }
         console.log();
       } else if (subCmd === 'month') {
         const summary = costTracker.getMonthSummary();
-        console.log(c('cyan', '\n  This Month\'s API Costs:\n'));
+        console.log(c('cyan', "\n  This Month's API Costs:\n"));
         if (summary.callCount === 0) {
           console.log(c('yellow', '    No API calls recorded this month'));
         } else {
-          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(
+            c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`)
+          );
           console.log(c('gray', `    API Calls:     ${summary.callCount}`));
           console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
-          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+          console.log(
+            c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`)
+          );
           console.log();
           console.log(c('cyan', '    By Model:'));
           for (const [model, data] of Object.entries(summary.byModel)) {
-            console.log(c('gray', `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`));
+            console.log(
+              c(
+                'gray',
+                `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`
+              )
+            );
           }
         }
         console.log();
@@ -927,14 +896,23 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         if (summary.callCount === 0) {
           console.log(c('yellow', '    No API calls recorded'));
         } else {
-          console.log(c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`));
+          console.log(
+            c('gray', `    Total Cost:    ${c('green', costTracker.formatCost(summary.totalCost))}`)
+          );
           console.log(c('gray', `    API Calls:     ${summary.callCount}`));
           console.log(c('gray', `    Input Tokens:  ${summary.totalInputTokens.toLocaleString()}`));
-          console.log(c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`));
+          console.log(
+            c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`)
+          );
           console.log();
           console.log(c('cyan', '    By Model:'));
           for (const [model, data] of Object.entries(summary.byModel)) {
-            console.log(c('gray', `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`));
+            console.log(
+              c(
+                'gray',
+                `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`
+              )
+            );
           }
           console.log();
           console.log(c('cyan', '    Recent Days:'));
@@ -1018,10 +996,14 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           console.log(c('gray', `    Tags:           ${stats.tags.join(', ')}`));
         }
         if (stats.oldest) {
-          console.log(c('gray', `    Oldest:         ${new Date(stats.oldest).toLocaleDateString()}`));
+          console.log(
+            c('gray', `    Oldest:         ${new Date(stats.oldest).toLocaleDateString()}`)
+          );
         }
         if (stats.newest) {
-          console.log(c('gray', `    Newest:         ${new Date(stats.newest).toLocaleDateString()}`));
+          console.log(
+            c('gray', `    Newest:         ${new Date(stats.newest).toLocaleDateString()}`)
+          );
         }
         console.log();
       } else if (subCmd === 'export') {
@@ -1030,7 +1012,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         fs.writeFileSync(exportPath, json);
         console.log(c('green', `\n  Memories exported to: ${exportPath}\n`));
       } else {
-        console.log(c('yellow', '\n  Usage: /memory [list|search <query>|delete <id>|clear|stats|export]\n'));
+        console.log(
+          c('yellow', '\n  Usage: /memory [list|search <query>|delete <id>|clear|stats|export]\n')
+        );
       }
       return true;
     }
@@ -1073,12 +1057,14 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'export': {
       const exporter = getDataExporter();
       const filePath = args[0] || path.join(os.homedir(), '.alexi', `export-${Date.now()}.json`);
-      
+
       try {
         await exporter.exportToFile(filePath);
         console.log(c('green', `\\n  Data exported to: ${filePath}\\n`));
       } catch (err) {
-        console.log(c('red', `\\n  Export failed: ${err instanceof Error ? err.message : String(err)}\\n`));
+        console.log(
+          c('red', `\\n  Export failed: ${err instanceof Error ? err.message : String(err)}\\n`)
+        );
       }
       return true;
     }
@@ -1091,7 +1077,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
 
       const exporter = getDataExporter();
       const result = await exporter.importFromFile(args[0]);
-      
+
       if (result.success) {
         console.log(c('green', '\\n  Import successful:'));
         console.log(c('gray', `    Sessions: ${result.imported.sessions}`));
@@ -1111,9 +1097,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'stats': {
       const statsManager = getStatsManager();
       const stats = statsManager.getOverallStats();
-      
+
       console.log(c('cyan', '\\n  Overall Statistics:\\n'));
-      
+
       // Sessions
       console.log(c('yellow', '  Sessions:'));
       console.log(c('gray', `    Total:            ${stats.sessions.totalSessions}`));
@@ -1127,28 +1113,41 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         console.log(c('gray', `    History:          ${duration}`));
       }
       console.log();
-      
+
       // Costs
       console.log(c('yellow', '  Costs:'));
       console.log(c('gray', `    Total Spent:      $${stats.costs.totalCost.toFixed(4)}`));
       console.log(c('gray', `    API Calls:        ${stats.costs.callCount}`));
-      console.log(c('gray', `    Input Tokens:     ${stats.costs.totalInputTokens.toLocaleString()}`));
-      console.log(c('gray', `    Output Tokens:    ${stats.costs.totalOutputTokens.toLocaleString()}`));
+      console.log(
+        c('gray', `    Input Tokens:     ${stats.costs.totalInputTokens.toLocaleString()}`)
+      );
+      console.log(
+        c('gray', `    Output Tokens:    ${stats.costs.totalOutputTokens.toLocaleString()}`)
+      );
       console.log();
-      
+
       // Memories
       console.log(c('yellow', '  Memories:'));
       console.log(c('gray', `    Stored:           ${stats.memories.count}`));
-      console.log(c('gray', `    Total Size:       ${(stats.memories.totalSize / 1024).toFixed(1)} KB`));
+      console.log(
+        c('gray', `    Total Size:       ${(stats.memories.totalSize / 1024).toFixed(1)} KB`)
+      );
       if (stats.memories.tags.length > 0) {
-        console.log(c('gray', `    Tags:             ${stats.memories.tags.slice(0, 5).join(', ')}${stats.memories.tags.length > 5 ? '...' : ''}`));
+        console.log(
+          c(
+            'gray',
+            `    Tags:             ${stats.memories.tags.slice(0, 5).join(', ')}${stats.memories.tags.length > 5 ? '...' : ''}`
+          )
+        );
       }
       console.log();
-      
+
       // System
       console.log(c('yellow', '  System:'));
       console.log(c('gray', `    Data Directory:   ${stats.system.dataDir}`));
-      console.log(c('gray', `    Data Size:        ${statsManager.formatBytes(stats.system.dataDirSize)}`));
+      console.log(
+        c('gray', `    Data Size:        ${statsManager.formatBytes(stats.system.dataDirSize)}`)
+      );
       console.log();
       return true;
     }
@@ -1156,7 +1155,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'alias': {
       const aliasManager = getAliasManager();
       const subCmd = args[0]?.toLowerCase();
-      
+
       if (!subCmd) {
         // List all aliases
         const aliases = aliasManager.list();
@@ -1202,7 +1201,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'snippet': {
       const snippetManager = getSnippetManager();
       const subCmd = args[0]?.toLowerCase();
-      
+
       if (!subCmd || subCmd === 'list') {
         const snippets = snippetManager.list().slice(0, 10);
         console.log(c('cyan', '\\n  Code Snippets:\\n'));
@@ -1255,7 +1254,12 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         }
         console.log();
       } else {
-        console.log(c('yellow', '\\n  Usage: /snippet [list|add <name>|use <name>|delete <name>|search <query>]\\n'));
+        console.log(
+          c(
+            'yellow',
+            '\\n  Usage: /snippet [list|add <name>|use <name>|delete <name>|search <query>]\\n'
+          )
+        );
       }
       return true;
     }
@@ -1263,7 +1267,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'template': {
       const templateManager = getTemplateManager();
       const subCmd = args[0]?.toLowerCase();
-      
+
       if (!subCmd || subCmd === 'list') {
         const templates = templateManager.list();
         console.log(c('cyan', '\\n  Message Templates:\\n'));
@@ -1272,21 +1276,25 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         } else {
           const categories = templateManager.getCategories();
           for (const category of categories) {
-            const catTemplates = templates.filter(t => t.category === category);
+            const catTemplates = templates.filter((t) => t.category === category);
             console.log(c('yellow', `  ${category}:`));
             for (const t of catTemplates) {
-              console.log(c('gray', `    /${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : ''));
+              console.log(
+                c('gray', `    /${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : '')
+              );
               if (t.variables.length > 0) {
                 console.log(c('dim', `      Variables: ${t.variables.join(', ')}`));
               }
             }
           }
           // Templates without category
-          const uncategorized = templates.filter(t => !t.category);
+          const uncategorized = templates.filter((t) => !t.category);
           if (uncategorized.length > 0) {
             console.log(c('yellow', '  Other:'));
             for (const t of uncategorized) {
-              console.log(c('gray', `    ${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : ''));
+              console.log(
+                c('gray', `    ${t.name}`) + (t.description ? c('dim', ` - ${t.description}`) : '')
+              );
             }
           }
         }
@@ -1297,7 +1305,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           console.log(c('red', `\\n  Template not found: ${args[1]}\\n`));
           return true;
         }
-        
+
         if (template.variables.length === 0) {
           // No variables needed, show the template
           console.log(c('cyan', `\\n  Template: ${template.name}\\n`));
@@ -1324,7 +1332,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 't': {
       // Shorthand for template apply: /t template-name var1=value1 var2=value2
       const templateManager = getTemplateManager();
-      
+
       if (!args[0]) {
         console.log(c('yellow', '\\n  Usage: /t <template-name> [var1=value1 var2=value2 ...]\\n'));
         return true;

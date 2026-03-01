@@ -17,15 +17,15 @@ describe('StatsManager', () => {
   beforeEach(() => {
     // Create temp directory for tests
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-stats-test-'));
-    
+
     // Create sessions directory
     fs.mkdirSync(path.join(testDir, 'sessions'), { recursive: true });
-    
+
     // Reset singletons
     resetStatsManager();
     resetCostTracker();
     resetMemoryManager();
-    
+
     statsManager = new StatsManager({ dataDir: testDir });
   });
 
@@ -40,7 +40,7 @@ describe('StatsManager', () => {
   describe('getSessionStats', () => {
     it('should return empty stats when no sessions exist', () => {
       const stats = statsManager.getSessionStats();
-      
+
       expect(stats.totalSessions).toBe(0);
       expect(stats.totalMessages).toBe(0);
       expect(stats.totalTokens).toBe(0);
@@ -84,16 +84,16 @@ describe('StatsManager', () => {
           messages: [],
         },
       ];
-      
+
       for (const s of sessions) {
         fs.writeFileSync(
           path.join(testDir, 'sessions', `${s.metadata.id}.json`),
           JSON.stringify(s, null, 2)
         );
       }
-      
+
       const stats = statsManager.getSessionStats();
-      
+
       expect(stats.totalSessions).toBe(3);
       expect(stats.totalMessages).toBe(15);
       expect(stats.totalTokens).toBe(450);
@@ -106,21 +106,39 @@ describe('StatsManager', () => {
     it('should track oldest and newest sessions', () => {
       const oldTime = Date.now() - 86400000 * 30; // 30 days ago
       const newTime = Date.now();
-      
+
       const sessions = [
-        { metadata: { id: 's1', created: oldTime, updated: oldTime, totalTokens: 0, messageCount: 0 }, messages: [] },
-        { metadata: { id: 's2', created: newTime, updated: newTime, totalTokens: 0, messageCount: 0 }, messages: [] },
+        {
+          metadata: {
+            id: 's1',
+            created: oldTime,
+            updated: oldTime,
+            totalTokens: 0,
+            messageCount: 0,
+          },
+          messages: [],
+        },
+        {
+          metadata: {
+            id: 's2',
+            created: newTime,
+            updated: newTime,
+            totalTokens: 0,
+            messageCount: 0,
+          },
+          messages: [],
+        },
       ];
-      
+
       for (const s of sessions) {
         fs.writeFileSync(
           path.join(testDir, 'sessions', `${s.metadata.id}.json`),
           JSON.stringify(s)
         );
       }
-      
+
       const stats = statsManager.getSessionStats();
-      
+
       expect(stats.oldestSession).toBe(oldTime);
       expect(stats.newestSession).toBe(newTime);
     });
@@ -128,22 +146,49 @@ describe('StatsManager', () => {
     it('should track sessions by date', () => {
       const today = new Date().toISOString().split('T')[0];
       const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-      
+
       const sessions = [
-        { metadata: { id: 's1', created: Date.now(), updated: Date.now(), totalTokens: 0, messageCount: 0 }, messages: [] },
-        { metadata: { id: 's2', created: Date.now(), updated: Date.now(), totalTokens: 0, messageCount: 0 }, messages: [] },
-        { metadata: { id: 's3', created: Date.now() - 86400000, updated: Date.now(), totalTokens: 0, messageCount: 0 }, messages: [] },
+        {
+          metadata: {
+            id: 's1',
+            created: Date.now(),
+            updated: Date.now(),
+            totalTokens: 0,
+            messageCount: 0,
+          },
+          messages: [],
+        },
+        {
+          metadata: {
+            id: 's2',
+            created: Date.now(),
+            updated: Date.now(),
+            totalTokens: 0,
+            messageCount: 0,
+          },
+          messages: [],
+        },
+        {
+          metadata: {
+            id: 's3',
+            created: Date.now() - 86400000,
+            updated: Date.now(),
+            totalTokens: 0,
+            messageCount: 0,
+          },
+          messages: [],
+        },
       ];
-      
+
       for (const s of sessions) {
         fs.writeFileSync(
           path.join(testDir, 'sessions', `${s.metadata.id}.json`),
           JSON.stringify(s)
         );
       }
-      
+
       const stats = statsManager.getSessionStats();
-      
+
       expect(stats.sessionsByDate[today]).toBe(2);
       expect(stats.sessionsByDate[yesterday]).toBe(1);
     });
@@ -153,16 +198,19 @@ describe('StatsManager', () => {
     it('should return combined stats', () => {
       // Create a session
       const session = {
-        metadata: { id: 's1', created: Date.now(), updated: Date.now(), totalTokens: 50, messageCount: 2 },
+        metadata: {
+          id: 's1',
+          created: Date.now(),
+          updated: Date.now(),
+          totalTokens: 50,
+          messageCount: 2,
+        },
         messages: [],
       };
-      fs.writeFileSync(
-        path.join(testDir, 'sessions', 's1.json'),
-        JSON.stringify(session)
-      );
-      
+      fs.writeFileSync(path.join(testDir, 'sessions', 's1.json'), JSON.stringify(session));
+
       const stats = statsManager.getOverallStats();
-      
+
       expect(stats.sessions.totalSessions).toBe(1);
       expect(stats.costs).toBeDefined();
       expect(stats.memories).toBeDefined();
@@ -186,7 +234,7 @@ describe('StatsManager', () => {
   describe('formatDuration', () => {
     it('should format duration correctly', () => {
       const now = Date.now();
-      
+
       expect(statsManager.formatDuration(now)).toBe('Today');
       expect(statsManager.formatDuration(now - 86400000)).toBe('1 day');
       expect(statsManager.formatDuration(now - 86400000 * 5)).toBe('5 days');
@@ -197,10 +245,10 @@ describe('StatsManager', () => {
   describe('getUsageTrends', () => {
     it('should return trends for last 7 and 30 days', () => {
       const trends = statsManager.getUsageTrends();
-      
+
       expect(trends.last7Days).toHaveLength(7);
       expect(trends.last30Days).toHaveLength(30);
-      
+
       // Each entry should have required fields
       for (const entry of trends.last7Days) {
         expect(entry).toHaveProperty('date');
@@ -211,7 +259,7 @@ describe('StatsManager', () => {
 
     it('should have correct date format', () => {
       const trends = statsManager.getUsageTrends();
-      
+
       // Date format should be YYYY-MM-DD
       const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
       for (const entry of trends.last30Days) {
@@ -225,7 +273,7 @@ describe('StatsManager', () => {
       resetStatsManager();
       const instance1 = getStatsManager();
       const instance2 = getStatsManager();
-      
+
       expect(instance1).toBe(instance2);
     });
 
@@ -233,7 +281,7 @@ describe('StatsManager', () => {
       const instance1 = getStatsManager();
       resetStatsManager();
       const instance2 = getStatsManager();
-      
+
       expect(instance1).not.toBe(instance2);
     });
   });

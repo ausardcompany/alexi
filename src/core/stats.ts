@@ -83,7 +83,7 @@ export class StatsManager {
       return stats;
     }
 
-    const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
     const modelCounts: Record<string, number> = {};
 
     for (const file of files) {
@@ -190,11 +190,11 @@ export class StatsManager {
    */
   formatBytes(bytes: number): string {
     if (bytes === 0) return '0 B';
-    
+
     const units = ['B', 'KB', 'MB', 'GB'];
     const k = 1024;
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    
+
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${units[i]}`;
   }
 
@@ -229,7 +229,7 @@ export class StatsManager {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
-      
+
       const dayData = {
         date: dateStr,
         sessions: sessionStats.sessionsByDate[dateStr] || 0,

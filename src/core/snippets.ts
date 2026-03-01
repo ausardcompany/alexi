@@ -126,7 +126,13 @@ export class SnippetManager {
    */
   update(
     id: string,
-    updates: { name?: string; code?: string; language?: string; description?: string; tags?: string[] }
+    updates: {
+      name?: string;
+      code?: string;
+      language?: string;
+      description?: string;
+      tags?: string[];
+    }
   ): CodeSnippet | null {
     const existing = this.snippets.get(id);
     if (!existing) {

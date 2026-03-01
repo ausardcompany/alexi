@@ -79,7 +79,10 @@ export class MemoryManager {
   /**
    * Add a new memory
    */
-  add(content: string, options: { tags?: string[]; source?: string; priority?: number } = {}): MemoryEntry {
+  add(
+    content: string,
+    options: { tags?: string[]; source?: string; priority?: number } = {}
+  ): MemoryEntry {
     const id = nanoid(10);
     const now = Date.now();
 
@@ -107,7 +110,11 @@ export class MemoryManager {
   /**
    * Update an existing memory
    */
-  update(id: string, content: string, options: { tags?: string[]; priority?: number } = {}): MemoryEntry | null {
+  update(
+    id: string,
+    content: string,
+    options: { tags?: string[]; priority?: number } = {}
+  ): MemoryEntry | null {
     const existing = this.memories.get(id);
     if (!existing) {
       return null;

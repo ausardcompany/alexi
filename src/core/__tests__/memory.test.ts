@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as os from 'os';
-import {
-  MemoryManager,
-  getMemoryManager,
-  resetMemoryManager,
-} from '../memory.js';
+import { MemoryManager, getMemoryManager, resetMemoryManager } from '../memory.js';
 
 // Mock fs module for testing
 vi.mock('fs', async () => {

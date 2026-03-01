@@ -45,7 +45,10 @@ export interface CostSummary {
   /** Number of API calls */
   callCount: number;
   /** Cost breakdown by model */
-  byModel: Record<string, { cost: number; calls: number; inputTokens: number; outputTokens: number }>;
+  byModel: Record<
+    string,
+    { cost: number; calls: number; inputTokens: number; outputTokens: number }
+  >;
   /** Cost breakdown by date (YYYY-MM-DD) */
   byDate: Record<string, number>;
 }
@@ -176,7 +179,9 @@ export class CostTracker {
     // Try partial match (e.g., 'claude-4.5-sonnet' matches 'anthropic--claude-4.5-sonnet')
     if (!pricing) {
       pricing = MODEL_PRICING.find(
-        (p) => normalized.includes(p.modelId.toLowerCase()) || p.modelId.toLowerCase().includes(normalized)
+        (p) =>
+          normalized.includes(p.modelId.toLowerCase()) ||
+          p.modelId.toLowerCase().includes(normalized)
       );
     }
 
@@ -383,7 +388,15 @@ export class CostTracker {
    * Export cost data as CSV
    */
   exportToCsv(): string {
-    const headers = ['timestamp', 'date', 'sessionId', 'modelId', 'inputTokens', 'outputTokens', 'cost'];
+    const headers = [
+      'timestamp',
+      'date',
+      'sessionId',
+      'modelId',
+      'inputTokens',
+      'outputTokens',
+      'cost',
+    ];
     const rows = this.records.map((r) => [
       r.timestamp,
       new Date(r.timestamp).toISOString(),

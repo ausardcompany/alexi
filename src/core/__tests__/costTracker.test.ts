@@ -1,12 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import * as os from 'os';
-import {
-  CostTracker,
-  getCostTracker,
-  resetCostTracker,
-  MODEL_PRICING,
-} from '../costTracker.js';
+import { CostTracker, getCostTracker, resetCostTracker, MODEL_PRICING } from '../costTracker.js';
 
 // Mock fs module for testing
 vi.mock('fs', async () => {
