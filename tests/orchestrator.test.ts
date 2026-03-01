@@ -3,10 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mock dependencies before importing the module
 vi.mock('../src/providers/index.js', () => ({
   getProviderForModel: vi.fn(),
-}));
-
-vi.mock('../src/config/env.js', () => ({
-  env: vi.fn(),
+  getDefaultModel: vi.fn(),
 }));
 
 vi.mock('../src/core/router.js', () => ({
@@ -15,14 +12,22 @@ vi.mock('../src/core/router.js', () => ({
 
 // Import after mocking
 import { sendChat } from '../src/core/orchestrator.js';
-import { getProviderForModel } from '../src/providers/index.js';
-import { env } from '../src/config/env.js';
+import { getProviderForModel, getDefaultModel } from '../src/providers/index.js';
 import { routePrompt } from '../src/core/router.js';
 import { SessionManager } from '../src/core/sessionManager.js';
+
+// Helper to create mock provider
+function createMockProvider(response: { text: string; usage?: Record<string, number> }) {
+  return {
+    complete: vi.fn().mockResolvedValue(response),
+  };
+}
 
 describe('Orchestrator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default mock for getDefaultModel
+    vi.mocked(getDefaultModel).mockReturnValue('gpt-4o');
   });
 
   afterEach(() => {
@@ -32,22 +37,12 @@ describe('Orchestrator', () => {
   describe('sendChat', () => {
     describe('model selection', () => {
       it('should use default model when no override provided', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Hello!',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Hello!',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
 
-        vi.mocked(env).mockImplementation((key: string) => {
-          if (key === 'SAP_PROXY_MODEL') return 'gpt-4o';
-          return undefined;
-        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const result = await sendChat('Hello');
 
@@ -57,19 +52,12 @@ describe('Orchestrator', () => {
       });
 
       it('should use modelOverride when provided', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response from claude',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response from claude',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
 
-        vi.mocked(env).mockReturnValue(undefined);
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const result = await sendChat('Hello', {
           modelOverride: 'anthropic--claude-4-sonnet',
@@ -80,17 +68,12 @@ describe('Orchestrator', () => {
       });
 
       it('should use auto-routing when enabled', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Routed response',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Routed response',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         vi.mocked(routePrompt).mockReturnValue({
           modelId: 'anthropic--claude-4-opus',
@@ -115,17 +98,12 @@ describe('Orchestrator', () => {
       });
 
       it('should ignore auto-routing when modelOverride is provided', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         await sendChat('Hello', {
           autoRoute: true,
@@ -138,138 +116,52 @@ describe('Orchestrator', () => {
     });
 
     describe('provider handling', () => {
-      it('should handle anthropic provider correctly', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Anthropic response',
-            usage: { inputTokens: 15, outputTokens: 20 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+      it('should call provider.complete with correct parameters', async () => {
+        const mockProvider = createMockProvider({
+          text: 'Provider response',
+          usage: { prompt_tokens: 15, completion_tokens: 20 },
         });
 
-        vi.mocked(env).mockReturnValue('test-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const result = await sendChat('Test message');
 
-        expect(mockSdk.complete).toHaveBeenCalledWith(
+        expect(mockProvider.complete).toHaveBeenCalledWith(
           [{ role: 'user', content: 'Test message' }],
           { maxTokens: 4096 }
         );
-        expect(result.text).toBe('Anthropic response');
-        expect(result.usage).toEqual({ inputTokens: 15, outputTokens: 20 });
+        expect(result.text).toBe('Provider response');
+        expect(result.usage).toEqual({ prompt_tokens: 15, completion_tokens: 20 });
       });
 
-      it('should handle claude-native provider correctly', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Claude native response',
-            usage: { inputTokens: 10, outputTokens: 15 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'claude-native',
-          sdk: mockSdk,
+      it('should handle provider without usage data', async () => {
+        const mockProvider = createMockProvider({
+          text: 'Response without usage',
         });
 
-        vi.mocked(env).mockReturnValue('claude-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const result = await sendChat('Test');
 
-        expect(result.text).toBe('Claude native response');
-      });
-
-      it('should handle proxy provider with fetch', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              choices: [{ message: { content: 'Proxy response' } }],
-              usage: { prompt_tokens: 10, completion_tokens: 20 },
-            }),
-        });
-
-        global.fetch = mockFetch;
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'proxy',
-          sdk: null,
-        });
-
-        vi.mocked(env).mockImplementation((key: string) => {
-          if (key === 'SAP_PROXY_BASE_URL') return 'https://api.example.com/';
-          if (key === 'SAP_PROXY_API_KEY') return 'test-api-key';
-          if (key === 'SAP_PROXY_MODEL') return 'gpt-4o';
-          return undefined;
-        });
-
-        const result = await sendChat('Test proxy');
-
-        expect(mockFetch).toHaveBeenCalledWith(
-          'https://api.example.com/chat/completions',
-          expect.objectContaining({
-            method: 'POST',
-            headers: {
-              Authorization: 'Bearer test-api-key',
-              'Content-Type': 'application/json',
-            },
-          })
-        );
-        expect(result.text).toBe('Proxy response');
-      });
-
-      it('should throw error when proxy request fails', async () => {
-        const mockFetch = vi.fn().mockResolvedValue({
-          ok: false,
-          status: 500,
-          statusText: 'Internal Server Error',
-        });
-
-        global.fetch = mockFetch;
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'proxy',
-          sdk: null,
-        });
-
-        vi.mocked(env).mockImplementation((key: string) => {
-          if (key === 'SAP_PROXY_BASE_URL') return 'https://api.example.com/';
-          if (key === 'SAP_PROXY_API_KEY') return 'test-api-key';
-          if (key === 'SAP_PROXY_MODEL') return 'gpt-4o';
-          return undefined;
-        });
-
-        await expect(sendChat('Test')).rejects.toThrow(
-          'Proxy completion failed: 500 Internal Server Error'
-        );
+        expect(result.text).toBe('Response without usage');
+        expect(result.usage).toBeUndefined();
       });
     });
 
     describe('system prompt handling', () => {
       it('should include system prompt in messages', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response',
-            usage: {},
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: {},
         });
 
-        vi.mocked(env).mockReturnValue('model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         await sendChat('Hello', {
           systemPrompt: 'You are a helpful assistant',
         });
 
-        expect(mockSdk.complete).toHaveBeenCalledWith(
+        expect(mockProvider.complete).toHaveBeenCalledWith(
           [
             { role: 'system', content: 'You are a helpful assistant' },
             { role: 'user', content: 'Hello' },
@@ -281,19 +173,12 @@ describe('Orchestrator', () => {
 
     describe('session management', () => {
       it('should create session if not exists', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
 
-        vi.mocked(env).mockReturnValue('test-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const sessionManager = new SessionManager();
 
@@ -303,19 +188,12 @@ describe('Orchestrator', () => {
       });
 
       it('should add messages to session history', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'AI Response',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'AI Response',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
 
-        vi.mocked(env).mockReturnValue('test-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const sessionManager = new SessionManager();
 
@@ -330,19 +208,12 @@ describe('Orchestrator', () => {
       });
 
       it('should include conversation history in subsequent messages', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response',
-            usage: { inputTokens: 10, outputTokens: 5 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
         });
 
-        vi.mocked(env).mockReturnValue('test-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const sessionManager = new SessionManager();
 
@@ -353,26 +224,19 @@ describe('Orchestrator', () => {
         await sendChat('Second message', { sessionManager });
 
         // Check that second call included history
-        const secondCallArgs = mockSdk.complete.mock.calls[1][0];
+        const secondCallArgs = mockProvider.complete.mock.calls[1][0];
         expect(secondCallArgs).toHaveLength(3); // user1 + assistant1 + user2
       });
     });
 
     describe('response format', () => {
       it('should return correct response structure', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response text',
-            usage: { inputTokens: 10, outputTokens: 20 },
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response text',
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
         });
 
-        vi.mocked(env).mockReturnValue('my-model');
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         const result = await sendChat('Test');
 
@@ -380,21 +244,16 @@ describe('Orchestrator', () => {
         expect(result).toHaveProperty('usage');
         expect(result).toHaveProperty('modelUsed');
         expect(result.text).toBe('Response text');
-        expect(result.modelUsed).toBe('my-model');
+        expect(result.modelUsed).toBe('gpt-4o');
       });
 
       it('should include routingReason when auto-routing is used', async () => {
-        const mockSdk = {
-          complete: vi.fn().mockResolvedValue({
-            text: 'Response',
-            usage: {},
-          }),
-        };
-
-        vi.mocked(getProviderForModel).mockReturnValue({
-          type: 'anthropic',
-          sdk: mockSdk,
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: {},
         });
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
         vi.mocked(routePrompt).mockReturnValue({
           modelId: 'routed-model',
@@ -407,6 +266,19 @@ describe('Orchestrator', () => {
         const result = await sendChat('Test', { autoRoute: true });
 
         expect(result.routingReason).toBe('Routing reason');
+      });
+
+      it('should not include routingReason when auto-routing is not used', async () => {
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: {},
+        });
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        const result = await sendChat('Test');
+
+        expect(result.routingReason).toBeUndefined();
       });
     });
   });
