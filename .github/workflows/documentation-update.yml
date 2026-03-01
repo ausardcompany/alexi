@@ -466,8 +466,8 @@ jobs:
       - name: Run documentation generation with own CLI
         if: steps.check_needed.outputs.skip != 'true'
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         id: bot
         continue-on-error: true
         run: |

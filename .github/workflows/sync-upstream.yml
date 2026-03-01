@@ -395,8 +395,8 @@ jobs:
         if: steps.check-changes.outputs.has_changes == 'true'
         id: plan
         env:
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
         run: |
           PLAN_FILE=".github/reports/update-plan-$(date +%Y-%m-%d).md"
           mkdir -p .github/reports
@@ -469,8 +469,8 @@ jobs:
         if: steps.check-changes.outputs.has_changes == 'true'
         id: execute
         env:
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
         run: |
           echo "=== Stage 2: Executing update plan with Claude 4.5 Sonnet (agentic mode) ==="
           echo "This stage uses tools to write/edit files directly..."
