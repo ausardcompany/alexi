@@ -4,6 +4,9 @@
  */
 
 import * as readline from 'readline';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 import { streamChat, resolveModelId, isAbortError } from '../core/streamingOrchestrator.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { env } from '../config/env.js';
@@ -12,6 +15,9 @@ import { getCheckpointManager } from '../core/checkpoints.js';
 import { compactConversation, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
 import { getStageManager, type ConversationStage } from '../core/stageManager.js';
+import { getPermissionManager, defaultRules } from '../permission/index.js';
+import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp/index.js';
+import { getDoctor } from '../doctor/index.js';
 
 export interface InteractiveOptions {
   model?: string;
@@ -31,6 +37,7 @@ interface ReplState {
   isStreaming: boolean;
   agent?: string;
   stage?: ConversationStage;
+  thinkingMode?: boolean;
 }
 
 // Spinner animation frames
@@ -117,6 +124,48 @@ function printHelp(): void {
   console.log(
     c('yellow', '  /dod') +
       c('gray', '               - Run Definition of Done checks for current stage')
+  );
+  console.log();
+  console.log(c('cyan', '  Configuration & System:'));
+  console.log();
+  console.log(
+    c('yellow', '  /config') + c('gray', '            - Show current configuration')
+  );
+  console.log(
+    c('yellow', '  /config path') + c('gray', '       - Show config file paths')
+  );
+  console.log(
+    c('yellow', '  /config set <k> <v>') + c('gray', '- Set a configuration value')
+  );
+  console.log(
+    c('yellow', '  /permissions') + c('gray', '       - List permission rules')
+  );
+  console.log(
+    c('yellow', '  /permissions reset') + c('gray', ' - Clear session permission grants')
+  );
+  console.log(
+    c('yellow', '  /mcp') + c('gray', '               - List MCP servers')
+  );
+  console.log(
+    c('yellow', '  /mcp connect <name>') + c('gray', '- Connect to MCP server')
+  );
+  console.log(
+    c('yellow', '  /mcp disconnect <n>') + c('gray', '- Disconnect from MCP server')
+  );
+  console.log(
+    c('yellow', '  /mcp status') + c('gray', '        - Show MCP connection status')
+  );
+  console.log(
+    c('yellow', '  /think [on|off]') + c('gray', '    - Toggle extended thinking mode')
+  );
+  console.log(
+    c('yellow', '  /doctor') + c('gray', '            - Run environment health checks')
+  );
+  console.log(
+    c('yellow', '  /clear-history') + c('gray', '     - Clear conversation history')
+  );
+  console.log(
+    c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback')
   );
   console.log();
 }
@@ -505,6 +554,254 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       console.log();
       console.log(c('gray', `  Summary: ${report.passed}/${report.totalChecks} passed`));
       console.log();
+      return true;
+    }
+
+    case 'config': {
+      const configDir = path.join(os.homedir(), '.alexi');
+      const configPath = path.join(configDir, 'config.json');
+
+      if (args.length === 0 || args[0] === 'show') {
+        console.log(c('cyan', '\n  Configuration:\n'));
+        try {
+          if (fs.existsSync(configPath)) {
+            const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            for (const [key, value] of Object.entries(config)) {
+              console.log(c('gray', `    ${key}: ${c('green', String(value))}`));
+            }
+          } else {
+            console.log(c('yellow', '    No config file found. Using defaults.'));
+          }
+        } catch (err) {
+          console.log(c('red', `    Error reading config: ${err}`));
+        }
+        console.log();
+      } else if (args[0] === 'path') {
+        console.log(c('cyan', '\n  Config Paths:\n'));
+        console.log(c('gray', `    Config dir:  ${configDir}`));
+        console.log(c('gray', `    Config file: ${configPath}`));
+        console.log(c('gray', `    MCP servers: ${path.join(configDir, 'mcp-servers.json')}`));
+        console.log(c('gray', `    Sessions:    ${path.join(configDir, 'sessions')}`));
+        console.log();
+      } else if (args[0] === 'set' && args.length >= 3) {
+        const key = args[1];
+        const value = args.slice(2).join(' ');
+        try {
+          if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+          }
+          let config: Record<string, unknown> = {};
+          if (fs.existsSync(configPath)) {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+          }
+          // Try to parse as JSON for booleans/numbers
+          try {
+            config[key] = JSON.parse(value);
+          } catch {
+            config[key] = value;
+          }
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+          console.log(c('green', `\n  Set ${key} = ${value}\n`));
+        } catch (err) {
+          console.log(c('red', `\n  Error saving config: ${err}\n`));
+        }
+      } else {
+        console.log(c('yellow', '\n  Usage: /config [show|path|set <key> <value>]\n'));
+      }
+      return true;
+    }
+
+    case 'permissions': {
+      const permManager = getPermissionManager();
+
+      if (args.length === 0 || args[0] === 'list') {
+        console.log(c('cyan', '\n  Permission Rules:\n'));
+        const rules = permManager.getRules();
+        for (const rule of rules) {
+          const status =
+            rule.decision === 'allow'
+              ? c('green', 'ALLOW')
+              : rule.decision === 'deny'
+                ? c('red', 'DENY')
+                : c('yellow', 'ASK');
+          const tools = rule.tools?.join(', ') || '*';
+          const paths = rule.paths?.join(', ') || '*';
+          console.log(c('gray', `    ${status} ${rule.name || rule.id || 'rule'}`));
+          console.log(c('dim', `          tools: ${tools}, paths: ${paths}`));
+        }
+        console.log();
+      } else if (args[0] === 'reset') {
+        // Reset by clearing session grants
+        permManager.clearSession();
+        console.log(c('green', '\n  Permission session grants cleared\n'));
+      } else {
+        console.log(c('yellow', '\n  Usage: /permissions [list|reset]\n'));
+      }
+      return true;
+    }
+
+    case 'mcp': {
+      const mcpManager = getMcpClientManager();
+
+      if (args.length === 0 || args[0] === 'list') {
+        console.log(c('cyan', '\n  MCP Servers:\n'));
+        const configDir = path.join(os.homedir(), '.alexi');
+        const mcpConfigPath = path.join(configDir, 'mcp-servers.json');
+        try {
+          if (fs.existsSync(mcpConfigPath)) {
+            const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
+            const servers = mcpConfig.servers || [];
+            if (!Array.isArray(servers) || servers.length === 0) {
+              console.log(c('yellow', '    No MCP servers configured'));
+            } else {
+              const statusList = mcpManager.getStatus();
+              for (const server of servers as McpServerConfig[]) {
+                const connStatus = statusList.find((s) => s.name === server.name);
+                const isConnected = connStatus?.status === 'connected';
+                const statusIcon = isConnected ? c('green', '●') : c('red', '○');
+                const enabledStr = server.enabled ? '' : c('dim', ' (disabled)');
+                console.log(
+                  c('gray', `    ${statusIcon} ${server.name}: ${server.command || 'unknown'}${enabledStr}`)
+                );
+              }
+            }
+          } else {
+            console.log(c('yellow', '    No MCP config file found'));
+            console.log(c('dim', `    Create ${mcpConfigPath} to add servers`));
+          }
+        } catch (err) {
+          console.log(c('red', `    Error reading MCP config: ${err}`));
+        }
+        console.log();
+      } else if (args[0] === 'connect' && args[1]) {
+        const serverName = args[1];
+        console.log(c('cyan', `\n  Connecting to ${serverName}...`));
+        try {
+          const config = loadMcpConfig();
+          const serverConfig = config.servers.find((s) => s.name === serverName);
+          if (!serverConfig) {
+            console.log(c('red', `  Server '${serverName}' not found in config\n`));
+          } else {
+            const result = await mcpManager.connect(serverConfig);
+            if (result.status === 'connected') {
+              console.log(c('green', `  Connected to ${serverName} (${result.tools.length} tools)\n`));
+            } else {
+              console.log(c('red', `  Connection failed: ${result.error || 'unknown error'}\n`));
+            }
+          }
+        } catch (err) {
+          console.log(c('red', `  Connection failed: ${err}\n`));
+        }
+      } else if (args[0] === 'disconnect' && args[1]) {
+        const serverName = args[1];
+        try {
+          await mcpManager.disconnect(serverName);
+          console.log(c('green', `\n  Disconnected from ${serverName}\n`));
+        } catch (err) {
+          console.log(c('red', `\n  Disconnect failed: ${err}\n`));
+        }
+      } else if (args[0] === 'status') {
+        console.log(c('cyan', '\n  MCP Connection Status:\n'));
+        const statusList = mcpManager.getStatus();
+        if (statusList.length === 0) {
+          console.log(c('yellow', '    No servers registered'));
+        } else {
+          for (const server of statusList) {
+            const statusIcon =
+              server.status === 'connected'
+                ? c('green', '●')
+                : server.status === 'connecting'
+                  ? c('yellow', '◐')
+                  : c('red', '○');
+            console.log(c('gray', `    ${statusIcon} ${server.name} (${server.tools} tools) - ${server.status}`));
+            if (server.error) {
+              console.log(c('dim', `        Error: ${server.error}`));
+            }
+          }
+        }
+        console.log();
+      } else {
+        console.log(c('yellow', '\n  Usage: /mcp [list|connect <name>|disconnect <name>|status]\n'));
+      }
+      return true;
+    }
+
+    case 'think': {
+      if (args.length === 0) {
+        const status = state.thinkingMode ? c('green', 'on') : c('red', 'off');
+        console.log(c('gray', `\n  Extended thinking mode: ${status}\n`));
+      } else if (args[0] === 'on') {
+        state.thinkingMode = true;
+        console.log(c('green', '\n  Extended thinking mode enabled\n'));
+        console.log(c('dim', '  The AI will show detailed reasoning for complex tasks\n'));
+      } else if (args[0] === 'off') {
+        state.thinkingMode = false;
+        console.log(c('yellow', '\n  Extended thinking mode disabled\n'));
+      } else {
+        console.log(c('yellow', '\n  Usage: /think [on|off]\n'));
+      }
+      return true;
+    }
+
+    case 'bug':
+    case 'feedback': {
+      console.log(c('cyan', '\n  Report Issues & Feedback:\n'));
+      console.log(c('gray', '    GitHub Issues: https://github.com/user/alexi/issues'));
+      console.log(c('gray', '    Discussions:   https://github.com/user/alexi/discussions'));
+      console.log();
+      console.log(c('dim', '  Please include:'));
+      console.log(c('dim', '    - Steps to reproduce'));
+      console.log(c('dim', '    - Expected vs actual behavior'));
+      console.log(c('dim', '    - Alexi version (run: alexi --version)'));
+      console.log();
+      return true;
+    }
+
+    case 'doctor': {
+      console.log(c('cyan', '\n  Running health checks...\n'));
+      try {
+        const doctor = getDoctor();
+        const results = await doctor.runAll();
+        for (const result of results) {
+          const statusIcon =
+            result.status === 'pass'
+              ? c('green', '✓')
+              : result.status === 'warn'
+                ? c('yellow', '⚠')
+                : c('red', '✗');
+          console.log(`  ${statusIcon} ${result.name}`);
+          if (result.status !== 'pass' && result.message) {
+            console.log(c('dim', `      ${result.message}`));
+          }
+          if (result.fix) {
+            console.log(c('dim', `      Fix: ${result.fix}`));
+          }
+        }
+        const summary = doctor.getSummary(results);
+        console.log();
+        console.log(
+          c(
+            'gray',
+            `  Summary: ${summary.passed}/${results.length} passed${summary.warned ? `, ${summary.warned} warnings` : ''}`
+          )
+        );
+      } catch (err) {
+        console.log(c('red', `  Doctor failed: ${err}`));
+      }
+      console.log();
+      return true;
+    }
+
+    case 'clear-history': {
+      const history = state.sessionManager.getHistory();
+      if (history.length === 0) {
+        console.log(c('yellow', '\n  No history to clear\n'));
+      } else {
+        const count = history.length;
+        state.sessionManager.clearSession();
+        state.sessionManager.createSession(state.currentModel);
+        console.log(c('green', `\n  Cleared ${count} messages from history\n`));
+      }
       return true;
     }
 
