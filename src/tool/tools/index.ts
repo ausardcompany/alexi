@@ -2,19 +2,19 @@
  * Tool Registry - Exports and registers all built-in tools
  */
 
-import { registerTool, type Tool } from "../index.js"
+import { registerTool, type Tool } from '../index.js';
 
 // Import all tools
-import { readTool } from "./read.js"
-import { writeTool } from "./write.js"
-import { editTool } from "./edit.js"
-import { bashTool } from "./bash.js"
-import { globTool } from "./glob.js"
-import { grepTool } from "./grep.js"
-import { webfetchTool } from "./webfetch.js"
-import { taskTool } from "./task.js"
-import { questionTool } from "./question.js"
-import { todowriteTool } from "./todowrite.js"
+import { readTool } from './read.js';
+import { writeTool } from './write.js';
+import { editTool } from './edit.js';
+import { bashTool } from './bash.js';
+import { globTool } from './glob.js';
+import { grepTool } from './grep.js';
+import { webfetchTool } from './webfetch.js';
+import { taskTool } from './task.js';
+import { questionTool } from './question.js';
+import { todowriteTool } from './todowrite.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -28,7 +28,7 @@ export const builtInTools = [
   taskTool,
   questionTool,
   todowriteTool,
-] as const
+] as const;
 
 /**
  * Register all built-in tools
@@ -36,7 +36,7 @@ export const builtInTools = [
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {
     // Cast needed because tools have different parameter schemas
-    registerTool(tool as Tool<any, any>)
+    registerTool(tool as Tool<any, any>);
   }
 }
 
@@ -52,8 +52,8 @@ export {
   taskTool,
   questionTool,
   todowriteTool,
-}
+};
 
 // Re-export UI utilities from specific tools
-export { getPendingQuestions, answerQuestion } from "./question.js"
-export { getTodos, onTodosChange, clearTodos, type Todo } from "./todowrite.js"
+export { getPendingQuestions, answerQuestion } from './question.js';
+export { getTodos, onTodosChange, clearTodos, type Todo } from './todowrite.js';

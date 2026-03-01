@@ -126,15 +126,15 @@ export function saveMcpConfig(config: McpConfig): void {
  */
 export function addMcpServer(server: McpServerConfig): McpConfig {
   const config = loadMcpConfig();
-  
+
   // Check for duplicate name
-  const existing = config.servers.findIndex(s => s.name === server.name);
+  const existing = config.servers.findIndex((s) => s.name === server.name);
   if (existing >= 0) {
     config.servers[existing] = server;
   } else {
     config.servers.push(server);
   }
-  
+
   saveMcpConfig(config);
   return config;
 }
@@ -144,7 +144,7 @@ export function addMcpServer(server: McpServerConfig): McpConfig {
  */
 export function removeMcpServer(name: string): McpConfig {
   const config = loadMcpConfig();
-  config.servers = config.servers.filter(s => s.name !== name);
+  config.servers = config.servers.filter((s) => s.name !== name);
   saveMcpConfig(config);
   return config;
 }
@@ -154,7 +154,7 @@ export function removeMcpServer(name: string): McpConfig {
  */
 export function toggleMcpServer(name: string, enabled: boolean): McpConfig {
   const config = loadMcpConfig();
-  const server = config.servers.find(s => s.name === name);
+  const server = config.servers.find((s) => s.name === name);
   if (server) {
     server.enabled = enabled;
     saveMcpConfig(config);
@@ -174,7 +174,7 @@ export function getConfigPath(): string {
  */
 export function resolveEnvVars(env?: Record<string, string>): Record<string, string> {
   if (!env) return {};
-  
+
   const resolved: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     // Replace ${VAR} with process.env.VAR

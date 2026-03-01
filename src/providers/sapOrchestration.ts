@@ -1,7 +1,7 @@
 /**
  * SAP AI SDK Orchestration Provider
  * Comprehensive wrapper for @sap-ai-sdk/orchestration package
- * 
+ *
  * Features:
  * - Streaming and non-streaming chat completion
  * - Tool/function calling with streaming support
@@ -344,7 +344,8 @@ function buildInputFilters(config?: InputFilterConfig) {
     if (config.azureConfig?.selfHarm) azureParams.self_harm = config.azureConfig.selfHarm;
     if (config.azureConfig?.sexual) azureParams.sexual = config.azureConfig.sexual;
     if (config.azureConfig?.violence) azureParams.violence = config.azureConfig.violence;
-    if (config.azureConfig?.promptShield) azureParams.prompt_shield = config.azureConfig.promptShield;
+    if (config.azureConfig?.promptShield)
+      azureParams.prompt_shield = config.azureConfig.promptShield;
     return [buildAzureContentSafetyFilter('input', azureParams)];
   } else if (config.type === 'llama_guard' && config.llamaGuardCategories) {
     return [buildLlamaGuard38BFilter('input', config.llamaGuardCategories)];
@@ -365,7 +366,8 @@ function buildOutputFilters(config?: OutputFilterConfig) {
     if (config.azureConfig?.selfHarm) azureParams.self_harm = config.azureConfig.selfHarm;
     if (config.azureConfig?.sexual) azureParams.sexual = config.azureConfig.sexual;
     if (config.azureConfig?.violence) azureParams.violence = config.azureConfig.violence;
-    if (config.azureConfig?.protectedMaterialCode) azureParams.protected_material_code = config.azureConfig.protectedMaterialCode;
+    if (config.azureConfig?.protectedMaterialCode)
+      azureParams.protected_material_code = config.azureConfig.protectedMaterialCode;
     return [buildAzureContentSafetyFilter('output', azureParams)];
   } else if (config.type === 'llama_guard' && config.llamaGuardCategories) {
     return [buildLlamaGuard38BFilter('output', config.llamaGuardCategories)];
@@ -399,7 +401,7 @@ function buildMaskingModuleConfig(masking?: MaskingConfig): MaskingModule | unde
 
   const dpiConfig: DpiMaskingConfig = {
     method: masking.method,
-    entities: masking.entities.map(entity => ({ type: entity })) as DpiMaskingConfig['entities'],
+    entities: masking.entities.map((entity) => ({ type: entity })) as DpiMaskingConfig['entities'],
     allowlist: masking.allowlist,
   };
 
@@ -419,7 +421,7 @@ function buildGroundingModuleConfig(grounding?: GroundingConfig): GroundingModul
       input: grounding.inputVariables,
       output: grounding.outputVariable,
     },
-    filters: grounding.filters?.map(f => ({
+    filters: grounding.filters?.map((f) => ({
       id: f.id,
       data_repository_id: f.dataRepositoryId,
       data_repository_type: f.dataRepositoryType,
@@ -434,7 +436,9 @@ function buildGroundingModuleConfig(grounding?: GroundingConfig): GroundingModul
 /**
  * Build translation module config
  */
-function buildTranslationModuleConfig(translation?: TranslationConfig): TranslationModule | undefined {
+function buildTranslationModuleConfig(
+  translation?: TranslationConfig
+): TranslationModule | undefined {
   if (!translation) return undefined;
 
   const translationModule: TranslationModule = {};
@@ -463,7 +467,7 @@ function buildTranslationModuleConfig(translation?: TranslationConfig): Translat
 function toOrchestrationMessages(
   messages: Array<{ role: string; content: string } | ChatMessage | ToolChatMessage>
 ): ChatMessage[] {
-  return messages.map(m => {
+  return messages.map((m) => {
     // Handle ToolChatMessage (has tool_call_id)
     if ('tool_call_id' in m) {
       return m as ToolChatMessage;
@@ -488,7 +492,7 @@ function toOrchestrationMessages(
 
 /**
  * SAP AI SDK Orchestration Provider
- * 
+ *
  * Provides a clean API for all SAP AI Core orchestration features including:
  * - Streaming and non-streaming chat completion
  * - Tool/function calling
@@ -496,7 +500,7 @@ function toOrchestrationMessages(
  * - Data masking
  * - Document grounding
  * - Translation
- * 
+ *
  * @example
  * ```typescript
  * const provider = new SapOrchestrationProvider({
@@ -511,7 +515,7 @@ function toOrchestrationMessages(
  *     }
  *   }]
  * });
- * 
+ *
  * const result = await provider.complete(messages);
  * if (result.toolCalls) {
  *   // Handle tool calls
@@ -622,18 +626,18 @@ export class SapOrchestrationProvider {
 
   /**
    * Non-streaming chat completion
-   * 
+   *
    * @param messages - Array of chat messages (supports ToolChatMessage for tool responses)
    * @param options - Optional completion options
    * @returns Completion result with text, tool calls, and usage statistics
-   * 
+   *
    * @example
    * ```typescript
    * // Basic completion
    * const result = await provider.complete([
    *   { role: 'user', content: 'Hello!' }
    * ]);
-   * 
+   *
    * // With tool response
    * const result = await provider.complete([
    *   { role: 'user', content: 'What is the weather?' },
@@ -674,14 +678,14 @@ export class SapOrchestrationProvider {
 
   /**
    * Streaming chat completion
-   * 
+   *
    * Yields chunks with text content and/or tool call deltas.
    * The final chunk contains finish reason and usage statistics.
-   * 
+   *
    * @param messages - Array of chat messages
    * @param options - Optional completion options (including AbortSignal)
    * @yields StreamChunk with text, tool calls, finish reason, and usage
-   * 
+   *
    * @example
    * ```typescript
    * // Stream text output
@@ -690,7 +694,7 @@ export class SapOrchestrationProvider {
    *     process.stdout.write(chunk.text);
    *   }
    * }
-   * 
+   *
    * // Stream with tool calls
    * const toolCallsAccumulator: Map<number, ToolCallChunk> = new Map();
    * for await (const chunk of provider.streamComplete(messages)) {
@@ -719,10 +723,7 @@ export class SapOrchestrationProvider {
     const orchestrationMessages = toOrchestrationMessages(messages);
 
     // Use SAP SDK streaming with AbortSignal support
-    const response = await client.stream(
-      { messages: orchestrationMessages },
-      options?.signal
-    );
+    const response = await client.stream({ messages: orchestrationMessages }, options?.signal);
 
     // Stream chunks using the iterator
     for await (const chunk of response.stream) {
@@ -842,16 +843,16 @@ export class SapOrchestrationProvider {
 
 /**
  * SAP AI SDK Orchestration Embeddings Provider
- * 
+ *
  * Provides text embedding generation using SAP AI Core orchestration.
- * 
+ *
  * @example
  * ```typescript
  * const embeddings = new SapOrchestrationEmbeddings({
  *   resourceGroup: 'my-group',
  *   modelName: 'text-embedding-ada-002'
  * });
- * 
+ *
  * const result = await embeddings.embed(['Hello world', 'How are you?']);
  * console.log(result.embeddings); // [[0.1, 0.2, ...], [0.3, 0.4, ...]]
  * ```
@@ -889,7 +890,7 @@ export class SapOrchestrationEmbeddings {
 
   /**
    * Generate embeddings for input texts
-   * 
+   *
    * @param input - Single text or array of texts to embed
    * @returns Embedding result with vectors and usage
    */
@@ -906,7 +907,7 @@ export class SapOrchestrationEmbeddings {
     const tokenUsage = response.getTokenUsage();
 
     return {
-      embeddings: embeddingData.map(d => {
+      embeddings: embeddingData.map((d) => {
         // Handle both number[] and base64-encoded string formats
         if (Array.isArray(d.embedding)) {
           return d.embedding as number[];
@@ -925,7 +926,7 @@ export class SapOrchestrationEmbeddings {
 
   /**
    * Generate embedding for a single text
-   * 
+   *
    * @param text - Text to embed
    * @returns Single embedding vector
    */
@@ -963,10 +964,10 @@ export function createSapOrchestrationEmbeddings(
 
 /**
  * Create a ChatCompletionTool from a function definition
- * 
+ *
  * @param fn - Function object definition
  * @returns ChatCompletionTool
- * 
+ *
  * @example
  * ```typescript
  * const weatherTool = createTool({
@@ -991,11 +992,11 @@ export function createTool(fn: FunctionObject): ChatCompletionTool {
 
 /**
  * Create a ToolChatMessage for responding to a tool call
- * 
+ *
  * @param toolCallId - The ID of the tool call being responded to
  * @param content - The tool's response content (will be JSON stringified if object)
  * @returns ToolChatMessage
- * 
+ *
  * @example
  * ```typescript
  * const toolResponse = createToolResponse(
@@ -1004,10 +1005,7 @@ export function createTool(fn: FunctionObject): ChatCompletionTool {
  * );
  * ```
  */
-export function createToolResponse(
-  toolCallId: string,
-  content: string | object
-): ToolChatMessage {
+export function createToolResponse(toolCallId: string, content: string | object): ToolChatMessage {
   return {
     role: 'tool',
     tool_call_id: toolCallId,
@@ -1062,10 +1060,4 @@ export function isOrchestrationModel(modelId: string): boolean {
 // Re-export SDK Types
 // ============================================================================
 
-export type {
-  ChatCompletionTool,
-  FunctionObject,
-  MessageToolCall,
-  ToolChatMessage,
-  ChatMessage,
-};
+export type { ChatCompletionTool, FunctionObject, MessageToolCall, ToolChatMessage, ChatMessage };

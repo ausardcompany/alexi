@@ -66,11 +66,11 @@ const nodeVersionCheck: HealthCheck = {
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
     const currentVersion = process.version.replace(/^v/, '');
-    
+
     const compareVersions = (current: string, required: string): number => {
       const currParts = current.split('.').map(Number);
       const reqParts = required.split('.').map(Number);
-      
+
       for (let i = 0; i < Math.max(currParts.length, reqParts.length); i++) {
         const curr = currParts[i] || 0;
         const req = reqParts[i] || 0;
@@ -79,9 +79,9 @@ const nodeVersionCheck: HealthCheck = {
       }
       return 0;
     };
-    
+
     const comparison = compareVersions(currentVersion, MIN_NODE_VERSION);
-    
+
     if (comparison >= 0) {
       return {
         id: this.id,
@@ -110,10 +110,10 @@ const envSapAicoreCheck: HealthCheck = {
   category: 'environment',
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     const aicoreServiceKey = env('AICORE_SERVICE_KEY');
     const sapProxyBaseUrl = env('SAP_PROXY_BASE_URL');
-    
+
     if (aicoreServiceKey) {
       // Validate it's valid JSON
       try {
@@ -176,10 +176,10 @@ const envModelCheck: HealthCheck = {
   category: 'environment',
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     const defaultModel = env('DEFAULT_MODEL');
     const aicoreModel = env('AICORE_MODEL');
-    
+
     if (defaultModel) {
       return {
         id: this.id,
@@ -216,7 +216,7 @@ const mcpConfigCheck: HealthCheck = {
   category: 'configuration',
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     if (!fs.existsSync(MCP_CONFIG_FILE)) {
       return {
         id: this.id,
@@ -227,11 +227,11 @@ const mcpConfigCheck: HealthCheck = {
         duration: Date.now() - start,
       };
     }
-    
+
     try {
       const content = fs.readFileSync(MCP_CONFIG_FILE, 'utf-8');
       const config = JSON.parse(content);
-      
+
       if (!config.version || !Array.isArray(config.servers)) {
         return {
           id: this.id,
@@ -242,7 +242,7 @@ const mcpConfigCheck: HealthCheck = {
           duration: Date.now() - start,
         };
       }
-      
+
       const enabledCount = config.servers.filter((s: { enabled?: boolean }) => s.enabled).length;
       return {
         id: this.id,
@@ -271,21 +271,21 @@ const sessionsDirCheck: HealthCheck = {
   category: 'filesystem',
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     try {
       // Create directory if it doesn't exist
       if (!fs.existsSync(SESSIONS_DIR)) {
         fs.mkdirSync(SESSIONS_DIR, { recursive: true });
       }
-      
+
       // Test write access
       const testFile = path.join(SESSIONS_DIR, '.write-test');
       fs.writeFileSync(testFile, 'test', 'utf-8');
       fs.unlinkSync(testFile);
-      
+
       // Count existing sessions
-      const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
-      
+      const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
+
       return {
         id: this.id,
         name: this.name,
@@ -313,14 +313,14 @@ const gitAvailableCheck: HealthCheck = {
   category: 'tools',
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     try {
       const version = execSync('git --version', {
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
-      
+
       return {
         id: this.id,
         name: this.name,
@@ -349,13 +349,13 @@ const networkSapCheck: HealthCheck = {
   optional: true,
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
-    
+
     // Get the endpoint to test
     const aicoreServiceKey = env('AICORE_SERVICE_KEY');
     const sapProxyBaseUrl = env('SAP_PROXY_BASE_URL');
-    
+
     let testUrl: string | null = null;
-    
+
     if (sapProxyBaseUrl) {
       testUrl = sapProxyBaseUrl;
     } else if (aicoreServiceKey) {
@@ -368,7 +368,7 @@ const networkSapCheck: HealthCheck = {
         // Will return below if no URL found
       }
     }
-    
+
     if (!testUrl) {
       return {
         id: this.id,
@@ -379,18 +379,18 @@ const networkSapCheck: HealthCheck = {
         duration: Date.now() - start,
       };
     }
-    
+
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
-      
+
       const response = await fetch(testUrl, {
         method: 'HEAD',
         signal: controller.signal,
       });
-      
+
       clearTimeout(timeout);
-      
+
       // Any response (even 401/403) means the endpoint is reachable
       return {
         id: this.id,
@@ -401,7 +401,7 @@ const networkSapCheck: HealthCheck = {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       if (errorMessage.includes('abort')) {
         return {
           id: this.id,
@@ -412,7 +412,7 @@ const networkSapCheck: HealthCheck = {
           duration: Date.now() - start,
         };
       }
-      
+
       return {
         id: this.id,
         name: this.name,
@@ -441,17 +441,17 @@ const ALL_CHECKS: HealthCheck[] = [
 
 export class DoctorService {
   private checks: HealthCheck[];
-  
+
   constructor() {
     this.checks = [...ALL_CHECKS];
   }
-  
+
   /**
    * Run all health checks
    */
   async runAll(options: DoctorOptions = {}): Promise<HealthCheckResult[]> {
     const results: HealthCheckResult[] = [];
-    
+
     for (const check of this.checks) {
       // Skip network checks if requested
       if (options.skipNetwork && check.category === 'network') {
@@ -464,7 +464,7 @@ export class DoctorService {
         });
         continue;
       }
-      
+
       try {
         const result = await check.run();
         results.push(result);
@@ -478,16 +478,16 @@ export class DoctorService {
         });
       }
     }
-    
+
     return results;
   }
-  
+
   /**
    * Run a single health check by ID
    */
   async runCheck(id: string): Promise<HealthCheckResult> {
-    const check = this.checks.find(c => c.id === id);
-    
+    const check = this.checks.find((c) => c.id === id);
+
     if (!check) {
       return {
         id,
@@ -497,7 +497,7 @@ export class DoctorService {
         duration: 0,
       };
     }
-    
+
     try {
       return await check.run();
     } catch (error) {
@@ -510,12 +510,12 @@ export class DoctorService {
       };
     }
   }
-  
+
   /**
    * List all available checks
    */
   listChecks(): CheckDefinition[] {
-    return this.checks.map(check => ({
+    return this.checks.map((check) => ({
       id: check.id,
       name: check.name,
       description: check.description,
@@ -523,44 +523,44 @@ export class DoctorService {
       optional: check.optional,
     }));
   }
-  
+
   /**
    * Get summary of results
    */
   getSummary(results: HealthCheckResult[]): DoctorSummary {
     return {
-      passed: results.filter(r => r.status === 'pass').length,
-      warned: results.filter(r => r.status === 'warn').length,
-      failed: results.filter(r => r.status === 'fail').length,
+      passed: results.filter((r) => r.status === 'pass').length,
+      warned: results.filter((r) => r.status === 'warn').length,
+      failed: results.filter((r) => r.status === 'fail').length,
     };
   }
-  
+
   /**
    * Format results as CLI report
    */
   formatReport(results: HealthCheckResult[]): string {
     const lines: string[] = [];
     const summary = this.getSummary(results);
-    
+
     // Status symbols and colors (ANSI escape codes)
     const symbols = {
-      pass: '\x1b[32m✓\x1b[0m',  // Green checkmark
-      warn: '\x1b[33m!\x1b[0m',  // Yellow exclamation
-      fail: '\x1b[31m✗\x1b[0m',  // Red X
+      pass: '\x1b[32m✓\x1b[0m', // Green checkmark
+      warn: '\x1b[33m!\x1b[0m', // Yellow exclamation
+      fail: '\x1b[31m✗\x1b[0m', // Red X
     };
-    
+
     const statusColors = {
-      pass: '\x1b[32m',  // Green
-      warn: '\x1b[33m',  // Yellow
-      fail: '\x1b[31m',  // Red
+      pass: '\x1b[32m', // Green
+      warn: '\x1b[33m', // Yellow
+      fail: '\x1b[31m', // Red
     };
     const resetColor = '\x1b[0m';
-    
+
     lines.push('');
     lines.push('\x1b[1mAlexi - Health Check\x1b[0m');
     lines.push('─'.repeat(50));
     lines.push('');
-    
+
     // Group results by category
     const categories = ['environment', 'configuration', 'filesystem', 'tools', 'network'] as const;
     const categoryLabels: Record<string, string> = {
@@ -570,36 +570,36 @@ export class DoctorService {
       tools: 'Tools',
       network: 'Network',
     };
-    
+
     for (const category of categories) {
-      const categoryResults = results.filter(r => {
-        const check = this.checks.find(c => c.id === r.id);
+      const categoryResults = results.filter((r) => {
+        const check = this.checks.find((c) => c.id === r.id);
         return check?.category === category;
       });
-      
+
       if (categoryResults.length === 0) continue;
-      
+
       lines.push(`\x1b[1m${categoryLabels[category]}\x1b[0m`);
-      
+
       for (const result of categoryResults) {
         const symbol = symbols[result.status];
         const color = statusColors[result.status];
-        
+
         lines.push(`  ${symbol} ${result.name}`);
         lines.push(`    ${color}${result.message}${resetColor}`);
-        
+
         if (result.fix && result.status !== 'pass') {
           lines.push(`    \x1b[2mFix: ${result.fix}\x1b[0m`);
         }
-        
+
         if (result.duration > 0) {
           lines.push(`    \x1b[2m(${result.duration}ms)\x1b[0m`);
         }
-        
+
         lines.push('');
       }
     }
-    
+
     // Summary
     lines.push('─'.repeat(50));
     lines.push('\x1b[1mSummary\x1b[0m');
@@ -607,7 +607,7 @@ export class DoctorService {
     lines.push(`  ${symbols.warn} Warnings: ${summary.warned}`);
     lines.push(`  ${symbols.fail} Failed: ${summary.failed}`);
     lines.push('');
-    
+
     // Overall status
     if (summary.failed > 0) {
       lines.push('\x1b[31m\x1b[1mStatus: Some checks failed. Please fix the issues above.\x1b[0m');
@@ -617,46 +617,46 @@ export class DoctorService {
       lines.push('\x1b[32m\x1b[1mStatus: All checks passed!\x1b[0m');
     }
     lines.push('');
-    
+
     return lines.join('\n');
   }
-  
+
   /**
    * Format results as plain text (no colors)
    */
   formatReportPlain(results: HealthCheckResult[]): string {
     const lines: string[] = [];
     const summary = this.getSummary(results);
-    
+
     const symbols = {
       pass: '[PASS]',
       warn: '[WARN]',
       fail: '[FAIL]',
     };
-    
+
     lines.push('');
     lines.push('Alexi - Health Check');
     lines.push('='.repeat(50));
     lines.push('');
-    
+
     for (const result of results) {
       lines.push(`${symbols[result.status]} ${result.name}`);
       lines.push(`  ${result.message}`);
-      
+
       if (result.fix && result.status !== 'pass') {
         lines.push(`  Fix: ${result.fix}`);
       }
-      
+
       lines.push('');
     }
-    
+
     lines.push('='.repeat(50));
     lines.push('Summary');
     lines.push(`  Passed: ${summary.passed}`);
     lines.push(`  Warnings: ${summary.warned}`);
     lines.push(`  Failed: ${summary.failed}`);
     lines.push('');
-    
+
     if (summary.failed > 0) {
       lines.push('Status: Some checks failed. Please fix the issues above.');
     } else if (summary.warned > 0) {
@@ -665,7 +665,7 @@ export class DoctorService {
       lines.push('Status: All checks passed!');
     }
     lines.push('');
-    
+
     return lines.join('\n');
   }
 }

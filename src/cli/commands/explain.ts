@@ -22,20 +22,20 @@ export function registerExplainCommand(program: Command): void {
         console.log(`Complexity: ${analysis.classification.complexity}`);
         console.log(`Requires Reasoning: ${analysis.classification.requiresReasoning}`);
         console.log(`Estimated Tokens: ${analysis.classification.estimatedTokens}`);
-        
+
         if (analysis.matchedRules && analysis.matchedRules.length > 0) {
           console.log('\n=== Matched Rules ===');
-          analysis.matchedRules.forEach(rule => {
+          analysis.matchedRules.forEach((rule) => {
             console.log(`• ${rule.name} (priority: ${rule.priority}): ${rule.description}`);
           });
         }
-        
+
         console.log('\n=== Model Candidates (by score) ===');
         analysis.candidates.forEach((c, i) => {
           const marker = i === 0 ? '✓ ' : '  ';
           console.log(`${marker}${c.modelId.padEnd(20)} Score: ${c.score} - ${c.reason}`);
         });
-        
+
         console.log('\n=== Selected Model ===');
         console.log(`Model: ${analysis.selected.modelId}`);
         console.log(`Reason: ${analysis.selected.reason}`);

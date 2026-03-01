@@ -57,21 +57,13 @@ export class MissingArgumentError extends CommandError {
 
 export class FileNotFoundError extends CommandError {
   constructor(filePath: string) {
-    super(
-      `File not found: ${filePath}`,
-      'FILE_NOT_FOUND',
-      { filePath }
-    );
+    super(`File not found: ${filePath}`, 'FILE_NOT_FOUND', { filePath });
   }
 }
 
 export class ShellExecutionError extends CommandError {
   constructor(command: string, error: string) {
-    super(
-      `Shell command failed: ${error}`,
-      'SHELL_EXECUTION_ERROR',
-      { command, error }
-    );
+    super(`Shell command failed: ${error}`, 'SHELL_EXECUTION_ERROR', { command, error });
   }
 }
 
@@ -85,10 +77,7 @@ interface TemplateContext {
 /**
  * Process template variables and expand them
  */
-async function processTemplate(
-  template: string,
-  context: TemplateContext
-): Promise<string> {
+async function processTemplate(template: string, context: TemplateContext): Promise<string> {
   let result = template;
 
   // Process $ARGUMENTS - all arguments as a string
@@ -118,12 +107,12 @@ async function processTemplate(
   // Then, expand @filepath to file contents
   const fileRefPattern = /@([^\s]+)/g;
   const fileMatches = [...result.matchAll(fileRefPattern)];
-  
+
   for (const match of fileMatches) {
     const [fullMatch, filePath] = match;
     // Skip if it looks like an email or already processed
     if (filePath.includes('@') || filePath.startsWith('$')) continue;
-    
+
     const resolvedPath = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(context.workdir, filePath);
@@ -133,7 +122,7 @@ async function processTemplate(
         const content = fs.readFileSync(resolvedPath, 'utf-8');
         const extension = path.extname(resolvedPath).slice(1) || 'txt';
         const fileName = path.basename(resolvedPath);
-        
+
         // Wrap in code block with file info
         const replacement = `\`\`\`${extension}\n// File: ${fileName}\n${content}\n\`\`\``;
         result = result.replace(fullMatch, replacement);
@@ -149,7 +138,7 @@ async function processTemplate(
   // Process shell injection !`command`
   const shellPattern = /!`([^`]+)`/g;
   const shellMatches = [...result.matchAll(shellPattern)];
-  
+
   for (const match of shellMatches) {
     const [fullMatch, command] = match;
     try {
@@ -172,12 +161,9 @@ async function processTemplate(
 /**
  * Validate arguments against command definition
  */
-function validateArguments(
-  command: Command,
-  args: string[]
-): { valid: boolean; errors: string[] } {
+function validateArguments(command: Command, args: string[]): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  
+
   if (!command.arguments || command.arguments.length === 0) {
     return { valid: true, errors: [] };
   }
@@ -201,7 +187,7 @@ function applyDefaults(command: Command, args: string[]): string[] {
   if (!command.arguments) return args;
 
   const result = [...args];
-  
+
   for (let i = 0; i < command.arguments.length; i++) {
     const argDef = command.arguments[i];
     if (!result[i] && argDef.default) {
@@ -369,9 +355,7 @@ export class CommandRegistry {
   search(query: string): Command[] {
     const q = query.toLowerCase();
     return this.list().filter(
-      (cmd) =>
-        cmd.name.toLowerCase().includes(q) ||
-        cmd.description?.toLowerCase().includes(q)
+      (cmd) => cmd.name.toLowerCase().includes(q) || cmd.description?.toLowerCase().includes(q)
     );
   }
 
@@ -381,11 +365,7 @@ export class CommandRegistry {
   async execute(name: string, args: string[]): Promise<string> {
     const command = this.get(name);
     if (!command) {
-      throw new CommandError(
-        `Command not found: ${name}`,
-        'COMMAND_NOT_FOUND',
-        { name }
-      );
+      throw new CommandError(`Command not found: ${name}`, 'COMMAND_NOT_FOUND', { name });
     }
 
     // Validate arguments
@@ -457,7 +437,7 @@ export class CommandRegistry {
 
     const lines: string[] = [];
     lines.push(`Command: ${command.name}`);
-    
+
     if (command.description) {
       lines.push(`Description: ${command.description}`);
     }
@@ -537,9 +517,7 @@ export function registerBuiltInCommands(): void {
     defineCommand({
       name: 'review',
       description: 'Review code for issues',
-      arguments: [
-        { name: 'file', description: 'File to review', required: true },
-      ],
+      arguments: [{ name: 'file', description: 'File to review', required: true }],
       template: `Review the following code for issues:
 
 @$1
@@ -558,9 +536,7 @@ Focus on:
     defineCommand({
       name: 'explain',
       description: 'Explain code or concept',
-      arguments: [
-        { name: 'target', description: 'File or concept to explain', required: true },
-      ],
+      arguments: [{ name: 'target', description: 'File or concept to explain', required: true }],
       template: `Please explain the following in detail:
 
 @$1
@@ -580,7 +556,12 @@ Include:
       description: 'Suggest refactoring improvements',
       arguments: [
         { name: 'file', description: 'File to refactor', required: true },
-        { name: 'goal', description: 'Refactoring goal', required: false, default: 'improve code quality' },
+        {
+          name: 'goal',
+          description: 'Refactoring goal',
+          required: false,
+          default: 'improve code quality',
+        },
       ],
       template: `Please suggest refactoring improvements for the following code.
 
@@ -601,9 +582,7 @@ Provide:
     defineCommand({
       name: 'test',
       description: 'Generate tests for code',
-      arguments: [
-        { name: 'file', description: 'File to generate tests for', required: true },
-      ],
+      arguments: [{ name: 'file', description: 'File to generate tests for', required: true }],
       template: `Generate comprehensive tests for the following code:
 
 @$1
@@ -621,9 +600,7 @@ Include:
     defineCommand({
       name: 'document',
       description: 'Generate documentation',
-      arguments: [
-        { name: 'file', description: 'File to document', required: true },
-      ],
+      arguments: [{ name: 'file', description: 'File to document', required: true }],
       template: `Generate documentation for the following code:
 
 @$1

@@ -3,13 +3,13 @@
  * Automatically compacts conversation history when approaching token limits
  */
 
-import { z } from "zod";
-import { defineEvent } from "../bus/index.js";
+import { z } from 'zod';
+import { defineEvent } from '../bus/index.js';
 
 // ============ Types ============
 
 export interface Message {
-  role: "user" | "assistant" | "system";
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp?: number;
   metadata?: Record<string, unknown>;
@@ -28,10 +28,10 @@ export interface CompactionOptions {
 }
 
 export type CompactionStrategy =
-  | "truncate" // Remove oldest messages
-  | "summarize" // AI summarization of old messages
-  | "sliding" // Sliding window, keep N most recent
-  | "smart"; // Combination based on content importance
+  | 'truncate' // Remove oldest messages
+  | 'summarize' // AI summarization of old messages
+  | 'sliding' // Sliding window, keep N most recent
+  | 'smart'; // Combination based on content importance
 
 export interface CompactionResult {
   success: boolean;
@@ -45,9 +45,7 @@ export interface CompactionResult {
 }
 
 // Summarization function type - can be injected for AI-based summarization
-export type SummarizeFn = (
-  prompt: string
-) => Promise<string>;
+export type SummarizeFn = (prompt: string) => Promise<string>;
 
 // ============ Constants ============
 
@@ -79,7 +77,7 @@ const IMPORTANCE_PATTERNS = [
 // ============ Events ============
 
 export const CompactionNeeded = defineEvent(
-  "context.compaction.needed",
+  'context.compaction.needed',
   z.object({
     currentTokens: z.number(),
     maxTokens: z.number(),
@@ -89,7 +87,7 @@ export const CompactionNeeded = defineEvent(
 );
 
 export const CompactionPerformed = defineEvent(
-  "context.compaction.performed",
+  'context.compaction.performed',
   z.object({
     strategy: z.string(),
     originalTokens: z.number(),
@@ -149,7 +147,7 @@ export class CompactionManager {
   }) {
     this.summarizeFn = options?.summarizeFn;
     this.defaultOptions = options?.defaultOptions ?? {
-      strategy: "sliding",
+      strategy: 'sliding',
       preserveRecent: DEFAULT_PRESERVE_RECENT,
       preserveSystemPrompt: true,
     };
@@ -172,10 +170,7 @@ export class CompactionManager {
   /**
    * Check if compaction is needed based on current token count
    */
-  needsCompaction(
-    messages: Message[],
-    options?: CompactionCheckOptions
-  ): boolean {
+  needsCompaction(messages: Message[], options?: CompactionCheckOptions): boolean {
     if (!messages || messages.length === 0) {
       return false;
     }
@@ -203,10 +198,7 @@ export class CompactionManager {
   /**
    * Compact messages using the specified strategy
    */
-  async compact(
-    messages: Message[],
-    options?: CompactionOptions
-  ): Promise<CompactionResult> {
+  async compact(messages: Message[], options?: CompactionOptions): Promise<CompactionResult> {
     const opts = { ...this.defaultOptions, ...options } as CompactionOptions;
     const originalTokens = estimateConversationTokens(messages);
     const originalCount = messages.length;
@@ -238,16 +230,16 @@ export class CompactionManager {
       let result: CompactionResult;
 
       switch (opts.strategy) {
-        case "truncate":
+        case 'truncate':
           result = await this.truncateStrategy(messages, opts);
           break;
-        case "summarize":
+        case 'summarize':
           result = await this.summarizeStrategy(messages, opts);
           break;
-        case "sliding":
+        case 'sliding':
           result = await this.slidingWindowStrategy(messages, opts);
           break;
-        case "smart":
+        case 'smart':
           result = await this.smartStrategy(messages, opts);
           break;
         default:
@@ -282,19 +274,19 @@ export class CompactionManager {
   async summarize(messages: Message[]): Promise<string> {
     if (!this.summarizeFn) {
       throw new Error(
-        "Summarization function not configured. Set summarizeFn in constructor or via setSummarizeFn()."
+        'Summarization function not configured. Set summarizeFn in constructor or via setSummarizeFn().'
       );
     }
 
     if (!messages || messages.length === 0) {
-      return "";
+      return '';
     }
 
     const formattedMessages = messages
       .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
-      .join("\n\n");
+      .join('\n\n');
 
-    const prompt = SUMMARY_PROMPT.replace("{messages}", formattedMessages);
+    const prompt = SUMMARY_PROMPT.replace('{messages}', formattedMessages);
     return await this.summarizeFn(prompt);
   }
 
@@ -310,10 +302,8 @@ export class CompactionManager {
     const preserveRecent = options.preserveRecent ?? DEFAULT_PRESERVE_RECENT;
     const preserveSystem = options.preserveSystemPrompt !== false;
 
-    const systemMessages = preserveSystem
-      ? messages.filter((m) => m.role === "system")
-      : [];
-    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+    const systemMessages = preserveSystem ? messages.filter((m) => m.role === 'system') : [];
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
     // Keep only recent non-system messages
     const recentMessages = nonSystemMessages.slice(-preserveRecent);
@@ -344,10 +334,8 @@ export class CompactionManager {
     const originalTokens = estimateConversationTokens(messages);
 
     // Separate system messages
-    const systemMessages = preserveSystem
-      ? messages.filter((m) => m.role === "system")
-      : [];
-    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+    const systemMessages = preserveSystem ? messages.filter((m) => m.role === 'system') : [];
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
     // Nothing to summarize if not enough messages
     if (nonSystemMessages.length <= preserveRecent) {
@@ -373,10 +361,8 @@ export class CompactionManager {
       if (customPrompt) {
         const formattedMessages = toSummarize
           .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
-          .join("\n\n");
-        summaryText = await this.summarizeFn(
-          customPrompt.replace("{messages}", formattedMessages)
-        );
+          .join('\n\n');
+        summaryText = await this.summarizeFn(customPrompt.replace('{messages}', formattedMessages));
       } else {
         summaryText = await this.summarize(toSummarize);
       }
@@ -387,7 +373,7 @@ export class CompactionManager {
 
     // Create summary message
     const summaryMessage: Message = {
-      role: "system",
+      role: 'system',
       content: `[CONVERSATION SUMMARY]\n${summaryText}`,
       timestamp: Date.now(),
       metadata: { isSummary: true, summarizedCount: toSummarize.length },
@@ -418,10 +404,8 @@ export class CompactionManager {
     const preserveSystem = options.preserveSystemPrompt !== false;
     const originalTokens = estimateConversationTokens(messages);
 
-    const systemMessages = preserveSystem
-      ? messages.filter((m) => m.role === "system")
-      : [];
-    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+    const systemMessages = preserveSystem ? messages.filter((m) => m.role === 'system') : [];
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
     // Keep recent messages
     const recentMessages = nonSystemMessages.slice(-preserveRecent);
@@ -433,7 +417,7 @@ export class CompactionManager {
       const briefSummary = this.extractKeySummary(removedMessages);
       if (briefSummary) {
         summaryMessage = {
-          role: "system",
+          role: 'system',
           content: `[PRIOR CONTEXT] ${briefSummary}`,
           timestamp: Date.now(),
           metadata: { isPriorContext: true, summarizedCount: removedMessages.length },
@@ -469,10 +453,8 @@ export class CompactionManager {
     const preserveSystem = options.preserveSystemPrompt !== false;
     const originalTokens = estimateConversationTokens(messages);
 
-    const systemMessages = preserveSystem
-      ? messages.filter((m) => m.role === "system")
-      : [];
-    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+    const systemMessages = preserveSystem ? messages.filter((m) => m.role === 'system') : [];
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
     // Nothing to compact
     if (nonSystemMessages.length <= preserveRecent) {
@@ -491,12 +473,8 @@ export class CompactionManager {
     const oldMessages = nonSystemMessages.slice(0, -preserveRecent);
 
     // Identify important messages in old messages
-    const importantOldMessages = oldMessages.filter((m) =>
-      this.isImportantMessage(m)
-    );
-    const unimportantOldMessages = oldMessages.filter(
-      (m) => !this.isImportantMessage(m)
-    );
+    const importantOldMessages = oldMessages.filter((m) => this.isImportantMessage(m));
+    const unimportantOldMessages = oldMessages.filter((m) => !this.isImportantMessage(m));
 
     // Create summary of unimportant messages
     let summaryMessage: Message | undefined;
@@ -511,7 +489,7 @@ export class CompactionManager {
 
       if (summaryText) {
         summaryMessage = {
-          role: "system",
+          role: 'system',
           content: `[CONVERSATION SUMMARY]\n${summaryText}`,
           timestamp: Date.now(),
           metadata: {
@@ -562,7 +540,7 @@ export class CompactionManager {
    */
   private extractKeySummary(messages: Message[]): string {
     if (!messages || messages.length === 0) {
-      return "";
+      return '';
     }
 
     const keyPoints: string[] = [];
@@ -574,7 +552,7 @@ export class CompactionManager {
       );
       if (fileMatches) {
         const uniqueFiles = [...new Set(fileMatches)];
-        keyPoints.push(`Files mentioned: ${uniqueFiles.slice(0, 5).join(", ")}`);
+        keyPoints.push(`Files mentioned: ${uniqueFiles.slice(0, 5).join(', ')}`);
       }
 
       // Extract decisions/confirmations
@@ -586,9 +564,7 @@ export class CompactionManager {
       }
 
       // Extract errors/issues
-      const errorMatch = message.content.match(
-        /(error|issue|bug|problem|fix)[:.\s].{10,80}/i
-      );
+      const errorMatch = message.content.match(/(error|issue|bug|problem|fix)[:.\s].{10,80}/i);
       if (errorMatch) {
         keyPoints.push(errorMatch[0].trim());
       }
@@ -602,7 +578,7 @@ export class CompactionManager {
       return `${messages.length} earlier messages in the conversation.`;
     }
 
-    return uniquePoints.join(". ");
+    return uniquePoints.join('. ');
   }
 }
 
@@ -630,10 +606,7 @@ export function setCompactionManager(manager: CompactionManager): void {
 /**
  * Check if compaction is needed for a conversation
  */
-export function shouldCompact(
-  messages: Message[],
-  maxTokens?: number
-): boolean {
+export function shouldCompact(messages: Message[], maxTokens?: number): boolean {
   return getCompactionManager().needsCompaction(messages, { maxTokens });
 }
 
@@ -669,27 +642,25 @@ export async function checkAndCompact(
 
   if (!result.success) {
     // Return original messages if compaction failed
-    console.warn("Compaction failed:", result.error);
+    console.warn('Compaction failed:', result.error);
     return { messages, wasCompacted: false };
   }
 
   // Reconstruct compacted messages from result
   // Note: The compact method modifies internally, so we need to rebuild
-  const opts = options ?? { strategy: "sliding" };
+  const opts = options ?? { strategy: 'sliding' };
   const preserveRecent = opts.preserveRecent ?? DEFAULT_PRESERVE_RECENT;
   const preserveSystem = opts.preserveSystemPrompt !== false;
 
-  const systemMessages = preserveSystem
-    ? messages.filter((m) => m.role === "system")
-    : [];
-  const nonSystemMessages = messages.filter((m) => m.role !== "system");
+  const systemMessages = preserveSystem ? messages.filter((m) => m.role === 'system') : [];
+  const nonSystemMessages = messages.filter((m) => m.role !== 'system');
   const recentMessages = nonSystemMessages.slice(-preserveRecent);
 
   let compactedMessages: Message[];
 
   if (result.summary) {
     const summaryMessage: Message = {
-      role: "system",
+      role: 'system',
       content: result.summary,
       timestamp: Date.now(),
       metadata: { isSummary: true },

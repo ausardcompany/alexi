@@ -50,7 +50,7 @@ export class AINotesGenerator {
    */
   generate(content: AINotesContent): string {
     const timestamp = new Date(content.createdAt).toISOString();
-    const stageLabel = content.stageNumber 
+    const stageLabel = content.stageNumber
       ? `Stage ${content.stageNumber}: ${content.title}`
       : content.title;
 
@@ -67,7 +67,7 @@ export class AINotesGenerator {
       content.changes.forEach((change, index) => {
         markdown += `${index + 1}. **${change.description}**\n`;
         if (change.files.length > 0) {
-          markdown += `   - Files: ${change.files.map(f => `\`${f}\``).join(', ')}\n`;
+          markdown += `   - Files: ${change.files.map((f) => `\`${f}\``).join(', ')}\n`;
         }
         if (change.rationale) {
           markdown += `   - Rationale: ${change.rationale}\n`;
@@ -81,7 +81,7 @@ export class AINotesGenerator {
     if (content.rationale.length === 0) {
       markdown += `No rationale provided.\n\n`;
     } else {
-      content.rationale.forEach(r => {
+      content.rationale.forEach((r) => {
         markdown += `- ${r}\n`;
       });
       markdown += `\n`;
@@ -92,7 +92,7 @@ export class AINotesGenerator {
     if (content.risks.length === 0) {
       markdown += `No known risks.\n\n`;
     } else {
-      content.risks.forEach(risk => {
+      content.risks.forEach((risk) => {
         const emoji = risk.severity === 'high' ? '🔴' : risk.severity === 'medium' ? '🟡' : '🟢';
         markdown += `${emoji} **${risk.severity.toUpperCase()}:** ${risk.description}\n`;
         if (risk.mitigation) {
@@ -107,7 +107,7 @@ export class AINotesGenerator {
     if (content.verification.length === 0) {
       markdown += `No verification steps defined.\n\n`;
     } else {
-      content.verification.forEach(step => {
+      content.verification.forEach((step) => {
         markdown += `${step.step}. ${step.description}\n`;
         if (step.command) {
           markdown += `   \`\`\`bash\n   ${step.command}\n   \`\`\`\n`;
@@ -122,7 +122,7 @@ export class AINotesGenerator {
     // Additional notes
     if (content.notes && content.notes.length > 0) {
       markdown += `## Additional Notes\n\n`;
-      content.notes.forEach(note => {
+      content.notes.forEach((note) => {
         markdown += `- ${note}\n`;
       });
       markdown += `\n`;
@@ -136,11 +136,11 @@ export class AINotesGenerator {
    */
   save(content: AINotesContent, filename?: string): string {
     const markdown = this.generate(content);
-    
+
     const defaultName = content.stageNumber
       ? `AI_NOTES_stage_${content.stageNumber}_${content.stage}.md`
       : `AI_NOTES_${content.stage}_${Date.now()}.md`;
-    
+
     const fileName = filename || defaultName;
     const filePath = path.join(this.outputDir, fileName);
 
@@ -176,7 +176,7 @@ export class AINotesGenerator {
   parse(markdown: string): AINotesContent {
     // Simple parser - in production, use a proper markdown parser
     const lines = markdown.split('\n');
-    
+
     const content: AINotesContent = {
       stage: 'implementation',
       title: 'Unknown',
@@ -184,7 +184,7 @@ export class AINotesGenerator {
       rationale: [],
       risks: [],
       verification: [],
-      createdAt: Date.now()
+      createdAt: Date.now(),
     };
 
     let currentSection: string | null = null;
@@ -240,14 +240,12 @@ export class AINotesGenerator {
           }
           currentChange = {
             description: trimmed.replace(/^\d+\.\s+\*\*/, '').replace(/\*\*$/, ''),
-            files: []
+            files: [],
           };
         } else if (trimmed.includes('- Files:')) {
           const filesMatch = trimmed.match(/Files:\s*(.+)/);
           if (filesMatch) {
-            currentChange.files = filesMatch[1].split(',').map(f => 
-              f.trim().replace(/`/g, '')
-            );
+            currentChange.files = filesMatch[1].split(',').map((f) => f.trim().replace(/`/g, ''));
           }
         } else if (trimmed.includes('- Rationale:')) {
           currentChange.rationale = trimmed.replace(/.*- Rationale:\s*/, '');
@@ -263,7 +261,7 @@ export class AINotesGenerator {
         if (riskMatch) {
           content.risks.push({
             severity: riskMatch[1].toLowerCase() as RiskItem['severity'],
-            description: riskMatch[2]
+            description: riskMatch[2],
           });
         }
       }
@@ -276,7 +274,7 @@ export class AINotesGenerator {
           }
           currentStep = {
             step: parseInt(stepMatch[1]),
-            description: stepMatch[2]
+            description: stepMatch[2],
           };
         }
       }
@@ -317,7 +315,7 @@ export class AINotesBuilder {
       rationale: [],
       risks: [],
       verification: [],
-      createdAt: Date.now()
+      createdAt: Date.now(),
     };
   }
 
@@ -346,7 +344,7 @@ export class AINotesBuilder {
       step: this.content.verification.length + 1,
       description,
       command,
-      expectedResult
+      expectedResult,
     });
     return this;
   }

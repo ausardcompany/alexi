@@ -61,17 +61,17 @@ const DEFAULT_CONTEXT: ProjectContext = {
     framework: 'Node.js',
     versions: {
       node: '22.x',
-      typescript: '5.x'
-    }
+      typescript: '5.x',
+    },
   },
   infrastructure: {
     platform: 'docker',
-    containerization: 'docker'
+    containerization: 'docker',
   },
   quality: {
     requireLinting: true,
     requireTypes: true,
-    noTODOs: true
+    noTODOs: true,
   },
   style: {
     indentation: 'spaces',
@@ -81,14 +81,14 @@ const DEFAULT_CONTEXT: ProjectContext = {
       variables: 'camelCase',
       functions: 'camelCase',
       classes: 'PascalCase',
-      constants: 'UPPER_SNAKE_CASE'
-    }
+      constants: 'UPPER_SNAKE_CASE',
+    },
   },
   architectureInvariants: [],
   constraints: [],
   externalDependencies: [],
   createdAt: Date.now(),
-  updatedAt: Date.now()
+  updatedAt: Date.now(),
 };
 
 export class ProjectContextManager {
@@ -96,7 +96,7 @@ export class ProjectContextManager {
   private context: ProjectContext | null = null;
 
   constructor(projectPath?: string) {
-    this.contextPath = projectPath 
+    this.contextPath = projectPath
       ? path.join(projectPath, 'project-context.json')
       : path.join(process.cwd(), 'project-context.json');
   }
@@ -128,7 +128,7 @@ export class ProjectContextManager {
   save(context: ProjectContext): void {
     context.updatedAt = Date.now();
     this.context = context;
-    
+
     try {
       fs.writeFileSync(this.contextPath, JSON.stringify(context, null, 2), 'utf-8');
     } catch (error) {
@@ -145,9 +145,9 @@ export class ProjectContextManager {
       ...DEFAULT_CONTEXT,
       ...overrides,
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
-    
+
     this.save(context);
     return context;
   }
@@ -178,7 +178,7 @@ export class ProjectContextManager {
    */
   removeInvariant(invariant: string): void {
     const context = this.load();
-    context.architectureInvariants = context.architectureInvariants.filter(i => i !== invariant);
+    context.architectureInvariants = context.architectureInvariants.filter((i) => i !== invariant);
     this.save(context);
   }
 
@@ -198,7 +198,7 @@ export class ProjectContextManager {
    */
   generateSystemPrompt(role: string = 'senior backend engineer + reviewer'): string {
     const ctx = this.load();
-    
+
     return `You are ${role} helping with project "${ctx.name}".
 
 ## Project Context
@@ -207,7 +207,9 @@ ${ctx.description ? `Description: ${ctx.description}` : ''}
 ### Stack
 - Language: ${ctx.stack.language}
 ${ctx.stack.framework ? `- Framework: ${ctx.stack.framework}` : ''}
-${Object.entries(ctx.stack.versions).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
+${Object.entries(ctx.stack.versions)
+  .map(([k, v]) => `- ${k}: ${v}`)
+  .join('\n')}
 
 ### Infrastructure
 - Platform: ${ctx.infrastructure.platform}
@@ -223,17 +225,23 @@ ${ctx.quality.noTODOs ? '- No TODO comments unless agreed' : ''}
 ### Coding Style
 - Indentation: ${ctx.style.indentation} (${ctx.style.indentSize})
 - Line length: ${ctx.style.lineLength}
-- Naming: ${Object.entries(ctx.style.namingConventions).map(([k, v]) => `${k}=${v}`).join(', ')}
+- Naming: ${Object.entries(ctx.style.namingConventions)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ')}
 
 ### Architecture Invariants
-${ctx.architectureInvariants.length > 0 
-  ? ctx.architectureInvariants.map(i => `- ${i}`).join('\n')
-  : '- No invariants defined yet'}
+${
+  ctx.architectureInvariants.length > 0
+    ? ctx.architectureInvariants.map((i) => `- ${i}`).join('\n')
+    : '- No invariants defined yet'
+}
 
 ### Constraints
-${ctx.constraints.length > 0 
-  ? ctx.constraints.map(c => `- ${c}`).join('\n')
-  : '- No constraints defined yet'}
+${
+  ctx.constraints.length > 0
+    ? ctx.constraints.map((c) => `- ${c}`).join('\n')
+    : '- No constraints defined yet'
+}
 
 ## Response Requirements
 - Provide only files you changed/created

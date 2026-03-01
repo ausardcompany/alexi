@@ -80,12 +80,12 @@ export class Logger {
    */
   configure(config: Partial<LoggerConfig>): void {
     this.config = { ...this.config, ...config };
-    
+
     // Re-ensure log directory if changed
     if (config.logDir) {
       this.ensureLogDirectory();
     }
-    
+
     // Reset current file tracking to force re-evaluation
     this.currentLogFile = null;
     this.currentFileSize = 0;
@@ -257,7 +257,7 @@ export class Logger {
       for (let i = this.config.maxFiles - 1; i >= 1; i--) {
         const currentRotation = `${logFile}.${i}`;
         const nextRotation = `${logFile}.${i + 1}`;
-        
+
         if (fs.existsSync(currentRotation)) {
           fs.renameSync(currentRotation, nextRotation);
         }

@@ -40,7 +40,7 @@ export interface McpConnection {
 
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
-  
+
   /**
    * Connect to an MCP server
    */
@@ -56,10 +56,7 @@ export class McpClientManager {
 
     const connection: McpConnection = {
       config,
-      client: new Client(
-        { name: 'alexi', version: '0.1.0' },
-        { capabilities: {} }
-      ),
+      client: new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} }),
       tools: [],
       status: 'connecting',
     };
@@ -75,7 +72,7 @@ export class McpClientManager {
 
       // Fetch available tools
       const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map(tool => ({
+      connection.tools = (toolsResult.tools || []).map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema as McpToolInfo['inputSchema'],
@@ -84,7 +81,7 @@ export class McpClientManager {
 
       connection.status = 'connected';
       console.log(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
-      
+
       return connection;
     } catch (error) {
       connection.status = 'error';
@@ -96,7 +93,7 @@ export class McpClientManager {
 
   private async connectStdio(connection: McpConnection): Promise<void> {
     const { config } = connection;
-    
+
     if (!config.command) {
       throw new Error('Stdio transport requires a command');
     }
@@ -140,7 +137,7 @@ export class McpClientManager {
         cleanEnv[key] = value;
       }
     }
-    
+
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args,
@@ -185,7 +182,7 @@ export class McpClientManager {
    */
   async connectFromConfig(): Promise<void> {
     const config = loadMcpConfig();
-    
+
     for (const server of config.servers) {
       if (server.enabled && server.autoConnect) {
         await this.connect(server);
@@ -198,13 +195,13 @@ export class McpClientManager {
    */
   getAllTools(): McpToolInfo[] {
     const allTools: McpToolInfo[] = [];
-    
+
     for (const connection of this.connections.values()) {
       if (connection.status === 'connected') {
         allTools.push(...connection.tools);
       }
     }
-    
+
     return allTools;
   }
 
@@ -228,11 +225,11 @@ export class McpClientManager {
     args: Record<string, unknown>
   ): Promise<{ success: boolean; result?: unknown; error?: string }> {
     const connection = this.connections.get(serverName);
-    
+
     if (!connection) {
       return { success: false, error: `Server not connected: ${serverName}` };
     }
-    
+
     if (connection.status !== 'connected') {
       return { success: false, error: `Server not ready: ${serverName} (${connection.status})` };
     }
@@ -246,7 +243,10 @@ export class McpClientManager {
       // Extract text content from result
       const content = (result.content || []) as Array<{ type: string; text?: string }>;
       const textContent = content
-        .filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof c.text === 'string')
+        .filter(
+          (c): c is { type: 'text'; text: string } =>
+            c.type === 'text' && typeof c.text === 'string'
+        )
         .map((c) => c.text)
         .join('\n');
 
@@ -269,7 +269,7 @@ export class McpClientManager {
   findToolServer(toolName: string): string | undefined {
     for (const connection of this.connections.values()) {
       if (connection.status === 'connected') {
-        const tool = connection.tools.find(t => t.name === toolName);
+        const tool = connection.tools.find((t) => t.name === toolName);
         if (tool) {
           return connection.config.name;
         }

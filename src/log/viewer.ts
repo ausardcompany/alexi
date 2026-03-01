@@ -158,7 +158,7 @@ export class LogViewer {
 
         try {
           const entry = JSON.parse(trimmedLine) as LogEntry;
-          
+
           if (this.matchesFilter(entry, filter)) {
             entries.push(entry);
           }
@@ -176,26 +176,22 @@ export class LogViewer {
   /**
    * Filter files by date range
    */
-  private filterFilesByDateRange(
-    files: LogFileInfo[],
-    since?: Date,
-    until?: Date
-  ): LogFileInfo[] {
+  private filterFilesByDateRange(files: LogFileInfo[], since?: Date, until?: Date): LogFileInfo[] {
     if (!since && !until) {
       return files;
     }
 
     return files.filter((file) => {
       const fileDate = new Date(file.date);
-      
+
       if (since && fileDate < new Date(since.toISOString().split('T')[0])) {
         return false;
       }
-      
+
       if (until && fileDate > new Date(until.toISOString().split('T')[0])) {
         return false;
       }
-      
+
       return true;
     });
   }
@@ -232,11 +228,11 @@ export class LogViewer {
     // Date range filters
     if (filter.since || filter.until) {
       const entryDate = new Date(entry.timestamp);
-      
+
       if (filter.since && entryDate < filter.since) {
         return false;
       }
-      
+
       if (filter.until && entryDate > filter.until) {
         return false;
       }
@@ -266,10 +262,7 @@ export class LogViewer {
    * Tail logs - follow new log entries in real time
    * Returns a stop function to cancel the tail
    */
-  tailLogs(
-    callback: (entry: LogEntry) => void,
-    filter?: LogFilter
-  ): () => void {
+  tailLogs(callback: (entry: LogEntry) => void, filter?: LogFilter): () => void {
     let running = true;
     let currentFile: string | null = null;
     let fileSize: number = 0;
@@ -279,7 +272,7 @@ export class LogViewer {
       if (!running) return;
 
       const logFile = this.getCurrentLogFile();
-      
+
       // Check if the current log file changed (new day)
       if (currentFile !== logFile) {
         // Close existing watcher
@@ -287,12 +280,12 @@ export class LogViewer {
           watcher.close();
           watcher = null;
         }
-        
+
         currentFile = logFile;
-        
+
         if (fs.existsSync(logFile)) {
           fileSize = fs.statSync(logFile).size;
-          
+
           // Start watching the new file
           try {
             watcher = fs.watch(logFile, (eventType) => {
@@ -335,7 +328,7 @@ export class LogViewer {
 
             try {
               const entry = JSON.parse(trimmedLine) as LogEntry;
-              
+
               if (this.matchesFilter(entry, filter)) {
                 callback(entry);
               }
@@ -370,12 +363,12 @@ export class LogViewer {
     // Return stop function
     return (): void => {
       running = false;
-      
+
       if (watcher) {
         watcher.close();
         watcher = null;
       }
-      
+
       clearInterval(rotationInterval);
     };
   }
@@ -410,17 +403,17 @@ export class LogViewer {
         const match = entry.match(LOG_FILE_PATTERN);
         if (match) {
           const fileDate = match[1];
-          
+
           // Delete files older than the cutoff
           if (fileDate < cutoffDate) {
             const filePath = path.join(this.logDir, entry);
-            
+
             try {
               const stats = fs.statSync(filePath);
               const fileSize = stats.size;
-              
+
               fs.unlinkSync(filePath);
-              
+
               result.deleted++;
               result.freed += fileSize;
             } catch {
@@ -454,7 +447,7 @@ export class LogViewer {
     newestDate: string | null;
   } {
     const files = this.getLogFiles();
-    
+
     return {
       totalFiles: files.length,
       totalSize: files.reduce((total, file) => total + file.size, 0),

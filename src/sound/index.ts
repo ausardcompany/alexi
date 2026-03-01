@@ -42,7 +42,7 @@ const DEFAULT_CONFIG: SoundConfig = {
     permission_request: true,
     tool_complete: false,
     warning: false,
-  }
+  },
 };
 
 // ============ Helper Functions ============
@@ -96,7 +96,8 @@ function loadSoundConfig(): SoundConfig {
 
   // Merge with defaults to ensure all fields exist
   return {
-    enabled: typeof soundConfig.enabled === 'boolean' ? soundConfig.enabled : DEFAULT_CONFIG.enabled,
+    enabled:
+      typeof soundConfig.enabled === 'boolean' ? soundConfig.enabled : DEFAULT_CONFIG.enabled,
     events: {
       ...DEFAULT_CONFIG.events,
       ...(soundConfig.events || {}),
@@ -270,7 +271,7 @@ const EVENT_MAP: Record<string, SoundEvent> = {
 /**
  * Connect SoundManager to EventBus events
  * Maps EventBus events to SoundEvents and plays sounds accordingly
- * 
+ *
  * @param events - Object containing BusEvent instances to subscribe to
  * @returns Cleanup function to unsubscribe from all events
  */
@@ -280,7 +281,7 @@ export function connectSoundToEventBus(events: Record<string, EventBusLike>): ()
 
   for (const [_key, event] of Object.entries(events)) {
     const soundEvent = EVENT_MAP[event.name];
-    
+
     if (soundEvent) {
       const unsubscribe = event.subscribe(() => {
         soundManager.play(soundEvent);
@@ -320,15 +321,11 @@ export function connectToBusEvents(busEvents: {
   }
 
   if (busEvents.SessionEnded) {
-    unsubscribers.push(
-      busEvents.SessionEnded.subscribe(() => soundManager.play('session_end'))
-    );
+    unsubscribers.push(busEvents.SessionEnded.subscribe(() => soundManager.play('session_end')));
   }
 
   if (busEvents.MessageSent) {
-    unsubscribers.push(
-      busEvents.MessageSent.subscribe(() => soundManager.play('prompt_submit'))
-    );
+    unsubscribers.push(busEvents.MessageSent.subscribe(() => soundManager.play('prompt_submit')));
   }
 
   if (busEvents.MessageReceived) {
@@ -344,9 +341,7 @@ export function connectToBusEvents(busEvents: {
   }
 
   if (busEvents.ErrorOccurred) {
-    unsubscribers.push(
-      busEvents.ErrorOccurred.subscribe(() => soundManager.play('error'))
-    );
+    unsubscribers.push(busEvents.ErrorOccurred.subscribe(() => soundManager.play('error')));
   }
 
   if (busEvents.PermissionRequested) {
@@ -365,8 +360,4 @@ export function connectToBusEvents(busEvents: {
 
 // ============ Exports ============
 
-export {
-  CONFIG_DIR,
-  CONFIG_FILE,
-  DEFAULT_CONFIG,
-};
+export { CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG };

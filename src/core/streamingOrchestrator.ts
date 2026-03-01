@@ -3,9 +3,9 @@
  * Uses SAP AI SDK Orchestration provider exclusively
  */
 
-import { getProviderForModel, getDefaultModel, type StreamChunk } from "../providers/index.js"
-import { routePrompt } from "./router.js"
-import { SessionManager } from "./sessionManager.js"
+import { getProviderForModel, getDefaultModel, type StreamChunk } from '../providers/index.js';
+import { routePrompt } from './router.js';
+import { SessionManager } from './sessionManager.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -30,7 +30,7 @@ export interface StreamingResult {
 }
 
 // Re-export StreamChunk for consumers
-export type { StreamChunk }
+export type { StreamChunk };
 
 /**
  * Stream chat completion, yielding text chunks as they arrive
@@ -50,42 +50,42 @@ export async function* streamChat(
     routingReason = decision.reason;
   } else {
     // Use specified or default model
-    modelId = (options?.modelOverride ?? getDefaultModel()).trim()
+    modelId = (options?.modelOverride ?? getDefaultModel()).trim();
   }
 
   // Build messages array with history if session manager provided
   const messages: Array<{ role: string; content: string }> = [];
-  
+
   if (options?.sessionManager) {
     const session = options.sessionManager.getCurrentSession();
-    
+
     // Initialize session if needed
     if (!session) {
       options.sessionManager.createSession(modelId);
     }
-    
+
     // Get conversation history
     const history = options.sessionManager.getHistory(20); // Last 20 messages
-    
+
     // Add system prompt if provided and not already in history
-    if (options.systemPrompt && !history.some(m => m.role === 'system')) {
+    if (options.systemPrompt && !history.some((m) => m.role === 'system')) {
       messages.push({ role: 'system', content: options.systemPrompt });
     }
-    
+
     // Add conversation history
-    messages.push(...history.map(m => ({ role: m.role, content: m.content })));
+    messages.push(...history.map((m) => ({ role: m.role, content: m.content })));
   } else {
     // Single message without history
     if (options?.systemPrompt) {
       messages.push({ role: 'system', content: options.systemPrompt });
     }
   }
-  
+
   // Add current user message
   messages.push({ role: 'user', content: message });
 
   // Get SAP Orchestration provider for this model
-  const provider = getProviderForModel(modelId)
+  const provider = getProviderForModel(modelId);
 
   let fullText = '';
   let finalUsage: StreamingResult['usage'];
@@ -104,10 +104,10 @@ export async function* streamChat(
   // Save messages to session AFTER streaming completes (not per-chunk)
   if (options?.sessionManager) {
     options.sessionManager.addMessage('user', message, {
-      input: finalUsage?.prompt_tokens
+      input: finalUsage?.prompt_tokens,
     });
     options.sessionManager.addMessage('assistant', fullText, {
-      output: finalUsage?.completion_tokens
+      output: finalUsage?.completion_tokens,
     });
   }
 
@@ -115,7 +115,7 @@ export async function* streamChat(
     text: fullText,
     usage: finalUsage,
     modelUsed: modelId,
-    routingReason
+    routingReason,
   };
 }
 
@@ -126,8 +126,8 @@ export function resolveModelId(options?: StreamingOptions): string {
   if (options?.modelOverride) {
     return options.modelOverride.trim();
   }
-  
-  return getDefaultModel()
+
+  return getDefaultModel();
 }
 
 /**

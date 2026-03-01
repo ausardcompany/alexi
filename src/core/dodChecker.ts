@@ -57,7 +57,7 @@ export class DoDChecker {
       description: 'Project compiles/assembles successfully',
       stage: 'implementation',
       autoFixable: false,
-      check: () => this.checkBuild()
+      check: () => this.checkBuild(),
     });
 
     // Test check
@@ -67,7 +67,7 @@ export class DoDChecker {
       description: 'All tests pass (green)',
       stage: 'implementation',
       autoFixable: false,
-      check: () => this.checkTests()
+      check: () => this.checkTests(),
     });
 
     // TODO check
@@ -77,7 +77,7 @@ export class DoDChecker {
       description: 'No TODO comments unless explicitly agreed',
       stage: 'implementation',
       autoFixable: false,
-      check: () => this.checkTODOs()
+      check: () => this.checkTODOs(),
     });
 
     // Lint check
@@ -87,7 +87,7 @@ export class DoDChecker {
       description: 'Code passes linting checks',
       stage: 'implementation',
       autoFixable: true,
-      check: () => this.checkLint()
+      check: () => this.checkLint(),
     });
 
     // Type check
@@ -97,7 +97,7 @@ export class DoDChecker {
       description: 'TypeScript types are valid',
       stage: 'implementation',
       autoFixable: false,
-      check: () => this.checkTypes()
+      check: () => this.checkTypes(),
     });
 
     // AI_NOTES check
@@ -107,7 +107,7 @@ export class DoDChecker {
       description: 'Changes documented in AI_NOTES.md',
       stage: 'implementation',
       autoFixable: false,
-      check: () => this.checkAINotes()
+      check: () => this.checkAINotes(),
     });
 
     // Architecture check
@@ -117,7 +117,7 @@ export class DoDChecker {
       description: 'Component/boundary map exists',
       stage: 'architecture',
       autoFixable: false,
-      check: () => this.checkArchitectureDoc()
+      check: () => this.checkArchitectureDoc(),
     });
 
     // Data flow check
@@ -127,7 +127,7 @@ export class DoDChecker {
       description: 'Main data flows are described',
       stage: 'architecture',
       autoFixable: false,
-      check: () => this.checkDataFlows()
+      check: () => this.checkDataFlows(),
     });
 
     // Invariants check
@@ -137,7 +137,7 @@ export class DoDChecker {
       description: 'Key invariants documented',
       stage: 'architecture',
       autoFixable: false,
-      check: () => this.checkInvariants()
+      check: () => this.checkInvariants(),
     });
 
     // Documentation check
@@ -147,7 +147,7 @@ export class DoDChecker {
       description: 'Documentation matches current contracts',
       stage: 'documentation',
       autoFixable: false,
-      check: () => this.checkDocsCurrent()
+      check: () => this.checkDocsCurrent(),
     });
   }
 
@@ -185,8 +185,8 @@ export class DoDChecker {
           result: {
             passed: false,
             message: `Check failed with error: ${error}`,
-            suggestion: 'Review the error and fix the underlying issue'
-          }
+            suggestion: 'Review the error and fix the underlying issue',
+          },
         });
         failed++;
       }
@@ -199,7 +199,7 @@ export class DoDChecker {
       passed,
       failed,
       warnings,
-      results
+      results,
     };
   }
 
@@ -223,7 +223,7 @@ export class DoDChecker {
 
     // Status indicator
     const allPassed = report.failed === 0;
-    markdown += allPassed 
+    markdown += allPassed
       ? `✅ **All checks passed**\n\n`
       : `❌ **${report.failed} check(s) failed**\n\n`;
 
@@ -234,17 +234,17 @@ export class DoDChecker {
       const icon = result.passed ? '✅' : '❌';
       markdown += `${icon} **${check}**\n`;
       markdown += `   ${result.message}\n`;
-      
+
       if (result.details && result.details.length > 0) {
         for (const detail of result.details) {
           markdown += `   - ${detail}\n`;
         }
       }
-      
+
       if (result.suggestion) {
         markdown += `   💡 ${result.suggestion}\n`;
       }
-      
+
       markdown += `\n`;
     }
 
@@ -255,104 +255,101 @@ export class DoDChecker {
 
   private checkBuild(): DoDResult {
     const packageJsonPath = path.join(this.projectPath, 'package.json');
-    
+
     if (!fs.existsSync(packageJsonPath)) {
       return {
         passed: false,
         message: 'No package.json found',
-        suggestion: 'Ensure you are in a valid project directory'
+        suggestion: 'Ensure you are in a valid project directory',
       };
     }
 
     try {
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      
+
       if (!packageJson.scripts?.build) {
         return {
           passed: true,
           message: 'No build script defined (may not be required)',
-          details: ['Project may not require a build step']
+          details: ['Project may not require a build step'],
         };
       }
 
-      execSync('npm run build', { 
+      execSync('npm run build', {
         cwd: this.projectPath,
         stdio: 'pipe',
-        timeout: 60000
+        timeout: 60000,
       });
 
       return {
         passed: true,
-        message: 'Project builds successfully'
+        message: 'Project builds successfully',
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Build failed',
         details: [String(error)],
-        suggestion: 'Run `npm run build` manually to see errors'
+        suggestion: 'Run `npm run build` manually to see errors',
       };
     }
   }
 
   private checkTests(): DoDResult {
     const packageJsonPath = path.join(this.projectPath, 'package.json');
-    
+
     if (!fs.existsSync(packageJsonPath)) {
       return {
         passed: false,
-        message: 'No package.json found'
+        message: 'No package.json found',
       };
     }
 
     try {
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      
+
       if (!packageJson.scripts?.test) {
         return {
           passed: true,
           message: 'No test script defined (may not be required)',
-          details: ['Consider adding tests for critical functionality']
+          details: ['Consider adding tests for critical functionality'],
         };
       }
 
-      execSync('npm test', { 
+      execSync('npm test', {
         cwd: this.projectPath,
         stdio: 'pipe',
-        timeout: 120000
+        timeout: 120000,
       });
 
       return {
         passed: true,
-        message: 'All tests pass'
+        message: 'All tests pass',
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Tests failed',
         details: [String(error)],
-        suggestion: 'Run `npm test` manually to see failures'
+        suggestion: 'Run `npm test` manually to see failures',
       };
     }
   }
 
   private checkTODOs(): DoDResult {
-    const todoPatterns = [
-      /TODO[\s:]/i,
-      /FIXME[\s:]/i,
-      /XXX[\s:]/i,
-      /HACK[\s:]/i
-    ];
+    const todoPatterns = [/TODO[\s:]/i, /FIXME[\s:]/i, /XXX[\s:]/i, /HACK[\s:]/i];
 
     const todos: string[] = [];
-    
+
     try {
       this.scanDirectory(this.projectPath, (filePath, content) => {
         const lines = content.split('\n');
         for (let i = 0; i < lines.length; i++) {
           for (const pattern of todoPatterns) {
             if (pattern.test(lines[i])) {
-              todos.push(`${path.relative(this.projectPath, filePath)}:${i + 1}: ${lines[i].trim()}`);
+              todos.push(
+                `${path.relative(this.projectPath, filePath)}:${i + 1}: ${lines[i].trim()}`
+              );
             }
           }
         }
@@ -361,7 +358,7 @@ export class DoDChecker {
       if (todos.length === 0) {
         return {
           passed: true,
-          message: 'No TODO/FIXME comments found'
+          message: 'No TODO/FIXME comments found',
         };
       }
 
@@ -369,116 +366,117 @@ export class DoDChecker {
         passed: false,
         message: `Found ${todos.length} TODO/FIXME comment(s)`,
         details: todos.slice(0, 5),
-        suggestion: todos.length > 5 
-          ? `... and ${todos.length - 5} more. Remove or resolve all TODOs before marking as done.`
-          : 'Remove or resolve all TODOs before marking as done'
+        suggestion:
+          todos.length > 5
+            ? `... and ${todos.length - 5} more. Remove or resolve all TODOs before marking as done.`
+            : 'Remove or resolve all TODOs before marking as done',
       };
     } catch (error) {
       return {
         passed: true,
         message: 'Could not scan for TODOs',
-        details: [String(error)]
+        details: [String(error)],
       };
     }
   }
 
   private checkLint(): DoDResult {
     const packageJsonPath = path.join(this.projectPath, 'package.json');
-    
+
     if (!fs.existsSync(packageJsonPath)) {
       return {
         passed: true,
-        message: 'No package.json found (skipping lint check)'
+        message: 'No package.json found (skipping lint check)',
       };
     }
 
     try {
       const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      
+
       if (!packageJson.scripts?.lint) {
         return {
           passed: true,
           message: 'No lint script defined (skipping)',
-          details: ['Consider adding linting for consistent code style']
+          details: ['Consider adding linting for consistent code style'],
         };
       }
 
-      execSync('npm run lint', { 
+      execSync('npm run lint', {
         cwd: this.projectPath,
         stdio: 'pipe',
-        timeout: 60000
+        timeout: 60000,
       });
 
       return {
         passed: true,
-        message: 'Code passes linting checks'
+        message: 'Code passes linting checks',
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Linting failed',
         details: [String(error)],
-        suggestion: 'Run `npm run lint` and fix the reported issues'
+        suggestion: 'Run `npm run lint` and fix the reported issues',
       };
     }
   }
 
   private checkTypes(): DoDResult {
     const tsconfigPath = path.join(this.projectPath, 'tsconfig.json');
-    
+
     if (!fs.existsSync(tsconfigPath)) {
       return {
         passed: true,
-        message: 'No TypeScript configuration found (skipping type check)'
+        message: 'No TypeScript configuration found (skipping type check)',
       };
     }
 
     try {
-      execSync('npx tsc --noEmit', { 
+      execSync('npx tsc --noEmit', {
         cwd: this.projectPath,
         stdio: 'pipe',
-        timeout: 60000
+        timeout: 60000,
       });
 
       return {
         passed: true,
-        message: 'TypeScript types are valid'
+        message: 'TypeScript types are valid',
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Type checking failed',
         details: [String(error)],
-        suggestion: 'Run `npx tsc --noEmit` to see type errors'
+        suggestion: 'Run `npx tsc --noEmit` to see type errors',
       };
     }
   }
 
   private checkAINotes(): DoDResult {
     const aiNotesPattern = /AI_NOTES.*\.md$/;
-    
+
     try {
       const files = fs.readdirSync(this.projectPath);
-      const aiNotesFiles = files.filter(f => aiNotesPattern.test(f));
+      const aiNotesFiles = files.filter((f) => aiNotesPattern.test(f));
 
       if (aiNotesFiles.length === 0) {
         return {
           passed: false,
           message: 'No AI_NOTES.md found',
-          suggestion: 'Create AI_NOTES.md documenting your changes'
+          suggestion: 'Create AI_NOTES.md documenting your changes',
         };
       }
 
       return {
         passed: true,
         message: `Found ${aiNotesFiles.length} AI_NOTES file(s)`,
-        details: aiNotesFiles
+        details: aiNotesFiles,
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Could not check for AI_NOTES.md',
-        details: [String(error)]
+        details: [String(error)],
       };
     }
   }
@@ -488,7 +486,7 @@ export class DoDChecker {
       'ARCHITECTURE.md',
       'docs/architecture.md',
       'docs/ARCHITECTURE.md',
-      'README.md'
+      'README.md',
     ];
 
     for (const p of possiblePaths) {
@@ -496,7 +494,7 @@ export class DoDChecker {
       if (fs.existsSync(fullPath)) {
         return {
           passed: true,
-          message: `Architecture document found: ${p}`
+          message: `Architecture document found: ${p}`,
         };
       }
     }
@@ -504,7 +502,7 @@ export class DoDChecker {
     return {
       passed: false,
       message: 'No architecture document found',
-      suggestion: 'Create ARCHITECTURE.md with component/boundary map'
+      suggestion: 'Create ARCHITECTURE.md with component/boundary map',
     };
   }
 
@@ -514,42 +512,43 @@ export class DoDChecker {
     return {
       passed: true,
       message: 'Data flow check requires manual verification',
-      details: ['Ensure main data flows are documented in architecture']
+      details: ['Ensure main data flows are documented in architecture'],
     };
   }
 
   private checkInvariants(): DoDResult {
     const contextPath = path.join(this.projectPath, 'project-context.json');
-    
+
     if (!fs.existsSync(contextPath)) {
       return {
         passed: false,
         message: 'No project-context.json found',
-        suggestion: 'Initialize project context with architecture invariants'
+        suggestion: 'Initialize project context with architecture invariants',
       };
     }
 
     try {
       const context = JSON.parse(fs.readFileSync(contextPath, 'utf-8'));
-      
+
       if (!context.architectureInvariants || context.architectureInvariants.length === 0) {
         return {
           passed: false,
           message: 'No architecture invariants defined',
-          suggestion: 'Add key invariants to project-context.json (idempotency, transactions, etc.)'
+          suggestion:
+            'Add key invariants to project-context.json (idempotency, transactions, etc.)',
         };
       }
 
       return {
         passed: true,
         message: `${context.architectureInvariants.length} invariant(s) defined`,
-        details: context.architectureInvariants
+        details: context.architectureInvariants,
       };
     } catch (error) {
       return {
         passed: false,
         message: 'Could not read project-context.json',
-        details: [String(error)]
+        details: [String(error)],
       };
     }
   }
@@ -560,7 +559,7 @@ export class DoDChecker {
     return {
       passed: true,
       message: 'Documentation currency requires manual verification',
-      details: ['Compare docs with actual API contracts and code']
+      details: ['Compare docs with actual API contracts and code'],
     };
   }
 
@@ -569,11 +568,11 @@ export class DoDChecker {
    */
   private scanDirectory(dir: string, callback: (filePath: string, content: string) => void): void {
     const files = fs.readdirSync(dir);
-    
+
     for (const file of files) {
       const fullPath = path.join(dir, file);
       const stat = fs.statSync(fullPath);
-      
+
       if (stat.isDirectory()) {
         // Skip node_modules and hidden directories
         if (file === 'node_modules' || file.startsWith('.')) continue;
@@ -596,11 +595,11 @@ export class DoDChecker {
    * Get list of available checks
    */
   listChecks(): Array<{ id: string; name: string; stage: string; autoFixable: boolean }> {
-    return Array.from(this.checks.values()).map(check => ({
+    return Array.from(this.checks.values()).map((check) => ({
       id: check.id,
       name: check.name,
       stage: check.stage,
-      autoFixable: check.autoFixable
+      autoFixable: check.autoFixable,
     }));
   }
 }

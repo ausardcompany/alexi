@@ -39,9 +39,9 @@ export function registerChatCommand(program: Command): void {
           console.error('Error: Either --message or --message-file is required');
           process.exit(1);
         }
-        
+
         const sessionManager = new SessionManager();
-        
+
         // Load or create session
         if (opts.session) {
           const session = sessionManager.loadSession(opts.session);
@@ -51,26 +51,28 @@ export function registerChatCommand(program: Command): void {
           }
           console.log(`[Continuing session: ${session.metadata.title || opts.session}]`);
         }
-        
+
         const res = await sendChat(message, {
           modelOverride: opts.model,
           autoRoute: opts.autoRoute,
           preferCheap: opts.preferCheap,
           sessionManager,
-          systemPrompt: opts.system
+          systemPrompt: opts.system,
         });
-        
+
         console.log(res.text);
         if (res.usage) console.log(JSON.stringify(res.usage));
         if (res.modelUsed && opts.autoRoute) {
           console.log(`\n[Model: ${res.modelUsed}]`);
         }
-        
+
         // Print session info
         const currentSession = sessionManager.getCurrentSession();
         if (currentSession) {
           console.log(`\n[Session: ${currentSession.metadata.id}]`);
-          console.log(`[Messages: ${currentSession.metadata.messageCount}, Tokens: ${currentSession.metadata.totalTokens}]`);
+          console.log(
+            `[Messages: ${currentSession.metadata.messageCount}, Tokens: ${currentSession.metadata.totalTokens}]`
+          );
         }
       } catch (e) {
         console.error(String(e));

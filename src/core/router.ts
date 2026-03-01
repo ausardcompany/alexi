@@ -3,7 +3,11 @@
  * Routes prompts to appropriate models based on task complexity and type
  */
 
-import { loadRoutingConfig, findMatchingRule, type RoutingConfig } from '../config/routingConfig.js';
+import {
+  loadRoutingConfig,
+  findMatchingRule,
+  type RoutingConfig,
+} from '../config/routingConfig.js';
 
 export interface ModelCapability {
   id: string;
@@ -33,7 +37,7 @@ function getConfig(): RoutingConfig {
 
 // Get model registry from config
 function getModelRegistry(): ModelCapability[] {
-  return getConfig().models.filter(m => (m as any).enabled !== false);
+  return getConfig().models.filter((m) => (m as any).enabled !== false);
 }
 
 /**
@@ -55,7 +59,7 @@ function classifyPrompt(prompt: string): {
     /^translate /i,
     /^summarize in \d+ words/i,
     /yes or no/i,
-    /true or false/i
+    /true or false/i,
   ];
 
   const codingPatterns = [
@@ -65,7 +69,7 @@ function classifyPrompt(prompt: string): {
     /debug/i,
     /refactor/i,
     /class.*{/i,
-    /```/
+    /```/,
   ];
 
   const reasoningPatterns = [
@@ -76,7 +80,7 @@ function classifyPrompt(prompt: string): {
     /reasoning/i,
     /proof/i,
     /derive/i,
-    /solve.*equation/i
+    /solve.*equation/i,
   ];
 
   const creativePatterns = [
@@ -84,24 +88,24 @@ function classifyPrompt(prompt: string): {
     /write.*poem/i,
     /write.*haiku/i,
     /create.*content/i,
-    /brainstorm/i
+    /brainstorm/i,
   ];
 
   // Determine task type
   let type = 'general-qa';
-  if (codingPatterns.some(p => p.test(prompt))) type = 'coding';
-  else if (reasoningPatterns.some(p => p.test(prompt))) type = 'deep-reasoning';
-  else if (creativePatterns.some(p => p.test(prompt))) type = 'creative-writing';
-  else if (simplePatterns.some(p => p.test(prompt))) type = 'simple-qa';
+  if (codingPatterns.some((p) => p.test(prompt))) type = 'coding';
+  else if (reasoningPatterns.some((p) => p.test(prompt))) type = 'deep-reasoning';
+  else if (creativePatterns.some((p) => p.test(prompt))) type = 'creative-writing';
+  else if (simplePatterns.some((p) => p.test(prompt))) type = 'simple-qa';
 
   // Determine complexity
   let complexity: 'simple' | 'medium' | 'complex' = 'medium';
-  
-  if (length < 100 && simplePatterns.some(p => p.test(prompt))) {
+
+  if (length < 100 && simplePatterns.some((p) => p.test(prompt))) {
     complexity = 'simple';
   } else if (
     length > 500 ||
-    reasoningPatterns.some(p => p.test(prompt)) ||
+    reasoningPatterns.some((p) => p.test(prompt)) ||
     lower.includes('complex') ||
     lower.includes('advanced')
   ) {
@@ -109,8 +113,8 @@ function classifyPrompt(prompt: string): {
   }
 
   // Check if requires reasoning
-  const requiresReasoning = 
-    reasoningPatterns.some(p => p.test(prompt)) ||
+  const requiresReasoning =
+    reasoningPatterns.some((p) => p.test(prompt)) ||
     lower.includes('explain') ||
     lower.includes('why') ||
     complexity === 'complex';
@@ -141,7 +145,7 @@ function scoreModel(
 
   // Task type matching
   if (model.strengths.includes(taskType)) score += 25;
-  
+
   // Reasoning requirement
   if (requiresReasoning && model.reasoning) score += 20;
   if (requiresReasoning && !model.reasoning) score -= 15;
@@ -171,7 +175,7 @@ export function routePrompt(
     return {
       modelId: options.forceModel,
       reason: 'User specified model',
-      confidence: 1.0
+      confidence: 1.0,
     };
   }
 
@@ -180,7 +184,7 @@ export function routePrompt(
 
   // Check if any rule matches
   const matchedRule = findMatchingRule(config.rules, classification, prompt);
-  
+
   if (matchedRule) {
     // Rule-based routing
     if (matchedRule.modelId) {
@@ -188,10 +192,10 @@ export function routePrompt(
         modelId: matchedRule.modelId,
         reason: `Rule applied: ${matchedRule.name} - ${matchedRule.description}`,
         confidence: 1.0,
-        ruleApplied: matchedRule.name
+        ruleApplied: matchedRule.name,
       };
     }
-    
+
     // Rule requires reasoning but doesn't specify model
     if (matchedRule.requiresReasoning) {
       classification.requiresReasoning = true;
@@ -204,14 +208,14 @@ export function routePrompt(
   // Filter available models
   let candidates = getModelRegistry();
   if (options?.availableModels) {
-    candidates = candidates.filter(m => options.availableModels!.includes(m.id));
+    candidates = candidates.filter((m) => options.availableModels!.includes(m.id));
   }
 
   // Score each model
   const preferCheap = options?.preferCheap ?? config.preferences.preferCheapWhenPossible;
-  const scored = candidates.map(model => ({
+  const scored = candidates.map((model) => ({
     model,
-    score: scoreModel(model, type, complexity, requiresReasoning, preferCheap)
+    score: scoreModel(model, type, complexity, requiresReasoning, preferCheap),
   }));
 
   // Sort by score descending
@@ -232,7 +236,7 @@ export function routePrompt(
     modelId: best.model.id,
     reason,
     confidence,
-    ruleApplied: matchedRule?.name
+    ruleApplied: matchedRule?.name,
   };
 }
 
@@ -247,21 +251,21 @@ export async function explainRouting(prompt: string): Promise<{
 }> {
   const config = getConfig();
   const classification = classifyPrompt(prompt);
-  
+
   // Find all matching rules
   const { evaluateRule: evaluateRuleFn } = await import('../config/routingConfig.js');
   const matchedRules = config.rules
-    .filter(rule => {
+    .filter((rule) => {
       return evaluateRuleFn(rule, classification, prompt.length, prompt);
     })
-    .map(rule => ({
+    .map((rule) => ({
       name: rule.name,
       description: rule.description,
-      priority: rule.priority
+      priority: rule.priority,
     }))
     .sort((a, b) => b.priority - a.priority);
-  
-  const scored = getModelRegistry().map(model => {
+
+  const scored = getModelRegistry().map((model) => {
     const score = scoreModel(
       model,
       classification.type,
@@ -269,7 +273,7 @@ export async function explainRouting(prompt: string): Promise<{
       classification.requiresReasoning,
       false
     );
-    
+
     let reason = `${model.costTier} tier`;
     if (model.strengths.includes(classification.type)) {
       reason += `, strong at ${classification.type}`;
@@ -277,11 +281,11 @@ export async function explainRouting(prompt: string): Promise<{
     if (classification.requiresReasoning && model.reasoning) {
       reason += ', has reasoning';
     }
-    
+
     return {
       modelId: model.id,
       score,
-      reason
+      reason,
     };
   });
 
@@ -293,7 +297,7 @@ export async function explainRouting(prompt: string): Promise<{
     classification,
     candidates: scored,
     selected,
-    matchedRules: matchedRules.length > 0 ? matchedRules : undefined
+    matchedRules: matchedRules.length > 0 ? matchedRules : undefined,
   };
 }
 

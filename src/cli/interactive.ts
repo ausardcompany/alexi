@@ -36,17 +36,21 @@ const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '
 function printHeader(state: ReplState): void {
   console.log();
   console.log(c('cyan', '╭─────────────────────────────────────────────────────╮'));
-  console.log(c('cyan', '│') + c('bold', '          SAP Bot Orchestrator - Interactive         ') + c('cyan', '│'));
+  console.log(
+    c('cyan', '│') +
+      c('bold', '          SAP Bot Orchestrator - Interactive         ') +
+      c('cyan', '│')
+  );
   console.log(c('cyan', '╰─────────────────────────────────────────────────────╯'));
   console.log();
   console.log(c('gray', `  Model: ${c('green', state.currentModel)}`));
   console.log(c('gray', `  Auto-route: ${state.autoRoute ? c('green', 'on') : c('red', 'off')}`));
-  
+
   const session = state.sessionManager.getCurrentSession();
   if (session) {
     console.log(c('gray', `  Session: ${c('yellow', session.metadata.id.slice(0, 8))}`));
   }
-  
+
   console.log();
   console.log(c('dim', '  Type /help for commands, /exit to quit'));
   console.log(c('dim', '  Press Ctrl+C during response to cancel'));
@@ -109,13 +113,13 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
 
     case 'models':
       try {
-        const baseURL = env("SAP_PROXY_BASE_URL");
-        const apiKey = env("SAP_PROXY_API_KEY");
+        const baseURL = env('SAP_PROXY_BASE_URL');
+        const apiKey = env('SAP_PROXY_API_KEY');
         if (baseURL && apiKey) {
-          const url = baseURL.replace(/\/$/, "") + "/models";
+          const url = baseURL.replace(/\/$/, '') + '/models';
           const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
           if (res.ok) {
-            const data = await res.json() as { data?: Array<{ id: string }> };
+            const data = (await res.json()) as { data?: Array<{ id: string }> };
             console.log(c('cyan', '\n  Available Models:\n'));
             const models = data?.data || [];
             models.forEach((m: any) => {
@@ -181,11 +185,13 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         console.log(c('yellow', '\n  No saved sessions\n'));
       } else {
         console.log(c('cyan', '\n  Saved Sessions:\n'));
-        sessions.slice(0, 10).forEach(s => {
+        sessions.slice(0, 10).forEach((s) => {
           const date = new Date(s.updated).toLocaleDateString();
           const current = state.sessionManager.getCurrentSession()?.metadata.id === s.id;
           const marker = current ? c('green', ' ← current') : '';
-          console.log(c('gray', `    ${s.id.slice(0, 8)} - ${s.title || 'Untitled'} (${date})${marker}`));
+          console.log(
+            c('gray', `    ${s.id.slice(0, 8)} - ${s.title || 'Untitled'} (${date})${marker}`)
+          );
         });
         if (sessions.length > 10) {
           console.log(c('dim', `\n    ... and ${sessions.length - 10} more`));
@@ -206,7 +212,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         console.log(c('yellow', '\n  No conversation history\n'));
       } else {
         console.log(c('cyan', '\n  Conversation History:\n'));
-        history.forEach(m => {
+        history.forEach((m) => {
           const role = m.role === 'user' ? c('blue', 'You') : c('green', 'AI');
           const preview = m.content.slice(0, 100) + (m.content.length > 100 ? '...' : '');
           console.log(c('gray', `    ${role}: ${preview}`));
@@ -308,7 +314,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   rl.on('line', async (line) => {
     const input = line.trim();
-    
+
     if (!input) {
       rl.prompt();
       return;
@@ -336,7 +342,9 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
       // Start spinner
       spinnerInterval = setInterval(() => {
         if (!hasContent) {
-          process.stdout.write(`\r  ${c('cyan', spinnerFrames[spinnerFrame])} ${c('dim', 'Thinking...')}`);
+          process.stdout.write(
+            `\r  ${c('cyan', spinnerFrames[spinnerFrame])} ${c('dim', 'Thinking...')}`
+          );
           spinnerFrame = (spinnerFrame + 1) % spinnerFrames.length;
         }
       }, 80);
@@ -353,7 +361,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
       let result;
       while (true) {
         const { value, done } = await generator.next();
-        
+
         if (done) {
           result = value;
           break;
@@ -385,12 +393,11 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
         console.log(c('dim', `  [Routing: ${result.routingReason}]`));
       }
       console.log();
-
     } catch (err) {
       if (spinnerInterval) {
         clearInterval(spinnerInterval);
       }
-      
+
       if (isAbortError(err)) {
         // Already handled in SIGINT
       } else {

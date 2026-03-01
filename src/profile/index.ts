@@ -59,7 +59,7 @@ const PROFILES_FILE = path.join(CONFIG_DIR, 'profiles.json');
  */
 function isSecretVar(varName: string): boolean {
   const upperName = varName.toUpperCase();
-  return SECRET_KEYWORDS.some(keyword => upperName.includes(keyword));
+  return SECRET_KEYWORDS.some((keyword) => upperName.includes(keyword));
 }
 
 /**
@@ -88,7 +88,7 @@ function ensureConfigDir(): void {
  */
 function loadProfileConfig(): ProfileConfig {
   ensureConfigDir();
-  
+
   if (!fs.existsSync(PROFILES_FILE)) {
     return { profiles: [] };
   }
@@ -96,16 +96,18 @@ function loadProfileConfig(): ProfileConfig {
   try {
     const content = fs.readFileSync(PROFILES_FILE, 'utf-8');
     const config = JSON.parse(content) as ProfileConfig;
-    
+
     // Validate structure
     if (!Array.isArray(config.profiles)) {
       config.profiles = [];
     }
-    
+
     return config;
   } catch (error) {
     // Return empty config on parse error
-    console.error(`Warning: Could not parse profiles.json: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `Warning: Could not parse profiles.json: ${error instanceof Error ? error.message : String(error)}`
+    );
     return { profiles: [] };
   }
 }
@@ -123,14 +125,14 @@ function saveProfileConfig(config: ProfileConfig): void {
  */
 function parseEnvFile(filePath: string): Record<string, string> {
   const absolutePath = path.resolve(filePath);
-  
+
   if (!fs.existsSync(absolutePath)) {
     throw new Error(`Env file not found: ${absolutePath}`);
   }
 
   const content = fs.readFileSync(absolutePath, 'utf-8');
   const parsed = dotenv.parse(content);
-  
+
   return parsed;
 }
 
@@ -146,14 +148,14 @@ function now(): string {
  */
 function captureCurrentEnv(): Record<string, string> {
   const env: Record<string, string> = {};
-  
+
   for (const varName of PROFILE_ENV_VARS) {
     const value = process.env[varName];
     if (value !== undefined && value.trim() !== '') {
       env[varName] = value;
     }
   }
-  
+
   return env;
 }
 
@@ -162,13 +164,13 @@ function captureCurrentEnv(): Record<string, string> {
  */
 function filterProfileEnvVars(env: Record<string, string>): Record<string, string> {
   const filtered: Record<string, string> = {};
-  
+
   for (const [key, value] of Object.entries(env)) {
-    if (PROFILE_ENV_VARS.includes(key as typeof PROFILE_ENV_VARS[number])) {
+    if (PROFILE_ENV_VARS.includes(key as (typeof PROFILE_ENV_VARS)[number])) {
       filtered[key] = value;
     }
   }
-  
+
   return filtered;
 }
 
@@ -199,7 +201,7 @@ export class ProfileManager {
    * Get profile by name
    */
   get(name: string): Profile | undefined {
-    return this.config.profiles.find(p => p.name === name);
+    return this.config.profiles.find((p) => p.name === name);
   }
 
   /**
@@ -229,7 +231,7 @@ export class ProfileManager {
     }
 
     const trimmedName = name.trim();
-    
+
     // Check for duplicates
     if (this.get(trimmedName)) {
       throw new Error(`Profile "${trimmedName}" already exists`);
@@ -267,7 +269,7 @@ export class ProfileManager {
     }
 
     const trimmedName = name.trim();
-    
+
     // Check for duplicates
     if (this.get(trimmedName)) {
       throw new Error(`Profile "${trimmedName}" already exists`);
@@ -303,7 +305,7 @@ export class ProfileManager {
    */
   switch(name: string): void {
     const profile = this.get(name);
-    
+
     if (!profile) {
       throw new Error(`Profile "${name}" not found`);
     }
@@ -322,8 +324,8 @@ export class ProfileManager {
    * Delete a profile
    */
   delete(name: string): boolean {
-    const index = this.config.profiles.findIndex(p => p.name === name);
-    
+    const index = this.config.profiles.findIndex((p) => p.name === name);
+
     if (index === -1) {
       return false;
     }
@@ -344,15 +346,12 @@ export class ProfileManager {
    */
   exportToEnvFile(name: string, outputPath: string): void {
     const profile = this.get(name);
-    
+
     if (!profile) {
       throw new Error(`Profile "${name}" not found`);
     }
 
-    const lines: string[] = [
-      `# Profile: ${profile.name}`,
-      `# Exported: ${now()}`,
-    ];
+    const lines: string[] = [`# Profile: ${profile.name}`, `# Exported: ${now()}`];
 
     if (profile.description) {
       lines.push(`# Description: ${profile.description}`);
@@ -379,7 +378,7 @@ export class ProfileManager {
    */
   update(name: string, updates: Partial<Pick<Profile, 'description' | 'environment'>>): Profile {
     const profile = this.get(name);
-    
+
     if (!profile) {
       throw new Error(`Profile "${name}" not found`);
     }
@@ -405,7 +404,7 @@ export class ProfileManager {
    */
   showMasked(name: string): Record<string, string> {
     const profile = this.get(name);
-    
+
     if (!profile) {
       throw new Error(`Profile "${name}" not found`);
     }
@@ -424,7 +423,7 @@ export class ProfileManager {
    */
   rename(oldName: string, newName: string): Profile {
     const profile = this.get(oldName);
-    
+
     if (!profile) {
       throw new Error(`Profile "${oldName}" not found`);
     }
@@ -458,7 +457,7 @@ export class ProfileManager {
    */
   clone(sourceName: string, newName: string, description?: string): Profile {
     const source = this.get(sourceName);
-    
+
     if (!source) {
       throw new Error(`Profile "${sourceName}" not found`);
     }
@@ -503,7 +502,7 @@ export class ProfileManager {
    * Check if a profile exists
    */
   exists(name: string): boolean {
-    return this.config.profiles.some(p => p.name === name);
+    return this.config.profiles.some((p) => p.name === name);
   }
 
   /**
@@ -545,7 +544,7 @@ export function loadActiveProfile(): void {
   try {
     const manager = getProfileManager();
     const active = manager.getActive();
-    
+
     if (active) {
       // Set env vars from active profile
       for (const [key, value] of Object.entries(active.environment)) {
@@ -557,7 +556,9 @@ export function loadActiveProfile(): void {
     }
   } catch (error) {
     // Silently fail during startup - profile loading is optional
-    console.error(`Warning: Could not load active profile: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `Warning: Could not load active profile: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
@@ -569,17 +570,17 @@ export function loadActiveProfile(): void {
 export function formatProfileForCLI(profile: Profile, isActive: boolean = false): string {
   const lines: string[] = [];
   const marker = isActive ? ' (active)' : '';
-  
+
   lines.push(`${profile.name}${marker}`);
-  
+
   if (profile.description) {
     lines.push(`  Description: ${profile.description}`);
   }
-  
+
   lines.push(`  Created: ${profile.createdAt}`);
   lines.push(`  Updated: ${profile.updatedAt}`);
   lines.push(`  Variables: ${Object.keys(profile.environment).length}`);
-  
+
   return lines.join('\n');
 }
 
@@ -609,19 +610,14 @@ export function formatProfileListForCLI(profiles: Profile[], activeProfileName?:
  */
 export function formatMaskedEnvForCLI(envVars: Record<string, string>): string {
   const lines: string[] = [];
-  
+
   for (const [key, value] of Object.entries(envVars)) {
     lines.push(`  ${key}=${value}`);
   }
-  
+
   return lines.join('\n');
 }
 
 // ============ Exports ============
 
-export {
-  CONFIG_DIR,
-  PROFILES_FILE,
-  isSecretVar,
-  maskSecret,
-};
+export { CONFIG_DIR, PROFILES_FILE, isSecretVar, maskSecret };

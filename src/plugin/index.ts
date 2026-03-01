@@ -10,19 +10,9 @@ import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
 import { defineEvent, type BusEvent } from '../bus/index.js';
-import {
-  type Tool,
-  type ToolDefinition,
-  registerTool,
-} from '../tool/index.js';
-import {
-  type SkillDefinition,
-  registerSkill,
-} from '../skill/index.js';
-import {
-  registerCommand,
-  defineCommand,
-} from '../command/index.js';
+import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
+import { type SkillDefinition, registerSkill } from '../skill/index.js';
+import { registerCommand, defineCommand } from '../command/index.js';
 
 // ============ Plugin Events ============
 
@@ -305,14 +295,10 @@ export class PluginManager {
   private createLogger(pluginName: string): PluginLogger {
     const prefix = `[plugin:${pluginName}]`;
     return {
-      debug: (message: string, ...args: unknown[]) =>
-        console.debug(prefix, message, ...args),
-      info: (message: string, ...args: unknown[]) =>
-        console.info(prefix, message, ...args),
-      warn: (message: string, ...args: unknown[]) =>
-        console.warn(prefix, message, ...args),
-      error: (message: string, ...args: unknown[]) =>
-        console.error(prefix, message, ...args),
+      debug: (message: string, ...args: unknown[]) => console.debug(prefix, message, ...args),
+      info: (message: string, ...args: unknown[]) => console.info(prefix, message, ...args),
+      warn: (message: string, ...args: unknown[]) => console.warn(prefix, message, ...args),
+      error: (message: string, ...args: unknown[]) => console.error(prefix, message, ...args),
     };
   }
 
@@ -397,10 +383,7 @@ export class PluginManager {
   /**
    * Register a skill from a plugin
    */
-  private registerSkillForPlugin(
-    skillDef: SkillDefinition,
-    state: PluginState
-  ): void {
+  private registerSkillForPlugin(skillDef: SkillDefinition, state: PluginState): void {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { defineSkill } = require('../skill/index.js');
@@ -417,10 +400,7 @@ export class PluginManager {
   /**
    * Register a command from a plugin
    */
-  private registerCommandForPlugin(
-    commandDef: CommandDefinition,
-    state: PluginState
-  ): void {
+  private registerCommandForPlugin(commandDef: CommandDefinition, state: PluginState): void {
     try {
       const command = defineCommand(commandDef);
       registerCommand(command);
@@ -866,7 +846,7 @@ export class PluginManager {
 
     for (const { pluginName, handler } of handlers) {
       const state = this.plugins.get(pluginName);
-      
+
       // Skip disabled plugins
       if (!state?.enabled) {
         continue;
@@ -876,7 +856,7 @@ export class PluginManager {
 
       try {
         const result = await handler(currentArgs);
-        
+
         // If handler returns a value, use it as next input
         if (result !== undefined && result !== null) {
           currentArgs = result as T;
@@ -893,12 +873,9 @@ export class PluginManager {
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        
+
         // Log error but continue with other hooks
-        console.error(
-          `[plugin:${pluginName}] Hook '${hookName}' failed:`,
-          errorMessage
-        );
+        console.error(`[plugin:${pluginName}] Hook '${hookName}' failed:`, errorMessage);
 
         PluginError.publish({
           pluginName,
@@ -933,7 +910,7 @@ export class PluginManager {
    */
   async clear(): Promise<void> {
     const pluginNames = Array.from(this.plugins.keys());
-    
+
     for (const name of pluginNames) {
       try {
         await this.unload(name);

@@ -4,16 +4,16 @@
  * Inspired by OpenCode's dual-agent system (Plan Mode vs Build Mode)
  */
 
-import { z } from "zod"
-import { defineEvent } from "../bus/index.js"
+import { z } from 'zod';
+import { defineEvent } from '../bus/index.js';
 
 // ============ Types ============
 
 /** Operation types that can be checked against plan mode restrictions */
-export type OperationType = "read" | "write" | "execute"
+export type OperationType = 'read' | 'write' | 'execute';
 
 /** Mode types for the plan system */
-export type PlanMode = "plan" | "build"
+export type PlanMode = 'plan' | 'build';
 
 // ============ Events ============
 
@@ -21,49 +21,38 @@ export type PlanMode = "plan" | "build"
  * Event emitted when the mode changes between plan and build
  */
 export const ModeChanged = defineEvent(
-  "plan.mode.changed",
+  'plan.mode.changed',
   z.object({
-    previousMode: z.enum(["plan", "build"]),
-    newMode: z.enum(["plan", "build"]),
+    previousMode: z.enum(['plan', 'build']),
+    newMode: z.enum(['plan', 'build']),
     timestamp: z.number(),
   })
-)
+);
 
 /**
  * Event emitted when an operation is blocked due to plan mode restrictions
  */
 export const OperationBlocked = defineEvent(
-  "plan.operation.blocked",
+  'plan.operation.blocked',
   z.object({
-    operation: z.enum(["read", "write", "execute"]),
+    operation: z.enum(['read', 'write', 'execute']),
     toolName: z.string(),
     reason: z.string(),
     timestamp: z.number(),
   })
-)
+);
 
 // ============ Constants ============
 
 /**
  * Tools allowed in plan mode (read-only analysis tools)
  */
-const PLAN_MODE_ALLOWED_TOOLS = [
-  "read",
-  "glob",
-  "grep",
-  "webfetch",
-  "question",
-] as const
+const PLAN_MODE_ALLOWED_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'question'] as const;
 
 /**
  * Tools blocked in plan mode (write/execute tools)
  */
-const PLAN_MODE_BLOCKED_TOOLS = [
-  "write",
-  "edit",
-  "bash",
-  "todowrite",
-] as const
+const PLAN_MODE_BLOCKED_TOOLS = ['write', 'edit', 'bash', 'todowrite'] as const;
 
 /**
  * System prompt addition for plan mode
@@ -94,7 +83,7 @@ Output your plan as:
 ## Estimated Complexity
 [Low/Medium/High] - [Brief justification]
 
-You CANNOT execute any write operations in this mode. Use /mode build to switch to build mode and execute the plan.`
+You CANNOT execute any write operations in this mode. Use /mode build to switch to build mode and execute the plan.`;
 
 /**
  * System prompt addition for build mode
@@ -108,26 +97,26 @@ You can:
 - Execute bash commands
 - Use all available tools
 
-Proceed with caution when making changes. Consider running in plan mode first (/mode plan) if you want to analyze before making changes.`
+Proceed with caution when making changes. Consider running in plan mode first (/mode plan) if you want to analyze before making changes.`;
 
 // ============ Plan Mode Manager ============
 
 /**
  * Manages the plan/build mode state and enforces restrictions
- * 
+ *
  * @example
  * ```ts
  * const manager = getPlanModeManager()
- * 
+ *
  * // Check current mode
  * if (manager.isPlanMode()) {
  *   console.log("Read-only mode active")
  * }
- * 
+ *
  * // Toggle mode
  * const newMode = manager.toggle()
  * console.log(`Switched to ${newMode} mode`)
- * 
+ *
  * // Check if operation is allowed
  * if (!manager.canExecute("write")) {
  *   console.log("Write operations blocked in plan mode")
@@ -136,23 +125,23 @@ Proceed with caution when making changes. Consider running in plan mode first (/
  */
 export class PlanModeManager {
   /** Current mode state */
-  private mode: PlanMode = "build"
+  private mode: PlanMode = 'build';
 
   /**
    * Toggle between plan and build modes
    * @returns The new mode after toggling
    */
   toggle(): PlanMode {
-    const previousMode = this.mode
-    this.mode = this.mode === "plan" ? "build" : "plan"
+    const previousMode = this.mode;
+    this.mode = this.mode === 'plan' ? 'build' : 'plan';
 
     ModeChanged.publish({
       previousMode,
       newMode: this.mode,
       timestamp: Date.now(),
-    })
+    });
 
-    return this.mode
+    return this.mode;
   }
 
   /**
@@ -160,7 +149,7 @@ export class PlanModeManager {
    * @returns Current mode ("plan" or "build")
    */
   getMode(): PlanMode {
-    return this.mode
+    return this.mode;
   }
 
   /**
@@ -169,14 +158,14 @@ export class PlanModeManager {
    */
   setMode(mode: PlanMode): void {
     if (this.mode !== mode) {
-      const previousMode = this.mode
-      this.mode = mode
+      const previousMode = this.mode;
+      this.mode = mode;
 
       ModeChanged.publish({
         previousMode,
         newMode: this.mode,
         timestamp: Date.now(),
-      })
+      });
     }
   }
 
@@ -186,12 +175,12 @@ export class PlanModeManager {
    * @returns true if the operation is allowed in current mode
    */
   canExecute(operation: OperationType): boolean {
-    if (this.mode === "build") {
-      return true
+    if (this.mode === 'build') {
+      return true;
     }
 
     // Plan mode only allows read operations
-    return operation === "read"
+    return operation === 'read';
   }
 
   /**
@@ -200,12 +189,12 @@ export class PlanModeManager {
    * @returns true if the tool is allowed in current mode
    */
   isToolAllowed(toolName: string): boolean {
-    if (this.mode === "build") {
-      return true
+    if (this.mode === 'build') {
+      return true;
     }
 
     // Check against allowed tools list
-    return (PLAN_MODE_ALLOWED_TOOLS as readonly string[]).includes(toolName)
+    return (PLAN_MODE_ALLOWED_TOOLS as readonly string[]).includes(toolName);
   }
 
   /**
@@ -213,9 +202,7 @@ export class PlanModeManager {
    * @returns System prompt string to append to base prompt
    */
   getModePrompt(): string {
-    return this.mode === "plan"
-      ? PLAN_MODE_SYSTEM_PROMPT
-      : BUILD_MODE_SYSTEM_PROMPT
+    return this.mode === 'plan' ? PLAN_MODE_SYSTEM_PROMPT : BUILD_MODE_SYSTEM_PROMPT;
   }
 
   /**
@@ -223,12 +210,12 @@ export class PlanModeManager {
    * @returns Array of allowed tool names
    */
   getAllowedTools(): string[] {
-    if (this.mode === "build") {
+    if (this.mode === 'build') {
       // Build mode allows all tools - return empty to indicate no restrictions
-      return []
+      return [];
     }
 
-    return [...PLAN_MODE_ALLOWED_TOOLS]
+    return [...PLAN_MODE_ALLOWED_TOOLS];
   }
 
   /**
@@ -236,11 +223,11 @@ export class PlanModeManager {
    * @returns Array of blocked tool names
    */
   getBlockedTools(): string[] {
-    if (this.mode === "build") {
-      return []
+    if (this.mode === 'build') {
+      return [];
     }
 
-    return [...PLAN_MODE_BLOCKED_TOOLS]
+    return [...PLAN_MODE_BLOCKED_TOOLS];
   }
 
   /**
@@ -250,20 +237,20 @@ export class PlanModeManager {
    */
   checkToolExecution(toolName: string): boolean {
     if (this.isToolAllowed(toolName)) {
-      return true
+      return true;
     }
 
     // Determine operation type from tool name
-    const operation = this.getOperationTypeForTool(toolName)
+    const operation = this.getOperationTypeForTool(toolName);
 
     OperationBlocked.publish({
       operation,
       toolName,
       reason: `Tool '${toolName}' is blocked in plan mode. Switch to build mode with /mode build to execute.`,
       timestamp: Date.now(),
-    })
+    });
 
-    return false
+    return false;
   }
 
   /**
@@ -273,21 +260,21 @@ export class PlanModeManager {
    */
   private getOperationTypeForTool(toolName: string): OperationType {
     switch (toolName) {
-      case "write":
-      case "edit":
-      case "todowrite":
-        return "write"
-      case "bash":
-        return "execute"
+      case 'write':
+      case 'edit':
+      case 'todowrite':
+        return 'write';
+      case 'bash':
+        return 'execute';
       default:
-        return "read"
+        return 'read';
     }
   }
 }
 
 // ============ Singleton Instance ============
 
-let instance: PlanModeManager | null = null
+let instance: PlanModeManager | null = null;
 
 /**
  * Get the singleton PlanModeManager instance
@@ -295,9 +282,9 @@ let instance: PlanModeManager | null = null
  */
 export function getPlanModeManager(): PlanModeManager {
   if (!instance) {
-    instance = new PlanModeManager()
+    instance = new PlanModeManager();
   }
-  return instance
+  return instance;
 }
 
 // ============ Helper Functions ============
@@ -307,7 +294,7 @@ export function getPlanModeManager(): PlanModeManager {
  * @returns true if in plan mode, false if in build mode
  */
 export function isPlanMode(): boolean {
-  return getPlanModeManager().getMode() === "plan"
+  return getPlanModeManager().getMode() === 'plan';
 }
 
 /**
@@ -315,7 +302,7 @@ export function isPlanMode(): boolean {
  * @returns true if in build mode, false if in plan mode
  */
 export function isBuildMode(): boolean {
-  return getPlanModeManager().getMode() === "build"
+  return getPlanModeManager().getMode() === 'build';
 }
 
 /**
@@ -323,16 +310,16 @@ export function isBuildMode(): boolean {
  * @returns "[PLAN]" if in plan mode, "[BUILD]" if in build mode
  */
 export function getPlanModeIndicator(): string {
-  return isPlanMode() ? "[PLAN]" : "[BUILD]"
+  return isPlanMode() ? '[PLAN]' : '[BUILD]';
 }
 
 /**
  * Wrapper that checks plan mode before executing an operation
- * 
+ *
  * @param operation - The operation type being performed
  * @param handler - The function to execute if allowed
  * @returns Result of handler or error object if blocked
- * 
+ *
  * @example
  * ```ts
  * const result = await withPlanModeCheck("write", async () => {
@@ -340,7 +327,7 @@ export function getPlanModeIndicator(): string {
  *   await writeFile(path, content)
  *   return { success: true }
  * })
- * 
+ *
  * if (!result.allowed) {
  *   console.log("Operation blocked:", result.reason)
  * }
@@ -350,22 +337,22 @@ export async function withPlanModeCheck<T>(
   operation: OperationType,
   handler: () => Promise<T>
 ): Promise<{ allowed: true; result: T } | { allowed: false; reason: string }> {
-  const manager = getPlanModeManager()
+  const manager = getPlanModeManager();
 
   if (!manager.canExecute(operation)) {
     return {
       allowed: false,
       reason: `Operation '${operation}' is blocked in plan mode. Switch to build mode to proceed.`,
-    }
+    };
   }
 
-  const result = await handler()
-  return { allowed: true, result }
+  const result = await handler();
+  return { allowed: true, result };
 }
 
 /**
  * Synchronous wrapper that checks plan mode before executing an operation
- * 
+ *
  * @param operation - The operation type being performed
  * @param handler - The function to execute if allowed
  * @returns Result of handler or error object if blocked
@@ -374,22 +361,22 @@ export function withPlanModeCheckSync<T>(
   operation: OperationType,
   handler: () => T
 ): { allowed: true; result: T } | { allowed: false; reason: string } {
-  const manager = getPlanModeManager()
+  const manager = getPlanModeManager();
 
   if (!manager.canExecute(operation)) {
     return {
       allowed: false,
       reason: `Operation '${operation}' is blocked in plan mode. Switch to build mode to proceed.`,
-    }
+    };
   }
 
-  const result = handler()
-  return { allowed: true, result }
+  const result = handler();
+  return { allowed: true, result };
 }
 
 /**
  * Decorator-style wrapper for tool execution with plan mode check
- * 
+ *
  * @param toolName - Name of the tool being executed
  * @param handler - The tool execution function
  * @returns Result of handler or error result if blocked
@@ -398,16 +385,16 @@ export async function withToolCheck<T>(
   toolName: string,
   handler: () => Promise<T>
 ): Promise<T | { success: false; error: string }> {
-  const manager = getPlanModeManager()
+  const manager = getPlanModeManager();
 
   if (!manager.checkToolExecution(toolName)) {
     return {
       success: false,
       error: `Tool '${toolName}' is blocked in plan mode. Use /mode build to switch to build mode.`,
-    }
+    };
   }
 
-  return handler()
+  return handler();
 }
 
 // ============ Mode Configuration ============
@@ -417,26 +404,26 @@ export async function withToolCheck<T>(
  */
 export interface PlanModeConfig {
   /** Allow bash commands that are read-only (like git status, ls) */
-  allowReadOnlyBash: boolean
+  allowReadOnlyBash: boolean;
   /** Custom list of additional allowed tools */
-  additionalAllowedTools: string[]
+  additionalAllowedTools: string[];
   /** Custom system prompt override */
-  customPlanPrompt?: string
+  customPlanPrompt?: string;
 }
 
 const defaultConfig: PlanModeConfig = {
   allowReadOnlyBash: false,
   additionalAllowedTools: [],
-}
+};
 
-let currentConfig = { ...defaultConfig }
+let currentConfig = { ...defaultConfig };
 
 /**
  * Configure plan mode behavior
  * @param config - Partial configuration to merge
  */
 export function configurePlanMode(config: Partial<PlanModeConfig>): void {
-  currentConfig = { ...currentConfig, ...config }
+  currentConfig = { ...currentConfig, ...config };
 }
 
 /**
@@ -444,14 +431,14 @@ export function configurePlanMode(config: Partial<PlanModeConfig>): void {
  * @returns Current configuration
  */
 export function getPlanModeConfig(): PlanModeConfig {
-  return { ...currentConfig }
+  return { ...currentConfig };
 }
 
 /**
  * Reset plan mode configuration to defaults
  */
 export function resetPlanModeConfig(): void {
-  currentConfig = { ...defaultConfig }
+  currentConfig = { ...defaultConfig };
 }
 
 // ============ Exports ============
@@ -461,4 +448,4 @@ export {
   PLAN_MODE_BLOCKED_TOOLS,
   PLAN_MODE_SYSTEM_PROMPT,
   BUILD_MODE_SYSTEM_PROMPT,
-}
+};
