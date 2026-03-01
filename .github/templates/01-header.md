@@ -1,12 +1,12 @@
-# Task: Generate Documentation for SAP Bot Orchestrator
+# Task: Generate Documentation for Alexi
 
 ## Context
 
-You are updating documentation for **SAP Bot Orchestrator** - an intelligent LLM orchestrator for SAP AI Core with automatic model routing, multi-turn conversations, and rule-based configuration.
+You are updating documentation for **Alexi** - an intelligent LLM orchestrator for SAP AI Core with automatic model routing, multi-turn conversations, and rule-based configuration.
 
 ## Project Overview
 
-**SAP Bot Orchestrator** is a TypeScript/Node.js application featuring:
+**Alexi** is a TypeScript/Node.js application featuring:
 - **Multi-Provider Support**: OpenAI-compatible proxy, Claude via Bedrock Converse API, Anthropic Messages API
 - **Intelligent Auto-Routing**: Automatic model selection based on prompt complexity and task type
 - **Session Management**: Multi-turn conversations with context preservation
@@ -25,7 +25,7 @@ You are updating documentation for **SAP Bot Orchestrator** - an intelligent LLM
 ## Project Structure
 
 ```
-sap-bot-orchestrator/
+alexi/
 ├── src/
 │   ├── cli/
 │   │   └── program.ts          # CLI entry point (Commander.js)

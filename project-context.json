@@ -1,5 +1,5 @@
 {
-  "name": "SAP Bot Orchestrator",
+  "name": "Alexi",
   "description": "Intelligent LLM orchestrator for SAP AI Core",
   "stack": {
     "language": "TypeScript",

@@ -67,6 +67,6 @@ Generated: 2026-02-28 12:22:32
 
 ## Recommendations
 
-Based on the changes, the following files in sap-bot-orchestrator should be reviewed:
+Based on the changes, the following files in Alexi should be reviewed:
 
 - No specific recommendations - review changes manually

@@ -2,12 +2,19 @@
  * Permission System
  * Last-match-wins rule evaluation with interactive ask flow
  * Based on kilocode/opencode permission patterns
+ * 
+ * Enhanced with:
+ * - Doom loop detection
+ * - External directory control
+ * - Enhanced pattern matching
  */
 
 import { z } from "zod"
 import { nanoid } from "nanoid"
+import * as path from "path"
+import * as os from "os"
 import { matchPattern, matchPatterns, matchCommand, isUnderDirectory } from "./wildcard.js"
-import { PermissionRequested, PermissionResponse, waitForEvent } from "../bus/index.js"
+import { PermissionRequested, PermissionResponse, waitForEvent, defineEvent } from "../bus/index.js"
 
 // Permission action types
 export type PermissionAction = "read" | "write" | "execute" | "network" | "admin"
@@ -15,7 +22,26 @@ export type PermissionAction = "read" | "write" | "execute" | "network" | "admin
 // Permission decision
 export type PermissionDecision = "allow" | "deny" | "ask"
 
-// Rule schema
+// Doom loop configuration
+export interface DoomLoopConfig {
+  maxRetries: number          // Max retries for same operation (default: 3)
+  windowMs: number            // Time window to track retries (default: 60000)
+  onDetected: "warn" | "block" | "ask"  // Action when detected
+}
+
+// Doom loop check result
+export interface DoomLoopCheckResult {
+  isLoop: boolean
+  attempts: number
+}
+
+// Operation attempt tracking
+interface OperationAttempt {
+  count: number
+  firstAttempt: number
+}
+
+// Rule schema - enhanced with external path and home expansion options
 export const PermissionRuleSchema = z.object({
   id: z.string().optional(),
   name: z.string().optional(),
@@ -30,9 +56,33 @@ export const PermissionRuleSchema = z.object({
   decision: z.enum(["allow", "deny", "ask"]),
   // Priority (higher = evaluated later in last-match-wins)
   priority: z.number().default(0),
+  // Enhanced options
+  externalPaths: z.boolean().optional(), // Whether rule applies to external paths
+  homeExpansion: z.boolean().optional(), // Expand ~/ to home directory in paths
 })
 
 export type PermissionRule = z.infer<typeof PermissionRuleSchema>
+
+// ============ New Permission Events ============
+
+export const DoomLoopDetected = defineEvent(
+  "permission.doomloop",
+  z.object({
+    operation: z.string(),
+    attempts: z.number(),
+    action: z.string(),
+    timestamp: z.number(),
+  })
+)
+
+export const ExternalAccessAttempted = defineEvent(
+  "permission.external",
+  z.object({
+    path: z.string(),
+    allowed: z.boolean(),
+    timestamp: z.number(),
+  })
+)
 
 // Permission request context
 export interface PermissionContext {
@@ -55,6 +105,18 @@ export class PermissionManager {
   private sessionGrants: Map<string, boolean> = new Map()
   private askTimeoutMs: number = 60000 // 1 minute timeout for ask prompts
 
+  // Doom loop detection
+  private recentOperations: Map<string, OperationAttempt> = new Map()
+  private doomLoopConfig: DoomLoopConfig = {
+    maxRetries: 3,
+    windowMs: 60000,
+    onDetected: "warn",
+  }
+
+  // External directory control
+  private projectRoot: string = process.cwd()
+  private allowExternalDirectories: boolean = false
+
   constructor(rules: PermissionRule[] = []) {
     this.rules = this.sortRules(rules)
   }
@@ -64,6 +126,208 @@ export class PermissionManager {
    */
   private sortRules(rules: PermissionRule[]): PermissionRule[] {
     return [...rules].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+  }
+
+  // ============ Doom Loop Detection ============
+
+  /**
+   * Configure doom loop detection
+   */
+  configureDoomLoop(config: Partial<DoomLoopConfig>): void {
+    this.doomLoopConfig = { ...this.doomLoopConfig, ...config }
+  }
+
+  /**
+   * Reset doom loop tracking
+   */
+  resetDoomLoopTracking(): void {
+    this.recentOperations.clear()
+  }
+
+  /**
+   * Get current doom loop config
+   */
+  getDoomLoopConfig(): DoomLoopConfig {
+    return { ...this.doomLoopConfig }
+  }
+
+  /**
+   * Generate operation key for doom loop tracking
+   */
+  private getOperationKey(ctx: PermissionContext): string {
+    return `${ctx.toolName}:${ctx.action}:${ctx.resource}`
+  }
+
+  /**
+   * Check for doom loop - detects repeated failed operation attempts
+   */
+  checkDoomLoop(ctx: PermissionContext): DoomLoopCheckResult {
+    const key = this.getOperationKey(ctx)
+    const now = Date.now()
+    const existing = this.recentOperations.get(key)
+
+    // Clean up expired entries
+    this.cleanupExpiredOperations(now)
+
+    if (!existing) {
+      return { isLoop: false, attempts: 0 }
+    }
+
+    // Check if within window
+    if (now - existing.firstAttempt > this.doomLoopConfig.windowMs) {
+      // Expired, reset
+      this.recentOperations.delete(key)
+      return { isLoop: false, attempts: 0 }
+    }
+
+    const isLoop = existing.count >= this.doomLoopConfig.maxRetries
+    return { isLoop, attempts: existing.count }
+  }
+
+  /**
+   * Record an operation attempt for doom loop tracking
+   */
+  private recordOperationAttempt(ctx: PermissionContext): void {
+    const key = this.getOperationKey(ctx)
+    const now = Date.now()
+    const existing = this.recentOperations.get(key)
+
+    if (existing && now - existing.firstAttempt <= this.doomLoopConfig.windowMs) {
+      // Within window, increment count
+      existing.count++
+    } else {
+      // New or expired, start fresh
+      this.recentOperations.set(key, { count: 1, firstAttempt: now })
+    }
+  }
+
+  /**
+   * Clean up expired operation tracking entries
+   */
+  private cleanupExpiredOperations(now: number): void {
+    for (const [key, value] of this.recentOperations.entries()) {
+      if (now - value.firstAttempt > this.doomLoopConfig.windowMs) {
+        this.recentOperations.delete(key)
+      }
+    }
+  }
+
+  /**
+   * Handle doom loop detection
+   */
+  private handleDoomLoop(ctx: PermissionContext, attempts: number): PermissionResult | null {
+    const action = this.doomLoopConfig.onDetected
+
+    // Publish doom loop detected event
+    DoomLoopDetected.publish({
+      operation: this.getOperationKey(ctx),
+      attempts,
+      action,
+      timestamp: Date.now(),
+    })
+
+    if (action === "block") {
+      return {
+        decision: "deny",
+        granted: false,
+      }
+    }
+
+    // "warn" and "ask" continue with normal flow
+    return null
+  }
+
+  // ============ External Directory Control ============
+
+  /**
+   * Set the project root directory
+   */
+  setProjectRoot(rootPath: string): void {
+    this.projectRoot = path.resolve(rootPath)
+  }
+
+  /**
+   * Get the current project root
+   */
+  getProjectRoot(): string {
+    return this.projectRoot
+  }
+
+  /**
+   * Set whether external directories are allowed
+   */
+  setAllowExternalDirectories(allow: boolean): void {
+    this.allowExternalDirectories = allow
+  }
+
+  /**
+   * Check if external directories are allowed
+   */
+  getAllowExternalDirectories(): boolean {
+    return this.allowExternalDirectories
+  }
+
+  /**
+   * Check if a path is external to the project
+   */
+  isExternalPath(targetPath: string): boolean {
+    const resolved = path.resolve(targetPath)
+    return !isUnderDirectory(resolved, this.projectRoot)
+  }
+
+  /**
+   * Handle external path access
+   */
+  private handleExternalPath(ctx: PermissionContext): PermissionResult | null {
+    // Only check for file-related actions
+    if (ctx.action === "network") {
+      return null
+    }
+
+    const isExternal = this.isExternalPath(ctx.resource)
+    
+    if (isExternal) {
+      // Publish external access event
+      ExternalAccessAttempted.publish({
+        path: ctx.resource,
+        allowed: this.allowExternalDirectories,
+        timestamp: Date.now(),
+      })
+
+      if (!this.allowExternalDirectories) {
+        return {
+          decision: "deny",
+          granted: false,
+        }
+      }
+    }
+
+    return null
+  }
+
+  // ============ Enhanced Pattern Matching ============
+
+  /**
+   * Expand home directory in path (~/ -> /Users/xxx)
+   */
+  private expandHomePath(pathStr: string): string {
+    if (pathStr.startsWith("~/") || pathStr === "~") {
+      return path.join(os.homedir(), pathStr.slice(1))
+    }
+    return pathStr
+  }
+
+  /**
+   * Process rule paths with home expansion
+   */
+  private processRulePaths(rule: PermissionRule): string[] {
+    if (!rule.paths) return []
+    
+    if (rule.homeExpansion) {
+      return rule.paths.map((p) => this.expandHomePath(p))
+    }
+    
+    return rule.paths
   }
 
   /**
@@ -111,9 +375,23 @@ export class PermissionManager {
       if (!rule.actions.includes(ctx.action)) return false
     }
 
-    // Check paths (for file operations)
+    // Check external paths constraint
+    if (rule.externalPaths !== undefined && ctx.action !== "network") {
+      const isExternal = this.isExternalPath(ctx.resource)
+      // If rule is for external paths but path is internal, skip
+      // If rule is for internal paths but path is external, skip
+      if (rule.externalPaths !== isExternal) {
+        return false
+      }
+    }
+
+    // Check paths (for file operations) with home expansion support
     if (rule.paths && rule.paths.length > 0 && ctx.action !== "network") {
-      const pathMatch = matchPatterns(rule.paths, ctx.resource)
+      const processedPaths = this.processRulePaths(rule)
+      const processedResource = rule.homeExpansion 
+        ? this.expandHomePath(ctx.resource) 
+        : ctx.resource
+      const pathMatch = matchPatterns(processedPaths, processedResource)
       if (!pathMatch.matched) return false
     }
 
@@ -159,15 +437,42 @@ export class PermissionManager {
 
   /**
    * Check permission with interactive ask flow
+   * Enhanced with doom loop detection and external path checking
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
+    // Check for doom loop first
+    const loopCheck = this.checkDoomLoop(ctx)
+    if (loopCheck.isLoop) {
+      const loopResult = this.handleDoomLoop(ctx, loopCheck.attempts)
+      if (loopResult) {
+        return loopResult
+      }
+      // If onDetected is "ask", continue to ask user
+      if (this.doomLoopConfig.onDetected === "ask") {
+        return this.askUser(ctx)
+      }
+    }
+
+    // Check for external path access
+    const externalResult = this.handleExternalPath(ctx)
+    if (externalResult) {
+      // Record the attempt before returning
+      this.recordOperationAttempt(ctx)
+      return externalResult
+    }
+
     const { decision, rule } = this.evaluate(ctx)
 
     if (decision === "allow") {
+      // Reset operation tracking on success
+      const key = this.getOperationKey(ctx)
+      this.recentOperations.delete(key)
       return { decision: "allow", rule, granted: true }
     }
 
     if (decision === "deny") {
+      // Record the denied attempt
+      this.recordOperationAttempt(ctx)
       return { decision: "deny", rule, granted: false }
     }
 
@@ -205,12 +510,22 @@ export class PermissionManager {
         this.sessionGrants.set(sessionKey, response.granted)
       }
 
+      if (response.granted) {
+        // Reset operation tracking on user approval
+        const key = this.getOperationKey(ctx)
+        this.recentOperations.delete(key)
+      } else {
+        // Record the denied attempt
+        this.recordOperationAttempt(ctx)
+      }
+
       return {
         decision: response.granted ? "allow" : "deny",
         granted: response.granted,
       }
     } catch {
-      // Timeout - deny by default
+      // Timeout - deny by default, record the attempt
+      this.recordOperationAttempt(ctx)
       return { decision: "deny", granted: false }
     }
   }

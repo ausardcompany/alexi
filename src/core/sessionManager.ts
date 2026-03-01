@@ -39,7 +39,7 @@ export class SessionManager {
   constructor(sessionsDir?: string) {
     this.sessionsDir = sessionsDir || path.join(
       process.env.HOME || '~',
-      '.sap-bot-orchestrator',
+      '.alexi',
       'sessions'
     );
     

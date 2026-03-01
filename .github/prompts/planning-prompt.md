@@ -1,4 +1,4 @@
-# Planning Task: Analyze Upstream Changes for SAP Bot Orchestrator
+# Planning Task: Analyze Upstream Changes for Alexi
 
 You are a senior software architect analyzing upstream changes from three AI coding assistant repositories:
 - **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
@@ -76,13 +76,13 @@ Generated: 2026-02-28 12:22:32
 
 ## Recommendations
 
-Based on the changes, the following files in sap-bot-orchestrator should be reviewed:
+Based on the changes, the following files in Alexi should be reviewed:
 
 - No specific recommendations - review changes manually
 
 ## Your Task
 
-Create a **detailed update plan** for sap-bot-orchestrator based on the changes above.
+Create a **detailed update plan** for Alexi based on the changes above.
 
 ### File Mapping
 - Tool system changes → `src/tool/`
@@ -111,7 +111,7 @@ Create a **detailed update plan** for sap-bot-orchestrator based on the changes 
 ### Output Format
 
 ```markdown
-# Update Plan for SAP Bot Orchestrator
+# Update Plan for Alexi
 
 Generated: [date]
 Based on upstream commits: [list commits analyzed]

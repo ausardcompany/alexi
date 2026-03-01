@@ -20,7 +20,7 @@ env:
   OPENCODE_REPO: ausard/opencode
   OPENCODE_UPSTREAM: anomalyco/opencode
   CLAUDE_CODE_UPSTREAM: anthropics/claude-code
-  ORCHESTRATOR_REPO: ausard/sap-bot-orchestrator
+  ORCHESTRATOR_REPO: ausard/alexi
 
 permissions:
   contents: write
@@ -69,7 +69,7 @@ jobs:
       has_changes: ${{ steps.check-changes.outputs.has_changes }}
       pr_url: ${{ steps.create-pr.outputs.pr_url }}
     steps:
-      - name: Checkout sap-bot-orchestrator
+      - name: Checkout alexi
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -276,14 +276,14 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Build sap-bot-orchestrator CLI
+      - name: Build Alexi CLI
         if: steps.check-changes.outputs.has_changes == 'true'
         run: |
           echo "Installing dependencies..."
           npm ci
           echo "Building project..."
           npm run build
-          echo "[OK] sap-bot-orchestrator CLI built successfully"
+          echo "[OK] Alexi CLI built successfully"
           node dist/cli/program.js --help
 
       # =================================================================
@@ -300,7 +300,7 @@ jobs:
           
           # Create planning prompt with diff report embedded
           cat > .github/prompts/planning-prompt.md << 'PLANNING_EOF'
-          # Planning Task: Analyze Upstream Changes for SAP Bot Orchestrator
+          # Planning Task: Analyze Upstream Changes for Alexi
 
           You are a senior software architect analyzing upstream changes from three AI coding assistant repositories:
           - **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
@@ -319,7 +319,7 @@ jobs:
 
           ## Your Task
 
-          Create a **detailed update plan** for sap-bot-orchestrator based on the changes above.
+          Create a **detailed update plan** for Alexi based on the changes above.
 
           ### File Mapping
           - Tool system changes → `src/tool/`
@@ -348,7 +348,7 @@ jobs:
           ### Output Format
 
           ```markdown
-          # Update Plan for SAP Bot Orchestrator
+          # Update Plan for Alexi
 
           Generated: [date]
           Based on upstream commits: [list commits analyzed]
@@ -425,7 +425,7 @@ jobs:
           PLAN_FILE="${{ steps.plan.outputs.plan_file }}"
           
           cat > .github/prompts/execution-prompt.md << 'EXEC_HEADER'
-          # Execution Task: Apply Update Plan to SAP Bot Orchestrator
+          # Execution Task: Apply Update Plan to Alexi
 
           You are an expert software developer. Your task is to execute the update plan below precisely.
 

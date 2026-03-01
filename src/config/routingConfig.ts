@@ -100,7 +100,7 @@ export function loadRoutingConfig(configPath?: string): RoutingConfig {
     : [
         path.join(process.cwd(), 'routing-config.json'),
         path.join(process.cwd(), 'config', 'routing.json'),
-        path.join(process.env.HOME || '~', '.sap-bot-orchestrator', 'routing-config.json')
+        path.join(process.env.HOME || '~', '.alexi', 'routing-config.json')
       ];
 
   // Try to find and load config file

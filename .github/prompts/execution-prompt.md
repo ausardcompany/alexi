@@ -1,11 +1,11 @@
-# Execution Task: Apply Update Plan to SAP Bot Orchestrator
+# Execution Task: Apply Update Plan to Alexi
 
 You are an expert software developer. Your task is to execute the update plan below precisely.
 
 ## Update Plan to Execute
 
 [dotenv@17.3.1] injecting env (3) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
-# Update Plan for SAP Bot Orchestrator
+# Update Plan for Alexi
 
 Generated: 2026-02-28 12:22:32
 Based on upstream commits: No new commits to analyze

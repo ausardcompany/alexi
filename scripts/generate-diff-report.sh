@@ -446,7 +446,7 @@ generate_recommendations_markdown() {
     
     echo "## Recommendations"
     echo ""
-    echo "Based on the changes, the following files in sap-bot-orchestrator should be reviewed:"
+    echo "Based on the changes, the following files in Alexi should be reviewed:"
     echo ""
     
     local recommendations=""

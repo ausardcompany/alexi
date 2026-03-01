@@ -429,7 +429,7 @@ build_analysis_prompt() {
     local claude_code_diff="$3"
     
     cat << 'PROMPT_EOF'
-You are analyzing upstream changes from three AI coding assistant repositories to identify updates that should be applied to the sap-bot-orchestrator project:
+You are analyzing upstream changes from three AI coding assistant repositories to identify updates that should be applied to the Alexi project:
 - **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
 - **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant  
 - **claude-code** (anthropics/claude-code) - Anthropic's Claude Code CLI
@@ -479,7 +479,7 @@ PROMPT_EOF
 
 ## Instructions
 1. Analyze the changes above from all three upstream repositories
-2. Identify which changes are relevant to sap-bot-orchestrator
+2. Identify which changes are relevant to Alexi
 3. Suggest specific updates to apply (prioritize security fixes, then bug fixes, then features)
 4. Highlight any breaking changes or potential issues
 5. Provide a summary of recommended actions
@@ -561,7 +561,7 @@ create_backup_branch() {
 # Show git diff of current changes
 #######################################
 show_pending_changes() {
-    log_info "Pending changes in sap-bot-orchestrator:"
+    log_info "Pending changes in Alexi:"
     echo ""
     
     pushd "$PROJECT_ROOT" > /dev/null
@@ -663,7 +663,7 @@ confirm_action() {
 main() {
     echo ""
     echo "=========================================="
-    echo "  SAP Bot Orchestrator - Upstream Sync"
+    echo "  Alexi - Upstream Sync"
     echo "=========================================="
     echo ""
     
