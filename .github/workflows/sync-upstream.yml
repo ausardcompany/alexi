@@ -465,23 +465,58 @@ jobs:
           echo "[OK] Execution prompt created at .github/prompts/execution-prompt.md"
           echo "Prompt size: $(wc -c < .github/prompts/execution-prompt.md) bytes"
 
-      - name: Execute update plan (Sonnet)
+      - name: Execute update plan (Sonnet with tools)
         if: steps.check-changes.outputs.has_changes == 'true'
         id: execute
         env:
           AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
           AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
         run: |
-          echo "=== Stage 2: Executing update plan with Claude 4.5 Sonnet ==="
+          echo "=== Stage 2: Executing update plan with Claude 4.5 Sonnet (agentic mode) ==="
+          echo "This stage uses tools to write/edit files directly..."
           
-          # Use --message-file to avoid shell escaping issues with complex prompts
-          node dist/cli/program.js chat \
+          # Create system prompt for execution
+          cat > .github/prompts/execution-system.txt << 'EXEC_SYSTEM'
+          You are an expert software developer executing an update plan for the Alexi project.
+
+          CRITICAL INSTRUCTIONS:
+          1. Read the update plan carefully
+          2. For each change in the plan:
+             - Use 'read' tool to examine existing files before modifying
+             - Use 'write' tool to create new files
+             - Use 'edit' tool to modify existing files precisely
+          3. Follow the exact code changes specified in the plan
+          4. Maintain SAP AI Core compatibility - do not break existing integrations
+          5. After making all changes, provide a brief summary of what was done
+
+          IMPORTANT:
+          - Execute ALL changes in the plan, in priority order (critical -> high -> medium -> low)
+          - Do NOT skip any items
+          - Do NOT add extra changes not in the plan
+          - If a file doesn't exist, create it with the 'write' tool
+          EXEC_SYSTEM
+          
+          SYSTEM_PROMPT=$(cat .github/prompts/execution-system.txt)
+          
+          # Use 'agent' command which enables tool execution loop
+          node dist/cli/program.js agent \
             --message-file .github/prompts/execution-prompt.md \
             --model "anthropic--claude-4.5-sonnet" \
-            --system "You are an expert software developer. Execute the update plan precisely. Make all file changes as specified. Output a brief summary of what was done."
+            --max-iterations 50 \
+            --tools "read,write,edit,glob,grep" \
+            --workdir "$(pwd)" \
+            --verbose \
+            --system "$SYSTEM_PROMPT" \
+            > .github/reports/execution-output.log 2>&1
+          
+          EXEC_EXIT_CODE=$?
           
           echo ""
-          echo "=== Execution complete ==="
+          echo "=== Execution complete (exit code: $EXEC_EXIT_CODE) ==="
+          echo ""
+          echo "--- Execution Output (last 50 lines) ---"
+          tail -50 .github/reports/execution-output.log
+          echo "--- End Output ---"
 
       - name: Check for bot changes
         if: steps.check-changes.outputs.has_changes == 'true'
