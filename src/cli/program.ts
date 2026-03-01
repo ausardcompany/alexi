@@ -7,10 +7,17 @@
  */
 
 import { Command } from 'commander';
+import { createRequire } from 'module';
 import { registerAllCommands } from './commands/index.js';
 
+const require = createRequire(import.meta.url);
+const packageJson = require('../../package.json');
+
 const program = new Command();
-program.name('alexi').description('Alexi - Intelligent LLM orchestrator').version('0.1.0');
+program
+  .name('alexi')
+  .description('Alexi - Intelligent LLM orchestrator')
+  .version(packageJson.version);
 
 // Register all commands from modular command files
 registerAllCommands(program);
