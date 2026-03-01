@@ -1,0 +1,126 @@
+name: On Release Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-update-homebrew:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${​{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from branch
+        id: version
+        run: |
+          BRANCH="${​{ github.event.pull_request.head.ref }}"
+          VERSION=${BRANCH#release/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${​{ steps.version.outputs.tag }} -m "Release ${​{ steps.version.outputs.tag }}"
+          git push origin ${​{ steps.version.outputs.tag }}
+
+      - name: Get commit SHA
+        id: sha
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: ausardcompany/homebrew-tap
+          token: ${​{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Formula
+        run: |
+          cat > homebrew-tap/Formula/alexi.rb << 'FORMULA'
+          class Alexi < Formula
+            desc "Intelligent LLM orchestrator with SAP AI Core provider support"
+            homepage "https://github.com/ausardcompany/sap-bot-orchestrator"
+            url "https://github.com/ausardcompany/sap-bot-orchestrator.git",
+                tag:      "TAG_PLACEHOLDER",
+                revision: "SHA_PLACEHOLDER"
+            license "ISC"
+            head "https://github.com/ausardcompany/sap-bot-orchestrator.git", branch: "master"
+
+            depends_on "node@22"
+
+            def install
+              system "npm", "install", *std_npm_args(prefix: false)
+              system "npm", "run", "build"
+
+              libexec.install Dir["*"]
+
+              (bin/"alexi").write <<~EOS
+                #!/bin/bash
+                exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/program.js" "$@"
+              EOS
+
+              (bin/"ax").write <<~EOS
+                #!/bin/bash
+                exec "#{Formula["node@22"].opt_bin}/node" "#{libexec}/dist/cli/program.js" "$@"
+              EOS
+            end
+
+            def caveats
+              <<~EOS
+                Alexi requires SAP AI Core credentials.
+                Set the following environment variables:
+                  - AICORE_SERVICE_KEY (JSON service key) or individual credentials:
+                  - AICORE_CLIENT_ID
+                  - AICORE_CLIENT_SECRET
+                  - AICORE_AUTH_URL
+                  - AICORE_BASE_URL
+                  - AICORE_RESOURCE_GROUP
+              EOS
+            end
+
+            test do
+              assert_match "alexi", shell_output("#{bin}/alexi --version")
+            end
+          end
+          FORMULA
+          
+          # Replace placeholders
+          sed -i 's|TAG_PLACEHOLDER|${{ steps.version.outputs.tag }}|g' homebrew-tap/Formula/alexi.rb
+          sed -i 's|SHA_PLACEHOLDER|${{ steps.sha.outputs.sha }}|g' homebrew-tap/Formula/alexi.rb
+
+      - name: Commit and push to homebrew-tap
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/alexi.rb
+          git rm -f Formula/sap-bot-orchestrator.rb 2>/dev/null || true
+          git commit -m "alexi ${​{ steps.version.outputs.version }}"
+          git push
+
+      - name: Summary
+        run: |
+          echo "## Release Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${​{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${​{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${​{ steps.sha.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Homebrew formula has been updated." >> $GITHUB_STEP_SUMMARY
+
+      - name: Delete release branch
+        run: git push origin --delete ${​{ github.event.pull_request.head.ref }} || true
