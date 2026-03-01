@@ -296,7 +296,7 @@ describe('Hooks System', () => {
       manager.register({
         event: 'PostToolUse',
         type: 'command',
-        command: 'sleep 10',
+        command: 'sleep 2', // 2 seconds is enough to exceed 100ms timeout
         timeout: 100, // 100ms timeout
       });
 
@@ -309,7 +309,7 @@ describe('Hooks System', () => {
 
       expect(results[0].success).toBe(false);
       expect(results[0].error).toContain('timed out');
-    }, 5000);
+    }, 10000); // Increased test timeout for slower CI runners
   });
 
   describe('HTTP Hook Execution', () => {
