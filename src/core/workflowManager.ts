@@ -7,9 +7,9 @@
 import fs from 'fs';
 import path from 'path';
 import { ConversationStage, STAGE_DEFINITIONS, getStageManager } from './stageManager.js';
-import { AINotesGenerator, AINotesBuilder } from './aiNotes.js';
+import { AINotesGenerator } from './aiNotes.js';
 import { DoDChecker, DoDReport } from './dodChecker.js';
-import { getProjectContextManager, ProjectContext } from '../config/projectContext.js';
+import { getProjectContextManager } from '../config/projectContext.js';
 
 export interface WorkflowState {
   currentStage: ConversationStage;
@@ -110,7 +110,7 @@ At the end provide:
 - {RISKS}
 
 ## How to Verify
-1. {VERIFICATION_STEPS}`
+1. {VERIFICATION_STEPS}`,
   },
 
   planning: {
@@ -164,7 +164,7 @@ Consider:
 - {RISKS}
 
 ## Timeline
-- {TIMELINE}`
+- {TIMELINE}`,
   },
 
   implementation: {
@@ -245,7 +245,7 @@ Code:
 ## How to Verify
 1. {BUILD_COMMAND}
 2. {TEST_COMMAND}
-3. {MANUAL_CHECKS}`
+3. {MANUAL_CHECKS}`,
   },
 
   documentation: {
@@ -294,7 +294,7 @@ Code/API reference:
 - {EXAMPLES}
 
 ## Fixed Discrepancies
-- {FIXES}`
+- {FIXES}`,
   },
 
   devops: {
@@ -346,7 +346,7 @@ Infrastructure constraints:
 - {ENV_CHANGES}
 
 ## Rollback Plan
-- {ROLLBACK_PLAN}`
+- {ROLLBACK_PLAN}`,
   },
 
   security: {
@@ -400,8 +400,8 @@ Code:
 - {RECOMMENDATIONS}
 
 ## Compliance Status
-- {COMPLIANCE}`
-  }
+- {COMPLIANCE}`,
+  },
 };
 
 export class WorkflowManager {
@@ -428,12 +428,12 @@ export class WorkflowManager {
       startedAt: Date.now(),
       artifacts: [],
       dodPassed: false,
-      history: []
+      history: [],
     };
 
     this.stageManager.setStage(initialStage, {
       stageNumber: 1,
-      name: this.state.stageName
+      name: this.state.stageName,
     });
 
     this.saveState();
@@ -450,7 +450,7 @@ export class WorkflowManager {
 
     // Check DoD before transition
     const dodReport = this.dodChecker.runChecks(this.state.currentStage);
-    
+
     // Add current stage to history
     this.state.history.push({
       stage: this.state.currentStage,
@@ -459,12 +459,12 @@ export class WorkflowManager {
       startedAt: this.state.startedAt,
       completedAt: Date.now(),
       artifacts: [...this.state.artifacts],
-      dodReport
+      dodReport,
     });
 
     // Determine next stage
     const nextStage = targetStage || this.getDefaultNextStage();
-    
+
     if (!nextStage) {
       // Workflow complete
       this.saveState();
@@ -486,7 +486,7 @@ export class WorkflowManager {
 
     this.stageManager.setStage(nextStage, {
       stageNumber: this.state.stageNumber,
-      name: this.state.stageName
+      name: this.state.stageName,
     });
 
     this.saveState();
@@ -499,11 +499,11 @@ export class WorkflowManager {
   private getDefaultNextStage(): ConversationStage | null {
     const order: ConversationStage[] = [
       'architecture',
-      'planning', 
+      'planning',
       'implementation',
       'documentation',
       'devops',
-      'security'
+      'security',
     ];
 
     const currentIndex = order.indexOf(this.state!.currentStage);
@@ -566,17 +566,21 @@ export class WorkflowManager {
       throw new Error('No active workflow');
     }
 
-    const builder = AINotesGenerator.builder(this.state.currentStage, this.state.stageName)
-      .stageNumber(this.state.stageNumber);
+    const builder = AINotesGenerator.builder(
+      this.state.currentStage,
+      this.state.stageName
+    ).stageNumber(this.state.stageNumber);
 
-    options.changes.forEach(c => builder.addChange(c.description, c.files, c.rationale));
-    options.rationale.forEach(r => builder.addRationale(r));
-    options.risks.forEach(r => builder.addRisk(r.description, r.severity, r.mitigation));
-    options.verificationSteps.forEach(s => builder.addVerificationStep(s.description, s.command, s.expectedResult));
+    options.changes.forEach((c) => builder.addChange(c.description, c.files, c.rationale));
+    options.rationale.forEach((r) => builder.addRationale(r));
+    options.risks.forEach((r) => builder.addRisk(r.description, r.severity, r.mitigation));
+    options.verificationSteps.forEach((s) =>
+      builder.addVerificationStep(s.description, s.command, s.expectedResult)
+    );
 
     const content = builder.build();
     const filePath = this.notesGenerator.save(content);
-    
+
     this.addArtifact(filePath);
     return filePath;
   }
@@ -636,19 +640,19 @@ export class WorkflowManager {
       `**Stage Number:** ${this.state.stageNumber}`,
       `**DoD Status:** ${this.state.dodPassed ? '✅ Passed' : '❌ Not passed'}`,
       `**Artifacts:** ${this.state.artifacts.length}`,
-      ``
+      ``,
     ];
 
     if (this.state.history.length > 0) {
       lines.push(`## Completed Stages`);
       lines.push(``);
 
-      this.state.history.forEach(entry => {
-        const duration = entry.completedAt 
+      this.state.history.forEach((entry) => {
+        const duration = entry.completedAt
           ? Math.round((entry.completedAt - entry.startedAt) / 60000)
           : '?';
         const dodStatus = entry.dodReport?.failed === 0 ? '✅' : '⚠️';
-        
+
         lines.push(`- **${entry.stageName}** (${entry.stage}) ${dodStatus}`);
         lines.push(`  Duration: ${duration} minutes, Artifacts: ${entry.artifacts.length}`);
       });

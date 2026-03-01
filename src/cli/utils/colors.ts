@@ -8,7 +8,7 @@ export const colors = {
   bold: '\x1b[1m',
   dim: '\x1b[2m',
   italic: '\x1b[3m',
-  
+
   // Foreground
   red: '\x1b[31m',
   green: '\x1b[32m',
@@ -18,7 +18,7 @@ export const colors = {
   cyan: '\x1b[36m',
   white: '\x1b[37m',
   gray: '\x1b[90m',
-  
+
   // Background
   bgRed: '\x1b[41m',
   bgGreen: '\x1b[42m',

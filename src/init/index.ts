@@ -13,7 +13,15 @@ import { defineEvent } from '../bus/index.js';
 // ============ Type Definitions ============
 
 export type ProjectType = 'nodejs' | 'python' | 'java' | 'rust' | 'go' | 'typescript' | 'unknown';
-export type PackageManager = 'npm' | 'yarn' | 'pnpm' | 'pip' | 'poetry' | 'maven' | 'gradle' | 'cargo';
+export type PackageManager =
+  | 'npm'
+  | 'yarn'
+  | 'pnpm'
+  | 'pip'
+  | 'poetry'
+  | 'maven'
+  | 'gradle'
+  | 'cargo';
 
 export interface ProjectStructure {
   hasTests: boolean;
@@ -42,24 +50,24 @@ export interface ProjectAnalysis {
   projectPath: string;
   name: string;
   type: ProjectType;
-  
+
   // Package info
   packageManager?: PackageManager;
   dependencies?: string[];
   devDependencies?: string[];
-  
+
   // Structure
   structure: ProjectStructure;
-  
+
   // Git info
   git?: GitInfo;
-  
+
   // Framework detection
   frameworks?: string[];
-  
+
   // File stats
   stats: ProjectStats;
-  
+
   // Additional metadata
   description?: string;
   version?: string;
@@ -67,10 +75,10 @@ export interface ProjectAnalysis {
 }
 
 export interface InitOptions {
-  force?: boolean;           // Overwrite existing files
-  skipGitIgnore?: boolean;   // Don't modify .gitignore
-  interactive?: boolean;     // Ask questions during init
-  contextOnly?: boolean;     // Only generate AI_CONTEXT.md
+  force?: boolean; // Overwrite existing files
+  skipGitIgnore?: boolean; // Don't modify .gitignore
+  interactive?: boolean; // Ask questions during init
+  contextOnly?: boolean; // Only generate AI_CONTEXT.md
 }
 
 export interface InitResult {
@@ -100,7 +108,7 @@ export interface ProjectConfig {
 // ============ Events ============
 
 export const ProjectInitialized = defineEvent(
-  "project.initialized",
+  'project.initialized',
   z.object({
     projectPath: z.string(),
     projectType: z.string(),
@@ -110,7 +118,7 @@ export const ProjectInitialized = defineEvent(
 );
 
 export const ProjectAnalyzed = defineEvent(
-  "project.analyzed",
+  'project.analyzed',
   z.object({
     projectPath: z.string(),
     projectType: z.string(),
@@ -158,7 +166,7 @@ export async function detectProjectType(projectPath: string): Promise<ProjectTyp
     for (const file of files) {
       if (typeof file !== 'string') continue;
       if (file.includes('node_modules') || file.includes('.git')) continue;
-      
+
       const ext = path.extname(file).toLowerCase();
       extensions.set(ext, (extensions.get(ext) || 0) + 1);
     }
@@ -193,7 +201,9 @@ export async function detectProjectType(projectPath: string): Promise<ProjectTyp
 /**
  * Detect package manager
  */
-export async function detectPackageManager(projectPath: string): Promise<PackageManager | undefined> {
+export async function detectPackageManager(
+  projectPath: string
+): Promise<PackageManager | undefined> {
   const managerFiles: Array<{ file: string; manager: PackageManager }> = [
     { file: 'pnpm-lock.yaml', manager: 'pnpm' },
     { file: 'yarn.lock', manager: 'yarn' },
@@ -235,40 +245,40 @@ export async function detectFrameworks(projectPath: string, type: ProjectType): 
         };
 
         const frameworkMap: Record<string, string> = {
-          'express': 'Express',
-          'fastify': 'Fastify',
-          'koa': 'Koa',
-          'hono': 'Hono',
-          'react': 'React',
-          'vue': 'Vue',
-          'angular': 'Angular',
+          express: 'Express',
+          fastify: 'Fastify',
+          koa: 'Koa',
+          hono: 'Hono',
+          react: 'React',
+          vue: 'Vue',
+          angular: 'Angular',
           '@angular/core': 'Angular',
-          'svelte': 'Svelte',
-          'next': 'Next.js',
-          'nuxt': 'Nuxt',
-          'gatsby': 'Gatsby',
-          'nest': 'NestJS',
+          svelte: 'Svelte',
+          next: 'Next.js',
+          nuxt: 'Nuxt',
+          gatsby: 'Gatsby',
+          nest: 'NestJS',
           '@nestjs/core': 'NestJS',
-          'jest': 'Jest',
-          'vitest': 'Vitest',
-          'mocha': 'Mocha',
-          'playwright': 'Playwright',
-          'cypress': 'Cypress',
-          'prisma': 'Prisma',
+          jest: 'Jest',
+          vitest: 'Vitest',
+          mocha: 'Mocha',
+          playwright: 'Playwright',
+          cypress: 'Cypress',
+          prisma: 'Prisma',
           '@prisma/client': 'Prisma',
-          'typeorm': 'TypeORM',
-          'mongoose': 'Mongoose',
-          'sequelize': 'Sequelize',
-          'tailwindcss': 'Tailwind CSS',
-          'redux': 'Redux',
+          typeorm: 'TypeORM',
+          mongoose: 'Mongoose',
+          sequelize: 'Sequelize',
+          tailwindcss: 'Tailwind CSS',
+          redux: 'Redux',
           '@reduxjs/toolkit': 'Redux Toolkit',
-          'mobx': 'MobX',
-          'zustand': 'Zustand',
-          'electron': 'Electron',
-          'vite': 'Vite',
-          'webpack': 'Webpack',
-          'esbuild': 'esbuild',
-          'graphql': 'GraphQL',
+          mobx: 'MobX',
+          zustand: 'Zustand',
+          electron: 'Electron',
+          vite: 'Vite',
+          webpack: 'Webpack',
+          esbuild: 'esbuild',
+          graphql: 'GraphQL',
           'apollo-server': 'Apollo Server',
           '@apollo/client': 'Apollo Client',
           'socket.io': 'Socket.IO',
@@ -286,16 +296,16 @@ export async function detectFrameworks(projectPath: string, type: ProjectType): 
       if (fs.existsSync(pyprojectPath)) {
         const content = fs.readFileSync(pyprojectPath, 'utf-8');
         const pythonFrameworks: Record<string, string> = {
-          'django': 'Django',
-          'flask': 'Flask',
-          'fastapi': 'FastAPI',
-          'pytest': 'Pytest',
-          'pandas': 'Pandas',
-          'numpy': 'NumPy',
-          'tensorflow': 'TensorFlow',
-          'pytorch': 'PyTorch',
-          'sqlalchemy': 'SQLAlchemy',
-          'celery': 'Celery',
+          django: 'Django',
+          flask: 'Flask',
+          fastapi: 'FastAPI',
+          pytest: 'Pytest',
+          pandas: 'Pandas',
+          numpy: 'NumPy',
+          tensorflow: 'TensorFlow',
+          pytorch: 'PyTorch',
+          sqlalchemy: 'SQLAlchemy',
+          celery: 'Celery',
         };
 
         for (const [dep, name] of Object.entries(pythonFrameworks)) {
@@ -310,12 +320,12 @@ export async function detectFrameworks(projectPath: string, type: ProjectType): 
       if (fs.existsSync(requirementsPath)) {
         const content = fs.readFileSync(requirementsPath, 'utf-8').toLowerCase();
         const pythonFrameworks: Record<string, string> = {
-          'django': 'Django',
-          'flask': 'Flask',
-          'fastapi': 'FastAPI',
-          'pytest': 'Pytest',
-          'pandas': 'Pandas',
-          'numpy': 'NumPy',
+          django: 'Django',
+          flask: 'Flask',
+          fastapi: 'FastAPI',
+          pytest: 'Pytest',
+          pandas: 'Pandas',
+          numpy: 'NumPy',
         };
 
         for (const [dep, name] of Object.entries(pythonFrameworks)) {
@@ -330,13 +340,13 @@ export async function detectFrameworks(projectPath: string, type: ProjectType): 
         const content = fs.readFileSync(cargoPath, 'utf-8').toLowerCase();
         const rustFrameworks: Record<string, string> = {
           'actix-web': 'Actix Web',
-          'axum': 'Axum',
-          'rocket': 'Rocket',
-          'tokio': 'Tokio',
-          'serde': 'Serde',
-          'diesel': 'Diesel',
-          'sqlx': 'SQLx',
-          'warp': 'Warp',
+          axum: 'Axum',
+          rocket: 'Rocket',
+          tokio: 'Tokio',
+          serde: 'Serde',
+          diesel: 'Diesel',
+          sqlx: 'SQLx',
+          warp: 'Warp',
         };
 
         for (const [dep, name] of Object.entries(rustFrameworks)) {
@@ -371,11 +381,11 @@ export async function detectFrameworks(projectPath: string, type: ProjectType): 
         const javaFrameworks: Record<string, string> = {
           'spring-boot': 'Spring Boot',
           'spring-framework': 'Spring Framework',
-          'quarkus': 'Quarkus',
-          'micronaut': 'Micronaut',
-          'hibernate': 'Hibernate',
-          'junit': 'JUnit',
-          'mockito': 'Mockito',
+          quarkus: 'Quarkus',
+          micronaut: 'Micronaut',
+          hibernate: 'Hibernate',
+          junit: 'JUnit',
+          mockito: 'Mockito',
         };
 
         for (const [dep, name] of Object.entries(javaFrameworks)) {
@@ -411,8 +421,8 @@ export async function detectStructure(projectPath: string): Promise<ProjectStruc
 
   try {
     const entries = fs.readdirSync(projectPath, { withFileTypes: true });
-    const dirNames = entries.filter(e => e.isDirectory()).map(e => e.name);
-    const fileNames = entries.filter(e => e.isFile()).map(e => e.name);
+    const dirNames = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    const fileNames = entries.filter((e) => e.isFile()).map((e) => e.name);
 
     // Detect test directory
     const testDirs = ['test', 'tests', '__tests__', 'spec', 'specs'];
@@ -427,8 +437,14 @@ export async function detectStructure(projectPath: string): Promise<ProjectStruc
     // Check for test files in src
     if (!structure.hasTests && dirNames.includes('src')) {
       try {
-        const srcFiles = fs.readdirSync(path.join(projectPath, 'src'), { recursive: true }) as string[];
-        if (srcFiles.some(f => typeof f === 'string' && (f.includes('.test.') || f.includes('.spec.')))) {
+        const srcFiles = fs.readdirSync(path.join(projectPath, 'src'), {
+          recursive: true,
+        }) as string[];
+        if (
+          srcFiles.some(
+            (f) => typeof f === 'string' && (f.includes('.test.') || f.includes('.spec.'))
+          )
+        ) {
           structure.hasTests = true;
           structure.testDir = 'src';
         }
@@ -448,11 +464,18 @@ export async function detectStructure(projectPath: string): Promise<ProjectStruc
 
     // Check for README
     if (!structure.hasDocs) {
-      structure.hasDocs = fileNames.some(f => f.toLowerCase().startsWith('readme'));
+      structure.hasDocs = fileNames.some((f) => f.toLowerCase().startsWith('readme'));
     }
 
     // Detect CI
-    const ciIndicators = ['.github', '.gitlab-ci.yml', '.travis.yml', 'Jenkinsfile', '.circleci', 'azure-pipelines.yml'];
+    const ciIndicators = [
+      '.github',
+      '.gitlab-ci.yml',
+      '.travis.yml',
+      'Jenkinsfile',
+      '.circleci',
+      'azure-pipelines.yml',
+    ];
     for (const ci of ciIndicators) {
       if (dirNames.includes(ci) || fileNames.includes(ci)) {
         structure.hasCI = true;
@@ -479,10 +502,20 @@ export async function detectStructure(projectPath: string): Promise<ProjectStruc
 
     // Detect entry point
     const entryPoints = [
-      'src/index.ts', 'src/index.js', 'src/main.ts', 'src/main.js',
-      'index.ts', 'index.js', 'main.ts', 'main.js',
-      'src/app.ts', 'src/app.js', 'app.ts', 'app.js',
-      'lib/index.ts', 'lib/index.js',
+      'src/index.ts',
+      'src/index.js',
+      'src/main.ts',
+      'src/main.js',
+      'index.ts',
+      'index.js',
+      'main.ts',
+      'main.js',
+      'src/app.ts',
+      'src/app.js',
+      'app.ts',
+      'app.js',
+      'lib/index.ts',
+      'lib/index.js',
     ];
 
     for (const entry of entryPoints) {
@@ -516,7 +549,7 @@ export async function detectStructure(projectPath: string): Promise<ProjectStruc
  */
 export async function analyzeGit(projectPath: string): Promise<GitInfo | undefined> {
   const gitDir = path.join(projectPath, '.git');
-  
+
   if (!fs.existsSync(gitDir)) {
     return undefined;
   }
@@ -580,9 +613,26 @@ async function countFiles(projectPath: string): Promise<ProjectStats> {
   };
 
   const codeExtensions = new Set([
-    '.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.go', '.java',
-    '.c', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift',
-    '.kt', '.scala', '.vue', '.svelte',
+    '.ts',
+    '.tsx',
+    '.js',
+    '.jsx',
+    '.py',
+    '.rs',
+    '.go',
+    '.java',
+    '.c',
+    '.cpp',
+    '.h',
+    '.hpp',
+    '.cs',
+    '.rb',
+    '.php',
+    '.swift',
+    '.kt',
+    '.scala',
+    '.vue',
+    '.svelte',
   ]);
 
   const docExtensions = new Set(['.md', '.mdx', '.rst', '.txt', '.adoc']);
@@ -593,10 +643,21 @@ async function countFiles(projectPath: string): Promise<ProjectStats> {
 
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-        
+
         // Skip common non-source directories
         if (entry.isDirectory()) {
-          if (['node_modules', '.git', 'dist', 'build', 'target', '__pycache__', '.venv', 'venv'].includes(entry.name)) {
+          if (
+            [
+              'node_modules',
+              '.git',
+              'dist',
+              'build',
+              'target',
+              '__pycache__',
+              '.venv',
+              'venv',
+            ].includes(entry.name)
+          ) {
             continue;
           }
           walkDir(fullPath);
@@ -606,12 +667,16 @@ async function countFiles(projectPath: string): Promise<ProjectStats> {
 
           if (codeExtensions.has(ext)) {
             stats.codeFiles++;
-            
+
             // Check if it's a test file
             const name = entry.name.toLowerCase();
-            if (name.includes('.test.') || name.includes('.spec.') || 
-                name.includes('_test.') || name.includes('_spec.') ||
-                name.startsWith('test_')) {
+            if (
+              name.includes('.test.') ||
+              name.includes('.spec.') ||
+              name.includes('_test.') ||
+              name.includes('_spec.') ||
+              name.startsWith('test_')
+            ) {
               stats.testFiles++;
             }
           } else if (docExtensions.has(ext)) {
@@ -716,7 +781,10 @@ async function extractDescription(projectPath: string): Promise<string | undefin
 /**
  * Extract dependencies from project files
  */
-async function extractDependencies(projectPath: string, type: ProjectType): Promise<{
+async function extractDependencies(
+  projectPath: string,
+  type: ProjectType
+): Promise<{
   dependencies: string[];
   devDependencies: string[];
 }> {
@@ -741,14 +809,14 @@ async function extractDependencies(projectPath: string, type: ProjectType): Prom
         if (depsMatch) {
           const deps = depsMatch[1].match(/^(\w[\w-]*)\s*=/gm);
           if (deps) {
-            result.dependencies = deps.map(d => d.replace(/\s*=/, ''));
+            result.dependencies = deps.map((d) => d.replace(/\s*=/, ''));
           }
         }
         const devDepsMatch = content.match(/\[dev-dependencies\]([\s\S]*?)(?:\[|$)/);
         if (devDepsMatch) {
           const deps = devDepsMatch[1].match(/^(\w[\w-]*)\s*=/gm);
           if (deps) {
-            result.devDependencies = deps.map(d => d.replace(/\s*=/, ''));
+            result.devDependencies = deps.map((d) => d.replace(/\s*=/, ''));
           }
         }
       }
@@ -763,7 +831,10 @@ async function extractDependencies(projectPath: string, type: ProjectType): Prom
 /**
  * Get project scripts/commands
  */
-async function extractScripts(projectPath: string, type: ProjectType): Promise<Record<string, string>> {
+async function extractScripts(
+  projectPath: string,
+  type: ProjectType
+): Promise<Record<string, string>> {
   const scripts: Record<string, string> = {};
 
   try {
@@ -785,16 +856,29 @@ async function extractScripts(projectPath: string, type: ProjectType): Promise<R
  * Generate directory tree string
  */
 function generateDirectoryTree(projectPath: string, maxDepth: number = 3): string {
-  const ignoreDirs = new Set(['node_modules', '.git', 'dist', 'build', 'target', '__pycache__', '.venv', 'venv', 'coverage', '.next', '.nuxt']);
+  const ignoreDirs = new Set([
+    'node_modules',
+    '.git',
+    'dist',
+    'build',
+    'target',
+    '__pycache__',
+    '.venv',
+    'venv',
+    'coverage',
+    '.next',
+    '.nuxt',
+  ]);
   const lines: string[] = [];
 
   const walk = (dir: string, prefix: string, depth: number) => {
     if (depth > maxDepth) return;
 
     try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true })
-        .filter(e => !e.name.startsWith('.') || ['.github', '.env.example'].includes(e.name))
-        .filter(e => !ignoreDirs.has(e.name))
+      const entries = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e) => !e.name.startsWith('.') || ['.github', '.env.example'].includes(e.name))
+        .filter((e) => !ignoreDirs.has(e.name))
         .sort((a, b) => {
           // Directories first
           if (a.isDirectory() && !b.isDirectory()) return -1;
@@ -843,28 +927,28 @@ export class ProjectAnalyzer {
 
     // Detect project type
     const type = await detectProjectType(absolutePath);
-    
+
     // Detect package manager
     const packageManager = await detectPackageManager(absolutePath);
-    
+
     // Detect frameworks
     const frameworks = await detectFrameworks(absolutePath, type);
-    
+
     // Detect structure
     const structure = await detectStructure(absolutePath);
-    
+
     // Analyze git
     const git = await analyzeGit(absolutePath);
-    
+
     // Count files
     const stats = await countFiles(absolutePath);
-    
+
     // Extract dependencies
     const { dependencies, devDependencies } = await extractDependencies(absolutePath, type);
-    
+
     // Extract description
     const description = await extractDescription(absolutePath);
-    
+
     // Extract scripts
     const scripts = await extractScripts(absolutePath, type);
 
@@ -923,7 +1007,7 @@ export class ProjectAnalyzer {
    */
   async generateContextFile(analysis: ProjectAnalysis, outputPath?: string): Promise<string> {
     const contextPath = outputPath || path.join(analysis.projectPath, 'AI_CONTEXT.md');
-    
+
     const typeDisplay: Record<ProjectType, string> = {
       nodejs: 'Node.js (JavaScript)',
       typescript: 'TypeScript',
@@ -934,15 +1018,53 @@ export class ProjectAnalyzer {
       unknown: 'Unknown',
     };
 
-    const managerCommands: Record<string, { install: string; build: string; test: string; start: string }> = {
+    const managerCommands: Record<
+      string,
+      { install: string; build: string; test: string; start: string }
+    > = {
       npm: { install: 'npm install', build: 'npm run build', test: 'npm test', start: 'npm start' },
-      yarn: { install: 'yarn install', build: 'yarn build', test: 'yarn test', start: 'yarn start' },
-      pnpm: { install: 'pnpm install', build: 'pnpm build', test: 'pnpm test', start: 'pnpm start' },
-      pip: { install: 'pip install -r requirements.txt', build: 'python setup.py build', test: 'pytest', start: 'python main.py' },
-      poetry: { install: 'poetry install', build: 'poetry build', test: 'poetry run pytest', start: 'poetry run python main.py' },
-      cargo: { install: 'cargo build', build: 'cargo build --release', test: 'cargo test', start: 'cargo run' },
-      maven: { install: 'mvn install', build: 'mvn package', test: 'mvn test', start: 'mvn exec:java' },
-      gradle: { install: 'gradle build', build: 'gradle build', test: 'gradle test', start: 'gradle run' },
+      yarn: {
+        install: 'yarn install',
+        build: 'yarn build',
+        test: 'yarn test',
+        start: 'yarn start',
+      },
+      pnpm: {
+        install: 'pnpm install',
+        build: 'pnpm build',
+        test: 'pnpm test',
+        start: 'pnpm start',
+      },
+      pip: {
+        install: 'pip install -r requirements.txt',
+        build: 'python setup.py build',
+        test: 'pytest',
+        start: 'python main.py',
+      },
+      poetry: {
+        install: 'poetry install',
+        build: 'poetry build',
+        test: 'poetry run pytest',
+        start: 'poetry run python main.py',
+      },
+      cargo: {
+        install: 'cargo build',
+        build: 'cargo build --release',
+        test: 'cargo test',
+        start: 'cargo run',
+      },
+      maven: {
+        install: 'mvn install',
+        build: 'mvn package',
+        test: 'mvn test',
+        start: 'mvn exec:java',
+      },
+      gradle: {
+        install: 'gradle build',
+        build: 'gradle build',
+        test: 'gradle test',
+        start: 'gradle run',
+      },
     };
 
     const commands = analysis.packageManager ? managerCommands[analysis.packageManager] : undefined;
@@ -953,10 +1075,21 @@ export class ProjectAnalyzer {
     // Find config files
     const configFiles: string[] = [];
     const configPatterns = [
-      'tsconfig.json', 'package.json', 'Cargo.toml', 'go.mod', 'pom.xml',
-      'build.gradle', 'pyproject.toml', '.eslintrc', '.prettierrc',
-      'vite.config.ts', 'vite.config.js', 'webpack.config.js',
-      'jest.config.js', 'vitest.config.ts', '.env.example',
+      'tsconfig.json',
+      'package.json',
+      'Cargo.toml',
+      'go.mod',
+      'pom.xml',
+      'build.gradle',
+      'pyproject.toml',
+      '.eslintrc',
+      '.prettierrc',
+      'vite.config.ts',
+      'vite.config.js',
+      'webpack.config.js',
+      'jest.config.js',
+      'vitest.config.ts',
+      '.env.example',
     ];
 
     for (const config of configPatterns) {
@@ -976,7 +1109,9 @@ export class ProjectAnalyzer {
     if (analysis.description) {
       sections.push(analysis.description);
     } else {
-      sections.push(`A ${typeDisplay[analysis.type]} project${analysis.frameworks?.length ? ` using ${analysis.frameworks.slice(0, 3).join(', ')}` : ''}.`);
+      sections.push(
+        `A ${typeDisplay[analysis.type]} project${analysis.frameworks?.length ? ` using ${analysis.frameworks.slice(0, 3).join(', ')}` : ''}.`
+      );
     }
     if (analysis.version) {
       sections.push(`\n**Version:** ${analysis.version}`);
@@ -1013,14 +1148,14 @@ export class ProjectAnalyzer {
       sections.push(`- **Tests:** \`${analysis.structure.testDir}/\``);
     }
     if (configFiles.length > 0) {
-      sections.push(`- **Configuration:** ${configFiles.map(f => `\`${f}\``).join(', ')}`);
+      sections.push(`- **Configuration:** ${configFiles.map((f) => `\`${f}\``).join(', ')}`);
     }
     sections.push('');
 
     // Development Commands
     if (commands || (analysis.scripts && Object.keys(analysis.scripts).length > 0)) {
       sections.push('## Development Commands');
-      
+
       if (analysis.scripts && Object.keys(analysis.scripts).length > 0) {
         // Use actual scripts from package.json
         const scriptDisplay: Record<string, string> = {
@@ -1119,7 +1254,10 @@ export class ProjectAnalyzer {
         type: analysis.type,
       },
       permissions: {
-        allowedPaths: [analysis.structure.sourceDir || 'src', analysis.structure.testDir || 'tests'].filter(Boolean),
+        allowedPaths: [
+          analysis.structure.sourceDir || 'src',
+          analysis.structure.testDir || 'tests',
+        ].filter(Boolean),
         blockedPaths: ['node_modules', '.git', 'dist', 'build', '.env'],
       },
       commands: [],
@@ -1174,7 +1312,7 @@ export class ProjectAnalyzer {
 
         // Generate config
         const config = await this.generateConfig(analysis);
-        
+
         if (!fs.existsSync(configFilePath) || options.force) {
           fs.writeFileSync(configFilePath, JSON.stringify(config, null, 2), 'utf-8');
           result.filesCreated.push(configFilePath);
@@ -1185,17 +1323,17 @@ export class ProjectAnalyzer {
         if (!options.skipGitIgnore) {
           const gitignorePath = path.join(absolutePath, '.gitignore');
           const entriesToAdd = ['.alexi/', 'AI_CONTEXT.md'];
-          
+
           if (fs.existsSync(gitignorePath)) {
             const content = fs.readFileSync(gitignorePath, 'utf-8');
             const linesToAdd: string[] = [];
-            
+
             for (const entry of entriesToAdd) {
               if (!content.includes(entry)) {
                 linesToAdd.push(entry);
               }
             }
-            
+
             if (linesToAdd.length > 0) {
               const newContent = content.trimEnd() + '\n\n# Alexi\n' + linesToAdd.join('\n') + '\n';
               fs.writeFileSync(gitignorePath, newContent, 'utf-8');
@@ -1219,7 +1357,6 @@ export class ProjectAnalyzer {
         filesCreated: result.filesCreated,
         timestamp: Date.now(),
       });
-
     } catch (error) {
       result.success = false;
       result.error = error instanceof Error ? error.message : String(error);
@@ -1260,7 +1397,10 @@ export async function analyzeProject(projectPath?: string): Promise<ProjectAnaly
 /**
  * Initialize a project
  */
-export async function initProject(projectPath?: string, options?: InitOptions): Promise<InitResult> {
+export async function initProject(
+  projectPath?: string,
+  options?: InitOptions
+): Promise<InitResult> {
   return getProjectAnalyzer().init(projectPath, options);
 }
 
@@ -1274,15 +1414,15 @@ export function formatAnalysisForCLI(analysis: ProjectAnalysis): string {
 
   lines.push(`Project: ${analysis.name}`);
   lines.push(`Type: ${analysis.type}`);
-  
+
   if (analysis.packageManager) {
     lines.push(`Package Manager: ${analysis.packageManager}`);
   }
-  
+
   if (analysis.frameworks && analysis.frameworks.length > 0) {
     lines.push(`Frameworks: ${analysis.frameworks.join(', ')}`);
   }
-  
+
   lines.push('');
   lines.push('Structure:');
   lines.push(`  Source: ${analysis.structure.sourceDir || 'N/A'}`);
@@ -1290,7 +1430,7 @@ export function formatAnalysisForCLI(analysis: ProjectAnalysis): string {
   lines.push(`  Entry: ${analysis.structure.entryPoint || 'N/A'}`);
   lines.push(`  Has CI: ${analysis.structure.hasCI ? 'Yes' : 'No'}`);
   lines.push(`  Has Docs: ${analysis.structure.hasDocs ? 'Yes' : 'No'}`);
-  
+
   lines.push('');
   lines.push('Stats:');
   lines.push(`  Total Files: ${analysis.stats.totalFiles}`);
@@ -1318,14 +1458,14 @@ export function formatInitResultForCLI(result: InitResult): string {
   if (result.success) {
     lines.push('Project initialized successfully!');
     lines.push('');
-    
+
     if (result.filesCreated.length > 0) {
       lines.push('Files created:');
       for (const file of result.filesCreated) {
         lines.push(`  + ${path.relative(result.analysis.projectPath, file)}`);
       }
     }
-    
+
     if (result.filesModified.length > 0) {
       lines.push('');
       lines.push('Files modified:');
@@ -1333,7 +1473,7 @@ export function formatInitResultForCLI(result: InitResult): string {
         lines.push(`  ~ ${path.relative(result.analysis.projectPath, file)}`);
       }
     }
-    
+
     lines.push('');
     lines.push(`Project type: ${result.analysis.type}`);
     if (result.analysis.frameworks && result.analysis.frameworks.length > 0) {

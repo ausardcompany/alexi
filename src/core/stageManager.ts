@@ -3,7 +3,7 @@
  * Organizes conversations by development stages to prevent context pollution
  */
 
-export type ConversationStage = 
+export type ConversationStage =
   | 'architecture'
   | 'planning'
   | 'implementation'
@@ -43,15 +43,15 @@ Be critical but constructive. Consider trade-offs explicitly.`,
       'Architecture review document',
       'List of weak points and risks',
       'Architecture invariants',
-      'ADR recommendations'
+      'ADR recommendations',
     ],
     dod: [
       'Component/boundary map exists',
       'Main data flows described',
-      'Key invariants documented (idempotency, transactions, retries, consistency)'
-    ]
+      'Key invariants documented (idempotency, transactions, retries, consistency)',
+    ],
   },
-  
+
   planning: {
     type: 'planning',
     name: 'Work Planning',
@@ -73,15 +73,15 @@ Be pragmatic about sequencing and resource allocation.`,
       'Work plan document',
       'Stage breakdown with dependencies',
       'Risk assessment',
-      'Timeline estimates'
+      'Timeline estimates',
     ],
     dod: [
       'Each stage has goal, input/output, risks',
       'Dependencies between stages are clear',
-      'Minimum checks defined (tests/linter/contracts)'
-    ]
+      'Minimum checks defined (tests/linter/contracts)',
+    ],
   },
-  
+
   implementation: {
     type: 'implementation',
     name: 'Implementation',
@@ -103,20 +103,16 @@ Always verify:
 - Tests pass
 - Public contracts match architecture
 - No shortcuts or placeholders`,
-    expectedArtifacts: [
-      'Source code changes',
-      'Test files',
-      'AI_NOTES.md'
-    ],
+    expectedArtifacts: ['Source code changes', 'Test files', 'AI_NOTES.md'],
     dod: [
       'Project builds successfully',
       'All tests pass (green)',
       'No TODOs or placeholders',
       'Public contracts (API/DTO/schemas) match architecture',
-      'Changes documented in AI_NOTES.md'
-    ]
+      'Changes documented in AI_NOTES.md',
+    ],
   },
-  
+
   documentation: {
     type: 'documentation',
     name: 'Documentation',
@@ -137,18 +133,14 @@ Focus on:
 - What is outdated
 - Where examples are missing
 - Where contracts diverge`,
-    expectedArtifacts: [
-      'Updated documentation',
-      'Discrepancy report',
-      'Example code snippets'
-    ],
+    expectedArtifacts: ['Updated documentation', 'Discrepancy report', 'Example code snippets'],
     dod: [
       'Documentation matches current contracts',
       'Run and verify instructions exist',
-      'Key decisions documented (ADR-style)'
-    ]
+      'Key decisions documented (ADR-style)',
+    ],
   },
-  
+
   devops: {
     type: 'devops',
     name: 'DevOps Review',
@@ -174,16 +166,16 @@ Consider:
       'CI/CD pipeline configuration',
       'Environment definitions',
       'Deployment runbook',
-      'Monitoring setup'
+      'Monitoring setup',
     ],
     dod: [
       'Pipeline defined for all environments',
       'Secrets management documented',
       'Rollback procedures established',
-      'Basic monitoring in place'
-    ]
+      'Basic monitoring in place',
+    ],
   },
-  
+
   security: {
     type: 'security',
     name: 'Security Review',
@@ -210,15 +202,15 @@ Focus on:
     expectedArtifacts: [
       'Security assessment report',
       'Vulnerability list with priorities',
-      'Remediation recommendations'
+      'Remediation recommendations',
     ],
     dod: [
       'All entry points reviewed',
       'OWASP Top 10 checked',
       'Secrets management validated',
-      'Error handling audited'
-    ]
-  }
+      'Error handling audited',
+    ],
+  },
 };
 
 export interface StageContext {
@@ -237,14 +229,14 @@ export class StageManager {
    * Set current stage
    */
   setStage(stage: ConversationStage, details?: Partial<StageContext>): StageContext {
-    const definition = STAGE_DEFINITIONS[stage];
-    
+    const _definition = STAGE_DEFINITIONS[stage];
+
     this.currentStage = {
       stage,
       artifacts: [],
-      ...details
+      ...details,
     };
-    
+
     return this.currentStage;
   }
 
@@ -279,14 +271,14 @@ export class StageManager {
     }
 
     const definition = STAGE_DEFINITIONS[this.currentStage.stage];
-    const missing = definition.dod.filter(item => {
+    const missing = definition.dod.filter((item) => {
       // Simple check - in real implementation, this would be more sophisticated
-      return !artifacts.some(a => a.toLowerCase().includes(item.toLowerCase()));
+      return !artifacts.some((a) => a.toLowerCase().includes(item.toLowerCase()));
     });
 
     return {
       passed: missing.length === 0,
-      missing
+      missing,
     };
   }
 
@@ -303,10 +295,10 @@ export class StageManager {
    * List all available stages
    */
   listStages(): Array<{ type: ConversationStage; name: string; description: string }> {
-    return Object.values(STAGE_DEFINITIONS).map(def => ({
+    return Object.values(STAGE_DEFINITIONS).map((def) => ({
       type: def.type,
       name: def.name,
-      description: def.description
+      description: def.description,
     }));
   }
 
@@ -328,7 +320,7 @@ export class StageManager {
       implementation: ['documentation', 'devops', 'security', 'planning'],
       documentation: ['implementation', 'devops'],
       devops: ['security', 'implementation'],
-      security: ['implementation', 'devops']
+      security: ['implementation', 'devops'],
     };
 
     return validTransitions[from]?.includes(to) ?? false;

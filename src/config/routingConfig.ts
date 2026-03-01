@@ -46,7 +46,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'cheap',
       strengths: ['simple-qa', 'classification', 'extraction', 'summarization'],
       maxTokens: 16000,
-      reasoning: false
+      reasoning: false,
     },
     {
       id: 'gpt-4o',
@@ -54,7 +54,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'medium',
       strengths: ['coding', 'analysis', 'creative-writing', 'complex-qa', 'vision'],
       maxTokens: 128000,
-      reasoning: false
+      reasoning: false,
     },
     {
       id: 'anthropic--claude-4.5-sonnet',
@@ -62,7 +62,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'medium',
       strengths: ['coding', 'analysis', 'long-context', 'technical-writing'],
       maxTokens: 200000,
-      reasoning: false
+      reasoning: false,
     },
     {
       id: 'anthropic--claude-4.5-haiku',
@@ -70,7 +70,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'cheap',
       strengths: ['simple-qa', 'classification', 'extraction', 'summarization'],
       maxTokens: 200000,
-      reasoning: false
+      reasoning: false,
     },
     {
       id: 'gpt-4.1',
@@ -78,7 +78,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'expensive',
       strengths: ['deep-reasoning', 'complex-math', 'research', 'advanced-coding'],
       maxTokens: 128000,
-      reasoning: true
+      reasoning: true,
     },
     {
       id: 'anthropic--claude-4.5-opus',
@@ -86,16 +86,16 @@ const DEFAULT_CONFIG: RoutingConfig = {
       costTier: 'expensive',
       strengths: ['deep-reasoning', 'complex-analysis', 'long-context', 'research'],
       maxTokens: 200000,
-      reasoning: true
-    }
+      reasoning: true,
+    },
   ],
   rules: [],
   preferences: {
     defaultCostTier: 'medium',
     preferCheapWhenPossible: false,
     maxCostPerRequest: null,
-    fallbackModel: 'gpt-4o'
-  }
+    fallbackModel: 'gpt-4o',
+  },
 };
 
 /**
@@ -108,7 +108,7 @@ export function loadRoutingConfig(configPath?: string): RoutingConfig {
     : [
         path.join(process.cwd(), 'routing-config.json'),
         path.join(process.cwd(), 'config', 'routing.json'),
-        path.join(process.env.HOME || '~', '.alexi', 'routing-config.json')
+        path.join(process.env.HOME || '~', '.alexi', 'routing-config.json'),
       ];
 
   // Try to find and load config file
@@ -117,18 +117,18 @@ export function loadRoutingConfig(configPath?: string): RoutingConfig {
       if (fs.existsSync(filePath)) {
         const content = fs.readFileSync(filePath, 'utf-8');
         const config = JSON.parse(content) as RoutingConfig;
-        
+
         // Validate required fields
         if (!config.models || !Array.isArray(config.models)) {
           console.warn(`Invalid config at ${filePath}: missing or invalid 'models' array`);
           continue;
         }
-        
+
         // Merge with defaults for missing fields
         return {
           models: config.models,
           rules: config.rules || [],
-          preferences: { ...DEFAULT_CONFIG.preferences, ...config.preferences }
+          preferences: { ...DEFAULT_CONFIG.preferences, ...config.preferences },
         };
       }
     } catch (error) {
@@ -175,7 +175,7 @@ export function evaluateRule(
   // Check keywords
   if (condition.keywords && condition.keywords.length > 0) {
     const lower = prompt.toLowerCase();
-    const hasKeyword = condition.keywords.some(kw => lower.includes(kw.toLowerCase()));
+    const hasKeyword = condition.keywords.some((kw) => lower.includes(kw.toLowerCase()));
     if (!hasKeyword) return false;
   }
 
@@ -196,7 +196,7 @@ export function findMatchingRule(
   prompt: string
 ): RoutingRule | null {
   // Filter matching rules
-  const matching = rules.filter(rule => 
+  const matching = rules.filter((rule) =>
     evaluateRule(rule, classification, prompt.length, prompt)
   );
 

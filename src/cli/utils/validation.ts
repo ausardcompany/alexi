@@ -9,11 +9,11 @@ import type { ConversationStage } from '../../core/stageManager.js';
  */
 export const VALID_STAGES: ConversationStage[] = [
   'architecture',
-  'planning', 
+  'planning',
   'implementation',
   'documentation',
   'devops',
-  'security'
+  'security',
 ];
 
 /**

@@ -14,32 +14,34 @@ export const SkillSchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string(),
-  
+
   // Core prompt content
   prompt: z.string(),
-  
+
   // Optional structured prompts for different contexts
-  prompts: z.object({
-    system: z.string().optional(),
-    review: z.string().optional(),
-    planning: z.string().optional(),
-    codeReview: z.string().optional(),
-  }).optional(),
-  
+  prompts: z
+    .object({
+      system: z.string().optional(),
+      review: z.string().optional(),
+      planning: z.string().optional(),
+      codeReview: z.string().optional(),
+    })
+    .optional(),
+
   // Tool constraints
   tools: z.array(z.string()).optional(),
   disabledTools: z.array(z.string()).optional(),
-  
+
   // Model preferences
   preferredModel: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().optional(),
-  
+
   // Metadata
   category: z.string().optional(),
   tags: z.array(z.string()).optional(),
   aliases: z.array(z.string()).optional(),
-  
+
   // Source information
   source: z.enum(['builtin', 'file', 'mcp']).optional(),
   sourcePath: z.string().optional(),
@@ -85,7 +87,7 @@ export function loadSkillFromFile(filePath: string): Skill | null {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const { data, content: promptContent } = matter(content);
-    
+
     const skill: Skill = {
       id: data.id || path.basename(filePath, path.extname(filePath)),
       name: data.name || data.id || path.basename(filePath, path.extname(filePath)),
@@ -103,7 +105,7 @@ export function loadSkillFromFile(filePath: string): Skill | null {
       source: 'file',
       sourcePath: filePath,
     };
-    
+
     return skill;
   } catch (error) {
     console.warn(`Failed to load skill from ${filePath}:`, error);
@@ -116,13 +118,13 @@ export function loadSkillFromFile(filePath: string): Skill | null {
  */
 export function loadSkillsFromDirectory(dirPath: string): Skill[] {
   const skills: Skill[] = [];
-  
+
   if (!fs.existsSync(dirPath)) {
     return skills;
   }
-  
+
   const files = fs.readdirSync(dirPath);
-  
+
   for (const file of files) {
     if (file.endsWith('.md') || file.endsWith('.yaml') || file.endsWith('.yml')) {
       const skill = loadSkillFromFile(path.join(dirPath, file));
@@ -131,7 +133,7 @@ export function loadSkillsFromDirectory(dirPath: string): Skill[] {
       }
     }
   }
-  
+
   return skills;
 }
 
@@ -141,13 +143,13 @@ export function loadSkillsFromDirectory(dirPath: string): Skill[] {
 class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
   private aliasMap: Map<string, string> = new Map();
-  
+
   /**
    * Register a skill
    */
   register(skill: Skill): void {
     this.skills.set(skill.id, skill);
-    
+
     // Register aliases
     if (skill.aliases) {
       for (const alias of skill.aliases) {
@@ -155,7 +157,7 @@ class SkillRegistry {
       }
     }
   }
-  
+
   /**
    * Get skill by id or alias
    */
@@ -163,7 +165,7 @@ class SkillRegistry {
     const id = this.aliasMap.get(idOrAlias.toLowerCase()) || idOrAlias;
     return this.skills.get(id);
   }
-  
+
   /**
    * Check if skill exists
    */
@@ -171,41 +173,42 @@ class SkillRegistry {
     const id = this.aliasMap.get(idOrAlias.toLowerCase()) || idOrAlias;
     return this.skills.has(id);
   }
-  
+
   /**
    * List all skills
    */
   list(): Skill[] {
     return Array.from(this.skills.values());
   }
-  
+
   /**
    * List skills by category
    */
   listByCategory(category: string): Skill[] {
-    return this.list().filter(s => s.category === category);
+    return this.list().filter((s) => s.category === category);
   }
-  
+
   /**
    * List skills by tag
    */
   listByTag(tag: string): Skill[] {
-    return this.list().filter(s => s.tags?.includes(tag));
+    return this.list().filter((s) => s.tags?.includes(tag));
   }
-  
+
   /**
    * Search skills
    */
   search(query: string): Skill[] {
     const q = query.toLowerCase();
-    return this.list().filter(s => 
-      s.id.toLowerCase().includes(q) ||
-      s.name.toLowerCase().includes(q) ||
-      s.description.toLowerCase().includes(q) ||
-      s.tags?.some(t => t.toLowerCase().includes(q))
+    return this.list().filter(
+      (s) =>
+        s.id.toLowerCase().includes(q) ||
+        s.name.toLowerCase().includes(q) ||
+        s.description.toLowerCase().includes(q) ||
+        s.tags?.some((t) => t.toLowerCase().includes(q))
     );
   }
-  
+
   /**
    * Get all categories
    */
@@ -218,24 +221,24 @@ class SkillRegistry {
     }
     return Array.from(categories);
   }
-  
+
   /**
    * Remove a skill
    */
   remove(id: string): boolean {
     const skill = this.skills.get(id);
     if (!skill) return false;
-    
+
     // Remove aliases
     if (skill.aliases) {
       for (const alias of skill.aliases) {
         this.aliasMap.delete(alias.toLowerCase());
       }
     }
-    
+
     return this.skills.delete(id);
   }
-  
+
   /**
    * Clear all skills
    */

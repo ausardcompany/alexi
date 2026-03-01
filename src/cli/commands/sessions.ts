@@ -14,14 +14,14 @@ export function registerSessionCommands(program: Command): void {
       try {
         const sessionManager = new SessionManager();
         const sessions = sessionManager.listSessions();
-        
+
         if (sessions.length === 0) {
           console.log('No sessions found');
           return;
         }
-        
+
         console.log('\n=== Saved Sessions ===\n');
-        sessions.forEach(session => {
+        sessions.forEach((session) => {
           const date = new Date(session.updated).toLocaleString();
           const title = session.title || 'Untitled';
           console.log(`ID: ${session.id}`);
@@ -47,7 +47,7 @@ export function registerSessionCommands(program: Command): void {
       try {
         const sessionManager = new SessionManager();
         const markdown = sessionManager.exportToMarkdown(opts.session);
-        
+
         if (opts.output) {
           const fs = await import('fs');
           fs.writeFileSync(opts.output, markdown, 'utf-8');
@@ -70,7 +70,7 @@ export function registerSessionCommands(program: Command): void {
       try {
         const sessionManager = new SessionManager();
         const deleted = sessionManager.deleteSession(opts.session);
-        
+
         if (deleted) {
           console.log(`Session ${opts.session} deleted`);
         } else {

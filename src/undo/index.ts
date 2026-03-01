@@ -4,11 +4,11 @@
  * Inspired by kilocode/opencode undo patterns
  */
 
-import { z } from "zod"
-import { nanoid } from "nanoid"
-import * as fs from "fs/promises"
-import * as path from "path"
-import { defineEvent } from "../bus/index.js"
+import { z } from 'zod';
+import { nanoid } from 'nanoid';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { defineEvent } from '../bus/index.js';
 
 // ============ Schemas ============
 
@@ -22,7 +22,7 @@ export const FileStateSchema = z.object({
   content: z.string().nullable(),
   /** Timestamp when the state was captured */
   timestamp: z.number(),
-})
+});
 
 /**
  * Schema for an undo operation entry
@@ -38,7 +38,7 @@ export const UndoEntrySchema = z.object({
   description: z.string().optional(),
   /** Timestamp when the entry was created */
   createdAt: z.number(),
-})
+});
 
 /**
  * Schema for undo/redo result
@@ -50,31 +50,31 @@ export const UndoResultSchema = z.object({
   restoredFiles: z.array(z.string()),
   /** Error message if operation failed */
   error: z.string().optional(),
-})
+});
 
 // ============ Types ============
 
 /**
  * Represents the state of a file at a specific point in time
  */
-export type FileState = z.infer<typeof FileStateSchema>
+export type FileState = z.infer<typeof FileStateSchema>;
 
 /**
  * Represents an entry in the undo/redo stack
  */
-export type UndoEntry = z.infer<typeof UndoEntrySchema>
+export type UndoEntry = z.infer<typeof UndoEntrySchema>;
 
 /**
  * Result of an undo/redo operation
  */
-export type UndoResult = z.infer<typeof UndoResultSchema>
+export type UndoResult = z.infer<typeof UndoResultSchema>;
 
 /**
  * Information about current undo/redo stack sizes
  */
 export interface StackInfo {
-  undoCount: number
-  redoCount: number
+  undoCount: number;
+  redoCount: number;
 }
 
 /**
@@ -82,11 +82,11 @@ export interface StackInfo {
  */
 export interface UndoManagerOptions {
   /** Maximum number of undo entries to keep (default: 100) */
-  maxHistorySize?: number
+  maxHistorySize?: number;
   /** Whether to persist history to disk (default: false) */
-  persistToDisk?: boolean
+  persistToDisk?: boolean;
   /** Directory for persistence storage */
-  persistenceDir?: string
+  persistenceDir?: string;
 }
 
 // ============ Events ============
@@ -95,7 +95,7 @@ export interface UndoManagerOptions {
  * Event published when file state is captured before modification
  */
 export const FileStateCapture = defineEvent(
-  "undo.state.captured",
+  'undo.state.captured',
   z.object({
     /** The undo entry ID */
     entryId: z.string(),
@@ -108,13 +108,13 @@ export const FileStateCapture = defineEvent(
     /** Timestamp */
     timestamp: z.number(),
   })
-)
+);
 
 /**
  * Event published when an undo operation is performed
  */
 export const UndoPerformed = defineEvent(
-  "undo.performed",
+  'undo.performed',
   z.object({
     /** The undo entry ID that was restored */
     entryId: z.string(),
@@ -129,13 +129,13 @@ export const UndoPerformed = defineEvent(
     /** Timestamp */
     timestamp: z.number(),
   })
-)
+);
 
 /**
  * Event published when a redo operation is performed
  */
 export const RedoPerformed = defineEvent(
-  "undo.redo.performed",
+  'undo.redo.performed',
   z.object({
     /** The redo entry ID that was restored */
     entryId: z.string(),
@@ -150,7 +150,7 @@ export const RedoPerformed = defineEvent(
     /** Timestamp */
     timestamp: z.number(),
   })
-)
+);
 
 // ============ Utility Functions ============
 
@@ -160,28 +160,28 @@ export const RedoPerformed = defineEvent(
  * @returns FileState object with current content or null if file doesn't exist
  */
 export async function captureFileState(filePath: string): Promise<FileState> {
-  const absolutePath = path.resolve(filePath)
-  const timestamp = Date.now()
+  const absolutePath = path.resolve(filePath);
+  const timestamp = Date.now();
 
   try {
-    const content = await fs.readFile(absolutePath, "utf-8")
+    const content = await fs.readFile(absolutePath, 'utf-8');
     return {
       path: absolutePath,
       content,
       timestamp,
-    }
+    };
   } catch (err) {
-    const error = err as NodeJS.ErrnoException
+    const error = err as NodeJS.ErrnoException;
     // File doesn't exist - record as null content
-    if (error.code === "ENOENT") {
+    if (error.code === 'ENOENT') {
       return {
         path: absolutePath,
         content: null,
         timestamp,
-      }
+      };
     }
     // Other errors (permission denied, etc.) - throw
-    throw new Error(`Failed to capture file state: ${error.message}`)
+    throw new Error(`Failed to capture file state: ${error.message}`);
   }
 }
 
@@ -190,10 +190,8 @@ export async function captureFileState(filePath: string): Promise<FileState> {
  * @param filePaths - Array of absolute file paths
  * @returns Array of FileState objects
  */
-export async function captureMultipleFileStates(
-  filePaths: string[]
-): Promise<FileState[]> {
-  return Promise.all(filePaths.map((fp) => captureFileState(fp)))
+export async function captureMultipleFileStates(filePaths: string[]): Promise<FileState[]> {
+  return Promise.all(filePaths.map((fp) => captureFileState(fp)));
 }
 
 /**
@@ -201,29 +199,29 @@ export async function captureMultipleFileStates(
  * @param state - FileState to restore
  */
 export async function restoreFileState(state: FileState): Promise<void> {
-  const absolutePath = path.resolve(state.path)
+  const absolutePath = path.resolve(state.path);
 
   if (state.content === null) {
     // File didn't exist before - delete it
     try {
-      await fs.unlink(absolutePath)
+      await fs.unlink(absolutePath);
     } catch (err) {
-      const error = err as NodeJS.ErrnoException
+      const error = err as NodeJS.ErrnoException;
       // Ignore if file already doesn't exist
-      if (error.code !== "ENOENT") {
-        throw new Error(`Failed to delete file: ${error.message}`)
+      if (error.code !== 'ENOENT') {
+        throw new Error(`Failed to delete file: ${error.message}`);
       }
     }
   } else {
     // Restore file content
     try {
       // Ensure parent directory exists
-      const dir = path.dirname(absolutePath)
-      await fs.mkdir(dir, { recursive: true })
-      await fs.writeFile(absolutePath, state.content, "utf-8")
+      const dir = path.dirname(absolutePath);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(absolutePath, state.content, 'utf-8');
     } catch (err) {
-      const error = err as NodeJS.ErrnoException
-      throw new Error(`Failed to restore file: ${error.message}`)
+      const error = err as NodeJS.ErrnoException;
+      throw new Error(`Failed to restore file: ${error.message}`);
     }
   }
 }
@@ -233,22 +231,20 @@ export async function restoreFileState(state: FileState): Promise<void> {
  * @param states - Array of FileState objects to restore
  * @returns Array of successfully restored file paths
  */
-export async function restoreMultipleFileStates(
-  states: FileState[]
-): Promise<string[]> {
-  const restored: string[] = []
-  
+export async function restoreMultipleFileStates(states: FileState[]): Promise<string[]> {
+  const restored: string[] = [];
+
   for (const state of states) {
     try {
-      await restoreFileState(state)
-      restored.push(state.path)
+      await restoreFileState(state);
+      restored.push(state.path);
     } catch (err) {
       // Continue with other files even if one fails
-      console.error(`Failed to restore ${state.path}:`, err)
+      console.error(`Failed to restore ${state.path}:`, err);
     }
   }
-  
-  return restored
+
+  return restored;
 }
 
 // ============ UndoManager Class ============
@@ -257,9 +253,9 @@ export async function restoreMultipleFileStates(
  * Manages undo/redo operations for file modifications
  */
 export class UndoManager {
-  private undoStack: UndoEntry[] = []
-  private redoStack: UndoEntry[] = []
-  private options: Required<UndoManagerOptions>
+  private undoStack: UndoEntry[] = [];
+  private redoStack: UndoEntry[] = [];
+  private options: Required<UndoManagerOptions>;
 
   /**
    * Create a new UndoManager instance
@@ -269,8 +265,8 @@ export class UndoManager {
     this.options = {
       maxHistorySize: options.maxHistorySize ?? 100,
       persistToDisk: options.persistToDisk ?? false,
-      persistenceDir: options.persistenceDir ?? ".alexi-undo",
-    }
+      persistenceDir: options.persistenceDir ?? '.alexi-undo',
+    };
   }
 
   /**
@@ -280,28 +276,24 @@ export class UndoManager {
    * @param description - Optional description of the operation
    * @returns The created undo entry ID
    */
-  pushState(
-    messageId: string,
-    files: FileState[],
-    description?: string
-  ): string {
+  pushState(messageId: string, files: FileState[], description?: string): string {
     const entry: UndoEntry = {
       id: nanoid(),
       messageId,
       files,
       description,
       createdAt: Date.now(),
-    }
+    };
 
     // Clear redo stack when new changes are made
-    this.redoStack = []
+    this.redoStack = [];
 
     // Add to undo stack
-    this.undoStack.push(entry)
+    this.undoStack.push(entry);
 
     // Trim history if exceeds max size
     while (this.undoStack.length > this.options.maxHistorySize) {
-      this.undoStack.shift()
+      this.undoStack.shift();
     }
 
     // Publish event
@@ -311,16 +303,16 @@ export class UndoManager {
       fileCount: files.length,
       filePaths: files.map((f) => f.path),
       timestamp: Date.now(),
-    })
+    });
 
     // Persist if enabled
     if (this.options.persistToDisk) {
       this.persistAsync().catch((err) => {
-        console.error("Failed to persist undo history:", err)
-      })
+        console.error('Failed to persist undo history:', err);
+      });
     }
 
-    return entry.id
+    return entry.id;
   }
 
   /**
@@ -332,18 +324,18 @@ export class UndoManager {
       return {
         success: false,
         restoredFiles: [],
-        error: "Nothing to undo",
-      }
+        error: 'Nothing to undo',
+      };
     }
 
-    const entry = this.undoStack.pop()!
-    
+    const entry = this.undoStack.pop()!;
+
     // Capture current state before undoing (for redo)
-    const currentStates = await this.captureCurrentStatesForEntry(entry)
-    
+    const currentStates = await this.captureCurrentStatesForEntry(entry);
+
     try {
       // Restore files
-      const restoredFiles = await restoreMultipleFileStates(entry.files)
+      const restoredFiles = await restoreMultipleFileStates(entry.files);
 
       // Push to redo stack with current state
       const redoEntry: UndoEntry = {
@@ -352,13 +344,13 @@ export class UndoManager {
         files: currentStates,
         description: entry.description,
         createdAt: Date.now(),
-      }
-      this.redoStack.push(redoEntry)
+      };
+      this.redoStack.push(redoEntry);
 
       const result: UndoResult = {
         success: true,
         restoredFiles,
-      }
+      };
 
       // Publish event
       UndoPerformed.publish({
@@ -367,26 +359,26 @@ export class UndoManager {
         success: true,
         restoredFiles,
         timestamp: Date.now(),
-      })
+      });
 
       // Persist if enabled
       if (this.options.persistToDisk) {
         this.persistAsync().catch((err) => {
-          console.error("Failed to persist undo history:", err)
-        })
+          console.error('Failed to persist undo history:', err);
+        });
       }
 
-      return result
+      return result;
     } catch (err) {
       // Restore the entry to the undo stack on failure
-      this.undoStack.push(entry)
+      this.undoStack.push(entry);
 
-      const errorMsg = err instanceof Error ? err.message : String(err)
+      const errorMsg = err instanceof Error ? err.message : String(err);
       const result: UndoResult = {
         success: false,
         restoredFiles: [],
         error: errorMsg,
-      }
+      };
 
       // Publish event
       UndoPerformed.publish({
@@ -396,9 +388,9 @@ export class UndoManager {
         restoredFiles: [],
         error: errorMsg,
         timestamp: Date.now(),
-      })
+      });
 
-      return result
+      return result;
     }
   }
 
@@ -411,18 +403,18 @@ export class UndoManager {
       return {
         success: false,
         restoredFiles: [],
-        error: "Nothing to redo",
-      }
+        error: 'Nothing to redo',
+      };
     }
 
-    const entry = this.redoStack.pop()!
-    
+    const entry = this.redoStack.pop()!;
+
     // Capture current state before redoing (for undo)
-    const currentStates = await this.captureCurrentStatesForEntry(entry)
+    const currentStates = await this.captureCurrentStatesForEntry(entry);
 
     try {
       // Restore files
-      const restoredFiles = await restoreMultipleFileStates(entry.files)
+      const restoredFiles = await restoreMultipleFileStates(entry.files);
 
       // Push to undo stack with current state
       const undoEntry: UndoEntry = {
@@ -431,13 +423,13 @@ export class UndoManager {
         files: currentStates,
         description: entry.description,
         createdAt: Date.now(),
-      }
-      this.undoStack.push(undoEntry)
+      };
+      this.undoStack.push(undoEntry);
 
       const result: UndoResult = {
         success: true,
         restoredFiles,
-      }
+      };
 
       // Publish event
       RedoPerformed.publish({
@@ -446,26 +438,26 @@ export class UndoManager {
         success: true,
         restoredFiles,
         timestamp: Date.now(),
-      })
+      });
 
       // Persist if enabled
       if (this.options.persistToDisk) {
         this.persistAsync().catch((err) => {
-          console.error("Failed to persist undo history:", err)
-        })
+          console.error('Failed to persist undo history:', err);
+        });
       }
 
-      return result
+      return result;
     } catch (err) {
       // Restore the entry to the redo stack on failure
-      this.redoStack.push(entry)
+      this.redoStack.push(entry);
 
-      const errorMsg = err instanceof Error ? err.message : String(err)
+      const errorMsg = err instanceof Error ? err.message : String(err);
       const result: UndoResult = {
         success: false,
         restoredFiles: [],
         error: errorMsg,
-      }
+      };
 
       // Publish event
       RedoPerformed.publish({
@@ -475,9 +467,9 @@ export class UndoManager {
         restoredFiles: [],
         error: errorMsg,
         timestamp: Date.now(),
-      })
+      });
 
-      return result
+      return result;
     }
   }
 
@@ -489,7 +481,7 @@ export class UndoManager {
     return {
       undoCount: this.undoStack.length,
       redoCount: this.redoStack.length,
-    }
+    };
   }
 
   /**
@@ -497,7 +489,7 @@ export class UndoManager {
    * @returns true if there are entries to undo
    */
   canUndo(): boolean {
-    return this.undoStack.length > 0
+    return this.undoStack.length > 0;
   }
 
   /**
@@ -505,7 +497,7 @@ export class UndoManager {
    * @returns true if there are entries to redo
    */
   canRedo(): boolean {
-    return this.redoStack.length > 0
+    return this.redoStack.length > 0;
   }
 
   /**
@@ -513,7 +505,7 @@ export class UndoManager {
    * @returns The most recent UndoEntry or undefined if stack is empty
    */
   peekUndo(): UndoEntry | undefined {
-    return this.undoStack[this.undoStack.length - 1]
+    return this.undoStack[this.undoStack.length - 1];
   }
 
   /**
@@ -521,7 +513,7 @@ export class UndoManager {
    * @returns The most recent redo UndoEntry or undefined if stack is empty
    */
   peekRedo(): UndoEntry | undefined {
-    return this.redoStack[this.redoStack.length - 1]
+    return this.redoStack[this.redoStack.length - 1];
   }
 
   /**
@@ -529,7 +521,7 @@ export class UndoManager {
    * @returns Copy of the undo stack
    */
   getUndoHistory(): UndoEntry[] {
-    return [...this.undoStack]
+    return [...this.undoStack];
   }
 
   /**
@@ -537,21 +529,21 @@ export class UndoManager {
    * @returns Copy of the redo stack
    */
   getRedoHistory(): UndoEntry[] {
-    return [...this.redoStack]
+    return [...this.redoStack];
   }
 
   /**
    * Clear all undo/redo history
    */
   clear(): void {
-    this.undoStack = []
-    this.redoStack = []
+    this.undoStack = [];
+    this.redoStack = [];
 
     // Persist if enabled
     if (this.options.persistToDisk) {
       this.persistAsync().catch((err) => {
-        console.error("Failed to persist undo history:", err)
-      })
+        console.error('Failed to persist undo history:', err);
+      });
     }
   }
 
@@ -560,32 +552,30 @@ export class UndoManager {
    * @param entry - UndoEntry to get file paths from
    * @returns Array of current FileState objects
    */
-  private async captureCurrentStatesForEntry(
-    entry: UndoEntry
-  ): Promise<FileState[]> {
-    const filePaths = entry.files.map((f) => f.path)
-    return captureMultipleFileStates(filePaths)
+  private async captureCurrentStatesForEntry(entry: UndoEntry): Promise<FileState[]> {
+    const filePaths = entry.files.map((f) => f.path);
+    return captureMultipleFileStates(filePaths);
   }
 
   /**
    * Persist undo/redo history to disk asynchronously
    */
   private async persistAsync(): Promise<void> {
-    const persistDir = path.resolve(this.options.persistenceDir)
-    
+    const persistDir = path.resolve(this.options.persistenceDir);
+
     try {
-      await fs.mkdir(persistDir, { recursive: true })
-      
+      await fs.mkdir(persistDir, { recursive: true });
+
       const data = {
         undoStack: this.undoStack,
         redoStack: this.redoStack,
         timestamp: Date.now(),
-      }
-      
-      const filePath = path.join(persistDir, "undo-history.json")
-      await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8")
+      };
+
+      const filePath = path.join(persistDir, 'undo-history.json');
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
-      console.error("Failed to persist undo history:", err)
+      console.error('Failed to persist undo history:', err);
     }
   }
 
@@ -595,45 +585,42 @@ export class UndoManager {
    */
   async loadFromDisk(): Promise<void> {
     if (!this.options.persistToDisk) {
-      return
+      return;
     }
 
-    const filePath = path.join(
-      path.resolve(this.options.persistenceDir),
-      "undo-history.json"
-    )
+    const filePath = path.join(path.resolve(this.options.persistenceDir), 'undo-history.json');
 
     try {
-      const content = await fs.readFile(filePath, "utf-8")
-      const data = JSON.parse(content)
-      
+      const content = await fs.readFile(filePath, 'utf-8');
+      const data = JSON.parse(content);
+
       // Validate loaded data
       if (Array.isArray(data.undoStack)) {
         this.undoStack = data.undoStack.filter((entry: unknown) => {
           try {
-            UndoEntrySchema.parse(entry)
-            return true
+            UndoEntrySchema.parse(entry);
+            return true;
           } catch {
-            return false
+            return false;
           }
-        })
+        });
       }
-      
+
       if (Array.isArray(data.redoStack)) {
         this.redoStack = data.redoStack.filter((entry: unknown) => {
           try {
-            UndoEntrySchema.parse(entry)
-            return true
+            UndoEntrySchema.parse(entry);
+            return true;
           } catch {
-            return false
+            return false;
           }
-        })
+        });
       }
     } catch (err) {
-      const error = err as NodeJS.ErrnoException
+      const error = err as NodeJS.ErrnoException;
       // Ignore if file doesn't exist
-      if (error.code !== "ENOENT") {
-        console.error("Failed to load undo history:", error)
+      if (error.code !== 'ENOENT') {
+        console.error('Failed to load undo history:', error);
       }
     }
   }
@@ -641,7 +628,7 @@ export class UndoManager {
 
 // ============ Global Instance ============
 
-let globalUndoManager: UndoManager | null = null
+let globalUndoManager: UndoManager | null = null;
 
 /**
  * Get the global UndoManager instance
@@ -650,9 +637,9 @@ let globalUndoManager: UndoManager | null = null
  */
 export function getUndoManager(options?: UndoManagerOptions): UndoManager {
   if (!globalUndoManager) {
-    globalUndoManager = new UndoManager(options)
+    globalUndoManager = new UndoManager(options);
   }
-  return globalUndoManager
+  return globalUndoManager;
 }
 
 /**
@@ -660,7 +647,7 @@ export function getUndoManager(options?: UndoManagerOptions): UndoManager {
  * @param manager - UndoManager instance to use globally
  */
 export function setUndoManager(manager: UndoManager): void {
-  globalUndoManager = manager
+  globalUndoManager = manager;
 }
 
 /**
@@ -668,7 +655,7 @@ export function setUndoManager(manager: UndoManager): void {
  * Useful for testing
  */
 export function resetUndoManager(): void {
-  globalUndoManager = null
+  globalUndoManager = null;
 }
 
 // ============ Helper Functions for Integration ============
@@ -686,9 +673,9 @@ export async function createUndoCheckpoint(
   filePaths: string[],
   description?: string
 ): Promise<string> {
-  const manager = getUndoManager()
-  const states = await captureMultipleFileStates(filePaths)
-  return manager.pushState(messageId, states, description)
+  const manager = getUndoManager();
+  const states = await captureMultipleFileStates(filePaths);
+  return manager.pushState(messageId, states, description);
 }
 
 /**
@@ -696,7 +683,7 @@ export async function createUndoCheckpoint(
  * @returns UndoResult
  */
 export async function performUndo(): Promise<UndoResult> {
-  return getUndoManager().undo()
+  return getUndoManager().undo();
 }
 
 /**
@@ -704,7 +691,7 @@ export async function performUndo(): Promise<UndoResult> {
  * @returns UndoResult
  */
 export async function performRedo(): Promise<UndoResult> {
-  return getUndoManager().redo()
+  return getUndoManager().redo();
 }
 
 /**
@@ -712,5 +699,5 @@ export async function performRedo(): Promise<UndoResult> {
  * @returns StackInfo
  */
 export function getUndoStackInfo(): StackInfo {
-  return getUndoManager().getStackInfo()
+  return getUndoManager().getStackInfo();
 }

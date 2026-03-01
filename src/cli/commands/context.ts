@@ -21,7 +21,7 @@ export function registerContextCommands(program: Command): void {
       try {
         const manager = getProjectContextManager();
         const context = manager.load();
-        
+
         console.log('\n=== Project Context ===\n');
         console.log(`Name: ${context.name}`);
         console.log(`Description: ${context.description || 'N/A'}`);
@@ -38,13 +38,13 @@ export function registerContextCommands(program: Command): void {
         if (context.architectureInvariants.length === 0) {
           console.log('  None defined');
         } else {
-          context.architectureInvariants.forEach(inv => console.log(`  • ${inv}`));
+          context.architectureInvariants.forEach((inv) => console.log(`  • ${inv}`));
         }
         console.log(`\nConstraints:`);
         if (context.constraints.length === 0) {
           console.log('  None defined');
         } else {
-          context.constraints.forEach(c => console.log(`  • ${c}`));
+          context.constraints.forEach((c) => console.log(`  • ${c}`));
         }
       } catch (e) {
         console.error(String(e));
@@ -69,10 +69,10 @@ export function registerContextCommands(program: Command): void {
           stack: {
             language: opts.language,
             framework: opts.framework,
-            versions: { node: '22.x' }
-          }
+            versions: { node: '22.x' },
+          },
         });
-        
+
         console.log(`\n✅ Project context initialized:`);
         console.log(`   Name: ${context.name}`);
         console.log(`   Path: ${manager.getPath()}`);

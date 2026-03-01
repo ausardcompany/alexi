@@ -7,28 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- ESLint and Prettier configuration for code quality
-- Pre-commit hooks with Husky and lint-staged
-- VS Code configuration for debugging and formatting
-- CI/CD pipeline with GitHub Actions
-- CONTRIBUTING.md with contribution guidelines
-- ARCHITECTURE.md with system design documentation
-- Test coverage reporting with thresholds
-
 ### Changed
-- Updated vitest configuration with coverage thresholds
+- Simplified to single provider: SAP AI Core Orchestration SDK
+- Removed direct integrations: OpenAI, Anthropic, Bedrock, Ollama (all available via SAP AI Core)
+- Updated CLI name and branding to "Alexi"
+- Improved release workflow with npm publishing support
+
+### Fixed
+- All ESLint errors fixed (0 errors, 333 warnings)
+- Fixed `NodeJS.Timeout` type issue with `ReturnType<typeof setTimeout>`
+- Fixed switch/case block scoping in interactive.ts
+- Fixed `this` aliasing in plugin/index.ts using `.bind()`
+- Fixed type exports in server/index.ts
+- Removed unused imports across test files
+- Added `vitest.config.ts` and `eslint.config.js` to ESLint tsconfig
+
+### Removed
+- Removed `dist/` from git tracking (build output)
 
 ## [0.1.0] - 2026-02-28
 
 ### Added
 - Initial release as **Alexi** (renamed from sap-bot-orchestrator)
-- Multi-provider support:
-  - OpenAI-compatible proxy
-  - AWS Bedrock Converse API
-  - Anthropic Messages API
-  - SAP AI Core integration
-  - Ollama local models
+- SAP AI Core Orchestration as the LLM provider
 - Intelligent auto-routing based on prompt complexity
 - Session management with multi-turn conversations
 - Rule-based routing configuration (JSON)

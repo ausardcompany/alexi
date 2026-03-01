@@ -48,8 +48,8 @@ export class McpServerAdapter {
     // List available tools
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       const tools = registry.list();
-      
-      const mcpTools: McpTool[] = tools.map(tool => {
+
+      const mcpTools: McpTool[] = tools.map((tool) => {
         const schema = tool.toFunctionSchema();
         return {
           name: schema.name,
@@ -68,7 +68,7 @@ export class McpServerAdapter {
     // Execute a tool
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
-      
+
       const tool = registry.get(name);
       if (!tool) {
         return {
@@ -84,15 +84,16 @@ export class McpServerAdapter {
 
       try {
         const result = await tool.execute(args || {}, this.context);
-        
+
         if (result.success) {
           return {
             content: [
               {
                 type: 'text' as const,
-                text: typeof result.data === 'string' 
-                  ? result.data 
-                  : JSON.stringify(result.data, null, 2),
+                text:
+                  typeof result.data === 'string'
+                    ? result.data
+                    : JSON.stringify(result.data, null, 2),
               },
             ],
           };
@@ -141,15 +142,15 @@ export class McpServerAdapter {
 /**
  * Create and start an MCP server
  */
-export async function createMcpServer(options?: { 
+export async function createMcpServer(options?: {
   workdir?: string;
   autoStart?: boolean;
 }): Promise<McpServerAdapter> {
   const adapter = new McpServerAdapter(options);
-  
+
   if (options?.autoStart !== false) {
     await adapter.start();
   }
-  
+
   return adapter;
 }

@@ -12,11 +12,11 @@ import { fileURLToPath } from 'url';
 // ============ Type Definitions ============
 
 export interface UpdateState {
-  lastCheck: string;        // ISO timestamp
-  currentVersion: string;   // From package.json
-  latestVersion?: string;   // From npm registry
+  lastCheck: string; // ISO timestamp
+  currentVersion: string; // From package.json
+  latestVersion?: string; // From npm registry
   updateAvailable: boolean;
-  checkedPackage: string;   // Package name
+  checkedPackage: string; // Package name
 }
 
 export interface UpdateCheckResult {
@@ -54,14 +54,14 @@ function getCurrentVersion(): string {
     // Navigate up from dist/update/index.js or src/update/index.ts to find package.json
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = path.dirname(__filename);
-    
+
     // Try multiple possible locations
     const possiblePaths = [
-      path.join(__dirname, '..', '..', 'package.json'),      // from src/update or dist/update
+      path.join(__dirname, '..', '..', 'package.json'), // from src/update or dist/update
       path.join(__dirname, '..', '..', '..', 'package.json'), // fallback
-      path.join(process.cwd(), 'package.json'),              // current working directory
+      path.join(process.cwd(), 'package.json'), // current working directory
     ];
-    
+
     for (const pkgPath of possiblePaths) {
       if (fs.existsSync(pkgPath)) {
         const content = fs.readFileSync(pkgPath, 'utf-8');
@@ -71,7 +71,7 @@ function getCurrentVersion(): string {
         }
       }
     }
-    
+
     // Fallback: try to get version from npm
     try {
       const result = execSync(`npm list ${PACKAGE_NAME} --json 2>/dev/null`, {
@@ -85,7 +85,7 @@ function getCurrentVersion(): string {
     } catch {
       // Ignore npm list errors
     }
-    
+
     return '0.0.0'; // Unknown version
   } catch {
     return '0.0.0';
@@ -95,10 +95,15 @@ function getCurrentVersion(): string {
 /**
  * Parse a semver version string into components
  */
-function parseVersion(version: string): { major: number; minor: number; patch: number; prerelease: string | null } {
+function parseVersion(version: string): {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string | null;
+} {
   // Handle versions like "1.2.3-beta.1"
   const prereleaseMatch = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
-  
+
   if (prereleaseMatch) {
     return {
       major: parseInt(prereleaseMatch[1], 10),
@@ -107,7 +112,7 @@ function parseVersion(version: string): { major: number; minor: number; patch: n
       prerelease: prereleaseMatch[4] || null,
     };
   }
-  
+
   // Simple version without prerelease
   const parts = version.split('.').map(Number);
   return {
@@ -127,20 +132,20 @@ function comparePrereleases(a: string | null, b: string | null): number {
   if (a === null && b === null) return 0;
   if (a === null) return 1;
   if (b === null) return -1;
-  
+
   const aParts = a.split('.');
   const bParts = b.split('.');
-  
+
   const maxLen = Math.max(aParts.length, bParts.length);
-  
+
   for (let i = 0; i < maxLen; i++) {
     const aPart = aParts[i] || '';
     const bPart = bParts[i] || '';
-    
+
     // Compare numeric parts as numbers
     const aNum = parseInt(aPart, 10);
     const bNum = parseInt(bPart, 10);
-    
+
     if (!isNaN(aNum) && !isNaN(bNum)) {
       if (aNum < bNum) return -1;
       if (aNum > bNum) return 1;
@@ -150,7 +155,7 @@ function comparePrereleases(a: string | null, b: string | null): number {
       if (aPart > bPart) return 1;
     }
   }
-  
+
   return 0;
 }
 
@@ -161,17 +166,17 @@ function comparePrereleases(a: string | null, b: string | null): number {
 function isNewerVersion(current: string, latest: string): boolean {
   const curr = parseVersion(current);
   const lat = parseVersion(latest);
-  
+
   // Compare major.minor.patch
   if (lat.major > curr.major) return true;
   if (lat.major < curr.major) return false;
-  
+
   if (lat.minor > curr.minor) return true;
   if (lat.minor < curr.minor) return false;
-  
+
   if (lat.patch > curr.patch) return true;
   if (lat.patch < curr.patch) return false;
-  
+
   // Same major.minor.patch - compare prerelease
   return comparePrereleases(lat.prerelease, curr.prerelease) > 0;
 }
@@ -195,13 +200,13 @@ function detectInstallationType(): 'global' | 'local' {
       encoding: 'utf-8',
       timeout: 5000,
     }).trim();
-    
+
     const __filename = fileURLToPath(import.meta.url);
-    
+
     if (__filename.startsWith(globalResult)) {
       return 'global';
     }
-    
+
     return 'local';
   } catch {
     return 'local';
@@ -214,13 +219,13 @@ export class UpdateManager {
   private currentVersion: string;
   private packageName: string;
   private checkIntervalMs: number;
-  
+
   constructor(options?: { checkIntervalMs?: number }) {
     this.currentVersion = getCurrentVersion();
     this.packageName = PACKAGE_NAME;
     this.checkIntervalMs = options?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
   }
-  
+
   /**
    * Get the current update state from cache
    */
@@ -229,14 +234,14 @@ export class UpdateManager {
       if (!fs.existsSync(UPDATE_CHECK_FILE)) {
         return undefined;
       }
-      
+
       const content = fs.readFileSync(UPDATE_CHECK_FILE, 'utf-8');
       return JSON.parse(content) as UpdateState;
     } catch {
       return undefined;
     }
   }
-  
+
   /**
    * Save update state to cache
    */
@@ -248,78 +253,78 @@ export class UpdateManager {
       // Silently fail - caching is not critical
     }
   }
-  
+
   /**
    * Check if rate limit allows a new check
    */
   shouldCheck(): boolean {
     const state = this.getState();
-    
+
     if (!state) {
       return true;
     }
-    
+
     try {
       const lastCheck = new Date(state.lastCheck);
       const now = new Date();
       const elapsed = now.getTime() - lastCheck.getTime();
-      
+
       return elapsed >= this.checkIntervalMs;
     } catch {
       return true;
     }
   }
-  
+
   /**
    * Fetch the latest version from npm registry
    */
   private async fetchLatestVersion(): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
-    
+
     try {
       const response = await fetch(NPM_REGISTRY_URL, {
         signal: controller.signal,
         headers: {
-          'Accept': 'application/json',
+          Accept: 'application/json',
           'User-Agent': `${PACKAGE_NAME}/${this.currentVersion}`,
         },
       });
-      
+
       clearTimeout(timeout);
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
-      const data = await response.json() as { version?: string };
-      
+
+      const data = (await response.json()) as { version?: string };
+
       if (!data.version) {
         throw new Error('No version found in registry response');
       }
-      
+
       return data.version;
     } catch (error) {
       clearTimeout(timeout);
-      
+
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error('Request timeout while checking npm registry');
       }
-      
+
       throw error;
     }
   }
-  
+
   /**
    * Check for updates
    */
   async check(options?: UpdateCheckOptions): Promise<UpdateCheckResult> {
     const force = options?.force ?? false;
-    
+
     // Check rate limit (unless forced)
     if (!force && !this.shouldCheck()) {
       const state = this.getState();
-      
+
       if (state) {
         return {
           currentVersion: this.currentVersion,
@@ -330,13 +335,13 @@ export class UpdateManager {
         };
       }
     }
-    
+
     // Fetch latest version from registry
     try {
       const latestVersion = await this.fetchLatestVersion();
       const updateAvailable = isNewerVersion(this.currentVersion, latestVersion);
       const now = new Date();
-      
+
       // Save state
       const state: UpdateState = {
         lastCheck: now.toISOString(),
@@ -345,9 +350,9 @@ export class UpdateManager {
         updateAvailable,
         checkedPackage: this.packageName,
       };
-      
+
       this.saveState(state);
-      
+
       return {
         currentVersion: this.currentVersion,
         latestVersion,
@@ -358,7 +363,7 @@ export class UpdateManager {
     } catch (error) {
       // On error, try to return cached state if available
       const state = this.getState();
-      
+
       if (state) {
         return {
           currentVersion: this.currentVersion,
@@ -368,12 +373,14 @@ export class UpdateManager {
           fromCache: true,
         };
       }
-      
+
       // No cache available, throw the error
-      throw new Error(`Failed to check for updates: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `Failed to check for updates: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
-  
+
   /**
    * Perform the update
    */
@@ -381,46 +388,47 @@ export class UpdateManager {
     try {
       // First, check if update is available
       const checkResult = await this.check({ force: true });
-      
+
       if (!checkResult.updateAvailable) {
         return {
           success: true,
           message: `Already running the latest version (${this.currentVersion})`,
         };
       }
-      
+
       // Detect installation type
       const installationType = detectInstallationType();
-      
+
       // Build the update command
-      const updateCommand = installationType === 'global'
-        ? `npm install -g ${this.packageName}@latest`
-        : `npm install ${this.packageName}@latest`;
-      
+      const updateCommand =
+        installationType === 'global'
+          ? `npm install -g ${this.packageName}@latest`
+          : `npm install ${this.packageName}@latest`;
+
       // Execute the update
       execSync(updateCommand, {
         encoding: 'utf-8',
         timeout: 120000, // 2 minutes
         stdio: 'inherit',
       });
-      
+
       // Clear the cache after successful update
       this.clearCache();
-      
+
       return {
         success: true,
         message: `Successfully updated from ${this.currentVersion} to ${checkResult.latestVersion}`,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       return {
         success: false,
         message: `Update failed: ${errorMessage}`,
       };
     }
   }
-  
+
   /**
    * Clear the update state cache
    */
@@ -433,14 +441,14 @@ export class UpdateManager {
       // Silently fail - not critical
     }
   }
-  
+
   /**
    * Get the current version
    */
   getCurrentVersion(): string {
     return this.currentVersion;
   }
-  
+
   /**
    * Get the package name
    */

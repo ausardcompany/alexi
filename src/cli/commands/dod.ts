@@ -21,13 +21,13 @@ export function registerDoDCommands(program: Command): void {
     .action(async (opts: DoDCheckOptions) => {
       try {
         const validStage = validateStageOrExit(opts.stage);
-        
+
         const checker = new DoDChecker();
         console.log(`\nRunning DoD checks for ${validStage}...\n`);
-        
+
         const report = checker.runChecks(validStage);
         const markdown = checker.generateReport(report);
-        
+
         if (opts.output) {
           const fs = await import('fs');
           fs.writeFileSync(opts.output, markdown, 'utf-8');
@@ -35,7 +35,7 @@ export function registerDoDCommands(program: Command): void {
         } else {
           console.log(markdown);
         }
-        
+
         process.exit(report.failed > 0 ? 1 : 0);
       } catch (e) {
         console.error(String(e));
@@ -51,9 +51,9 @@ export function registerDoDCommands(program: Command): void {
       try {
         const checker = new DoDChecker();
         const checks = checker.listChecks();
-        
+
         console.log('\n=== Available DoD Checks ===\n');
-        checks.forEach(check => {
+        checks.forEach((check) => {
           const autoFix = check.autoFixable ? ' (auto-fixable)' : '';
           console.log(`${check.name}${autoFix}`);
           console.log(`  ID: ${check.id}`);

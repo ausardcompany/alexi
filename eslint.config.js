@@ -12,7 +12,7 @@ export default [
       parserOptions: {
         ecmaVersion: 2022,
         sourceType: 'module',
-        project: './tsconfig.json',
+        project: './tsconfig.eslint.json',
       },
       globals: {
         console: 'readonly',
@@ -29,6 +29,14 @@ export default [
         setImmediate: 'readonly',
         URL: 'readonly',
         URLSearchParams: 'readonly',
+        fetch: 'readonly',
+        NodeJS: 'readonly',
+        Response: 'readonly',
+        Request: 'readonly',
+        Headers: 'readonly',
+        FormData: 'readonly',
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
       },
     },
     plugins: {

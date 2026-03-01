@@ -4,18 +4,18 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 
-import { z } from "zod"
-import { AgentSwitched } from "../bus/index.js"
+import { z } from 'zod';
+import { AgentSwitched } from '../bus/index.js';
 
 // Agent mode - determines when agent is available
-export type AgentMode = "primary" | "subagent" | "all"
+export type AgentMode = 'primary' | 'subagent' | 'all';
 
 // Agent schema for validation
 export const AgentSchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string(),
-  mode: z.enum(["primary", "subagent", "all"]).default("all"),
+  mode: z.enum(['primary', 'subagent', 'all']).default('all'),
   systemPrompt: z.string(),
   // Tool configuration
   tools: z.array(z.string()).optional(), // Tool IDs this agent can use
@@ -26,13 +26,13 @@ export const AgentSchema = z.object({
   maxTokens: z.number().optional(),
   // Aliases for @syntax switching
   aliases: z.array(z.string()).optional(),
-})
+});
 
-export type AgentConfig = z.infer<typeof AgentSchema>
+export type AgentConfig = z.infer<typeof AgentSchema>;
 
 // Agent definition with utilities
 export interface Agent extends AgentConfig {
-  canUseTool(toolId: string): boolean
+  canUseTool(toolId: string): boolean;
 }
 
 // Create an agent from config
@@ -41,15 +41,15 @@ function createAgent(config: AgentConfig): Agent {
     ...config,
     canUseTool(toolId: string): boolean {
       // Check disabled first
-      if (this.disabledTools?.includes(toolId)) return false
+      if (this.disabledTools?.includes(toolId)) return false;
       // If tools list specified, check inclusion
       if (this.tools && this.tools.length > 0) {
-        return this.tools.includes(toolId) || this.tools.includes("*")
+        return this.tools.includes(toolId) || this.tools.includes('*');
       }
       // Default: allow all
-      return true
+      return true;
     },
-  }
+  };
 }
 
 // Built-in agent prompts
@@ -67,7 +67,7 @@ Key behaviors:
 When editing code:
 - Read the file first to understand context
 - Make minimal, focused changes
-- Preserve existing code style and formatting`
+- Preserve existing code style and formatting`;
 
 const debugAgentPrompt = `You are a debugging specialist focused on finding and fixing issues in code.
 
@@ -82,7 +82,7 @@ Key behaviors:
 - Ask clarifying questions about error messages and reproduction steps
 - Use search tools to find related code and patterns
 - Consider edge cases and error handling
-- Check for similar issues elsewhere in the codebase`
+- Check for similar issues elsewhere in the codebase`;
 
 const planAgentPrompt = `You are a technical planning specialist who creates detailed implementation plans.
 
@@ -97,7 +97,7 @@ Output format:
 - Use numbered lists for sequential steps
 - Include file paths when relevant
 - Note any questions or assumptions
-- Highlight risks and mitigation strategies`
+- Highlight risks and mitigation strategies`;
 
 const exploreAgentPrompt = `You are a codebase exploration specialist optimized for quickly finding and understanding code.
 
@@ -108,7 +108,7 @@ Your focus:
 4. Follow imports and dependencies
 5. Summarize findings concisely
 
-Keep explorations focused and efficient. Return specific file paths and line numbers.`
+Keep explorations focused and efficient. Return specific file paths and line numbers.`;
 
 const orchestratorPrompt = `You are an orchestrator agent that coordinates work across multiple specialized agents.
 
@@ -122,66 +122,66 @@ Available agents you can delegate to:
 - @code - General code implementation
 - @debug - Debugging and fixing issues
 - @plan - Creating detailed plans
-- @explore - Finding and understanding code`
+- @explore - Finding and understanding code`;
 
 // Built-in agents
 export const builtInAgents: AgentConfig[] = [
   {
-    id: "code",
-    name: "Code Agent",
-    description: "General-purpose coding agent for implementation tasks",
-    mode: "all",
+    id: 'code',
+    name: 'Code Agent',
+    description: 'General-purpose coding agent for implementation tasks',
+    mode: 'all',
     systemPrompt: codeAgentPrompt,
-    aliases: ["c", "default"],
+    aliases: ['c', 'default'],
   },
   {
-    id: "debug",
-    name: "Debug Agent",
-    description: "Specialized for debugging and fixing issues",
-    mode: "all",
+    id: 'debug',
+    name: 'Debug Agent',
+    description: 'Specialized for debugging and fixing issues',
+    mode: 'all',
     systemPrompt: debugAgentPrompt,
-    aliases: ["d", "fix"],
+    aliases: ['d', 'fix'],
   },
   {
-    id: "plan",
-    name: "Plan Agent",
-    description: "Creates detailed implementation plans",
-    mode: "all",
+    id: 'plan',
+    name: 'Plan Agent',
+    description: 'Creates detailed implementation plans',
+    mode: 'all',
     systemPrompt: planAgentPrompt,
-    aliases: ["p", "architect"],
-    tools: ["read", "glob", "grep", "webfetch"], // Read-only tools
+    aliases: ['p', 'architect'],
+    tools: ['read', 'glob', 'grep', 'webfetch'], // Read-only tools
   },
   {
-    id: "explore",
-    name: "Explore Agent",
-    description: "Fast codebase exploration and search",
-    mode: "subagent",
+    id: 'explore',
+    name: 'Explore Agent',
+    description: 'Fast codebase exploration and search',
+    mode: 'subagent',
     systemPrompt: exploreAgentPrompt,
-    aliases: ["e", "search"],
-    tools: ["read", "glob", "grep"],
+    aliases: ['e', 'search'],
+    tools: ['read', 'glob', 'grep'],
     temperature: 0.2, // Lower temperature for factual responses
   },
   {
-    id: "orchestrator",
-    name: "Orchestrator Agent",
-    description: "Coordinates work across multiple agents",
-    mode: "primary",
+    id: 'orchestrator',
+    name: 'Orchestrator Agent',
+    description: 'Coordinates work across multiple agents',
+    mode: 'primary',
     systemPrompt: orchestratorPrompt,
-    aliases: ["o", "main"],
-    tools: ["task"], // Can only delegate
+    aliases: ['o', 'main'],
+    tools: ['task'], // Can only delegate
   },
-]
+];
 
 // Agent registry
 class AgentRegistry {
-  private agents: Map<string, Agent> = new Map()
-  private aliasMap: Map<string, string> = new Map()
-  private currentAgentId: string = "code"
+  private agents: Map<string, Agent> = new Map();
+  private aliasMap: Map<string, string> = new Map();
+  private currentAgentId: string = 'code';
 
   constructor() {
     // Register built-in agents
     for (const config of builtInAgents) {
-      this.register(config)
+      this.register(config);
     }
   }
 
@@ -189,46 +189,46 @@ class AgentRegistry {
    * Register an agent
    */
   register(config: AgentConfig): Agent {
-    const validated = AgentSchema.parse(config)
-    const agent = createAgent(validated)
-    this.agents.set(agent.id, agent)
+    const validated = AgentSchema.parse(config);
+    const agent = createAgent(validated);
+    this.agents.set(agent.id, agent);
 
     // Register aliases
     if (agent.aliases) {
       for (const alias of agent.aliases) {
-        this.aliasMap.set(alias.toLowerCase(), agent.id)
+        this.aliasMap.set(alias.toLowerCase(), agent.id);
       }
     }
     // Also register id as alias
-    this.aliasMap.set(agent.id.toLowerCase(), agent.id)
+    this.aliasMap.set(agent.id.toLowerCase(), agent.id);
 
-    return agent
+    return agent;
   }
 
   /**
    * Get agent by id or alias
    */
   get(idOrAlias: string): Agent | undefined {
-    const id = this.aliasMap.get(idOrAlias.toLowerCase()) ?? idOrAlias
-    return this.agents.get(id)
+    const id = this.aliasMap.get(idOrAlias.toLowerCase()) ?? idOrAlias;
+    return this.agents.get(id);
   }
 
   /**
    * Get current agent
    */
   getCurrent(): Agent {
-    return this.agents.get(this.currentAgentId) ?? this.agents.get("code")!
+    return this.agents.get(this.currentAgentId) ?? this.agents.get('code')!;
   }
 
   /**
    * Switch to a different agent
    */
   switchTo(idOrAlias: string, reason?: string): Agent | null {
-    const agent = this.get(idOrAlias)
-    if (!agent) return null
+    const agent = this.get(idOrAlias);
+    if (!agent) return null;
 
-    const fromId = this.currentAgentId
-    this.currentAgentId = agent.id
+    const fromId = this.currentAgentId;
+    this.currentAgentId = agent.id;
 
     // Publish event
     AgentSwitched.publish({
@@ -236,20 +236,20 @@ class AgentRegistry {
       to: agent.id,
       reason,
       timestamp: Date.now(),
-    })
+    });
 
-    return agent
+    return agent;
   }
 
   /**
    * List all agents
    */
   list(mode?: AgentMode): Agent[] {
-    const agents = Array.from(this.agents.values())
+    const agents = Array.from(this.agents.values());
     if (mode) {
-      return agents.filter((a) => a.mode === mode || a.mode === "all")
+      return agents.filter((a) => a.mode === mode || a.mode === 'all');
     }
-    return agents
+    return agents;
   }
 
   /**
@@ -258,48 +258,48 @@ class AgentRegistry {
    */
   parseAndSwitch(message: string): { message: string; switched: boolean; agent?: Agent } {
     // Match @agent at start of message
-    const match = message.match(/^@(\w+)\s*(.*)$/s)
+    const match = message.match(/^@(\w+)\s*(.*)$/s);
     if (!match) {
-      return { message, switched: false }
+      return { message, switched: false };
     }
 
-    const [, agentRef, rest] = match
-    const agent = this.get(agentRef)
+    const [, agentRef, rest] = match;
+    const agent = this.get(agentRef);
 
     if (agent) {
-      this.switchTo(agent.id, `User requested via @${agentRef}`)
-      return { message: rest.trim() || message, switched: true, agent }
+      this.switchTo(agent.id, `User requested via @${agentRef}`);
+      return { message: rest.trim() || message, switched: true, agent };
     }
 
     // Unknown agent reference, keep original message
-    return { message, switched: false }
+    return { message, switched: false };
   }
 }
 
 // Global registry instance
-let globalRegistry: AgentRegistry | null = null
+let globalRegistry: AgentRegistry | null = null;
 
 export function getAgentRegistry(): AgentRegistry {
   if (!globalRegistry) {
-    globalRegistry = new AgentRegistry()
+    globalRegistry = new AgentRegistry();
   }
-  return globalRegistry
+  return globalRegistry;
 }
 
 export function getCurrentAgent(): Agent {
-  return getAgentRegistry().getCurrent()
+  return getAgentRegistry().getCurrent();
 }
 
 export function switchAgent(idOrAlias: string, reason?: string): Agent | null {
-  return getAgentRegistry().switchTo(idOrAlias, reason)
+  return getAgentRegistry().switchTo(idOrAlias, reason);
 }
 
 export function parseAgentSwitch(message: string): {
-  message: string
-  switched: boolean
-  agent?: Agent
+  message: string;
+  switched: boolean;
+  agent?: Agent;
 } {
-  return getAgentRegistry().parseAndSwitch(message)
+  return getAgentRegistry().parseAndSwitch(message);
 }
 
 /**
@@ -307,21 +307,21 @@ export function parseAgentSwitch(message: string): {
  * Returns agent ID and cleaned message
  */
 export function parseAgentMention(message: string): {
-  agentId: string | null
-  cleanMessage: string
+  agentId: string | null;
+  cleanMessage: string;
 } {
-  const match = message.match(/^@(\w+)\s*(.*)$/s)
+  const match = message.match(/^@(\w+)\s*(.*)$/s);
   if (!match) {
-    return { agentId: null, cleanMessage: message }
+    return { agentId: null, cleanMessage: message };
   }
 
-  const [, agentRef, rest] = match
-  const registry = getAgentRegistry()
-  const agent = registry.get(agentRef)
+  const [, agentRef, rest] = match;
+  const registry = getAgentRegistry();
+  const agent = registry.get(agentRef);
 
   if (agent) {
-    return { agentId: agent.id, cleanMessage: rest.trim() || message }
+    return { agentId: agent.id, cleanMessage: rest.trim() || message };
   }
 
-  return { agentId: null, cleanMessage: message }
+  return { agentId: null, cleanMessage: message };
 }

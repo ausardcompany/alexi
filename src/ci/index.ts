@@ -88,10 +88,10 @@ export class CIManager {
     };
 
     const outputDir = options.outputDir || process.cwd();
-    
+
     // Get templates to generate
     let templatesToGenerate: CITemplate[];
-    
+
     if (options.template) {
       // Generate specific template
       const template = getTemplate(options.platform, options.template);
@@ -109,7 +109,7 @@ export class CIManager {
     for (const template of templatesToGenerate) {
       try {
         const outputPath = path.join(outputDir, template.outputPath);
-        
+
         // Check if file exists
         if (fs.existsSync(outputPath)) {
           if (options.overwrite) {
@@ -141,12 +141,12 @@ export class CIManager {
    */
   private writeTemplate(filePath: string, content: string): void {
     const dir = path.dirname(filePath);
-    
+
     // Create directory if it doesn't exist
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    
+
     // Write file
     fs.writeFileSync(filePath, content, 'utf-8');
   }
@@ -185,12 +185,12 @@ export class CIManager {
    */
   getRequiredSecrets(template: CITemplate): string[] {
     const secrets: string[] = [];
-    
+
     if (template.platform === 'github') {
       secrets.push('SAP_AICORE_SERVICE_KEY');
       secrets.push('SAP_PROXY_BASE_URL (alternative)');
       secrets.push('SAP_PROXY_API_KEY (optional)');
-      
+
       if (template.type === 'feature-implement') {
         secrets.push('GITHUB_TOKEN (automatic)');
       }
@@ -198,12 +198,12 @@ export class CIManager {
       secrets.push('SAP_AICORE_SERVICE_KEY');
       secrets.push('SAP_PROXY_BASE_URL (alternative)');
       secrets.push('SAP_PROXY_API_KEY (optional)');
-      
+
       if (template.type === 'pr-review') {
         secrets.push('GITLAB_TOKEN (for posting comments)');
       }
     }
-    
+
     return secrets;
   }
 }
@@ -242,14 +242,14 @@ export { ALL_TEMPLATES };
  */
 export function formatInitResultForCLI(result: CIInitResult): string {
   const lines: string[] = [];
-  
+
   if (result.created.length > 0) {
     lines.push('Created files:');
     for (const file of result.created) {
       lines.push(`  + ${file}`);
     }
   }
-  
+
   if (result.skipped.length > 0) {
     if (lines.length > 0) lines.push('');
     lines.push('Skipped files (already exist, use --overwrite to replace):');
@@ -257,7 +257,7 @@ export function formatInitResultForCLI(result: CIInitResult): string {
       lines.push(`  - ${file}`);
     }
   }
-  
+
   if (result.errors.length > 0) {
     if (lines.length > 0) lines.push('');
     lines.push('Errors:');
@@ -265,11 +265,11 @@ export function formatInitResultForCLI(result: CIInitResult): string {
       lines.push(`  ! ${error}`);
     }
   }
-  
+
   if (result.created.length === 0 && result.skipped.length === 0 && result.errors.length === 0) {
     lines.push('No templates found for the specified options.');
   }
-  
+
   return lines.join('\n');
 }
 
@@ -280,22 +280,22 @@ export function formatInitResultForCLI(result: CIInitResult): string {
  */
 export function formatTemplateListForCLI(templates: CITemplate[]): string {
   const lines: string[] = [];
-  
+
   const manager = getCIManager();
-  
+
   // Group by platform
   const byPlatform = new Map<CIPlatform, CITemplate[]>();
-  
+
   for (const template of templates) {
     const platformTemplates = byPlatform.get(template.platform) || [];
     platformTemplates.push(template);
     byPlatform.set(template.platform, platformTemplates);
   }
-  
+
   for (const [platform, platformTemplates] of byPlatform) {
     lines.push(`${manager.getPlatformDisplayName(platform)}:`);
     lines.push('');
-    
+
     for (const template of platformTemplates) {
       lines.push(`  ${template.id}`);
       lines.push(`    Type: ${manager.getTypeDisplayName(template.type)}`);
@@ -304,7 +304,7 @@ export function formatTemplateListForCLI(templates: CITemplate[]): string {
       lines.push('');
     }
   }
-  
+
   return lines.join('\n');
 }
 
@@ -316,7 +316,7 @@ export function formatTemplateListForCLI(templates: CITemplate[]): string {
 export function formatTemplatePreviewForCLI(template: CITemplate): string {
   const manager = getCIManager();
   const lines: string[] = [];
-  
+
   lines.push(`Template: ${template.name}`);
   lines.push(`Platform: ${manager.getPlatformDisplayName(template.platform)}`);
   lines.push(`Type: ${manager.getTypeDisplayName(template.type)}`);
@@ -330,6 +330,6 @@ export function formatTemplatePreviewForCLI(template: CITemplate): string {
   lines.push('--- Template Content ---');
   lines.push('');
   lines.push(template.content);
-  
+
   return lines.join('\n');
 }

@@ -37,12 +37,8 @@ export class SessionManager {
   private activeSession: Session | null = null;
 
   constructor(sessionsDir?: string) {
-    this.sessionsDir = sessionsDir || path.join(
-      process.env.HOME || '~',
-      '.alexi',
-      'sessions'
-    );
-    
+    this.sessionsDir = sessionsDir || path.join(process.env.HOME || '~', '.alexi', 'sessions');
+
     // Ensure sessions directory exists
     if (!fs.existsSync(this.sessionsDir)) {
       fs.mkdirSync(this.sessionsDir, { recursive: true });
@@ -60,14 +56,14 @@ export class SessionManager {
         updated: Date.now(),
         modelId,
         totalTokens: 0,
-        messageCount: 0
+        messageCount: 0,
       },
-      messages: []
+      messages: [],
     };
 
     this.activeSession = session;
     this.saveSession(session);
-    
+
     return session;
   }
 
@@ -76,7 +72,7 @@ export class SessionManager {
    */
   loadSession(sessionId: string): Session | null {
     const sessionPath = path.join(this.sessionsDir, `${sessionId}.json`);
-    
+
     try {
       if (!fs.existsSync(sessionPath)) {
         return null;
@@ -84,7 +80,7 @@ export class SessionManager {
 
       const content = fs.readFileSync(sessionPath, 'utf-8');
       const session = JSON.parse(content) as Session;
-      
+
       this.activeSession = session;
       return session;
     } catch (error) {
@@ -98,7 +94,7 @@ export class SessionManager {
    */
   private saveSession(session: Session): void {
     const sessionPath = path.join(this.sessionsDir, `${session.metadata.id}.json`);
-    
+
     try {
       fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
     } catch (error) {
@@ -118,13 +114,13 @@ export class SessionManager {
       role,
       content,
       timestamp: Date.now(),
-      tokens
+      tokens,
     };
 
     this.activeSession!.messages.push(message);
     this.activeSession!.metadata.updated = Date.now();
     this.activeSession!.metadata.messageCount++;
-    
+
     if (tokens) {
       this.activeSession!.metadata.totalTokens += (tokens.input || 0) + (tokens.output || 0);
     }
@@ -154,12 +150,12 @@ export class SessionManager {
     }
 
     const messages = this.activeSession.messages;
-    
+
     if (maxMessages && messages.length > maxMessages) {
       // Keep system messages and last N messages
-      const systemMessages = messages.filter(m => m.role === 'system');
+      const systemMessages = messages.filter((m) => m.role === 'system');
       const recentMessages = messages.slice(-maxMessages);
-      
+
       return [...systemMessages, ...recentMessages];
     }
 
@@ -180,7 +176,7 @@ export class SessionManager {
         const sessionPath = path.join(this.sessionsDir, file);
         const content = fs.readFileSync(sessionPath, 'utf-8');
         const session = JSON.parse(content) as Session;
-        
+
         sessions.push(session.metadata);
       }
 
@@ -199,15 +195,15 @@ export class SessionManager {
    */
   deleteSession(sessionId: string): boolean {
     const sessionPath = path.join(this.sessionsDir, `${sessionId}.json`);
-    
+
     try {
       if (fs.existsSync(sessionPath)) {
         fs.unlinkSync(sessionPath);
-        
+
         if (this.activeSession?.metadata.id === sessionId) {
           this.activeSession = null;
         }
-        
+
         return true;
       }
       return false;
@@ -228,9 +224,7 @@ export class SessionManager {
    * Export session to markdown
    */
   exportToMarkdown(sessionId?: string): string {
-    const session = sessionId 
-      ? this.loadSession(sessionId) 
-      : this.activeSession;
+    const session = sessionId ? this.loadSession(sessionId) : this.activeSession;
 
     if (!session) {
       return '# No session found\n';
@@ -247,7 +241,7 @@ export class SessionManager {
       const timestamp = new Date(message.timestamp).toLocaleString();
       markdown += `## ${message.role.toUpperCase()} (${timestamp})\n\n`;
       markdown += `${message.content}\n\n`;
-      
+
       if (message.tokens) {
         markdown += `*Tokens: ${message.tokens.input || 0} in / ${message.tokens.output || 0} out*\n\n`;
       }
@@ -269,15 +263,14 @@ export class SessionManager {
 
     const { metadata } = this.activeSession;
     const duration = metadata.updated - metadata.created;
-    const avgTokensPerMessage = metadata.messageCount > 0 
-      ? metadata.totalTokens / metadata.messageCount 
-      : 0;
+    const avgTokensPerMessage =
+      metadata.messageCount > 0 ? metadata.totalTokens / metadata.messageCount : 0;
 
     return {
       messageCount: metadata.messageCount,
       totalTokens: metadata.totalTokens,
       avgTokensPerMessage: Math.round(avgTokensPerMessage),
-      duration
+      duration,
     };
   }
 }
