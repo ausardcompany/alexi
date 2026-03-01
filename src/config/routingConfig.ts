@@ -57,10 +57,18 @@ const DEFAULT_CONFIG: RoutingConfig = {
       reasoning: false
     },
     {
-      id: 'claude-3.5-sonnet',
+      id: 'anthropic--claude-4.5-sonnet',
       type: 'claude',
       costTier: 'medium',
       strengths: ['coding', 'analysis', 'long-context', 'technical-writing'],
+      maxTokens: 200000,
+      reasoning: false
+    },
+    {
+      id: 'anthropic--claude-4.5-haiku',
+      type: 'claude',
+      costTier: 'cheap',
+      strengths: ['simple-qa', 'classification', 'extraction', 'summarization'],
       maxTokens: 200000,
       reasoning: false
     },
@@ -73,7 +81,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
       reasoning: true
     },
     {
-      id: 'claude-4-sonnet',
+      id: 'anthropic--claude-4.5-opus',
       type: 'claude',
       costTier: 'expensive',
       strengths: ['deep-reasoning', 'complex-analysis', 'long-context', 'research'],

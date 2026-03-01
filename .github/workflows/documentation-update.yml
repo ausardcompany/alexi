@@ -466,18 +466,16 @@ jobs:
       - name: Run documentation generation with own CLI
         if: steps.check_needed.outputs.skip != 'true'
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         id: bot
         continue-on-error: true
         run: |
           echo "Running Alexi CLI with SAP AI Core..."
           
-          # Read prompt from file and run with own CLI
-          PROMPT=$(cat kilo-prompt.md)
-          
+          # Use --message-file to avoid shell escaping issues with complex prompts
           node dist/cli/program.js chat \
-            --message "$PROMPT" \
+            --message-file kilo-prompt.md \
             --auto-route \
             --system "You are an expert technical writer generating documentation. Follow the instructions exactly and update the files directly. Output only the documentation changes." \
             > bot-output.log 2>&1
@@ -545,7 +543,7 @@ jobs:
         if: steps.check_needed.outputs.skip != 'true' && steps.bot.outputs.success == 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${​{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             
@@ -574,7 +572,7 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${​{ steps.pr_number.outputs.pr_number }},
+              issue_number: ${{ steps.pr_number.outputs.pr_number }},
               body: comment
             });
       
@@ -582,7 +580,7 @@ jobs:
         if: steps.check_needed.outputs.skip != 'true' && steps.bot.outputs.success == 'false'
         uses: actions/github-script@v7
         with:
-          github-token: ${​{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             
@@ -597,29 +595,29 @@ jobs:
             
             comment += '### Manual Documentation Checklist\\n\\n';
             
-            if ('${​{ steps.analyze.outputs.cli_changed }}' === 'true' || '${​{ steps.analyze.outputs.core_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.cli_changed }}' === 'true' || '${{ steps.analyze.outputs.core_changed }}' === 'true') {
               comment += '- [ ] Update `docs/ARCHITECTURE.md`\\n';
               comment += '- [ ] Update `docs/API.md`\\n';
               comment += '- [ ] Add/update Mermaid diagrams (minimum 3)\\n';
             }
             
-            if ('${​{ steps.analyze.outputs.routing_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.routing_changed }}' === 'true') {
               comment += '- [ ] Update `docs/ROUTING.md`\\n';
             }
             
-            if ('${​{ steps.analyze.outputs.providers_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.providers_changed }}' === 'true') {
               comment += '- [ ] Update `docs/PROVIDERS.md`\\n';
             }
             
-            if ('${​{ steps.analyze.outputs.config_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.config_changed }}' === 'true') {
               comment += '- [ ] Update `docs/CONFIGURATION.md`\\n';
             }
             
-            if ('${​{ steps.analyze.outputs.tests_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.tests_changed }}' === 'true') {
               comment += '- [ ] Update `docs/TESTING.md`\\n';
             }
             
-            if ('${​{ steps.analyze.outputs.workflows_changed }}' === 'true' || '${​{ steps.analyze.outputs.scripts_changed }}' === 'true') {
+            if ('${{ steps.analyze.outputs.workflows_changed }}' === 'true' || '${{ steps.analyze.outputs.scripts_changed }}' === 'true') {
               comment += '- [ ] Update `docs/AUTOMATION.md`\\n';
             }
             
@@ -632,7 +630,7 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${​{ steps.pr_number.outputs.pr_number }},
+              issue_number: ${{ steps.pr_number.outputs.pr_number }},
               body: comment
             });
       
