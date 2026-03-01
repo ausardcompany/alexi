@@ -67,6 +67,7 @@ export const OUR_FEATURES = {
     'skill',
     'question',
     'diagnostics',
+    'codesearch',
   ],
   providers: ['sap-ai-core'],
   commands: [

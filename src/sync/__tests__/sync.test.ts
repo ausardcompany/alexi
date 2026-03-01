@@ -304,9 +304,9 @@ describe('FeatureAnalyzer', () => {
 
       const toolGaps = result.featureGaps.filter((g) => g.category === 'tool');
 
-      // Should find codesearch as a gap (we don't have it)
-      const codesearchGap = toolGaps.find((g) => g.feature === 'codesearch');
-      expect(codesearchGap).toBeDefined();
+      // Should find apply_patch as a gap (we don't have it)
+      const applyPatchGap = toolGaps.find((g) => g.feature === 'apply_patch');
+      expect(applyPatchGap).toBeDefined();
     });
   });
 
