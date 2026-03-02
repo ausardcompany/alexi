@@ -13,19 +13,21 @@ Thank you for your interest in contributing to Alexi! This document provides gui
 - [Documentation](#documentation)
 - [Automation System](#automation-system)
 
+---
+
 ## Code of Conduct
 
 This project follows a professional code of conduct. We expect all contributors to:
-
 - Be respectful and inclusive
 - Provide constructive feedback
 - Focus on technical merit
 - Maintain professional communication
 
+---
+
 ## Getting Started
 
 ### Prerequisites
-
 - Node.js 22 or higher
 - npm or yarn package manager
 - Git
@@ -33,39 +35,32 @@ This project follows a professional code of conduct. We expect all contributors 
 - TypeScript knowledge
 
 ### Initial Setup
-
 1. Fork the repository on GitHub
 2. Clone your fork locally:
-   ```bash
-   git clone git@github.com:YOUR_USERNAME/sap-bot-orchestrator.git
-   cd sap-bot-orchestrator
-   ```
-
+    ```bash
+    git clone git@github.com:YOUR_USERNAME/sap-bot-orchestrator.git
+    cd sap-bot-orchestrator
+    ```
 3. Install dependencies:
-   ```bash
-   npm install
-   ```
-
+    ```bash
+    npm install
+    ```
 4. Configure environment variables:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your SAP AI Core credentials
-   ```
-
+    ```bash
+    cp .env.example .env
+    # Edit .env with your SAP AI Core credentials
+    ```
 5. Build the project:
-   ```bash
-   npm run build
-   ```
-
+    ```bash
+    npm run build
+    ```
 6. Verify the setup:
-   ```bash
-   node dist/cli/program.js --help
-   ```
+    ```bash
+    node dist/cli/program.js --help
+    ```
 
 ### Environment Configuration
-
 Create a `.env` file (never commit this file) with:
-
 ```bash
 # Proxy configuration (for OpenAI-compatible models)
 SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
@@ -77,10 +72,11 @@ AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceu
 AICORE_RESOURCE_GROUP=your-resource-group-id
 ```
 
+---
+
 ## Development Workflow
 
 ### Branch Strategy
-
 - `main`: Production-ready code
 - `feature/*`: New features
 - `fix/*`: Bug fixes
@@ -90,7 +86,7 @@ AICORE_RESOURCE_GROUP=your-resource-group-id
 ### Development Process
 
 ```mermaid
-graph LR
+flowchart LR
     A[Create Branch] --> B[Make Changes]
     B --> C[Write Tests]
     C --> D[Run Tests]
@@ -104,104 +100,89 @@ graph LR
 ```
 
 1. Create a feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
+    ```bash
+    git checkout -b feature/your-feature-name
+    ```
 2. Make your changes following coding standards
-
 3. Write or update tests for your changes
-
 4. Run tests locally:
-   ```bash
-   npm test
-   ```
-
+    ```bash
+    npm test
+    ```
 5. Build and verify:
-   ```bash
-   npm run build
-   npm run lint
-   ```
-
+    ```bash
+    npm run build
+    npm run lint
+    ```
 6. Commit your changes with descriptive messages:
-   ```bash
-   git add .
-   git commit -m "feat: add new feature description"
-   ```
-
+    ```bash
+    git add .
+    git commit -m "feat: add new feature description"
+    ```
 7. Push to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
+    ```bash
+    git push origin feature/your-feature-name
+    ```
 8. Create a pull request on GitHub
+
+---
 
 ## Coding Standards
 
 ### TypeScript Guidelines
-
 1. **Type Safety**: Always use explicit types, avoid `any`
-   ```typescript
-   // Good
-   function processMessage(message: string): Promise<Response> {
-     // ...
-   }
-   
-   // Bad
-   function processMessage(message: any): any {
-     // ...
-   }
-   ```
-
+    ```typescript
+    // Good
+    function processMessage(message: string): Promise<Response> {
+      // ...
+    }
+    // Bad
+    function processMessage(message: any): any {
+      // ...
+    }
+    ```
 2. **Interfaces over Types**: Prefer interfaces for object shapes
-   ```typescript
-   // Good
-   interface ToolContext {
-     workdir: string;
-     signal?: AbortSignal;
-   }
-   
-   // Acceptable for unions/intersections
-   type PermissionAction = 'read' | 'write' | 'execute';
-   ```
-
+    ```typescript
+    // Good
+    interface ToolContext {
+      workdir: string;
+      signal?: AbortSignal;
+    }
+    // Acceptable for unions/intersections
+    type PermissionAction = 'read' | 'write' | 'execute';
+    ```
 3. **Async/Await**: Use async/await over raw promises
-   ```typescript
-   // Good
-   async function fetchData(): Promise<Data> {
-     const response = await fetch(url);
-     return await response.json();
-   }
-   
-   // Avoid
-   function fetchData(): Promise<Data> {
-     return fetch(url).then(r => r.json());
-   }
-   ```
-
+    ```typescript
+    // Good
+    async function fetchData(): Promise<Data> {
+      const response = await fetch(url);
+      return await response.json();
+    }
+    // Avoid
+    function fetchData(): Promise<Data> {
+      return fetch(url).then(r => r.json());
+    }
+    ```
 4. **Error Handling**: Always handle errors appropriately
-   ```typescript
-   try {
-     const result = await riskyOperation();
-     return { success: true, data: result };
-   } catch (err) {
-     const message = err instanceof Error ? err.message : String(err);
-     return { success: false, error: message };
-   }
-   ```
-
+    ```typescript
+    try {
+      const result = await riskyOperation();
+      return { success: true, data: result };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: message };
+    }
+    ```
 5. **Null Safety**: Use optional chaining and nullish coalescing
-   ```typescript
-   // Good
-   const value = context?.workdir ?? process.cwd();
-   
-   // Avoid
-   const value = context && context.workdir ? context.workdir : process.cwd();
-   ```
+    ```typescript
+    // Good
+    const value = context?.workdir ?? process.cwd();
+    // Avoid
+    const value = context && context.workdir ? context.workdir : process.cwd();
+    ```
 
 ### File Organization
-
-```
+```text
 src/
 ├── cli/              # CLI-related code
 │   ├── program.ts    # Main CLI entry point
@@ -224,7 +205,6 @@ src/
 ```
 
 ### Naming Conventions
-
 - **Files**: camelCase for TypeScript files (`orchestrator.ts`)
 - **Classes**: PascalCase (`class ToolRegistry`)
 - **Functions**: camelCase (`function defineTool()`)
@@ -233,7 +213,6 @@ src/
 - **Types**: PascalCase (`type PermissionAction`)
 
 ### Code Style
-
 - Use 2 spaces for indentation
 - Maximum line length: 100 characters (flexible for readability)
 - Use single quotes for strings
@@ -241,13 +220,11 @@ src/
 - Use semicolons
 
 ### Documentation Comments
-
 Use JSDoc for functions and classes:
-
 ```typescript
 /**
  * Define a new tool with lazy initialization
- * 
+ *
  * @param definition - Tool definition with parameters and execution logic
  * @returns Tool instance with execution methods
  */
@@ -258,10 +235,11 @@ export function defineTool<TParams extends z.ZodType, TResult>(
 }
 ```
 
+---
+
 ## Testing Guidelines
 
 ### Test Structure
-
 - Place tests next to the code they test: `tool.test.ts` next to `tool.ts`
 - Use descriptive test names
 - Follow Arrange-Act-Assert pattern
@@ -280,10 +258,8 @@ describe('defineTool', () => {
       },
       execute: async () => ({ success: true }),
     };
-    
     // Act
     const tool = defineTool(definition);
-    
     // Assert
     expect(tool.name).toBe('test-tool');
     expect(tool.toFunctionSchema()).toBeDefined();
@@ -292,25 +268,22 @@ describe('defineTool', () => {
 ```
 
 ### Running Tests
-
 ```bash
 # Run all tests
 npm test
-
 # Run specific test file
 npm test -- tool.test.ts
-
 # Run with coverage
 npm test -- --coverage
-
 # Watch mode
 npm test -- --watch
 ```
 
+---
+
 ## Pull Request Process
 
 ### Before Submitting
-
 1. Ensure all tests pass
 2. Update relevant documentation
 3. Add entries to CHANGELOG.md if needed
@@ -318,9 +291,7 @@ npm test -- --watch
 5. Run linter and fix issues
 
 ### PR Title Format
-
 Use conventional commit format:
-
 - `feat: add new feature`
 - `fix: resolve bug in tool system`
 - `docs: update API documentation`
@@ -329,9 +300,7 @@ Use conventional commit format:
 - `chore: update dependencies`
 
 ### PR Description
-
 Include:
-
 1. **Summary**: Brief description of changes
 2. **Motivation**: Why this change is needed
 3. **Changes**: List of specific changes made
@@ -339,14 +308,12 @@ Include:
 5. **Screenshots**: If UI changes (not applicable for CLI)
 
 Example:
-
 ```markdown
 ## Summary
 Enhanced write and edit tools with relative path resolution for permission checks.
 
 ## Motivation
-In CI environments, the agentic system needs to resolve relative paths correctly
-for permission checks to work with the workdir context.
+In CI environments, the agentic system needs to resolve relative paths correctly for permission checks to work with the workdir context.
 
 ## Changes
 - Modified `getResource` in write.ts to accept ToolContext parameter
@@ -361,15 +328,13 @@ for permission checks to work with the workdir context.
 ```
 
 ### Automated Checks
-
 Pull requests trigger automated workflows:
-
 1. **CI**: Runs tests, linting, and build verification
 2. **Documentation Update**: AI-powered documentation generation
-   - Analyzes code changes
-   - Updates relevant documentation files
-   - Generates Mermaid diagrams
-   - Updates CHANGELOG.md
+    - Analyzes code changes
+    - Updates relevant documentation files
+    - Generates Mermaid diagrams
+    - Updates CHANGELOG.md
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
@@ -378,7 +343,6 @@ The documentation update workflow will automatically:
 - Ensure documentation stays in sync with code
 
 ### Code Review
-
 All PRs require:
 - At least one approval from a maintainer
 - Passing CI checks
@@ -392,25 +356,26 @@ Reviewers will check:
 - Performance implications
 - Security considerations
 
+---
+
 ## Documentation
 
 ### Documentation Files
 
-| File | Purpose |
-|------|---------|
-| `README.md` | Project overview and quick start |
-| `docs/ARCHITECTURE.md` | System architecture and design |
-| `docs/API.md` | API reference and usage examples |
-| `docs/ROUTING.md` | Routing system documentation |
-| `docs/PROVIDERS.md` | Provider integration guide |
-| `docs/CONFIGURATION.md` | Configuration options |
-| `docs/TESTING.md` | Testing guide |
-| `docs/AUTOMATION.md` | CI/CD and automation |
-| `docs/CONTRIBUTING.md` | This file |
-| `CHANGELOG.md` | Version history |
+| File                         | Purpose                                 |
+|------------------------------|-----------------------------------------|
+| `README.md`                  | Project overview and quick start        |
+| `docs/ARCHITECTURE.md`       | System architecture and design          |
+| `docs/API.md`                | API reference and usage examples        |
+| `docs/ROUTING.md`            | Routing system documentation            |
+| `docs/PROVIDERS.md`          | Provider integration guide              |
+| `docs/CONFIGURATION.md`      | Configuration options                   |
+| `docs/TESTING.md`            | Testing guide                           |
+| `docs/AUTOMATION.md`         | CI/CD and automation                    |
+| `docs/CONTRIBUTING.md`       | This file                               |
+| `CHANGELOG.md`               | Version history                         |
 
 ### Documentation Standards
-
 1. Use clear, technical language
 2. Include code examples from actual codebase
 3. Add Mermaid diagrams for complex concepts
@@ -418,20 +383,19 @@ Reviewers will check:
 5. Use proper markdown formatting
 
 ### Mermaid Diagrams
-
 Include at least 3 Mermaid diagrams in major documentation:
-
 ```mermaid
-graph TD
+flowchart TD
     A[Start] --> B[Process]
     B --> C[End]
 ```
-
 Supported diagram types:
-- Flowcharts (`graph`)
+- Flowcharts (`graph`, `flowchart`)
 - Sequence diagrams (`sequenceDiagram`)
 - Class diagrams (`classDiagram`)
 - State diagrams (`stateDiagram`)
+
+---
 
 ## Automation System
 
@@ -440,16 +404,18 @@ Supported diagram types:
 Alexi includes an autonomous upstream synchronization system:
 
 ```mermaid
-graph LR
-    A[Daily Schedule] --> B[Sync Forks]
-    B --> C[Analyze Changes]
-    C --> D[Generate Plan]
-    D --> E[Execute Updates]
-    E --> F[Create PR]
-    F --> G[Auto-Merge]
+sequenceDiagram
+    participant Scheduler
+    participant Sync
+    participant AI
+    participant Repo
+    Scheduler->>Sync: Trigger (daily)
+    Sync->>AI: Analyze upstream
+    AI->>Repo: Update code/docs
+    Repo-->>Sync: Create PR
+    Sync->>Scheduler: Auto-merge on CI pass
 ```
 
-The system:
 - Runs daily at 06:00 UTC
 - Syncs from kilocode, opencode, and claude-code repositories
 - Uses AI to analyze and apply relevant changes
@@ -457,52 +423,43 @@ The system:
 - Auto-merges after CI passes
 
 ### Agentic File Operations
-
 The tool system supports autonomous file operations with:
+- **Automatic Permission Configuration**:
+    ```typescript
+    // High-priority allow rules for agentic mode
+    {
+      id: 'agentic-allow-write',
+      priority: 200,
+      actions: ['write'],
+      paths: ['<workdir>/**'],
+      decision: 'allow'
+    }
+    ```
+- **Relative Path Resolution**:
+    ```typescript
+    // Tools resolve relative paths using workdir context
+    getResource: (params, context) => {
+      if (path.isAbsolute(params.filePath)) {
+        return params.filePath;
+      }
+      return path.join(context?.workdir || process.cwd(), params.filePath);
+    }
+    ```
 
-**Automatic Permission Configuration**:
-```typescript
-// High-priority allow rules for agentic mode
-{
-  id: 'agentic-allow-write',
-  priority: 200,
-  actions: ['write'],
-  paths: ['<workdir>/**'],
-  decision: 'allow'
-}
-```
-
-**Relative Path Resolution**:
-```typescript
-// Tools resolve relative paths using workdir context
-getResource: (params, context) => {
-  if (path.isAbsolute(params.filePath)) {
-    return params.filePath;
-  }
-  return path.join(context?.workdir || process.cwd(), params.filePath);
-}
-```
-
-### Contributing to Automation
-
-When modifying workflows:
-
-1. Test with manual dispatch first
-2. Use dry-run mode for sync workflows
-3. Update `docs/AUTOMATION.md`
-4. Document new secrets or configuration
-5. Ensure backward compatibility
+---
 
 ## Getting Help
-
 - Open an issue for bugs or feature requests
 - Join discussions for questions
 - Check existing issues before creating new ones
 - Provide minimal reproducible examples for bugs
 
-## License
+---
 
+## License
 By contributing, you agree that your contributions will be licensed under the same license as the project.
+
+---
 
 ## Recognition
 
