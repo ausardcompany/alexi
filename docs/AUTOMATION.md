@@ -1,387 +1,448 @@
-# Alexi Automation Documentation
+# Automation and CI/CD
 
-This document describes the automated workflows and CI/CD processes in the Alexi project.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [GitHub Actions Workflows](#github-actions-workflows)
-- [Documentation Update Workflow](#documentation-update-workflow)
-- [Workflow Diagrams](#workflow-diagrams)
-- [Required Secrets](#required-secrets)
-- [Local Testing](#local-testing)
+This document describes the GitHub Actions workflows and automation systems in the Alexi project.
 
 ## Overview
 
-Alexi uses GitHub Actions to automate several critical processes:
+Alexi uses GitHub Actions for continuous integration, automated documentation updates, and autonomous upstream synchronization. The automation system consists of multiple workflows that handle different aspects of the development lifecycle.
 
-1. **Documentation Updates**: Automatically generates and updates documentation when code changes are detected
-2. **Autonomous Sync**: Syncs with upstream AI coding assistant repositories
-3. **CI/CD**: Builds, tests, and validates code changes
+## Workflow Architecture
 
-## GitHub Actions Workflows
+```mermaid
+graph TB
+    subgraph Triggers["Workflow Triggers"]
+        PR[Pull Request]
+        Push[Push to main]
+        Schedule[Daily Schedule]
+        Manual[Manual Dispatch]
+    end
+    
+    subgraph Workflows["GitHub Actions Workflows"]
+        DocUpdate[Documentation Update]
+        Sync[Upstream Sync]
+        CI[Continuous Integration]
+        Release[Release Automation]
+    end
+    
+    subgraph Tools["Automation Tools"]
+        Alexi[Alexi CLI]
+        Claude[Claude AI Models]
+        Scripts[Shell Scripts]
+    end
+    
+    PR --> DocUpdate
+    PR --> CI
+    Schedule --> Sync
+    Manual --> Sync
+    Manual --> DocUpdate
+    Push --> Release
+    
+    DocUpdate --> Alexi
+    Sync --> Alexi
+    Alexi --> Claude
+    Sync --> Scripts
+```
 
-### Documentation Update Workflow
+## Workflows
+
+### 1. Documentation Update Workflow
 
 **File**: `.github/workflows/documentation-update.yml`
 
-The documentation update workflow automatically generates and updates documentation files based on code changes in pull requests.
+**Triggers**:
+- Pull request events (opened, synchronize, reopened)
+- Manual workflow dispatch with PR number
 
-#### Triggers
-
-- **Pull Request Events**: Opened, synchronized, or reopened PRs to main/master branches
-- **Manual Dispatch**: Can be triggered manually with PR number and optional force regeneration flag
+**Purpose**: Automatically generates and updates documentation based on code changes in pull requests.
 
 #### Workflow Steps
 
 ```mermaid
-flowchart TB
-    Start([PR Opened/Updated]) --> DeterminePR[Determine PR Number]
-    DeterminePR --> GetBranch[Get PR Branch Name]
-    GetBranch --> Checkout[Checkout PR Branch]
-    Checkout --> FetchBase[Fetch Base Branch]
-    FetchBase --> SetupNode[Setup Node.js 22]
-    SetupNode --> Build[Build Alexi CLI]
-    Build --> VerifyCLI[Verify CLI & SAP AI Core]
-    VerifyCLI --> Analyze[Analyze Changed Files]
-    Analyze --> DetermineScope[Determine Documentation Scope]
-    DetermineScope --> GenerateDiff[Generate Code Diff]
-    GenerateDiff --> GenerateCommitSummary[Generate Commit Summary]
-    GenerateCommitSummary --> CreatePrompt[Create AI Prompt]
-    CreatePrompt --> CallAlexi[Call Alexi Agent]
-    CallAlexi --> CheckChanges{Docs Changed?}
-    CheckChanges -->|Yes| CommitDocs[Commit Documentation]
-    CheckChanges -->|No| Skip[Skip Commit]
-    CommitDocs --> PushChanges[Push to PR Branch]
-    PushChanges --> End([Complete])
-    Skip --> End
+sequenceDiagram
+    participant GH as GitHub Actions
+    participant Repo as Repository
+    participant Alexi as Alexi CLI
+    participant Claude as Claude AI
+    participant Docs as Documentation Files
+    
+    GH->>Repo: Checkout PR branch
+    GH->>Repo: Analyze changed files
+    GH->>GH: Determine documentation scope
+    GH->>Repo: Generate diff summary
+    GH->>Alexi: Build CLI
+    Alexi->>Claude: Send documentation prompt
+    Claude->>Docs: Generate/update docs
+    GH->>Repo: Commit documentation changes
+    GH->>Repo: Push to PR branch
 ```
 
-#### Change Detection Logic
+#### Key Features
 
-The workflow analyzes changed files to determine which documentation needs updating:
+1. **Intelligent Scope Detection**: Analyzes changed files to determine which documentation needs updating
+   - Core/CLI changes trigger `ARCHITECTURE.md` and `API.md` updates
+   - Routing changes trigger `ROUTING.md` updates
+   - Provider changes trigger `PROVIDERS.md` updates
+   - Workflow/script changes trigger `AUTOMATION.md` updates
+   - Always updates `CHANGELOG.md` and `CONTRIBUTING.md`
 
-| Changed Files | Documentation Updated |
-|---------------|----------------------|
-| CLI files (`src/cli/**`) | `docs/ARCHITECTURE.md`, `docs/API.md` |
-| Core files (`src/core/**`) | `docs/ARCHITECTURE.md`, `docs/API.md` |
-| Routing files (`src/router/**`, `routing-config.json`) | `docs/ROUTING.md` |
-| Provider files (`src/providers/**`) | `docs/PROVIDERS.md` |
-| Config files (`*.json`, `.env.example`) | `docs/CONFIGURATION.md` |
-| Test files (`tests/**`, `*.test.ts`) | `docs/TESTING.md` |
-| Workflow files (`.github/workflows/**`) | `docs/AUTOMATION.md` |
-| Script files (`scripts/**`) | `docs/AUTOMATION.md` |
+2. **Code Analysis**: Generates detailed analysis including:
+   - Changed file list with categorization
+   - Commit history since last documentation update
+   - Code diff statistics
+   - TypeScript and configuration change previews
 
-Additionally, `CHANGELOG.md` (in repository root) and `docs/CONTRIBUTING.md` are always updated.
+3. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI to:
+   - Analyze code changes
+   - Update documentation with accurate technical details
+   - Generate Mermaid diagrams
+   - Maintain consistent documentation style
 
-#### File Path Handling
+4. **Force Regeneration**: Manual trigger option to regenerate all documentation
 
-The workflow uses precise file path specifications:
-
-- Most documentation files are in the `docs/` directory (e.g., `docs/ARCHITECTURE.md`)
-- `CHANGELOG.md` is in the repository root (not `docs/`)
-- The scope.md file includes full relative paths to ensure correct file placement
-
-#### AI-Powered Documentation Generation
-
-The workflow uses Alexi's agent mode to generate documentation:
+#### Environment Variables
 
 ```bash
-alexi agent \
-  --message-file prompt.md \
-  --model anthropic--claude-4.5-sonnet \
-  --workdir . \
-  --max-iterations 50 \
-  --verbose
+AICORE_SERVICE_KEY      # SAP AI Core service credentials
+AICORE_RESOURCE_GROUP   # SAP AI Core resource group ID
 ```
 
-The AI agent:
-1. Reads the generated prompt with code changes and documentation scope
-2. Examines existing documentation files
-3. Updates or creates documentation files as needed
-4. Ensures consistency with project standards
-5. Includes Mermaid diagrams where appropriate
+#### Configuration
 
-#### Documentation Requirements
+The workflow determines documentation scope based on file patterns:
 
-The workflow enforces these requirements:
+| Pattern | Documentation Triggered |
+|---------|------------------------|
+| `src/cli/**`, `src/core/**` | ARCHITECTURE.md, API.md |
+| `src/router/**`, `routing-config.json` | ROUTING.md |
+| `src/providers/**` | PROVIDERS.md |
+| `*.json`, `.env*` | CONFIGURATION.md |
+| `*.test.ts`, `*.spec.ts` | TESTING.md |
+| `.github/workflows/**`, `scripts/**` | AUTOMATION.md |
+| All changes | CHANGELOG.md, CONTRIBUTING.md |
 
-- Minimum 3 Mermaid diagrams per major document
-- Professional technical language (no emojis)
-- Actual code examples from the repository
-- TypeScript type definitions for key interfaces
-- Keep a Changelog format for CHANGELOG.md
-
-### Workflow Configuration
-
-```mermaid
-flowchart LR
-    subgraph Triggers
-        PR[Pull Request]
-        Manual[Manual Dispatch]
-    end
-    
-    subgraph Permissions
-        Contents[contents: write]
-        PRs[pull-requests: write]
-    end
-    
-    subgraph Environment
-        Node[Node.js 22]
-        Ubuntu[ubuntu-latest]
-    end
-    
-    subgraph Secrets
-        AICORE_KEY[AICORE_SERVICE_KEY]
-        AICORE_RG[AICORE_RESOURCE_GROUP]
-        GH_TOKEN[GITHUB_TOKEN]
-    end
-    
-    PR --> Permissions
-    Manual --> Permissions
-    Permissions --> Environment
-    Environment --> Secrets
-    Secrets --> Workflow[Documentation Workflow]
-```
-
-### Workflow Inputs
-
-When triggered manually via `workflow_dispatch`:
-
-| Input | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `pr_number` | number | Yes | - | Pull request number to process |
-| `force_full_regeneration` | boolean | No | false | Force full documentation regeneration |
-
-### Workflow Outputs
-
-The workflow produces:
-
-1. **Updated Documentation Files**: Modified or created .md files in the repository
-2. **Commit**: A single commit with message "docs: update documentation for PR #N"
-3. **Analysis Report**: Temporary files showing changed files and documentation scope
-
-### Error Handling
-
-The workflow includes robust error handling:
-
-- Validates PR number exists
-- Checks if PR branch can be fetched
-- Verifies Alexi CLI builds successfully
-- Confirms SAP AI Core credentials are configured
-- Handles cases where no documentation changes are needed
-- Reports errors via GitHub Actions annotations
-
-## Upstream Sync Workflow
+### 2. Upstream Sync Workflow
 
 **File**: `.github/workflows/sync-upstream.yml`
 
-The sync workflow automatically updates Alexi by syncing with upstream AI coding assistant repositories.
-
-### Monitored Repositories
-
-| Repository | Description | Source |
-|------------|-------------|--------|
-| **kilocode** | Kilo AI coding assistant | [Kilo-Org/kilocode](https://github.com/Kilo-Org/kilocode) |
-| **opencode** | OpenCode AI terminal assistant | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
-| **claude-code** | Anthropic's Claude Code CLI | [anthropics/claude-code](https://github.com/anthropics/claude-code) |
-
-### Sync Process Flow
-
-```mermaid
-sequenceDiagram
-    participant GHA as GitHub Actions
-    participant Repo as Alexi Repository
-    participant Upstream as Upstream Repos
-    participant AI as Kilo AI
-    participant PR as Pull Request
-    
-    GHA->>Repo: Checkout repository
-    GHA->>Upstream: Fetch latest commits
-    GHA->>Repo: Load last sync state
-    GHA->>GHA: Compare commit SHAs
-    
-    alt Changes detected
-        GHA->>GHA: Generate diff reports
-        GHA->>AI: Analyze changes
-        AI-->>GHA: Suggested updates
-        GHA->>Repo: Apply changes
-        GHA->>PR: Create pull request
-        GHA->>PR: Auto-merge (squash)
-        GHA->>Repo: Update sync state
-    else No changes
-        GHA->>GHA: Skip sync
-    end
-```
-
-### Sync Triggers
-
-- **Scheduled**: Daily at 06:00 UTC
-- **Manual**: Via GitHub Actions UI with options:
-  - `dry_run`: Analyze without applying changes
+**Triggers**:
+- Daily schedule at 06:00 UTC
+- Manual workflow dispatch with options:
+  - `dry_run`: Analyze changes without creating PR
   - `force_sync`: Sync even if no changes detected
 
-### Sync State Management
+**Purpose**: Automatically synchronizes changes from upstream AI coding assistant repositories (kilocode, opencode, claude-code) and applies relevant updates to Alexi.
+
+#### Upstream Repositories
+
+| Repository | Purpose | Sync Source |
+|------------|---------|-------------|
+| kilocode | AI coding assistant patterns | Kilo-Org/kilocode |
+| opencode | Open source coding patterns | anomalyco/opencode |
+| claude-code | Anthropic Claude patterns | anthropics/claude-code |
+
+#### Workflow Architecture
+
+```mermaid
+graph LR
+    subgraph Upstream["Upstream Repositories"]
+        Kilo[kilocode]
+        Open[opencode]
+        Claude[claude-code]
+    end
+    
+    subgraph Sync["Sync Process"]
+        Fork[Sync Forks]
+        Analyze[Analyze Changes]
+        Plan[Generate Plan]
+        Execute[Execute Updates]
+    end
+    
+    subgraph Alexi["Alexi Repository"]
+        Code[Source Code]
+        Commit[Commit Changes]
+        PR[Create PR]
+    end
+    
+    Kilo --> Fork
+    Open --> Fork
+    Claude --> Fork
+    Fork --> Analyze
+    Analyze --> Plan
+    Plan --> Execute
+    Execute --> Code
+    Code --> Commit
+    Commit --> PR
+```
+
+#### Sync Process
+
+The upstream sync workflow follows a sophisticated two-stage AI-powered process:
+
+**Stage 1: Planning (Claude 4.5 Opus)**
+1. Clone upstream repositories
+2. Read previous sync state from `.github/last-sync-commits.json`
+3. Generate diff report comparing current vs last synced commits
+4. Use Claude 4.5 Opus to analyze changes and create detailed update plan
+5. Plan includes:
+   - Critical, high, medium, and low priority changes
+   - Exact code snippets and modifications
+   - SAP AI Core compatibility considerations
+   - File-by-file change instructions
+
+**Stage 2: Execution (Claude 4.5 Sonnet with Tools)**
+1. Read the generated update plan
+2. Use agentic mode with enabled tools:
+   - `read`: Examine existing files
+   - `write`: Create new files
+   - `edit`: Modify existing files with exact string replacement
+   - `glob`: Find files by pattern
+   - `grep`: Search file contents
+3. Execute changes in priority order
+4. Maximum 50 iterations for complex updates
+5. Generate execution summary
+
+**Stage 3: PR Creation**
+1. Commit all changes made by the AI agent
+2. Update `.github/last-sync-commits.json` with new commit hashes
+3. Create pull request with:
+   - Detailed description of upstream changes
+   - Links to upstream commits
+   - Diff report attachment
+   - Auto-merge enabled for trusted updates
+
+#### Sync State Management
 
 The workflow maintains sync state in `.github/last-sync-commits.json`:
 
 ```json
 {
-  "kilocode": "abc123...",
-  "opencode": "def456...",
-  "claude-code": "ghi789...",
-  "lastSyncDate": "2024-01-15T06:00:00Z"
-}
-```
-
-## Required Secrets
-
-The following GitHub secrets must be configured in the repository:
-
-### AICORE_SERVICE_KEY
-
-Full SAP AI Core service key in JSON format.
-
-```json
-{
-  "clientid": "...",
-  "clientsecret": "...",
-  "url": "...",
-  "serviceurls": {
-    "AI_API_URL": "..."
+  "kilocode": {
+    "last_synced_commit": "abc123...",
+    "last_sync_date": "2024-01-15T06:00:00Z"
+  },
+  "opencode": {
+    "last_synced_commit": "def456...",
+    "last_sync_date": "2024-01-15T06:00:00Z"
+  },
+  "claude-code": {
+    "last_synced_commit": "ghi789...",
+    "last_sync_date": "2024-01-15T06:00:00Z"
   }
 }
 ```
 
-**Usage**: Authentication with SAP AI Core for LLM access
+#### Auto-Merge Behavior
 
-### AICORE_RESOURCE_GROUP
+The workflow automatically merges PRs when:
+- All CI checks pass
+- Changes are from trusted upstream sources
+- No merge conflicts exist
+- PR is properly labeled with `upstream-sync`
 
-SAP AI Core resource group identifier (e.g., "default", "production").
+#### Dry Run Mode
 
-**Usage**: Specifies which resource group to use for deployments
+Manual trigger with `dry_run: true` will:
+- Analyze all upstream changes
+- Generate update plan
+- Show proposed changes in workflow logs
+- NOT create a pull request
+- NOT commit any changes
 
-### GITHUB_TOKEN
+### 3. Continuous Integration Workflow
 
-Automatically provided by GitHub Actions. Used for:
-- Fetching PR information
-- Committing documentation changes
-- Creating and managing pull requests
+**File**: `.github/workflows/ci.yml`
 
-### GH_PAT (Optional)
+**Triggers**:
+- Push to any branch
+- Pull requests
 
-Personal Access Token with repo permissions. Required for:
-- Auto-merging pull requests in sync workflow
-- Cross-repository operations
+**Purpose**: Runs tests, linting, and build verification.
 
-## Local Testing
+**Steps**:
+1. Checkout code
+2. Set up Node.js 22
+3. Install dependencies
+4. Run TypeScript compiler
+5. Run tests
+6. Run linters
 
-### Testing Documentation Generation
+### 4. Release Workflows
 
-You can test the documentation generation process locally:
+**Files**: 
+- `.github/workflows/release.yml`
+- `.github/workflows/tag-release.yml`
+- `.github/workflows/on-release-merge.yml`
 
-```bash
-# 1. Build the project
-npm run build
+**Purpose**: Automate version bumping, changelog generation, and release publishing.
 
-# 2. Create a test prompt file
-cat > test-prompt.md << 'EOF'
-# Task: Generate Documentation for Alexi
+## GitHub Secrets Required
 
-Update the following documentation files:
-- docs/ARCHITECTURE.md
-- CHANGELOG.md
+The automation workflows require the following secrets to be configured in the repository settings:
 
-## Changed Files
-src/utils/logger.ts
-EOF
+| Secret | Purpose | Required For |
+|--------|---------|--------------|
+| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync |
+| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync |
+| `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
+| `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
 
-# 3. Run the agent
-node dist/cli/program.js agent \
-  --message-file test-prompt.md \
-  --model anthropic--claude-4.5-sonnet \
-  --workdir . \
-  --max-iterations 50 \
-  --verbose
+### Setting Up Secrets
+
+1. Navigate to repository Settings > Secrets and variables > Actions
+2. Click "New repository secret"
+3. Add each required secret with appropriate values
+
+#### AICORE_SERVICE_KEY Format
+
+The service key should be a JSON string containing SAP AI Core credentials:
+
+```json
+{
+  "clientid": "your-client-id",
+  "clientsecret": "your-client-secret",
+  "url": "https://your-auth-url",
+  "serviceurls": {
+    "AI_API_URL": "https://your-ai-api-url"
+  }
+}
 ```
 
-### Testing Upstream Sync
+#### GH_PAT Permissions
 
-The upstream sync can be tested locally using the sync script:
+The Personal Access Token needs the following permissions:
+- `repo` (full control of private repositories)
+- `workflow` (update GitHub Actions workflows)
 
+## Local Development Scripts
+
+### Sync Upstream Script
+
+**File**: `scripts/sync-upstream.sh`
+
+Local version of the upstream sync workflow for development and testing.
+
+**Usage**:
 ```bash
-# Dry run - analyze without applying
-./scripts/sync-upstream.sh --dry-run --verbose
+./scripts/sync-upstream.sh [OPTIONS]
 
-# Full sync with auto-apply
-./scripts/sync-upstream.sh --yes
+Options:
+  --dry-run           Analyze changes without applying
+  --kilocode-dir DIR  Path to kilocode repository
+  --opencode-dir DIR  Path to opencode repository
+  --verbose           Enable verbose output
 ```
 
-## Workflow Best Practices
+### Generate Diff Report Script
 
-### Documentation Updates
+**File**: `scripts/generate-diff-report.sh`
 
-1. **Let the workflow run**: The workflow automatically triggers on PR events
-2. **Review generated docs**: Check the documentation changes before merging
-3. **Force regeneration**: Use manual dispatch with force flag if needed
-4. **Update scope logic**: Modify the workflow if new file patterns need documentation
+Generates detailed diff reports comparing upstream repositories.
 
-### Upstream Sync
+**Usage**:
+```bash
+./scripts/generate-diff-report.sh \
+  --kilocode-dir ../kilocode \
+  --opencode-dir ../opencode \
+  --last-sync .github/last-sync-commits.json \
+  --format markdown \
+  --output diff-report.md
+```
 
-1. **Monitor daily syncs**: Check workflow runs for successful syncs
-2. **Review sync PRs**: Examine changes before auto-merge
-3. **Handle conflicts**: Manually resolve if auto-merge fails
-4. **Update sync state**: Ensure `.github/last-sync-commits.json` is current
+## Agentic File Operations
 
-### Secrets Management
+The automation system leverages Alexi's agentic capabilities with automatic permission management:
 
-1. **Rotate credentials**: Update secrets periodically
-2. **Test after rotation**: Verify workflows after secret updates
-3. **Use least privilege**: Grant minimum required permissions
-4. **Document changes**: Update this file if secret requirements change
+### Permission Configuration
 
-## Troubleshooting
+In agentic mode, the tool system automatically configures high-priority permission rules:
 
-### Documentation Workflow Fails
+```typescript
+// Automatic write permissions for workdir
+{
+  id: 'agentic-allow-write',
+  priority: 200,
+  description: 'Allow writing files in workdir for agentic mode',
+  actions: ['write'],
+  paths: ['<workdir>/**'],
+  decision: 'allow'
+}
 
-**Issue**: Workflow fails to generate documentation
+// Automatic execute permissions
+{
+  id: 'agentic-allow-execute',
+  priority: 200,
+  description: 'Allow executing commands for agentic mode',
+  actions: ['execute'],
+  decision: 'allow'
+}
+```
 
-**Solutions**:
-1. Check if Alexi CLI builds successfully
-2. Verify SAP AI Core credentials are valid
-3. Ensure PR branch is accessible
-4. Check if file paths in scope.md are correct
-5. Review agent logs for errors
+### Tool Context Resolution
 
-### Sync Workflow Fails
+The `write` and `edit` tools now support relative path resolution:
 
-**Issue**: Upstream sync fails or creates incorrect changes
+```typescript
+// tools/write.ts and tools/edit.ts
+permission: {
+  action: 'write',
+  getResource: (params, context) => {
+    // Resolve relative paths to absolute using workdir
+    if (path.isAbsolute(params.filePath)) {
+      return params.filePath;
+    }
+    return path.join(context?.workdir || process.cwd(), params.filePath);
+  }
+}
+```
 
-**Solutions**:
-1. Verify upstream repositories are accessible
-2. Check if diff generation succeeds
-3. Review AI analysis output
-4. Ensure GH_PAT has required permissions
-5. Manually resolve merge conflicts
+This enhancement allows the AI agent to:
+- Work with relative file paths naturally
+- Respect workdir boundaries for permission checks
+- Operate autonomously within the project directory
+- Support external directory operations when explicitly allowed
 
-### Permission Errors
+## Workflow Maintenance
 
-**Issue**: Workflow cannot commit or push changes
+### Updating Workflows
 
-**Solutions**:
-1. Verify GITHUB_TOKEN has write permissions
-2. Check repository settings for Actions permissions
-3. Ensure branch protection rules allow bot commits
-4. Review workflow permissions in YAML file
+1. Edit workflow YAML files in `.github/workflows/`
+2. Test changes using manual workflow dispatch
+3. Commit and push changes
+4. Workflow changes automatically trigger `AUTOMATION.md` update
+
+### Debugging Workflows
+
+1. Check workflow run logs in GitHub Actions tab
+2. Use workflow dispatch with verbose flags
+3. Review generated reports in `.github/reports/`
+4. Check sync state in `.github/last-sync-commits.json`
+
+### Common Issues
+
+**Issue**: Documentation update fails with permission error
+**Solution**: Verify `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` secrets are set correctly
+
+**Issue**: Upstream sync creates no PR
+**Solution**: Check if upstream repositories have new commits since last sync
+
+**Issue**: AI agent makes incorrect changes
+**Solution**: Review generated plan in `.github/reports/update-plan-*.md` and adjust prompts
+
+## Best Practices
+
+1. **Always test workflow changes**: Use manual dispatch with dry-run mode first
+2. **Review AI-generated changes**: Check PR diffs before merging
+3. **Keep secrets updated**: Rotate credentials regularly
+4. **Monitor workflow costs**: Claude API usage is tracked in SAP AI Core
+5. **Document workflow modifications**: Update this file when changing workflows
 
 ## Future Enhancements
 
-Planned improvements to automation:
+Planned improvements to the automation system:
 
-- [ ] Add automated testing workflow
-- [ ] Implement deployment automation
-- [ ] Add code quality checks
-- [ ] Create release automation workflow
-- [ ] Add automated changelog generation from commits
-- [ ] Implement semantic versioning automation
-- [ ] Add performance benchmarking workflow
+- [ ] Support for additional upstream repositories
+- [ ] Configurable sync schedules per repository
+- [ ] Automated testing of synced changes before PR creation
+- [ ] Slack/Teams notifications for sync results
+- [ ] Rollback mechanism for failed syncs
+- [ ] Metrics dashboard for sync success rates
