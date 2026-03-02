@@ -179,14 +179,23 @@ graph LR
    }
    ```
 
-4. **Error Handling**: Always handle errors appropriately
+4. **Error Handling**: Always handle errors appropriately with error chaining
    ```typescript
    try {
      const result = await riskyOperation();
      return { success: true, data: result };
    } catch (err) {
      const message = err instanceof Error ? err.message : String(err);
-     return { success: false, error: message };
+     throw new Error(`Failed to perform operation: ${message}`, { cause: err });
+   }
+   ```
+   
+   When rethrowing errors, use the `cause` property to maintain error context:
+   ```typescript
+   try {
+     await fs.readFile(path, 'utf-8');
+   } catch (err) {
+     throw new Error(`Failed to read file: ${err.message}`, { cause: err });
    }
    ```
 

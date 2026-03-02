@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added docs/TESTING.md with comprehensive testing guide
   - Added docs/AUTOMATION.md with workflow documentation
   - Includes testing best practices and CI/CD pipeline details
+- Automated Homebrew formula updates
+  - New workflow to update Homebrew tap repository daily
+  - Automatic version and commit SHA synchronization
+  - Runs daily at 02:00 UTC to keep formula current
 
 ### Changed
 
@@ -54,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - External directories enabled for agentic operations
   - High-priority allow rules for write and execute actions
 - Updated env.ts to export env function with proper return type handling
+- Improved error handling across multiple modules with error chaining
+  - Error objects now include cause property for better debugging
+  - Applied to share, sync, undo, and update modules
+  - Maintains error context through the call stack
+- Updated development dependencies
+  - ESLint upgraded from 9.28.0 to 10.0.2
+  - @eslint/js upgraded from 9.28.3 to 10.0.1
+  - @types/node upgraded from 25.3.2 to 25.3.3
+  - lint-staged upgraded from 16.3.0 to 16.3.1
 
 ### Fixed
 
@@ -61,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed zero-width space characters in GitHub workflow expressions
 - Corrected file path specifications in documentation workflow scope
 - Removed .env file from git tracking to prevent accidental credential exposure
+- Enhanced error handling with proper error cause chaining in share module
+- Enhanced error handling with proper error cause chaining in sync module
+- Enhanced error handling with proper error cause chaining in undo module
+- Enhanced error handling with proper error cause chaining in update module
 
 ### Removed
 

@@ -266,7 +266,68 @@ Manual trigger with `dry_run: true` will:
 5. Run tests
 6. Run linters
 
-### 4. Release Workflows
+### 4. Homebrew Formula Update Workflow
+
+**File**: `.github/workflows/update-homebrew.yml`
+
+**Triggers**:
+- Daily schedule at 02:00 UTC
+- Manual workflow dispatch
+
+**Purpose**: Automatically updates the Homebrew formula in the tap repository to keep the installation current with the latest master branch.
+
+#### Workflow Steps
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub Actions
+    participant Main as Main Repository
+    participant Tap as Homebrew Tap
+    participant Users as Homebrew Users
+    
+    GH->>Main: Checkout master branch
+    GH->>Main: Read package.json version
+    GH->>Main: Get latest commit SHA
+    GH->>Tap: Checkout homebrew-tap
+    GH->>Tap: Update formula with new tag/revision
+    GH->>Tap: Commit and push changes
+    Users->>Tap: brew upgrade alexi
+```
+
+#### Key Features
+
+1. **Automatic Version Detection**: Reads version from package.json
+2. **Commit SHA Tracking**: Updates formula with exact commit revision
+3. **Smart Updates**: Only commits if there are actual changes
+4. **User-Friendly Output**: Generates summary with upgrade instructions
+
+#### Formula Update Process
+
+The workflow updates two key fields in the Homebrew formula:
+
+```ruby
+# Before
+url "https://github.com/ausardcompany/sap-bot-orchestrator.git",
+    tag:      "v0.1.2",
+    revision: "abc123..."
+
+# After
+url "https://github.com/ausardcompany/sap-bot-orchestrator.git",
+    tag:      "v0.1.3",
+    revision: "def456..."
+```
+
+#### Required Secrets
+
+| Secret | Purpose |
+|--------|---------|
+| `HOMEBREW_TAP_TOKEN` | GitHub Personal Access Token with write access to homebrew-tap repository |
+
+#### Daily Schedule
+
+The workflow runs once per day at 02:00 UTC to ensure the formula stays synchronized with the latest code changes. This allows users to receive updates through the standard Homebrew upgrade process without waiting for formal releases.
+
+### 5. Release Workflows
 
 **Files**: 
 - `.github/workflows/release.yml`
@@ -284,6 +345,7 @@ The automation workflows require the following secrets to be configured in the r
 | `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync |
 | `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync |
 | `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
+| `HOMEBREW_TAP_TOKEN` | GitHub Personal Access Token | Homebrew Formula Update (write access to tap) |
 | `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
 
 ### Setting Up Secrets
@@ -312,6 +374,12 @@ The service key should be a JSON string containing SAP AI Core credentials:
 The Personal Access Token needs the following permissions:
 - `repo` (full control of private repositories)
 - `workflow` (update GitHub Actions workflows)
+
+#### HOMEBREW_TAP_TOKEN Permissions
+
+The Personal Access Token for Homebrew tap updates needs:
+- `repo` (full control of the homebrew-tap repository)
+- Write access to ausardcompany/homebrew-tap repository
 
 ## Local Development Scripts
 
