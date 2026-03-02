@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolved relative path handling in write/edit tools for CI permission checks
 - Fixed zero-width space characters in GitHub workflow expressions
 - Corrected file path specifications in documentation workflow scope
+- Removed .env file from git tracking to prevent accidental credential exposure
+
+### Removed
+
+- .env file removed from version control (use .env.example as template)
 
 ## [0.1.3] - 2024-01-XX
 
