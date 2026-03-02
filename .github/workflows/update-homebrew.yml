@@ -1,19 +1,16 @@
 name: Update Homebrew Formula
 
 on:
-  pull_request_target:
-    types: [closed]
-    branches: [master]
+  schedule:
+    # Run once a day at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   update-homebrew:
-    # Run on every merged PR except release/* (those are handled by on-release-merge.yml)
-    if: |
-      github.event.pull_request.merged == true &&
-      !startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-latest
 
     steps:
