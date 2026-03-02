@@ -234,41 +234,43 @@ jobs:
           DOCS_TO_UPDATE=""
           
           # Determine which docs need updating based on changes
-          if [ "${{ steps.analyze.outputs.cli_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.core_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          # IMPORTANT: File paths in scope.md MUST include the full relative path (e.g., docs/ARCHITECTURE.md)
+          # so the bot writes to the correct location
+          if [ "${​{ steps.analyze.outputs.cli_changed }}" = "true" ] || [ "${​{ steps.analyze.outputs.core_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/ARCHITECTURE.md docs/API.md"
-            echo "- ARCHITECTURE.md (core component changes)" >> scope.md
-            echo "- API.md (CLI commands, APIs)" >> scope.md
+            echo "- docs/ARCHITECTURE.md (core component changes)" >> scope.md
+            echo "- docs/API.md (CLI commands, APIs)" >> scope.md
           fi
           
-          if [ "${{ steps.analyze.outputs.routing_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          if [ "${​{ steps.analyze.outputs.routing_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/ROUTING.md"
-            echo "- ROUTING.md (routing system documentation)" >> scope.md
+            echo "- docs/ROUTING.md (routing system documentation)" >> scope.md
           fi
           
-          if [ "${{ steps.analyze.outputs.providers_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          if [ "${​{ steps.analyze.outputs.providers_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/PROVIDERS.md"
-            echo "- PROVIDERS.md (provider integration documentation)" >> scope.md
+            echo "- docs/PROVIDERS.md (provider integration documentation)" >> scope.md
           fi
           
-          if [ "${{ steps.analyze.outputs.config_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          if [ "${​{ steps.analyze.outputs.config_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/CONFIGURATION.md"
-            echo "- CONFIGURATION.md (configuration and settings)" >> scope.md
+            echo "- docs/CONFIGURATION.md (configuration and settings)" >> scope.md
           fi
           
-          if [ "${{ steps.analyze.outputs.tests_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          if [ "${​{ steps.analyze.outputs.tests_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/TESTING.md"
-            echo "- TESTING.md (testing guide)" >> scope.md
+            echo "- docs/TESTING.md (testing guide)" >> scope.md
           fi
           
-          if [ "${{ steps.analyze.outputs.workflows_changed }}" = "true" ] || [ "${{ steps.analyze.outputs.scripts_changed }}" = "true" ] || [ "${{ steps.force_flag.outputs.force }}" = "true" ]; then
+          if [ "${​{ steps.analyze.outputs.workflows_changed }}" = "true" ] || [ "${​{ steps.analyze.outputs.scripts_changed }}" = "true" ] || [ "${​{ steps.force_flag.outputs.force }}" = "true" ]; then
             DOCS_TO_UPDATE="$DOCS_TO_UPDATE docs/AUTOMATION.md"
-            echo "- AUTOMATION.md (workflows and automation)" >> scope.md
+            echo "- docs/AUTOMATION.md (workflows and automation)" >> scope.md
           fi
           
-          # Always update CHANGELOG and CONTRIBUTING
+          # Always update CHANGELOG (in root) and CONTRIBUTING (in docs/)
           DOCS_TO_UPDATE="$DOCS_TO_UPDATE CHANGELOG.md docs/CONTRIBUTING.md"
-          echo "- CHANGELOG.md (always generated)" >> scope.md
-          echo "- CONTRIBUTING.md (contribution guidelines)" >> scope.md
+          echo "- CHANGELOG.md (always generated, in repository root)" >> scope.md
+          echo "- docs/CONTRIBUTING.md (contribution guidelines)" >> scope.md
           
           echo "" >> scope.md
           echo "docs_to_update=$DOCS_TO_UPDATE" >> $GITHUB_OUTPUT
@@ -484,6 +486,11 @@ jobs:
           2. Use the 'write' tool to create new documentation files or fully replace existing ones
           3. Use the 'edit' tool to make targeted changes to existing documentation files
           4. Use 'glob' and 'grep' to find relevant code to document
+          
+          IMPORTANT FILE PATHS:
+          - Most documentation files go in the 'docs/' directory (e.g., docs/ARCHITECTURE.md, docs/API.md)
+          - CHANGELOG.md goes in the repository root (not docs/)
+          - Use the EXACT paths specified in the Documentation Scope section
           
           DOCUMENTATION REQUIREMENTS:
           - Include at least 3 Mermaid diagrams per major document
