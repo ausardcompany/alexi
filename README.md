@@ -1,12 +1,12 @@
-# Alexi
+# SAP Bot Orchestrator
 
 Intelligent LLM orchestrator for SAP AI Core with automatic model routing, multi-turn conversations, and rule-based configuration.
 
 ## Features
 
 ✅ **Multi-Provider Support**
-- OpenAI-compatible models (GPT-4o, GPT-4.1, GPT-4o-mini)
-- Claude models via SAP AI Core (Claude 4.5 Sonnet, Claude 4.5 Haiku, Claude 4.5 Opus)
+- OpenAI-compatible models via proxy (GPT-4o, GPT-4.1, GPT-4o-mini)
+- Claude models via native Bedrock Converse API (Claude 4.5 Opus, Claude 4.5 Sonnet, Claude 4.5 Haiku)
 - Extensible architecture for additional providers
 
 ✅ **Intelligent Auto-Routing**
@@ -38,7 +38,7 @@ For macOS/Linux users with access to the ausardcompany private tap:
 brew tap ausardcompany/tap git@github.com:ausardcompany/homebrew-tap.git
 
 # Install
-brew install alexi
+brew install sap-bot-orchestrator
 
 # Use the CLI
 alexi chat -m "Hello!"
@@ -63,10 +63,14 @@ npm install
 ### 2. Configure Environment
 Create a `.env` file (see `.env.example`):
 ```bash
-# Native SAP AI Core
+# Proxy configuration (for OpenAI-compatible models)
+SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
+SAP_PROXY_API_KEY=your_secret_key
+SAP_PROXY_MODEL=gpt-4o
+
+# Native SAP AI Core (for Claude models)
 AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
 AICORE_RESOURCE_GROUP=your-resource-group-id
-AICORE_MODEL=gpt-4o  # Default model
 ```
 
 ### 3. Build
@@ -87,12 +91,20 @@ alexi chat -m "Now make it recursive" --session <session-id> --auto-route
 
 # Explain routing decision
 alexi explain -m "Prove that sqrt(2) is irrational"
-
-# Start interactive mode
-alexi interactive
-# or use the short alias
-alexi i
 ```
+
+## Available Models
+
+The following models are available (configured in `routing-config.json`):
+
+| Model ID | Type | Cost Tier | Reasoning | Max Tokens | Strengths |
+|----------|------|-----------|-----------|------------|-----------|
+| `gpt-4o-mini` | OpenAI | cheap | ❌ | 16,000 | simple-qa, classification, extraction, summarization |
+| `gpt-4o` | OpenAI | medium | ❌ | 128,000 | coding, analysis, creative-writing, complex-qa, vision |
+| `gpt-4.1` | OpenAI | expensive | ✅ | 128,000 | deep-reasoning, complex-math, research, advanced-coding |
+| `anthropic--claude-4.5-haiku` | Claude | cheap | ❌ | 200,000 | simple-qa, classification, extraction, summarization |
+| `anthropic--claude-4.5-sonnet` | Claude | medium | ❌ | 200,000 | coding, analysis, long-context, technical-writing |
+| `anthropic--claude-4.5-opus` | Claude | expensive | ✅ | 200,000 | deep-reasoning, complex-analysis, long-context, research |
 
 ## Commands
 
@@ -121,46 +133,6 @@ alexi chat -m "What is AI?" --auto-route --prefer-cheap
 alexi chat -m "Tell me more" --session abc-123 --auto-route
 ```
 
-### `agent` - Run autonomous agent mode
-```bash
-alexi agent -m "your task" [options]
-
-Options:
-  -m, --message <text>      Message/task to execute (required)
-  -f, --message-file <path> Read message from file
-  --model <id>              Model ID override
-  --auto-route              Enable automatic model routing
-  --prefer-cheap            Prefer cheaper models when auto-routing
-  --session <id>            Continue existing session
-  --system <prompt>         System prompt for the conversation
-  --max-iterations <n>      Maximum tool execution iterations (default: 50)
-  --workdir <path>          Working directory for tool execution
-  --tools <list>            Comma-separated list of tool names to enable
-  -v, --verbose             Show progress updates
-  -q, --quiet               Only output the final response
-```
-
-The agent command enables tool execution capabilities, allowing the LLM to:
-- Read and write files
-- Execute shell commands
-- Interact with the filesystem
-- Complete multi-step tasks autonomously
-
-### `interactive` - Start interactive REPL
-```bash
-alexi interactive [options]
-alexi i [options]  # short alias
-
-Options:
-  --model <id>        Model ID to use
-  --auto-route        Enable automatic model routing
-  --prefer-cheap      Prefer cheaper models when auto-routing
-  --session <id>      Continue existing session
-  --system <prompt>   System prompt for the conversation
-```
-
-Start an interactive chat session with streaming responses and slash commands.
-
 ### `explain` - Analyze routing decisions
 ```bash
 alexi explain -m "your message"
@@ -184,8 +156,8 @@ Estimated Tokens: 19
 • reasoning-for-math (priority: 80): Use reasoning models for math problems
 
 === Model Candidates (by score) ===
-✓ gpt-4.1                    Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
-  anthropic--claude-4.5-opus Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
+✓ gpt-4.1              Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
+  anthropic--claude-4.5-opus      Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
   ...
 
 === Selected Model ===
@@ -195,48 +167,58 @@ Confidence: 100%
 Rule Applied: reasoning-for-math
 ```
 
-### `stages` - Manage development stages
+### `agent` - Run an autonomous AI agent
 ```bash
-# List available stages
-alexi stages
+alexi agent -m "your task" [options]
 
-# Set current development stage
-alexi stage-set -s <stage-type> [-n <number>] [--name <name>]
-
-Stage types: architecture, planning, implementation, documentation, devops, security
+Options:
+  -m, --message <text>    Task description for the agent (required)
+  --model <id>            Model to use for the agent
+  --max-iterations <n>    Maximum number of agent iterations (default: 10)
 ```
 
-Development stages help organize work and track expected artifacts and Definition of Done criteria.
+The agent command runs an autonomous AI that can plan and execute multi-step tasks.
 
-### `notes` - Manage notes
+### `stages` - Manage pipeline stages
 ```bash
-# Generate AI_NOTES.md for current stage
-alexi notes-generate [-o <output-file>]
+alexi stages [options]
+
+Options:
+  --list                  List all available stages
+  --run <stage>           Run a specific stage
+  --config <file>         Path to stages configuration file
 ```
 
-Generates documentation notes based on the current development stage.
+### `notes` - Manage conversation notes
+```bash
+alexi notes [options]
+
+Options:
+  --add <note>            Add a note to the current session
+  --list                  List all notes
+  --clear                 Clear all notes
+  --session <id>          Specify session for notes
+```
 
 ### `dod` - Definition of Done checker
 ```bash
-# Run DoD checks for a stage
-alexi dod-check [-s <stage>] [-o <output-file>]
+alexi dod [options]
 
-# List available DoD checks
-alexi dod-list
+Options:
+  --check                 Check if current task meets definition of done
+  --set <criteria>        Set definition of done criteria
+  --list                  List current DoD criteria
 ```
 
-Run Definition of Done checks to verify stage completion criteria.
-
-### `context` - Manage project context
+### `context` - Manage conversation context
 ```bash
-# Show current project context
-alexi context
+alexi context [options]
 
-# Initialize project context
-alexi context-init -n <name> [-d <description>] [--language <lang>] [--framework <fw>]
-
-# Add architecture invariant
-alexi context-add-invariant -i <invariant-text>
+Options:
+  --add <file>            Add file content to context
+  --clear                 Clear current context
+  --show                  Display current context
+  --limit <tokens>        Set context token limit
 ```
 
 ### `sessions` - List all saved sessions
@@ -254,125 +236,43 @@ alexi session-export -s <session-id> [-o output.md]
 alexi session-delete -s <session-id>
 ```
 
-### `models` - List available models
+### `models` - List available models (proxy only)
 ```bash
 alexi models
 ```
 
 ## Interactive Mode Commands
 
-When in interactive mode (`alexi interactive` or `alexi i`), use these slash commands:
+Start interactive mode:
+```bash
+alexi interactive
+# or
+alexi -i
+```
 
-### Basic Commands
+Once in interactive mode, the following commands are available:
+
 | Command | Description |
 |---------|-------------|
 | `/help` | Show available commands |
-| `/exit`, `/quit`, `/q` | Exit the REPL |
-| `/clear` | Clear screen |
-| `/history` | Show conversation history |
-
-### Model & Routing
-| Command | Description |
-|---------|-------------|
 | `/model <id>` | Switch to a different model |
 | `/models` | List available models |
-| `/autoroute` | Toggle auto model routing |
-
-### Session Management
-| Command | Description |
-|---------|-------------|
 | `/session` | Show current session info |
 | `/sessions` | List all sessions |
-| `/session load <id>` | Load a previous session |
-| `/session new` | Start a new session |
-| `/session export` | Export session to markdown |
-| `/fork [name]` | Fork current session |
-| `/rename <name>` | Rename current session |
-
-### Context & History
-| Command | Description |
-|---------|-------------|
-| `/compact` | Compact conversation history |
-| `/context` | Show context usage (tokens) |
-| `/status` | Show current status |
-| `/tokens` | Show token usage stats |
-| `/clear-history` | Clear conversation history |
-
-### File Changes
-| Command | Description |
-|---------|-------------|
-| `/diff` | Show files changed in session |
-| `/undo` | Undo last file change |
-| `/redo` | Redo last undone change |
-
-### Agents & Stages
-| Command | Description |
-|---------|-------------|
-| `/agent <name>` | Switch agent (code, debug, plan, explore, orchestrator) |
-| `/stage <name>` | Switch development stage |
-| `/dod` | Run Definition of Done checks |
-
-### Configuration
-| Command | Description |
-|---------|-------------|
-| `/config` | Show current configuration |
-| `/config path` | Show config file paths |
-| `/config set <key> <value>` | Set configuration value |
+| `/new` | Start a new session |
+| `/load <id>` | Load an existing session |
+| `/export [file]` | Export current session to markdown |
+| `/clear` | Clear conversation history |
 | `/system <prompt>` | Set system prompt |
-
-### MCP Servers
-| Command | Description |
-|---------|-------------|
-| `/mcp` | List MCP servers |
-| `/mcp connect <name>` | Connect to MCP server |
-| `/mcp disconnect <name>` | Disconnect from server |
-| `/mcp status` | Show connection status |
-
-### Cost & Memory
-| Command | Description |
-|---------|-------------|
-| `/cost` | Show today's cost summary |
-| `/cost month` | Show this month's costs |
-| `/cost all` | Show all-time costs |
-| `/cost export` | Export cost history to CSV |
-| `/remember <text>` | Save a memory (use #tags) |
-| `/memory` | List all memories |
-| `/memory search <query>` | Search memories |
-| `/memory stats` | Show memory statistics |
-
-### Data & Export
-| Command | Description |
-|---------|-------------|
-| `/export [file]` | Export all data |
-| `/import <file>` | Import data from file |
-| `/stats` | Show usage statistics |
-
-### Aliases & Templates
-| Command | Description |
-|---------|-------------|
-| `/alias` | List command aliases |
-| `/alias <name> <cmd>` | Create alias |
-| `/snippet` | List code snippets |
-| `/template` | List message templates |
-
-### Other
-| Command | Description |
-|---------|-------------|
-| `/think [on\|off]` | Toggle extended thinking mode |
-| `/doctor` | Run environment health checks |
-| `/permissions` | List permission rules |
-| `/bug`, `/feedback` | Report issues |
-
-## Available Models
-
-| Model ID | Type | Cost Tier | Reasoning | Best For |
-|----------|------|-----------|-----------|----------|
-| `gpt-4o-mini` | OpenAI | Cheap | No | Simple QA, classification, extraction |
-| `gpt-4o` | OpenAI | Medium | No | Coding, analysis, creative writing, vision |
-| `gpt-4.1` | OpenAI | Expensive | Yes | Deep reasoning, complex math, research |
-| `anthropic--claude-4.5-haiku` | Claude | Cheap | No | Simple QA, classification, summarization |
-| `anthropic--claude-4.5-sonnet` | Claude | Medium | No | Coding, analysis, long-context, technical writing |
-| `anthropic--claude-4.5-opus` | Claude | Expensive | Yes | Deep reasoning, complex analysis, research |
+| `/auto` | Toggle auto-routing |
+| `/cheap` | Toggle prefer-cheap mode |
+| `/context add <file>` | Add file to context |
+| `/context clear` | Clear context |
+| `/context show` | Show current context |
+| `/notes add <note>` | Add a note |
+| `/notes list` | List all notes |
+| `/notes clear` | Clear all notes |
+| `/quit` or `/exit` | Exit interactive mode |
 
 ## Routing Configuration
 
@@ -428,9 +328,10 @@ Create a `routing-config.json` in the project root (see `routing-config.example.
 ## Architecture
 
 ### Provider Resolution
-The orchestrator routes all requests through SAP AI Core's orchestration service:
-- **GPT models** → SAP AI Core Orchestration API
-- **Claude models** → SAP AI Core Orchestration API
+The orchestrator automatically selects the appropriate provider based on model ID:
+- **GPT models** → OpenAI-compatible proxy (`/v1/chat/completions`)
+- **Claude models** → Native Bedrock Converse API (`/converse`)
+- **Anthropic models** → Anthropic Messages API (`/v1/messages`)
 
 ### Routing Logic
 1. Check for forced model via `--model` flag
@@ -459,20 +360,8 @@ npm run build
 # Run in dev mode with tsx
 npm run dev -- chat -m "test"
 
-# Run tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Lint code
-npm run lint
-
-# Format code
-npm run format
-
-# Type check
-npm run typecheck
+# Watch mode for development
+npm run dev:watch
 ```
 
 ## Autonomous Self-Updating System
@@ -570,8 +459,8 @@ alexi explain -m "$(cat very_long_document.txt)"
 - [x] Document grounding
 - [x] Translation support
 - [x] Embeddings support
-- [x] Cost tracking and budget limits
-- [x] Token usage analytics
+- [ ] Cost tracking and budget limits
+- [ ] Token usage analytics
 - [ ] Channel integrations (Telegram, Slack, WebChat)
 - [ ] Caching layer for repeated queries
 - [ ] A/B testing for routing strategies
