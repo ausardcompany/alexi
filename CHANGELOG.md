@@ -32,9 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Clarified CHANGELOG.md location in repository root (not docs/)
   - Removed zero-width space characters from workflow expressions
   - Enhanced documentation scope comments for bot guidance
+  - Added explicit file path instructions to system prompt for documentation bot
 - Enhanced write and edit tools with relative path resolution
   - Tools now resolve relative paths using workdir context for permission checks
-  - Permission getResource functions receive ToolContext for path resolution
+  - Permission getResource functions receive ToolContext parameter for path resolution
+  - Both absolute and relative paths supported with automatic resolution
+- Updated tool system permission interface
+  - getResource function signature now accepts optional ToolContext parameter
+  - Enables context-aware resource path resolution for permission checks
+  - Maintains backward compatibility with existing tool implementations
 - Updated agenticChat module with permission configuration
   - Project root set to workdir for permission checks
   - External directories enabled for agentic operations
