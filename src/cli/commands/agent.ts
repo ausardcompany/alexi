@@ -63,10 +63,7 @@ export function registerAgentCommand(program: Command): void {
     .option('--attribute-co-authored-by', 'Add Co-authored-by trailer to AI commits (default)')
     .option('--attribute-author', 'Override git author for AI commits')
     // Repo map flags
-    .option(
-      '--map-tokens <n>',
-      'Include a repo map in the system prompt with token budget N (default: 1000; 0 = disabled)'
-    )
+    .option('--map-tokens <n>', 'Repo map token budget (default: 2000; set to 0 to disable)')
     .action(async (opts: AgentOptions) => {
       try {
         // Get message from either --message or --message-file
@@ -122,16 +119,13 @@ export function registerAgentCommand(program: Command): void {
           }
         }
 
-        // Set up repo map manager
+        // Set up repo map manager (enabled by default; disable with --map-tokens 0)
+        const DEFAULT_MAP_TOKENS = 2000;
+        const mapTokensBudget =
+          opts.mapTokens !== undefined ? parseInt(opts.mapTokens, 10) : DEFAULT_MAP_TOKENS;
         let repoMapManager: RepoMapManager | undefined;
-        if (opts.mapTokens !== undefined) {
-          const mapTokensBudget = parseInt(opts.mapTokens, 10);
-          if (!isNaN(mapTokensBudget) && mapTokensBudget > 0) {
-            repoMapManager = new RepoMapManager(workdir, { maxTokens: mapTokensBudget });
-            if (!opts.quiet) {
-              console.error(`[RepoMap] Building repo map (token budget: ${mapTokensBudget})…`);
-            }
-          }
+        if (!isNaN(mapTokensBudget) && mapTokensBudget > 0) {
+          repoMapManager = new RepoMapManager(workdir, { maxTokens: mapTokensBudget });
         }
 
         // Progress callback
