@@ -40,23 +40,19 @@ This project follows a professional code of conduct. We expect all contributors 
    git clone git@github.com:YOUR_USERNAME/sap-bot-orchestrator.git
    cd sap-bot-orchestrator
    ```
-
 3. Install dependencies:
    ```bash
    npm install
    ```
-
 4. Configure environment variables:
    ```bash
    cp .env.example .env
    # Edit .env with your SAP AI Core credentials
    ```
-
 5. Build the project:
    ```bash
    npm run build
    ```
-
 6. Verify the setup:
    ```bash
    node dist/cli/program.js --help
@@ -107,33 +103,26 @@ graph LR
    ```bash
    git checkout -b feature/your-feature-name
    ```
-
 2. Make your changes following coding standards
-
 3. Write or update tests for your changes
-
 4. Run tests locally:
    ```bash
    npm test
    ```
-
 5. Build and verify:
    ```bash
    npm run build
    npm run lint
    ```
-
 6. Commit your changes with descriptive messages:
    ```bash
    git add .
    git commit -m "feat: add new feature description"
    ```
-
 7. Push to your fork:
    ```bash
    git push origin feature/your-feature-name
    ```
-
 8. Create a pull request on GitHub
 
 ## Coding Standards
@@ -141,12 +130,12 @@ graph LR
 ### TypeScript Guidelines
 
 1. **Type Safety**: Always use explicit types, avoid `any`
+
    ```typescript
    // Good
    function processMessage(message: string): Promise<Response> {
      // ...
    }
-   
    // Bad
    function processMessage(message: any): any {
      // ...
@@ -154,25 +143,25 @@ graph LR
    ```
 
 2. **Interfaces over Types**: Prefer interfaces for object shapes
+
    ```typescript
    // Good
    interface ToolContext {
      workdir: string;
      signal?: AbortSignal;
    }
-   
    // Acceptable for unions/intersections
    type PermissionAction = 'read' | 'write' | 'execute';
    ```
 
 3. **Async/Await**: Use async/await over raw promises
+
    ```typescript
    // Good
    async function fetchData(): Promise<Data> {
      const response = await fetch(url);
      return await response.json();
    }
-   
    // Avoid
    function fetchData(): Promise<Data> {
      return fetch(url).then(r => r.json());
@@ -180,6 +169,7 @@ graph LR
    ```
 
 4. **Error Handling**: Always handle errors appropriately
+
    ```typescript
    try {
      const result = await riskyOperation();
@@ -191,10 +181,10 @@ graph LR
    ```
 
 5. **Null Safety**: Use optional chaining and nullish coalescing
+
    ```typescript
    // Good
    const value = context?.workdir ?? process.cwd();
-   
    // Avoid
    const value = context && context.workdir ? context.workdir : process.cwd();
    ```
@@ -247,7 +237,7 @@ Use JSDoc for functions and classes:
 ```typescript
 /**
  * Define a new tool with lazy initialization
- * 
+ *
  * @param definition - Tool definition with parameters and execution logic
  * @returns Tool instance with execution methods
  */
@@ -262,7 +252,7 @@ export function defineTool<TParams extends z.ZodType, TResult>(
 
 ### Test Structure
 
-- Place tests next to the code they test: `tool.test.ts` next to `tool.ts`
+- Place tests in `tests/` directory, mirroring source file structure
 - Use descriptive test names
 - Follow Arrange-Act-Assert pattern
 
@@ -280,10 +270,8 @@ describe('defineTool', () => {
       },
       execute: async () => ({ success: true }),
     };
-    
     // Act
     const tool = defineTool(definition);
-    
     // Assert
     expect(tool.name).toBe('test-tool');
     expect(tool.toFunctionSchema()).toBeDefined();
@@ -306,6 +294,18 @@ npm test -- --coverage
 # Watch mode
 npm test -- --watch
 ```
+
+### Test Coverage
+
+- Ensure new features have >80% coverage
+- File operation tools must be tested for:
+  - Basic operations
+  - Path handling (absolute/relative)
+  - Error handling
+  - Metadata/schema generation
+  - Actual file system changes
+- Use temporary directories and clean up after each test
+- Mock permission checks using `vi.mock` as in the codebase
 
 ## Pull Request Process
 
@@ -345,8 +345,7 @@ Example:
 Enhanced write and edit tools with relative path resolution for permission checks.
 
 ## Motivation
-In CI environments, the agentic system needs to resolve relative paths correctly
-for permission checks to work with the workdir context.
+In CI environments, the agentic system needs to resolve relative paths correctly for permission checks to work with the workdir context.
 
 ## Changes
 - Modified `getResource` in write.ts to accept ToolContext parameter
@@ -461,6 +460,7 @@ The system:
 The tool system supports autonomous file operations with:
 
 **Automatic Permission Configuration**:
+
 ```typescript
 // High-priority allow rules for agentic mode
 {
@@ -473,6 +473,7 @@ The tool system supports autonomous file operations with:
 ```
 
 **Relative Path Resolution**:
+
 ```typescript
 // Tools resolve relative paths using workdir context
 getResource: (params, context) => {

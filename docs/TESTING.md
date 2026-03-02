@@ -1,6 +1,6 @@
 # Testing Guide
 
-This document provides comprehensive testing guidelines for Alexi, including testing strategies, test commands, coverage expectations, and best practices.
+This document provides comprehensive testing guidelines for Alexi, including testing strategies, test commands, coverage expectations, best practices, and integration with SAP AI Core.
 
 ## Table of Contents
 
@@ -11,10 +11,14 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Providers](#testing-providers)
 - [Testing Routing](#testing-routing)
 - [Best Practices](#best-practices)
+- [Testing with SAP AI Core](#testing-with-sap-ai-core)
+- [Continuous Integration](#continuous-integration)
+- [Troubleshooting](#troubleshooting)
+- [Contributing Tests](#contributing-tests)
 
 ## Testing Strategy
 
-Alexi employs a multi-layered testing strategy to ensure reliability and maintainability:
+Alexi uses a multi-layered testing approach to ensure reliability and maintainability:
 
 ```mermaid
 graph TB
@@ -23,21 +27,21 @@ graph TB
         Integration[Integration Tests]
         E2E[End-to-End Tests]
     end
-    
+
     subgraph "Test Coverage Areas"
         Tools[Tool System Tests]
         Providers[Provider Tests]
         Router[Router Tests]
         Core[Core Logic Tests]
     end
-    
+
     Unit --> Tools
     Unit --> Router
     Unit --> Core
     Integration --> Providers
     Integration --> Tools
     E2E --> Core
-    
+
     style Unit fill:#4CAF50
     style Integration fill:#2196F3
     style E2E fill:#FF9800
@@ -106,13 +110,13 @@ Alexi uses **Vitest** as its testing framework, chosen for:
 
 ### Coverage Expectations
 
-| Component | Target Coverage | Current Status |
-|-----------|----------------|----------------|
-| Tool System | 90%+ | ✅ Achieved |
-| Core Logic | 85%+ | 🔄 In Progress |
-| Providers | 80%+ | 🔄 In Progress |
-| Router | 90%+ | 🔄 In Progress |
-| CLI | 70%+ | 🔄 In Progress |
+| Component     | Target Coverage | Current Status    |
+|--------------|----------------|------------------|
+| Tool System  | 90%+           | ✅ Achieved      |
+| Core Logic   | 85%+           | 🔄 In Progress   |
+| Providers    | 80%+           | 🔄 In Progress   |
+| Router       | 90%+           | 🔄 In Progress   |
+| CLI          | 70%+           | 🔄 In Progress   |
 
 ### Coverage Reports
 
@@ -139,24 +143,24 @@ graph LR
         Context[Tool Context]
         Mock[Permission Mock]
     end
-    
+
     subgraph "Test Execution"
         Execute[Execute Tool]
         Verify[Verify Results]
         Cleanup[Cleanup Resources]
     end
-    
+
     TempDir --> Context
     Mock --> Context
     Context --> Execute
     Execute --> Verify
     Verify --> Cleanup
-    
+
     style Execute fill:#4CAF50
     style Verify fill:#2196F3
 ```
 
-### Example: Testing Write Tool
+#### Example: Testing Write Tool
 
 ```typescript
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -218,19 +222,19 @@ describe('Write Tool', () => {
 });
 ```
 
-### Tool Test Coverage
+#### Tool Test Coverage
 
 All file operation tools have comprehensive test coverage:
 
-| Tool | Test File | Test Cases |
-|------|-----------|------------|
-| `read` | `tests/tool/tools/read.test.ts` | 20+ cases |
-| `write` | `tests/tool/tools/write.test.ts` | 18+ cases |
-| `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
-| `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
-| `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| Tool     | Test File                    | Test Cases |
+|----------|------------------------------|------------|
+| `read`   | `tests/tool/tools/read.test.ts`   | 20+ cases  |
+| `write`  | `tests/tool/tools/write.test.ts`  | 18+ cases  |
+| `edit`   | `tests/tool/tools/edit.test.ts`   | 15+ cases  |
+| `glob`   | `tests/tool/tools/glob.test.ts`   | 16+ cases  |
+| `grep`   | `tests/tool/tools/grep.test.ts`   | 20+ cases  |
 
-### Test Categories
+#### Test Categories
 
 Each tool is tested across multiple categories:
 
@@ -238,19 +242,16 @@ Each tool is tested across multiple categories:
    - Normal usage scenarios
    - Edge cases (empty files, large files)
    - Special characters and unicode
-
 2. **Path Handling**
    - Absolute paths
    - Relative paths with workdir
    - Nested directory creation
    - Path normalization
-
 3. **Error Handling**
    - Non-existent files/directories
    - Permission errors
    - Invalid parameters
    - Malformed patterns (glob/grep)
-
 4. **Tool Metadata**
    - Correct tool names
    - Description presence
@@ -268,40 +269,40 @@ sequenceDiagram
     participant Provider as Provider Implementation
     participant Mock as Mock SAP AI Core
     participant Validator as Response Validator
-    
+
     Test->>Provider: Initialize with config
     Provider->>Mock: Send request
     Mock->>Provider: Return mock response
     Provider->>Validator: Validate format
     Validator->>Test: Assert expectations
-    
+
     Note over Test,Validator: Verify message format, streaming, error handling
 ```
 
-### Example: Testing Provider Integration
+#### Example: Testing Provider Integration
 
 ```typescript
 describe('OpenAI Compatible Provider', () => {
   it('should format messages correctly', async () => {
     const provider = new OpenAICompatibleProvider(config);
-    
+
     const messages = [
       { role: 'user', content: 'Hello' }
     ];
-    
+
     const result = await provider.sendMessage(messages, {
       model: 'gpt-4o',
       temperature: 0.7
     });
-    
+
     expect(result.content).toBeDefined();
     expect(result.role).toBe('assistant');
   });
-  
+
   it('should handle streaming responses', async () => {
     // Test streaming implementation
   });
-  
+
   it('should handle API errors gracefully', async () => {
     // Test error handling
   });
@@ -319,46 +320,46 @@ graph TD
     Input[Test Input Prompt] --> Classifier[Prompt Classifier]
     Classifier --> Complexity[Complexity Score]
     Classifier --> Category[Task Category]
-    
+
     Complexity --> Router[Router Logic]
     Category --> Router
     Config[Routing Config] --> Router
-    
+
     Router --> Model[Selected Model]
     Model --> Verify[Verify Selection]
-    
+
     style Input fill:#E3F2FD
     style Router fill:#4CAF50
     style Verify fill:#2196F3
 ```
 
-### Example: Testing Routing Decisions
+#### Example: Testing Routing Decisions
 
 ```typescript
 describe('Auto Router', () => {
   it('should select cheap model for simple prompts', async () => {
     const router = new AutoRouter(config);
-    
+
     const result = await router.selectModel({
       prompt: 'What is 2+2?',
       preferCheap: true
     });
-    
+
     expect(result.model).toBe('gpt-4o-mini');
     expect(result.confidence).toBeGreaterThan(0.8);
   });
-  
+
   it('should select powerful model for complex tasks', async () => {
     const router = new AutoRouter(config);
-    
+
     const result = await router.selectModel({
       prompt: 'Analyze this codebase and suggest architectural improvements...',
       preferCheap: false
     });
-    
+
     expect(result.model).toBe('claude-4-sonnet');
   });
-  
+
   it('should respect routing rules', async () => {
     // Test rule-based routing
   });
@@ -368,7 +369,6 @@ describe('Auto Router', () => {
 ## Best Practices
 
 ### 1. Test Isolation
-
 Always use temporary directories and clean up after tests:
 
 ```typescript
@@ -376,14 +376,12 @@ beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-'));
   context = { workdir: tempDir };
 });
-
 afterEach(async () => {
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 ```
 
 ### 2. Mock External Dependencies
-
 Mock SAP AI Core API calls and file system operations when appropriate:
 
 ```typescript
@@ -409,7 +407,6 @@ describe('error handling', () => {
       { filePath: '/nonexistent.txt' },
       context
     );
-    
     expect(result.success).toBe(false);
     expect(result.error).toContain('File not found');
   });
@@ -417,15 +414,12 @@ describe('error handling', () => {
 ```
 
 ### 4. Verify Actual File System Changes
-
 Don't just check return values - verify actual changes:
 
 ```typescript
 it('should create file on disk', async () => {
   const result = await writeTool.execute({ filePath, content }, context);
-  
   expect(result.success).toBe(true);
-  
   // Verify file actually exists
   const actualContent = await fs.readFile(filePath, 'utf-8');
   expect(actualContent).toBe(content);
@@ -459,14 +453,11 @@ it('test write', async () => {
 
 ### 7. Test Tool Metadata
 
-Verify tool definitions are correct:
-
 ```typescript
 describe('tool metadata', () => {
   it('should have correct name', () => {
     expect(writeTool.name).toBe('write');
   });
-
   it('should have a description', () => {
     expect(writeTool.description).toBeDefined();
     expect(writeTool.description.length).toBeGreaterThan(0);
@@ -477,7 +468,6 @@ describe('tool metadata', () => {
 ## Testing with SAP AI Core
 
 ### Local Development Testing
-
 For local testing without SAP AI Core:
 
 ```bash
@@ -487,20 +477,17 @@ npm test
 ```
 
 ### Integration Testing
-
 For integration tests with real SAP AI Core:
 
 ```bash
 # Set required environment variables
 export AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...",...}'
 export AICORE_RESOURCE_GROUP='default'
-
 # Run integration tests
 npm run test:integration
 ```
 
 ### CI/CD Testing
-
 GitHub Actions workflows use secrets for SAP AI Core credentials:
 
 ```yaml
@@ -528,7 +515,7 @@ graph LR
     Lint --> Test[Run Tests]
     Test --> Coverage[Generate Coverage]
     Coverage --> Report[Upload Report]
-    
+
     style Test fill:#4CAF50
     style Coverage fill:#2196F3
 ```
@@ -540,15 +527,12 @@ graph LR
 1. **Tests fail with "File not found"**
    - Ensure temporary directories are created in `beforeEach`
    - Check that file paths use `path.join(tempDir, ...)`
-
 2. **Permission errors in CI**
    - Verify tool mocking is configured correctly
    - Check that `defineTool` mock bypasses permission checks
-
 3. **Timeout errors**
    - Increase timeout for slow operations: `it('test', { timeout: 10000 }, async () => {})`
    - Check for hanging async operations
-
 4. **Flaky tests**
    - Use proper cleanup in `afterEach`
    - Avoid shared state between tests
