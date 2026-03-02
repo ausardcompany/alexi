@@ -98,19 +98,36 @@ function truncateOutput(output: string): { content: string; truncated: boolean }
 /**
  * Convert Zod schema to JSON Schema for function calling
  */
+
+interface ZodDefBase {
+  description?: string;
+}
+
+interface ZodArrayDef extends ZodDefBase {
+  type: z.ZodType;
+}
+
+interface ZodWrappedDef extends ZodDefBase {
+  innerType: z.ZodType;
+  defaultValue?: unknown;
+}
+
+interface ZodEnumDef extends ZodDefBase {
+  values: string[];
+}
+
 function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
   // Use Zod's built-in JSON schema generation if available
   // For now, implement a basic converter
-  const def = (schema as any)._def;
 
   if (schema instanceof z.ZodObject) {
-    const shape = schema.shape;
+    const shape = schema.shape as Record<string, z.ZodType>;
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
 
     for (const [key, value] of Object.entries(shape)) {
-      properties[key] = zodToJsonSchema(value as z.ZodType);
-      if (!((value as any) instanceof z.ZodOptional)) {
+      properties[key] = zodToJsonSchema(value);
+      if (!(value instanceof z.ZodOptional)) {
         required.push(key);
       }
     }
@@ -123,18 +140,22 @@ function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
   }
 
   if (schema instanceof z.ZodString) {
+    const def = (schema as unknown as { _def: ZodDefBase })._def;
     return { type: 'string', description: def.description };
   }
 
   if (schema instanceof z.ZodNumber) {
+    const def = (schema as unknown as { _def: ZodDefBase })._def;
     return { type: 'number', description: def.description };
   }
 
   if (schema instanceof z.ZodBoolean) {
+    const def = (schema as unknown as { _def: ZodDefBase })._def;
     return { type: 'boolean', description: def.description };
   }
 
   if (schema instanceof z.ZodArray) {
+    const def = (schema as unknown as { _def: ZodArrayDef })._def;
     return {
       type: 'array',
       items: zodToJsonSchema(def.type),
@@ -143,6 +164,7 @@ function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
   }
 
   if (schema instanceof z.ZodEnum) {
+    const def = (schema as unknown as { _def: ZodEnumDef })._def;
     return {
       type: 'string',
       enum: def.values,
@@ -151,14 +173,18 @@ function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
   }
 
   if (schema instanceof z.ZodOptional) {
+    const def = (schema as unknown as { _def: ZodWrappedDef })._def;
     return zodToJsonSchema(def.innerType);
   }
 
   if (schema instanceof z.ZodDefault) {
+    const def = (schema as unknown as { _def: ZodWrappedDef })._def;
     const inner = zodToJsonSchema(def.innerType);
     // Zod v4: defaultValue is a value, not a function
     const defaultVal =
-      typeof def.defaultValue === 'function' ? def.defaultValue() : def.defaultValue;
+      typeof def.defaultValue === 'function'
+        ? (def.defaultValue as () => unknown)()
+        : def.defaultValue;
     return { ...inner, default: defaultVal };
   }
 

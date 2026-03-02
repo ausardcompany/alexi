@@ -11,12 +11,15 @@ type EventHandler<T> = (payload: T) => void | Promise<void>;
 type UnsubscribeFn = () => void;
 
 // Internal event registry
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const eventHandlers = new Map<string, Set<EventHandler<any>>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const eventSchemas = new Map<string, z.ZodType<any>>();
 
 /**
  * Define a typed event with Zod schema validation
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function defineEvent<T extends z.ZodType<any>>(
   name: string,
   schema: T

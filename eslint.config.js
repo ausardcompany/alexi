@@ -67,6 +67,13 @@ export default [
   },
   prettierConfig,
   {
+    // Allow console statements in logger utility
+    files: ['src/utils/logger.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', '*.js', '*.d.ts', 'coverage/', 'eslint.config.js'],
   },
 ];
