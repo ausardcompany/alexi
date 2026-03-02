@@ -308,7 +308,7 @@ export class UpdateManager {
       clearTimeout(timeout);
 
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request timeout while checking npm registry');
+        throw new Error('Request timeout while checking npm registry', { cause: error });
       }
 
       throw error;
@@ -376,7 +376,8 @@ export class UpdateManager {
 
       // No cache available, throw the error
       throw new Error(
-        `Failed to check for updates: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to check for updates: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }

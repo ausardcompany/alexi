@@ -181,7 +181,7 @@ export async function captureFileState(filePath: string): Promise<FileState> {
       };
     }
     // Other errors (permission denied, etc.) - throw
-    throw new Error(`Failed to capture file state: ${error.message}`);
+    throw new Error(`Failed to capture file state: ${error.message}`, { cause: err });
   }
 }
 
@@ -209,7 +209,7 @@ export async function restoreFileState(state: FileState): Promise<void> {
       const error = err as NodeJS.ErrnoException;
       // Ignore if file already doesn't exist
       if (error.code !== 'ENOENT') {
-        throw new Error(`Failed to delete file: ${error.message}`);
+        throw new Error(`Failed to delete file: ${error.message}`, { cause: err });
       }
     }
   } else {
@@ -221,7 +221,7 @@ export async function restoreFileState(state: FileState): Promise<void> {
       await fs.writeFile(absolutePath, state.content, 'utf-8');
     } catch (err) {
       const error = err as NodeJS.ErrnoException;
-      throw new Error(`Failed to restore file: ${error.message}`);
+      throw new Error(`Failed to restore file: ${error.message}`, { cause: err });
     }
   }
 }

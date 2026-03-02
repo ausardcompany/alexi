@@ -282,7 +282,7 @@ export function decodeShareData(encoded: string): SharePackage {
     return SharePackageSchema.parse(parsed);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to decode share data: ${message}`);
+    throw new Error(`Failed to decode share data: ${message}`, { cause: err });
   }
 }
 

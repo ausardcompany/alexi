@@ -333,7 +333,8 @@ export class SyncManager {
       }
     } catch (error) {
       throw new Error(
-        `Failed to fetch commits for ${repo.name}: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to fetch commits for ${repo.name}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
       );
     }
   }
