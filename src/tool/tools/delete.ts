@@ -138,6 +138,8 @@ Usage:
           await fs.rm(targetPath, { recursive: true });
         }
 
+        context.gitManager?.onFileChanged(targetPath, 'delete', 'deleted directory');
+
         return {
           success: true,
           data: {
@@ -151,6 +153,8 @@ Usage:
 
       // Delete file
       await fs.unlink(targetPath);
+
+      context.gitManager?.onFileChanged(targetPath, 'delete', 'deleted file');
 
       return {
         success: true,

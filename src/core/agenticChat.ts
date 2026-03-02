@@ -17,6 +17,8 @@ import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/inde
 import { registerBuiltInTools } from '../tool/tools/index.js';
 import { getPermissionManager } from '../permission/index.js';
 import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration.js';
+import type { AutoCommitManager } from '../git/autoCommit.js';
+import type { RepoMapManager } from '../context/repoMap.js';
 
 // Tool call from LLM response
 interface ToolCall {
@@ -50,6 +52,10 @@ export interface AgenticChatOptions {
   onProgress?: (event: AgenticProgressEvent) => void;
   /** AbortSignal for cancellation */
   signal?: AbortSignal;
+  /** Optional git auto-commit manager */
+  gitManager?: AutoCommitManager;
+  /** Optional repo map manager for codebase indexing context */
+  repoMapManager?: RepoMapManager;
 }
 
 export interface AgenticProgressEvent {
@@ -238,6 +244,25 @@ export async function agenticChat(
 
   const toolSchemas = enabledTools.map((t) => formatToolForApi(t.toFunctionSchema()));
 
+  // Fetch repo map if a manager is provided (non-blocking best-effort)
+  let repoMapText = '';
+  if (options?.repoMapManager) {
+    try {
+      repoMapText = await options.repoMapManager.getMap();
+    } catch {
+      // Non-fatal: proceed without repo map
+    }
+  }
+
+  /**
+   * Build the effective system prompt, optionally prepending the repo map.
+   */
+  function buildSystemPrompt(base?: string): string {
+    if (!repoMapText) return base ?? '';
+    if (!base) return repoMapText;
+    return `${repoMapText}\n\n${base}`;
+  }
+
   // Build initial messages
   const messages: Message[] = [];
 
@@ -249,14 +274,17 @@ export async function agenticChat(
 
     const history = options.sessionManager.getHistory(20);
     if (options.systemPrompt && !history.some((m) => m.role === 'system')) {
-      messages.push({ role: 'system', content: options.systemPrompt });
+      messages.push({ role: 'system', content: buildSystemPrompt(options.systemPrompt) });
+    } else if (repoMapText && !history.some((m) => m.role === 'system')) {
+      messages.push({ role: 'system', content: repoMapText });
     }
     messages.push(
       ...history.map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
     );
   } else {
-    if (options?.systemPrompt) {
-      messages.push({ role: 'system', content: options.systemPrompt });
+    const effectiveSystemPrompt = buildSystemPrompt(options?.systemPrompt);
+    if (effectiveSystemPrompt) {
+      messages.push({ role: 'system', content: effectiveSystemPrompt });
     }
   }
 
@@ -277,6 +305,7 @@ export async function agenticChat(
     workdir,
     signal: options?.signal,
     sessionId: options?.sessionManager?.getCurrentSession()?.metadata.id,
+    gitManager: options?.gitManager,
   };
 
   // Agent loop

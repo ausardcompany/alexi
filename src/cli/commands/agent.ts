@@ -12,6 +12,10 @@ import { readFileSync } from 'node:fs';
 import type { Command } from 'commander';
 import { agenticChat, type AgenticProgressEvent } from '../../core/agenticChat.js';
 import { SessionManager } from '../../core/sessionManager.js';
+import { createAutoCommitManager } from '../../git/autoCommit.js';
+import { loadGitConfig } from '../../git/config.js';
+import { commitDirtyFiles } from '../../git/dirtyFiles.js';
+import { RepoMapManager } from '../../context/repoMap.js';
 
 interface AgentOptions {
   message?: string;
@@ -26,6 +30,14 @@ interface AgentOptions {
   tools?: string;
   verbose?: boolean;
   quiet?: boolean;
+  // Git flags
+  noAutoCommits?: boolean;
+  noDirtyCommits?: boolean;
+  gitCommitVerify?: boolean;
+  attributeCoAuthoredBy?: boolean;
+  attributeAuthor?: boolean;
+  // Repo map flags
+  mapTokens?: string;
 }
 
 export function registerAgentCommand(program: Command): void {
@@ -44,6 +56,17 @@ export function registerAgentCommand(program: Command): void {
     .option('--tools <list>', 'Comma-separated list of tool names to enable (default: all)')
     .option('-v, --verbose', 'Show progress updates')
     .option('-q, --quiet', 'Only output the final response')
+    // Git auto-commit flags
+    .option('--no-auto-commits', 'Disable git auto-commits after AI file changes')
+    .option('--no-dirty-commits', 'Skip committing pre-existing dirty files before AI edits')
+    .option('--git-commit-verify', 'Run pre-commit hooks when auto-committing (default: skip)')
+    .option('--attribute-co-authored-by', 'Add Co-authored-by trailer to AI commits (default)')
+    .option('--attribute-author', 'Override git author for AI commits')
+    // Repo map flags
+    .option(
+      '--map-tokens <n>',
+      'Include a repo map in the system prompt with token budget N (default: 1000; 0 = disabled)'
+    )
     .action(async (opts: AgentOptions) => {
       try {
         // Get message from either --message or --message-file
@@ -57,6 +80,7 @@ export function registerAgentCommand(program: Command): void {
           process.exit(1);
         }
 
+        const workdir = opts.workdir ?? process.cwd();
         const sessionManager = new SessionManager();
 
         // Load or create session
@@ -73,6 +97,42 @@ export function registerAgentCommand(program: Command): void {
 
         // Parse enabled tools
         const enabledTools = opts.tools ? opts.tools.split(',').map((t) => t.trim()) : undefined;
+
+        // Set up git auto-commits
+        let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
+        if (!opts.noAutoCommits) {
+          const gitConfig = await loadGitConfig(workdir);
+
+          // Apply CLI flag overrides
+          if (opts.noDirtyCommits) gitConfig.dirtyCommits = false;
+          if (opts.gitCommitVerify) gitConfig.commitVerify = true;
+          if (opts.attributeAuthor) gitConfig.attribution.style = 'author';
+          else if (opts.attributeCoAuthoredBy) gitConfig.attribution.style = 'co-authored-by';
+
+          gitManager = createAutoCommitManager(workdir, gitConfig);
+
+          // Commit pre-existing dirty files before AI starts editing
+          if (gitConfig.dirtyCommits) {
+            const dirtyResult = await commitDirtyFiles(workdir, gitConfig);
+            if (dirtyResult.committed && !opts.quiet) {
+              console.error(
+                `[Git] Committed ${dirtyResult.filesCommitted.length} pre-existing dirty file(s): ${dirtyResult.hash}`
+              );
+            }
+          }
+        }
+
+        // Set up repo map manager
+        let repoMapManager: RepoMapManager | undefined;
+        if (opts.mapTokens !== undefined) {
+          const mapTokensBudget = parseInt(opts.mapTokens, 10);
+          if (!isNaN(mapTokensBudget) && mapTokensBudget > 0) {
+            repoMapManager = new RepoMapManager(workdir, { maxTokens: mapTokensBudget });
+            if (!opts.quiet) {
+              console.error(`[RepoMap] Building repo map (token budget: ${mapTokensBudget})…`);
+            }
+          }
+        }
 
         // Progress callback
         const onProgress =
@@ -112,10 +172,27 @@ export function registerAgentCommand(program: Command): void {
           sessionManager,
           systemPrompt: opts.system,
           maxIterations: parseInt(String(opts.maxIterations ?? '50'), 10),
-          workdir: opts.workdir ?? process.cwd(),
+          workdir,
           enabledTools,
           onProgress,
+          gitManager,
+          repoMapManager,
         });
+
+        // Flush any pending auto-commits
+        if (gitManager) {
+          try {
+            const finalCommit = await gitManager.commitPendingChanges();
+            if (finalCommit && !opts.quiet) {
+              console.error(`[Git] Auto-committed: ${finalCommit.hash} — ${finalCommit.message}`);
+            }
+          } catch (commitErr) {
+            console.error(
+              `[Git] Warning: auto-commit failed: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`
+            );
+          }
+          gitManager.destroy();
+        }
 
         // Output result
         console.log(res.text);

@@ -63,7 +63,7 @@ Usage:
       await fs.writeFile(filePath, params.content, 'utf-8');
       const bytesWritten = Buffer.byteLength(params.content, 'utf-8');
 
-      return {
+      const toolResult = {
         success: true,
         data: {
           path: filePath,
@@ -71,6 +71,14 @@ Usage:
           created: !exists,
         },
       };
+
+      context.gitManager?.onFileChanged(
+        filePath,
+        'write',
+        !exists ? 'created file' : 'overwrote file'
+      );
+
+      return toolResult;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
 

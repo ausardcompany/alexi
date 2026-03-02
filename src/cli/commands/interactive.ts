@@ -4,6 +4,10 @@
 
 import type { Command } from 'commander';
 import { startInteractive } from '../interactive.js';
+import { createAutoCommitManager } from '../../git/autoCommit.js';
+import { loadGitConfig } from '../../git/config.js';
+import { commitDirtyFiles } from '../../git/dirtyFiles.js';
+import { RepoMapManager } from '../../context/repoMap.js';
 
 interface InteractiveOptions {
   model?: string;
@@ -11,6 +15,14 @@ interface InteractiveOptions {
   preferCheap?: boolean;
   session?: string;
   system?: string;
+  // Git flags
+  noAutoCommits?: boolean;
+  noDirtyCommits?: boolean;
+  gitCommitVerify?: boolean;
+  attributeCoAuthoredBy?: boolean;
+  attributeAuthor?: boolean;
+  // Repo map flags
+  mapTokens?: string;
 }
 
 export function registerInteractiveCommand(program: Command): void {
@@ -23,14 +35,60 @@ export function registerInteractiveCommand(program: Command): void {
     .option('--prefer-cheap', 'Prefer cheaper models when auto-routing')
     .option('--session <id>', 'Continue existing session')
     .option('--system <prompt>', 'System prompt for the conversation')
+    // Git auto-commit flags
+    .option('--no-auto-commits', 'Disable git auto-commits')
+    .option('--no-dirty-commits', 'Skip committing pre-existing dirty files')
+    .option('--git-commit-verify', 'Run pre-commit hooks when auto-committing')
+    .option('--attribute-co-authored-by', 'Add Co-authored-by trailer to AI commits (default)')
+    .option('--attribute-author', 'Override git author for AI commits')
+    // Repo map flags
+    .option(
+      '--map-tokens <n>',
+      'Enable repo map in system prompt with token budget N (default: 1000; 0 = disabled)'
+    )
     .action(async (opts: InteractiveOptions) => {
       try {
+        const workdir = process.cwd();
+        let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
+
+        if (!opts.noAutoCommits) {
+          const gitConfig = await loadGitConfig(workdir);
+
+          if (opts.noDirtyCommits) gitConfig.dirtyCommits = false;
+          if (opts.gitCommitVerify) gitConfig.commitVerify = true;
+          if (opts.attributeAuthor) gitConfig.attribution.style = 'author';
+          else if (opts.attributeCoAuthoredBy) gitConfig.attribution.style = 'co-authored-by';
+
+          gitManager = createAutoCommitManager(workdir, gitConfig);
+
+          if (gitConfig.dirtyCommits) {
+            const dirtyResult = await commitDirtyFiles(workdir, gitConfig);
+            if (dirtyResult.committed) {
+              console.log(
+                `[Git] Committed ${dirtyResult.filesCommitted.length} pre-existing dirty file(s): ${dirtyResult.hash}`
+              );
+            }
+          }
+        }
+
+        // Set up repo map manager
+        let repoMapManager: RepoMapManager | undefined;
+        if (opts.mapTokens !== undefined) {
+          const mapTokensBudget = parseInt(opts.mapTokens, 10);
+          if (!isNaN(mapTokensBudget) && mapTokensBudget > 0) {
+            repoMapManager = new RepoMapManager(workdir, { maxTokens: mapTokensBudget });
+            console.log(`[RepoMap] Building repo map (token budget: ${mapTokensBudget})…`);
+          }
+        }
+
         await startInteractive({
           model: opts.model,
           autoRoute: opts.autoRoute,
           preferCheap: opts.preferCheap,
           session: opts.session,
           systemPrompt: opts.system,
+          gitManager,
+          repoMapManager,
         });
       } catch (e) {
         console.error(String(e));

@@ -147,6 +147,8 @@ Usage:
         result.hint = 'Warning: File became empty after edits';
       }
 
+      context.gitManager?.onFileChanged(filePath, 'multiedit', `${changes.length} edit(s) applied`);
+
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

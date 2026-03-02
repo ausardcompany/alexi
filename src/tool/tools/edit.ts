@@ -87,7 +87,7 @@ Usage:
         Buffer.byteLength(newContent, 'utf-8') - Buffer.byteLength(content, 'utf-8')
       );
 
-      return {
+      const toolResult = {
         success: true,
         data: {
           path: filePath,
@@ -95,6 +95,10 @@ Usage:
           bytesChanged,
         },
       };
+
+      context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);
+
+      return toolResult;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
 

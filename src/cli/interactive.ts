@@ -11,6 +11,8 @@ import { streamChat, resolveModelId, isAbortError } from '../core/streamingOrche
 import { SessionManager } from '../core/sessionManager.js';
 import { env } from '../config/env.js';
 import { colors, c } from './utils/colors.js';
+import type { AutoCommitManager } from '../git/autoCommit.js';
+import type { RepoMapManager } from '../context/repoMap.js';
 import { getCheckpointManager } from '../core/checkpoints.js';
 import { compactConversation, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
@@ -32,6 +34,10 @@ export interface InteractiveOptions {
   preferCheap?: boolean;
   session?: string;
   systemPrompt?: string;
+  /** Optional git auto-commit manager for /commit, /git, /git-log, /git-config commands */
+  gitManager?: AutoCommitManager;
+  /** Optional repo map manager for /map, /map-refresh, /map-tokens commands */
+  repoMapManager?: RepoMapManager;
 }
 
 interface ReplState {
@@ -45,6 +51,8 @@ interface ReplState {
   agent?: string;
   stage?: ConversationStage;
   thinkingMode?: boolean;
+  gitManager?: AutoCommitManager;
+  repoMapManager?: RepoMapManager;
 }
 
 // Spinner animation frames
@@ -115,6 +123,24 @@ function printHelp(): void {
     c('yellow', '  /diff') + c('gray', '              - Show files changed in current session')
   );
   console.log(c('yellow', '  /undo') + c('gray', '              - Undo last file change'));
+  console.log();
+  console.log(c('cyan', '  Repo Map:'));
+  console.log();
+  console.log(c('yellow', '  /map') + c('gray', '                - Show current repo map'));
+  console.log(c('yellow', '  /map-refresh') + c('gray', '        - Force rebuild of the repo map'));
+  console.log(
+    c('yellow', '  /map-tokens <n>') + c('gray', '     - Set repo map token budget (default: 1000)')
+  );
+  console.log();
+  console.log(c('cyan', '  Git:'));
+  console.log();
+  console.log(
+    c('yellow', '  /commit [msg]') +
+      c('gray', '      - Force commit pending changes (optional message)')
+  );
+  console.log(c('yellow', '  /git <cmd>') + c('gray', '         - Run a raw git command'));
+  console.log(c('yellow', '  /git-log') + c('gray', '           - Show recent AI commits'));
+  console.log(c('yellow', '  /git-config') + c('gray', '        - Show current git config'));
   console.log(c('yellow', '  /redo') + c('gray', '              - Redo last undone change'));
   console.log(
     c('yellow', '  /fork [name]') + c('gray', '       - Fork current session with optional name')
@@ -1362,6 +1388,174 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       return true;
     }
 
+    case 'commit': {
+      const gitManager = state.gitManager;
+      if (!gitManager) {
+        console.log(
+          c(
+            'yellow',
+            '\n  Git auto-commits not enabled (start with --attribute-co-authored-by or similar)\n'
+          )
+        );
+        return true;
+      }
+      const msgOverride = args.length > 0 ? args.join(' ') : undefined;
+      try {
+        const commitResult = await gitManager.commitPendingChanges(msgOverride);
+        if (!commitResult) {
+          console.log(c('yellow', '\n  No pending changes to commit\n'));
+        } else {
+          console.log(c('green', `\n  Committed: ${commitResult.hash}`));
+          console.log(c('dim', `  ${commitResult.message}`));
+          console.log(c('gray', `  ${commitResult.filesCommitted.length} file(s)\n`));
+        }
+      } catch (err) {
+        console.log(
+          c('red', `\n  Commit failed: ${err instanceof Error ? err.message : String(err)}\n`)
+        );
+      }
+      return true;
+    }
+
+    case 'git': {
+      const gitManager = state.gitManager;
+      if (!gitManager) {
+        console.log(c('yellow', '\n  Git manager not available\n'));
+        return true;
+      }
+      if (args.length === 0) {
+        console.log(c('red', '\n  Usage: /git <command> [args...]\n'));
+        return true;
+      }
+      try {
+        const output = await gitManager.runRaw(args);
+        console.log(c('cyan', '\n  Git output:'));
+        console.log(output || c('dim', '  (no output)'));
+        console.log();
+      } catch (err) {
+        console.log(
+          c('red', `\n  Git error: ${err instanceof Error ? err.message : String(err)}\n`)
+        );
+      }
+      return true;
+    }
+
+    case 'git-log': {
+      const gitManager = state.gitManager;
+      if (!gitManager) {
+        console.log(c('yellow', '\n  Git manager not available\n'));
+        return true;
+      }
+      try {
+        const commits = await gitManager.getRecentCommits(10);
+        if (commits.length === 0) {
+          console.log(c('yellow', '\n  No commits found\n'));
+        } else {
+          console.log(c('cyan', '\n  Recent commits:\n'));
+          for (const commit of commits) {
+            console.log(`  ${c('yellow', commit.hash)} ${commit.message}`);
+            console.log(c('dim', `           ${commit.date}`));
+          }
+          console.log();
+        }
+      } catch (err) {
+        console.log(c('red', `\n  Error: ${err instanceof Error ? err.message : String(err)}\n`));
+      }
+      return true;
+    }
+
+    case 'git-config': {
+      const gitManager = state.gitManager;
+      if (!gitManager) {
+        console.log(c('yellow', '\n  Git manager not available\n'));
+        return true;
+      }
+      // Access private config via a getter or cast — expose via method
+      try {
+        const output = await gitManager.runRaw(['config', '--list', '--local']);
+        console.log(c('cyan', '\n  Git local config:\n'));
+        console.log(output || c('dim', '  (no local config)'));
+        console.log();
+      } catch {
+        console.log(c('yellow', '\n  No local git config found (not a repo?)\n'));
+      }
+      return true;
+    }
+
+    case 'map': {
+      const mapManager = state.repoMapManager;
+      if (!mapManager) {
+        console.log(c('yellow', '\n  Repo map not enabled (start with --map-tokens to enable)\n'));
+        return true;
+      }
+      try {
+        const mapText = await mapManager.getMap();
+        if (!mapText.trim()) {
+          console.log(c('yellow', '\n  No source files found for repo map\n'));
+        } else {
+          console.log(c('cyan', '\n  Repo Map:\n'));
+          console.log(mapText);
+          console.log();
+        }
+      } catch (err) {
+        console.log(
+          c('red', `\n  Repo map error: ${err instanceof Error ? err.message : String(err)}\n`)
+        );
+      }
+      return true;
+    }
+
+    case 'map-refresh': {
+      const mapManager = state.repoMapManager;
+      if (!mapManager) {
+        console.log(c('yellow', '\n  Repo map not enabled\n'));
+        return true;
+      }
+      try {
+        console.log(c('dim', '\n  Rebuilding repo map…'));
+        const mapText = await mapManager.refresh();
+        const lines = mapText.split('\n').length;
+        console.log(
+          c('green', `  Repo map rebuilt (${lines} lines, ~${mapManager.maxTokens} token budget)\n`)
+        );
+      } catch (err) {
+        console.log(
+          c(
+            'red',
+            `\n  Repo map refresh error: ${err instanceof Error ? err.message : String(err)}\n`
+          )
+        );
+      }
+      return true;
+    }
+
+    case 'map-tokens': {
+      const mapManager = state.repoMapManager;
+      if (!mapManager) {
+        console.log(c('yellow', '\n  Repo map not enabled\n'));
+        return true;
+      }
+      if (args.length === 0) {
+        console.log(
+          c(
+            'gray',
+            `\n  Current repo map token budget: ${c('green', String(mapManager.maxTokens))}\n`
+          )
+        );
+        return true;
+      }
+      const n = parseInt(args[0], 10);
+      if (isNaN(n) || n < 0) {
+        console.log(c('red', '\n  Usage: /map-tokens <positive integer>\n'));
+        return true;
+      }
+      mapManager.setMaxTokens(n);
+      console.log(
+        c('green', `\n  Repo map token budget set to ${n}. Run /map-refresh to apply.\n`)
+      );
+      return true;
+    }
+
     default:
       console.log(c('red', `\n  Unknown command: /${cmd}`));
       console.log(c('gray', '  Type /help for available commands\n'));
@@ -1380,6 +1574,8 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     preferCheap: options.preferCheap || false,
     systemPrompt: options.systemPrompt,
     isStreaming: false,
+    gitManager: options.gitManager,
+    repoMapManager: options.repoMapManager,
   };
 
   // Load existing session if specified

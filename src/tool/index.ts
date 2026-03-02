@@ -8,12 +8,15 @@ import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { ToolExecutionStarted, ToolExecutionCompleted, ToolExecutionFailed } from '../bus/index.js';
 import { getPermissionManager, type PermissionAction } from '../permission/index.js';
+import type { AutoCommitManager } from '../git/autoCommit.js';
 
 // Tool execution context
 export interface ToolContext {
   workdir: string;
   signal?: AbortSignal;
   sessionId?: string;
+  /** Optional git auto-commit manager — injected by agenticChat when enabled */
+  gitManager?: AutoCommitManager;
 }
 
 // Tool result
