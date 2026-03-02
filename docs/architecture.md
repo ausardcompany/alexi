@@ -133,6 +133,7 @@ graph TB
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
+| Logger | `src/utils/logger.ts` | Centralized logging utility |
 
 ## Data Flow
 
@@ -225,6 +226,34 @@ flowchart LR
     RetErr --> Result
 ```
 
+## Tool System with Context Resolution
+
+The tool system resolves relative paths using the workdir context:
+
+```mermaid
+flowchart TB
+    ToolCall[Tool Call with Params] --> ParseParams[Parse Parameters]
+    ParseParams --> CheckPath{Path Type?}
+    
+    CheckPath -->|Absolute| UseAbsolute[Use Path As-Is]
+    CheckPath -->|Relative| ResolveRelative[Resolve with Workdir]
+    
+    ResolveRelative --> JoinPath[path.join workdir, filePath]
+    JoinPath --> AbsolutePath[Absolute Path]
+    UseAbsolute --> AbsolutePath
+    
+    AbsolutePath --> PermCheck[Permission Check]
+    PermCheck --> GetResource[getResource params, context]
+    GetResource --> CheckPerms[Check Against Rules]
+    
+    CheckPerms --> Allowed{Allowed?}
+    Allowed -->|Yes| Execute[Execute Tool]
+    Allowed -->|No| Deny[Return Permission Denied]
+    
+    Execute --> Result[Return Result]
+    Deny --> Result
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -297,6 +326,7 @@ Tools are implemented as independent modules that:
 - Support permission-based access control with last-match-wins rule evaluation
 - Resolve relative paths using workdir context for agentic operations
 - Support interactive permission prompts and high-priority allow rules
+- Convert Zod schemas to JSON Schema for LLM function calling with proper type handling
 
 ### 3. Agentic Execution Mode
 
@@ -327,6 +357,115 @@ Sessions provide:
 1. **Secrets Management**: Secrets are redacted in exports and logs
 2. **Permission System**: File access is controlled by configurable rules
 3. **Environment Isolation**: Sensitive config stored in `~/.alexi/`
+4. **Type Safety**: Strict TypeScript configuration with proper type assertions
+5. **Logging**: Centralized logger replaces direct console calls for better control
+
+## Logging System
+
+Alexi uses a centralized logging utility to provide consistent logging across the application.
+
+### Logger API
+
+```typescript
+import { logger } from './utils/logger.js';
+
+// Set log level (debug, info, warn, error)
+logger.setLevel('debug');
+
+// Log messages at different levels
+logger.debug('Debug message', additionalData);
+logger.info('Info message');
+logger.warn('Warning message');
+logger.error('Error message', error);
+
+// Print without formatting (for CLI output)
+logger.print('Raw output');
+```
+
+### Log Levels
+
+| Level | Priority | Description | Output Format |
+|-------|----------|-------------|---------------|
+| `debug` | 0 | Detailed debugging information | `[DEBUG] message` |
+| `info` | 1 | General informational messages | `message` (no prefix) |
+| `warn` | 2 | Warning messages | `[WARN] message` |
+| `error` | 3 | Error messages | `[ERROR] message` |
+
+The logger respects the configured log level and only outputs messages at or above that level. The default level is `info`.
+
+### ESLint Integration
+
+The logger utility is the only module permitted to use direct console calls. All other modules should import and use the centralized logger to maintain ESLint compliance.
+
+```typescript
+// ❌ Avoid direct console usage
+console.log('message');
+
+// ✅ Use centralized logger
+import { logger } from './utils/logger.js';
+logger.info('message');
+```
+
+## Type Safety and Code Quality
+
+### TypeScript Configuration
+
+Alexi uses strict TypeScript configuration with proper type assertions:
+
+```typescript
+// Model capability filtering with explicit type assertion
+const models = config.models.filter(
+  (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
+);
+
+// Zod schema type handling with interface definitions
+interface ZodDefBase {
+  description?: string;
+}
+
+const def = (schema as unknown as { _def: ZodDefBase })._def;
+```
+
+### ESLint Rules
+
+Key ESLint rules enforced:
+
+- `no-console: warn` - Prevents direct console usage (except in logger)
+- `@typescript-eslint/no-explicit-any: warn` - Flags any type usage
+- `@typescript-eslint/no-unused-vars: error` - Prevents unused variables
+- `prefer-const: error` - Enforces const for immutable variables
+- `eqeqeq: error` - Requires strict equality checks
+
+### Code Quality Diagram
+
+```mermaid
+flowchart LR
+    subgraph Development
+        Code[Write Code] --> TypeCheck[TypeScript Check]
+        TypeCheck --> Lint[ESLint]
+        Lint --> Test[Run Tests]
+    end
+    
+    subgraph Quality Gates
+        Test --> Build[Build Project]
+        Build --> CI[CI Pipeline]
+    end
+    
+    subgraph Standards
+        Logger[Centralized Logger]
+        Types[Type Safety]
+        Validation[Zod Validation]
+    end
+    
+    Code --> Logger
+    Code --> Types
+    Code --> Validation
+    
+    CI --> Deploy{Pass?}
+    Deploy -->|Yes| Merge[Merge to Main]
+    Deploy -->|No| Fix[Fix Issues]
+    Fix --> Code
+```
 
 ## Future Improvements
 

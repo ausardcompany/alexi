@@ -393,6 +393,26 @@ interface ToolContext {
 }
 ```
 
+### ToolDefinition
+
+Tool definition with permission support and context-aware resource resolution.
+
+```typescript
+interface ToolDefinition<TParams extends z.ZodType, TResult> {
+  name: string;
+  description: string;
+  parameters: TParams;
+  // Permission requirements
+  permission?: {
+    action: PermissionAction;
+    // getResource can optionally receive context to resolve relative paths
+    getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
+  };
+  // Execution function
+  execute: (params: z.infer<TParams>, context: ToolContext) => Promise<ToolResult<TResult>>;
+}
+```
+
 ### ToolResult
 
 Result returned from tool execution.
@@ -654,3 +674,53 @@ try {
 ## Streaming Support
 
 Alexi supports streaming responses for real-time output. See the streaming orchestrator documentation for details on implementing streaming in custom integrations.
+
+## Logging Utility
+
+Alexi provides a centralized logging utility for consistent logging across the application.
+
+### Logger Interface
+
+```typescript
+interface Logger {
+  setLevel(level: LogLevel): void;
+  debug(message: string, ...args: unknown[]): void;
+  info(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+  print(message: string): void;
+}
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+```
+
+### Usage
+
+```typescript
+import { logger } from './utils/index.js';
+
+// Set log level
+logger.setLevel('debug');
+
+// Log messages
+logger.debug('Debugging information', { context: 'value' });
+logger.info('Operation completed successfully');
+logger.warn('Potential issue detected');
+logger.error('Operation failed', error);
+
+// Print raw output (for CLI)
+logger.print('Output without formatting');
+```
+
+### Log Level Behavior
+
+The logger filters messages based on the configured level:
+
+| Current Level | Messages Shown |
+|---------------|----------------|
+| `debug` | debug, info, warn, error |
+| `info` (default) | info, warn, error |
+| `warn` | warn, error |
+| `error` | error only |
+
+The `print` method always outputs regardless of log level and is intended for CLI output that should not be filtered.

@@ -37,7 +37,9 @@ function getConfig(): RoutingConfig {
 
 // Get model registry from config
 function getModelRegistry(): ModelCapability[] {
-  return getConfig().models.filter((m) => (m as any).enabled !== false);
+  return getConfig().models.filter(
+    (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
+  );
 }
 
 /**

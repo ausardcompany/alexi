@@ -1,6 +1,6 @@
 # Contributing to Alexi
 
-Thank you for your interest in contributing to Alexi! This document provides guidelines and best practices for contributing to the project.
+Thank you for your interest in contributing to Alexi! This document provides guidelines and instructions for contributing to the project.
 
 ## Table of Contents
 
@@ -9,386 +9,287 @@ Thank you for your interest in contributing to Alexi! This document provides gui
 - [Development Workflow](#development-workflow)
 - [Coding Standards](#coding-standards)
 - [Testing Guidelines](#testing-guidelines)
-- [Documentation](#documentation)
 - [Pull Request Process](#pull-request-process)
-- [Autonomous Systems](#autonomous-systems)
+- [Documentation](#documentation)
+- [Automation System](#automation-system)
 
 ## Code of Conduct
 
-We are committed to providing a welcoming and inclusive environment. Please be respectful and professional in all interactions.
+This project follows a professional code of conduct. We expect all contributors to:
+
+- Be respectful and inclusive
+- Provide constructive feedback
+- Focus on technical merit
+- Maintain professional communication
 
 ## Getting Started
 
 ### Prerequisites
 
-- **Node.js**: Version 22 or higher
-- **npm**: Version 10 or higher
-- **Git**: Version 2.30 or higher
-- **TypeScript**: 5.x (installed via npm)
+- Node.js 22 or higher
+- npm or yarn package manager
+- Git
+- SAP AI Core account with valid credentials
+- TypeScript knowledge
 
 ### Initial Setup
 
-1. **Fork the Repository**
-
-   Fork the repository to your GitHub account.
-
-2. **Clone Your Fork**
-
+1. Fork the repository on GitHub
+2. Clone your fork locally:
    ```bash
-   git clone git@github.com:YOUR_USERNAME/alexi.git
-   cd alexi
+   git clone git@github.com:YOUR_USERNAME/sap-bot-orchestrator.git
+   cd sap-bot-orchestrator
    ```
 
-3. **Add Upstream Remote**
-
-   ```bash
-   git remote add upstream git@github.com:ausard/alexi.git
-   ```
-
-4. **Install Dependencies**
-
+3. Install dependencies:
    ```bash
    npm install
    ```
 
-5. **Configure Environment**
-
-   Copy `.env.example` to `.env` and configure your SAP AI Core credentials:
-
+4. Configure environment variables:
    ```bash
    cp .env.example .env
+   # Edit .env with your SAP AI Core credentials
    ```
 
-   Edit `.env` with your credentials:
-   ```bash
-   # SAP AI Core Configuration
-   AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
-   AICORE_RESOURCE_GROUP=your-resource-group-id
-   
-   # Optional: Proxy Configuration
-   SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
-   SAP_PROXY_API_KEY=your_secret_key
-   SAP_PROXY_MODEL=gpt-4o
-   ```
-
-6. **Build the Project**
-
+5. Build the project:
    ```bash
    npm run build
    ```
 
-7. **Verify Installation**
-
+6. Verify the setup:
    ```bash
-   node dist/cli/program.js --version
    node dist/cli/program.js --help
    ```
+
+### Environment Configuration
+
+Create a `.env` file (never commit this file) with:
+
+```bash
+# Proxy configuration (for OpenAI-compatible models)
+SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
+SAP_PROXY_API_KEY=your_secret_key
+SAP_PROXY_MODEL=gpt-4o
+
+# Native SAP AI Core (for Claude models)
+AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
+AICORE_RESOURCE_GROUP=your-resource-group-id
+```
 
 ## Development Workflow
 
 ### Branch Strategy
 
-```mermaid
-gitGraph
-    commit id: "main"
-    branch feature/new-provider
-    checkout feature/new-provider
-    commit id: "Add provider interface"
-    commit id: "Implement provider"
-    commit id: "Add tests"
-    checkout main
-    merge feature/new-provider
-    branch fix/routing-bug
-    checkout fix/routing-bug
-    commit id: "Fix routing logic"
-    checkout main
-    merge fix/routing-bug
-```
-
-**Branch Naming Convention**:
-- `feature/*`: New features (e.g., `feature/add-gemini-provider`)
-- `fix/*`: Bug fixes (e.g., `fix/session-persistence`)
-- `docs/*`: Documentation updates (e.g., `docs/update-api-guide`)
-- `refactor/*`: Code refactoring (e.g., `refactor/router-architecture`)
-- `test/*`: Test improvements (e.g., `test/add-provider-tests`)
+- `main`: Production-ready code
+- `feature/*`: New features
+- `fix/*`: Bug fixes
+- `docs/*`: Documentation updates
+- `refactor/*`: Code refactoring
 
 ### Development Process
 
-1. **Create a Feature Branch**
+```mermaid
+graph LR
+    A[Create Branch] --> B[Make Changes]
+    B --> C[Write Tests]
+    C --> D[Run Tests]
+    D --> E[Commit]
+    E --> F[Push]
+    F --> G[Create PR]
+    G --> H[Code Review]
+    H --> I[Address Feedback]
+    I --> J[Auto-Generate Docs]
+    J --> K[Merge]
+```
 
+1. Create a feature branch:
    ```bash
    git checkout -b feature/your-feature-name
    ```
 
-2. **Make Changes**
+2. Make your changes following coding standards
 
-   Follow the coding standards and write tests for new functionality.
+3. Write or update tests for your changes
 
-3. **Run Tests Locally**
-
+4. Run tests locally:
    ```bash
    npm test
    ```
 
-4. **Build and Verify**
-
+5. Build and verify:
    ```bash
    npm run build
    npm run lint
    ```
 
-5. **Commit Changes**
-
-   Use conventional commit format:
-
+6. Commit your changes with descriptive messages:
    ```bash
-   git commit -m "feat: add new provider for Gemini models"
-   git commit -m "fix: resolve session persistence issue"
-   git commit -m "docs: update routing documentation"
+   git add .
+   git commit -m "feat: add new feature description"
    ```
 
-   **Commit Types**:
-   - `feat`: New feature
-   - `fix`: Bug fix
-   - `docs`: Documentation changes
-   - `refactor`: Code refactoring
-   - `test`: Test additions or modifications
-   - `chore`: Build process or auxiliary tool changes
-   - `style`: Code style changes (formatting, missing semicolons, etc.)
-   - `perf`: Performance improvements
-
-6. **Push to Your Fork**
-
+7. Push to your fork:
    ```bash
    git push origin feature/your-feature-name
    ```
 
-7. **Create Pull Request**
-
-   Open a pull request from your fork to the main repository.
+8. Create a pull request on GitHub
 
 ## Coding Standards
 
-### TypeScript Style Guide
+### TypeScript Guidelines
 
-**File Organization**:
-```typescript
-// 1. Imports (external first, then internal)
-import { z } from 'zod';
-import * as fs from 'fs/promises';
-import { defineTool, type ToolResult } from '../index.js';
+1. **Type Safety**: Always use explicit types, avoid `any`
+   ```typescript
+   // Good
+   function processMessage(message: string): Promise<Response> {
+     // ...
+   }
+   
+   // Bad
+   function processMessage(message: any): any {
+     // ...
+   }
+   ```
 
-// 2. Type definitions
-interface MyResult {
-  success: boolean;
-  data?: string;
-}
+2. **Interfaces over Types**: Prefer interfaces for object shapes
+   ```typescript
+   // Good
+   interface ToolContext {
+     workdir: string;
+     signal?: AbortSignal;
+   }
+   
+   // Acceptable for unions/intersections
+   type PermissionAction = 'read' | 'write' | 'execute';
+   ```
 
-// 3. Constants
-const MAX_RETRIES = 3;
+3. **Async/Await**: Use async/await over raw promises
+   ```typescript
+   // Good
+   async function fetchData(): Promise<Data> {
+     const response = await fetch(url);
+     return await response.json();
+   }
+   
+   // Avoid
+   function fetchData(): Promise<Data> {
+     return fetch(url).then(r => r.json());
+   }
+   ```
 
-// 4. Implementation
-export function myFunction(): MyResult {
-  // Implementation
-}
+4. **Error Handling**: Always handle errors appropriately
+   ```typescript
+   try {
+     const result = await riskyOperation();
+     return { success: true, data: result };
+   } catch (err) {
+     const message = err instanceof Error ? err.message : String(err);
+     return { success: false, error: message };
+   }
+   ```
+
+5. **Null Safety**: Use optional chaining and nullish coalescing
+   ```typescript
+   // Good
+   const value = context?.workdir ?? process.cwd();
+   
+   // Avoid
+   const value = context && context.workdir ? context.workdir : process.cwd();
+   ```
+
+### File Organization
+
+```
+src/
+├── cli/              # CLI-related code
+│   ├── program.ts    # Main CLI entry point
+│   └── commands/     # Individual CLI commands
+├── core/             # Core orchestration logic
+│   ├── orchestrator.ts
+│   ├── router.ts
+│   └── agenticChat.ts
+├── providers/        # LLM provider implementations
+│   ├── openai/
+│   ├── bedrock/
+│   └── anthropic/
+├── tool/             # Tool system
+│   ├── index.ts      # Tool framework
+│   └── tools/        # Individual tool implementations
+├── permission/       # Permission system
+│   └── index.ts
+├── session/          # Session management
+└── bus/              # Event bus system
 ```
 
-**Naming Conventions**:
-- **Files**: kebab-case (`my-provider.ts`, `session-manager.ts`)
-- **Classes**: PascalCase (`SessionManager`, `RouterService`)
-- **Interfaces**: PascalCase with descriptive names (`ToolResult`, `ProviderConfig`)
-- **Functions**: camelCase (`getSession`, `routeToModel`)
-- **Constants**: UPPER_SNAKE_CASE (`MAX_TOKENS`, `DEFAULT_MODEL`)
-- **Type Parameters**: Single uppercase letter or PascalCase (`T`, `TParams`, `TResult`)
+### Naming Conventions
 
-**Code Style**:
-```typescript
-// Good: Explicit types for function parameters and return values
-export async function executeQuery(
-  query: string,
-  options: QueryOptions
-): Promise<QueryResult> {
-  // Implementation
-}
+- **Files**: camelCase for TypeScript files (`orchestrator.ts`)
+- **Classes**: PascalCase (`class ToolRegistry`)
+- **Functions**: camelCase (`function defineTool()`)
+- **Constants**: UPPER_SNAKE_CASE (`const MAX_LINES = 2000`)
+- **Interfaces**: PascalCase (`interface ToolContext`)
+- **Types**: PascalCase (`type PermissionAction`)
 
-// Good: Use const for immutable values
-const config = loadConfig();
+### Code Style
 
-// Good: Destructuring with types
-const { model, temperature }: ModelConfig = getConfig();
+- Use 2 spaces for indentation
+- Maximum line length: 100 characters (flexible for readability)
+- Use single quotes for strings
+- Include trailing commas in multi-line objects/arrays
+- Use semicolons
 
-// Good: Early returns for error cases
-function processData(data: string | null): Result {
-  if (!data) {
-    return { success: false, error: 'No data provided' };
-  }
-  
-  // Process data
-  return { success: true, data: processedData };
-}
+### Documentation Comments
 
-// Good: Use async/await instead of promises
-async function fetchData(): Promise<Data> {
-  try {
-    const response = await fetch(url);
-    return await response.json();
-  } catch (error) {
-    throw new Error(`Failed to fetch: ${error.message}`);
-  }
-}
-```
-
-**Error Handling**:
-```typescript
-// Good: Specific error types
-class ProviderError extends Error {
-  constructor(
-    message: string,
-    public readonly provider: string,
-    public readonly statusCode?: number
-  ) {
-    super(message);
-    this.name = 'ProviderError';
-  }
-}
-
-// Good: Comprehensive error handling
-async function callProvider(request: Request): Promise<Response> {
-  try {
-    return await provider.send(request);
-  } catch (error) {
-    if (error instanceof ProviderError) {
-      logger.error('Provider error', { provider: error.provider });
-      throw error;
-    }
-    throw new Error(`Unexpected error: ${error.message}`);
-  }
-}
-```
-
-### Tool System Patterns
-
-When implementing new tools, follow the established pattern:
+Use JSDoc for functions and classes:
 
 ```typescript
-import { z } from 'zod';
-import { defineTool, type ToolResult } from '../index.js';
-
-// 1. Define parameter schema with descriptions
-const MyToolParamsSchema = z.object({
-  param1: z.string().describe('Description of param1'),
-  param2: z.number().optional().describe('Optional param2'),
-});
-
-// 2. Define result interface
-interface MyToolResult {
-  success: boolean;
-  data?: string;
-}
-
-// 3. Define tool with permission requirements
-export const myTool = defineTool<typeof MyToolParamsSchema, MyToolResult>({
-  name: 'my_tool',
-  description: 'Clear description of what the tool does',
-  
-  parameters: MyToolParamsSchema,
-  
-  permission: {
-    action: 'read', // or 'write', 'execute'
-    getResource: (params, context) => {
-      // Resolve resource path, using context.workdir if needed
-      return resolveResourcePath(params, context);
-    },
-  },
-  
-  async execute(params, context): Promise<ToolResult<MyToolResult>> {
-    try {
-      // Implementation
-      return {
-        success: true,
-        data: { /* result data */ },
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
-  },
-});
-```
-
-**Key Requirements**:
-- Always use Zod schemas for parameter validation
-- Provide clear descriptions for all parameters
-- Implement proper permission checks using context
-- Handle relative and absolute paths correctly
-- Return consistent `ToolResult` structure
-- Include comprehensive error handling
-
-### Permission System
-
-When implementing tools that access resources, use the permission system:
-
-```typescript
-permission: {
-  action: 'write',
-  getResource: (params, context) => {
-    // Resolve relative paths to absolute using workdir
-    if (path.isAbsolute(params.filePath)) {
-      return params.filePath;
-    }
-    return path.join(context?.workdir || process.cwd(), params.filePath);
-  },
+/**
+ * Define a new tool with lazy initialization
+ * 
+ * @param definition - Tool definition with parameters and execution logic
+ * @returns Tool instance with execution methods
+ */
+export function defineTool<TParams extends z.ZodType, TResult>(
+  definition: ToolDefinition<TParams, TResult>
+): Tool<TParams, TResult> {
+  // ...
 }
 ```
-
-**Permission Actions**:
-- `read`: Reading files or data
-- `write`: Writing or modifying files
-- `execute`: Executing commands or scripts
 
 ## Testing Guidelines
 
 ### Test Structure
 
+- Place tests next to the code they test: `tool.test.ts` next to `tool.ts`
+- Use descriptive test names
+- Follow Arrange-Act-Assert pattern
+
 ```typescript
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { myFunction } from '../src/my-module.js';
-
-describe('MyModule', () => {
-  beforeEach(() => {
-    // Setup
-  });
-
-  afterEach(() => {
-    // Cleanup
-  });
-
-  describe('myFunction', () => {
-    it('should return expected result for valid input', () => {
-      const result = myFunction('valid input');
-      expect(result).toBe('expected output');
-    });
-
-    it('should handle edge cases', () => {
-      const result = myFunction('');
-      expect(result).toBe(null);
-    });
-
-    it('should throw error for invalid input', () => {
-      expect(() => myFunction(null)).toThrow('Invalid input');
-    });
+describe('defineTool', () => {
+  it('should create tool with permission checks', async () => {
+    // Arrange
+    const definition = {
+      name: 'test-tool',
+      description: 'Test tool',
+      parameters: z.object({ path: z.string() }),
+      permission: {
+        action: 'write' as const,
+        getResource: (params) => params.path,
+      },
+      execute: async () => ({ success: true }),
+    };
+    
+    // Act
+    const tool = defineTool(definition);
+    
+    // Assert
+    expect(tool.name).toBe('test-tool');
+    expect(tool.toFunctionSchema()).toBeDefined();
   });
 });
 ```
-
-### Test Coverage
-
-Aim for comprehensive test coverage:
-- **Unit Tests**: Test individual functions and classes
-- **Integration Tests**: Test interactions between modules
-- **End-to-End Tests**: Test complete workflows
 
 ### Running Tests
 
@@ -396,205 +297,218 @@ Aim for comprehensive test coverage:
 # Run all tests
 npm test
 
-# Run tests in watch mode
-npm run test:watch
+# Run specific test file
+npm test -- tool.test.ts
 
-# Run tests with coverage
-npm run test:coverage
-```
+# Run with coverage
+npm test -- --coverage
 
-## Documentation
-
-### Code Documentation
-
-**Use JSDoc comments for public APIs**:
-
-```typescript
-/**
- * Routes a message to the appropriate model based on complexity analysis.
- * 
- * @param message - The user message to route
- * @param options - Routing options including cost preferences
- * @returns The selected model ID and routing confidence
- * 
- * @example
- * ```typescript
- * const result = await router.route('Explain quantum computing', {
- *   preferCheap: true
- * });
- * console.log(result.modelId); // 'claude-3-5-haiku'
- * ```
- */
-export async function route(
-  message: string,
-  options: RoutingOptions
-): Promise<RoutingResult> {
-  // Implementation
-}
-```
-
-### Documentation Files
-
-When making changes, update relevant documentation:
-
-| Change Type | Documentation to Update |
-|------------|------------------------|
-| CLI commands | `docs/API.md`, `README.md` |
-| Architecture changes | `docs/ARCHITECTURE.md` |
-| New provider | `docs/PROVIDERS.md` |
-| Configuration options | `docs/CONFIGURATION.md` |
-| Workflow changes | `docs/AUTOMATION.md` |
-| All changes | `CHANGELOG.md` |
-
-**Mermaid Diagrams**:
-
-Include diagrams for complex workflows:
-
-```markdown
-## Process Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Router
-    participant Provider
-    
-    User->>CLI: Send message
-    CLI->>Router: Analyze and route
-    Router->>Provider: Forward to model
-    Provider->>CLI: Return response
-    CLI->>User: Display result
-```
+# Watch mode
+npm test -- --watch
 ```
 
 ## Pull Request Process
 
-### PR Checklist
+### Before Submitting
 
-Before submitting a pull request, ensure:
+1. Ensure all tests pass
+2. Update relevant documentation
+3. Add entries to CHANGELOG.md if needed
+4. Verify build succeeds
+5. Run linter and fix issues
 
-- [ ] Code follows TypeScript style guidelines
-- [ ] All tests pass (`npm test`)
-- [ ] Code builds successfully (`npm run build`)
-- [ ] Linting passes (`npm run lint`)
-- [ ] New features have tests
-- [ ] Documentation is updated
-- [ ] Commit messages follow conventional format
-- [ ] PR description clearly explains changes
+### PR Title Format
 
-### PR Template
+Use conventional commit format:
+
+- `feat: add new feature`
+- `fix: resolve bug in tool system`
+- `docs: update API documentation`
+- `refactor: simplify orchestrator logic`
+- `test: add tests for permission system`
+- `chore: update dependencies`
+
+### PR Description
+
+Include:
+
+1. **Summary**: Brief description of changes
+2. **Motivation**: Why this change is needed
+3. **Changes**: List of specific changes made
+4. **Testing**: How changes were tested
+5. **Screenshots**: If UI changes (not applicable for CLI)
+
+Example:
 
 ```markdown
-## Description
+## Summary
+Enhanced write and edit tools with relative path resolution for permission checks.
 
-Brief description of changes
+## Motivation
+In CI environments, the agentic system needs to resolve relative paths correctly
+for permission checks to work with the workdir context.
 
-## Type of Change
-
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Breaking change
-- [ ] Documentation update
-
-## Changes Made
-
-- Change 1
-- Change 2
+## Changes
+- Modified `getResource` in write.ts to accept ToolContext parameter
+- Modified `getResource` in edit.ts to accept ToolContext parameter
+- Updated tool index to pass context to getResource functions
+- Added path resolution logic using workdir
 
 ## Testing
-
-Describe how you tested the changes
-
-## Related Issues
-
-Closes #123
+- Added unit tests for relative path resolution
+- Verified in CI environment with documentation-update workflow
+- Tested locally with various path configurations
 ```
 
-### Review Process
+### Automated Checks
+
+Pull requests trigger automated workflows:
+
+1. **CI**: Runs tests, linting, and build verification
+2. **Documentation Update**: AI-powered documentation generation
+   - Analyzes code changes
+   - Updates relevant documentation files
+   - Generates Mermaid diagrams
+   - Updates CHANGELOG.md
+
+The documentation update workflow will automatically:
+- Detect which documentation files need updating based on changed code
+- Generate accurate technical documentation using Claude AI
+- Commit documentation changes to your PR branch
+- Ensure documentation stays in sync with code
+
+### Code Review
+
+All PRs require:
+- At least one approval from a maintainer
+- Passing CI checks
+- Passing documentation generation
+- No merge conflicts
+
+Reviewers will check:
+- Code quality and style
+- Test coverage
+- Documentation accuracy
+- Performance implications
+- Security considerations
+
+## Documentation
+
+### Documentation Files
+
+| File | Purpose |
+|------|---------|
+| `README.md` | Project overview and quick start |
+| `docs/ARCHITECTURE.md` | System architecture and design |
+| `docs/API.md` | API reference and usage examples |
+| `docs/ROUTING.md` | Routing system documentation |
+| `docs/PROVIDERS.md` | Provider integration guide |
+| `docs/CONFIGURATION.md` | Configuration options |
+| `docs/TESTING.md` | Testing guide |
+| `docs/AUTOMATION.md` | CI/CD and automation |
+| `docs/CONTRIBUTING.md` | This file |
+| `CHANGELOG.md` | Version history |
+
+### Documentation Standards
+
+1. Use clear, technical language
+2. Include code examples from actual codebase
+3. Add Mermaid diagrams for complex concepts
+4. Keep examples up-to-date with code changes
+5. Use proper markdown formatting
+
+### Mermaid Diagrams
+
+Include at least 3 Mermaid diagrams in major documentation:
 
 ```mermaid
-flowchart LR
-    A[PR Opened] --> B{Automated Checks}
-    B -->|Pass| C[Code Review]
-    B -->|Fail| D[Fix Issues]
-    D --> B
-    C --> E{Approved?}
-    E -->|Yes| F[Documentation Generated]
-    E -->|No| G[Address Feedback]
-    G --> C
-    F --> H[Merge to Main]
+graph TD
+    A[Start] --> B[Process]
+    B --> C[End]
 ```
 
-**Review Criteria**:
-1. **Code Quality**: Follows standards, well-structured
-2. **Functionality**: Works as intended, handles edge cases
-3. **Tests**: Adequate test coverage, tests pass
-4. **Documentation**: Clear, accurate, complete
-5. **Performance**: No significant performance regressions
+Supported diagram types:
+- Flowcharts (`graph`)
+- Sequence diagrams (`sequenceDiagram`)
+- Class diagrams (`classDiagram`)
+- State diagrams (`stateDiagram`)
 
-### Automated Documentation
+## Automation System
 
-The repository uses an automated documentation workflow that:
-1. Analyzes code changes in your PR
-2. Generates/updates relevant documentation
-3. Commits documentation to your PR branch
-4. Posts a summary comment
+### Autonomous Sync
 
-**What to Review**:
-- Verify generated documentation is accurate
-- Check that Mermaid diagrams render correctly
-- Ensure CHANGELOG entries are appropriate
-- Confirm all code examples work
+Alexi includes an autonomous upstream synchronization system:
 
-## Autonomous Systems
+```mermaid
+graph LR
+    A[Daily Schedule] --> B[Sync Forks]
+    B --> C[Analyze Changes]
+    C --> D[Generate Plan]
+    D --> E[Execute Updates]
+    E --> F[Create PR]
+    F --> G[Auto-Merge]
+```
 
-### Upstream Sync System
+The system:
+- Runs daily at 06:00 UTC
+- Syncs from kilocode, opencode, and claude-code repositories
+- Uses AI to analyze and apply relevant changes
+- Creates PRs with detailed change descriptions
+- Auto-merges after CI passes
 
-Alexi automatically syncs with upstream AI coding assistant repositories:
+### Agentic File Operations
 
-**Repositories Monitored**:
-- `Kilo-Org/kilocode`: Kilo AI patterns
-- `anomalyco/opencode`: OpenCode patterns  
-- `anthropics/claude-code`: Claude Code patterns
+The tool system supports autonomous file operations with:
 
-**How It Works**:
-1. Daily sync at 06:00 UTC
-2. Analyzes changes with AI
-3. Creates PR with integration recommendations
-4. Auto-merges low-risk changes
+**Automatic Permission Configuration**:
+```typescript
+// High-priority allow rules for agentic mode
+{
+  id: 'agentic-allow-write',
+  priority: 200,
+  actions: ['write'],
+  paths: ['<workdir>/**'],
+  decision: 'allow'
+}
+```
 
-**Contributing to Sync Process**:
-- Review sync PRs for breaking changes
-- Test integrated patterns locally
-- Provide feedback on AI analysis accuracy
+**Relative Path Resolution**:
+```typescript
+// Tools resolve relative paths using workdir context
+getResource: (params, context) => {
+  if (path.isAbsolute(params.filePath)) {
+    return params.filePath;
+  }
+  return path.join(context?.workdir || process.cwd(), params.filePath);
+}
+```
 
-### Documentation Bot
+### Contributing to Automation
 
-The documentation bot uses Alexi's own CLI to generate docs:
+When modifying workflows:
 
-**Features**:
-- Reads existing documentation
-- Uses `write` and `edit` tools to update files
-- Generates Mermaid diagrams
-- Updates CHANGELOG with conventional commits
-
-**Improving the Bot**:
-- Update prompt templates in `.github/templates/`
-- Enhance tool implementations for better file operations
-- Improve scope detection logic in workflow
+1. Test with manual dispatch first
+2. Use dry-run mode for sync workflows
+3. Update `docs/AUTOMATION.md`
+4. Document new secrets or configuration
+5. Ensure backward compatibility
 
 ## Getting Help
 
-- **Issues**: Open an issue for bugs or feature requests
-- **Discussions**: Use GitHub Discussions for questions
-- **Documentation**: Check existing docs in `docs/` directory
-- **Code Examples**: Review existing code for patterns
+- Open an issue for bugs or feature requests
+- Join discussions for questions
+- Check existing issues before creating new ones
+- Provide minimal reproducible examples for bugs
 
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project.
 
----
+## Recognition
 
-Thank you for contributing to Alexi! Your contributions help make AI orchestration more accessible and powerful.
+Contributors are recognized in:
+- GitHub contributors page
+- Release notes for significant contributions
+- Project documentation when appropriate
+
+Thank you for contributing to Alexi!
