@@ -155,7 +155,10 @@ function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
 
   if (schema instanceof z.ZodDefault) {
     const inner = zodToJsonSchema(def.innerType);
-    return { ...inner, default: def.defaultValue() };
+    // Zod v4: defaultValue is a value, not a function
+    const defaultVal =
+      typeof def.defaultValue === 'function' ? def.defaultValue() : def.defaultValue;
+    return { ...inner, default: defaultVal };
   }
 
   // Fallback
