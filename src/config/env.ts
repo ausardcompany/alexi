@@ -11,7 +11,7 @@
 
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 export function env(key: string): string | undefined {
   const v = process.env[key];
