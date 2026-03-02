@@ -140,17 +140,21 @@ graph LR
 
 ### TypeScript Guidelines
 
-1. **Type Safety**: Always use explicit types, avoid `any`
+1. **Type Safety**: Always use explicit types, avoid `any` unless documented
    ```typescript
    // Good
    function processMessage(message: string): Promise<Response> {
      // ...
    }
    
-   // Bad
+   // Avoid (unless documented with eslint-disable comment)
    function processMessage(message: any): any {
      // ...
    }
+   
+   // Acceptable with documentation
+   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   const eventHandlers = new Map<string, Set<EventHandler<any>>>();
    ```
 
 2. **Interfaces over Types**: Prefer interfaces for object shapes
@@ -197,6 +201,35 @@ graph LR
    
    // Avoid
    const value = context && context.workdir ? context.workdir : process.cwd();
+   ```
+
+6. **Type Assertions**: Use proper type assertions when necessary
+   ```typescript
+   // Good - explicit type extension
+   const models = config.models.filter(
+     (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
+   );
+   
+   // Good - defined interface for internal types
+   interface ZodDefBase {
+     description?: string;
+   }
+   const def = (schema as unknown as { _def: ZodDefBase })._def;
+   
+   // Avoid - unsafe any cast
+   const def = (schema as any)._def;
+   ```
+
+7. **Logging**: Use centralized logger instead of console
+   ```typescript
+   // Good
+   import { logger } from './utils/logger.js';
+   logger.info('Operation completed');
+   logger.error('Operation failed', error);
+   
+   // Avoid (triggers ESLint warning)
+   console.log('Operation completed');
+   console.error('Operation failed', error);
    ```
 
 ### File Organization
@@ -301,11 +334,51 @@ npm test
 npm test -- tool.test.ts
 
 # Run with coverage
-npm test -- --coverage
+npm run test:coverage
 
 # Watch mode
-npm test -- --watch
+npm run test:watch
 ```
+
+### Test Coverage
+
+The project maintains a minimum coverage threshold of 40% enforced by CI:
+
+- Lines: 40%
+- Statements: 40%
+- Functions: 40%
+- Branches: 40%
+
+Coverage reports are:
+- Generated in `coverage/` directory
+- Uploaded as CI artifacts (14-day retention)
+- Posted as comments on pull requests
+- Available in multiple formats (text, JSON, HTML, LCOV)
+
+### Coverage Configuration
+
+Vitest configuration (`vitest.config.ts`):
+
+```typescript
+export default defineConfig({
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json', 'json-summary', 'html', 'lcov'],
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.test.ts', 'src/cli/**', 'src/**/*.d.ts'],
+      thresholds: {
+        statements: 15,
+        branches: 15,
+        functions: 20,
+        lines: 15,
+      },
+    },
+  },
+});
+```
+
+Note: Local thresholds are lower than CI enforcement (40%) to allow incremental improvement.
 
 ## Pull Request Process
 
@@ -364,25 +437,43 @@ for permission checks to work with the workdir context.
 
 Pull requests trigger automated workflows:
 
-1. **CI**: Runs tests, linting, and build verification
-2. **Documentation Update**: AI-powered documentation generation
-   - Analyzes code changes
+1. **CI Pipeline**: Runs quality checks, tests, and build verification
+   - **Quality Job**: Linting, type checking, format checking
+   - **Test Job**: Unit tests with coverage reporting
+   - **Build Job**: TypeScript compilation and CLI verification
+
+2. **Coverage Reporting**: Automated coverage analysis
+   - Enforces 40% minimum coverage threshold
+   - Posts detailed coverage report as PR comment
+   - Updates existing comments to avoid spam
+   - Fails CI if coverage drops below threshold
+
+3. **Security Scanning**: Vulnerability detection
+   - NPM audit for dependency vulnerabilities
+   - CodeQL static analysis for code security issues
+   - Weekly scheduled scans in addition to PR checks
+
+4. **Documentation Update**: AI-powered documentation generation
+   - Analyzes code changes automatically
    - Updates relevant documentation files
    - Generates Mermaid diagrams
    - Updates CHANGELOG.md
+   - Commits documentation changes to PR branch
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
 - Generate accurate technical documentation using Claude AI
-- Commit documentation changes to your PR branch
 - Ensure documentation stays in sync with code
+- Create professional diagrams and examples
 
 ### Code Review
 
 All PRs require:
 - At least one approval from a maintainer
-- Passing CI checks
+- Passing CI checks (quality, tests, build)
+- Passing security scans (NPM audit, CodeQL)
 - Passing documentation generation
+- Meeting coverage threshold (40%)
 - No merge conflicts
 
 Reviewers will check:
@@ -391,6 +482,7 @@ Reviewers will check:
 - Documentation accuracy
 - Performance implications
 - Security considerations
+- Type safety and proper error handling
 
 ## Documentation
 
@@ -492,6 +584,23 @@ When modifying workflows:
 3. Update `docs/AUTOMATION.md`
 4. Document new secrets or configuration
 5. Ensure backward compatibility
+
+### Dependency Management
+
+The project uses Dependabot for automated dependency updates:
+
+- **Schedule**: Weekly checks for npm package updates
+- **Grouping**: Dev dependencies (TypeScript, ESLint, Vitest) are grouped together
+- **PR Limit**: Maximum 10 open dependency PRs at once
+- **Auto-labeling**: All dependency PRs are labeled with "dependencies"
+
+When reviewing Dependabot PRs:
+1. Check the changelog for breaking changes
+2. Verify CI passes with updated dependencies
+3. Test locally if changes affect critical functionality
+4. Merge grouped PRs together when possible
+
+Configuration is in `.github/dependabot.yml`.
 
 ## Getting Help
 

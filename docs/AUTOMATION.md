@@ -253,18 +253,266 @@ Manual trigger with `dry_run: true` will:
 **File**: `.github/workflows/ci.yml`
 
 **Triggers**:
-- Push to any branch
-- Pull requests
+- Push to main/master branches
+- Pull requests to main/master branches
 
-**Purpose**: Runs tests, linting, and build verification.
+**Purpose**: Runs comprehensive quality checks, tests, and build verification with automated coverage reporting.
 
-**Steps**:
-1. Checkout code
-2. Set up Node.js 22
-3. Install dependencies
-4. Run TypeScript compiler
-5. Run tests
-6. Run linters
+#### Workflow Architecture
+
+```mermaid
+flowchart TB
+    subgraph Triggers
+        Push[Push to main/master]
+        PR[Pull Request]
+    end
+    
+    subgraph Jobs
+        Quality[Code Quality Job]
+        Test[Test Job]
+        Build[Build Job]
+    end
+    
+    subgraph Quality Steps
+        Lint[Lint Check]
+        TypeCheck[Type Check]
+        Format[Format Check]
+    end
+    
+    subgraph Test Steps
+        RunTests[Run Tests with Coverage]
+        UploadCov[Upload Coverage Report]
+        CheckThreshold[Check Coverage Threshold]
+        CommentPR[Comment Coverage on PR]
+    end
+    
+    subgraph Build Steps
+        BuildDist[Build Distribution]
+        VerifyCLI[Verify CLI]
+        UploadArtifact[Upload Build Artifacts]
+    end
+    
+    Push --> Quality
+    PR --> Quality
+    Quality --> Quality Steps
+    Quality Steps --> Test
+    Test --> Test Steps
+    Test Steps --> Build
+    Build --> Build Steps
+```
+
+#### Quality Job
+
+Ensures code quality standards:
+
+1. **Lint**: Runs ESLint to check code style and catch common errors
+2. **Type Check**: Verifies TypeScript types are correct
+3. **Format Check**: Ensures code is properly formatted
+
+#### Test Job
+
+Runs comprehensive test suite with coverage:
+
+1. **Run Tests**: Executes all unit tests with coverage collection
+2. **Upload Coverage**: Stores coverage reports as artifacts (14-day retention)
+3. **Check Threshold**: Enforces minimum coverage threshold (40%)
+4. **PR Comment**: Posts coverage summary to pull requests
+
+Coverage threshold check:
+
+```bash
+COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+THRESHOLD=40
+if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+  echo "::error::Coverage ($COVERAGE%) is below threshold ($THRESHOLD%)"
+  exit 1
+fi
+```
+
+#### PR Coverage Comments
+
+Automated PR comments include:
+
+```markdown
+## Coverage Report
+
+| Metric | Coverage |
+|--------|----------|
+| Lines | 45.2% |
+| Statements | 44.8% |
+| Functions | 38.5% |
+| Branches | 35.1% |
+
+<details>
+<summary>Coverage Details</summary>
+
+- Lines: 1234/2730
+- Statements: 1456/3250
+- Functions: 385/1000
+- Branches: 351/1000
+
+</details>
+```
+
+The workflow updates existing comments instead of creating duplicates.
+
+#### Build Job
+
+Verifies successful build:
+
+1. **Build**: Compiles TypeScript to JavaScript
+2. **Verify CLI**: Tests CLI entry point works
+3. **Upload Artifacts**: Stores build output (7-day retention)
+
+#### Permissions
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write  # Required for PR comments
+```
+
+### 4. Security Scanning Workflow
+
+**File**: `.github/workflows/security.yml`
+
+**Triggers**:
+- Push to master branch
+- Pull requests to master branch
+- Weekly schedule (Sunday at 00:00 UTC)
+
+**Purpose**: Automated security vulnerability detection through NPM audit and CodeQL analysis.
+
+#### Security Workflow Architecture
+
+```mermaid
+flowchart LR
+    subgraph Triggers
+        PushMaster[Push to master]
+        PRMaster[Pull Request]
+        Weekly[Weekly Schedule]
+    end
+    
+    subgraph Jobs
+        NPMAudit[NPM Audit Job]
+        CodeQL[CodeQL Analysis Job]
+    end
+    
+    subgraph NPM Steps
+        Setup1[Setup Node.js]
+        Install1[Install Dependencies]
+        Audit[Run npm audit]
+    end
+    
+    subgraph CodeQL Steps
+        Checkout[Checkout Code]
+        InitQL[Initialize CodeQL]
+        Autobuild[Autobuild]
+        Analyze[Perform Analysis]
+    end
+    
+    PushMaster --> NPMAudit
+    PRMaster --> NPMAudit
+    Weekly --> NPMAudit
+    
+    PushMaster --> CodeQL
+    PRMaster --> CodeQL
+    Weekly --> CodeQL
+    
+    NPMAudit --> NPM Steps
+    CodeQL --> CodeQL Steps
+```
+
+#### NPM Audit Job
+
+Checks for known vulnerabilities in dependencies:
+
+```yaml
+- name: Run npm audit
+  run: npm audit --audit-level=high
+  continue-on-error: true
+```
+
+Features:
+- Checks all dependencies for security vulnerabilities
+- Fails on high or critical severity issues
+- Continues on error to allow other checks to run
+- Runs on Node.js 22
+
+#### CodeQL Analysis Job
+
+Static code analysis for security issues:
+
+```yaml
+- name: Initialize CodeQL
+  uses: github/codeql-action/init@v3
+  with:
+    languages: typescript
+
+- name: Autobuild
+  uses: github/codeql-action/autobuild@v3
+
+- name: Perform CodeQL Analysis
+  uses: github/codeql-action/analyze@v3
+```
+
+Features:
+- Analyzes TypeScript code for security vulnerabilities
+- Detects common security patterns and anti-patterns
+- Integrates with GitHub Security tab
+- Provides actionable security recommendations
+
+#### Permissions
+
+```yaml
+permissions:
+  security-events: write  # Required for CodeQL
+```
+
+### 5. Dependabot Configuration
+
+**File**: `.github/dependabot.yml`
+
+**Purpose**: Automated dependency updates for npm packages.
+
+#### Configuration
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    groups:
+      dev-dependencies:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "typescript*"
+          - "vitest*"
+```
+
+#### Features
+
+- **Weekly Updates**: Checks for dependency updates every week
+- **Grouped PRs**: Groups related dev dependencies into single PRs
+- **PR Limit**: Maximum 10 open PRs at once
+- **Auto-labeling**: Tags PRs with "dependencies" label
+- **Dev Dependency Grouping**: Combines TypeScript, ESLint, and Vitest updates
+
+#### Grouped Dependencies
+
+The following patterns are grouped together:
+- `@types/*` - TypeScript type definitions
+- `eslint*` - ESLint and related plugins
+- `typescript*` - TypeScript compiler and tools
+- `vitest*` - Vitest testing framework
+
+This reduces PR noise and makes dependency updates easier to review.
 
 ### 4. Release Workflows
 

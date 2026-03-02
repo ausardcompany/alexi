@@ -362,7 +362,49 @@ Sessions provide:
 
 ## Logging System
 
-Alexi uses a centralized logging utility to provide consistent logging across the application.
+Alexi uses a centralized logging utility to provide consistent logging across the application. This design ensures maintainable code and ESLint compliance while providing flexible log level control.
+
+### Logger Architecture
+
+```mermaid
+flowchart TB
+    subgraph Application
+        CLI[CLI Modules]
+        Core[Core Modules]
+        Tools[Tool Modules]
+        Providers[Provider Modules]
+    end
+    
+    subgraph Logger[Centralized Logger]
+        LogLevel[Log Level Filter]
+        Debug[Debug Output]
+        Info[Info Output]
+        Warn[Warn Output]
+        Error[Error Output]
+        Print[Raw Print]
+    end
+    
+    subgraph Output
+        Console[Console Output]
+    end
+    
+    CLI --> LogLevel
+    Core --> LogLevel
+    Tools --> LogLevel
+    Providers --> LogLevel
+    
+    LogLevel --> Debug
+    LogLevel --> Info
+    LogLevel --> Warn
+    LogLevel --> Error
+    LogLevel --> Print
+    
+    Debug --> Console
+    Info --> Console
+    Warn --> Console
+    Error --> Console
+    Print --> Console
+```
 
 ### Logger API
 
@@ -393,15 +435,53 @@ logger.print('Raw output');
 
 The logger respects the configured log level and only outputs messages at or above that level. The default level is `info`.
 
+### Log Level Filtering
+
+The logger implements a priority-based filtering system:
+
+```typescript
+const LOG_LEVELS: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+// Only log if current level priority <= message level priority
+if (LOG_LEVELS[currentLevel] <= LOG_LEVELS.debug) {
+  console.debug(`[DEBUG] ${message}`, ...args);
+}
+```
+
 ### ESLint Integration
 
 The logger utility is the only module permitted to use direct console calls. All other modules should import and use the centralized logger to maintain ESLint compliance.
 
+ESLint configuration enforces this pattern:
+
+```javascript
+// eslint.config.js
+{
+  rules: {
+    'no-console': 'warn', // Warn on direct console usage
+  },
+},
+{
+  // Allow console statements in logger utility only
+  files: ['src/utils/logger.ts'],
+  rules: {
+    'no-console': 'off',
+  },
+}
+```
+
+Usage pattern:
+
 ```typescript
-// ❌ Avoid direct console usage
+// Direct console usage triggers ESLint warning
 console.log('message');
 
-// ✅ Use centralized logger
+// Use centralized logger instead
 import { logger } from './utils/logger.js';
 logger.info('message');
 ```
@@ -410,31 +490,98 @@ logger.info('message');
 
 ### TypeScript Configuration
 
-Alexi uses strict TypeScript configuration with proper type assertions:
+Alexi uses strict TypeScript configuration with proper type assertions to eliminate unsafe any types while maintaining type flexibility.
+
+#### Event Bus Type Safety
+
+The event bus system uses explicit type annotations for generic handlers and schemas:
+
+```typescript
+// Internal event registry with explicit any annotations
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const eventHandlers = new Map<string, Set<EventHandler<any>>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const eventSchemas = new Map<string, z.ZodType<any>>();
+
+// Define typed events with Zod schema validation
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function defineEvent<T extends z.ZodType<any>>(
+  name: string,
+  schema: T
+): BusEvent<z.infer<T>> {
+  // Implementation
+}
+```
+
+#### Router Type Assertions
+
+Model capability filtering uses proper type assertions:
 
 ```typescript
 // Model capability filtering with explicit type assertion
 const models = config.models.filter(
   (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
 );
+```
 
+This approach:
+- Extends the base ModelCapability interface with optional enabled property
+- Avoids unsafe any types
+- Maintains type safety throughout the codebase
+
+#### Tool System Type Definitions
+
+The tool system defines explicit interfaces for Zod internal type definitions:
+
+```typescript
 // Zod schema type handling with interface definitions
 interface ZodDefBase {
   description?: string;
 }
 
+interface ZodArrayDef extends ZodDefBase {
+  type: z.ZodType;
+}
+
+interface ZodWrappedDef extends ZodDefBase {
+  innerType: z.ZodType;
+  defaultValue?: unknown;
+}
+
+interface ZodEnumDef extends ZodDefBase {
+  values: string[];
+}
+
+// Safe type casting for Zod internals
 const def = (schema as unknown as { _def: ZodDefBase })._def;
 ```
+
+This pattern:
+- Provides type safety for Zod internal structures
+- Enables JSON Schema generation for function calling
+- Avoids direct any type usage
+- Maintains compatibility with Zod's internal API
 
 ### ESLint Rules
 
 Key ESLint rules enforced:
 
-- `no-console: warn` - Prevents direct console usage (except in logger)
-- `@typescript-eslint/no-explicit-any: warn` - Flags any type usage
-- `@typescript-eslint/no-unused-vars: error` - Prevents unused variables
+- `no-console: warn` - Prevents direct console usage (except in logger utility)
+- `@typescript-eslint/no-explicit-any: warn` - Flags any type usage (with documented exceptions)
+- `@typescript-eslint/no-unused-vars: error` - Prevents unused variables (allows underscore prefix)
+- `@typescript-eslint/no-non-null-assertion: warn` - Warns on non-null assertions
 - `prefer-const: error` - Enforces const for immutable variables
 - `eqeqeq: error` - Requires strict equality checks
+- `curly: error` - Requires curly braces for all control statements
+- `no-throw-literal: error` - Prevents throwing non-Error objects
+
+### Documented Type Exceptions
+
+When any types are necessary (e.g., for generic event handlers or Zod internals), they are:
+1. Explicitly documented with eslint-disable comments
+2. Justified by the use case (generic handlers, library internals)
+3. Isolated to specific modules (bus, tool system)
+4. Wrapped with proper type interfaces where possible
 
 ### Code Quality Diagram
 

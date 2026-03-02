@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Centralized logging utility for consistent logging across the application
+  - New `src/utils/logger.ts` module with log level support (debug, info, warn, error)
+  - Exported through `src/utils/index.ts` for easy importing
+  - Replaces direct console calls to maintain ESLint compliance
+  - Provides formatted output with level prefixes
+  - Includes `print` method for raw CLI output without formatting
+- Security scanning workflows for automated vulnerability detection
+  - NPM audit workflow runs on push, pull requests, and weekly schedule
+  - CodeQL analysis for static code security scanning
+  - Automated security checks integrated into CI pipeline
+- Dependabot configuration for automated dependency updates
+  - Weekly dependency update checks for npm packages
+  - Grouped dev dependencies for cleaner PRs
+  - Automatic labeling of dependency PRs
+  - Configured for TypeScript, ESLint, and Vitest updates
+- Enhanced CI workflow with coverage reporting
+  - Coverage threshold enforcement (40% minimum)
+  - Automated PR comments with coverage metrics
+  - Coverage report artifacts with 14-day retention
+  - Detailed coverage breakdown by metric (lines, statements, functions, branches)
 - Comprehensive unit tests for file operation tools
   - Added tests for read tool (20+ test cases covering file/directory reading, offsets, limits)
   - Added tests for write tool (18+ test cases covering file creation, overwriting, directory creation)
@@ -39,6 +59,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Improved type safety in core modules with proper type assertions
+  - Event bus uses explicit type annotations for generic handlers and schemas
+  - Router uses proper type assertion for model capability filtering with enabled property
+  - Tool system defines explicit interfaces for Zod internal type definitions
+  - Eliminates unsafe any types while maintaining type flexibility
+- Enhanced ESLint configuration with stricter rules
+  - Added `no-console: warn` rule to prevent direct console usage (except in logger)
+  - Configured to allow console in logger utility only
+  - Enforces consistent code quality across the codebase
+- Updated Vitest configuration for improved test coverage
+  - Coverage thresholds adjusted for realistic targets
+  - JSON summary reporter added for CI integration
+  - Improved coverage reporting with multiple output formats
 - Enhanced tool system with context-aware path resolution
   - Tool permission system now receives ToolContext in getResource function
   - Write and edit tools resolve relative paths using workdir context
@@ -57,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolved ESLint warnings for direct console usage by implementing centralized logger
+- Fixed type safety issues with explicit type assertions instead of any types
+- Improved code quality with proper handling of Zod schema type definitions
 - Resolved relative path handling in write/edit tools for CI permission checks
 - Fixed zero-width space characters in GitHub workflow expressions
 - Corrected file path specifications in documentation workflow scope

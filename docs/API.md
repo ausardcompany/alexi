@@ -724,3 +724,77 @@ The logger filters messages based on the configured level:
 | `error` | error only |
 
 The `print` method always outputs regardless of log level and is intended for CLI output that should not be filtered.
+
+### Implementation Details
+
+The logger is implemented in `src/utils/logger.ts` and exported through `src/utils/index.ts`:
+
+```typescript
+// src/utils/logger.ts
+const LOG_LEVELS: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+let currentLevel: LogLevel = 'info';
+
+export const logger = {
+  setLevel(level: LogLevel): void {
+    currentLevel = level;
+  },
+
+  debug(message: string, ...args: unknown[]): void {
+    if (LOG_LEVELS[currentLevel] <= LOG_LEVELS.debug) {
+      console.debug(`[DEBUG] ${message}`, ...args);
+    }
+  },
+
+  info(message: string, ...args: unknown[]): void {
+    if (LOG_LEVELS[currentLevel] <= LOG_LEVELS.info) {
+      console.log(message, ...args);
+    }
+  },
+
+  warn(message: string, ...args: unknown[]): void {
+    if (LOG_LEVELS[currentLevel] <= LOG_LEVELS.warn) {
+      console.warn(`[WARN] ${message}`, ...args);
+    }
+  },
+
+  error(message: string, ...args: unknown[]): void {
+    console.error(`[ERROR] ${message}`, ...args);
+  },
+
+  print(message: string): void {
+    console.log(message);
+  },
+};
+```
+
+### ESLint Integration
+
+The logger is the only module allowed to use direct console calls. All other modules must use the centralized logger to maintain ESLint compliance:
+
+```javascript
+// eslint.config.js
+{
+  rules: {
+    'no-console': 'warn', // Warn on direct console usage
+  },
+},
+{
+  // Allow console statements in logger utility only
+  files: ['src/utils/logger.ts'],
+  rules: {
+    'no-console': 'off',
+  },
+}
+```
+
+This ensures consistent logging patterns across the codebase and makes it easier to:
+- Control log output globally
+- Add log aggregation in the future
+- Filter logs by level in production
+- Maintain code quality standards
