@@ -31,7 +31,13 @@ Usage:
 
   permission: {
     action: 'write',
-    getResource: (params) => params.filePath,
+    getResource: (params, context) => {
+      // Resolve relative paths to absolute using workdir
+      if (path.isAbsolute(params.filePath)) {
+        return params.filePath;
+      }
+      return path.join(context?.workdir || process.cwd(), params.filePath);
+    },
   },
 
   async execute(params, context): Promise<ToolResult<WriteResult>> {

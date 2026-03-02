@@ -93,6 +93,7 @@ graph TB
 | Router | `src/core/router.ts` | Model selection and routing |
 | Session Manager | `src/core/sessionManager.ts` | Conversation session persistence |
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
+| Agentic Chat | `src/core/agenticChat.ts` | Autonomous agent with tool execution loop |
 | Stage Manager | `src/core/stageManager.ts` | Workflow stage management |
 | Workflow Manager | `src/core/workflowManager.ts` | Multi-stage workflow orchestration |
 
@@ -162,6 +163,68 @@ sequenceDiagram
     CLI-->>User: Display output
 ```
 
+## Agentic Chat Flow
+
+```mermaid
+flowchart TB
+    Start([Start Agentic Chat]) --> Init[Initialize Permission Manager]
+    Init --> SetRoot[Set Project Root to workdir]
+    SetRoot --> EnableExt[Enable External Directories]
+    EnableExt --> AddRules[Add High-Priority Allow Rules]
+    AddRules --> DetermineModel[Determine Model via Router]
+    
+    DetermineModel --> BuildMessages[Build Message History]
+    BuildMessages --> LoopStart{Iteration < Max?}
+    
+    LoopStart -->|Yes| CallLLM[Call LLM with Tools]
+    CallLLM --> CheckTools{Tool Calls?}
+    
+    CheckTools -->|Yes| ExecTools[Execute Tool Calls]
+    ExecTools --> CheckPerm[Check Permissions]
+    CheckPerm -->|Allowed| RunTool[Run Tool]
+    CheckPerm -->|Denied| ReturnError[Return Permission Error]
+    
+    RunTool --> AddToolResult[Add Tool Result to Messages]
+    ReturnError --> AddToolResult
+    AddToolResult --> LoopStart
+    
+    CheckTools -->|No| RecordCost[Record Token Usage]
+    RecordCost --> SaveSession[Save to Session]
+    SaveSession --> End([Return Result])
+    
+    LoopStart -->|No| MaxReached[Max Iterations Reached]
+    MaxReached --> End
+```
+
+## Permission System Flow
+
+```mermaid
+flowchart LR
+    ToolExec[Tool Execution Request] --> HasPerm{Has Permission Config?}
+    HasPerm -->|Yes| GetResource[Get Resource Path]
+    HasPerm -->|No| DirectExec[Execute Directly]
+    
+    GetResource --> ResolveCtx[Resolve with Context]
+    ResolveCtx --> CheckRules[Check Permission Rules]
+    
+    CheckRules --> EvalRules[Evaluate Rules by Priority]
+    EvalRules --> LastMatch[Last Match Wins]
+    
+    LastMatch --> Decision{Decision?}
+    Decision -->|Allow| Grant[Grant Permission]
+    Decision -->|Deny| Reject[Deny Permission]
+    Decision -->|Ask| Interactive[Interactive Prompt]
+    
+    Interactive --> UserResp{User Response}
+    UserResp -->|Allow| Grant
+    UserResp -->|Deny| Reject
+    
+    Grant --> DirectExec
+    Reject --> RetErr[Return Error]
+    DirectExec --> Result[Return Result]
+    RetErr --> Result
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -226,21 +289,33 @@ Alexi supports multiple LLM providers through a unified interface, allowing:
 - Fallback mechanisms
 - Cost optimization through routing
 
-### 2. Tool System
+### 2. Tool System with Permission Control
 
 Tools are implemented as independent modules that:
-- Follow a consistent interface
+- Follow a consistent interface based on Zod schema validation
 - Can be enabled/disabled per session
-- Support permission-based access control
+- Support permission-based access control with last-match-wins rule evaluation
+- Resolve relative paths using workdir context for agentic operations
+- Support interactive permission prompts and high-priority allow rules
 
-### 3. Event-Driven Architecture
+### 3. Agentic Execution Mode
+
+The agentic chat system enables autonomous file operations:
+- Automatic permission configuration for write and execute actions
+- High-priority allow rules (priority 200) override default ask prompts
+- External directory access for full workspace capability
+- Tool execution loop with LLM-driven decision making
+- Iteration limits to prevent infinite loops (default: 50)
+
+### 4. Event-Driven Architecture
 
 The event bus enables:
 - Loose coupling between modules
 - Plugin extensibility
 - Real-time streaming updates
+- Permission events (DoomLoopDetected, ExternalAccessAttempted)
 
-### 4. Session Management
+### 5. Session Management
 
 Sessions provide:
 - Multi-turn conversation context

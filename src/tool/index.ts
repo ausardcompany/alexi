@@ -33,7 +33,8 @@ export interface ToolDefinition<TParams extends z.ZodType, TResult> {
   // Permission requirements
   permission?: {
     action: PermissionAction;
-    getResource: (params: z.infer<TParams>) => string;
+    // getResource can optionally receive context to resolve relative paths
+    getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
   };
   // Execution function
   execute: (params: z.infer<TParams>, context: ToolContext) => Promise<ToolResult<TResult>>;
@@ -187,7 +188,8 @@ export function defineTool<TParams extends z.ZodType, TResult>(
     async execute(params: z.infer<TParams>, context: ToolContext): Promise<ToolResult<TResult>> {
       // Check permission if required
       if (definition.permission) {
-        const resource = definition.permission.getResource(params);
+        // Pass context to getResource so it can resolve relative paths
+        const resource = definition.permission.getResource(params, context);
         const permissionManager = getPermissionManager();
         const result = await permissionManager.check({
           toolName: definition.name,
