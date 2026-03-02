@@ -291,6 +291,32 @@ describe('defineTool', () => {
 });
 ```
 
+### Coverage Requirements
+
+All new code must meet minimum coverage thresholds:
+
+| Metric | Minimum |
+|--------|---------|
+| Lines | 40% |
+| Statements | 15% |
+| Branches | 15% |
+| Functions | 20% |
+
+Target higher coverage for critical components:
+- Tool System: 90%+
+- Core Logic: 85%+
+- Providers: 80%+
+- Router: 90%+
+
+### Test Best Practices
+
+1. **Isolation**: Use temporary directories and clean up
+2. **Mocking**: Mock external dependencies appropriately
+3. **Both Paths**: Test success and failure cases
+4. **Verification**: Verify actual file system changes
+5. **Edge Cases**: Test empty files, unicode, special characters
+6. **Descriptive Names**: Use clear, descriptive test names
+
 ### Running Tests
 
 ```bash
@@ -306,6 +332,8 @@ npm test -- --coverage
 # Watch mode
 npm test -- --watch
 ```
+
+For detailed testing guidelines, see [TESTING.md](TESTING.md).
 
 ## Pull Request Process
 
@@ -365,7 +393,15 @@ for permission checks to work with the workdir context.
 Pull requests trigger automated workflows:
 
 1. **CI**: Runs tests, linting, and build verification
-2. **Documentation Update**: AI-powered documentation generation
+   - Code quality checks (lint, typecheck, format)
+   - Unit tests with coverage collection
+   - Coverage threshold validation (40% minimum)
+   - Build verification and CLI functionality test
+2. **Security Scanning**: Automated security analysis
+   - NPM audit for dependency vulnerabilities
+   - CodeQL analysis for code security issues
+   - Results visible in GitHub Security tab
+3. **Documentation Update**: AI-powered documentation generation
    - Analyzes code changes
    - Updates relevant documentation files
    - Generates Mermaid diagrams
@@ -382,8 +418,10 @@ The documentation update workflow will automatically:
 All PRs require:
 - At least one approval from a maintainer
 - Passing CI checks
+- Passing security scans
 - Passing documentation generation
 - No merge conflicts
+- Coverage threshold met (40% minimum)
 
 Reviewers will check:
 - Code quality and style
@@ -391,6 +429,7 @@ Reviewers will check:
 - Documentation accuracy
 - Performance implications
 - Security considerations
+- Dependency updates appropriateness
 
 ## Documentation
 
@@ -455,6 +494,45 @@ The system:
 - Uses AI to analyze and apply relevant changes
 - Creates PRs with detailed change descriptions
 - Auto-merges after CI passes
+
+### Security and Dependency Management
+
+Alexi uses automated tools to maintain security and dependencies:
+
+#### Security Scanning
+
+**Automated Security Checks**:
+- NPM audit for dependency vulnerabilities
+- CodeQL analysis for code security issues
+- Weekly scheduled scans
+- Results in GitHub Security tab
+
+**Responding to Security Issues**:
+1. Review security alerts in GitHub Security tab
+2. Assess severity and impact
+3. Update vulnerable dependencies
+4. Test changes thoroughly
+5. Create PR with security fix
+
+#### Dependency Updates
+
+**Dependabot Configuration**:
+- Weekly automated dependency updates
+- Grouped updates for related packages
+- Maximum 10 open PRs to avoid noise
+- Automatic labeling with `dependencies`
+
+**Reviewing Dependabot PRs**:
+1. Check changelog and release notes
+2. Verify compatibility with existing code
+3. Run tests locally if significant changes
+4. Approve and merge if tests pass
+5. Monitor for issues after merge
+
+**Dependency Groups**:
+- **Dev Dependencies**: TypeScript types, ESLint, Vitest
+- Grouped to reduce PR overhead
+- Ensures compatible versions
 
 ### Agentic File Operations
 

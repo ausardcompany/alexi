@@ -114,9 +114,24 @@ Alexi uses **Vitest** as its testing framework, chosen for:
 | Router | 90%+ | 🔄 In Progress |
 | CLI | 70%+ | 🔄 In Progress |
 
+### Coverage Thresholds
+
+The project enforces minimum coverage thresholds in CI:
+
+| Metric | Minimum Threshold |
+|--------|-------------------|
+| Lines | 40% |
+| Statements | 15% |
+| Branches | 15% |
+| Functions | 20% |
+
+These thresholds are enforced in:
+- CI workflow (`.github/workflows/ci.yml`)
+- Vitest configuration (`vitest.config.ts`)
+
 ### Coverage Reports
 
-Coverage reports are generated in the `coverage/` directory:
+Coverage reports are generated in multiple formats:
 
 ```bash
 # Generate coverage report
@@ -124,6 +139,49 @@ npm run test:coverage
 
 # View HTML report
 open coverage/index.html
+
+# View text summary in terminal
+cat coverage/coverage-summary.json | jq
+```
+
+Coverage reports include:
+- **Text**: Console output during test runs
+- **JSON**: Machine-readable full coverage data
+- **JSON Summary**: Compact coverage metrics for CI
+- **HTML**: Interactive browser-based report
+- **LCOV**: Standard format for third-party tools
+
+### CI Coverage Reporting
+
+On pull requests, the CI workflow automatically:
+
+1. Runs tests with coverage collection
+2. Validates coverage meets minimum thresholds
+3. Posts coverage report as PR comment
+4. Updates existing coverage comment if present
+5. Uploads coverage artifacts for 14 days
+
+Coverage comment format:
+
+```markdown
+## Coverage Report
+
+| Metric | Coverage |
+|--------|----------|
+| Lines | 45.2% |
+| Statements | 44.8% |
+| Functions | 38.5% |
+| Branches | 35.7% |
+
+<details>
+<summary>Coverage Details</summary>
+
+- Lines: 1234/2730
+- Statements: 1456/3250
+- Functions: 385/1000
+- Branches: 357/1000
+
+</details>
 ```
 
 ## Testing Tool System
@@ -518,6 +576,55 @@ Tests run automatically on:
 - Push to main/master
 - Manual workflow dispatch
 
+### CI Workflow Architecture
+
+```mermaid
+graph TB
+    subgraph "Quality Job"
+        Q1[Checkout Code]
+        Q2[Setup Node.js 22]
+        Q3[Install Dependencies]
+        Q4[Run Linting]
+        Q5[Type Check]
+        Q6[Format Check]
+        
+        Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6
+    end
+    
+    subgraph "Test Job"
+        T1[Checkout Code]
+        T2[Setup Node.js 22]
+        T3[Install Dependencies]
+        T4[Build Project]
+        T5[Run Tests with Coverage]
+        T6[Upload Coverage Report]
+        T7[Check Coverage Threshold]
+        T8[Comment Coverage on PR]
+        
+        T1 --> T2 --> T3 --> T4 --> T5 --> T6
+        T5 --> T7
+        T5 --> T8
+    end
+    
+    subgraph "Build Job"
+        B1[Checkout Code]
+        B2[Setup Node.js 22]
+        B3[Install Dependencies]
+        B4[Build Project]
+        B5[Verify CLI]
+        B6[Upload Build Artifacts]
+        
+        B1 --> B2 --> B3 --> B4 --> B5 --> B6
+    end
+    
+    Q6 --> T1
+    T8 --> B1
+    
+    style Q4 fill:#4CAF50
+    style T5 fill:#2196F3
+    style B4 fill:#FF9800
+```
+
 ### Test Workflow
 
 ```mermaid
@@ -527,10 +634,59 @@ graph LR
     Build --> Lint[Run Linting]
     Lint --> Test[Run Tests]
     Test --> Coverage[Generate Coverage]
-    Coverage --> Report[Upload Report]
+    Coverage --> Threshold[Check Threshold]
+    Threshold --> Report[Comment on PR]
+    Report --> Artifacts[Upload Artifacts]
     
     style Test fill:#4CAF50
     style Coverage fill:#2196F3
+    style Threshold fill:#FF9800
+```
+
+### CI Jobs
+
+The CI workflow consists of three sequential jobs:
+
+#### 1. Quality Job
+
+Validates code quality and formatting:
+
+```yaml
+- Lint: npm run lint
+- Type check: npm run typecheck
+- Format check: npm run format:check
+```
+
+#### 2. Test Job
+
+Runs tests and generates coverage:
+
+```yaml
+- Build project: npm run build
+- Run tests: npm run test:coverage
+- Upload coverage artifacts (14-day retention)
+- Check coverage threshold (40% minimum)
+- Comment coverage report on PR
+```
+
+Coverage threshold check:
+```bash
+COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+THRESHOLD=40
+if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+  echo "::error::Coverage ($COVERAGE%) is below threshold ($THRESHOLD%)"
+  exit 1
+fi
+```
+
+#### 3. Build Job
+
+Verifies build artifacts:
+
+```yaml
+- Build project: npm run build
+- Verify CLI: node dist/cli/program.js --help
+- Upload build artifacts (7-day retention)
 ```
 
 ## Troubleshooting

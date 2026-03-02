@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Security scanning workflow with CodeQL and npm audit
+  - Automated CodeQL analysis for TypeScript code
+  - Weekly security scans on schedule
+  - NPM audit for dependency vulnerabilities
+  - Runs on all pull requests and pushes to master
+- Dependabot configuration for automated dependency updates
+  - Weekly dependency updates for npm packages
+  - Grouped updates for development dependencies
+  - Automatic PR creation with dependency label
+  - Limits to 10 open PRs to avoid noise
+- Enhanced CI workflow with coverage reporting
+  - Automated coverage threshold checks (40% minimum)
+  - Coverage comments on pull requests with detailed metrics
+  - Coverage report artifacts with 14-day retention
+  - Resilient coverage reporting that continues on error
 - Comprehensive unit tests for file operation tools
   - Added tests for read tool (20+ test cases covering file/directory reading, offsets, limits)
   - Added tests for write tool (18+ test cases covering file creation, overwriting, directory creation)
@@ -39,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Enhanced CI workflow with improved coverage reporting
+  - Added json-summary reporter to vitest configuration
+  - Coverage comments now update existing comments instead of creating duplicates
+  - Coverage threshold enforcement with clear error messages
+  - Pull request write permissions for automated commenting
+- Vitest configuration improvements
+  - Added json-summary reporter for machine-readable coverage data
+  - Maintained existing reporters (text, json, html, lcov)
+  - Coverage thresholds aligned with current project state
 - Enhanced tool system with context-aware path resolution
   - Tool permission system now receives ToolContext in getResource function
   - Write and edit tools resolve relative paths using workdir context
@@ -57,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Coverage reporting resilience in CI workflow
+  - Coverage comments continue on error to prevent workflow failures
+  - Graceful handling of missing coverage summary files
+  - Proper bot comment detection and update logic
+- Coverage threshold validation with accurate error reporting
+  - Clear output of current coverage vs threshold
+  - Proper exit codes for threshold violations
 - Resolved relative path handling in write/edit tools for CI permission checks
 - Fixed zero-width space characters in GitHub workflow expressions
 - Corrected file path specifications in documentation workflow scope

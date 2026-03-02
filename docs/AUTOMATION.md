@@ -14,6 +14,7 @@ graph TB
         PR[Pull Request]
         Push[Push to main]
         Schedule[Daily Schedule]
+        WeeklySchedule[Weekly Schedule]
         Manual[Manual Dispatch]
     end
     
@@ -21,6 +22,7 @@ graph TB
         DocUpdate[Documentation Update]
         Sync[Upstream Sync]
         CI[Continuous Integration]
+        Security[Security Scanning]
         Release[Release Automation]
     end
     
@@ -28,19 +30,26 @@ graph TB
         Alexi[Alexi CLI]
         Claude[Claude AI Models]
         Scripts[Shell Scripts]
+        CodeQL[CodeQL]
+        Dependabot[Dependabot]
     end
     
     PR --> DocUpdate
     PR --> CI
+    PR --> Security
     Schedule --> Sync
+    WeeklySchedule --> Security
     Manual --> Sync
     Manual --> DocUpdate
     Push --> Release
+    Push --> Security
     
     DocUpdate --> Alexi
     Sync --> Alexi
     Alexi --> Claude
     Sync --> Scripts
+    Security --> CodeQL
+    Dependabot --> PR
 ```
 
 ## Workflows
@@ -253,20 +262,270 @@ Manual trigger with `dry_run: true` will:
 **File**: `.github/workflows/ci.yml`
 
 **Triggers**:
-- Push to any branch
-- Pull requests
+- Push to main/master branches
+- Pull requests to main/master branches
 
-**Purpose**: Runs tests, linting, and build verification.
+**Purpose**: Runs tests, linting, build verification, and coverage reporting.
 
-**Steps**:
+#### CI Architecture
+
+```mermaid
+sequenceDiagram
+    participant PR as Pull Request
+    participant Quality as Quality Job
+    participant Test as Test Job
+    participant Build as Build Job
+    participant GitHub as GitHub API
+    
+    PR->>Quality: Trigger workflow
+    Quality->>Quality: Lint code
+    Quality->>Quality: Type check
+    Quality->>Quality: Format check
+    Quality->>Test: Pass
+    
+    Test->>Test: Build project
+    Test->>Test: Run tests with coverage
+    Test->>Test: Check coverage threshold
+    Test->>GitHub: Upload coverage artifacts
+    Test->>GitHub: Comment coverage on PR
+    Test->>Build: Pass
+    
+    Build->>Build: Build project
+    Build->>Build: Verify CLI
+    Build->>GitHub: Upload build artifacts
+```
+
+#### Jobs
+
+**Quality Job**:
 1. Checkout code
-2. Set up Node.js 22
+2. Setup Node.js 22
 3. Install dependencies
-4. Run TypeScript compiler
-5. Run tests
-6. Run linters
+4. Run ESLint
+5. Run TypeScript type checking
+6. Run Prettier format check
 
-### 4. Release Workflows
+**Test Job** (depends on Quality):
+1. Checkout code
+2. Setup Node.js 22
+3. Install dependencies
+4. Build project
+5. Run tests with coverage collection
+6. Upload coverage report (14-day retention)
+7. Check coverage threshold (40% minimum)
+8. Comment coverage report on PR (updates existing comment)
+
+**Build Job** (depends on Quality and Test):
+1. Checkout code
+2. Setup Node.js 22
+3. Install dependencies
+4. Build project
+5. Verify CLI functionality
+6. Upload build artifacts (7-day retention)
+
+#### Coverage Reporting
+
+The CI workflow includes intelligent coverage reporting:
+
+```yaml
+- name: Check coverage threshold
+  run: |
+    COVERAGE=$(cat coverage/coverage-summary.json | jq '.total.lines.pct')
+    THRESHOLD=40
+    echo "Current coverage: $COVERAGE%"
+    echo "Threshold: $THRESHOLD%"
+    if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+      echo "::error::Coverage ($COVERAGE%) is below threshold ($THRESHOLD%)"
+      exit 1
+    fi
+    echo "Coverage check passed!"
+
+- name: Comment coverage on PR
+  if: github.event_name == 'pull_request' && always()
+  uses: actions/github-script@v7
+  continue-on-error: true
+```
+
+Features:
+- Automatic threshold validation
+- PR comment with coverage metrics
+- Updates existing comments instead of creating duplicates
+- Continues on error to prevent workflow failures
+- Includes detailed coverage breakdown
+
+### 4. Security Scanning Workflow
+
+**File**: `.github/workflows/security.yml`
+
+**Triggers**:
+- Push to master branch
+- Pull requests to master branch
+- Weekly schedule (Sunday at 00:00 UTC)
+
+**Purpose**: Automated security scanning for vulnerabilities and code quality issues.
+
+#### Security Workflow Architecture
+
+```mermaid
+graph TB
+    subgraph Triggers["Trigger Events"]
+        PR[Pull Request]
+        Push[Push to master]
+        Schedule[Weekly Schedule]
+    end
+    
+    subgraph Jobs["Security Jobs"]
+        NPM[NPM Audit]
+        CodeQL[CodeQL Analysis]
+    end
+    
+    subgraph Analysis["Security Analysis"]
+        Deps[Dependency Vulnerabilities]
+        Code[Code Security Issues]
+        SAST[Static Analysis]
+    end
+    
+    PR --> NPM
+    PR --> CodeQL
+    Push --> NPM
+    Push --> CodeQL
+    Schedule --> NPM
+    Schedule --> CodeQL
+    
+    NPM --> Deps
+    CodeQL --> Code
+    CodeQL --> SAST
+    
+    style NPM fill:#FF5722
+    style CodeQL fill:#9C27B0
+```
+
+#### Jobs
+
+**NPM Audit Job**:
+1. Checkout code
+2. Setup Node.js 22
+3. Install dependencies
+4. Run npm audit with high severity threshold
+5. Continue on error (non-blocking)
+
+```yaml
+- name: Run npm audit
+  run: npm audit --audit-level=high
+  continue-on-error: true
+```
+
+**CodeQL Analysis Job**:
+1. Checkout code
+2. Initialize CodeQL for TypeScript
+3. Autobuild project
+4. Perform CodeQL analysis
+5. Upload results to GitHub Security tab
+
+```yaml
+- name: Initialize CodeQL
+  uses: github/codeql-action/init@v3
+  with:
+    languages: typescript
+
+- name: Perform CodeQL Analysis
+  uses: github/codeql-action/analyze@v3
+```
+
+#### Security Features
+
+- **Dependency Scanning**: Identifies known vulnerabilities in npm packages
+- **Code Analysis**: Detects security issues in TypeScript code
+- **SAST**: Static application security testing for common vulnerabilities
+- **Weekly Scans**: Automated scheduled scans for new vulnerabilities
+- **Security Events**: Results visible in GitHub Security tab
+- **Non-blocking**: Does not fail builds on security issues
+
+### 5. Dependabot Configuration
+
+**File**: `.github/dependabot.yml`
+
+**Purpose**: Automated dependency updates with grouped pull requests.
+
+#### Dependabot Architecture
+
+```mermaid
+graph LR
+    subgraph Schedule["Update Schedule"]
+        Weekly[Weekly Check]
+    end
+    
+    subgraph Analysis["Dependency Analysis"]
+        NPM[NPM Registry]
+        Versions[Version Check]
+        Groups[Group Updates]
+    end
+    
+    subgraph Actions["Automated Actions"]
+        PR[Create PR]
+        Label[Add Labels]
+        Limit[Limit PRs]
+    end
+    
+    Weekly --> NPM
+    NPM --> Versions
+    Versions --> Groups
+    Groups --> PR
+    PR --> Label
+    PR --> Limit
+    
+    style Weekly fill:#4CAF50
+    style PR fill:#2196F3
+```
+
+#### Configuration
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    groups:
+      dev-dependencies:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "typescript*"
+          - "vitest*"
+```
+
+#### Features
+
+- **Weekly Updates**: Checks for dependency updates every week
+- **Grouped Updates**: Combines related dependencies into single PRs
+  - TypeScript types (`@types/*`)
+  - ESLint packages (`eslint*`)
+  - TypeScript compiler (`typescript*`)
+  - Vitest testing framework (`vitest*`)
+- **PR Limit**: Maximum 10 open PRs to avoid noise
+- **Auto-labeling**: Adds `dependencies` label to all PRs
+- **Smart Grouping**: Reduces PR overhead by grouping dev dependencies
+
+#### Dependency Groups
+
+**Dev Dependencies Group**:
+- All TypeScript type definitions
+- ESLint and related plugins
+- TypeScript compiler updates
+- Vitest testing framework updates
+
+This grouping strategy:
+- Reduces review overhead
+- Ensures compatible versions
+- Simplifies testing of related updates
+- Maintains clean PR history
+
+### 6. Release Workflows
 
 **Files**: 
 - `.github/workflows/release.yml`
@@ -285,6 +544,17 @@ The automation workflows require the following secrets to be configured in the r
 | `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync |
 | `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
 | `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
+
+### Permissions Required
+
+The workflows require specific GitHub permissions:
+
+| Workflow | Permissions |
+|----------|-------------|
+| CI | `contents: read`, `pull-requests: write` |
+| Security | `contents: read`, `security-events: write` |
+| Documentation Update | `contents: write`, `pull-requests: write` |
+| Upstream Sync | `contents: write`, `pull-requests: write` |
 
 ### Setting Up Secrets
 
@@ -435,6 +705,11 @@ This enhancement allows the AI agent to:
 3. **Keep secrets updated**: Rotate credentials regularly
 4. **Monitor workflow costs**: Claude API usage is tracked in SAP AI Core
 5. **Document workflow modifications**: Update this file when changing workflows
+6. **Review security scan results**: Check GitHub Security tab regularly
+7. **Update dependencies promptly**: Review and merge Dependabot PRs weekly
+8. **Monitor coverage trends**: Ensure test coverage does not decrease over time
+9. **Validate CI changes locally**: Test build and test commands before pushing
+10. **Use continue-on-error wisely**: Only for non-critical steps like coverage comments
 
 ## Future Enhancements
 
@@ -446,3 +721,9 @@ Planned improvements to the automation system:
 - [ ] Slack/Teams notifications for sync results
 - [ ] Rollback mechanism for failed syncs
 - [ ] Metrics dashboard for sync success rates
+- [ ] Advanced security scanning with custom rules
+- [ ] Automated security patch application
+- [ ] Coverage trend analysis and reporting
+- [ ] Performance regression testing in CI
+- [ ] Multi-architecture build testing
+- [ ] Container image scanning for deployments
