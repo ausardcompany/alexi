@@ -64,15 +64,33 @@ Usage:
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
+        detached: true,
       });
 
+      // Kill the entire process group (shell + all children)
+      const killGroup = (signal: NodeJS.Signals) => {
+        try {
+          if (proc.pid !== undefined) {
+            process.kill(-proc.pid, signal);
+          }
+        } catch {
+          // Process group may already be gone
+          try {
+            proc.kill(signal);
+          } catch {
+            // Ignore
+          }
+        }
+      };
+
       // Handle timeout
+      let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
       const timer = setTimeout(() => {
         timedOut = true;
-        proc.kill('SIGTERM');
-        setTimeout(() => {
+        killGroup('SIGTERM');
+        sigkillTimer = setTimeout(() => {
           if (!killed) {
-            proc.kill('SIGKILL');
+            killGroup('SIGKILL');
           }
         }, 5000);
       }, timeout);
@@ -80,8 +98,9 @@ Usage:
       // Handle abort signal
       const abortHandler = () => {
         killed = true;
-        proc.kill('SIGTERM');
         clearTimeout(timer);
+        killGroup('SIGTERM');
+        setTimeout(() => killGroup('SIGKILL'), 500);
       };
       context.signal?.addEventListener('abort', abortHandler);
 
@@ -95,6 +114,7 @@ Usage:
 
       proc.on('close', async (code) => {
         clearTimeout(timer);
+        clearTimeout(sigkillTimer);
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
 
@@ -155,6 +175,7 @@ Usage:
 
       proc.on('error', (err) => {
         clearTimeout(timer);
+        clearTimeout(sigkillTimer);
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
 
