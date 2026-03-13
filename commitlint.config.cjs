@@ -1,5 +1,5 @@
 /**
- * Commitlint configuration for sap-bot-orchestrator repository
+ * Commitlint configuration for alexi repository
  * @see https://commitlint.js.org/reference/configuration.html
  */
 

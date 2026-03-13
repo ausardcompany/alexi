@@ -76,5 +76,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/sap-bot-orchestrator/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/ausardcompany/sap-bot-orchestrator/releases/tag/v0.1.3
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/ausardcompany/alexi/releases/tag/v0.1.3

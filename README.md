@@ -1,4 +1,4 @@
-# SAP Bot Orchestrator
+# Alexi
 
 Intelligent LLM orchestrator for SAP AI Core with automatic model routing, multi-turn conversations, and rule-based configuration.
 
@@ -38,7 +38,7 @@ For macOS/Linux users with access to the ausardcompany private tap:
 brew tap ausardcompany/tap git@github.com:ausardcompany/homebrew-tap.git
 
 # Install
-brew install sap-bot-orchestrator
+brew install alexi
 
 # Use the CLI
 alexi chat -m "Hello!"
@@ -47,8 +47,8 @@ alexi chat -m "Hello!"
 ### From Source
 
 ```bash
-git clone git@github.com:ausardcompany/sap-bot-orchestrator.git
-cd sap-bot-orchestrator
+git clone git@github.com:ausardcompany/alexi.git
+cd alexi
 npm install
 npm run build
 ```

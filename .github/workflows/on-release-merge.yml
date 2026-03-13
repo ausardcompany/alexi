@@ -54,12 +54,12 @@ jobs:
           cat > homebrew-tap/Formula/alexi.rb << 'FORMULA'
           class Alexi < Formula
             desc "Intelligent LLM orchestrator with SAP AI Core provider support"
-            homepage "https://github.com/ausardcompany/sap-bot-orchestrator"
-            url "https://github.com/ausardcompany/sap-bot-orchestrator.git",
+            homepage "https://github.com/ausardcompany/alexi"
+            url "https://github.com/ausardcompany/alexi.git",
                 tag:      "TAG_PLACEHOLDER",
                 revision: "SHA_PLACEHOLDER"
             license "ISC"
-            head "https://github.com/ausardcompany/sap-bot-orchestrator.git", branch: "master"
+            head "https://github.com/ausardcompany/alexi.git", branch: "master"
 
             depends_on "node@22"
 

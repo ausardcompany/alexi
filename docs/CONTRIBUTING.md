@@ -37,8 +37,8 @@ This project follows a professional code of conduct. We expect all contributors 
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone git@github.com:YOUR_USERNAME/sap-bot-orchestrator.git
-   cd sap-bot-orchestrator
+   git clone git@github.com:YOUR_USERNAME/alexi.git
+   cd alexi
    ```
 
 3. Install dependencies:
