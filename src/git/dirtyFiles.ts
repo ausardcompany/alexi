@@ -79,7 +79,7 @@ export async function commitDirtyFiles(
   const rawMessage = 'chore: save uncommitted changes before ai session';
   const message = formatCommitMessage(rawMessage, config);
 
-  const commitOptions: Record<string, string> = {};
+  const commitOptions: Record<string, null> = {};
   const authorEnv = buildAuthorEnv(config);
   if (authorEnv) {
     // simple-git doesn't directly support env overrides per-call;
@@ -89,7 +89,7 @@ export async function commitDirtyFiles(
   }
 
   if (!config.commitVerify) {
-    commitOptions['--no-verify'] = 'true';
+    commitOptions['--no-verify'] = null;
   }
 
   const result = await git.commit(message, undefined, commitOptions);

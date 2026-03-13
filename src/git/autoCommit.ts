@@ -102,9 +102,9 @@ export class AutoCommitManager {
         process.env['GIT_AUTHOR_EMAIL'] = authorEnv['GIT_AUTHOR_EMAIL'];
       }
 
-      const commitOptions: Record<string, string> = {};
+      const commitOptions: Record<string, null> = {};
       if (!this.config.commitVerify) {
-        commitOptions['--no-verify'] = 'true';
+        commitOptions['--no-verify'] = null;
       }
 
       const result = await this.git.commit(message, undefined, commitOptions);
