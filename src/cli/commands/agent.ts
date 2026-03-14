@@ -221,19 +221,43 @@ export function registerAgentCommand(program: Command): void {
         // Log full error details for debugging (especially API errors)
         if (e instanceof Error) {
           console.error(`Error: ${e.message}`);
-          if ('cause' in e && e.cause) {
-            console.error(`Cause: ${e.cause instanceof Error ? e.cause.message : String(e.cause)}`);
-          }
-          // SAP SDK errors may include response details
-          const errAny = e as unknown as Record<string, unknown>;
-          if (errAny['response']) {
-            const resp = errAny['response'] as Record<string, unknown>;
-            console.error(
-              `API Response: status=${resp['status']}, data=${JSON.stringify(resp['data'] ?? resp['body'] ?? '', null, 2)}`
-            );
-          }
-          if (errAny['rootCause']) {
-            console.error(`Root cause: ${String(errAny['rootCause'])}`);
+
+          // Walk the full cause chain and extract Axios response data
+          let current: unknown = e;
+          let depth = 0;
+          while (current && depth < 10) {
+            const err = current as Record<string, unknown>;
+
+            // Check for Axios response data at each level
+            if (err['response'] && typeof err['response'] === 'object') {
+              const resp = err['response'] as Record<string, unknown>;
+              const data = resp['data'] ?? resp['body'];
+              if (data) {
+                console.error(
+                  `API Response (depth=${depth}): status=${resp['status']}, data=${JSON.stringify(data, null, 2).slice(0, 2000)}`
+                );
+              }
+            }
+
+            // Check for rootCause (SAP SDK specific)
+            if (err['rootCause']) {
+              console.error(`Root cause (depth=${depth}): ${String(err['rootCause'])}`);
+              // rootCause may itself have response data
+              const rc = err['rootCause'] as Record<string, unknown>;
+              if (rc['response'] && typeof rc['response'] === 'object') {
+                const rcResp = rc['response'] as Record<string, unknown>;
+                const rcData = rcResp['data'] ?? rcResp['body'];
+                if (rcData) {
+                  console.error(
+                    `Root cause response: status=${rcResp['status']}, data=${JSON.stringify(rcData, null, 2).slice(0, 2000)}`
+                  );
+                }
+              }
+            }
+
+            // Move to next level in cause chain
+            current = (err['cause'] as unknown) ?? (err['rootCause'] as unknown) ?? undefined;
+            depth++;
           }
         } else {
           console.error(String(e));

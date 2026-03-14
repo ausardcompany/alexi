@@ -500,20 +500,34 @@ jobs:
           
           # Use 'agent' command which enables tool execution loop
           # Disable git auto-commits since the workflow has its own commit step
-          set +e
-          node dist/cli/program.js agent \
-            --message-file .github/prompts/execution-prompt.md \
-            --model "anthropic--claude-4.5-sonnet" \
-            --max-iterations 50 \
-            --tools "read,write,edit,glob,grep" \
-            --workdir "$(pwd)" \
-            --verbose \
-            --no-auto-commits \
-            --no-dirty-commits \
-            --system "$SYSTEM_PROMPT" \
-            > .github/reports/execution-output.log 2>&1
-          EXEC_EXIT_CODE=$?
-          set -e
+          # Enable debug messages to diagnose intermittent API 400 errors
+          export ALEXI_DEBUG_MESSAGES=1
+          
+          # Retry up to 3 times — SAP AI Core occasionally returns transient 400 errors
+          MAX_RETRIES=3
+          RETRY=0
+          EXEC_EXIT_CODE=1
+          while [ "$RETRY" -lt "$MAX_RETRIES" ] && [ "$EXEC_EXIT_CODE" -ne 0 ]; do
+            RETRY=$((RETRY + 1))
+            if [ "$RETRY" -gt 1 ]; then
+              echo "Retry $RETRY/$MAX_RETRIES after previous failure..."
+              sleep 10
+            fi
+            set +e
+            node dist/cli/program.js agent \
+              --message-file .github/prompts/execution-prompt.md \
+              --model "anthropic--claude-4.5-sonnet" \
+              --max-iterations 50 \
+              --tools "read,write,edit,glob,grep" \
+              --workdir "$(pwd)" \
+              --verbose \
+              --no-auto-commits \
+              --no-dirty-commits \
+              --system "$SYSTEM_PROMPT" \
+              > .github/reports/execution-output.log 2>&1
+            EXEC_EXIT_CODE=$?
+            set -e
+          done
           
           echo ""
           echo "=== Execution complete (exit code: $EXEC_EXIT_CODE) ==="

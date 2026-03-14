@@ -32,9 +32,12 @@ interface ToolCall {
 }
 
 // Message types for conversation
+// Note: assistant messages with tool_calls may have undefined content — the SAP AI SDK
+// AssistantChatMessage type has content as optional, and some API backends reject
+// empty-string content on tool-call-only messages.
 type Message =
   | { role: 'system' | 'user' | 'assistant'; content: string }
-  | { role: 'assistant'; content: string; tool_calls: ToolCall[] }
+  | { role: 'assistant'; content: string | undefined; tool_calls: ToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 
 export interface AgenticChatOptions {
@@ -360,6 +363,23 @@ export async function agenticChat(
       iteration: iterations,
     });
 
+    // Diagnostic: log message structure before API call (helps debug 400 errors)
+    if (process.env.ALEXI_DEBUG_MESSAGES === '1') {
+      const msgSummary = messages.map((m, i) => {
+        const msg = m as Record<string, unknown>;
+        const role = msg['role'] as string;
+        const hasToolCalls = 'tool_calls' in m;
+        const hasToolCallId = 'tool_call_id' in m;
+        const contentLen =
+          typeof msg['content'] === 'string' ? (msg['content'] as string).length : 0;
+        return `  [${i}] role=${role} content_len=${contentLen}${hasToolCalls ? ` tool_calls=${JSON.stringify((msg['tool_calls'] as unknown[]).length)}` : ''}${hasToolCallId ? ` tool_call_id=${msg['tool_call_id']}` : ''}`;
+      });
+      // eslint-disable-next-line no-console
+      console.error(
+        `[DEBUG] Iteration ${iterations} - sending ${messages.length} messages:\n${msgSummary.join('\n')}`
+      );
+    }
+
     const result: CompletionResult = await provider.complete(
       messages as Array<{ role: string; content: string }>,
       {
@@ -380,9 +400,11 @@ export async function agenticChat(
     // Check if LLM wants to use tools
     if (result.toolCalls && result.toolCalls.length > 0) {
       // Add assistant message with tool calls
+      // Use undefined for content when empty — some API backends (e.g. Anthropic
+      // via SAP AI Core) may reject empty-string content on tool-call messages
       messages.push({
         role: 'assistant',
-        content: result.text || '',
+        content: result.text || undefined,
         tool_calls: result.toolCalls as ToolCall[],
       });
 
