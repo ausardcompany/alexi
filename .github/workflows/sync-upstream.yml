@@ -551,6 +551,31 @@ jobs:
             echo "Kilo made the following changes:"
             git status --short
             git diff --stat
+
+            # Capture file change stats for PR body
+            {
+              echo "diff_stat<<DIFF_STAT_EOF"
+              git diff --stat
+              echo "DIFF_STAT_EOF"
+            } >> $GITHUB_OUTPUT
+
+            # Capture changed file list
+            {
+              echo "changed_files<<CHANGED_FILES_EOF"
+              git status --short
+              echo "CHANGED_FILES_EOF"
+            } >> $GITHUB_OUTPUT
+
+            # Extract AI execution summary from the agent output log
+            # The agent's final text summary typically appears after the tool call list
+            {
+              echo "ai_summary<<AI_SUMMARY_EOF"
+              if [ -f .github/reports/execution-output.log ]; then
+                # Extract everything after "[Complete:" line to end, skipping tool metadata
+                sed -n '/\[Complete:/,$ { /^\[/d; /^$/d; p }' .github/reports/execution-output.log | head -80
+              fi
+              echo "AI_SUMMARY_EOF"
+            } >> $GITHUB_OUTPUT
           else
             echo "kilo_made_changes=false" >> $GITHUB_OUTPUT
             echo "No changes were made by Kilo"
@@ -581,57 +606,74 @@ jobs:
         if: inputs.dry_run != true && steps.kilo-changes.outputs.kilo_made_changes == 'true'
         id: commit-changes
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Create a dated feature branch
-          BRANCH="auto/sync-upstream-$(date +%Y-%m-%d)"
+          # Create a dated feature branch (include run number for same-day retries)
+          BRANCH="auto/sync-upstream-$(date +%Y-%m-%d)-run${​{ github.run_number }}"
           git checkout -b "$BRANCH"
 
-          # Update last-sync-commits.json on the same branch
+          # ── Auto-bump patch version ───────────────────────────────────
+          OLD_VERSION=$(node -p "require('./package.json').version")
+          # Increment patch: 0.1.8 → 0.1.9, 0.1.99 → 0.1.100, etc.
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$OLD_VERSION"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          # Update package.json version in-place
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$NEW_VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          echo "Version bumped: $OLD_VERSION → $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+          # ── Update last-sync-commits.json ─────────────────────────────
           mkdir -p .github
           SYNCED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           cat > .github/last-sync-commits.json << SYNC_EOF
           {
             "kilocode": {
-              "last_synced_commit": "${{ steps.current-commits.outputs.current_kilocode }}",
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_kilocode }}",
               "last_synced_at": "$SYNCED_AT",
               "upstream": "Kilo-Org/kilocode",
               "fork": "ausard/kilocode"
             },
             "opencode": {
-              "last_synced_commit": "${{ steps.current-commits.outputs.current_opencode }}",
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_opencode }}",
               "last_synced_at": "$SYNCED_AT",
               "upstream": "anomalyco/opencode",
               "fork": "ausard/opencode"
             },
             "claude-code": {
-              "last_synced_commit": "${{ steps.current-commits.outputs.current_claude_code }}",
+              "last_synced_commit": "${​{ steps.current-commits.outputs.current_claude_code }}",
               "last_synced_at": "$SYNCED_AT",
               "upstream": "anthropics/claude-code",
               "fork": "direct-clone"
             },
             "metadata": {
               "version": "1.1.0",
-              "workflow_run": "${{ github.run_id }}",
+              "workflow_run": "${​{ github.run_id }}",
               "description": "Tracks last synced commits from upstream repositories"
             }
           }
           SYNC_EOF
 
-          # Stage everything (AI changes + updated sync state)
+          # ── Stage & commit ────────────────────────────────────────────
           git add -A
 
-          # Commit (--no-verify: skip pre-commit hooks — AI-generated code
-          # will be reviewed in the PR and checked by CI)
+          # --no-verify: skip pre-commit hooks — AI-generated code
+          # will be reviewed in the PR and checked by CI
           git commit --no-verify -m "feat(sync): apply upstream changes ($(date +%Y-%m-%d))
 
           Synchronized changes from upstream repositories:
-          - kilocode: ${{ steps.prev-commits.outputs.prev_kilocode }} -> ${{ steps.current-commits.outputs.current_kilocode }}
-          - opencode: ${{ steps.prev-commits.outputs.prev_opencode }} -> ${{ steps.current-commits.outputs.current_opencode }}
-          - claude-code: ${{ steps.prev-commits.outputs.prev_claude_code }} -> ${{ steps.current-commits.outputs.current_claude_code }}
+          - kilocode: ${​{ steps.prev-commits.outputs.prev_kilocode }} -> ${​{ steps.current-commits.outputs.current_kilocode }}
+          - opencode: ${​{ steps.prev-commits.outputs.prev_opencode }} -> ${​{ steps.current-commits.outputs.current_opencode }}
+          - claude-code: ${​{ steps.prev-commits.outputs.prev_claude_code }} -> ${​{ steps.current-commits.outputs.current_claude_code }}
+
+          Version bump: $OLD_VERSION → $NEW_VERSION
 
           Two-stage AI process:
           - Stage 1 (Planning): anthropic--claude-4.5-opus
@@ -639,27 +681,68 @@ jobs:
 
           git push -u origin "$BRANCH"
 
-          # Create PR — auto-merge.yml will enable squash auto-merge on open
+          # ── Create PR with detailed change summary ────────────────────
           PLAN_FILE=".github/reports/update-plan-$(date +%Y-%m-%d).md"
-          PR_BODY="## Upstream Sync — $(date +%Y-%m-%d)
 
-          Auto-generated by \`sync-upstream.yml\`.
+          # Build the PR body (indented for YAML, then strip 10-space prefix)
+          PR_BODY=$(sed 's/^          //' <<'PRBODY_EOF'
+          ## Upstream Sync — SYNC_DATE
+
+          Auto-generated by `sync-upstream.yml`.  **Version bump: OLD_VER → NEW_VER**
+
+          ### What changed
+
+          ```
+          DIFF_STAT_PLACEHOLDER
+          ```
+
+          <details>
+          <summary>AI Execution Summary</summary>
+
+          AI_SUMMARY_PLACEHOLDER
+
+          </details>
 
           ### Repositories analysed
           | Repo | Previous | Current |
           |------|----------|---------|
-          | kilocode | \`${{ steps.prev-commits.outputs.prev_kilocode }}\` | \`${{ steps.current-commits.outputs.current_kilocode }}\` |
-          | opencode | \`${{ steps.prev-commits.outputs.prev_opencode }}\` | \`${{ steps.current-commits.outputs.current_opencode }}\` |
-          | claude-code | \`${{ steps.prev-commits.outputs.prev_claude_code }}\` | \`${{ steps.current-commits.outputs.current_claude_code }}\` |
+          REPO_TABLE_PLACEHOLDER
 
           ### Process
-          1. **Planning** — \`anthropic--claude-4.5-opus\` analysed diffs and produced an update plan
-          2. **Execution** — \`anthropic--claude-4.5-sonnet\` applied the plan using file tools
+          1. **Planning** — `anthropic--claude-4.5-opus` analysed diffs and produced an update plan
+          2. **Execution** — `anthropic--claude-4.5-sonnet` applied the plan using file tools
 
-          See \`$PLAN_FILE\` in the workflow artifacts for the full AI-generated plan."
+          See `PLAN_FILE_PLACEHOLDER` for the full AI-generated plan.
+          PRBODY_EOF
+          )
+
+          # Fill in placeholders
+          SYNC_DATE=$(date +%Y-%m-%d)
+          PR_BODY="${PR_BODY//SYNC_DATE/$SYNC_DATE}"
+          PR_BODY="${PR_BODY//OLD_VER/$OLD_VERSION}"
+          PR_BODY="${PR_BODY//NEW_VER/$NEW_VERSION}"
+          PR_BODY="${PR_BODY//PLAN_FILE_PLACEHOLDER/$PLAN_FILE}"
+
+          # Insert diff stat
+          DIFF_STAT="${​{ steps.kilo-changes.outputs.diff_stat }}"
+          PR_BODY="${PR_BODY//DIFF_STAT_PLACEHOLDER/$DIFF_STAT}"
+
+          # Insert AI summary
+          AI_SUMMARY="${​{ steps.kilo-changes.outputs.ai_summary }}"
+          if [ -z "$AI_SUMMARY" ]; then
+            AI_SUMMARY="No summary extracted from agent output."
+          fi
+          PR_BODY="${PR_BODY//AI_SUMMARY_PLACEHOLDER/$AI_SUMMARY}"
+
+          # Insert repo table (built line-by-line to stay inside YAML indentation)
+          REPO_LINE1="| kilocode | \`${​{ steps.prev-commits.outputs.prev_kilocode }}\` | \`${​{ steps.current-commits.outputs.current_kilocode }}\` |"
+          REPO_LINE2="| opencode | \`${​{ steps.prev-commits.outputs.prev_opencode }}\` | \`${​{ steps.current-commits.outputs.current_opencode }}\` |"
+          REPO_LINE3="| claude-code | \`${​{ steps.prev-commits.outputs.prev_claude_code }}\` | \`${​{ steps.current-commits.outputs.current_claude_code }}\` |"
+          REPO_TABLE="${REPO_LINE1}"$'\n'"${REPO_LINE2}"$'\n'"${REPO_LINE3}"
+          PR_BODY="${PR_BODY//REPO_TABLE_PLACEHOLDER/$REPO_TABLE}"
 
           PR_URL=$(gh pr create \
-            --title "feat(sync): apply upstream changes ($(date +%Y-%m-%d))" \
+            --title "feat(sync): apply upstream changes ($SYNC_DATE) — v$NEW_VERSION" \
             --body "$PR_BODY" \
             --base master \
             --head "$BRANCH" \
@@ -682,29 +765,70 @@ jobs:
           echo "| Force Sync | ${{ inputs.force_sync }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Changes Detected | ${{ steps.check-changes.outputs.has_changes }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Bot Made Changes | ${{ steps.kilo-changes.outputs.kilo_made_changes }} |" >> $GITHUB_STEP_SUMMARY
-          
+
+          if [ "${{ steps.commit-changes.outputs.new_version }}" != "" ]; then
+            echo "| Version | \`${{ steps.commit-changes.outputs.new_version }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
           if [ "${{ steps.commit-changes.outputs.pr_url }}" != "" ]; then
             echo "| PR | ${{ steps.commit-changes.outputs.pr_url }} |" >> $GITHUB_STEP_SUMMARY
           fi
           if [ "${{ steps.commit-changes.outputs.commit_sha }}" != "" ]; then
             echo "| Commit | \`${{ steps.commit-changes.outputs.commit_sha }}\` |" >> $GITHUB_STEP_SUMMARY
           fi
-          
+
           echo "" >> $GITHUB_STEP_SUMMARY
+
+          # ── Diff stat & changed files ──────────────────────────────────
+          DIFF_STAT="${{ steps.kilo-changes.outputs.diff_stat }}"
+          if [ -n "$DIFF_STAT" ]; then
+            echo "### Changes Applied" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$DIFF_STAT" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          CHANGED_FILES="${{ steps.kilo-changes.outputs.changed_files }}"
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "<details>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Changed files</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$CHANGED_FILES" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # ── AI execution summary ───────────────────────────────────────
+          AI_SUMMARY="${{ steps.kilo-changes.outputs.ai_summary }}"
+          if [ -n "$AI_SUMMARY" ]; then
+            echo "<details>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>AI Execution Summary</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "$AI_SUMMARY" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # ── Two-stage process ──────────────────────────────────────────
           echo "### Two-Stage Update Process" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Stage | Model | Purpose |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|---------|" >> $GITHUB_STEP_SUMMARY
           echo "| 1. Planning | \`anthropic--claude-4.5-opus\` | Analyze changes, create detailed plan |" >> $GITHUB_STEP_SUMMARY
           echo "| 2. Execution | \`anthropic--claude-4.5-sonnet\` | Execute plan, apply code changes |" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ -f "${{ steps.plan.outputs.plan_file }}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Generated Plan" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Plan file: \`${{ steps.plan.outputs.plan_file }}\`" >> $GITHUB_STEP_SUMMARY
           fi
-          
+
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Commit References" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

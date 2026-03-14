@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   update-homebrew:
@@ -26,9 +26,22 @@ jobs:
         run: |
           SHA=$(git rev-parse HEAD)
           VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Ensure version tag exists
+        run: |
+          TAG="${​{ steps.meta.outputs.tag }}"
+          SHA="${​{ steps.meta.outputs.sha }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists"
+          else
+            echo "Creating tag $TAG at $SHA"
+            git tag "$TAG" "$SHA"
+            git push origin "$TAG"
+          fi
 
       - name: Checkout homebrew-tap
         uses: actions/checkout@v4
@@ -40,12 +53,15 @@ jobs:
       - name: Update Formula revision
         run: |
           FORMULA="homebrew-tap/Formula/alexi.rb"
-          TAG="${{ steps.meta.outputs.tag }}"
-          SHA="${{ steps.meta.outputs.sha }}"
+          TAG="${​{ steps.meta.outputs.tag }}"
+          SHA="${​{ steps.meta.outputs.sha }}"
 
           # Update tag and revision in the formula
           sed -i "s|tag:      \"v[^\"]*\"|tag:      \"$TAG\"|g" "$FORMULA"
           sed -i "s|revision: \"[a-f0-9]*\"|revision: \"$SHA\"|g" "$FORMULA"
+
+          # Ensure repo URL uses the current name (handle old sap-bot-orchestrator references)
+          sed -i "s|ausardcompany/sap-bot-orchestrator|ausardcompany/alexi|g" "$FORMULA"
 
           echo "Updated formula to tag=$TAG revision=$SHA"
           cat "$FORMULA"
