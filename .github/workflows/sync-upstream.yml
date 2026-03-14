@@ -518,8 +518,8 @@ jobs:
           echo ""
           echo "=== Execution complete (exit code: $EXEC_EXIT_CODE) ==="
           echo ""
-          echo "--- Execution Output (last 50 lines) ---"
-          tail -50 .github/reports/execution-output.log
+          echo "--- Execution Output (last 100 lines) ---"
+          tail -100 .github/reports/execution-output.log
           echo "--- End Output ---"
           
           # Fail the step if the agent command failed
