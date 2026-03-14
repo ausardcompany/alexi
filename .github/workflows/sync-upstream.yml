@@ -499,6 +499,8 @@ jobs:
           SYSTEM_PROMPT=$(cat .github/prompts/execution-system.txt)
           
           # Use 'agent' command which enables tool execution loop
+          # Disable git auto-commits since the workflow has its own commit step
+          set +e
           node dist/cli/program.js agent \
             --message-file .github/prompts/execution-prompt.md \
             --model "anthropic--claude-4.5-sonnet" \
@@ -506,10 +508,12 @@ jobs:
             --tools "read,write,edit,glob,grep" \
             --workdir "$(pwd)" \
             --verbose \
+            --no-auto-commits \
+            --no-dirty-commits \
             --system "$SYSTEM_PROMPT" \
             > .github/reports/execution-output.log 2>&1
-          
           EXEC_EXIT_CODE=$?
+          set -e
           
           echo ""
           echo "=== Execution complete (exit code: $EXEC_EXIT_CODE) ==="
@@ -517,6 +521,12 @@ jobs:
           echo "--- Execution Output (last 50 lines) ---"
           tail -50 .github/reports/execution-output.log
           echo "--- End Output ---"
+          
+          # Fail the step if the agent command failed
+          if [ "$EXEC_EXIT_CODE" -ne 0 ]; then
+            echo "::error::Agent command failed with exit code $EXEC_EXIT_CODE"
+            exit 1
+          fi
 
       - name: Check for bot changes
         if: steps.check-changes.outputs.has_changes == 'true'
