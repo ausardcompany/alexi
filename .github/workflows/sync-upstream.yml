@@ -610,8 +610,9 @@ jobs:
           # Stage everything (AI changes + updated sync state)
           git add -A
 
-          # Commit
-          git commit -m "feat(sync): apply upstream changes ($(date +%Y-%m-%d))
+          # Commit (--no-verify: skip pre-commit hooks — AI-generated code
+          # will be reviewed in the PR and checked by CI)
+          git commit --no-verify -m "feat(sync): apply upstream changes ($(date +%Y-%m-%d))
 
           Synchronized changes from upstream repositories:
           - kilocode: ${{ steps.prev-commits.outputs.prev_kilocode }} -> ${{ steps.current-commits.outputs.current_kilocode }}
