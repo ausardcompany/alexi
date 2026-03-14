@@ -20,6 +20,7 @@ import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
+import { buildAssembledSystemPrompt } from '../agent/system.js';
 
 // Tool call from LLM response
 interface ToolCall {
@@ -62,6 +63,8 @@ export interface AgenticChatOptions {
   repoMapManager?: RepoMapManager;
   /** Effort level for cost/quality tradeoff (default: 'medium') */
   effort?: EffortLevel;
+  /** Agent ID to use for assembled system prompt (e.g. 'code', 'debug') */
+  agentId?: string;
 }
 
 export interface AgenticProgressEvent {
@@ -283,12 +286,20 @@ export async function agenticChat(
 
   /**
    * Build the effective system prompt with cache-friendly ordering.
-   * Stable content first (best prefix for prompt caching), volatile last:
-   *   base (agent persona) → memory → session → repoMap
+   * Uses the assembled prompt pipeline (soul → model → env → agent → AGENTS.md → custom rules)
+   * as the stable base, then appends volatile content (memory → session → repoMap) last.
    */
-  function buildSystemPrompt(base?: string): string {
+  function buildSystemPrompt(customRules?: string): string {
+    // Assembled prompt: stable layers first (best prefix for prompt caching)
+    const assembled = buildAssembledSystemPrompt({
+      modelId,
+      agentId: options?.agentId,
+      workdir,
+      customRules,
+    });
     const parts: string[] = [];
-    if (base) parts.push(base);
+    if (assembled) parts.push(assembled);
+    // Volatile layers appended last so stable prefix is cache-friendly
     if (memoryContext) parts.push(memoryContext);
     if (sessionContext) parts.push(sessionContext);
     if (repoMapText) parts.push(repoMapText);
@@ -305,10 +316,12 @@ export async function agenticChat(
     }
 
     const history = options.sessionManager.getHistory(20);
-    if (options.systemPrompt && !history.some((m) => m.role === 'system')) {
-      messages.push({ role: 'system', content: buildSystemPrompt(options.systemPrompt) });
-    } else if ((repoMapText || memoryContext) && !history.some((m) => m.role === 'system')) {
-      messages.push({ role: 'system', content: buildSystemPrompt() });
+    if (!history.some((m) => m.role === 'system')) {
+      // Always include assembled system prompt for new conversations
+      const systemContent = buildSystemPrompt(options?.systemPrompt);
+      if (systemContent) {
+        messages.push({ role: 'system', content: systemContent });
+      }
     }
     messages.push(
       ...history.map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))

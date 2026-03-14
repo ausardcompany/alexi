@@ -605,7 +605,7 @@ describe('agenticChat', () => {
     });
 
     describe('no context', () => {
-      it('should not include a system message when all contexts are empty and no systemPrompt', async () => {
+      it('should include a system message from the assembled prompt even when all dynamic contexts are empty', async () => {
         vi.mocked(getMemoryManager).mockReturnValue({
           getContextString: vi.fn().mockReturnValue(''),
         } as any);
@@ -615,7 +615,9 @@ describe('agenticChat', () => {
 
         const messages = mockProvider.complete.mock.calls[0][0];
         const systemMessages = messages.filter((m: { role: string }) => m.role === 'system');
-        expect(systemMessages).toHaveLength(0);
+        // buildAssembledSystemPrompt always produces at least the soul + env block
+        expect(systemMessages).toHaveLength(1);
+        expect(systemMessages[0].content).toBeTruthy();
       });
     });
 

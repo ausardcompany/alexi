@@ -6,6 +6,7 @@ import {
   formatHintsBar,
   type KeypressHandlerOptions,
   type KeypressKey,
+  type LeaderAction,
 } from '../keybindings.js';
 import { colors } from '../colors.js';
 
@@ -101,10 +102,10 @@ describe('keybindings', () => {
   describe('KeypressHandler', () => {
     let handler: KeypressHandler;
     let options: KeypressHandlerOptions;
-    let onTabCycleAgent: ReturnType<typeof vi.fn>;
-    let onLeaderAction: ReturnType<typeof vi.fn>;
-    let onLeaderModeChange: ReturnType<typeof vi.fn>;
-    let onClearScreen: ReturnType<typeof vi.fn>;
+    let onTabCycleAgent: ReturnType<typeof vi.fn<(reverse: boolean) => void>>;
+    let onLeaderAction: ReturnType<typeof vi.fn<(action: LeaderAction) => void>>;
+    let onLeaderModeChange: ReturnType<typeof vi.fn<(active: boolean) => void>>;
+    let onClearScreen: ReturnType<typeof vi.fn<() => void>>;
 
     beforeEach(() => {
       vi.useFakeTimers();

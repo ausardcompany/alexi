@@ -8,6 +8,7 @@ import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
+import { buildAssembledSystemPrompt } from '../agent/system.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -20,6 +21,10 @@ export interface StreamingOptions {
   temperature?: number;
   /** Effort level for cost/quality tradeoff (default: 'medium') */
   effort?: EffortLevel;
+  /** Agent ID to use for assembled system prompt (e.g. 'code', 'debug') */
+  agentId?: string;
+  /** Working directory for env info and AGENTS.md loading */
+  workdir?: string;
 }
 
 export interface StreamingResult {
@@ -60,6 +65,16 @@ export async function* streamChat(
     modelId = (options?.modelOverride ?? getDefaultModel()).trim();
   }
 
+  // Assemble the effective system prompt using the pipeline.
+  // buildAssembledSystemPrompt handles soul → model → env → agent → AGENTS.md layers.
+  // A manual systemPrompt (e.g. from /system command) is appended as custom rules.
+  const assembledPrompt = buildAssembledSystemPrompt({
+    modelId,
+    agentId: options?.agentId,
+    workdir: options?.workdir,
+    customRules: options?.systemPrompt,
+  });
+
   // Build messages array with history if session manager provided
   const messages: Array<{ role: string; content: string }> = [];
 
@@ -74,17 +89,17 @@ export async function* streamChat(
     // Get conversation history
     const history = options.sessionManager.getHistory(20); // Last 20 messages
 
-    // Add system prompt if provided and not already in history
-    if (options.systemPrompt && !history.some((m) => m.role === 'system')) {
-      messages.push({ role: 'system', content: options.systemPrompt });
+    // Add assembled system prompt if not already in history
+    if (assembledPrompt && !history.some((m) => m.role === 'system')) {
+      messages.push({ role: 'system', content: assembledPrompt });
     }
 
     // Add conversation history
     messages.push(...history.map((m) => ({ role: m.role, content: m.content })));
   } else {
     // Single message without history
-    if (options?.systemPrompt) {
-      messages.push({ role: 'system', content: options.systemPrompt });
+    if (assembledPrompt) {
+      messages.push({ role: 'system', content: assembledPrompt });
     }
   }
 

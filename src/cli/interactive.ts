@@ -1856,22 +1856,21 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
         }
       }, 80);
 
-      // Build effective system prompt with memory context
-      // Cache-friendly ordering: stable base prompt first, volatile memory last
-      let effectiveSystemPrompt = state.systemPrompt;
+      // Collect volatile context (memory) to pass as custom rules to the assembled prompt.
+      // The assembled prompt pipeline (soul → model → env → agent → AGENTS.md) is handled
+      // by streamChat/buildAssembledSystemPrompt; memory is appended last as it changes often.
       const memoryContext = getMemoryManager().getContextString();
-      if (memoryContext) {
-        effectiveSystemPrompt = effectiveSystemPrompt
-          ? `${effectiveSystemPrompt}\n\n${memoryContext}`
-          : memoryContext;
-      }
+      const customRules =
+        [state.systemPrompt, memoryContext].filter(Boolean).join('\n\n') || undefined;
 
       const generator = streamChat(input, {
         modelOverride: state.autoRoute ? undefined : state.currentModel,
         autoRoute: state.autoRoute,
         preferCheap: state.preferCheap,
         sessionManager: state.sessionManager,
-        systemPrompt: effectiveSystemPrompt,
+        systemPrompt: customRules,
+        agentId: state.agent ?? 'code',
+        workdir: process.cwd(),
         signal: state.abortController.signal,
         effort: state.effort,
       });
