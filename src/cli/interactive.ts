@@ -7,10 +7,23 @@ import * as readline from 'readline';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { streamChat, resolveModelId, isAbortError } from '../core/streamingOrchestrator.js';
+import { isOrchestrationModel } from '../providers/sapOrchestration.js';
 import { SessionManager } from '../core/sessionManager.js';
-import { env } from '../config/env.js';
 import { colors, c } from './utils/colors.js';
+import {
+  formatAgentPrompt,
+  formatAgentSwitchNotice,
+  formatAgentBadge,
+} from './utils/agentColors.js';
+import {
+  setupKeypressHandler,
+  cycleAgent,
+  formatHintsBar,
+  type KeypressHandler,
+  type LeaderAction,
+} from './utils/keybindings.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { getCheckpointManager } from '../core/checkpoints.js';
@@ -61,6 +74,8 @@ interface ReplState {
   effort?: EffortLevel;
   gitManager?: AutoCommitManager;
   repoMapManager?: RepoMapManager;
+  rl?: readline.Interface;
+  keypressHandler?: KeypressHandler;
 }
 
 // Spinner animation frames
@@ -87,9 +102,12 @@ function printHeader(state: ReplState): void {
     console.log(c('gray', `  Session: ${c('yellow', session.metadata.id.slice(0, 8))}`));
   }
 
+  console.log(c('gray', `  Agent: ${formatAgentBadge(state.agent || 'code')}`));
+
   console.log();
   console.log(c('dim', '  Type /help for commands, /exit to quit'));
   console.log(c('dim', '  Press Ctrl+C during response to cancel'));
+  console.log(formatHintsBar(state.agent, false));
   console.log();
 }
 
@@ -103,7 +121,10 @@ function printHelp(): void {
   console.log(c('yellow', '  /help') + c('gray', '              - Show this help message'));
   console.log(c('yellow', '  /exit, /quit, /q') + c('gray', '   - Exit the REPL'));
   console.log(c('yellow', '  /model <id>') + c('gray', '        - Switch to a different model'));
-  console.log(c('yellow', '  /models') + c('gray', '            - List available models'));
+  console.log(
+    c('yellow', '  /models') + c('gray', '            - Pick a model (interactive selector)')
+  );
+  console.log(c('yellow', '  ! <command>') + c('gray', '        - Execute a shell command'));
   console.log(c('yellow', '  /session') + c('gray', '           - Show current session info'));
   console.log(c('yellow', '  /sessions') + c('gray', '          - List all sessions'));
   console.log(c('yellow', '  /session load <id>') + c('gray', ' - Load a previous session'));
@@ -228,6 +249,17 @@ function printHelp(): void {
   console.log(c('yellow', '  /template') + c('gray', '          - List message templates'));
   console.log(c('yellow', '  /template use <n>') + c('gray', '  - Apply a template'));
   console.log();
+  console.log(c('cyan', '  Keybindings:'));
+  console.log();
+  console.log(c('yellow', '  Tab') + c('gray', '                - Cycle to next agent'));
+  console.log(c('yellow', '  Shift+Tab') + c('gray', '          - Cycle to previous agent'));
+  console.log(c('yellow', '  Ctrl+X n') + c('gray', '           - New session'));
+  console.log(c('yellow', '  Ctrl+X m') + c('gray', '           - Model picker'));
+  console.log(c('yellow', '  Ctrl+X a') + c('gray', '           - List agents'));
+  console.log(c('yellow', '  Ctrl+X s') + c('gray', '           - Show status'));
+  console.log(c('yellow', '  Ctrl+X h') + c('gray', '           - Show help'));
+  console.log(c('yellow', '  Ctrl+L') + c('gray', '             - Clear screen'));
+  console.log();
 }
 
 /**
@@ -259,37 +291,41 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       if (args.length === 0) {
         console.log(c('gray', `\n  Current model: ${c('green', state.currentModel)}\n`));
       } else {
-        state.currentModel = args.join(' ');
+        const modelId = args.join(' ');
+        if (!isOrchestrationModel(modelId)) {
+          console.log(c('yellow', `\n  Warning: '${modelId}' is not in the known models list`));
+          console.log(c('yellow', '  Use /models to see available models'));
+        }
+        state.currentModel = modelId;
         console.log(c('green', `\n  Switched to model: ${state.currentModel}\n`));
       }
       return true;
 
-    case 'models':
+    case 'models': {
+      const rl = state.rl;
+      if (rl) {
+        rl.pause();
+      }
       try {
-        const baseURL = env('SAP_PROXY_BASE_URL');
-        const apiKey = env('SAP_PROXY_API_KEY');
-        if (baseURL && apiKey) {
-          const url = baseURL.replace(/\/$/, '') + '/models';
-          const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-          if (res.ok) {
-            const data = (await res.json()) as { data?: Array<{ id: string }> };
-            console.log(c('cyan', '\n  Available Models:\n'));
-            const models = data?.data || [];
-            models.forEach((m: any) => {
-              const marker = m.id === state.currentModel ? c('green', ' ← current') : '';
-              console.log(c('gray', `    • ${m.id}${marker}`));
-            });
-            console.log();
-          } else {
-            console.log(c('red', `\n  Failed to fetch models: ${res.status}\n`));
-          }
+        const { pickModel } = await import('./utils/modelPicker.js');
+        const selected = await pickModel(state.currentModel);
+        if (selected && selected !== state.currentModel) {
+          state.currentModel = selected;
+          console.log(c('green', `\n  Switched to model: ${state.currentModel}\n`));
+        } else if (selected === state.currentModel) {
+          console.log(c('gray', `\n  Model unchanged: ${state.currentModel}\n`));
         } else {
-          console.log(c('yellow', '\n  Model listing requires SAP_PROXY_BASE_URL\n'));
+          console.log(c('gray', '\n  Model selection cancelled\n'));
         }
       } catch (e) {
-        console.log(c('red', `\n  Error fetching models: ${e}\n`));
+        console.log(c('red', `\n  Error: ${e instanceof Error ? e.message : String(e)}\n`));
+      } finally {
+        if (rl) {
+          rl.resume();
+        }
       }
       return true;
+    }
 
     case 'session':
       if (args.length === 0) {
@@ -461,7 +497,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       const currentStage = stageManager.getCurrentStage();
       console.log(c('cyan', '\n  Current Status:\n'));
       console.log(c('gray', `    Model: ${c('green', state.currentModel)}`));
-      console.log(c('gray', `    Agent: ${c('yellow', state.agent || 'code')}`));
+      console.log(c('gray', `    Agent: `) + formatAgentBadge(state.agent || 'code'));
       console.log(
         c('gray', `    Session: ${c('yellow', session?.metadata.id.slice(0, 8) || 'none')}`)
       );
@@ -557,15 +593,21 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       if (args.length === 0) {
         console.log(c('cyan', '\n  Available Agents:\n'));
         for (const agent of availableAgents) {
-          const marker = agent === (state.agent || 'code') ? c('green', ' <- current') : '';
-          console.log(c('gray', `    @${agent}${marker}`));
+          const badge = formatAgentBadge(agent);
+          const marker = agent === (state.agent || 'code') ? c('green', ' ← current') : '';
+          console.log(`    ${badge} @${agent}${marker}`);
         }
         console.log();
       } else {
         const requestedAgent = args[0].replace('@', '');
         if (availableAgents.includes(requestedAgent)) {
+          const fromAgent = state.agent;
           state.agent = requestedAgent;
-          console.log(c('green', `\n  Switched to agent: @${requestedAgent}\n`));
+          console.log('\n' + formatAgentSwitchNotice(fromAgent, requestedAgent) + '\n');
+          // Update the readline prompt to reflect new agent
+          if (state.rl) {
+            state.rl.setPrompt(formatAgentPrompt(state.agent));
+          }
         } else {
           console.log(c('red', `\n  Unknown agent: ${args[0]}`));
           console.log(c('gray', `  Available: ${availableAgents.join(', ')}\n`));
@@ -1633,12 +1675,91 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   printHeader(state);
 
+  // Enable keypress events before creating readline (must be called first)
+  readline.emitKeypressEvents(process.stdin);
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c('blue', '❯ '),
+    prompt: formatAgentPrompt(state.agent),
     terminal: true,
   });
+
+  state.rl = rl;
+
+  /** Helper: update the prompt to reflect current agent and re-display it */
+  const refreshPrompt = (): void => {
+    rl.setPrompt(formatAgentPrompt(state.agent));
+    rl.prompt();
+  };
+
+  /** Helper: switch agent via Tab cycling */
+  const handleTabCycle = (reverse: boolean): void => {
+    if (state.isStreaming) {
+      return; // Don't switch agents while streaming
+    }
+    const fromAgent = state.agent;
+    const nextAgent = cycleAgent(state.agent, reverse);
+    state.agent = nextAgent;
+    // Print switch notice above the prompt
+    process.stdout.write('\r' + ' '.repeat(60) + '\r'); // Clear current line
+    console.log(formatAgentSwitchNotice(fromAgent, nextAgent));
+    refreshPrompt();
+  };
+
+  /** Helper: handle leader key actions (Ctrl+X sequences) */
+  const handleLeaderAction = async (action: LeaderAction): Promise<void> => {
+    if (state.isStreaming) {
+      return;
+    }
+    switch (action) {
+      case 'new-session':
+        await handleCommand('/session new', state);
+        refreshPrompt();
+        break;
+      case 'model-picker':
+        await handleCommand('/models', state);
+        refreshPrompt();
+        break;
+      case 'agent-list':
+        await handleCommand('/agent', state);
+        refreshPrompt();
+        break;
+      case 'status':
+        await handleCommand('/status', state);
+        refreshPrompt();
+        break;
+      case 'help':
+        await handleCommand('/help', state);
+        refreshPrompt();
+        break;
+    }
+  };
+
+  // Set up keypress handler for Tab cycling and leader keys
+  const keypressHandler = setupKeypressHandler(process.stdin, {
+    onTabCycleAgent: handleTabCycle,
+    onLeaderAction: (action) => {
+      void handleLeaderAction(action);
+    },
+    onLeaderModeChange: (active) => {
+      if (active) {
+        // Show leader mode hints
+        process.stdout.write('\r' + ' '.repeat(80) + '\r');
+        process.stdout.write(formatHintsBar(state.agent, true));
+      } else {
+        // Clear the hints line and re-display prompt
+        process.stdout.write('\r' + ' '.repeat(80) + '\r');
+        rl.prompt(true); // preserve = true to not clear existing input
+      }
+    },
+    onClearScreen: () => {
+      process.stdout.write('\x1b[2J\x1b[H'); // ANSI clear screen + move cursor home
+      printHeader(state);
+      refreshPrompt();
+    },
+  });
+  state.keypressHandler = keypressHandler;
 
   // Handle Ctrl+C during streaming
   process.on('SIGINT', () => {
@@ -1647,12 +1768,28 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
       console.log(c('yellow', '\n\n  [Cancelled]\n'));
       rl.prompt();
     } else {
+      keypressHandler.dispose();
       console.log(c('gray', '\n\n  Goodbye!\n'));
       process.exit(0);
     }
   });
 
   rl.prompt();
+
+  // Track current line content for Tab-on-empty-line guard
+  process.stdin.on('keypress', (_str: unknown, key: { name?: string } | undefined) => {
+    // After each keypress, sync the current line buffer with the keypress handler
+    // readline exposes the current line via rl.line (undocumented but stable)
+    const currentLine = (rl as unknown as { line: string }).line ?? '';
+    keypressHandler.setCurrentLineContent(currentLine);
+
+    // Suppress Tab character from being written to the line when input is empty
+    if (key?.name === 'tab' && currentLine.length === 0) {
+      // Clear the tab character that readline may have inserted
+      (rl as unknown as { line: string; cursor: number }).line = '';
+      (rl as unknown as { line: string; cursor: number }).cursor = 0;
+    }
+  });
 
   rl.on('line', async (line) => {
     const input = line.trim();
@@ -1665,6 +1802,34 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     // Handle slash commands
     if (input.startsWith('/')) {
       await handleCommand(input, state);
+      rl.prompt();
+      return;
+    }
+
+    // Handle bang commands (shell execution)
+    if (input.startsWith('!')) {
+      const command = input.slice(1).trim();
+      if (!command) {
+        console.log(c('yellow', '\n  Usage: ! <command>\n'));
+        rl.prompt();
+        return;
+      }
+      try {
+        console.log(); // blank line before output
+        execSync(command, {
+          stdio: 'inherit',
+          cwd: process.cwd(),
+          env: process.env,
+        });
+        console.log(); // blank line after output
+      } catch (err: unknown) {
+        const exitCode = (err as { status?: number }).status;
+        if (exitCode !== null && exitCode !== undefined) {
+          console.log(c('yellow', `\n  [exit code: ${exitCode}]\n`));
+        } else {
+          console.log(c('red', `\n  Error: ${err instanceof Error ? err.message : String(err)}\n`));
+        }
+      }
       rl.prompt();
       return;
     }
@@ -1766,6 +1931,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
   });
 
   rl.on('close', () => {
+    keypressHandler.dispose();
     console.log(c('gray', '\n  Goodbye!\n'));
     process.exit(0);
   });
