@@ -24,6 +24,25 @@ interface BashResult {
 
 const DEFAULT_TIMEOUT = 120000; // 2 minutes
 
+/**
+ * Processes carriage returns in command output.
+ * Handles Windows-style line endings and progress indicators that use \r.
+ */
+function processCarriageReturns(output: string): string {
+  // Split by lines, handling both \r\n and \n
+  const lines = output.split(/\r?\n/);
+  
+  return lines.map(line => {
+    // Handle carriage returns within a line (progress indicators)
+    if (line.includes("\r")) {
+      const parts = line.split("\r");
+      // Return the last part (most recent overwrite)
+      return parts[parts.length - 1];
+    }
+    return line;
+  }).join("\n");
+}
+
 export const bashTool = defineTool<typeof BashParamsSchema, BashResult>({
   name: 'bash',
   description: `Execute a bash command in a shell.
@@ -121,6 +140,10 @@ Usage:
         // Flush any remaining bytes in the decoders
         stdout += stdoutDecoder.end();
         stderr += stderrDecoder.end();
+
+        // Process carriage returns for consistent output formatting
+        stdout = processCarriageReturns(stdout);
+        stderr = processCarriageReturns(stderr);
 
         // Persist large outputs to disk before truncating
         const [stdoutFile, stderrFile] = await Promise.all([

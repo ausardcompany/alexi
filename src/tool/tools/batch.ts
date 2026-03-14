@@ -76,6 +76,16 @@ async function executeInvocation(
     };
   }
 
+  // Disallow plan_exit from batch execution
+  if (toolName === 'plan_exit') {
+    return {
+      tool: toolName,
+      index,
+      success: false,
+      error: 'plan_exit cannot be executed within a batch operation',
+    };
+  }
+
   try {
     // Execute the tool
     const result = await tool.execute(params, context);
