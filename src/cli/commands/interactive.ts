@@ -15,9 +15,9 @@ interface InteractiveOptions {
   preferCheap?: boolean;
   session?: string;
   system?: string;
-  // Git flags
-  noAutoCommits?: boolean;
-  noDirtyCommits?: boolean;
+  // Git flags — commander's --no-<name> sets <name> to false (not no<Name> to true)
+  autoCommits?: boolean;
+  dirtyCommits?: boolean;
   gitCommitVerify?: boolean;
   attributeCoAuthoredBy?: boolean;
   attributeAuthor?: boolean;
@@ -48,10 +48,12 @@ export function registerInteractiveCommand(program: Command): void {
         const workdir = process.cwd();
         let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
 
-        if (!opts.noAutoCommits) {
+        // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
+        if (opts.autoCommits !== false) {
           const gitConfig = await loadGitConfig(workdir);
 
-          if (opts.noDirtyCommits) gitConfig.dirtyCommits = false;
+          // Commander's --no-dirty-commits sets opts.dirtyCommits = false
+          if (opts.dirtyCommits === false) gitConfig.dirtyCommits = false;
           if (opts.gitCommitVerify) gitConfig.commitVerify = true;
           if (opts.attributeAuthor) gitConfig.attribution.style = 'author';
           else if (opts.attributeCoAuthoredBy) gitConfig.attribution.style = 'co-authored-by';

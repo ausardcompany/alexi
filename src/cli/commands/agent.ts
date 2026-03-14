@@ -30,9 +30,9 @@ interface AgentOptions {
   tools?: string;
   verbose?: boolean;
   quiet?: boolean;
-  // Git flags
-  noAutoCommits?: boolean;
-  noDirtyCommits?: boolean;
+  // Git flags — commander's --no-<name> sets <name> to false (not no<Name> to true)
+  autoCommits?: boolean;
+  dirtyCommits?: boolean;
   gitCommitVerify?: boolean;
   attributeCoAuthoredBy?: boolean;
   attributeAuthor?: boolean;
@@ -96,12 +96,14 @@ export function registerAgentCommand(program: Command): void {
         const enabledTools = opts.tools ? opts.tools.split(',').map((t) => t.trim()) : undefined;
 
         // Set up git auto-commits
+        // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
         let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
-        if (!opts.noAutoCommits) {
+        if (opts.autoCommits !== false) {
           const gitConfig = await loadGitConfig(workdir);
 
           // Apply CLI flag overrides
-          if (opts.noDirtyCommits) gitConfig.dirtyCommits = false;
+          // Commander's --no-dirty-commits sets opts.dirtyCommits = false
+          if (opts.dirtyCommits === false) gitConfig.dirtyCommits = false;
           if (opts.gitCommitVerify) gitConfig.commitVerify = true;
           if (opts.attributeAuthor) gitConfig.attribution.style = 'author';
           else if (opts.attributeCoAuthoredBy) gitConfig.attribution.style = 'co-authored-by';
