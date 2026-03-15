@@ -93,9 +93,11 @@ export class KeypressHandler {
       return;
     }
 
-    // Tab / Shift+Tab: cycle agents (only when input line is empty)
-    if (key.name === 'tab' && this.currentLineContent.length === 0) {
-      this.options.onTabCycleAgent(key.shift === true);
+    // Shift+Tab: cycle agents backwards
+    // (plain Tab is handled by readline's completer in interactive.ts so it
+    //  never reaches here — only Shift+Tab needs to be caught here)
+    if (key.name === 'tab' && key.shift === true) {
+      this.options.onTabCycleAgent(true);
       return;
     }
   }

@@ -1688,11 +1688,22 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
   // Enable keypress events before creating readline (must be called first)
   readline.emitKeypressEvents(process.stdin);
 
+  // Placeholder used by the completer before rl is assigned; replaced immediately after
+  // createInterface returns.
+  let _tabCycleRef: ((reverse: boolean) => void) | null = null;
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     prompt: formatAgentPrompt(state.agent),
     terminal: true,
+    // Use readline's completer hook to intercept Tab completely.
+    // Returning an empty completions array prevents readline from inserting \t
+    // while still firing so we can cycle agents.
+    completer: (_line: string, callback: (err: null, result: [string[], string]) => void) => {
+      _tabCycleRef?.(false); // forward Tab → cycle forward
+      callback(null, [[], _line]); // no completions → nothing inserted
+    },
   });
 
   state.rl = rl;
@@ -1716,6 +1727,9 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     console.log(formatAgentSwitchNotice(fromAgent, nextAgent));
     refreshPrompt();
   };
+
+  // Wire the completer placeholder to the real handler
+  _tabCycleRef = handleTabCycle;
 
   /** Helper: handle leader key actions (Ctrl+X sequences) */
   const handleLeaderAction = async (action: LeaderAction): Promise<void> => {
@@ -1789,19 +1803,11 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   rl.prompt();
 
-  // Track current line content for Tab-on-empty-line guard
-  process.stdin.on('keypress', (_str: unknown, key: { name?: string } | undefined) => {
-    // After each keypress, sync the current line buffer with the keypress handler
-    // readline exposes the current line via rl.line (undocumented but stable)
+  // Keep the keypress handler's line cache in sync so Ctrl+X leader mode
+  // can still read current input. Tab itself is now handled by the completer.
+  process.stdin.on('keypress', () => {
     const currentLine = (rl as unknown as { line: string }).line ?? '';
     keypressHandler.setCurrentLineContent(currentLine);
-
-    // Suppress Tab character from being written to the line when input is empty
-    if (key?.name === 'tab' && currentLine.length === 0) {
-      // Clear the tab character that readline may have inserted
-      (rl as unknown as { line: string; cursor: number }).line = '';
-      (rl as unknown as { line: string; cursor: number }).cursor = 0;
-    }
   });
 
   rl.on('line', async (line) => {
