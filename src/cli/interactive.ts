@@ -30,7 +30,7 @@ import { getCheckpointManager } from '../core/checkpoints.js';
 import { compactConversation, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
 import { getStageManager, type ConversationStage } from '../core/stageManager.js';
-import { getPermissionManager } from '../permission/index.js';
+import { getPermissionManager, startPermissionPromptHandler, isPermissionPromptSupported } from '../permission/index.js';
 import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp/index.js';
 import { getDoctor } from '../doctor/index.js';
 import { getCostTracker } from '../core/costTracker.js';
@@ -1675,6 +1675,12 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   printHeader(state);
 
+  // Start permission prompt handler if in interactive terminal
+  let permissionPromptCleanup: (() => void) | undefined;
+  if (isPermissionPromptSupported()) {
+    permissionPromptCleanup = startPermissionPromptHandler();
+  }
+
   // Enable keypress events before creating readline (must be called first)
   readline.emitKeypressEvents(process.stdin);
 
@@ -1769,6 +1775,9 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
       rl.prompt();
     } else {
       keypressHandler.dispose();
+      if (permissionPromptCleanup) {
+        permissionPromptCleanup();
+      }
       console.log(c('gray', '\n\n  Goodbye!\n'));
       process.exit(0);
     }
@@ -1931,6 +1940,9 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   rl.on('close', () => {
     keypressHandler.dispose();
+    if (permissionPromptCleanup) {
+      permissionPromptCleanup();
+    }
     console.log(c('gray', '\n  Goodbye!\n'));
     process.exit(0);
   });
