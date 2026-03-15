@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-15
+
+### Fixed
+
+- Slash commands (`/help`, `/model`, `/exit`, etc.) were leaking directly to the LLM in the TUI instead of being intercepted by the command handler
+- Command Palette (`Ctrl+K`) was opening with an empty command list
+
+### Added
+
+- Inline autocomplete for slash commands in the TUI input box — shows filtered suggestions when typing `/`
+- Keyboard navigation (Up/Down/Tab) and acceptance (Enter/Tab) for autocomplete suggestions
+- Command Palette now displays all 11 registered slash commands
+
+## [0.2.0] - 2026-03-14
+
 ### Added
 
 - Comprehensive unit tests for file operation tools
@@ -76,5 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ausardcompany/alexi/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/ausardcompany/alexi/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/ausardcompany/alexi/releases/tag/v0.1.3
