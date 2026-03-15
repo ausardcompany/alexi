@@ -727,7 +727,7 @@ jobs:
           sed -i "s|PLAN_FILE_PLACEHOLDER|$PLAN_FILE|g" "$PR_BODY_FILE"
 
           # Write step outputs to temp files via heredocs (safe from bash expansion).
-          # GitHub Actions evaluates ${{ }} at YAML level before bash runs, so
+          # GitHub Actions evaluates expressions at YAML level before bash runs, so
           # the raw content is inserted into the heredoc body. Single-quoted
           # heredoc delimiters prevent bash from interpreting backticks etc.
           DIFF_STAT_FILE=$(mktemp)
@@ -818,7 +818,7 @@ jobs:
           # ── Diff stat & changed files ──────────────────────────────────
           # Use heredoc to safely assign multi-line outputs that may contain
           # backticks or other shell metacharacters (GitHub Actions evaluates
-          # ${{ }} before bash runs, so backticks in values would be interpreted)
+          # expressions before bash runs, so backticks in values would be interpreted)
           DIFF_STAT_FILE=$(mktemp)
           cat > "$DIFF_STAT_FILE" << 'DIFFSTAT_EOF'
           ${{ steps.kilo-changes.outputs.diff_stat }}
