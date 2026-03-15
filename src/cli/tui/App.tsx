@@ -11,6 +11,7 @@ import type { ImageAttachmentPreview } from './context/AttachmentContext.js';
 import { useStreamChat } from './hooks/useStreamChat.js';
 import { usePermission } from './hooks/usePermission.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
+import { useCommands } from './hooks/useCommands.js';
 
 import { PermissionDialog } from './dialogs/PermissionDialog.js';
 import type { PermissionDialogProps } from './dialogs/PermissionDialog.js';
@@ -127,6 +128,7 @@ function AppLayout(): React.JSX.Element {
   const chat = useChat();
   const { sendMessage } = useStreamChat();
   const { pending: pendingAttachments } = useAttachments();
+  const { handleCommand, commands } = useCommands();
   useToolEvents();
   usePermission();
 
@@ -162,12 +164,14 @@ function AppLayout(): React.JSX.Element {
       /* no-op for now — session management TBD */
     },
     isInputActive: !keybindState.leaderActive,
+    commands,
   });
 
   const handleSubmit = useCallback(
     (text: string): void => {
-      if (text === '/exit') {
-        exit();
+      // Intercept slash commands — if handled, do NOT send to LLM
+      if (text.startsWith('/')) {
+        void handleCommand(text);
         return;
       }
 
@@ -195,7 +199,7 @@ function AppLayout(): React.JSX.Element {
       // Fire and forget — streaming updates flow through ChatContext
       void sendMessage(text);
     },
-    [exit, pendingAttachments, sendMessage]
+    [handleCommand, pendingAttachments, sendMessage]
   );
 
   const agentColor = theme.colors.agents[agent as AgentName] ?? theme.colors.primary;
@@ -242,6 +246,7 @@ function AppLayout(): React.JSX.Element {
             disabled={chat.isStreaming}
             onSubmit={handleSubmit}
             isFocused={!keybindState.leaderActive}
+            commands={commands}
           />
 
           {/* Status Bar — height: 1 */}

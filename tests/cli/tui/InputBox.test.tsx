@@ -22,6 +22,7 @@ vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
 }));
 
 import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
+import type { SlashCommand } from '../../../src/cli/tui/hooks/useCommands.js';
 import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
 
 /** Wrap component in ThemeProvider since AttachmentBar uses useTheme(). */
@@ -95,5 +96,87 @@ describe('InputBox', () => {
       </Wrapper>
     );
     expect(lastFrame()).not.toContain('Type a message or /command');
+  });
+
+  describe('autocomplete', () => {
+    const mockCommands: SlashCommand[] = [
+      {
+        name: 'help',
+        aliases: ['h'],
+        description: 'Show available commands',
+        category: 'general',
+        execute: async () => true,
+      },
+      {
+        name: 'exit',
+        aliases: ['quit', 'q'],
+        description: 'Exit the TUI',
+        category: 'general',
+        execute: async () => true,
+      },
+      {
+        name: 'model',
+        description: 'Show or switch the current model',
+        category: 'model',
+        execute: async () => true,
+      },
+      {
+        name: 'agent',
+        description: 'Show or switch the current agent',
+        category: 'session',
+        execute: async () => true,
+      },
+    ];
+
+    it('renders without crashing when commands prop is provided', () => {
+      const { lastFrame } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </Wrapper>
+      );
+      expect(lastFrame()).toContain('code');
+      expect(lastFrame()).toContain('❯');
+    });
+
+    it('does not show suggestions when input is empty', () => {
+      const { lastFrame } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </Wrapper>
+      );
+      const frame = lastFrame() ?? '';
+      // None of the command names should appear as suggestions
+      expect(frame).not.toContain('/help');
+      expect(frame).not.toContain('/exit');
+    });
+
+    it('renders with commands prop and shows placeholder', () => {
+      const { lastFrame } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </Wrapper>
+      );
+      expect(lastFrame()).toContain('Type a message or /command');
+    });
+
+    it('accepts empty commands array without errors', () => {
+      expect(() => {
+        render(
+          <Wrapper>
+            <InputBox {...defaultProps} commands={[]} />
+          </Wrapper>
+        );
+      }).not.toThrow();
+    });
+
+    it('accepts undefined commands without errors', () => {
+      expect(() => {
+        render(
+          <Wrapper>
+            <InputBox {...defaultProps} />
+          </Wrapper>
+        );
+      }).not.toThrow();
+    });
   });
 });

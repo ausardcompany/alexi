@@ -7,6 +7,7 @@
  */
 
 import type { ImageAttachmentPreview } from '../context/AttachmentContext.js';
+import type { SlashCommand } from '../hooks/useCommands.js';
 
 // ---------------------------------------------------------------------------
 // Header & StatusBar  (from contracts/app-layout.ts)
@@ -44,6 +45,8 @@ export interface InputBoxProps {
   onSubmit: (text: string) => void;
   /** Whether this component has focus */
   isFocused: boolean;
+  /** Available slash commands for inline autocomplete */
+  commands?: SlashCommand[];
 }
 
 // ---------------------------------------------------------------------------
