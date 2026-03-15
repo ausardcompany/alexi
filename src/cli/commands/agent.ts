@@ -16,6 +16,7 @@ import { createAutoCommitManager } from '../../git/autoCommit.js';
 import { loadGitConfig } from '../../git/config.js';
 import { commitDirtyFiles } from '../../git/dirtyFiles.js';
 import { RepoMapManager } from '../../context/repoMap.js';
+import { parseEffortLevel, type EffortLevel } from '../../core/effortLevel.js';
 
 interface AgentOptions {
   message?: string;
@@ -38,6 +39,8 @@ interface AgentOptions {
   attributeAuthor?: boolean;
   // Repo map flags
   mapTokens?: string;
+  // Effort level
+  effort?: string;
 }
 
 export function registerAgentCommand(program: Command): void {
@@ -64,6 +67,8 @@ export function registerAgentCommand(program: Command): void {
     .option('--attribute-author', 'Override git author for AI commits')
     // Repo map flags
     .option('--map-tokens <n>', 'Repo map token budget (default: 2000; set to 0 to disable)')
+    // Effort level
+    .option('--effort <level>', 'Effort level: low, medium, high (default: medium)')
     .action(async (opts: AgentOptions) => {
       try {
         // Get message from either --message or --message-file
@@ -94,6 +99,16 @@ export function registerAgentCommand(program: Command): void {
 
         // Parse enabled tools
         const enabledTools = opts.tools ? opts.tools.split(',').map((t) => t.trim()) : undefined;
+
+        // Parse effort level
+        let effort: EffortLevel | undefined;
+        if (opts.effort) {
+          effort = parseEffortLevel(opts.effort);
+          if (!effort) {
+            console.error(`Invalid effort level: ${opts.effort} (valid: low, medium, high)`);
+            process.exit(1);
+          }
+        }
 
         // Set up git auto-commits
         // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
@@ -173,6 +188,7 @@ export function registerAgentCommand(program: Command): void {
           onProgress,
           gitManager,
           repoMapManager,
+          effort,
         });
 
         // Flush any pending auto-commits

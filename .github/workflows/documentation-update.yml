@@ -506,6 +506,10 @@ jobs:
           
           # Use 'agent' command which enables tool execution loop
           # This allows the LLM to write/edit files directly
+          # --no-auto-commits: The workflow handles git commit/push itself.
+          #   Without this flag the git auto-commit manager commits changes
+          #   mid-run, leaving the working tree clean so the workflow's own
+          #   commit step sees "No documentation changes" and never pushes.
           node dist/cli/program.js agent \
             --message-file kilo-prompt.md \
             --auto-route \
@@ -513,6 +517,7 @@ jobs:
             --tools "read,write,edit,glob,grep" \
             --workdir "$(pwd)" \
             --verbose \
+            --no-auto-commits \
             --system "$SYSTEM_PROMPT" \
             > bot-output.log 2>&1
           
@@ -538,29 +543,30 @@ jobs:
       - name: Commit and push documentation changes
         if: steps.check_needed.outputs.skip != 'true' && steps.bot.outputs.success == 'true'
         run: |
-          # Check if there are changes
-          if git diff --quiet; then
-            echo "No documentation changes to commit"
-            exit 0
-          fi
-          
+          # --- 1. Handle any unstaged/untracked documentation changes ---
           # Add all documentation files (only if they exist)
-          git add docs/ CHANGELOG.md || true
+          git add docs/ CHANGELOG.md 2>/dev/null || true
           [ -f README.md ] && git add README.md || true
           
-          # Check if there's anything staged
-          if git diff --cached --quiet; then
-            echo "No documentation changes staged"
-            exit 0
+          # Create a new commit if there are staged changes
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: auto-generate documentation [skip ci]"
+            echo "[OK] Created documentation commit"
+          else
+            echo "[INFO] No unstaged documentation changes to commit"
           fi
           
-          # Commit with skip ci flag
-          git commit -m "docs: auto-generate documentation [skip ci]"
+          # --- 2. Push any local commits (including auto-commits from the agent) ---
+          BRANCH="${{ steps.pr_data.outputs.branch }}"
+          LOCAL_HEAD=$(git rev-parse HEAD)
+          REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
           
-          # Push to PR branch
-          git push origin "${{ steps.pr_data.outputs.branch }}"
-          
-          echo "[OK] Documentation changes committed and pushed"
+          if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+            git push origin "$BRANCH"
+            echo "[OK] Documentation changes pushed to $BRANCH"
+          else
+            echo "[INFO] No new commits to push — branch is up to date"
+          fi
       
       - name: Post skip comment
         if: steps.check_needed.outputs.skip == 'true'
