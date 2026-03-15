@@ -5,6 +5,8 @@ import { useKeybind } from '../context/KeybindContext.js';
 import { useDialog } from '../context/DialogContext.js';
 import { useChat } from '../context/ChatContext.js';
 import type { ModelGroup } from '../dialogs/ModelPicker.js';
+import type { SlashCommand } from './useCommands.js';
+import type { CommandEntry } from '../components/CommandPalette.js';
 
 // ---------------------------------------------------------------------------
 // Static model groups (same constant as in useCommands.ts)
@@ -54,6 +56,8 @@ export interface UseKeyboardOptions {
   onNewSession: () => void;
   /** Whether the input box is currently accepting text input (i.e. NOT in leader mode) */
   isInputActive: boolean;
+  /** Available slash commands (passed to command palette when opened via Ctrl+K) */
+  commands?: SlashCommand[];
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +65,7 @@ export interface UseKeyboardOptions {
 // ---------------------------------------------------------------------------
 
 export function useKeyboard(options: UseKeyboardOptions): void {
-  const { onExit, onClear, onNewSession } = options;
+  const { onExit, onClear, onNewSession, commands = [] } = options;
 
   const { cycleAgent } = useSession();
   const { state: keybindState, activateLeader, deactivateLeader } = useKeybind();
@@ -89,7 +93,12 @@ export function useKeyboard(options: UseKeyboardOptions): void {
 
     // Ctrl+K — open command palette
     if (key.ctrl && input === 'k') {
-      open('command-palette', { commands: [] }).catch(() => {
+      const paletteCommands: CommandEntry[] = commands.map((cmd) => ({
+        name: cmd.name,
+        description: cmd.description,
+        category: cmd.category,
+      }));
+      open('command-palette', { commands: paletteCommands }).catch(() => {
         // user cancelled — no-op
       });
       return;
