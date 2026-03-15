@@ -15,7 +15,7 @@ vi.mock('node:util', async (importOriginal) => {
       // Return a function that calls the mock and wraps in a promise
       return (...args: unknown[]) => {
         return new Promise((resolve, reject) => {
-          (fn as Function)(...args, (err: Error | null, result: unknown) => {
+          (fn as (...a: unknown[]) => void)(...args, (err: Error | null, result: unknown) => {
             if (err) {
               reject(err);
             } else {
