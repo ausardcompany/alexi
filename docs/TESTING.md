@@ -108,8 +108,12 @@ Alexi uses **Vitest** as its testing framework, chosen for:
 
 | Component | Target Coverage | Current Status |
 |-----------|----------------|----------------|
+| TUI Components | 85%+ | ✅ Achieved |
 | Tool System | 90%+ | ✅ Achieved |
-| Core Logic | 85%+ | 🔄 In Progress |
+| Core Logic | 85%+ | ✅ Achieved |
+| Context System | 85%+ | ✅ Achieved |
+| Agent System | 80%+ | ✅ Achieved |
+| Git Integration | 80%+ | ✅ Achieved |
 | Providers | 80%+ | 🔄 In Progress |
 | Router | 90%+ | 🔄 In Progress |
 | CLI | 70%+ | 🔄 In Progress |
@@ -124,6 +128,171 @@ npm run test:coverage
 
 # View HTML report
 open coverage/index.html
+```
+
+## Testing TUI Components
+
+The TUI components use ink-testing-library for React component testing.
+
+### TUI Test Architecture
+
+```mermaid
+graph LR
+    subgraph "Test Setup"
+        Render[Render Component]
+        Context[Mock Context Providers]
+        Props[Mock Props]
+    end
+
+    subgraph "Test Execution"
+        Interact[Simulate User Input]
+        Wait[Wait for Updates]
+        Assert[Assert Output]
+    end
+
+    subgraph "Cleanup"
+        Unmount[Unmount Component]
+        Restore[Restore Mocks]
+    end
+
+    Render --> Context
+    Context --> Props
+    Props --> Interact
+    Interact --> Wait
+    Wait --> Assert
+    Assert --> Unmount
+    Unmount --> Restore
+
+    style Render fill:#4CAF50
+    style Assert fill:#2196F3
+```
+
+### Example: Testing TUI Components
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { render } from 'ink-testing-library';
+import React from 'react';
+import { Header } from '../../../src/cli/tui/components/Header.js';
+
+describe('Header Component', () => {
+  it('should display model, agent, and session info', () => {
+    const { lastFrame } = render(
+      <Header
+        model="gpt-4o"
+        agent="code"
+        agentColor="#00ff00"
+        sessionId="abc-123"
+        tokenCount={1500}
+        autoRoute={true}
+      />
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('gpt-4o');
+    expect(output).toContain('code');
+    expect(output).toContain('abc-123');
+    expect(output).toContain('1500');
+  });
+
+  it('should show auto-route indicator when enabled', () => {
+    const { lastFrame } = render(
+      <Header
+        model="gpt-4o"
+        agent="code"
+        agentColor="#00ff00"
+        sessionId="abc-123"
+        tokenCount={1500}
+        autoRoute={true}
+      />
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('auto-route');
+  });
+});
+```
+
+### Testing Context Providers
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { render } from 'ink-testing-library';
+import React from 'react';
+import { ThemeProvider, useTheme } from '../../../src/cli/tui/context/ThemeContext.js';
+
+describe('ThemeContext', () => {
+  it('should provide default dark theme', () => {
+    let theme: any;
+
+    function TestComponent() {
+      theme = useTheme();
+      return null;
+    }
+
+    render(
+      <ThemeProvider>
+        <TestComponent />
+      </ThemeProvider>
+    );
+
+    expect(theme.current).toBe('dark');
+    expect(theme.colors).toBeDefined();
+  });
+
+  it('should toggle theme', () => {
+    let theme: any;
+
+    function TestComponent() {
+      theme = useTheme();
+      return null;
+    }
+
+    render(
+      <ThemeProvider>
+        <TestComponent />
+      </ThemeProvider>
+    );
+
+    expect(theme.current).toBe('dark');
+    theme.toggle();
+    expect(theme.current).toBe('light');
+  });
+});
+```
+
+### Testing Hooks
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { renderHook, act } from '@testing-library/react-hooks';
+import { useStreamChat } from '../../../src/cli/tui/hooks/useStreamChat.js';
+
+describe('useStreamChat Hook', () => {
+  it('should initialize with empty messages', () => {
+    const { result } = renderHook(() => useStreamChat({
+      model: 'gpt-4o',
+      autoRoute: false,
+    }));
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.isStreaming).toBe(false);
+  });
+
+  it('should send message and update state', async () => {
+    const { result } = renderHook(() => useStreamChat({
+      model: 'gpt-4o',
+      autoRoute: false,
+    }));
+
+    await act(async () => {
+      await result.current.sendMessage('Hello');
+    });
+
+    expect(result.current.messages.length).toBeGreaterThan(0);
+    expect(result.current.messages[0].content).toBe('Hello');
+  });
+});
 ```
 
 ## Testing Tool System
@@ -255,6 +424,256 @@ Each tool is tested across multiple categories:
    - Correct tool names
    - Description presence
    - Schema generation
+
+## Testing Multimodal Features
+
+Multimodal support includes clipboard image detection and validation.
+
+### Testing Clipboard Detection
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { detectClipboardCapabilities, readClipboardImage } from '../src/utils/clipboard.js';
+
+describe('Clipboard Detection', () => {
+  it('should detect available clipboard tools', async () => {
+    const capabilities = await detectClipboardCapabilities();
+    
+    expect(capabilities).toBeInstanceOf(Array);
+    expect(capabilities.length).toBeGreaterThan(0);
+    
+    const available = capabilities.find(c => c.available);
+    if (available) {
+      expect(available.tool).toMatch(/pngpaste|xclip|wl-paste|powershell/);
+    }
+  });
+
+  it('should read clipboard image when available', async () => {
+    const result = await readClipboardImage();
+    
+    if (result.success) {
+      expect(result.data).toBeInstanceOf(Buffer);
+      expect(result.format).toMatch(/png|jpeg|gif|webp/);
+    } else {
+      expect(result.error).toBeDefined();
+    }
+  });
+});
+```
+
+### Testing Image Validation
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { validateImage, detectImageFormat } from '../src/utils/imageValidation.js';
+
+describe('Image Validation', () => {
+  it('should validate PNG images', () => {
+    const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const result = validateImage(pngSignature);
+    
+    expect(result.valid).toBe(true);
+    expect(result.format).toBe('png');
+  });
+
+  it('should detect image format from buffer', () => {
+    const jpegSignature = Buffer.from([0xff, 0xd8, 0xff]);
+    const format = detectImageFormat(jpegSignature);
+    
+    expect(format).toBe('jpeg');
+  });
+
+  it('should reject invalid image data', () => {
+    const invalidData = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+    const result = validateImage(invalidData);
+    
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+
+  it('should enforce size limits', () => {
+    const largeBuffer = Buffer.alloc(20 * 1024 * 1024); // 20MB
+    const result = validateImage(largeBuffer);
+    
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain('size');
+  });
+});
+```
+
+### Testing Multimodal Message Building
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { buildMultimodalMessage } from '../src/utils/multimodal.js';
+
+describe('Multimodal Message Building', () => {
+  it('should build text-only message', () => {
+    const message = buildMultimodalMessage({
+      text: 'Hello, world!',
+      images: [],
+    });
+    
+    expect(message.role).toBe('user');
+    expect(message.content).toHaveLength(1);
+    expect(message.content[0].type).toBe('text');
+    expect(message.content[0].text).toBe('Hello, world!');
+  });
+
+  it('should build message with image', () => {
+    const imageData = Buffer.from('fake-image-data').toString('base64');
+    const message = buildMultimodalMessage({
+      text: 'Look at this:',
+      images: [{
+        id: '123',
+        data: imageData,
+        mediaType: 'image/png',
+        size: 1024,
+      }],
+    });
+    
+    expect(message.content).toHaveLength(2);
+    expect(message.content[0].type).toBe('text');
+    expect(message.content[1].type).toBe('image');
+    expect(message.content[1].source.type).toBe('base64');
+    expect(message.content[1].source.media_type).toBe('image/png');
+  });
+
+  it('should handle multiple images', () => {
+    const message = buildMultimodalMessage({
+      text: 'Compare these:',
+      images: [
+        { id: '1', data: 'data1', mediaType: 'image/png', size: 100 },
+        { id: '2', data: 'data2', mediaType: 'image/jpeg', size: 200 },
+      ],
+    });
+    
+    expect(message.content).toHaveLength(3);
+    expect(message.content.filter(c => c.type === 'image')).toHaveLength(2);
+  });
+});
+```
+
+## Testing Context System
+
+The context system includes repository mapping and symbol extraction.
+
+### Testing Repository Map
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { generateRepoMap } from '../src/context/repoMap.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+
+describe('Repository Map', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'repo-map-test-'));
+    
+    // Create test files
+    await fs.writeFile(
+      path.join(tempDir, 'index.ts'),
+      'export function hello() { return "world"; }'
+    );
+    await fs.writeFile(
+      path.join(tempDir, 'utils.ts'),
+      'export const PI = 3.14;'
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should generate repository map', async () => {
+    const map = await generateRepoMap({
+      workdir: tempDir,
+      tokenBudget: 2000,
+    });
+    
+    expect(map).toBeDefined();
+    expect(map.files).toBeInstanceOf(Array);
+    expect(map.files.length).toBeGreaterThan(0);
+  });
+
+  it('should extract symbols from files', async () => {
+    const map = await generateRepoMap({
+      workdir: tempDir,
+      tokenBudget: 2000,
+    });
+    
+    const indexFile = map.files.find(f => f.relativePath === 'index.ts');
+    expect(indexFile).toBeDefined();
+    expect(indexFile.symbols).toBeInstanceOf(Array);
+    expect(indexFile.symbols.some(s => s.name === 'hello')).toBe(true);
+  });
+
+  it('should respect token budget', async () => {
+    const map = await generateRepoMap({
+      workdir: tempDir,
+      tokenBudget: 100,
+    });
+    
+    expect(map.tokenCount).toBeLessThanOrEqual(100);
+  });
+});
+```
+
+### Testing Symbol Extraction
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { extractSymbols } from '../src/context/symbols.js';
+
+describe('Symbol Extraction', () => {
+  it('should extract function definitions', () => {
+    const code = `
+      export function greet(name: string): string {
+        return \`Hello, \${name}!\`;
+      }
+    `;
+    
+    const symbols = extractSymbols(code, 'typescript');
+    
+    expect(symbols).toBeInstanceOf(Array);
+    const greetSymbol = symbols.find(s => s.name === 'greet');
+    expect(greetSymbol).toBeDefined();
+    expect(greetSymbol.type).toBe('function');
+  });
+
+  it('should extract class definitions', () => {
+    const code = `
+      export class User {
+        constructor(public name: string) {}
+      }
+    `;
+    
+    const symbols = extractSymbols(code, 'typescript');
+    
+    const userSymbol = symbols.find(s => s.name === 'User');
+    expect(userSymbol).toBeDefined();
+    expect(userSymbol.type).toBe('class');
+  });
+
+  it('should extract interface definitions', () => {
+    const code = `
+      export interface Config {
+        apiKey: string;
+        timeout: number;
+      }
+    `;
+    
+    const symbols = extractSymbols(code, 'typescript');
+    
+    const configSymbol = symbols.find(s => s.name === 'Config');
+    expect(configSymbol).toBeDefined();
+    expect(configSymbol.type).toBe('interface');
+  });
+});
+```
 
 ## Testing Providers
 

@@ -12,7 +12,26 @@ Alexi is a TypeScript/Node.js application that orchestrates multiple LLM provide
 graph TB
     subgraph CLI["CLI Layer"]
         Program[program.ts]
-        Interactive[interactive.ts]
+        Commands[commands/]
+        TUI[tui/App.tsx]
+        Interactive[interactive.ts - deprecated]
+    end
+
+    subgraph TUI_Components["TUI Components"]
+        Header[Header]
+        MessageArea[MessageArea]
+        InputBox[InputBox]
+        StatusBar[StatusBar]
+        Dialogs[Dialogs]
+    end
+
+    subgraph TUI_Context["TUI Context Providers"]
+        ThemeCtx[ThemeContext]
+        SessionCtx[SessionContext]
+        ChatCtx[ChatContext]
+        KeybindCtx[KeybindContext]
+        DialogCtx[DialogContext]
+        AttachmentCtx[AttachmentContext]
     end
 
     subgraph Core["Core Layer"]
@@ -20,14 +39,26 @@ graph TB
         Router[router.ts]
         SessionManager[sessionManager.ts]
         StreamingOrch[streamingOrchestrator.ts]
+        AgenticChat[agenticChat.ts]
+        Memory[memory.ts]
+        SessionContext[sessionContext.ts]
+    end
+
+    subgraph Agent_System["Agent System"]
+        AgentRegistry[agent/index.ts]
+        SystemPrompts[agent/system.ts]
+        AgentPrompts[agent/prompts/]
+    end
+
+    subgraph Context["Context System"]
+        RepoMap[context/repoMap.ts]
+        Symbols[context/symbols.ts]
+        TreeSitter[context/treeSitter.ts]
+        Ranking[context/ranking.ts]
     end
 
     subgraph Providers["Provider Layer"]
-        OpenAI[openaiCompatible.ts]
-        Anthropic[anthropicCompatible.ts]
-        Claude[claudeNative.ts]
         SAP[sapOrchestration.ts]
-        SAPNative[sapNative.ts]
     end
 
     subgraph Tools["Tool System"]
@@ -38,28 +69,38 @@ graph TB
         Edit[edit.ts]
         Glob[glob.ts]
         Grep[grep.ts]
-        Task[task.ts]
-        WebFetch[webfetch.ts]
+        MemoryTool[memory.ts]
+        Batch[batch.ts]
     end
 
     subgraph Support["Support Systems"]
         Bus[bus/index.ts]
         Permission[permission/index.ts]
-        Agent[agent/index.ts]
-        MCP[mcp/index.ts]
-        Skill[skill/index.ts]
+        PermissionPrompt[permission/prompt.ts]
+        Git[git/]
+        I18n[i18n/]
+        Clipboard[utils/clipboard.ts]
+        Multimodal[utils/multimodal.ts]
     end
 
-    Program --> Interactive
-    Interactive --> Orchestrator
+    Program --> Commands
+    Commands --> TUI
+    TUI --> TUI_Components
+    TUI --> TUI_Context
+    TUI_Context --> Core
+    Commands --> Orchestrator
     Orchestrator --> Router
     Orchestrator --> SessionManager
     Orchestrator --> StreamingOrch
-    Router --> OpenAI
-    Router --> Anthropic
-    Router --> Claude
+    Orchestrator --> AgenticChat
+    AgenticChat --> AgentRegistry
+    AgentRegistry --> SystemPrompts
+    SystemPrompts --> AgentPrompts
+    Orchestrator --> RepoMap
+    RepoMap --> Symbols
+    Symbols --> TreeSitter
+    RepoMap --> Ranking
     Router --> SAP
-    Router --> SAPNative
     Orchestrator --> ToolIndex
     ToolIndex --> Bash
     ToolIndex --> Read
@@ -67,13 +108,14 @@ graph TB
     ToolIndex --> Edit
     ToolIndex --> Glob
     ToolIndex --> Grep
-    ToolIndex --> Task
-    ToolIndex --> WebFetch
+    ToolIndex --> MemoryTool
+    ToolIndex --> Batch
     Orchestrator --> Bus
     Orchestrator --> Permission
-    Orchestrator --> Agent
-    Orchestrator --> MCP
-    Orchestrator --> Skill
+    Permission --> PermissionPrompt
+    Orchestrator --> Git
+    TUI --> Clipboard
+    TUI --> Multimodal
 ```
 
 ## Module Descriptions
@@ -83,7 +125,45 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| Commands | `src/cli/commands/` | Individual CLI command implementations |
+| TUI App | `src/cli/tui/App.tsx` | Ink-based terminal user interface |
+| Interactive (deprecated) | `src/cli/interactive.ts` | Legacy readline-based REPL |
+
+### TUI Components
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Header | `src/cli/tui/components/Header.tsx` | Top bar with model, agent, session info |
+| MessageArea | `src/cli/tui/components/MessageArea.tsx` | Scrollable message history display |
+| MessageBubble | `src/cli/tui/components/MessageBubble.tsx` | Individual message rendering |
+| InputBox | `src/cli/tui/components/InputBox.tsx` | User input field with history |
+| StatusBar | `src/cli/tui/components/StatusBar.tsx` | Bottom bar with keybindings and status |
+| MarkdownRenderer | `src/cli/tui/components/MarkdownRenderer.tsx` | Markdown to terminal formatting |
+| ToolCallBlock | `src/cli/tui/components/ToolCallBlock.tsx` | Tool execution display |
+| DiffView | `src/cli/tui/components/DiffView.tsx` | File diff visualization |
+| CommandPalette | `src/cli/tui/components/CommandPalette.tsx` | Fuzzy command search |
+| AttachmentBar | `src/cli/tui/components/AttachmentBar.tsx` | Image attachment preview |
+
+### TUI Context Providers
+
+| Provider | File | Description |
+|----------|------|-------------|
+| ThemeContext | `src/cli/tui/context/ThemeContext.tsx` | Dark/light theme management |
+| SessionContext | `src/cli/tui/context/SessionContext.tsx` | Session state management |
+| ChatContext | `src/cli/tui/context/ChatContext.tsx` | Message history and streaming |
+| KeybindContext | `src/cli/tui/context/KeybindContext.tsx` | Keyboard shortcuts |
+| DialogContext | `src/cli/tui/context/DialogContext.tsx` | Modal dialog management |
+| AttachmentContext | `src/cli/tui/context/AttachmentContext.tsx` | Image attachment handling |
+
+### TUI Dialogs
+
+| Dialog | File | Description |
+|--------|------|-------------|
+| ModelPicker | `src/cli/tui/dialogs/ModelPicker.tsx` | Interactive model selection |
+| AgentSelector | `src/cli/tui/dialogs/AgentSelector.tsx` | Agent switching interface |
+| PermissionDialog | `src/cli/tui/dialogs/PermissionDialog.tsx` | Permission request prompt |
+| SessionList | `src/cli/tui/dialogs/SessionList.tsx` | Session browser |
+| McpManager | `src/cli/tui/dialogs/McpManager.tsx` | MCP server management |
 
 ### Core Layer
 
@@ -94,33 +174,54 @@ graph TB
 | Session Manager | `src/core/sessionManager.ts` | Conversation session persistence |
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
 | Agentic Chat | `src/core/agenticChat.ts` | Autonomous agent with tool execution loop |
-| Stage Manager | `src/core/stageManager.ts` | Workflow stage management |
-| Workflow Manager | `src/core/workflowManager.ts` | Multi-stage workflow orchestration |
+| Session Context | `src/core/sessionContext.ts` | Session metadata and state |
+| Session Close | `src/core/sessionClose.ts` | Session finalization and summary |
+| Memory | `src/core/memory.ts` | Persistent memory management |
+| Effort Level | `src/core/effortLevel.ts` | Task effort configuration |
+| Aliases | `src/core/aliases.ts` | Command alias management |
+
+### Agent System
+
+| Module | File | Description |
+|--------|------|-------------|
+| Agent Registry | `src/agent/index.ts` | Agent registration and switching |
+| System Prompts | `src/agent/system.ts` | Prompt assembly pipeline |
+| Code Agent | `src/agent/prompts/code.txt` | Coding specialist prompt |
+| Debug Agent | `src/agent/prompts/debug.txt` | Debugging specialist prompt |
+| Plan Agent | `src/agent/prompts/plan.txt` | Planning specialist prompt |
+| Explore Agent | `src/agent/prompts/explore.txt` | Exploration specialist prompt |
+| Orchestrator Agent | `src/agent/prompts/orchestrator.txt` | Orchestration prompt |
+| Soul Prompt | `src/agent/prompts/soul.txt` | Core identity prompt |
+
+### Context System
+
+| Module | File | Description |
+|--------|------|-------------|
+| Repo Map | `src/context/repoMap.ts` | Repository structure mapping |
+| Symbols | `src/context/symbols.ts` | Code symbol extraction |
+| Tree Sitter | `src/context/treeSitter.ts` | Syntax tree parsing |
+| Ranking | `src/context/ranking.ts` | File importance ranking |
 
 ### Provider Layer
 
 | Module | File | Description |
 |--------|------|-------------|
-| OpenAI Compatible | `src/providers/openaiCompatible.ts` | OpenAI API compatible provider |
-| Anthropic Compatible | `src/providers/anthropicCompatible.ts` | Anthropic Messages API |
-| Claude Native | `src/providers/claudeNative.ts` | Direct Claude integration |
-| SAP Orchestration | `src/providers/sapOrchestration.ts` | SAP AI Core via SDK |
-| SAP Native | `src/providers/sapNative.ts` | Native SAP AI Core API |
+| SAP Orchestration | `src/providers/sapOrchestration.ts` | SAP AI Core via SDK with multimodal support |
 
 ### Tool System
 
 | Tool | File | Description |
 |------|------|-------------|
-| Bash | `src/tool/tools/bash.ts` | Execute shell commands |
+| Bash | `src/tool/tools/bash.ts` | Execute shell commands with timeout |
 | Read | `src/tool/tools/read.ts` | Read files and directories |
 | Write | `src/tool/tools/write.ts` | Write files |
 | Edit | `src/tool/tools/edit.ts` | Edit files with string replacement |
+| Multiedit | `src/tool/tools/multiedit.ts` | Multiple file edits |
+| Delete | `src/tool/tools/delete.ts` | Delete files |
 | Glob | `src/tool/tools/glob.ts` | Find files by pattern |
 | Grep | `src/tool/tools/grep.ts` | Search file contents |
-| Task | `src/tool/tools/task.ts` | Launch sub-agents |
-| WebFetch | `src/tool/tools/webfetch.ts` | Fetch web content |
-| Question | `src/tool/tools/question.ts` | Ask user questions |
-| TodoWrite | `src/tool/tools/todowrite.ts` | Manage task lists |
+| Memory | `src/tool/tools/memory.ts` | Store and retrieve memories |
+| Batch | `src/tool/tools/batch.ts` | Parallel tool execution |
 
 ### Support Systems
 
@@ -128,29 +229,187 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
-| Agent | `src/agent/index.ts` | Autonomous agent system |
-| MCP | `src/mcp/index.ts` | Model Context Protocol |
-| Skill | `src/skill/index.ts` | Specialized prompt skills |
-| Compaction | `src/compaction/index.ts` | Context compression |
-| Profile | `src/profile/index.ts` | User profile management |
-| Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Permission Prompt | `src/permission/prompt.ts` | Interactive permission requests |
+| Permission Next | `src/permission/next.ts` | Next permission handler |
+| Git Auto-Commit | `src/git/autoCommit.ts` | Automatic git commits |
+| Git Attribution | `src/git/attribution.ts` | File attribution tracking |
+| Git Commit Message | `src/git/commitMessage.ts` | LLM-generated commit messages |
+| Git Config | `src/git/config.ts` | Git configuration |
+| Git Dirty Files | `src/git/dirtyFiles.ts` | Working directory changes |
+| Internationalization | `src/i18n/index.ts` | Translation system |
+| Clipboard | `src/utils/clipboard.ts` | Clipboard image detection |
+| Multimodal | `src/utils/multimodal.ts` | Multimodal content building |
+| Image Validation | `src/utils/imageValidation.ts` | Image format validation |
+
+## TUI Architecture
+
+The terminal user interface uses React components rendered with Ink for a full-screen experience.
+
+```mermaid
+graph TB
+    subgraph "Provider Tree"
+        Theme[ThemeProvider]
+        Session[SessionProvider]
+        Chat[ChatProvider]
+        Keybind[KeybindProvider]
+        Dialog[DialogProvider]
+        Attachment[AttachmentProvider]
+    end
+
+    subgraph "Layout Components"
+        App[App.tsx]
+        Header[Header]
+        MessageArea[MessageArea]
+        InputBox[InputBox]
+        StatusBar[StatusBar]
+    end
+
+    subgraph "Dialog Overlays"
+        ModelPicker[ModelPicker]
+        AgentSelector[AgentSelector]
+        PermissionDialog[PermissionDialog]
+        SessionList[SessionList]
+        CommandPalette[CommandPalette]
+    end
+
+    Theme --> Session
+    Session --> Chat
+    Chat --> Keybind
+    Keybind --> Dialog
+    Dialog --> Attachment
+    Attachment --> App
+    App --> Header
+    App --> MessageArea
+    App --> InputBox
+    App --> StatusBar
+    App --> ModelPicker
+    App --> AgentSelector
+    App --> PermissionDialog
+    App --> SessionList
+    App --> CommandPalette
+```
+
+### TUI Layout
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Header (3 lines)                                        │
+│ Model: gpt-4o | Agent: code | Session: abc123          │
+├─────────────────────────────────────────────────────────┤
+│ MessageArea (flexible height)                           │
+│                                                         │
+│ ┌─────────────────────────────────────────────────┐   │
+│ │ User: Hello                                     │   │
+│ └─────────────────────────────────────────────────┘   │
+│                                                         │
+│ ┌─────────────────────────────────────────────────┐   │
+│ │ Assistant: Hi! How can I help?                  │   │
+│ └─────────────────────────────────────────────────┘   │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│ InputBox (1+ lines)                                     │
+│ > Type your message...                                  │
+├─────────────────────────────────────────────────────────┤
+│ StatusBar (1 line)                                      │
+│ Tab: agent · Ctrl+X: leader · /help                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Agent System Architecture
+
+The agent system provides specialized prompts and role switching for different tasks.
+
+```mermaid
+graph LR
+    subgraph "Agent Registry"
+        Registry[AgentRegistry]
+        Current[Current Agent]
+        Agents[Built-in Agents]
+    end
+
+    subgraph "Built-in Agents"
+        Code[code - Coding specialist]
+        Debug[debug - Debugging expert]
+        Plan[plan - Planning strategist]
+        Explore[explore - Codebase explorer]
+        Orchestrator[orchestrator - Task coordinator]
+    end
+
+    subgraph "Prompt Assembly"
+        Soul[Soul Prompt]
+        ModelPrompt[Model-Specific Prompt]
+        EnvInfo[Environment Info]
+        AgentPrompt[Agent Role Prompt]
+        AgentsMd[AGENTS.md]
+    end
+
+    Registry --> Current
+    Registry --> Agents
+    Agents --> Code
+    Agents --> Debug
+    Agents --> Plan
+    Agents --> Explore
+    Agents --> Orchestrator
+    
+    Current --> Soul
+    Soul --> ModelPrompt
+    ModelPrompt --> EnvInfo
+    EnvInfo --> AgentPrompt
+    AgentPrompt --> AgentsMd
+```
+
+### System Prompt Assembly Pipeline
+
+The system prompt is assembled from multiple layers:
+
+```mermaid
+flowchart TD
+    Start([Build System Prompt]) --> Soul[Layer 1: Soul Prompt]
+    Soul --> ModelCheck{Model Type?}
+    
+    ModelCheck -->|anthropic| Anthropic[Layer 2: Anthropic Instructions]
+    ModelCheck -->|openai| OpenAI[Layer 2: OpenAI Instructions]
+    ModelCheck -->|gemini| Gemini[Layer 2: Gemini Instructions]
+    ModelCheck -->|other| Default[Layer 2: Default Instructions]
+    
+    Anthropic --> Env[Layer 3: Environment Info]
+    OpenAI --> Env
+    Gemini --> Env
+    Default --> Env
+    
+    Env --> Agent[Layer 4: Agent Role Prompt]
+    Agent --> AgentsMd{AGENTS.md exists?}
+    
+    AgentsMd -->|Yes| LoadAgentsMd[Layer 5: Load AGENTS.md]
+    AgentsMd -->|No| CustomRules{Custom Rules?}
+    
+    LoadAgentsMd --> CustomRules
+    CustomRules -->|Yes| AddRules[Layer 6: Add Custom Rules]
+    CustomRules -->|No| Assemble[Assemble Final Prompt]
+    
+    AddRules --> Assemble
+    Assemble --> End([Return System Prompt])
+```
 
 ## Data Flow
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant CLI
+    participant TUI
     participant Orchestrator
+    participant Agent
     participant Router
     participant Provider
     participant Tools
 
-    User->>CLI: Input message
-    CLI->>Orchestrator: Process request
+    User->>TUI: Input message
+    TUI->>Agent: Get current agent
+    Agent-->>TUI: Agent context
+    TUI->>Orchestrator: Process request
     Orchestrator->>Router: Select model
     Router-->>Orchestrator: Model selection
-    Orchestrator->>Provider: Send to LLM
+    Orchestrator->>Provider: Send to LLM with agent prompt
     Provider-->>Orchestrator: LLM response
     
     alt Tool calls needed
@@ -160,8 +419,8 @@ sequenceDiagram
         Provider-->>Orchestrator: Final response
     end
     
-    Orchestrator-->>CLI: Response
-    CLI-->>User: Display output
+    Orchestrator-->>TUI: Response
+    TUI-->>User: Display output
 ```
 
 ## Agentic Chat Flow
@@ -254,6 +513,121 @@ flowchart TB
     Deny --> Result
 ```
 
+## Multimodal Support
+
+Alexi supports image attachments through clipboard paste functionality.
+
+```mermaid
+flowchart TB
+    Start([User Pastes Image]) --> Detect[Detect Clipboard Tool]
+    
+    Detect -->|macOS| Pngpaste[Use pngpaste]
+    Detect -->|Linux X11| Xclip[Use xclip]
+    Detect -->|Linux Wayland| WlPaste[Use wl-paste]
+    Detect -->|Windows| PowerShell[Use PowerShell]
+    
+    Pngpaste --> Extract[Extract Image Data]
+    Xclip --> Extract
+    WlPaste --> Extract
+    PowerShell --> Extract
+    
+    Extract --> Validate[Validate Image Format]
+    Validate --> FormatCheck{Valid Format?}
+    
+    FormatCheck -->|No| Error[Return Error]
+    FormatCheck -->|Yes| SizeCheck{Size OK?}
+    
+    SizeCheck -->|No| Error
+    SizeCheck -->|Yes| Encode[Base64 Encode]
+    
+    Encode --> Build[Build Multimodal Message]
+    Build --> Attach[Add to Attachments]
+    Attach --> Preview[Show Preview in TUI]
+    Preview --> Send[Send to LLM]
+    Send --> End([Complete])
+```
+
+### Supported Image Formats
+
+- PNG (image/png)
+- JPEG (image/jpeg)
+- GIF (image/gif)
+- WebP (image/webp)
+
+### Image Validation
+
+Images are validated for:
+- Format signature (magic bytes)
+- File size limits
+- Dimensions
+- Encoding integrity
+
+### Multimodal Message Structure
+
+```typescript
+interface MultimodalUserMessage {
+  role: 'user';
+  content: MultimodalContentItem[];
+}
+
+type MultimodalContentItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+```
+
+## Repository Context System
+
+Alexi can generate repository maps using tree-sitter for code parsing.
+
+```mermaid
+flowchart LR
+    subgraph "File Discovery"
+        Scan[Scan Repository]
+        Filter[Filter Files]
+        Rank[Rank by Importance]
+    end
+
+    subgraph "Symbol Extraction"
+        Parse[Parse with Tree-Sitter]
+        Extract[Extract Symbols]
+        Summarize[Generate Summary]
+    end
+
+    subgraph "Map Generation"
+        Budget[Check Token Budget]
+        Select[Select Files]
+        Format[Format Map]
+    end
+
+    Scan --> Filter
+    Filter --> Rank
+    Rank --> Budget
+    Budget --> Select
+    Select --> Parse
+    Parse --> Extract
+    Extract --> Summarize
+    Summarize --> Format
+    Format --> Output[Repository Map]
+```
+
+### File Ranking Criteria
+
+Files are ranked by:
+1. Git modification status (modified files ranked higher)
+2. Modification time (recently modified ranked higher)
+3. Import relationships (frequently imported ranked higher)
+4. File type priority (source files over config files)
+
+### Symbol Extraction
+
+Tree-sitter extracts:
+- Function definitions
+- Class definitions
+- Interface definitions
+- Type definitions
+- Export statements
+- Import statements
+
 ## Configuration
 
 ### Environment Variables
@@ -290,35 +664,118 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 ```
 alexi/
 ├── src/
-│   ├── cli/           # CLI entry points
-│   ├── core/          # Core orchestration
-│   ├── providers/     # LLM providers
-│   ├── tool/          # Tool system
-│   │   └── tools/     # Individual tools
-│   ├── agent/         # Agent system
-│   ├── bus/           # Event bus
-│   ├── permission/    # Permission system
-│   ├── mcp/           # MCP integration
-│   ├── skill/         # Skill system
-│   ├── config/        # Configuration
-│   ├── log/           # Logging
-│   ├── profile/       # Profile management
+│   ├── cli/              # CLI entry points
+│   │   ├── program.ts    # Commander.js CLI
+│   │   ├── commands/     # CLI commands
+│   │   ├── tui/          # Ink TUI components
+│   │   │   ├── App.tsx   # Root TUI component
+│   │   │   ├── components/  # UI components
+│   │   │   ├── context/     # React context providers
+│   │   │   ├── dialogs/     # Modal dialogs
+│   │   │   ├── hooks/       # Custom React hooks
+│   │   │   └── theme/       # Theme definitions
+│   │   ├── utils/        # CLI utilities
+│   │   └── interactive.ts # Legacy REPL (deprecated)
+│   ├── core/             # Core orchestration
+│   │   ├── orchestrator.ts
+│   │   ├── agenticChat.ts
+│   │   ├── sessionManager.ts
+│   │   ├── sessionContext.ts
+│   │   ├── memory.ts
+│   │   └── effortLevel.ts
+│   ├── providers/        # LLM providers
+│   │   └── sapOrchestration.ts
+│   ├── tool/             # Tool system
+│   │   ├── index.ts      # Tool framework
+│   │   └── tools/        # Individual tools
+│   │       ├── bash.ts
+│   │       ├── read.ts
+│   │       ├── write.ts
+│   │       ├── edit.ts
+│   │       ├── glob.ts
+│   │       ├── grep.ts
+│   │       ├── memory.ts
+│   │       └── batch.ts
+│   ├── agent/            # Agent system
+│   │   ├── index.ts      # Agent registry
+│   │   ├── system.ts     # Prompt assembly
+│   │   └── prompts/      # Agent prompts
+│   ├── context/          # Repository context
+│   │   ├── repoMap.ts    # Map generation
+│   │   ├── symbols.ts    # Symbol extraction
+│   │   ├── treeSitter.ts # Syntax parsing
+│   │   └── ranking.ts    # File ranking
+│   ├── bus/              # Event bus
+│   ├── permission/       # Permission system
+│   │   ├── index.ts
+│   │   ├── prompt.ts     # Interactive prompts
+│   │   └── next.ts       # Next handler
+│   ├── git/              # Git integration
+│   │   ├── autoCommit.ts
+│   │   ├── attribution.ts
+│   │   ├── commitMessage.ts
+│   │   ├── config.ts
+│   │   └── dirtyFiles.ts
+│   ├── i18n/             # Internationalization
+│   ├── config/           # Configuration
+│   ├── utils/            # Utilities
+│   │   ├── clipboard.ts
+│   │   ├── multimodal.ts
+│   │   └── imageValidation.ts
 │   └── ...
-├── tests/             # Test files
-├── dist/              # Compiled output
-└── docs/              # Documentation
+├── tests/                # Test files
+│   ├── cli/tui/          # TUI component tests
+│   ├── clipboard.test.ts
+│   ├── multimodal.test.ts
+│   └── ...
+├── specs/                # Feature specifications
+│   ├── 001-tui-clone/    # TUI implementation spec
+│   └── 002-screenshot-paste/  # Image paste spec
+├── dist/                 # Compiled output
+├── docs/                 # Documentation
+└── .github/              # GitHub workflows
 ```
 
 ## Key Design Decisions
 
-### 1. Multi-Provider Architecture
+### 1. Component-Based TUI
 
-Alexi supports multiple LLM providers through a unified interface, allowing:
-- Easy switching between providers
-- Fallback mechanisms
-- Cost optimization through routing
+Alexi uses Ink (React for CLI) to provide a modern terminal user interface:
+- Full-screen layout with Header, MessageArea, InputBox, and StatusBar
+- React component architecture with context providers
+- Real-time streaming message display
+- Interactive dialogs for model selection, agent switching, and permissions
+- Theme support (dark/light modes)
+- Keyboard shortcuts and command palette
 
-### 2. Tool System with Permission Control
+### 2. Agent System with Specialized Prompts
+
+The agent system provides role-based specialization:
+- Built-in agents for different tasks (code, debug, plan, explore)
+- Agent registry with aliases and switching
+- Layered prompt assembly (soul + model + environment + agent + project)
+- Agent-specific color coding in UI
+- Agent switching via Tab key or explicit commands
+
+### 3. Repository Context Mapping
+
+Alexi can generate repository maps for better context:
+- Tree-sitter based code parsing
+- Symbol extraction from TypeScript/JavaScript files
+- File ranking by importance (git status, modification time)
+- Token budget management
+- Configurable via --map-tokens flag
+
+### 4. Multimodal Support
+
+Screenshot and image paste functionality:
+- Clipboard detection for multiple platforms (macOS, Linux, Windows)
+- Image validation and format detection
+- Base64 encoding for LLM transmission
+- Attachment preview in TUI
+- Support for PNG, JPEG, GIF, WebP formats
+
+### 5. Tool System with Permission Control
 
 Tools are implemented as independent modules that:
 - Follow a consistent interface based on Zod schema validation
@@ -328,29 +785,41 @@ Tools are implemented as independent modules that:
 - Support interactive permission prompts and high-priority allow rules
 - Convert Zod schemas to JSON Schema for LLM function calling with proper type handling
 
-### 3. Agentic Execution Mode
+### 6. Agentic Execution Mode
 
 The agentic chat system enables autonomous file operations:
 - Automatic permission configuration for write and execute actions
 - High-priority allow rules (priority 200) override default ask prompts
 - External directory access for full workspace capability
 - Tool execution loop with LLM-driven decision making
-- Iteration limits to prevent infinite loops (default: 50)
+- Iteration limits based on effort level (quick: 5, standard: 10, thorough: 25, exhaustive: 50)
 
-### 4. Event-Driven Architecture
+### 7. Event-Driven Architecture
 
 The event bus enables:
 - Loose coupling between modules
 - Plugin extensibility
 - Real-time streaming updates
 - Permission events (DoomLoopDetected, ExternalAccessAttempted)
+- Agent switching events
+- Tool execution events
 
-### 5. Session Management
+### 8. Session Management with Memory
 
 Sessions provide:
 - Multi-turn conversation context
 - Persistence across CLI invocations
 - Export and sharing capabilities
+- Typed memory storage and retrieval
+- Session summaries generated on close
+
+### 9. Git Integration
+
+Automatic git operations:
+- Auto-commit with LLM-generated messages
+- File attribution tracking
+- Dirty files detection
+- Git configuration management
 
 ## Security Considerations
 

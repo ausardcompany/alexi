@@ -256,17 +256,122 @@ Manual trigger with `dry_run: true` will:
 - Push to any branch
 - Pull requests
 
-**Purpose**: Runs tests, linting, and build verification.
+**Purpose**: Runs tests, linting, and build verification with optimized parallel execution.
 
-**Steps**:
-1. Checkout code
-2. Set up Node.js 22
-3. Install dependencies
-4. Run TypeScript compiler
-5. Run tests
-6. Run linters
+#### Workflow Architecture
 
-### 4. Release Workflows
+```mermaid
+graph LR
+    subgraph "Parallel Jobs"
+        Install[Install Dependencies]
+        Lint[Lint Code]
+        TypeCheck[Type Check]
+        Format[Format Check]
+        Test[Run Tests]
+    end
+
+    subgraph "Caching"
+        Cache[node_modules Cache]
+    end
+
+    Install --> Cache
+    Cache --> Lint
+    Cache --> TypeCheck
+    Cache --> Format
+    Cache --> Test
+
+    style Install fill:#4CAF50
+    style Cache fill:#2196F3
+```
+
+#### Optimizations
+
+The CI workflow includes several optimizations:
+
+1. **Dependency Caching**: node_modules are cached after installation
+2. **Parallel Execution**: Lint, type check, format check, and tests run in parallel
+3. **Cache Restoration**: Subsequent jobs restore cached dependencies
+4. **Fast Failure**: Jobs fail fast if any step fails
+
+#### Steps
+
+1. **Install Job**:
+   - Checkout code
+   - Set up Node.js 22
+   - Install dependencies with `npm ci`
+   - Save node_modules to cache
+
+2. **Lint Job**:
+   - Restore cached dependencies
+   - Run ESLint on src/ and tests/
+
+3. **Type Check Job**:
+   - Restore cached dependencies
+   - Run TypeScript compiler with --noEmit
+
+4. **Format Check Job**:
+   - Restore cached dependencies
+   - Run Prettier format check
+
+5. **Test Job**:
+   - Restore cached dependencies
+   - Run Vitest test suite
+   - Generate coverage report
+
+### 4. Auto-Merge Workflow
+
+**File**: `.github/workflows/auto-merge.yml`
+
+**Triggers**:
+- Pull request events (opened, synchronize, reopened)
+
+**Purpose**: Automatically enable auto-merge for PRs after CI passes.
+
+#### Features
+
+- Automatically enables squash-merge for approved PRs
+- Deletes branch after merge
+- Skips release branches (those are merged manually)
+- Requires all CI checks to pass before merging
+
+#### Workflow Steps
+
+```mermaid
+sequenceDiagram
+    participant PR as Pull Request
+    participant CI as CI Workflow
+    participant AutoMerge as Auto-Merge Workflow
+    participant GitHub as GitHub API
+
+    PR->>CI: Trigger CI checks
+    CI->>CI: Run tests, lint, build
+    CI-->>PR: CI status: passing
+    PR->>AutoMerge: Trigger auto-merge
+    AutoMerge->>GitHub: Enable auto-merge (squash)
+    GitHub->>GitHub: Wait for approvals
+    GitHub->>GitHub: Merge when ready
+    GitHub->>GitHub: Delete branch
+```
+
+### 5. Homebrew Update Workflow
+
+**File**: `.github/workflows/update-homebrew.yml`
+
+**Triggers**:
+- Release PR merge to master
+- Sync upstream PR merge to master
+- Manual workflow dispatch
+
+**Purpose**: Automatically updates the Homebrew formula after releases.
+
+#### Steps
+
+1. Checkout ausardcompany/homebrew-tap repository
+2. Update formula with new version and SHA256
+3. Commit and push changes
+4. Create PR in homebrew-tap repository
+
+### 6. Release Workflows
 
 **Files**: 
 - `.github/workflows/release.yml`

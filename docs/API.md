@@ -12,6 +12,124 @@ This document provides comprehensive API documentation for Alexi's CLI commands,
 
 ## CLI Commands
 
+### interactive
+
+Launch the terminal user interface for interactive chat sessions.
+
+```bash
+alexi interactive [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Model to use (e.g., gpt-4o, claude-4.5-sonnet) |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
+| `--session <id>` | string | Resume existing session |
+| `--system <prompt>` | string | Custom system prompt |
+
+#### Features
+
+The TUI provides:
+- Full-screen terminal interface with Header, MessageArea, InputBox, and StatusBar
+- Real-time streaming message display with markdown rendering
+- Interactive dialogs for model picker, agent selector, and session list
+- Command palette with fuzzy search (Ctrl+P)
+- Image attachment support via clipboard paste
+- Keyboard shortcuts:
+  - Tab: Cycle through agents
+  - Ctrl+X: Enter leader mode
+  - Ctrl+P: Open command palette
+  - Ctrl+M: Open model picker
+  - Ctrl+A: Open agent selector
+  - Ctrl+S: Open session list
+  - Ctrl+C: Cancel streaming response
+  - Ctrl+D: Exit application
+
+#### TUI Layout
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Model: gpt-4o | Agent: code | Session: abc123          │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│ ┌─────────────────────────────────────────────────┐   │
+│ │ User: Write a function to reverse a string      │   │
+│ └─────────────────────────────────────────────────┘   │
+│                                                         │
+│ ┌─────────────────────────────────────────────────┐   │
+│ │ Assistant (code): Here's a function...          │   │
+│ │ ```typescript                                    │   │
+│ │ function reverse(s: string): string {           │   │
+│ │   return s.split('').reverse().join('');        │   │
+│ │ }                                                │   │
+│ │ ```                                              │   │
+│ └─────────────────────────────────────────────────┘   │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│ > Type your message...                                  │
+├─────────────────────────────────────────────────────────┤
+│ Tab: agent · Ctrl+X: leader · /help | Cost: $0.05      │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Examples
+
+```bash
+# Launch TUI with default settings
+alexi interactive
+
+# Launch with specific model
+alexi interactive --model gpt-4o
+
+# Launch with auto-routing
+alexi interactive --auto-route --prefer-cheap
+
+# Resume previous session
+alexi interactive --session abc-123-def
+```
+
+### agent
+
+Switch or list agents in the current session.
+
+```bash
+alexi agent [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--list` | boolean | List all available agents |
+| `--switch <name>` | string | Switch to specified agent |
+| `--current` | boolean | Show current agent |
+
+#### Built-in Agents
+
+| Agent | Alias | Description |
+|-------|-------|-------------|
+| code | c | Coding specialist - writes and refactors code |
+| debug | d | Debugging expert - analyzes and fixes bugs |
+| plan | p | Planning strategist - creates task plans |
+| explore | e | Codebase explorer - navigates and explains code |
+| orchestrator | o | Task coordinator - manages complex workflows |
+
+#### Examples
+
+```bash
+# List all agents
+alexi agent --list
+
+# Switch to debug agent
+alexi agent --switch debug
+
+# Show current agent
+alexi agent --current
+```
+
 ### chat
 
 Send messages to LLMs with optional auto-routing and session management.
@@ -244,6 +362,187 @@ SAP_PROXY_API_KEY=your_secret_key
 ```
 
 ## TypeScript Interfaces
+
+### TUI Components
+
+#### AppProps
+
+Root TUI component props.
+
+```typescript
+interface AppProps {
+  model: string;
+  autoRoute: boolean;
+  sessionId?: string;
+  preferCheap?: boolean;
+  systemPrompt?: string;
+  gitManager?: AutoCommitManager;
+  repoMapManager?: RepoMapManager;
+}
+```
+
+#### MessageDisplay
+
+Message display structure for TUI.
+
+```typescript
+interface MessageDisplay {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp?: Date;
+  agent?: string;
+  toolCalls?: ToolCallDisplay[];
+  attachments?: ImageAttachmentPreview[];
+}
+
+interface ToolCallDisplay {
+  id: string;
+  name: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  result?: string;
+  error?: string;
+}
+```
+
+### Multimodal Support
+
+#### ImageAttachment
+
+Image attachment structure.
+
+```typescript
+interface ImageAttachment {
+  id: string;
+  data: string; // Base64 encoded
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  size: number; // Bytes
+  width?: number;
+  height?: number;
+  filename?: string;
+}
+
+interface ImageAttachmentPreview {
+  id: string;
+  mediaType: string;
+  size: number;
+  dimensions?: { width: number; height: number };
+  thumbnail?: string; // Base64 preview
+}
+```
+
+#### MultimodalContent
+
+Multimodal message content.
+
+```typescript
+interface TextContentItem {
+  type: 'text';
+  text: string;
+}
+
+interface ImageContentItem {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: string;
+    data: string;
+  };
+}
+
+type MultimodalContentItem = TextContentItem | ImageContentItem;
+
+interface MultimodalUserMessage {
+  role: 'user';
+  content: MultimodalContentItem[];
+}
+```
+
+#### ClipboardImageReader
+
+Clipboard image detection interface.
+
+```typescript
+type ClipboardTool = 'pngpaste' | 'xclip' | 'wl-paste' | 'powershell';
+
+interface ClipboardCapability {
+  tool: ClipboardTool;
+  available: boolean;
+  platform: 'darwin' | 'linux' | 'win32';
+}
+
+type ClipboardImageResult =
+  | { success: true; data: Buffer; format: ImageFormat }
+  | { success: false; error: string };
+
+interface ClipboardImageReader {
+  detect(): Promise<ClipboardCapability[]>;
+  read(): Promise<ClipboardImageResult>;
+}
+```
+
+### Agent System
+
+#### AgentConfig
+
+Agent configuration and metadata.
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  description: string;
+  aliases?: string[];
+  mode: 'primary' | 'subagent' | 'all';
+  prompt?: string;
+}
+
+interface Agent extends AgentConfig {
+  switchTo(reason?: string): void;
+}
+```
+
+#### AssembleOptions
+
+System prompt assembly options.
+
+```typescript
+interface AssembleOptions {
+  modelId?: string;
+  agentId?: string;
+  workdir?: string;
+  customRules?: string;
+}
+```
+
+### Repository Context
+
+#### RepoMapOptions
+
+Repository map generation options.
+
+```typescript
+interface RepoMapOptions {
+  workdir: string;
+  tokenBudget?: number; // Default: 2000
+  includePatterns?: string[];
+  excludePatterns?: string[];
+}
+
+interface FileSymbol {
+  name: string;
+  type: 'function' | 'class' | 'interface' | 'type' | 'export';
+  line: number;
+  signature?: string;
+}
+
+interface FileEntry {
+  path: string;
+  relativePath: string;
+  rank: number;
+  symbols: FileSymbol[];
+  summary: string;
+}
+```
 
 ### Core Interfaces
 

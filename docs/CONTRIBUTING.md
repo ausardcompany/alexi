@@ -86,6 +86,7 @@ AICORE_RESOURCE_GROUP=your-resource-group-id
 - `fix/*`: Bug fixes
 - `docs/*`: Documentation updates
 - `refactor/*`: Code refactoring
+- `specs/*`: Feature specifications
 
 ### Development Process
 
@@ -97,10 +98,10 @@ graph LR
     D --> E[Commit]
     E --> F[Push]
     F --> G[Create PR]
-    G --> H[Code Review]
-    H --> I[Address Feedback]
-    I --> J[Auto-Generate Docs]
-    J --> K[Merge]
+    G --> H[CI Checks]
+    H --> I[Auto-Generate Docs]
+    I --> J[Code Review]
+    J --> K[Auto-Merge]
 ```
 
 1. Create a feature branch:
@@ -111,16 +112,21 @@ graph LR
 2. Make your changes following coding standards
 
 3. Write or update tests for your changes
+   - TUI components: Use ink-testing-library
+   - Tools: Use temporary directories with cleanup
+   - Core logic: Mock external dependencies
 
 4. Run tests locally:
    ```bash
    npm test
+   npm run test:coverage
    ```
 
 5. Build and verify:
    ```bash
    npm run build
    npm run lint
+   npm run typecheck
    ```
 
 6. Commit your changes with descriptive messages:
@@ -205,22 +211,51 @@ graph LR
 src/
 ├── cli/              # CLI-related code
 │   ├── program.ts    # Main CLI entry point
-│   └── commands/     # Individual CLI commands
+│   ├── commands/     # Individual CLI commands
+│   ├── tui/          # Ink TUI components
+│   │   ├── App.tsx   # Root TUI component
+│   │   ├── components/  # UI components
+│   │   ├── context/     # React context providers
+│   │   ├── dialogs/     # Modal dialogs
+│   │   ├── hooks/       # Custom React hooks
+│   │   └── theme/       # Theme definitions
+│   ├── utils/        # CLI utilities
+│   └── interactive.ts # Legacy REPL (deprecated)
 ├── core/             # Core orchestration logic
 │   ├── orchestrator.ts
-│   ├── router.ts
-│   └── agenticChat.ts
+│   ├── agenticChat.ts
+│   ├── sessionManager.ts
+│   ├── sessionContext.ts
+│   ├── memory.ts
+│   └── effortLevel.ts
 ├── providers/        # LLM provider implementations
-│   ├── openai/
-│   ├── bedrock/
-│   └── anthropic/
+│   └── sapOrchestration.ts
 ├── tool/             # Tool system
 │   ├── index.ts      # Tool framework
 │   └── tools/        # Individual tool implementations
+├── agent/            # Agent system
+│   ├── index.ts      # Agent registry
+│   ├── system.ts     # Prompt assembly
+│   └── prompts/      # Agent prompts
+├── context/          # Repository context
+│   ├── repoMap.ts    # Map generation
+│   ├── symbols.ts    # Symbol extraction
+│   ├── treeSitter.ts # Syntax parsing
+│   └── ranking.ts    # File ranking
 ├── permission/       # Permission system
-│   └── index.ts
-├── session/          # Session management
-└── bus/              # Event bus system
+│   ├── index.ts
+│   ├── prompt.ts     # Interactive prompts
+│   └── next.ts       # Next handler
+├── git/              # Git integration
+│   ├── autoCommit.ts
+│   ├── attribution.ts
+│   └── commitMessage.ts
+├── bus/              # Event bus system
+├── i18n/             # Internationalization
+└── utils/            # Utilities
+    ├── clipboard.ts
+    ├── multimodal.ts
+    └── imageValidation.ts
 ```
 
 ### Naming Conventions
@@ -266,6 +301,36 @@ export function defineTool<TParams extends z.ZodType, TResult>(
 - Use descriptive test names
 - Follow Arrange-Act-Assert pattern
 
+### TUI Component Testing
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { render } from 'ink-testing-library';
+import React from 'react';
+import { Header } from '../../../src/cli/tui/components/Header.js';
+
+describe('Header Component', () => {
+  it('should display model and agent info', () => {
+    const { lastFrame } = render(
+      <Header
+        model="gpt-4o"
+        agent="code"
+        agentColor="#00ff00"
+        sessionId="abc-123"
+        tokenCount={1500}
+        autoRoute={true}
+      />
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('gpt-4o');
+    expect(output).toContain('code');
+  });
+});
+```
+
+### Tool Testing
+
 ```typescript
 describe('defineTool', () => {
   it('should create tool with permission checks', async () => {
@@ -291,6 +356,23 @@ describe('defineTool', () => {
 });
 ```
 
+### Context Provider Testing
+
+```typescript
+import { renderHook } from '@testing-library/react-hooks';
+import { useTheme } from '../../../src/cli/tui/context/ThemeContext.js';
+
+describe('ThemeContext', () => {
+  it('should toggle theme', () => {
+    const { result } = renderHook(() => useTheme());
+    
+    expect(result.current.current).toBe('dark');
+    result.current.toggle();
+    expect(result.current.current).toBe('light');
+  });
+});
+```
+
 ### Running Tests
 
 ```bash
@@ -305,6 +387,12 @@ npm test -- --coverage
 
 # Watch mode
 npm test -- --watch
+
+# Run TUI tests only
+npm test -- tests/cli/tui/
+
+# Run integration tests
+npm test -- tests/integration-*
 ```
 
 ## Pull Request Process
@@ -364,12 +452,23 @@ for permission checks to work with the workdir context.
 
 Pull requests trigger automated workflows:
 
-1. **CI**: Runs tests, linting, and build verification
+1. **CI Pipeline**: Runs in parallel
+   - Install dependencies (cached)
+   - Lint code
+   - Type check
+   - Format check
+   - Run tests with coverage
+
 2. **Documentation Update**: AI-powered documentation generation
    - Analyzes code changes
    - Updates relevant documentation files
    - Generates Mermaid diagrams
    - Updates CHANGELOG.md
+
+3. **Auto-Merge**: Enabled after CI passes
+   - Squash-merges approved PRs
+   - Deletes branch after merge
+   - Skips release branches
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
@@ -380,7 +479,6 @@ The documentation update workflow will automatically:
 ### Code Review
 
 All PRs require:
-- At least one approval from a maintainer
 - Passing CI checks
 - Passing documentation generation
 - No merge conflicts
