@@ -1,12 +1,8 @@
-#### AUTOMATION.md
+#### docs/AUTOMATION.md
 - Document all GitHub Actions workflows
-- Explain the autonomous sync workflow:
-  - Daily schedule (06:00 UTC)
-  - Manual trigger options
-  - Fork syncing process
-  - Kilo AI analysis step
-  - Auto-merge behavior
-- Document the documentation update workflow
-- Include workflow diagrams
+- Explain the autonomous sync workflow (sync-upstream.yml):
+  - Schedule, manual triggers, fork syncing, analysis, auto-merge
+- Explain the documentation update workflow (documentation-update.yml):
+  - Triggers, scope analysis, template assembly, agent invocation, validation
+- Include workflow diagrams (Mermaid)
 - Document required GitHub secrets
-

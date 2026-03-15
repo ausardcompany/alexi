@@ -1,17 +1,15 @@
-#### CHANGELOG.md (ROOT directory)
+#### CHANGELOG.md (repository ROOT — not docs/)
 - Use Keep a Changelog format
 - Include ONLY sections with actual changes:
-  - Added: [what was added]
-  - Changed: [what was updated]
-  - Fixed: [what was fixed]
-  - Removed: [what was removed]
+  - Added: new features
+  - Changed: updates to existing features
+  - Fixed: bug fixes
+  - Removed: removed features
 - Be concise but clear about what changed
-- NO emojis - use professional technical language only
+- NO emojis — use professional technical language only
 
-#### CONTRIBUTING.md
-- Update development workflow
-- Update coding standards (TypeScript best practices)
-- Update PR process
-- Include testing guidelines
+#### docs/CONTRIBUTING.md
+- Update development workflow (branching, commits, PRs)
+- Update coding standards (TypeScript strict, ESLint, Prettier)
+- Update testing guidelines (Vitest, mocking, temp dirs)
 - Reference the autonomous sync system
-
