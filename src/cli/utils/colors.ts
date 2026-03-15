@@ -3,6 +3,7 @@
  */
 
 // ANSI color codes
+/** @deprecated Use src/cli/tui/index.ts (startTui) instead. */
 export const colors = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',

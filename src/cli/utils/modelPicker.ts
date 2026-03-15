@@ -28,6 +28,7 @@ const PROVIDER_GROUPS: Record<string, string> = {
   'sap-': 'SAP',
 };
 
+/** @deprecated Use src/cli/tui/index.ts (startTui) instead. */
 export function getProviderGroup(modelId: string): string {
   for (const [prefix, group] of Object.entries(PROVIDER_GROUPS)) {
     if (modelId.startsWith(prefix)) {

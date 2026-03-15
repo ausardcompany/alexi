@@ -3,7 +3,9 @@
  */
 
 import type { Command } from 'commander';
-import { startInteractive } from '../interactive.js';
+// Fallback: import { startInteractive } from '../interactive.js';
+import { startTui } from '../tui/index.js';
+import { getDefaultModel } from '../../providers/index.js';
 import { createAutoCommitManager } from '../../git/autoCommit.js';
 import { loadGitConfig } from '../../git/config.js';
 import { commitDirtyFiles } from '../../git/dirtyFiles.js';
@@ -79,11 +81,11 @@ export function registerInteractiveCommand(program: Command): void {
           repoMapManager = new RepoMapManager(workdir, { maxTokens: mapTokensBudget });
         }
 
-        await startInteractive({
-          model: opts.model,
-          autoRoute: opts.autoRoute,
+        await startTui({
+          model: opts.model ?? getDefaultModel(),
+          autoRoute: opts.autoRoute ?? false,
           preferCheap: opts.preferCheap,
-          session: opts.session,
+          sessionId: opts.session,
           systemPrompt: opts.system,
           gitManager,
           repoMapManager,

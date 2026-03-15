@@ -74,6 +74,14 @@ export default [
     },
   },
   {
-    ignores: ['dist/', 'node_modules/', '*.js', '*.d.ts', 'coverage/', 'eslint.config.js'],
+    ignores: [
+      'dist/',
+      'node_modules/',
+      '*.js',
+      '*.d.ts',
+      'coverage/',
+      'eslint.config.js',
+      'specs/',
+    ],
   },
 ];

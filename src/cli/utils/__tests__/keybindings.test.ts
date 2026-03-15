@@ -139,10 +139,10 @@ describe('keybindings', () => {
     });
 
     describe('Tab cycling', () => {
-      it('should call onTabCycleAgent(false) on Tab when line is empty', () => {
+      it('should NOT call onTabCycleAgent on plain Tab (intercepted by readline completer)', () => {
         handler.setCurrentLineContent('');
         handler.handleKeypress(undefined, key({ name: 'tab' }));
-        expect(onTabCycleAgent).toHaveBeenCalledWith(false);
+        expect(onTabCycleAgent).not.toHaveBeenCalled();
       });
 
       it('should call onTabCycleAgent(true) on Shift+Tab when line is empty', () => {

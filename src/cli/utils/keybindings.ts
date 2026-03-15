@@ -12,6 +12,7 @@ const LEADER_TIMEOUT_MS = 1500;
 /** Ordered list of agents for Tab cycling */
 const AGENT_CYCLE_ORDER = ['code', 'debug', 'plan', 'explore', 'orchestrator'] as const;
 
+/** @deprecated Use src/cli/tui/index.ts (startTui) instead. */
 /** Actions available via leader key sequences */
 export type LeaderAction = 'new-session' | 'model-picker' | 'agent-list' | 'status' | 'help';
 

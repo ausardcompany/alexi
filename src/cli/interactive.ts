@@ -52,6 +52,7 @@ import {
   parseEffortLevel,
 } from '../core/effortLevel.js';
 
+/** @deprecated Use src/cli/tui/index.ts (startTui) instead. */
 export interface InteractiveOptions {
   model?: string;
   autoRoute?: boolean;

@@ -7,6 +7,7 @@ import { c, colors, type ColorName } from './colors.js';
 
 export type { ColorName };
 
+/** @deprecated Use src/cli/tui/index.ts (startTui) instead. */
 /** Color mapping for each built-in agent */
 export const AGENT_COLORS: Record<string, ColorName> = {
   code: 'green',
