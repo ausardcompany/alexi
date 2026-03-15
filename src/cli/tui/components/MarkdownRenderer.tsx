@@ -4,7 +4,7 @@ import { Marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight } from 'cli-highlight';
 
-import type { MarkdownRendererProps } from '../../../../specs/001-tui-clone/contracts/message-area.js';
+import type { MarkdownRendererProps } from '../types/props.js';
 
 export type { MarkdownRendererProps };
 

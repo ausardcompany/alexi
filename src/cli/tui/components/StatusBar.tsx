@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import type { StatusBarProps } from '../../../../specs/001-tui-clone/contracts/app-layout.js';
+import type { StatusBarProps } from '../types/props.js';
 
 export type { StatusBarProps };
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import type { HeaderProps } from '../../../../specs/001-tui-clone/contracts/app-layout.js';
+import type { HeaderProps } from '../types/props.js';
 
 export type { HeaderProps };
 

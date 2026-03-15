@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import type { MessageBubbleProps } from '../../../../specs/001-tui-clone/contracts/message-area.js';
+import type { MessageBubbleProps } from '../types/props.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
 import { useTheme } from '../context/ThemeContext.js';
 

@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 
-import type { InputBoxProps } from '../../../../specs/001-tui-clone/contracts/input-box.js';
+import type { InputBoxProps } from '../types/props.js';
 
 export type { InputBoxProps };
 
