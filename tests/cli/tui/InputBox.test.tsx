@@ -2,6 +2,25 @@ import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 
+// Mock useClipboardImage so InputBox doesn't need a real AttachmentProvider
+vi.mock('../../../src/cli/tui/hooks/useClipboardImage.js', () => ({
+  useClipboardImage: vi.fn(),
+}));
+
+// Mock useAttachments so the AttachmentBar inside InputBox renders safely
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: vi.fn(),
+    addFromFile: vi.fn(),
+    remove: vi.fn(),
+    clearAll: vi.fn(),
+    consumeAll: vi.fn(),
+  }),
+}));
+
 import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
 
 describe('InputBox', () => {

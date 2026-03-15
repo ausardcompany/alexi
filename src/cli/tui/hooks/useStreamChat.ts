@@ -2,6 +2,8 @@ import { useCallback, useRef } from 'react';
 
 import { useChat } from '../context/ChatContext.js';
 import { useSession } from '../context/SessionContext.js';
+import { useAttachments } from '../context/AttachmentContext.js';
+import { buildUserMessage, type MultimodalContentItem } from '../../../utils/multimodal.js';
 
 export interface UseStreamChatReturn {
   sendMessage: (text: string) => Promise<void>;
@@ -11,6 +13,7 @@ export interface UseStreamChatReturn {
 export function useStreamChat(): UseStreamChatReturn {
   const chat = useChat();
   const session = useSession();
+  const { consumeAll } = useAttachments();
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const sendMessage = useCallback(
@@ -29,10 +32,22 @@ export function useStreamChat(): UseStreamChatReturn {
       chat.setStreaming(true);
 
       try {
+        // Consume any pending image attachments and build the message
+        const attachments = consumeAll();
+        const images = attachments.map((att) => ({
+          data: att.data,
+          format: att.format,
+        }));
+        const userMessage = buildUserMessage(text, images);
+
+        // Determine what to send: plain string for text-only, array for multimodal
+        const messageContent: string | MultimodalContentItem[] =
+          typeof userMessage.content === 'string' ? userMessage.content : userMessage.content;
+
         // Dynamic import to handle environments where streamChat may not be available
         const { streamChat } = await import('../../../core/streamingOrchestrator.js');
 
-        const generator = streamChat(text, {
+        const generator = streamChat(messageContent, {
           modelOverride: session.model,
           autoRoute: session.autoRoute,
           agentId: session.agent,

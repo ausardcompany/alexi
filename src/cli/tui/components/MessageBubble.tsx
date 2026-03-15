@@ -4,6 +4,7 @@ import { Box, Text } from 'ink';
 import type { MessageBubbleProps } from '../types/props.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { formatSize } from '../../../utils/imageValidation.js';
 
 export type { MessageBubbleProps };
 
@@ -30,6 +31,7 @@ export function MessageBubble({
   model,
   tokens,
   timestamp,
+  images,
   isPartial = false,
 }: MessageBubbleExtendedProps): React.JSX.Element {
   const {
@@ -53,6 +55,16 @@ export function MessageBubble({
   if (role === 'user') {
     return (
       <Box paddingX={1} flexDirection="column">
+        {/* Image placeholders */}
+        {images && images.length > 0 && (
+          <Box gap={1}>
+            {images.map((img) => (
+              <Text key={img.id} color="cyan">
+                [Image: {img.format.toUpperCase()} {formatSize(img.sizeBytes)}]
+              </Text>
+            ))}
+          </Box>
+        )}
         <Box>
           <Text color={colors.primary} bold>
             You ❯{' '}

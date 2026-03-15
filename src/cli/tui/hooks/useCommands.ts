@@ -14,6 +14,7 @@ import type { AgentName } from '../context/SessionContext.js';
 import { useDialog } from '../context/DialogContext.js';
 import type { DialogType } from '../context/DialogContext.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { useAttachments } from '../context/AttachmentContext.js';
 import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { AgentOption } from '../dialogs/AgentSelector.js';
 
@@ -61,6 +62,9 @@ const AGENT_DESCRIPTIONS: Record<AgentName, string> = {
 interface BuildCommandsDeps {
   openDialog: (type: DialogType, props: Record<string, unknown>) => Promise<unknown>;
   setTheme: (theme: 'dark' | 'light') => void;
+  pasteFromClipboard: () => Promise<void>;
+  addFromFile: (filePath: string) => Promise<void>;
+  clearAttachments: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +259,35 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         return true;
       },
     },
+
+    // /image [file-path] ---------------------------------------------------
+    {
+      name: 'image',
+      aliases: ['img'],
+      description: 'Attach an image from clipboard or file path',
+      category: 'general',
+      execute: async (args, _ctx) => {
+        const filePath = args.trim();
+        if (filePath) {
+          await deps.addFromFile(filePath);
+        } else {
+          await deps.pasteFromClipboard();
+        }
+        return true;
+      },
+    },
+
+    // /clear-images --------------------------------------------------------
+    {
+      name: 'clear-images',
+      aliases: ['cli'],
+      description: 'Remove all pending image attachments',
+      category: 'general',
+      execute: async (_args, _ctx) => {
+        deps.clearAttachments();
+        return true;
+      },
+    },
   ];
 }
 
@@ -274,14 +307,18 @@ export function useCommands(): UseCommandsReturn {
   const session = useSession();
   const { open } = useDialog();
   const { setTheme } = useTheme();
+  const { pasteFromClipboard, addFromFile, clearAll: clearAttachments } = useAttachments();
 
   const commands = useMemo(
     () =>
       buildCommands({
         openDialog: open as BuildCommandsDeps['openDialog'],
         setTheme,
+        pasteFromClipboard,
+        addFromFile,
+        clearAttachments,
       }),
-    [open, setTheme]
+    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments]
   );
 
   const handleCommand = useCallback(

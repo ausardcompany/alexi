@@ -61,6 +61,21 @@ vi.mock('../../../src/cli/tui/context/SessionContext.js', () => ({
   useSession: () => mockSession,
 }));
 
+const mockConsumeAll = vi.fn().mockReturnValue([]);
+
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: vi.fn(),
+    addFromFile: vi.fn(),
+    remove: vi.fn(),
+    clearAll: vi.fn(),
+    consumeAll: mockConsumeAll,
+  }),
+}));
+
 // Import hook AFTER mocks are set up
 import { useStreamChat } from '../../../src/cli/tui/hooks/useStreamChat.js';
 

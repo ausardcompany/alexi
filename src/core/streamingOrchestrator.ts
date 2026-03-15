@@ -46,18 +46,22 @@ export type { StreamChunk };
  * Collects and returns full response after streaming completes
  */
 export async function* streamChat(
-  message: string,
+  message: string | unknown[],
   options?: StreamingOptions
 ): AsyncGenerator<StreamChunk, StreamingResult> {
   const effortConfig = getEffortConfig(options?.effort ?? DEFAULT_EFFORT);
   const preferCheap = options?.preferCheap ?? effortConfig.preferCheap;
+
+  // Extract text for routing and session history (multimodal messages have array content)
+  const isMultimodal = Array.isArray(message);
+  const messageText = isMultimodal ? '[multimodal message]' : message;
 
   let modelId: string;
   let routingReason: string | undefined;
 
   // Auto-routing enabled?
   if (options?.autoRoute && !options?.modelOverride) {
-    const decision = routePrompt(message, { preferCheap });
+    const decision = routePrompt(messageText, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
   } else {
@@ -76,7 +80,8 @@ export async function* streamChat(
   });
 
   // Build messages array with history if session manager provided
-  const messages: Array<{ role: string; content: string }> = [];
+  // Content can be string (text) or unknown[] (multimodal content items)
+  const messages: Array<{ role: string; content: string | unknown[] }> = [];
 
   if (options?.sessionManager) {
     const session = options.sessionManager.getCurrentSession();
@@ -125,7 +130,7 @@ export async function* streamChat(
 
   // Save messages to session AFTER streaming completes (not per-chunk)
   if (options?.sessionManager) {
-    options.sessionManager.addMessage('user', message, {
+    options.sessionManager.addMessage('user', messageText, {
       input: finalUsage?.prompt_tokens,
     });
     options.sessionManager.addMessage('assistant', fullText, {

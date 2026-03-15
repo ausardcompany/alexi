@@ -462,10 +462,15 @@ function buildTranslationModuleConfig(
 }
 
 /**
- * Convert simple message format to SDK ChatMessage format
+ * Convert simple message format to SDK ChatMessage format.
+ *
+ * Supports multimodal user messages: if a message has `role === 'user'` and
+ * `Array.isArray(content)`, it is treated as a pre-constructed
+ * `UserChatMessage` with `UserChatMessageContentItem[]` and passed through
+ * without string coercion.
  */
 function toOrchestrationMessages(
-  messages: Array<{ role: string; content: string } | ChatMessage | ToolChatMessage>
+  messages: Array<{ role: string; content: string | unknown[] } | ChatMessage | ToolChatMessage>
 ): ChatMessage[] {
   return messages.map((m) => {
     // Handle ToolChatMessage (has tool_call_id)
@@ -478,10 +483,15 @@ function toOrchestrationMessages(
       return m as ChatMessage;
     }
 
-    // Simple message format
+    // Handle multimodal user messages (content is an array of content items)
+    if (m.role === 'user' && Array.isArray(m.content)) {
+      return { role: 'user', content: m.content } as ChatMessage;
+    }
+
+    // Simple message format (string content)
     return {
       role: m.role as 'user' | 'assistant' | 'system',
-      content: m.content,
+      content: m.content as string,
     } as ChatMessage;
   });
 }
@@ -647,7 +657,7 @@ export class SapOrchestrationProvider {
    * ```
    */
   async complete(
-    messages: Array<{ role: string; content: string } | ChatMessage | ToolChatMessage>,
+    messages: Array<{ role: string; content: string | unknown[] } | ChatMessage | ToolChatMessage>,
     options?: CompletionOptions
   ): Promise<CompletionResult> {
     const client = this.createClient(options);
@@ -716,7 +726,7 @@ export class SapOrchestrationProvider {
    * ```
    */
   async *streamComplete(
-    messages: Array<{ role: string; content: string } | ChatMessage | ToolChatMessage>,
+    messages: Array<{ role: string; content: string | unknown[] } | ChatMessage | ToolChatMessage>,
     options?: CompletionOptions
   ): AsyncGenerator<StreamChunk> {
     const client = this.createClient(options);

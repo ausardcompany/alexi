@@ -6,6 +6,8 @@
  * inferred rootDir stable and `dist/` output flat.
  */
 
+import type { ImageAttachmentPreview } from '../context/AttachmentContext.js';
+
 // ---------------------------------------------------------------------------
 // Header & StatusBar  (from contracts/app-layout.ts)
 // ---------------------------------------------------------------------------
@@ -61,6 +63,8 @@ export interface MessageBubbleProps {
   tokens?: number;
   /** Timestamp */
   timestamp: number;
+  /** Image attachments included with this message (display metadata only). */
+  images?: ImageAttachmentPreview[];
 }
 
 export interface MarkdownRendererProps {

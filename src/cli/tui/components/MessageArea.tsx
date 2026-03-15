@@ -7,6 +7,7 @@ import { Spinner } from './Spinner.js';
 import { ToolCallBlock } from './ToolCallBlock.js';
 import type { ToolCallState } from '../context/ChatContext.js';
 import { useTheme } from '../context/ThemeContext.js';
+import type { ImageAttachmentPreview } from '../context/AttachmentContext.js';
 
 // ---------------------------------------------------------------------------
 // Types (aligned with contracts/message-area.ts MessageDisplay)
@@ -21,6 +22,8 @@ export interface MessageDisplay {
   model?: string;
   tokens?: number;
   timestamp: number;
+  /** Image attachments included with this message (display metadata only). */
+  images?: ImageAttachmentPreview[];
 }
 
 export interface MessageAreaProps {
@@ -75,6 +78,7 @@ export function MessageArea({
               model={msg.model}
               tokens={msg.tokens}
               timestamp={msg.timestamp}
+              images={msg.images}
             />
             {/* Completed tool calls for this message */}
             {msg.toolCalls.map((tc) => (

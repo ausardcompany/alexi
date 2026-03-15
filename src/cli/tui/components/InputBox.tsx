@@ -3,6 +3,9 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 
 import type { InputBoxProps } from '../types/props.js';
+import { useClipboardImage } from '../hooks/useClipboardImage.js';
+import { useAttachments } from '../context/AttachmentContext.js';
+import { AttachmentBar } from './AttachmentBar.js';
 
 export type { InputBoxProps };
 
@@ -33,13 +36,24 @@ export function InputBox({
   // Saved current input before we started navigating history
   const savedInputRef = useRef('');
 
-  // Handle Up/Down arrow keys for history navigation.
+  // Clipboard image paste (Ctrl+V interception)
+  useClipboardImage({ enabled: isFocused && !disabled });
+  const { pending, clearAll: clearAttachments } = useAttachments();
+
+  // Handle Up/Down arrow keys + Escape for history navigation and attachment clearing.
   // useInput fires even when TextInput is focused (we guard with isFocused + !disabled).
   useInput(
     (_input, key) => {
       if (disabled) {
         return;
       }
+
+      // Escape — clear attachments when they exist
+      if (key.escape && pending.length > 0) {
+        clearAttachments();
+        return;
+      }
+
       if (key.upArrow) {
         if (history.length === 0) {
           return;
@@ -110,27 +124,33 @@ export function InputBox({
 
   if (disabled) {
     return (
-      <Box paddingX={1}>
-        <Text color={agentColor} bold>
-          {agent} ❯{' '}
-        </Text>
-        <Text dimColor>Streaming...</Text>
+      <Box flexDirection="column">
+        <AttachmentBar />
+        <Box paddingX={1}>
+          <Text color={agentColor} bold>
+            {agent} ❯{' '}
+          </Text>
+          <Text dimColor>Streaming...</Text>
+        </Box>
       </Box>
     );
   }
 
   return (
-    <Box paddingX={1}>
-      <Text color={agentColor} bold>
-        {agent} ❯{' '}
-      </Text>
-      <TextInput
-        value={value}
-        onChange={handleChange}
-        onSubmit={handleSubmit}
-        focus={isFocused}
-        placeholder="Type a message or /command"
-      />
+    <Box flexDirection="column">
+      <AttachmentBar />
+      <Box paddingX={1}>
+        <Text color={agentColor} bold>
+          {agent} ❯{' '}
+        </Text>
+        <TextInput
+          value={value}
+          onChange={handleChange}
+          onSubmit={handleSubmit}
+          focus={isFocused}
+          placeholder="Type a message or /command"
+        />
+      </Box>
     </Box>
   );
 }
