@@ -5,12 +5,22 @@ on:
     # Run once a day at 02:00 UTC
     - cron: '0 2 * * *'
   workflow_dispatch:
+  # Trigger immediately after any auto-sync or release PR merges to master
+  pull_request_target:
+    types: [closed]
+    branches: [master]
 
 permissions:
   contents: write
 
 jobs:
   update-homebrew:
+    # On pull_request_target: only run when a PR is actually merged
+    if: >
+      github.event_name != 'pull_request_target' ||
+      (github.event.pull_request.merged == true &&
+       (startsWith(github.event.pull_request.head.ref, 'auto/sync-upstream-') ||
+        startsWith(github.event.pull_request.head.ref, 'release/')))
     runs-on: ubuntu-latest
 
     steps:
@@ -31,12 +41,20 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Ensure version tag exists
+      - name: Ensure version tag points to current HEAD
         run: |
           TAG="${{ steps.meta.outputs.tag }}"
           SHA="${{ steps.meta.outputs.sha }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists"
+            EXISTING=$(git rev-parse "$TAG")
+            if [ "$EXISTING" = "$SHA" ]; then
+              echo "Tag $TAG already points to $SHA — nothing to do"
+            else
+              echo "Tag $TAG exists at $EXISTING, moving to $SHA"
+              git tag -f "$TAG" "$SHA"
+              git push origin ":refs/tags/$TAG"
+              git push origin "$TAG"
+            fi
           else
             echo "Creating tag $TAG at $SHA"
             git tag "$TAG" "$SHA"
