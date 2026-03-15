@@ -84,10 +84,7 @@ function renderPermissionPrompt(data: {
   const headerText = `${icon}  ${label}`;
   const headerPadding = Math.max(0, boxWidth - headerText.length - 4);
   console.log(
-    c('cyan', '│ ') +
-      c('bold', headerText) +
-      ' '.repeat(headerPadding) +
-      c('cyan', ' │')
+    c('cyan', '│ ') + c('bold', headerText) + ' '.repeat(headerPadding) + c('cyan', ' │')
   );
 
   // Separator
@@ -96,12 +93,7 @@ function renderPermissionPrompt(data: {
   // Tool name
   const toolLine = `Tool: ${data.toolName}`;
   const toolPadding = Math.max(0, boxWidth - toolLine.length - 4);
-  console.log(
-    c('cyan', '│ ') +
-      c('gray', toolLine) +
-      ' '.repeat(toolPadding) +
-      c('cyan', ' │')
-  );
+  console.log(c('cyan', '│ ') + c('gray', toolLine) + ' '.repeat(toolPadding) + c('cyan', ' │'));
 
   // Resource (split into multiple lines if too long)
   const resourcePrefix = 'Resource: ';
@@ -127,22 +119,14 @@ function renderPermissionPrompt(data: {
   const firstResourceLine = resourcePrefix + (resourceLines[0] || '');
   const firstPadding = Math.max(0, boxWidth - firstResourceLine.length - 4);
   console.log(
-    c('cyan', '│ ') +
-      c('yellow', firstResourceLine) +
-      ' '.repeat(firstPadding) +
-      c('cyan', ' │')
+    c('cyan', '│ ') + c('yellow', firstResourceLine) + ' '.repeat(firstPadding) + c('cyan', ' │')
   );
 
   // Additional resource lines (if any)
   for (let i = 1; i < resourceLines.length; i++) {
     const line = ' '.repeat(resourcePrefix.length) + resourceLines[i];
     const padding = Math.max(0, boxWidth - line.length - 4);
-    console.log(
-      c('cyan', '│ ') +
-        c('yellow', line) +
-        ' '.repeat(padding) +
-        c('cyan', ' │')
-    );
+    console.log(c('cyan', '│ ') + c('yellow', line) + ' '.repeat(padding) + c('cyan', ' │'));
   }
 
   // Description (if different from default)
@@ -168,12 +152,7 @@ function renderPermissionPrompt(data: {
 
     for (const line of descLines) {
       const padding = Math.max(0, boxWidth - line.length - 4);
-      console.log(
-        c('cyan', '│ ') +
-          c('dim', line) +
-          ' '.repeat(padding) +
-          c('cyan', ' │')
-      );
+      console.log(c('cyan', '│ ') + c('dim', line) + ' '.repeat(padding) + c('cyan', ' │'));
     }
   }
 
@@ -182,7 +161,7 @@ function renderPermissionPrompt(data: {
 
   // Action buttons
   const actionsText = '[A]pprove  [D]eny  [R]emember & Approve  [N]ever Ask';
-  const actionsPadding = Math.max(0, boxWidth - actionsText.length - 4);
+  const _actionsPadding = Math.max(0, boxWidth - actionsText.length - 4);
   console.log(
     c('cyan', '│ ') +
       c('green', '[A]') +
@@ -205,12 +184,15 @@ function renderPermissionPrompt(data: {
 /**
  * Prompt user for permission decision
  */
-async function promptUser(requestId: string, data: {
-  toolName: string;
-  action: PermissionAction;
-  resource: string;
-  description: string;
-}): Promise<void> {
+async function promptUser(
+  requestId: string,
+  data: {
+    toolName: string;
+    action: PermissionAction;
+    resource: string;
+    description: string;
+  }
+): Promise<void> {
   renderPermissionPrompt(data);
 
   const rl = readline.createInterface({
