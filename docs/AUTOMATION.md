@@ -83,21 +83,34 @@ sequenceDiagram
    - Routing changes trigger `ROUTING.md` updates
    - Provider changes trigger `PROVIDERS.md` updates
    - Workflow/script changes trigger `AUTOMATION.md` updates
-   - Always updates `CHANGELOG.md` and `CONTRIBUTING.md`
+   - Always updates `CHANGELOG.md` (in repository root) and `CONTRIBUTING.md`
 
 2. **Code Analysis**: Generates detailed analysis including:
    - Changed file list with categorization
-   - Commit history since last documentation update
-   - Code diff statistics
-   - TypeScript and configuration change previews
+   - Commit history since last documentation update (tracked by [alexi-bot] marker)
+   - Code diff statistics with 500-line preview limit
+   - TypeScript, configuration, and workflow change previews
+   - Truncation warnings when diffs exceed preview limit
 
 3. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI to:
-   - Analyze code changes
+   - Analyze code changes with `--effort high` flag for quality
    - Update documentation with accurate technical details
    - Generate Mermaid diagrams
    - Maintain consistent documentation style
+   - Read source files using tools (read, grep, glob)
+   - Write documentation using tools (write, edit)
 
-4. **Force Regeneration**: Manual trigger option to regenerate all documentation
+4. **Documentation Validation**: Validates generated documentation with markdownlint
+   - Runs markdownlint-cli2 on updated files
+   - Reports validation warnings in PR comments
+   - Continues workflow even if validation warnings exist
+
+5. **Smart Change Detection**: Excludes documentation files from change analysis
+   - Filters out `docs/` directory and `CHANGELOG.md` from code change detection
+   - Tracks last documentation commit using [alexi-bot] marker
+   - Only regenerates when actual code changes detected
+
+6. **Force Regeneration**: Manual trigger option to regenerate all documentation
 
 #### Environment Variables
 
@@ -112,13 +125,45 @@ The workflow determines documentation scope based on file patterns:
 
 | Pattern | Documentation Triggered |
 |---------|------------------------|
-| `src/cli/**`, `src/core/**` | ARCHITECTURE.md, API.md |
-| `src/router/**`, `routing-config.json` | ROUTING.md |
-| `src/providers/**` | PROVIDERS.md |
-| `*.json`, `.env*` | CONFIGURATION.md |
-| `*.test.ts`, `*.spec.ts` | TESTING.md |
-| `.github/workflows/**`, `scripts/**` | AUTOMATION.md |
-| All changes | CHANGELOG.md, CONTRIBUTING.md |
+| `src/cli/**`, `src/core/**` | docs/ARCHITECTURE.md, docs/API.md |
+| `src/core/router`, `src/config/routing` | docs/ROUTING.md |
+| `src/providers/**` | docs/PROVIDERS.md |
+| `*.json`, `.env*` | docs/CONFIGURATION.md |
+| `*.test.ts`, `*.spec.ts` | docs/TESTING.md |
+| `.github/workflows/**`, `scripts/**` | docs/AUTOMATION.md |
+| All changes | CHANGELOG.md (root), docs/CONTRIBUTING.md |
+
+#### Workflow Process Details
+
+1. **Checkout PR Branch**: Fetches the pull request branch with full history
+2. **Build Alexi CLI**: Installs dependencies and compiles TypeScript to dist/
+3. **Analyze Changed Files**: 
+   - Finds last documentation commit by searching for [alexi-bot] marker
+   - Compares current HEAD with last code commit before documentation
+   - Filters out documentation files (docs/, CHANGELOG.md) from analysis
+   - Categorizes changes (TypeScript, CLI, routing, providers, tests, config, workflows)
+4. **Determine Scope**: Maps changed file categories to documentation files
+5. **Generate Diff Summary**: 
+   - Creates statistics with `git diff --stat`
+   - Generates 500-line preview of TypeScript changes
+   - Generates 500-line preview of configuration changes
+   - Generates 500-line preview of workflow changes
+   - Adds truncation warnings for large diffs
+6. **Build Prompt**: Assembles modular prompt from templates in `.github/templates/`
+7. **Invoke Alexi Agent**: 
+   - Runs `alexi agent` command with `--effort high` flag
+   - Provides read, write, edit, glob, grep tools
+   - Maximum 30 iterations for complex updates
+   - Workdir set to repository root
+8. **Validate Documentation**: 
+   - Runs markdownlint-cli2 on updated files
+   - Collects validation warnings
+   - Continues even if warnings exist
+9. **Commit Changes**: 
+   - Stages only files specified in documentation scope
+   - Creates commit with [alexi-bot] marker for tracking
+   - Pushes to PR branch
+10. **Comment on PR**: Posts summary with analysis, validation warnings, and next steps
 
 ### 2. Upstream Sync Workflow
 

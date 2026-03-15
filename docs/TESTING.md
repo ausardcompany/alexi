@@ -256,6 +256,186 @@ Each tool is tested across multiple categories:
    - Description presence
    - Schema generation
 
+## Testing TUI Components
+
+The TUI (Terminal User Interface) components are tested using Vitest with React component testing.
+
+### TUI Test Architecture
+
+```mermaid
+graph LR
+    subgraph "TUI Test Setup"
+        Render[Render Component]
+        Context[Mock Contexts]
+        Props[Test Props]
+    end
+    
+    subgraph "Test Execution"
+        Interact[Simulate User Input]
+        Assert[Assert Output]
+        Cleanup[Cleanup]
+    end
+    
+    Render --> Context
+    Context --> Props
+    Props --> Interact
+    Interact --> Assert
+    Assert --> Cleanup
+    
+    style Interact fill:#4CAF50
+    style Assert fill:#2196F3
+```
+
+### Example: Testing InputBox Component
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render } from 'ink-testing-library';
+import React from 'react';
+
+// Mock contexts
+vi.mock('../../../src/cli/tui/hooks/useClipboardImage.js', () => ({
+  useClipboardImage: vi.fn(),
+}));
+
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: vi.fn(() => ({
+    pending: [],
+    clearAll: vi.fn(),
+  })),
+}));
+
+import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
+import type { SlashCommand } from '../../../src/cli/tui/hooks/useCommands.js';
+import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+
+describe('InputBox', () => {
+  const defaultProps = {
+    agent: 'code',
+    agentColor: '#00ff00',
+    disabled: false,
+    onSubmit: vi.fn(),
+    isFocused: true,
+  };
+
+  it('renders without crashing', () => {
+    const { lastFrame } = render(
+      <ThemeProvider>
+        <InputBox {...defaultProps} />
+      </ThemeProvider>
+    );
+    expect(lastFrame()).toContain('code');
+    expect(lastFrame()).toContain('❯');
+  });
+
+  describe('autocomplete', () => {
+    const mockCommands: SlashCommand[] = [
+      {
+        name: 'help',
+        aliases: ['h'],
+        description: 'Show available commands',
+        category: 'general',
+        execute: async () => true,
+      },
+      {
+        name: 'exit',
+        aliases: ['quit', 'q'],
+        description: 'Exit the TUI',
+        category: 'general',
+        execute: async () => true,
+      },
+    ];
+
+    it('renders with commands prop', () => {
+      const { lastFrame } = render(
+        <ThemeProvider>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </ThemeProvider>
+      );
+      expect(lastFrame()).toContain('Type a message or /command');
+    });
+
+    it('does not show suggestions when input is empty', () => {
+      const { lastFrame } = render(
+        <ThemeProvider>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </ThemeProvider>
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).not.toContain('/help');
+      expect(frame).not.toContain('/exit');
+    });
+
+    it('accepts empty commands array', () => {
+      expect(() => {
+        render(
+          <ThemeProvider>
+            <InputBox {...defaultProps} commands={[]} />
+          </ThemeProvider>
+        );
+      }).not.toThrow();
+    });
+  });
+});
+```
+
+### TUI Test Coverage
+
+| Component | Test File | Test Cases |
+|-----------|-----------|------------|
+| `InputBox` | `tests/cli/tui/InputBox.test.tsx` | 8+ cases |
+| `MessageArea` | `tests/cli/tui/MessageArea.test.tsx` | TBD |
+| `Header` | `tests/cli/tui/Header.test.tsx` | TBD |
+| `StatusBar` | `tests/cli/tui/StatusBar.test.tsx` | TBD |
+
+### TUI Testing Best Practices
+
+1. **Mock Contexts**: Always mock React contexts that depend on external state
+   ```typescript
+   vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+     useAttachments: vi.fn(() => ({
+       pending: [],
+       clearAll: vi.fn(),
+     })),
+   }));
+   ```
+
+2. **Wrap in Providers**: Components using theme/context must be wrapped
+   ```typescript
+   render(
+     <ThemeProvider>
+       <InputBox {...props} />
+     </ThemeProvider>
+   );
+   ```
+
+3. **Test Rendering**: Verify component renders without crashing
+   ```typescript
+   it('renders without crashing', () => {
+     const { lastFrame } = render(<Component {...props} />);
+     expect(lastFrame()).toBeDefined();
+   });
+   ```
+
+4. **Test Props**: Verify component handles different prop combinations
+   ```typescript
+   it('handles undefined commands', () => {
+     expect(() => {
+       render(<InputBox {...defaultProps} />);
+     }).not.toThrow();
+   });
+   ```
+
+5. **Test User Interactions**: Simulate keyboard input and user actions
+   ```typescript
+   it('calls onSubmit when enter is pressed', () => {
+     const onSubmit = vi.fn();
+     const { stdin } = render(<InputBox {...props} onSubmit={onSubmit} />);
+     stdin.write('hello\r');
+     expect(onSubmit).toHaveBeenCalledWith('hello');
+   });
+   ```
+
 ## Testing Providers
 
 Provider tests verify integration with SAP AI Core and proper message formatting.

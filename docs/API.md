@@ -197,6 +197,89 @@ alexi session-delete -s <session-id>
 |--------|------|-------------|
 | `-s, --session <id>` | string | Session ID to delete (required) |
 
+### interactive / i
+
+Start interactive TUI mode with real-time streaming and slash commands.
+
+```bash
+alexi interactive [options]
+alexi i [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Initial model to use |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--session <id>` | string | Resume existing session |
+| `--system <prompt>` | string | Custom system prompt |
+
+#### TUI Slash Commands
+
+The interactive mode supports slash commands for quick actions:
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/h` | Show available commands |
+| `/exit` | `/quit`, `/q` | Exit the TUI |
+| `/clear` | - | Clear message history |
+| `/model [id]` | - | Show or switch model (opens picker if no ID) |
+| `/agent [name]` | - | Show or switch agent (opens selector if no name) |
+| `/status` | - | Show current session status |
+| `/sessions` | - | Open session list dialog |
+| `/mcp` | - | Manage MCP servers |
+| `/theme [dark\|light]` | - | Switch color theme |
+| `/image [path]` | `/img` | Attach image from clipboard or file path |
+| `/clear-images` | `/cli` | Remove all pending image attachments |
+
+#### TUI Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Tab | Cycle to next agent |
+| Shift+Tab | Cycle to previous agent |
+| Ctrl+X | Activate leader mode |
+| Ctrl+K | Open command palette |
+| Ctrl+L | Clear messages |
+| Ctrl+C | Abort streaming / Exit |
+| Ctrl+V | Paste image from clipboard |
+
+#### Leader Mode (after Ctrl+X)
+
+| Key | Action |
+|-----|--------|
+| n | New session |
+| m | Open model picker |
+| a | Open agent selector |
+| s | Open session list |
+
+#### Slash Command Autocomplete
+
+The TUI provides inline autocomplete for slash commands:
+
+1. Type `/` to see all available commands
+2. Continue typing to filter commands by name or alias
+3. Use Up/Down arrows to navigate suggestions
+4. Press Tab to select first suggestion or cycle through
+5. Press Enter to accept selected suggestion
+6. Press Escape to dismiss autocomplete
+
+Example workflow:
+```
+User types: /
+Shows: /help, /exit, /clear, /model, /agent, /status
+
+User types: /h
+Shows: /help (h), /image (img)
+
+User presses Tab
+Selects: /help
+
+User presses Enter
+Executes: help command
+```
+
 ## Environment Variables
 
 ### Required Variables
@@ -513,6 +596,79 @@ Execute shell commands.
   parameters: {
     command: string; // Shell command to execute
   }
+}
+```
+
+## TUI Component Interfaces
+
+### SlashCommand
+
+Slash command definition for the TUI.
+
+```typescript
+interface SlashCommand {
+  name: string;
+  aliases?: string[];
+  description: string;
+  category: CommandCategory;
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+
+type CommandCategory = 'general' | 'session' | 'model' | 'git' | 'debug' | 'config';
+```
+
+### CommandContext
+
+Context provided to slash command execution.
+
+```typescript
+interface CommandContext {
+  exit: () => void;
+  sessionId: string;
+  model: string;
+  agent: string;
+  setModel: (m: string) => void;
+  setAgent: (a: AgentName) => void;
+}
+```
+
+### InputBoxProps
+
+Props for the TUI InputBox component.
+
+```typescript
+interface InputBoxProps {
+  agent: string;
+  agentColor: string;
+  disabled: boolean;
+  onSubmit: (text: string) => void;
+  isFocused: boolean;
+  commands?: SlashCommand[];
+}
+```
+
+### UseCommandsReturn
+
+Return value from the useCommands hook.
+
+```typescript
+interface UseCommandsReturn {
+  handleCommand: (input: string) => Promise<boolean>;
+  commands: SlashCommand[];
+}
+```
+
+### UseKeyboardOptions
+
+Options for the useKeyboard hook.
+
+```typescript
+interface UseKeyboardOptions {
+  onExit: () => void;
+  onClear: () => void;
+  onNewSession: () => void;
+  isInputActive: boolean;
+  commands?: SlashCommand[];
 }
 ```
 

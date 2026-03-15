@@ -205,7 +205,30 @@ graph LR
 src/
 ├── cli/              # CLI-related code
 │   ├── program.ts    # Main CLI entry point
-│   └── commands/     # Individual CLI commands
+│   ├── commands/     # Individual CLI commands
+│   └── tui/          # Terminal UI (Ink + React)
+│       ├── App.tsx            # Main TUI application
+│       ├── components/        # UI components
+│       │   ├── InputBox.tsx       # User input with autocomplete
+│       │   ├── MessageArea.tsx    # Chat message display
+│       │   ├── Header.tsx         # Session header
+│       │   ├── StatusBar.tsx      # Status information
+│       │   └── ...
+│       ├── context/           # React contexts
+│       │   ├── SessionContext.tsx  # Session state
+│       │   ├── ChatContext.tsx     # Chat state
+│       │   ├── ThemeContext.tsx    # Theme state
+│       │   └── ...
+│       ├── dialogs/           # Dialog components
+│       │   ├── ModelPicker.tsx     # Model selection
+│       │   ├── AgentSelector.tsx   # Agent selection
+│       │   └── ...
+│       ├── hooks/             # Custom React hooks
+│       │   ├── useCommands.ts      # Slash command system
+│       │   ├── useKeyboard.ts      # Keyboard shortcuts
+│       │   ├── useStreamChat.ts    # Streaming chat
+│       │   └── ...
+│       └── theme/             # Theme configuration
 ├── core/             # Core orchestration logic
 │   ├── orchestrator.ts
 │   ├── router.ts
@@ -300,12 +323,58 @@ npm test
 # Run specific test file
 npm test -- tool.test.ts
 
+# Run TUI component tests
+npm test -- tests/cli/tui/
+
 # Run with coverage
 npm test -- --coverage
 
 # Watch mode
 npm test -- --watch
 ```
+
+### Testing TUI Components
+
+When testing TUI components built with Ink and React:
+
+1. **Mock Contexts**: Mock React contexts that depend on external state
+   ```typescript
+   vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+     useAttachments: vi.fn(() => ({
+       pending: [],
+       clearAll: vi.fn(),
+     })),
+   }));
+   ```
+
+2. **Wrap in Providers**: Components using contexts must be wrapped
+   ```typescript
+   import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+   
+   render(
+     <ThemeProvider>
+       <InputBox {...props} />
+     </ThemeProvider>
+   );
+   ```
+
+3. **Test Rendering**: Verify components render without crashing
+   ```typescript
+   it('renders without crashing', () => {
+     const { lastFrame } = render(<Component {...props} />);
+     expect(lastFrame()).toBeDefined();
+   });
+   ```
+
+4. **Test User Interactions**: Simulate keyboard input
+   ```typescript
+   it('handles user input', () => {
+     const onSubmit = vi.fn();
+     const { stdin } = render(<InputBox {...props} onSubmit={onSubmit} />);
+     stdin.write('hello\r');
+     expect(onSubmit).toHaveBeenCalledWith('hello');
+   });
+   ```
 
 ## Pull Request Process
 
@@ -366,16 +435,22 @@ Pull requests trigger automated workflows:
 
 1. **CI**: Runs tests, linting, and build verification
 2. **Documentation Update**: AI-powered documentation generation
-   - Analyzes code changes
-   - Updates relevant documentation files
-   - Generates Mermaid diagrams
-   - Updates CHANGELOG.md
+   - Analyzes code changes since last documentation commit
+   - Detects which documentation files need updating
+   - Generates accurate technical documentation using Claude AI with `--effort high`
+   - Validates generated documentation with markdownlint
+   - Updates relevant documentation files (ARCHITECTURE.md, API.md, etc.)
+   - Always updates CHANGELOG.md (in repository root)
+   - Commits documentation changes with [alexi-bot] marker
+   - Posts PR comment with summary and validation warnings
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
 - Generate accurate technical documentation using Claude AI
+- Include Mermaid diagrams where appropriate
 - Commit documentation changes to your PR branch
 - Ensure documentation stays in sync with code
+- Track documentation commits using [alexi-bot] marker to avoid redundant updates
 
 ### Code Review
 

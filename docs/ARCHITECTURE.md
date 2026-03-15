@@ -291,6 +291,13 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   └── tui/       # Terminal UI (Ink + React)
+│   │       ├── App.tsx            # Main TUI application
+│   │       ├── components/        # UI components (InputBox, MessageArea, etc.)
+│   │       ├── context/           # React contexts (Session, Chat, Theme, etc.)
+│   │       ├── dialogs/           # Dialog components (ModelPicker, AgentSelector, etc.)
+│   │       ├── hooks/             # Custom hooks (useCommands, useKeyboard, etc.)
+│   │       └── theme/             # Theme configuration
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -467,6 +474,168 @@ flowchart LR
     Fix --> Code
 ```
 
+## Terminal UI (TUI) Architecture
+
+Alexi includes a sophisticated terminal user interface built with Ink (React for CLIs) that provides an interactive chat experience with real-time streaming, slash commands, and keyboard shortcuts.
+
+### TUI Component Architecture
+
+```mermaid
+graph TB
+    subgraph "TUI Application"
+        App[App.tsx - Root Component]
+        AppLayout[AppLayout - Main Layout]
+    end
+    
+    subgraph "UI Components"
+        Header[Header - Session Info]
+        MessageArea[MessageArea - Chat Display]
+        InputBox[InputBox - User Input]
+        StatusBar[StatusBar - Status Info]
+    end
+    
+    subgraph "Contexts"
+        Session[SessionContext]
+        Chat[ChatContext]
+        Theme[ThemeContext]
+        Keybind[KeybindContext]
+        Dialog[DialogContext]
+        Attachment[AttachmentContext]
+    end
+    
+    subgraph "Hooks"
+        Commands[useCommands - Slash Commands]
+        Keyboard[useKeyboard - Keyboard Shortcuts]
+        StreamChat[useStreamChat - Streaming]
+        Permission[usePermission - Permission Prompts]
+    end
+    
+    App --> AppLayout
+    AppLayout --> Header
+    AppLayout --> MessageArea
+    AppLayout --> InputBox
+    AppLayout --> StatusBar
+    
+    AppLayout --> Session
+    AppLayout --> Chat
+    AppLayout --> Theme
+    AppLayout --> Keybind
+    AppLayout --> Dialog
+    AppLayout --> Attachment
+    
+    AppLayout --> Commands
+    AppLayout --> Keyboard
+    AppLayout --> StreamChat
+    AppLayout --> Permission
+```
+
+### Slash Command System
+
+The TUI implements a declarative slash command system with autocomplete:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant InputBox
+    participant useCommands
+    participant CommandHandler
+    participant LLM
+    
+    User->>InputBox: Type "/"
+    InputBox->>InputBox: Show all commands
+    User->>InputBox: Type "/h"
+    InputBox->>InputBox: Filter to /help, /h
+    User->>InputBox: Press Tab
+    InputBox->>InputBox: Select first suggestion
+    User->>InputBox: Press Enter
+    InputBox->>useCommands: handleCommand("/help")
+    useCommands->>CommandHandler: Execute help command
+    CommandHandler-->>User: Display help
+    
+    Note over InputBox,LLM: Slash commands NOT sent to LLM
+    
+    User->>InputBox: Type "hello world"
+    InputBox->>LLM: Send message to LLM
+    LLM-->>User: LLM response
+```
+
+### Slash Command Interface
+
+```typescript
+interface SlashCommand {
+  name: string;
+  aliases?: string[];
+  description: string;
+  category: CommandCategory;
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+
+type CommandCategory = 'general' | 'session' | 'model' | 'git' | 'debug' | 'config';
+
+interface CommandContext {
+  exit: () => void;
+  sessionId: string;
+  model: string;
+  agent: string;
+  setModel: (m: string) => void;
+  setAgent: (a: AgentName) => void;
+}
+```
+
+### Built-in Slash Commands
+
+| Command | Aliases | Category | Description |
+|---------|---------|----------|-------------|
+| `/help` | `/h` | general | Show available commands |
+| `/exit` | `/quit`, `/q` | general | Exit the TUI |
+| `/clear` | - | general | Clear messages |
+| `/model [id]` | - | model | Show or switch the current model |
+| `/agent [name]` | - | session | Show or switch the current agent |
+| `/status` | - | session | Show current session status |
+| `/sessions` | - | session | Open session list |
+| `/mcp` | - | config | Manage MCP servers |
+| `/theme [dark\|light]` | - | config | Switch theme |
+| `/image [path]` | `/img` | general | Attach image from clipboard or file |
+| `/clear-images` | `/cli` | general | Remove all pending image attachments |
+
+### InputBox Autocomplete Features
+
+1. **Trigger**: Autocomplete activates when input starts with `/`
+2. **Filtering**: 
+   - Shows all commands when just `/` is typed
+   - Filters by command name or aliases as user types
+   - Maximum 6 suggestions displayed
+3. **Navigation**:
+   - Up/Down arrows: Navigate suggestions
+   - Tab: Select first suggestion or cycle through
+   - Shift+Tab: Cycle backwards through suggestions
+   - Enter: Accept selected suggestion or submit command
+   - Escape: Dismiss autocomplete
+4. **Display**: Shows command name, aliases, and description with color highlighting
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Tab | Cycle agents forward |
+| Shift+Tab | Cycle agents backward |
+| Ctrl+X | Activate leader mode |
+| Ctrl+K | Open command palette |
+| Ctrl+L | Clear messages |
+| Ctrl+C | Abort streaming / Exit |
+| Ctrl+V | Paste image from clipboard |
+
+### Leader Mode Keybindings
+
+After pressing Ctrl+X (leader key):
+
+| Key | Action |
+|-----|--------|
+| n | New session |
+| m | Open model picker |
+| a | Open agent selector |
+| s | Open session list |
+
 ## Future Improvements
 
 - [ ] Add more provider implementations
@@ -474,3 +643,6 @@ flowchart LR
 - [ ] Add metrics and telemetry
 - [ ] Implement caching layer
 - [ ] Add web UI option
+- [ ] Expand slash command system with plugins
+- [ ] Add command history and favorites
+- [ ] Implement command aliases customization
