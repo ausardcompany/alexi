@@ -44,11 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Write and edit tools resolve relative paths using workdir context
   - Enables proper permission checks for both absolute and relative paths
   - Maintains compatibility with CI/CD workflows
-- Updated documentation-update.yml workflow with improved file path handling
-  - File paths in scope.md now include full relative paths (e.g., docs/ARCHITECTURE.md)
-  - Clarified CHANGELOG.md location in repository root (not docs/)
-  - Removed zero-width space characters from workflow expressions
+- Redesigned documentation-update.yml workflow with 12 structural improvements
+  - Fixed last documentation commit detection to use `[alexi-bot]` marker instead of generic message
+  - Corrected routing change detection pattern to `src/core/router|src/config/routing`
+  - Enhanced diff preview with 500-line limits and truncation warnings for TypeScript, JSON, and YAML changes
+  - Replaced large inline system prompt with concise role-only prompt (detailed instructions in templates)
+  - Added `--effort high` flag to agent command for better quality
+  - Implemented markdown validation step with markdownlint-cli2
+  - Fixed git staging to only add files listed in docs_to_update scope
+  - Updated commit message with `[alexi-bot]` marker for reliable detection
+  - Added validation warnings section to PR success comments
+  - Improved artifact uploads to include validation.log
   - Enhanced documentation scope comments for bot guidance
+  - Removed zero-width space characters from workflow expressions
 - Updated agenticChat module with permission configuration
   - Project root set to workdir for permission checks
   - External directories enabled for agentic operations
@@ -58,9 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Resolved relative path handling in write/edit tools for CI permission checks
-- Fixed zero-width space characters in GitHub workflow expressions
+- Fixed zero-width space characters in GitHub workflow expressions causing syntax errors
 - Corrected file path specifications in documentation workflow scope
 - Removed .env file from git tracking to prevent accidental credential exposure
+- Fixed documentation-update.yml to prevent staging unmanaged files during git commit
+- Corrected grep pattern for routing module changes from `src/(router|routing)/` to `src/core/router|src/config/routing`
+- Fixed diff preview truncation to show meaningful truncation warnings instead of silent cutoffs
 
 ### Removed
 

@@ -50,29 +50,40 @@ graph TB
 **File**: `.github/workflows/documentation-update.yml`
 
 **Triggers**:
-- Pull request events (opened, synchronize, reopened)
-- Manual workflow dispatch with PR number
+- Pull request events (opened, synchronize, reopened) to main/master branches
+- Manual workflow dispatch with options:
+  - `pr_number`: Target PR number (required)
+  - `force_full_regeneration`: Force regeneration of all documentation (optional, default: false)
 
-**Purpose**: Automatically generates and updates documentation based on code changes in pull requests.
+**Purpose**: Automatically generates and updates documentation based on code changes in pull requests using AI-powered analysis.
 
-#### Workflow Steps
+#### Workflow Architecture
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub Actions
     participant Repo as Repository
-    participant Alexi as Alexi CLI
-    participant Claude as Claude AI
+    participant Analyze as Change Analysis
+    participant Alexi as Alexi CLI (Agent Mode)
+    participant Claude as Claude AI (SAP AI Core)
     participant Docs as Documentation Files
+    participant Validate as Markdown Validator
     
     GH->>Repo: Checkout PR branch
-    GH->>Repo: Analyze changed files
-    GH->>GH: Determine documentation scope
-    GH->>Repo: Generate diff summary
-    GH->>Alexi: Build CLI
-    Alexi->>Claude: Send documentation prompt
-    Claude->>Docs: Generate/update docs
-    GH->>Repo: Commit documentation changes
+    GH->>Analyze: Analyze changed files
+    Analyze->>Analyze: Find last [alexi-bot] commit
+    Analyze->>Analyze: Filter out docs/ and CHANGELOG.md
+    Analyze->>GH: Determine documentation scope
+    GH->>GH: Build kilo-prompt from templates
+    GH->>Alexi: Run agent command (--no-auto-commits)
+    Alexi->>Claude: Send assembled prompt
+    Claude->>Docs: Use read/write/edit tools
+    Claude->>Alexi: Complete generation
+    Alexi->>GH: Exit with status
+    GH->>Validate: Run markdownlint-cli2
+    Validate->>GH: Report warnings
+    GH->>Repo: Stage only docs_to_update files
+    GH->>Repo: Commit with [alexi-bot] marker
     GH->>Repo: Push to PR branch
 ```
 
@@ -80,45 +91,176 @@ sequenceDiagram
 
 1. **Intelligent Scope Detection**: Analyzes changed files to determine which documentation needs updating
    - Core/CLI changes trigger `ARCHITECTURE.md` and `API.md` updates
-   - Routing changes trigger `ROUTING.md` updates
+   - Routing changes (`src/core/router`, `src/config/routing`) trigger `ROUTING.md` updates
    - Provider changes trigger `PROVIDERS.md` updates
    - Workflow/script changes trigger `AUTOMATION.md` updates
-   - Always updates `CHANGELOG.md` and `CONTRIBUTING.md`
+   - Always updates `CHANGELOG.md` (repository root) and `docs/CONTRIBUTING.md`
 
-2. **Code Analysis**: Generates detailed analysis including:
-   - Changed file list with categorization
-   - Commit history since last documentation update
-   - Code diff statistics
-   - TypeScript and configuration change previews
+2. **Smart Change Detection**: Avoids redundant documentation regeneration
+   - Searches for last commit with `[alexi-bot]` marker using `git log --grep`
+   - Compares changes since last documentation commit (not base branch)
+   - Filters out documentation files from change analysis
+   - Skips workflow if no code changes detected
 
-3. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI to:
-   - Analyze code changes
-   - Update documentation with accurate technical details
-   - Generate Mermaid diagrams
-   - Maintain consistent documentation style
+3. **Modular Prompt Assembly**: Builds documentation prompt from template files
+   - Base templates: `01-header.md` through `08-footer.md`
+   - Conditional sections based on changed modules (e.g., `07-conditional/automation.md`)
+   - Injects change analysis, commit history, and diff previews
+   - Prevents truncation with 500-line limits and truncation warnings
 
-4. **Force Regeneration**: Manual trigger option to regenerate all documentation
+4. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI agent mode
+   - Runs with `--auto-route` and `--effort high` for quality
+   - Maximum 30 iterations for complex documentation tasks
+   - Enabled tools: `read`, `write`, `edit`, `glob`, `grep`
+   - Uses `--no-auto-commits` flag to let workflow handle git operations
+
+5. **Validation and Quality Control**:
+   - Runs `markdownlint-cli2` on generated documentation
+   - Reports validation warnings in PR comments
+   - Uploads full bot output and validation logs as artifacts
+
+6. **Safe Git Operations**:
+   - Stages only files listed in `docs_to_update` scope
+   - Never stages unmanaged or unintended files
+   - Commits with `[skip ci] [alexi-bot]` markers
+   - Pushes only if local HEAD differs from remote
+
+#### Workflow Steps
+
+**Step 1: Determine PR Context**
+- Extracts PR number from event or manual input
+- Fetches PR branch name via GitHub API
+- Checkouts PR branch with full history
+
+**Step 2: Analyze Changed Files**
+```bash
+# Find last documentation commit
+LAST_DOC_COMMIT=$(git log --oneline --grep="\\[alexi-bot\\]" -1 --format="%H")
+
+# Get changes since last doc commit (or base branch if none)
+CHANGED_FILES=$(git diff --name-only "$LAST_CODE_COMMIT"...HEAD -- ':!docs/' ':!CHANGELOG.md')
+
+# Filter out documentation files
+CHANGED_FILES=$(echo "$CHANGED_FILES" | grep -v -E '^(docs/|CHANGELOG\.md$)')
+```
+
+**Step 3: Determine Documentation Scope**
+- Maps changed files to documentation targets
+- Outputs full relative paths (e.g., `docs/ARCHITECTURE.md`)
+- Clarifies `CHANGELOG.md` location (repository root, not `docs/`)
+- Always includes `CHANGELOG.md` and `docs/CONTRIBUTING.md`
+
+**Step 4: Build Kilo Prompt**
+- Assembles modular templates from `.github/templates/`
+- Injects change analysis, commits, and diffs
+- Adds conditional sections based on changed modules
+- Produces final prompt file: `kilo-prompt.md`
+
+**Step 5: Run Alexi Agent**
+```bash
+node dist/cli/program.js agent \
+  --message-file kilo-prompt.md \
+  --auto-route \
+  --effort high \
+  --max-iterations 30 \
+  --tools "read,write,edit,glob,grep" \
+  --workdir "$(pwd)" \
+  --verbose \
+  --no-auto-commits \
+  --system "$SYSTEM_PROMPT"
+```
+
+**Step 6: Validate Generated Documentation**
+```bash
+npx --yes markdownlint-cli2 $EXISTING_DOCS
+```
+
+**Step 7: Commit and Push**
+```bash
+# Stage only intended files
+for f in $DOCS_TO_UPDATE; do
+  [ -f "$f" ] && git add "$f"
+done
+
+# Commit if changes exist
+git commit -m "docs: auto-generate documentation [skip ci] [alexi-bot]"
+
+# Push if local differs from remote
+git push origin "$BRANCH"
+```
 
 #### Environment Variables
 
 ```bash
-AICORE_SERVICE_KEY      # SAP AI Core service credentials
+AICORE_SERVICE_KEY      # SAP AI Core service credentials (JSON)
 AICORE_RESOURCE_GROUP   # SAP AI Core resource group ID
+GITHUB_TOKEN            # Automatically provided by GitHub Actions
 ```
 
-#### Configuration
+#### Documentation Scope Mapping
 
-The workflow determines documentation scope based on file patterns:
+| Changed Files Pattern | Documentation Updated |
+|-----------------------|----------------------|
+| `src/cli/`, `src/core/` | `docs/ARCHITECTURE.md`, `docs/API.md` |
+| `src/core/router`, `src/config/routing` | `docs/ROUTING.md` |
+| `src/providers/` | `docs/PROVIDERS.md` |
+| `*.json`, `.env*` | `docs/CONFIGURATION.md` |
+| `*.test.ts`, `*.spec.ts` | `docs/TESTING.md` |
+| `.github/workflows/`, `scripts/` | `docs/AUTOMATION.md` |
+| All changes | `CHANGELOG.md`, `docs/CONTRIBUTING.md` |
 
-| Pattern | Documentation Triggered |
-|---------|------------------------|
-| `src/cli/**`, `src/core/**` | ARCHITECTURE.md, API.md |
-| `src/router/**`, `routing-config.json` | ROUTING.md |
-| `src/providers/**` | PROVIDERS.md |
-| `*.json`, `.env*` | CONFIGURATION.md |
-| `*.test.ts`, `*.spec.ts` | TESTING.md |
-| `.github/workflows/**`, `scripts/**` | AUTOMATION.md |
-| All changes | CHANGELOG.md, CONTRIBUTING.md |
+#### Template Structure
+
+Templates are stored in `.github/templates/`:
+
+```
+.github/templates/
+├── 01-header.md                    # Project overview and context
+├── 02-changed-files-header.md      # Changed files section header
+├── 03-commits-header.md            # Commit history section header
+├── 04-diff-header.md               # Code diff section header
+├── 05-scope-header.md              # Documentation scope header
+├── 06-requirements.md              # General documentation requirements
+├── 07-conditional/                 # Module-specific requirements
+│   ├── architecture-api.md
+│   ├── routing.md
+│   ├── providers.md
+│   ├── configuration.md
+│   ├── testing.md
+│   ├── automation.md
+│   └── changelog-contributing.md
+└── 08-footer.md                    # Output format instructions
+```
+
+#### Artifact Uploads
+
+The workflow uploads the following artifacts (retained for 30 days):
+- `analysis.md` - File change analysis
+- `scope.md` - Documentation scope determination
+- `commits.md` - Commit history
+- `diff.md` - Code diff summary
+- `kilo-prompt.md` - Assembled prompt sent to AI
+- `bot-output.log` - Full agent execution log
+- `validation.log` - Markdown validation results
+
+#### PR Comments
+
+The workflow posts status comments to the PR:
+
+**Success Comment**:
+- Documentation scope
+- Changed files analysis
+- Validation warnings (if any)
+- Next steps checklist
+
+**Skip Comment**:
+- Posted when no code changes detected
+- Indicates documentation is already up-to-date
+
+**Failure Comment**:
+- Error details from bot output
+- Manual documentation checklist
+- Retry instructions
 
 ### 2. Upstream Sync Workflow
 
@@ -127,8 +269,8 @@ The workflow determines documentation scope based on file patterns:
 **Triggers**:
 - Daily schedule at 06:00 UTC
 - Manual workflow dispatch with options:
-  - `dry_run`: Analyze changes without creating PR
-  - `force_sync`: Sync even if no changes detected
+  - `dry_run`: Analyze changes without creating PR (default: false)
+  - `force_sync`: Sync even if no changes detected (default: false)
 
 **Purpose**: Automatically synchronizes changes from upstream AI coding assistant repositories (kilocode, opencode, claude-code) and applies relevant updates to Alexi.
 
@@ -143,72 +285,129 @@ The workflow determines documentation scope based on file patterns:
 #### Workflow Architecture
 
 ```mermaid
-graph LR
+graph TB
     subgraph Upstream["Upstream Repositories"]
-        Kilo[kilocode]
-        Open[opencode]
-        Claude[claude-code]
+        Kilo[kilocode<br/>Kilo-Org/kilocode]
+        Open[opencode<br/>anomalyco/opencode]
+        Claude[claude-code<br/>anthropics/claude-code]
     end
     
-    subgraph Sync["Sync Process"]
-        Fork[Sync Forks]
-        Analyze[Analyze Changes]
-        Plan[Generate Plan]
-        Execute[Execute Updates]
+    subgraph Stage1["Stage 1: Planning"]
+        SyncForks[Sync Forks<br/>gh repo sync]
+        Clone[Clone Repos<br/>git clone --depth 100]
+        ReadState[Read Sync State<br/>.github/last-sync-commits.json]
+        GenDiff[Generate Diff Report<br/>git diff with stats]
+        PlanPrompt[Build Planning Prompt<br/>Embed diff + instructions]
+        Opus[Claude 4.5 Opus<br/>Analyze & Plan]
     end
     
-    subgraph Alexi["Alexi Repository"]
-        Code[Source Code]
-        Commit[Commit Changes]
-        PR[Create PR]
+    subgraph Stage2["Stage 2: Execution"]
+        ExecPrompt[Build Execution Prompt<br/>Embed plan + instructions]
+        Sonnet[Claude 4.5 Sonnet<br/>Agent Mode with Tools]
+        Tools[read/write/edit/glob/grep<br/>50 iterations max]
+        Retry[Retry Logic<br/>3 attempts for 400 errors]
     end
     
-    Kilo --> Fork
-    Open --> Fork
-    Claude --> Fork
-    Fork --> Analyze
-    Analyze --> Plan
-    Plan --> Execute
-    Execute --> Code
-    Code --> Commit
-    Commit --> PR
+    subgraph Output["Output"]
+        BumpVer[Auto-bump Version<br/>patch increment]
+        UpdateState[Update Sync State<br/>new commit hashes]
+        Commit[Commit to Feature Branch<br/>auto/sync-upstream-DATE]
+        CreatePR[Create Pull Request<br/>with detailed summary]
+        AutoMerge[Enable Auto-Merge<br/>squash after CI passes]
+    end
+    
+    Kilo --> SyncForks
+    Open --> SyncForks
+    Claude --> SyncForks
+    SyncForks --> Clone
+    Clone --> ReadState
+    ReadState --> GenDiff
+    GenDiff --> PlanPrompt
+    PlanPrompt --> Opus
+    Opus --> ExecPrompt
+    ExecPrompt --> Sonnet
+    Sonnet --> Tools
+    Tools --> Retry
+    Retry --> BumpVer
+    BumpVer --> UpdateState
+    UpdateState --> Commit
+    Commit --> CreatePR
+    CreatePR --> AutoMerge
 ```
 
-#### Sync Process
+#### Two-Stage Sync Process
 
-The upstream sync workflow follows a sophisticated two-stage AI-powered process:
+**Stage 1: Planning with Claude 4.5 Opus**
 
-**Stage 1: Planning (Claude 4.5 Opus)**
-1. Clone upstream repositories
-2. Read previous sync state from `.github/last-sync-commits.json`
-3. Generate diff report comparing current vs last synced commits
-4. Use Claude 4.5 Opus to analyze changes and create detailed update plan
-5. Plan includes:
-   - Critical, high, medium, and low priority changes
-   - Exact code snippets and modifications
-   - SAP AI Core compatibility considerations
-   - File-by-file change instructions
+1. **Fork Synchronization**: Uses `gh repo sync` to update ausard forks from upstream
+2. **State Management**: Reads `.github/last-sync-commits.json` to get previous sync commits
+3. **Diff Generation**: Creates comprehensive diff report with:
+   - Commits since last sync
+   - Changed files statistics
+   - Detailed code diffs for TypeScript, JavaScript, JSON files
+4. **AI Planning**: Claude 4.5 Opus analyzes changes and produces detailed update plan:
+   ```markdown
+   # Update Plan for Alexi
+   
+   ## Summary
+   - Total changes planned: X
+   - Critical: X | High: X | Medium: X | Low: X
+   
+   ## Changes
+   
+   ### 1. [Brief description]
+   **File**: `src/path/to/file.ts`
+   **Priority**: high
+   **Type**: feature | bugfix | security | refactor
+   **Reason**: [Why this change is needed]
+   
+   **Current code**:
+   ```typescript
+   // existing code
+   ```
+   
+   **New code**:
+   ```typescript
+   // code to add or replace with
+   ```
+   ```
 
-**Stage 2: Execution (Claude 4.5 Sonnet with Tools)**
-1. Read the generated update plan
-2. Use agentic mode with enabled tools:
-   - `read`: Examine existing files
-   - `write`: Create new files
-   - `edit`: Modify existing files with exact string replacement
-   - `glob`: Find files by pattern
-   - `grep`: Search file contents
-3. Execute changes in priority order
-4. Maximum 50 iterations for complex updates
-5. Generate execution summary
+**Stage 2: Execution with Claude 4.5 Sonnet (Agent Mode)**
 
-**Stage 3: PR Creation**
-1. Commit all changes made by the AI agent
-2. Update `.github/last-sync-commits.json` with new commit hashes
-3. Create pull request with:
-   - Detailed description of upstream changes
-   - Links to upstream commits
-   - Diff report attachment
-   - Auto-merge enabled for trusted updates
+1. **Execution Prompt**: Embeds generated plan with execution instructions
+2. **Agentic Mode**: Runs Alexi CLI with tool execution enabled:
+   ```bash
+   node dist/cli/program.js agent \
+     --message-file .github/prompts/execution-prompt.md \
+     --model "anthropic--claude-4.5-sonnet" \
+     --max-iterations 50 \
+     --tools "read,write,edit,glob,grep" \
+     --workdir "$(pwd)" \
+     --verbose \
+     --no-auto-commits \
+     --no-dirty-commits \
+     --system "$SYSTEM_PROMPT"
+   ```
+3. **Retry Logic**: Attempts up to 3 times to handle transient SAP AI Core 400 errors
+4. **Debug Mode**: Sets `ALEXI_DEBUG_MESSAGES=1` for diagnostic output
+5. **Tool Operations**: AI uses tools to:
+   - Read existing files before modifying
+   - Write new files
+   - Edit existing files with exact string replacement
+   - Search for relevant code with glob/grep
+
+**Stage 3: PR Creation and Version Bump**
+
+1. **Version Increment**: Automatically bumps patch version (e.g., 0.1.8 → 0.1.9)
+2. **Sync State Update**: Updates `.github/last-sync-commits.json` with new commit hashes
+3. **Feature Branch**: Creates dated branch `auto/sync-upstream-YYYY-MM-DD-runN`
+4. **Detailed PR**: Creates pull request with:
+   - Version bump information
+   - Diff statistics
+   - AI execution summary
+   - Repository comparison table
+   - Link to generated plan file
+5. **Auto-Merge**: Enables squash auto-merge (via separate workflow) after CI passes
 
 #### Sync State Management
 
@@ -218,35 +417,86 @@ The workflow maintains sync state in `.github/last-sync-commits.json`:
 {
   "kilocode": {
     "last_synced_commit": "abc123...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_at": "2024-01-15T06:00:00Z",
+    "upstream": "Kilo-Org/kilocode",
+    "fork": "ausard/kilocode"
   },
   "opencode": {
     "last_synced_commit": "def456...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_at": "2024-01-15T06:00:00Z",
+    "upstream": "anomalyco/opencode",
+    "fork": "ausard/opencode"
   },
   "claude-code": {
     "last_synced_commit": "ghi789...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_at": "2024-01-15T06:00:00Z",
+    "upstream": "anthropics/claude-code",
+    "fork": "direct-clone"
+  },
+  "metadata": {
+    "version": "1.1.0",
+    "workflow_run": "12345678",
+    "description": "Tracks last synced commits from upstream repositories"
   }
 }
 ```
 
-#### Auto-Merge Behavior
+#### File Mapping Strategy
 
-The workflow automatically merges PRs when:
-- All CI checks pass
-- Changes are from trusted upstream sources
-- No merge conflicts exist
-- PR is properly labeled with `upstream-sync`
+The planning prompt instructs Opus to map upstream changes to Alexi structure:
+
+| Upstream Change Type | Alexi Target |
+|---------------------|--------------|
+| Tool system changes | `src/tool/` |
+| Agent system changes | `src/agent/` |
+| Permission system changes | `src/permission/` |
+| Event bus changes | `src/bus/` |
+| Core orchestration changes | `src/core/` |
+| Provider changes | `src/providers/` |
+| Router changes | `src/router/` |
+| CLI changes | `src/cli/` |
+
+#### Safety Mechanisms
+
+1. **SAP AI Core Compatibility**: Planning prompt explicitly requires maintaining SAP integration
+2. **Existing Customizations**: Instructions to preserve SAP-specific code
+3. **Priority-Based Execution**: Critical and high-priority changes executed first
+4. **No Direct Master Push**: Always creates feature branch and PR
+5. **CI Validation**: Auto-merge only after all checks pass
+6. **Dry Run Mode**: Test sync process without making changes
 
 #### Dry Run Mode
 
-Manual trigger with `dry_run: true` will:
-- Analyze all upstream changes
-- Generate update plan
-- Show proposed changes in workflow logs
-- NOT create a pull request
-- NOT commit any changes
+Manual trigger with `dry_run: true`:
+- Analyzes all upstream changes
+- Generates update plan
+- Shows proposed changes in workflow logs
+- Does NOT create pull request
+- Does NOT commit any changes
+- Useful for testing and validation
+
+#### Environment Variables
+
+```bash
+AICORE_SERVICE_KEY      # SAP AI Core service credentials (JSON)
+AICORE_RESOURCE_GROUP   # SAP AI Core resource group ID
+GH_PAT                  # GitHub Personal Access Token (for cross-repo sync)
+GITHUB_TOKEN            # Default token (automatically provided)
+ALEXI_DEBUG_MESSAGES    # Set to 1 for debug output
+```
+
+#### Workflow Summary Output
+
+The workflow generates a detailed summary with:
+- Workflow parameters (dry run, force sync)
+- Change detection status
+- Version bump information
+- PR URL and commit SHA
+- Diff statistics
+- Changed files list
+- AI execution summary
+- Two-stage process details
+- Commit references table
 
 ### 3. Continuous Integration Workflow
 
@@ -379,7 +629,7 @@ In agentic mode, the tool system automatically configures high-priority permissi
 
 ### Tool Context Resolution
 
-The `write` and `edit` tools now support relative path resolution:
+The `write` and `edit` tools support relative path resolution:
 
 ```typescript
 // tools/write.ts and tools/edit.ts
@@ -416,17 +666,24 @@ This enhancement allows the AI agent to:
 2. Use workflow dispatch with verbose flags
 3. Review generated reports in `.github/reports/`
 4. Check sync state in `.github/last-sync-commits.json`
+5. Download artifacts for detailed analysis
 
 ### Common Issues
 
-**Issue**: Documentation update fails with permission error
+**Issue**: Documentation update fails with permission error  
 **Solution**: Verify `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` secrets are set correctly
 
-**Issue**: Upstream sync creates no PR
-**Solution**: Check if upstream repositories have new commits since last sync
+**Issue**: Upstream sync creates no PR  
+**Solution**: Check if upstream repositories have new commits since last sync in `.github/last-sync-commits.json`
 
-**Issue**: AI agent makes incorrect changes
-**Solution**: Review generated plan in `.github/reports/update-plan-*.md` and adjust prompts
+**Issue**: AI agent makes incorrect changes  
+**Solution**: Review generated plan in `.github/reports/update-plan-*.md` and adjust prompts in `.github/templates/`
+
+**Issue**: Workflow skips documentation generation  
+**Solution**: Ensure code changes exist outside of `docs/` and `CHANGELOG.md` directories
+
+**Issue**: SAP AI Core returns 400 errors  
+**Solution**: Workflow retries up to 3 times automatically; check `ALEXI_DEBUG_MESSAGES` output in logs
 
 ## Best Practices
 
@@ -435,6 +692,9 @@ This enhancement allows the AI agent to:
 3. **Keep secrets updated**: Rotate credentials regularly
 4. **Monitor workflow costs**: Claude API usage is tracked in SAP AI Core
 5. **Document workflow modifications**: Update this file when changing workflows
+6. **Use artifacts for debugging**: Download workflow artifacts for detailed analysis
+7. **Validate generated documentation**: Check markdown linting warnings in PR comments
+8. **Maintain template consistency**: Keep `.github/templates/` files synchronized with requirements
 
 ## Future Enhancements
 
@@ -446,3 +706,7 @@ Planned improvements to the automation system:
 - [ ] Slack/Teams notifications for sync results
 - [ ] Rollback mechanism for failed syncs
 - [ ] Metrics dashboard for sync success rates
+- [ ] Parallel processing for multiple upstream sources
+- [ ] Smart conflict resolution for overlapping changes
+- [ ] Cost optimization for AI API usage
+- [ ] Documentation quality scoring

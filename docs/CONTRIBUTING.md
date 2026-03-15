@@ -374,7 +374,8 @@ Pull requests trigger automated workflows:
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
 - Generate accurate technical documentation using Claude AI
-- Commit documentation changes to your PR branch
+- Commit documentation changes to your PR branch with `[alexi-bot]` marker
+- Run markdown validation and report warnings
 - Ensure documentation stays in sync with code
 
 ### Code Review
@@ -407,7 +408,7 @@ Reviewers will check:
 | `docs/TESTING.md` | Testing guide |
 | `docs/AUTOMATION.md` | CI/CD and automation |
 | `docs/CONTRIBUTING.md` | This file |
-| `CHANGELOG.md` | Version history |
+| `CHANGELOG.md` | Version history (repository root) |
 
 ### Documentation Standards
 
@@ -435,7 +436,43 @@ Supported diagram types:
 
 ## Automation System
 
-### Autonomous Sync
+### Autonomous Documentation Updates
+
+Alexi includes an autonomous documentation update system that runs on every pull request:
+
+```mermaid
+sequenceDiagram
+    participant PR as Pull Request
+    participant Workflow as Documentation Workflow
+    participant Analyze as Change Analysis
+    participant Templates as Template System
+    participant Alexi as Alexi Agent
+    participant Claude as Claude AI
+    participant Docs as Documentation Files
+    
+    PR->>Workflow: Trigger on PR event
+    Workflow->>Analyze: Find last [alexi-bot] commit
+    Analyze->>Analyze: Detect changed modules
+    Analyze->>Workflow: Return scope
+    Workflow->>Templates: Assemble kilo-prompt
+    Templates->>Alexi: Provide assembled prompt
+    Alexi->>Claude: Execute with tools
+    Claude->>Docs: Update documentation
+    Docs->>Workflow: Validation
+    Workflow->>PR: Commit with [alexi-bot]
+```
+
+The system:
+- Runs automatically on pull requests to main/master
+- Analyzes code changes since last `[alexi-bot]` commit
+- Determines documentation scope based on changed files
+- Assembles prompt from modular templates in `.github/templates/`
+- Uses Claude AI through Alexi CLI in agent mode
+- Validates generated documentation with markdownlint-cli2
+- Commits changes with `[skip ci] [alexi-bot]` markers
+- Posts detailed status comments to PR
+
+### Autonomous Upstream Sync
 
 Alexi includes an autonomous upstream synchronization system:
 
@@ -452,8 +489,8 @@ graph LR
 The system:
 - Runs daily at 06:00 UTC
 - Syncs from kilocode, opencode, and claude-code repositories
-- Uses AI to analyze and apply relevant changes
-- Creates PRs with detailed change descriptions
+- Uses two-stage AI process (Opus for planning, Sonnet for execution)
+- Creates PRs with detailed change descriptions and version bumps
 - Auto-merges after CI passes
 
 ### Agentic File Operations
@@ -492,6 +529,36 @@ When modifying workflows:
 3. Update `docs/AUTOMATION.md`
 4. Document new secrets or configuration
 5. Ensure backward compatibility
+6. Update template files in `.github/templates/` if changing prompts
+7. Test documentation generation with force regeneration option
+
+### Workflow Template System
+
+Documentation generation uses modular templates:
+
+```
+.github/templates/
+├── 01-header.md                    # Project context
+├── 02-changed-files-header.md      # Changed files section
+├── 03-commits-header.md            # Commit history section
+├── 04-diff-header.md               # Code diff section
+├── 05-scope-header.md              # Documentation scope
+├── 06-requirements.md              # General requirements
+├── 07-conditional/                 # Module-specific requirements
+│   ├── architecture-api.md
+│   ├── routing.md
+│   ├── providers.md
+│   ├── configuration.md
+│   ├── testing.md
+│   ├── automation.md
+│   └── changelog-contributing.md
+└── 08-footer.md                    # Output format
+```
+
+When updating requirements:
+- Edit relevant template files, not the workflow YAML
+- Test changes by triggering documentation update manually
+- Ensure templates maintain consistent formatting
 
 ## Getting Help
 
