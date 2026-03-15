@@ -636,3 +636,6 @@ export function getPermissionManager(): PermissionManager {
 export function setPermissionManager(manager: PermissionManager): void {
   globalPermissionManager = manager;
 }
+
+// Export prompt functionality
+export { startPermissionPromptHandler, isPermissionPromptSupported } from './prompt.js';
