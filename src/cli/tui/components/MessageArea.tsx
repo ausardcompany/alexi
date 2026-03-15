@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Text, Static } from 'ink';
+import { Box, Text } from 'ink';
 
 import { MessageBubble } from './MessageBubble.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
@@ -67,36 +67,40 @@ export function MessageArea({
 
   return (
     <Box flexDirection="column" flexGrow={1} overflow="hidden">
-      {/* Completed messages - Static for performance */}
-      <Static items={messages}>
-        {(msg) => (
-          <React.Fragment key={msg.id}>
-            <MessageBubble
-              role={msg.role}
-              content={msg.content}
-              agent={msg.agent}
-              model={msg.model}
-              tokens={msg.tokens}
-              timestamp={msg.timestamp}
-              images={msg.images}
+      {/* Completed messages */}
+      {messages.map((msg, idx) => (
+        <React.Fragment key={msg.id}>
+          {/* Separator between messages */}
+          {idx > 0 && (
+            <Box paddingX={1}>
+              <Text dimColor>{'─'.repeat(40)}</Text>
+            </Box>
+          )}
+          <MessageBubble
+            role={msg.role}
+            content={msg.content}
+            agent={msg.agent}
+            model={msg.model}
+            tokens={msg.tokens}
+            timestamp={msg.timestamp}
+            images={msg.images}
+          />
+          {/* Completed tool calls for this message */}
+          {msg.toolCalls.map((tc) => (
+            <ToolCallBlock
+              key={tc.id}
+              toolName={tc.toolName}
+              params={tc.params}
+              status={tc.status}
+              output={tc.output}
+              error={tc.error}
+              isExpanded={tc.isExpanded}
+              onToggle={() => onToggleToolCall(tc.id)}
+              diff={tc.diff}
             />
-            {/* Completed tool calls for this message */}
-            {msg.toolCalls.map((tc) => (
-              <ToolCallBlock
-                key={tc.id}
-                toolName={tc.toolName}
-                params={tc.params}
-                status={tc.status}
-                output={tc.output}
-                error={tc.error}
-                isExpanded={tc.isExpanded}
-                onToggle={() => onToggleToolCall(tc.id)}
-                diff={tc.diff}
-              />
-            ))}
-          </React.Fragment>
-        )}
-      </Static>
+          ))}
+        </React.Fragment>
+      ))}
 
       {/* Active tool calls */}
       {activeToolCalls.map((tc) => (
@@ -116,10 +120,18 @@ export function MessageArea({
       {/* Streaming text (live assistant response) */}
       {isStreaming && streamingText && (
         <Box paddingX={1} flexDirection="column">
+          {/* Separator from previous messages */}
+          {messages.length > 0 && (
+            <Box>
+              <Text dimColor>{'─'.repeat(40)}</Text>
+            </Box>
+          )}
           <Box>
             <Text color={colors.success} bold>
-              assistant ❯{' '}
+              assistant ❯
             </Text>
+          </Box>
+          <Box paddingLeft={2}>
             <MarkdownRenderer markdown={streamingText} isPartial={true} />
           </Box>
         </Box>

@@ -124,7 +124,15 @@ export function InputBox({
 
   if (disabled) {
     return (
-      <Box flexDirection="column">
+      <Box
+        flexDirection="column"
+        borderTop
+        borderStyle="single"
+        borderColor="gray"
+        borderBottom={false}
+        borderLeft={false}
+        borderRight={false}
+      >
         <AttachmentBar />
         <Box paddingX={1}>
           <Text color={agentColor} bold>
@@ -137,7 +145,15 @@ export function InputBox({
   }
 
   return (
-    <Box flexDirection="column">
+    <Box
+      flexDirection="column"
+      borderTop
+      borderStyle="single"
+      borderColor="gray"
+      borderBottom={false}
+      borderLeft={false}
+      borderRight={false}
+    >
       <AttachmentBar />
       <Box paddingX={1}>
         <Text color={agentColor} bold>

@@ -23,37 +23,32 @@ export function Header({
   autoRoute,
 }: HeaderProps): React.JSX.Element {
   return (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between">
-        {/* Left: model name */}
-        <Box>
-          <Text bold>{model}</Text>
-          {autoRoute && (
-            <>
-              <Text dimColor> [</Text>
-              <Text color="cyan">auto-route</Text>
-              <Text dimColor>]</Text>
-            </>
-          )}
-        </Box>
+    <Box flexDirection="row" justifyContent="space-between" width="100%">
+      {/* Left: model name (truncated if too long) */}
+      <Box flexShrink={1}>
+        <Text bold wrap="truncate-end">
+          {model}
+        </Text>
+        {autoRoute && (
+          <>
+            <Text dimColor> [</Text>
+            <Text color="cyan">auto-route</Text>
+            <Text dimColor>]</Text>
+          </>
+        )}
+      </Box>
 
-        {/* Center: agent badge */}
-        <Box>
-          <Text color={agentColor} bold>
-            {agent}
-          </Text>
-        </Box>
+      {/* Center: agent badge */}
+      <Box flexShrink={0} marginX={1}>
+        <Text color={agentColor} bold>
+          {agent}
+        </Text>
+      </Box>
 
-        {/* Right: session ID + token count */}
-        <Box>
-          <Text dimColor>{sessionId.slice(0, 8)}</Text>
-          {tokenCount > 0 && (
-            <>
-              <Text dimColor> </Text>
-              <Text dimColor>{tokenCount.toLocaleString()} tok</Text>
-            </>
-          )}
-        </Box>
+      {/* Right: session ID + token count */}
+      <Box flexShrink={0}>
+        <Text dimColor>{sessionId.slice(0, 8)}</Text>
+        {tokenCount > 0 && <Text dimColor> {tokenCount.toLocaleString()} tok</Text>}
       </Box>
     </Box>
   );

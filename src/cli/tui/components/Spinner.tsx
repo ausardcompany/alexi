@@ -17,7 +17,7 @@ export function Spinner({ label, type = 'dots', color }: SpinnerProps): React.JS
   const {
     theme: { colors },
   } = useTheme();
-  const spinnerColor = color ?? colors.warning;
+  const spinnerColor = color ?? colors.primary;
 
   return (
     <Text color={spinnerColor}>

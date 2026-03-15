@@ -2,8 +2,17 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import type { StatusBarProps } from '../types/props.js';
+import { useTheme } from '../context/ThemeContext.js';
 
 export type { StatusBarProps };
+
+/** Map common ISO 4217 currency codes to symbols. */
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: '$',
+  EUR: '€',
+  GBP: '£',
+  JPY: '¥',
+};
 
 /**
  * StatusBar — single-line bar at the very bottom of the TUI.
@@ -19,12 +28,17 @@ export function StatusBar({
   isStreaming,
   leaderActive,
 }: StatusBarProps): React.JSX.Element {
-  const costStr = `$${cost.totalCost.toFixed(4)}`;
+  const {
+    theme: { colors },
+  } = useTheme();
+
+  const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
+  const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
 
   if (leaderActive) {
     return (
-      <Box>
-        <Text color="yellow">
+      <Box paddingX={1}>
+        <Text color={colors.warning}>
           leader: [n]ew session · [m]odel · [a]gent · [s]essions · [/]palette · [Esc] cancel
         </Text>
       </Box>
@@ -32,7 +46,7 @@ export function StatusBar({
   }
 
   return (
-    <Box flexDirection="row" justifyContent="space-between">
+    <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
       {/* Left: keybinding hints */}
       <Box>
         <Text dimColor>Tab: switch agent · Ctrl+X: leader · /help</Text>
@@ -45,7 +59,11 @@ export function StatusBar({
 
       {/* Right: cost + streaming indicator */}
       <Box>
-        {isStreaming ? <Text color="green">● streaming</Text> : <Text dimColor>{costStr}</Text>}
+        {isStreaming ? (
+          <Text color={colors.info}>● streaming</Text>
+        ) : (
+          <Text dimColor>{costStr}</Text>
+        )}
       </Box>
     </Box>
   );

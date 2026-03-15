@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Text } from 'ink';
+import { Text, useStdout } from 'ink';
 import { Marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight } from 'cli-highlight';
@@ -20,22 +20,25 @@ export function closePartialFences(md: string): string {
 }
 
 /**
- * Pre-configured Marked instance with terminal renderer and syntax highlighting.
+ * Create a Marked instance configured for the given terminal width.
  */
-const markedInstance = new Marked(
-  markedTerminal({
-    code: (code: string, lang: string): string => {
-      try {
-        return highlight(code, { language: lang, ignoreIllegals: true });
-      } catch {
-        return code;
-      }
-    },
-    reflowText: true,
-    showSectionPrefix: false,
-    tab: 2,
-  })
-);
+function createMarkedInstance(width: number): Marked {
+  return new Marked(
+    markedTerminal({
+      code: (code: string, lang: string): string => {
+        try {
+          return highlight(code, { language: lang, ignoreIllegals: true });
+        } catch {
+          return code;
+        }
+      },
+      reflowText: true,
+      showSectionPrefix: false,
+      tab: 2,
+      width: Math.max(40, width - 4), // leave room for padding/borders
+    })
+  );
+}
 
 /**
  * MarkdownRenderer — parses markdown into ANSI-styled terminal output.
@@ -46,13 +49,16 @@ const markedInstance = new Marked(
  * When `isPartial` is true (streaming), any unclosed code fences are
  * automatically closed before parsing so the output remains valid.
  *
- * The parsed result is memoized and only recomputed when `markdown`
- * or `isPartial` changes.
+ * The parsed result is memoized and only recomputed when `markdown`,
+ * `isPartial`, or terminal width changes.
  */
 export function MarkdownRenderer({
   markdown,
   isPartial,
 }: MarkdownRendererProps): React.JSX.Element {
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
+
   const rendered = useMemo(() => {
     const source = isPartial ? closePartialFences(markdown) : markdown;
 
@@ -60,10 +66,11 @@ export function MarkdownRenderer({
       return '';
     }
 
-    const result = markedInstance.parse(source, { async: false });
+    const instance = createMarkedInstance(columns);
+    const result = instance.parse(source, { async: false });
     // Trim trailing newline that marked typically appends
     return result.replace(/\n$/, '');
-  }, [markdown, isPartial]);
+  }, [markdown, isPartial, columns]);
 
   return <Text>{rendered}</Text>;
 }

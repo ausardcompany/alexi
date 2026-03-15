@@ -40,13 +40,17 @@ export function CommandPalette({ commands }: CommandPaletteProps): React.JSX.Ele
   );
 
   const items = filtered.map((entry) => ({
-    label: `/${entry.name}  ${entry.description}`,
+    label: entry.shortcut
+      ? `/${entry.name}  ${entry.description}  (${entry.shortcut})`
+      : `/${entry.name}  ${entry.description}`,
     value: entry.name,
   }));
 
   const handleSelect = (item: { label: string; value: string }) => {
     dialog.close(item.value);
   };
+
+  const VISIBLE_ITEMS = 10;
 
   return (
     <Box
@@ -55,6 +59,7 @@ export function CommandPalette({ commands }: CommandPaletteProps): React.JSX.Ele
       paddingX={2}
       paddingY={1}
       flexDirection="column"
+      width={60}
     >
       <Text color={colors.primary} bold>
         Command Palette
@@ -63,9 +68,9 @@ export function CommandPalette({ commands }: CommandPaletteProps): React.JSX.Ele
         <Text color={colors.dimText}>&gt; </Text>
         <TextInput value={query} onChange={setQuery} placeholder="Type to filter commands..." />
       </Box>
-      <Box marginTop={1}>
+      <Box marginTop={1} flexDirection="column">
         {items.length > 0 ? (
-          <SelectInput items={items} onSelect={handleSelect} />
+          <SelectInput items={items} onSelect={handleSelect} limit={VISIBLE_ITEMS} />
         ) : (
           <Text color={colors.dimText}>No commands match &quot;{query}&quot;</Text>
         )}

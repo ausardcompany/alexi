@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import { useAttachments } from '../context/AttachmentContext.js';
+import { useTheme } from '../context/ThemeContext.js';
 import { formatSize } from '../../../utils/imageValidation.js';
 
 // ---------------------------------------------------------------------------
@@ -20,6 +21,9 @@ import { formatSize } from '../../../utils/imageValidation.js';
  */
 export function AttachmentBar(): React.JSX.Element | null {
   const { pending, reading, error } = useAttachments();
+  const {
+    theme: { colors },
+  } = useTheme();
 
   // Nothing to show
   if (pending.length === 0 && !reading && !error) {
@@ -27,19 +31,21 @@ export function AttachmentBar(): React.JSX.Element | null {
   }
 
   return (
-    <Box flexDirection="row" gap={1}>
+    <Box flexDirection="row" gap={1} paddingX={1}>
       {/* Reading indicator */}
-      {reading && <Text color="yellow">Reading clipboard...</Text>}
+      {reading && <Text color={colors.warning}>Reading clipboard...</Text>}
 
       {/* Error message */}
-      {error && !reading && <Text color="red">{error}</Text>}
+      {error && !reading && <Text color={colors.error}>{error}</Text>}
 
       {/* Attachment chips */}
       {!reading && !error && pending.length > 0 && (
         <>
-          <Text color="cyan">{pending.length === 1 ? '1 image' : `${pending.length} images`}:</Text>
+          <Text color={colors.info}>
+            {pending.length === 1 ? '1 image' : `${pending.length} images`}:
+          </Text>
           {pending.map((att) => (
-            <Text key={att.id} color="cyan">
+            <Text key={att.id} color={colors.info}>
               [{att.format.toUpperCase()} {formatSize(att.sizeBytes)}]
             </Text>
           ))}

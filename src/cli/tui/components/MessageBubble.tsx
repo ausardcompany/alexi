@@ -83,16 +83,19 @@ export function MessageBubble({
 
   return (
     <Box paddingX={1} flexDirection="column">
+      {/* Label on its own line */}
       <Box>
         <Text color={colors.success} bold>
-          {agentLabel} ❯{' '}
+          {agentLabel} ❯
         </Text>
+      </Box>
+      {/* Content with consistent left padding */}
+      <Box paddingLeft={2}>
         <MarkdownRenderer markdown={content} isPartial={isPartial} />
       </Box>
       {/* Metadata line */}
-      <Box>
+      <Box paddingLeft={2}>
         <Text dimColor>
-          {'   '}
           {[model, tokens !== undefined ? `${tokens} tok` : null, timeStr]
             .filter(Boolean)
             .join(' | ')}

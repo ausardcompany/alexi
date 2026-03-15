@@ -60,9 +60,11 @@ export function ToolCallBlock({
   output,
   error,
   isExpanded,
-  onToggle: _onToggle,
+  onToggle,
   diff,
 }: ToolCallBlockProps): React.JSX.Element {
+  // onToggle is available for future interactive expansion (e.g. click/key binding)
+  void onToggle;
   const { theme } = useTheme();
   const { colors } = theme;
 
@@ -154,14 +156,14 @@ export function ToolCallBlock({
   };
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" paddingLeft={2}>
       {/* Header line */}
       <Box>
         {renderStatusIcon()}
         <Text color={colors.toolHeader} bold>
           {toolName}
         </Text>
-        <Text color={colors.dimText}>({paramsPreview})</Text>
+        <Text color={colors.dimText}> ({paramsPreview})</Text>
         {renderStatusLabel()}
       </Box>
 
