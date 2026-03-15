@@ -82,10 +82,43 @@ describe('clipboard', () => {
       }
     });
 
+    it('should fall back to osascript when pngpaste is missing on macOS', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+
+      // pngpaste not found, but osascript is available
+      mockExecFile.mockImplementation(
+        (cmd: unknown, args: unknown, _opts: unknown, cb?: unknown) => {
+          const callback = typeof _opts === 'function' ? _opts : cb;
+          if (typeof callback === 'function') {
+            if (cmd === 'which' && (args as string[])[0] === 'osascript') {
+              callback(null, { stdout: '/usr/bin/osascript', stderr: '' });
+            } else {
+              callback(new Error('not found'), null);
+            }
+          }
+          return undefined as never;
+        }
+      );
+
+      const { detectClipboard } = await importClipboard();
+      _resetClipboardCache();
+      const result = await detectClipboard();
+
+      expect(result.available).toBe(true);
+      expect(result.tool).toBe('osascript');
+      expect(result.platform).toBe('darwin');
+
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('should report unavailable when no tool found on macOS', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
 
+      // Both pngpaste and osascript unavailable
       mockExecFile.mockImplementation(
         (_cmd: unknown, _args: unknown, _opts: unknown, cb?: unknown) => {
           const callback = typeof _opts === 'function' ? _opts : cb;

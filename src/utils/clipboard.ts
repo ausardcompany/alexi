@@ -11,6 +11,9 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { detectImageFormat, type ImageFormat } from './imageValidation.js';
 import { logger } from './logger.js';
@@ -22,7 +25,7 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 /** Platform-specific clipboard tool identifier. */
-export type ClipboardTool = 'pngpaste' | 'xclip' | 'wl-paste' | 'powershell';
+export type ClipboardTool = 'pngpaste' | 'osascript' | 'xclip' | 'wl-paste' | 'powershell';
 
 /** Detected clipboard capability for the current platform. */
 export interface ClipboardCapability {
@@ -51,6 +54,11 @@ const PLATFORM_TOOLS: Record<
       tool: 'pngpaste',
       check: 'pngpaste',
       hint: 'Install with: brew install pngpaste',
+    },
+    {
+      tool: 'osascript',
+      check: 'osascript',
+      hint: 'osascript should be pre-installed on macOS',
     },
   ],
   linux: [
@@ -148,12 +156,16 @@ export function _resetClipboardCache(): void {
 
 /**
  * Read the clipboard image commands per tool.
+ * Returns `undefined` for tools that need special handling (e.g. osascript).
  */
-function getReadCommand(tool: ClipboardTool): { cmd: string; args: string[] } {
+function getReadCommand(tool: ClipboardTool): { cmd: string; args: string[] } | undefined {
   switch (tool) {
     case 'pngpaste':
       // pngpaste - : write PNG to stdout
       return { cmd: 'pngpaste', args: ['-'] };
+    case 'osascript':
+      // osascript uses a file-based flow — handled separately in readClipboardImage
+      return undefined;
     case 'xclip':
       return { cmd: 'xclip', args: ['-selection', 'clipboard', '-t', 'image/png', '-o'] };
     case 'wl-paste':
@@ -180,6 +192,69 @@ function getReadCommand(tool: ClipboardTool): { cmd: string; args: string[] } {
 }
 
 /**
+ * Read clipboard image via macOS osascript.
+ *
+ * Uses AppleScript to write the clipboard image to a temporary file,
+ * reads the file, then cleans up. This avoids requiring any external
+ * dependencies like pngpaste.
+ */
+async function readClipboardViaOsascript(): Promise<ClipboardImageResult> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-clip-'));
+  const tmpFile = path.join(tmpDir, 'clipboard.png');
+
+  try {
+    // AppleScript: write clipboard image to a temp file as PNG
+    const script = `
+      set tmpFile to POSIX file "${tmpFile}"
+      try
+        set imgData to the clipboard as «class PNGf»
+        set fRef to open for access tmpFile with write permission
+        set eof fRef to 0
+        write imgData to fRef
+        close access fRef
+      on error errMsg
+        try
+          close access tmpFile
+        end try
+        error errMsg
+      end try
+    `;
+
+    await execFileAsync('osascript', ['-e', script], {
+      timeout: 5000,
+    });
+
+    const data = await fs.readFile(tmpFile);
+
+    if (!data || data.length === 0) {
+      return { success: false, error: 'No image found in clipboard' };
+    }
+
+    const format = detectImageFormat(data);
+    if (!format) {
+      return { success: false, error: 'Clipboard contains unrecognized image data' };
+    }
+
+    return { success: true, data, format };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+
+    if (
+      message.includes("Can't get the clipboard as") ||
+      message.includes('clipboard') ||
+      message.includes('-1728')
+    ) {
+      return { success: false, error: 'No image found in clipboard' };
+    }
+
+    return { success: false, error: `Failed to read clipboard via osascript: ${message}` };
+  } finally {
+    // Clean up temp directory
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
  * Read image data from the system clipboard.
  *
  * Auto-detects the platform and available tool on first call.
@@ -195,7 +270,17 @@ export async function readClipboardImage(): Promise<ClipboardImageResult> {
     };
   }
 
-  const { cmd, args } = getReadCommand(capability.tool);
+  // osascript uses a file-based flow — handle separately
+  if (capability.tool === 'osascript') {
+    return readClipboardViaOsascript();
+  }
+
+  const readCmd = getReadCommand(capability.tool);
+  if (!readCmd) {
+    return { success: false, error: `Unsupported clipboard tool: ${capability.tool}` };
+  }
+
+  const { cmd, args } = readCmd;
 
   try {
     const { stdout } = await execFileAsync(cmd, args, {
