@@ -62,8 +62,8 @@
     "@commitlint/cli": "^20.4.3",
     "@commitlint/config-conventional": "^20.5.0",
     "@eslint/js": "^10.0.1",
-    "@types/diff": "^7.0.2",
-    "@types/node": "^25.3.5",
+    "@types/diff": "^8.0.0",
+    "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@typescript-eslint/eslint-plugin": "^8.34.1",
     "@typescript-eslint/parser": "^8.57.0",
@@ -79,7 +79,7 @@
     "tsc-files": "^1.1.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.0"
   },
   "engines": {
     "node": ">=22.12.0"
