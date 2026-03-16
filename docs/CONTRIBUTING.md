@@ -260,6 +260,128 @@ export function defineTool<TParams extends z.ZodType, TResult>(
 
 ## Testing Guidelines
 
+## Testing Guidelines
+
+All code changes must include appropriate tests. See [TESTING.md](TESTING.md) for comprehensive testing guidelines.
+
+### Test Requirements
+
+1. **Unit Tests**: Required for all new functions and modules
+   - Tool implementations must have 15+ test cases
+   - TUI components must have basic rendering and interaction tests
+   - Utilities must have edge case coverage
+
+2. **Integration Tests**: Required for provider and core module changes
+   - Test interactions between components
+   - Mock external dependencies (SAP AI Core, file system)
+   - Use temporary directories with proper cleanup
+
+3. **Test Coverage**: Maintain minimum 80% coverage
+   - Run `npm run test:coverage` to check coverage
+   - Add tests for uncovered code paths
+   - Focus on critical paths and error handling
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run specific test file
+npm test -- tests/tool/tools/write.test.ts
+
+# Run tests with coverage
+npm run test:coverage
+
+# Run TUI component tests
+npm test -- tests/cli/tui/
+
+# Run clipboard tests
+npm test -- tests/clipboard.test.ts
+```
+
+### Writing Tests
+
+#### Tool Tests
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+describe('write tool', () => {
+  let tempDir: string;
+  let context: ToolContext;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-'));
+    context = { workdir: tempDir };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should create a new file with content', async () => {
+    const filePath = path.join(tempDir, 'new-file.txt');
+    const content = 'Hello, World!';
+
+    const result = await writeTool.execute({ filePath, content }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.created).toBe(true);
+
+    // Verify file was actually created
+    const actualContent = await fs.readFile(filePath, 'utf-8');
+    expect(actualContent).toBe(content);
+  });
+});
+```
+
+#### TUI Component Tests
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { render } from 'ink-testing-library';
+import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
+import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+
+// Mock external dependencies
+vi.mock('../../../src/cli/tui/hooks/useClipboardImage.js', () => ({
+  useClipboardImage: vi.fn(),
+}));
+
+function Wrapper({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <ThemeProvider>{children}</ThemeProvider>;
+}
+
+describe('InputBox', () => {
+  it('renders agent name and prompt symbol', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <InputBox agent="code" agentColor="green" disabled={false} onSubmit={vi.fn()} isFocused={true} />
+      </Wrapper>
+    );
+    expect(lastFrame()).toContain('code');
+    expect(lastFrame()).toContain('❯');
+  });
+});
+```
+
+### Test Best Practices
+
+1. **Use Temporary Directories**: Always use `os.tmpdir()` for file operations
+2. **Clean Up Resources**: Use `beforeEach`/`afterEach` to set up and tear down
+3. **Mock External Dependencies**: Mock file system, network, and external APIs
+4. **Test Error Cases**: Include tests for error handling and edge cases
+5. **Verify Actual Changes**: Don't just check return values, verify file system changes
+6. **Use Descriptive Names**: Test names should clearly describe what is being tested
+7. **Isolate Tests**: Each test should be independent and not rely on others
+
 ### Test Structure
 
 - Place tests next to the code they test: `tool.test.ts` next to `tool.ts`

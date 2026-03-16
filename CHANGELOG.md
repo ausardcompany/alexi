@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Inline autocomplete for slash commands in TUI input box with keyboard navigation
+  - Shows filtered command suggestions when typing `/` prefix
+  - Supports Up/Down arrow keys and Tab/Shift+Tab for navigation
+  - Enter or Tab accepts the selected suggestion
+  - Escape dismisses autocomplete without clearing input
+  - Displays up to 6 suggestions with command name, aliases, and description
+- Native osascript fallback for clipboard image reading on macOS
+  - Uses AppleScript to read clipboard images without external dependencies
+  - Automatically falls back to osascript when pngpaste is not installed
+  - Writes clipboard image to temporary file, reads it, and cleans up
+  - Supports standard PNG format detection and validation
+- Comprehensive test coverage for clipboard functionality
+  - Tests for detectClipboard with pngpaste and osascript detection
+  - Tests for readImageFile with PNG validation and error handling
+  - Tests for platform-specific tool availability and fallback behavior
+- Comprehensive test coverage for TUI InputBox component
+  - Tests for autocomplete rendering and suggestion filtering
+  - Tests for keyboard navigation and command acceptance
+  - Tests for disabled state and placeholder text behavior
+
+### Changed
+
+- Enhanced TUI command system with declarative slash command registry
+  - Migrated from monolithic switch statement to extensible SlashCommand array
+  - Commands now include name, aliases, description, category, and execute function
+  - Supports 11 registered commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images
+  - Command execution integrated with useCommands hook for better separation of concerns
+- Improved TUI InputBox component with autocomplete integration
+  - Added commands prop to receive available slash commands
+  - Integrated autocomplete suggestion list above input line
+  - Enhanced keyboard input handling to support autocomplete navigation
+  - Added selectedSuggestion state for tracking current selection
+- Updated useKeyboard hook to pass commands to command palette
+  - Command palette now displays all registered slash commands when opened via Ctrl+K
+  - Commands converted to CommandEntry format for palette display
+- Enhanced clipboard utility with improved error handling
+  - Added support for osascript as ClipboardTool type
+  - Improved error messages for clipboard reading failures
+  - Better detection of empty clipboard or missing image data
+- Updated documentation workflow with improved validation and commit handling
+  - Added markdownlint validation step for generated documentation
+  - Enhanced commit message format with [alexi-bot] tag for tracking
+  - Improved file path handling to stage only intended documentation files
+  - Extended diff preview limits from 100 to 500 lines per section
+  - Added validation warnings to PR comments when linting issues are detected
+- Dependency updates
+  - @inquirer/prompts: 8.3.0 to 8.3.2
+  - @commitlint/config-conventional: 20.4.3 to 20.5.0
+  - @typescript-eslint/parser: 8.56.1 to 8.57.0
+  - @vitejs/plugin-react: 5.2.0 to 6.0.1
+  - @vitest/coverage-v8: 4.0.0 to 4.1.0
+  - @types/node: 25.3.5 to 25.5.0
+  - hono: 4.12.5 to 4.12.8
+  - nanoid: 5.1.6 to 5.1.7
+  - puppeteer: 24.38.0 to 24.39.1
+  - simple-git: 3.32.3 to 3.33.0
+  - vitest: 4.0.0 to 4.1.0
+
+### Fixed
+
+- Slash commands now properly intercepted in TUI before being sent to LLM
+  - Commands starting with `/` are handled by useCommands hook
+  - Only non-command messages are sent to the streaming chat system
+  - Fixes issue where commands like /help, /model, /exit were leaking to LLM
+
 ## [0.2.2] - 2026-03-15
 
 ### Fixed

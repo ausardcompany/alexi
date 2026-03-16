@@ -12,6 +12,78 @@ This document provides comprehensive API documentation for Alexi's CLI commands,
 
 ## CLI Commands
 
+### interactive
+
+Start an interactive TUI (Terminal User Interface) session with real-time streaming.
+
+```bash
+alexi interactive [options]
+# or
+alexi i [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Override model selection |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--session <id>` | string | Continue existing session |
+| `--system <prompt>` | string | System prompt for conversation |
+
+#### Features
+
+- Real-time streaming responses with token-by-token display
+- Inline autocomplete for slash commands (type `/` to see available commands)
+- Image paste support (Ctrl+V to paste from clipboard)
+- Keyboard shortcuts for agent switching, model selection, and session management
+- Command palette (Ctrl+K) for quick command access
+- History navigation with Up/Down arrow keys
+- Dark/light theme support
+
+#### Examples
+
+```bash
+# Start interactive mode with auto-routing
+alexi interactive --auto-route
+
+# Continue a previous session
+alexi interactive --session abc-123
+
+# Use specific model
+alexi interactive --model anthropic--claude-4.5-sonnet
+```
+
+#### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Tab` | Cycle agents forward |
+| `Shift+Tab` | Cycle agents backward |
+| `Ctrl+X` | Activate leader mode (then n/m/a/s) |
+| `Ctrl+K` | Open command palette |
+| `Ctrl+L` | Clear messages |
+| `Ctrl+V` | Paste image from clipboard |
+| `Ctrl+C` | Abort streaming / Exit |
+| `Up/Down` | Navigate history or autocomplete |
+| `Escape` | Dismiss autocomplete / Clear attachments |
+
+#### Slash Commands
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/h` | Show available commands |
+| `/exit` | `/quit`, `/q` | Exit the TUI |
+| `/clear` | - | Clear message history |
+| `/model [id]` | - | Show or switch current model |
+| `/agent [name]` | - | Show or switch current agent |
+| `/status` | - | Show session status |
+| `/sessions` | - | Open session list dialog |
+| `/mcp` | - | Manage MCP servers |
+| `/theme [dark\|light]` | - | Switch theme |
+| `/image [path]` | `/img` | Attach image from clipboard or file |
+| `/clear-images` | `/cli` | Remove all pending attachments |
+
 ### chat
 
 Send messages to LLMs with optional auto-routing and session management.
@@ -244,6 +316,105 @@ SAP_PROXY_API_KEY=your_secret_key
 ```
 
 ## TypeScript Interfaces
+
+### TUI Component Interfaces
+
+#### InputBoxProps
+
+```typescript
+interface InputBoxProps {
+  /** Current agent name (e.g., 'code', 'debug', 'plan') */
+  agent: string;
+  /** Agent color for prompt styling */
+  agentColor: string;
+  /** Whether input is disabled (during streaming) */
+  disabled: boolean;
+  /** Callback when user submits input */
+  onSubmit: (text: string) => void;
+  /** Whether this component has focus */
+  isFocused: boolean;
+  /** Available slash commands for inline autocomplete */
+  commands?: SlashCommand[];
+}
+```
+
+#### SlashCommand
+
+```typescript
+type CommandCategory = 'general' | 'session' | 'model' | 'git' | 'debug' | 'config';
+
+interface SlashCommand {
+  /** Command name (without leading slash) */
+  name: string;
+  /** Alternative command names */
+  aliases?: string[];
+  /** Human-readable description */
+  description: string;
+  /** Command category for grouping */
+  category: CommandCategory;
+  /** Execute the command with arguments and context */
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+
+interface CommandContext {
+  exit: () => void;
+  sessionId: string;
+  model: string;
+  agent: string;
+  setModel: (m: string) => void;
+  setAgent: (a: AgentName) => void;
+}
+```
+
+#### ImageAttachment
+
+```typescript
+type ImageFormat = 'png' | 'jpeg' | 'gif' | 'webp';
+
+interface ImageAttachment {
+  /** Unique attachment ID */
+  id: string;
+  /** Image format */
+  format: ImageFormat;
+  /** Image data as base64 string */
+  data: string;
+  /** File size in bytes */
+  sizeBytes: number;
+  /** Source: 'clipboard' or 'file' */
+  source: 'clipboard' | 'file';
+  /** Original file path (if from file) */
+  filePath?: string;
+}
+
+interface ImageAttachmentPreview {
+  id: string;
+  format: ImageFormat;
+  sizeBytes: number;
+  source: 'clipboard' | 'file';
+  filePath?: string;
+}
+```
+
+#### ClipboardCapability
+
+```typescript
+type ClipboardTool = 'pngpaste' | 'osascript' | 'xclip' | 'wl-paste' | 'powershell';
+
+interface ClipboardCapability {
+  /** Whether clipboard reading is available */
+  available: boolean;
+  /** Detected clipboard tool */
+  tool?: ClipboardTool;
+  /** Current platform */
+  platform: NodeJS.Platform;
+  /** Installation hint if unavailable */
+  installHint?: string;
+}
+
+type ClipboardImageResult =
+  | { success: true; data: Buffer; format: ImageFormat }
+  | { success: false; error: string };
+```
 
 ### Core Interfaces
 

@@ -83,21 +83,36 @@ sequenceDiagram
    - Routing changes trigger `ROUTING.md` updates
    - Provider changes trigger `PROVIDERS.md` updates
    - Workflow/script changes trigger `AUTOMATION.md` updates
+   - TUI changes trigger `ARCHITECTURE.md` and `API.md` updates
    - Always updates `CHANGELOG.md` and `CONTRIBUTING.md`
 
 2. **Code Analysis**: Generates detailed analysis including:
    - Changed file list with categorization
-   - Commit history since last documentation update
+   - Commit history since last documentation update (using [alexi-bot] tag)
    - Code diff statistics
-   - TypeScript and configuration change previews
+   - TypeScript, configuration, and workflow change previews (500 lines per section)
+   - Truncation indicators when diffs exceed limits
 
 3. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI to:
    - Analyze code changes
    - Update documentation with accurate technical details
    - Generate Mermaid diagrams
    - Maintain consistent documentation style
+   - Use read/write/edit/glob/grep tools to examine and update files
 
 4. **Force Regeneration**: Manual trigger option to regenerate all documentation
+
+5. **Validation and Quality Control**:
+   - Runs markdownlint validation on generated documentation
+   - Reports validation warnings in PR comments
+   - Stages only intended documentation files (never unmanaged files)
+   - Uses [alexi-bot] tag in commit messages for tracking
+
+6. **Smart Commit Handling**:
+   - Detects previous documentation commits by searching for [alexi-bot] tag
+   - Analyzes changes since last doc generation to avoid redundant updates
+   - Filters out documentation files from change analysis
+   - Commits only when documentation actually changes
 
 #### Environment Variables
 

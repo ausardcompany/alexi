@@ -84,6 +84,7 @@ graph TB
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
 | Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| TUI | `src/cli/tui/` | Ink-based terminal user interface |
 
 ### Core Layer
 
@@ -285,12 +286,295 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 }
 ```
 
+## Terminal User Interface (TUI)
+
+Alexi features a modern, interactive TUI built with Ink and React for real-time streaming conversations.
+
+### TUI Architecture
+
+```mermaid
+graph TB
+    subgraph TUI["TUI Layer (Ink + React)"]
+        App[App.tsx]
+        AppLayout[AppLayout Component]
+        
+        subgraph Components["UI Components"]
+            Header[Header]
+            MessageArea[MessageArea]
+            InputBox[InputBox]
+            StatusBar[StatusBar]
+            AttachmentBar[AttachmentBar]
+        end
+        
+        subgraph Contexts["React Contexts"]
+            Theme[ThemeContext]
+            Session[SessionContext]
+            Chat[ChatContext]
+            Keybind[KeybindContext]
+            Dialog[DialogContext]
+            Attachment[AttachmentContext]
+        end
+        
+        subgraph Hooks["Custom Hooks"]
+            UseStreamChat[useStreamChat]
+            UseCommands[useCommands]
+            UseKeyboard[useKeyboard]
+            UseClipboard[useClipboardImage]
+            UsePermission[usePermission]
+            UseToolEvents[useToolEvents]
+        end
+        
+        subgraph Dialogs["Dialog System"]
+            ModelPicker[ModelPicker]
+            AgentSelector[AgentSelector]
+            PermissionDialog[PermissionDialog]
+            CommandPalette[CommandPalette]
+            SessionList[SessionList]
+        end
+    end
+    
+    App --> AppLayout
+    AppLayout --> Components
+    AppLayout --> Contexts
+    AppLayout --> Hooks
+    AppLayout --> Dialogs
+    
+    Components --> Contexts
+    Hooks --> Contexts
+    Dialogs --> Contexts
+```
+
+### TUI Component Structure
+
+| Component | File | Description |
+|-----------|------|-------------|
+| App | `src/cli/tui/App.tsx` | Root component with provider tree |
+| AppLayout | `src/cli/tui/App.tsx` | Main layout with header, messages, input, status |
+| Header | `src/cli/tui/components/Header.tsx` | Session info and model display |
+| MessageArea | `src/cli/tui/components/MessageArea.tsx` | Scrollable message history with streaming |
+| InputBox | `src/cli/tui/components/InputBox.tsx` | Command input with autocomplete |
+| StatusBar | `src/cli/tui/components/StatusBar.tsx` | Cost, streaming status, keybinds |
+| AttachmentBar | `src/cli/tui/components/AttachmentBar.tsx` | Image attachment preview |
+| CommandPalette | `src/cli/tui/components/CommandPalette.tsx` | Searchable command list (Ctrl+K) |
+
+### TUI Context System
+
+The TUI uses React Context for state management across components:
+
+```typescript
+// ThemeContext - Dark/light theme switching
+interface ThemeContextValue {
+  theme: Theme;
+  setTheme: (name: 'dark' | 'light') => void;
+}
+
+// SessionContext - Session and agent state
+interface SessionContextValue {
+  sessionId: string;
+  model: string;
+  agent: string;
+  setModel: (model: string) => void;
+  setAgent: (agent: AgentName) => void;
+  cycleAgent: (forward: boolean) => void;
+  tokenCount: number;
+  cost: { totalCost: number; currency: string };
+}
+
+// ChatContext - Message and streaming state
+interface ChatContextValue {
+  isStreaming: boolean;
+  streamingText: string;
+  responseModel: string | null;
+  activeToolCalls: ToolCallDisplay[];
+  clearStreamText: () => void;
+  toggleToolCallExpansion: (id: string) => void;
+  abortController: AbortController | null;
+}
+
+// KeybindContext - Leader key mode
+interface KeybindContextValue {
+  state: { leaderActive: boolean };
+  activateLeader: () => void;
+  deactivateLeader: () => void;
+}
+
+// AttachmentContext - Image attachments
+interface AttachmentContextValue {
+  pending: ImageAttachment[];
+  reading: boolean;
+  error: string | null;
+  pasteFromClipboard: () => Promise<void>;
+  addFromFile: (filePath: string) => Promise<void>;
+  remove: (id: string) => void;
+  clearAll: () => void;
+  consumeAll: () => ImageAttachment[];
+}
+```
+
+### Slash Command System
+
+The TUI implements a declarative slash command system with autocomplete support:
+
+```typescript
+interface SlashCommand {
+  name: string;
+  aliases?: string[];
+  description: string;
+  category: CommandCategory;
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+
+// Built-in commands
+const commands: SlashCommand[] = [
+  { name: 'help', aliases: ['h'], description: 'Show available commands', category: 'general' },
+  { name: 'exit', aliases: ['quit', 'q'], description: 'Exit the TUI', category: 'general' },
+  { name: 'clear', description: 'Clear messages', category: 'general' },
+  { name: 'model', description: 'Show or switch the current model', category: 'model' },
+  { name: 'agent', description: 'Show or switch the current agent', category: 'session' },
+  { name: 'status', description: 'Show current session status', category: 'session' },
+  { name: 'sessions', description: 'Open session list', category: 'session' },
+  { name: 'mcp', description: 'Manage MCP servers', category: 'config' },
+  { name: 'theme', description: 'Switch theme (dark/light)', category: 'config' },
+  { name: 'image', aliases: ['img'], description: 'Attach image from clipboard or file', category: 'general' },
+  { name: 'clear-images', aliases: ['cli'], description: 'Remove all pending attachments', category: 'general' },
+];
+```
+
+### Input Autocomplete Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant InputBox
+    participant useCommands
+    participant Autocomplete
+    
+    User->>InputBox: Type "/"
+    InputBox->>Autocomplete: Filter commands (all)
+    Autocomplete-->>InputBox: Show 6 suggestions
+    
+    User->>InputBox: Type "/he"
+    InputBox->>Autocomplete: Filter commands (prefix "he")
+    Autocomplete-->>InputBox: Show "help" (+ aliases)
+    
+    User->>InputBox: Press Down Arrow
+    InputBox->>Autocomplete: Select next suggestion
+    Autocomplete-->>InputBox: Highlight selection
+    
+    User->>InputBox: Press Enter/Tab
+    InputBox->>InputBox: Accept suggestion
+    InputBox-->>User: Fill "/help "
+    
+    User->>InputBox: Press Enter (submit)
+    InputBox->>useCommands: handleCommand("/help")
+    useCommands-->>InputBox: Command handled
+```
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Tab` | Cycle agents forward |
+| `Shift+Tab` | Cycle agents backward (or navigate autocomplete) |
+| `Ctrl+X` | Activate leader mode |
+| `Ctrl+K` | Open command palette |
+| `Ctrl+L` | Clear messages |
+| `Ctrl+C` | Abort streaming / Exit |
+| `Ctrl+V` | Paste image from clipboard |
+| `Up Arrow` | Navigate command history / autocomplete |
+| `Down Arrow` | Navigate command history / autocomplete |
+| `Escape` | Dismiss autocomplete / Clear attachments |
+
+### Leader Mode Keybinds
+
+After pressing `Ctrl+X`, the following keys are active:
+
+| Key | Action |
+|-----|--------|
+| `n` | New session |
+| `m` | Open model picker |
+| `a` | Open agent selector |
+| `s` | Open session list |
+
+### Clipboard Image Support
+
+The TUI supports pasting images directly from the clipboard using platform-specific tools:
+
+```mermaid
+flowchart TB
+    UserPaste[User Presses Ctrl+V] --> DetectPlatform{Detect Platform}
+    
+    DetectPlatform -->|macOS| TryPngpaste[Try pngpaste]
+    DetectPlatform -->|Linux X11| TryXclip[Try xclip]
+    DetectPlatform -->|Linux Wayland| TryWlPaste[Try wl-paste]
+    DetectPlatform -->|Windows| TryPowershell[Try PowerShell]
+    
+    TryPngpaste -->|Available| UsePngpaste[Use pngpaste]
+    TryPngpaste -->|Not Found| FallbackOsascript[Fallback to osascript]
+    
+    FallbackOsascript --> CreateTempFile[Create Temp File]
+    CreateTempFile --> RunAppleScript[Run AppleScript]
+    RunAppleScript --> ReadTempFile[Read PNG from Temp]
+    ReadTempFile --> Cleanup[Cleanup Temp File]
+    Cleanup --> ValidateImage
+    
+    UsePngpaste --> ReadStdout[Read PNG from stdout]
+    TryXclip --> ReadStdout
+    TryWlPaste --> ReadStdout
+    TryPowershell --> ReadStdout
+    
+    ReadStdout --> ValidateImage[Validate Image Format]
+    ValidateImage -->|PNG| AddAttachment[Add to Attachments]
+    ValidateImage -->|Invalid| ShowError[Show Error]
+    
+    AddAttachment --> RenderPreview[Render Preview in AttachmentBar]
+```
+
+### Dialog System
+
+Dialogs are rendered as full-screen overlays that replace the main content:
+
+```typescript
+type DialogType = 
+  | 'permission'
+  | 'model-picker'
+  | 'agent-selector'
+  | 'session-list'
+  | 'mcp-manager'
+  | 'command-palette'
+  | 'confirm'
+  | 'alert';
+
+// Usage example
+const { open } = useDialog();
+
+// Open model picker
+const selectedModel = await open('model-picker', {
+  currentModel: 'gpt-4o',
+  modelGroups: STATIC_MODEL_GROUPS,
+});
+
+// Open permission dialog
+const result = await open('permission', {
+  action: 'write',
+  resource: '/path/to/file.ts',
+  reason: 'Tool execution requires write access',
+});
+```
+
 ## Directory Structure
 
 ```
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   └── tui/       # Terminal UI (Ink + React)
+│   │       ├── components/   # UI components
+│   │       ├── context/      # React contexts
+│   │       ├── hooks/        # Custom hooks
+│   │       ├── dialogs/      # Dialog components
+│   │       ├── theme/        # Theme definitions
+│   │       └── types/        # TypeScript types
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -303,8 +587,10 @@ alexi/
 │   ├── config/        # Configuration
 │   ├── log/           # Logging
 │   ├── profile/       # Profile management
-│   └── ...
+│   └── utils/         # Utilities (clipboard, logger, etc.)
 ├── tests/             # Test files
+│   ├── cli/tui/       # TUI component tests
+│   └── ...
 ├── dist/              # Compiled output
 └── docs/              # Documentation
 ```

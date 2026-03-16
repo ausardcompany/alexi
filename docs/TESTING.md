@@ -230,7 +230,200 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
-### Test Categories
+### TUI Component Test Coverage
+
+TUI components are tested using Ink Testing Library:
+
+| Component | Test File | Test Cases |
+|-----------|-----------|------------|
+| `InputBox` | `tests/cli/tui/InputBox.test.tsx` | 10+ cases |
+| Clipboard | `tests/clipboard.test.ts` | 8+ cases |
+
+### Testing TUI Components
+
+TUI components are tested using Ink Testing Library for React component testing.
+
+#### Test Setup
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { render } from 'ink-testing-library';
+import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
+import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+
+// Mock hooks and contexts
+vi.mock('../../../src/cli/tui/hooks/useClipboardImage.js', () => ({
+  useClipboardImage: vi.fn(),
+}));
+
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: vi.fn(),
+    addFromFile: vi.fn(),
+    remove: vi.fn(),
+    clearAll: vi.fn(),
+    consumeAll: vi.fn(),
+  }),
+}));
+
+// Wrap component in providers
+function Wrapper({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <ThemeProvider>{children}</ThemeProvider>;
+}
+```
+
+#### Example TUI Component Test
+
+```typescript
+describe('InputBox', () => {
+  const defaultProps = {
+    agent: 'code',
+    agentColor: 'green',
+    disabled: false,
+    onSubmit: vi.fn(),
+    isFocused: true,
+  };
+
+  it('renders agent name and prompt symbol', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <InputBox {...defaultProps} />
+      </Wrapper>
+    );
+    expect(lastFrame()).toContain('code');
+    expect(lastFrame()).toContain('❯');
+  });
+
+  it('shows Streaming placeholder when disabled', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <InputBox {...defaultProps} disabled={true} />
+      </Wrapper>
+    );
+    expect(lastFrame()).toContain('Streaming...');
+  });
+
+  describe('autocomplete', () => {
+    const mockCommands: SlashCommand[] = [
+      {
+        name: 'help',
+        aliases: ['h'],
+        description: 'Show available commands',
+        category: 'general',
+        execute: async () => true,
+      },
+    ];
+
+    it('renders without crashing when commands prop is provided', () => {
+      const { lastFrame } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} commands={mockCommands} />
+        </Wrapper>
+      );
+      expect(lastFrame()).toContain('code');
+    });
+  });
+});
+```
+
+#### Testing Clipboard Functionality
+
+```typescript
+describe('clipboard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetClipboardCache();
+  });
+
+  describe('detectClipboard', () => {
+    it('should detect pngpaste on macOS', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      
+      mockExecFile.mockImplementation((cmd, args, _opts, cb) => {
+        const callback = typeof _opts === 'function' ? _opts : cb;
+        if (typeof callback === 'function') {
+          if (cmd === 'which' && args[0] === 'pngpaste') {
+            callback(null, { stdout: '/usr/local/bin/pngpaste', stderr: '' });
+          } else {
+            callback(new Error('not found'), null);
+          }
+        }
+        return undefined as never;
+      });
+
+      const { detectClipboard } = await importClipboard();
+      _resetClipboardCache();
+      const result = await detectClipboard();
+
+      expect(result.available).toBe(true);
+      expect(result.tool).toBe('pngpaste');
+      expect(result.platform).toBe('darwin');
+    });
+
+    it('should fall back to osascript when pngpaste is missing on macOS', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      
+      mockExecFile.mockImplementation((cmd, args, _opts, cb) => {
+        const callback = typeof _opts === 'function' ? _opts : cb;
+        if (typeof callback === 'function') {
+          if (cmd === 'which' && args[0] === 'osascript') {
+            callback(null, { stdout: '/usr/bin/osascript', stderr: '' });
+          } else {
+            callback(new Error('not found'), null);
+          }
+        }
+        return undefined as never;
+      });
+
+      const { detectClipboard } = await importClipboard();
+      _resetClipboardCache();
+      const result = await detectClipboard();
+
+      expect(result.available).toBe(true);
+      expect(result.tool).toBe('osascript');
+    });
+  });
+
+  describe('readImageFile', () => {
+    it('should read a valid PNG file', async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clipboard-test-'));
+      const filePath = path.join(tmpDir, 'test.png');
+      const pngData = Buffer.alloc(64);
+      pngData[0] = 0x89;
+      pngData[1] = 0x50;
+      pngData[2] = 0x4e;
+      pngData[3] = 0x47;
+      await fs.writeFile(filePath, pngData);
+
+      try {
+        const { readImageFile } = await importClipboard();
+        const result = await readImageFile(filePath);
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.format).toBe('png');
+          expect(result.data.length).toBe(64);
+        }
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+});
+```
+
+#### TUI Testing Best Practices
+
+1. **Mock External Dependencies**: Mock hooks and contexts that interact with external systems
+2. **Wrap in Providers**: Always wrap components in required context providers
+3. **Test Rendering**: Verify component renders without crashing
+4. **Test Props**: Test different prop combinations (disabled, focused, etc.)
+5. **Test Platform-Specific Code**: Use property descriptors to mock process.platform
+6. **Clean Up Mocks**: Reset mocks and caches in beforeEach/afterEach hooks
+
+### Tool Test Coverage
 
 Each tool is tested across multiple categories:
 
