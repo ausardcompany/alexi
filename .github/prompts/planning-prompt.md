@@ -8,19 +8,22 @@ You are a senior software architect analyzing upstream changes from three AI cod
 ## Diff Report
 
 # Upstream Changes Report
-Generated: 2026-03-15 07:44:26
+Generated: 2026-03-16 07:20:01
 
 ## Summary
-- kilocode: 3 commits, 23 files changed
+- kilocode: 6 commits, 3 files changed
 - opencode: 0 commits, 0 files changed
 
-## kilocode Changes (93c9819a..4bf437da)
+## kilocode Changes (4bf437da..a3eecbbf)
 
 ### Commits
 
-- 4bf437da - Merge branch 'Kilo-Org:main' into main (Aleksei Sabetski, 2026-03-15)
-- 72a2963f - Permission prompt style improvements (#7050) (Imanol Maiztegui, 2026-03-14)
-- 673ab875 - Improved permission prompt layout (#7037) (Imanol Maiztegui, 2026-03-14)
+- a3eecbbf - Merge branch 'Kilo-Org:main' into main (Aleksei Sabetski, 2026-03-16)
+- 146da404 - chore(sdk): regenerate endpoints (#7062) (Imanol Maiztegui, 2026-03-15)
+- b668b9c2 - Merge pull request #7036 from Kilo-Org/kirillk/model-dropdown-6997 (Kirill Kalishev, 2026-03-15)
+- 5097cf2f - Merge branch 'main' into kirillk/model-dropdown-6997 (Kirill Kalishev, 2026-03-13)
+- 41e6e36b - fix(vscode): debounce ModelSelector search input by 250ms (kirillk, 2026-03-13)
+- f26004b3 - fix(vscode): fix laggy hover in ModelSelector, clarify naming (kirillk, 2026-03-13)
 
 ### Changed Files by Category
 
@@ -40,29 +43,9 @@ Generated: 2026-03-15 07:44:26
 (no changes)
 
 #### Other Changes
-- `packages/kilo-vscode/tests/visual-regression.spec.ts-snapshots/composite-webview/bash-with-permission-chromium-linux.png` (+2, -2)
-- `packages/kilo-vscode/tests/visual-regression.spec.ts-snapshots/composite-webview/glob-with-permission-chromium-linux.png` (+2, -2)
-- `packages/kilo-vscode/tests/visual-regression.spec.ts-snapshots/composite-webview/permission-dock-todo-chromium-linux.png` (+2, -2)
-- `packages/kilo-vscode/tests/visual-regression.spec.ts-snapshots/composite-webview/permission-dock-write-chromium-linux.png` (+2, -2)
-- `packages/kilo-vscode/tests/visual-regression.spec.ts-snapshots/composite-webview/todo-write-with-permission-chromium-linux.png` (+2, -2)
-- `packages/kilo-vscode/webview-ui/src/components/chat/PermissionDock.tsx` (+104, -90)
-- `packages/kilo-vscode/webview-ui/src/i18n/ar.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/br.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/bs.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/da.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/de.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/en.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/es.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/fr.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ja.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ko.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/no.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/pl.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ru.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/th.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/zh.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/zht.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/styles/chat.css` (+92, -15)
+- `packages/kilo-vscode/webview-ui/src/components/shared/ModelSelector.tsx` (+59, -40)
+- `packages/kilo-vscode/webview-ui/src/styles/chat.css` (+2, -2)
+- `packages/sdk/openapi.json` (+92, -0)
 
 ### Key Diffs
 
