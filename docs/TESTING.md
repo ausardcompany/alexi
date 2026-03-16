@@ -365,6 +365,103 @@ describe('Auto Router', () => {
 });
 ```
 
+### Clipboard System Tests
+
+Location: `tests/clipboard.test.ts`
+
+Tests for platform-specific clipboard image reading with automatic fallback detection.
+
+**Test Coverage**:
+- Platform detection (macOS, Linux, Windows)
+- Tool availability checks (pngpaste, osascript, xclip, wl-paste, powershell)
+- Fallback mechanisms (osascript when pngpaste is missing on macOS)
+- Image file reading with format validation
+- Error handling for missing files, unsupported formats, empty files
+
+**Key Test Cases**:
+
+```typescript
+describe('detectClipboard', () => {
+  it('should detect pngpaste on macOS');
+  it('should fall back to osascript when pngpaste is missing on macOS');
+  it('should report unavailable when no tool found on macOS');
+  it('should report unavailable on unsupported platform');
+});
+
+describe('readImageFile', () => {
+  it('should read a valid PNG file');
+  it('should return error for non-existent file');
+  it('should return error for unsupported format');
+  it('should return error for empty file');
+});
+```
+
+**Mocking Strategy**:
+- Mock `child_process.execFile` to simulate tool availability checks
+- Mock `node:util.promisify` to wrap mock execFile
+- Use platform property descriptor to test different platforms
+- Create temporary files with PNG magic bytes for validation tests
+
+**Example Test**:
+
+```typescript
+it('should fall back to osascript when pngpaste is missing on macOS', async () => {
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  
+  // pngpaste not found, but osascript is available
+  mockExecFile.mockImplementation((cmd, args, _opts, cb) => {
+    const callback = typeof _opts === 'function' ? _opts : cb;
+    if (cmd === 'which' && args[0] === 'osascript') {
+      callback(null, { stdout: '/usr/bin/osascript', stderr: '' });
+    } else {
+      callback(new Error('not found'), null);
+    }
+  });
+  
+  const result = await detectClipboard();
+  expect(result.available).toBe(true);
+  expect(result.tool).toBe('osascript');
+});
+```
+
+### TUI Component Tests
+
+Location: `tests/cli/tui/`
+
+Tests for Ink-based Terminal UI components.
+
+**Test Coverage**:
+- InputBox component with autocomplete
+- Command registry and execution
+- Keyboard event handling
+- Attachment management
+- Message rendering
+
+**Example Test** (`InputBox.test.tsx`):
+
+```typescript
+describe('InputBox autocomplete', () => {
+  it('should show suggestions when typing /', async () => {
+    const { getByText, stdin } = render(
+      <InputBox
+        agent="code"
+        agentColor="#00ff00"
+        disabled={false}
+        onSubmit={vi.fn()}
+        isFocused={true}
+        commands={mockCommands}
+      />
+    );
+    
+    stdin.write('/');
+    await waitFor(() => {
+      expect(getByText('/help')).toBeDefined();
+      expect(getByText('/exit')).toBeDefined();
+    });
+  });
+});
+```
+
 ## Best Practices
 
 ### 1. Test Isolation

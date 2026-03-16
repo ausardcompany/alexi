@@ -140,6 +140,45 @@ The workflow determines documentation scope based on file patterns:
 | opencode | Open source coding patterns | anomalyco/opencode |
 | claude-code | Anthropic Claude patterns | anthropics/claude-code |
 
+#### Documentation Commit Identification
+
+The workflow tracks documentation commits using a special tag to avoid analyzing documentation-only changes:
+
+```bash
+# Documentation commits are tagged with [alexi-bot]
+git commit -m "docs: auto-generate documentation [skip ci] [alexi-bot]"
+
+# Workflow searches for last documentation commit
+LAST_DOC_COMMIT=$(git log --oneline --grep="\\[alexi-bot\\]" -1 --format="%H")
+```
+
+This ensures that:
+- Documentation-only commits are excluded from change analysis
+- Only code changes trigger documentation updates
+- The workflow can identify the baseline for diff generation
+
+#### Diff Preview Limits
+
+The workflow generates diff previews with intelligent truncation:
+
+| File Type | Preview Limit | Truncation Indicator |
+|-----------|---------------|----------------------|
+| TypeScript (`*.ts`, `*.tsx`) | 500 lines | `... [truncated, N lines total]` |
+| JSON (`*.json`) | 500 lines | `... [truncated, N lines total]` |
+| YAML (`*.yml`, `*.yaml`) | 500 lines | `... [truncated, N lines total]` |
+
+When diffs exceed the preview limit, a truncation message is added to guide the AI agent to use `read` and `grep` tools for full context.
+
+#### Validation Step
+
+After documentation generation, the workflow validates markdown files using `markdownlint-cli2`:
+
+```bash
+npx --yes markdownlint-cli2 docs/*.md CHANGELOG.md
+```
+
+Validation warnings are included in the PR comment but do not block the workflow.
+
 #### Workflow Architecture
 
 ```mermaid

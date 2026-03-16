@@ -197,6 +197,231 @@ alexi session-delete -s <session-id>
 |--------|------|-------------|
 | `-s, --session <id>` | string | Session ID to delete (required) |
 
+## Interactive Mode Commands
+
+The interactive REPL supports a comprehensive set of slash commands for session management, agent control, and configuration.
+
+### Memory Management Commands
+
+#### /memory
+
+List and manage instruction files that are loaded into the system prompt.
+
+```bash
+# List all instruction files
+/memory
+
+# Edit project-level AGENTS.md
+/memory edit project
+
+# Edit user-level ALEXI.md
+/memory edit user
+
+# Edit a specific rule file
+/memory edit <filename>
+
+# Create AGENTS.md from template
+/memory init
+```
+
+**Instruction File Sources** (loaded in order):
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific instructions for AI agents
+   - Wrapped in `<agents-md>` tags in system prompt
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - User-wide instructions loaded into every session
+   - Wrapped in `<user-instructions>` tags in system prompt
+
+3. **Project-level rule files** (`workdir/.alexi/rules/*.md`)
+   - Scoped instruction files for specific domains
+   - Each file wrapped in `<rule file="...">` tags in system prompt
+
+**Example Output**:
+
+```
+  Instruction Files:
+
+  1. [loaded] Project instructions
+     /path/to/project/AGENTS.md
+  2. [loaded] User instructions
+     /home/user/.alexi/ALEXI.md
+  3. [not found] Rules directory not found
+     /path/to/project/.alexi/rules
+
+  Commands:
+    /memory edit [project|user]  - Open file in $EDITOR
+    /memory init                 - Create AGENTS.md from template
+```
+
+#### /mem
+
+Manage stored memories (key-value pairs with tags).
+
+```bash
+# List recent memories
+/mem
+/mem list
+
+# Search memories by text or tag
+/mem search <query>
+
+# Delete a memory by ID prefix
+/mem delete <id>
+
+# Clear all memories
+/mem clear
+
+# Show memory statistics
+/mem stats
+
+# Export memories to JSON
+/mem export
+```
+
+**Example Output**:
+
+```
+  Stored Memories:
+
+    abc123 Remember to use TypeScript strict mode [#coding #style]
+         Updated: Mar 16, 2026
+    def456 SAP AI Core resource group is 'production' [#config]
+         Updated: Mar 15, 2026
+
+  ... and 8 more memories
+```
+
+#### /remember
+
+Save a new memory with optional tags.
+
+```bash
+# Save a memory
+/remember <text to remember>
+
+# Save with tags (use #tag syntax)
+/remember Use gpt-4o for complex reasoning #model #preference
+```
+
+### Session Commands
+
+```bash
+/session           # Show current session info
+/sessions          # List all sessions
+/session load <id> # Load a previous session
+/session new       # Start a new session
+/session export    # Export session to markdown
+/fork [name]       # Fork current session with optional name
+/rename <name>     # Rename current session
+```
+
+### Model and Agent Commands
+
+```bash
+/model <id>        # Switch to a different model
+/models            # Pick a model (interactive selector)
+/agent <name>      # Switch to different agent (code, debug, plan, explore)
+```
+
+### Tool and Context Commands
+
+```bash
+/compact           # Trigger manual context compaction
+/context           # Show context usage (tokens used/available)
+/status            # Show current status (model, agent, session, stage)
+/diff              # Show files changed in current session
+/undo              # Undo last file change
+/redo              # Redo last undone change
+```
+
+### Git Commands
+
+```bash
+/commit [msg]      # Force commit pending changes (optional message)
+/git <cmd>         # Run a raw git command
+/git-log           # Show recent AI commits
+/git-config        # Show current git config
+```
+
+### Configuration Commands
+
+```bash
+/config            # Show current configuration
+/config path       # Show config file paths
+/config set <k> <v># Set a configuration value
+/permissions       # List permission rules
+/permissions reset # Clear session permission grants
+/mcp               # List MCP servers
+/mcp connect <name># Connect to MCP server
+/mcp disconnect <n># Disconnect from MCP server
+/mcp status        # Show MCP connection status
+```
+
+### Development Stage Commands
+
+```bash
+/stage <name>      # Switch development stage
+/dod               # Run Definition of Done checks for current stage
+```
+
+### Utility Commands
+
+```bash
+/help, /h          # Show help message
+/exit, /quit, /q   # Exit the REPL
+/clear             # Clear screen
+/history           # Show conversation history
+/autoroute         # Toggle auto model routing
+/system <prompt>   # Set system prompt
+/tokens            # Show token usage stats
+/think [on|off]    # Toggle extended thinking mode
+/effort [low|med|high] # Set effort level (cost/quality)
+/doctor            # Run environment health checks
+/clear-history     # Clear conversation history
+/bug, /feedback    # Report issues and feedback
+```
+
+### Cost and Data Commands
+
+```bash
+/cost              # Show cost summary for current session
+/cost today        # Show today's cost summary
+/cost month        # Show this month's cost summary
+/cost all          # Show all-time cost summary
+/cost export       # Export cost history to CSV
+/export [file]     # Export all data to file (JSON/MD/CSV)
+/import <file>     # Import data from file
+/stats             # Show overall usage statistics
+```
+
+### Aliases and Templates
+
+```bash
+/alias             # List all command aliases
+/alias <n> <cmd>   # Create alias (e.g., /alias gpt /model gpt-4o)
+/alias delete <n>  # Delete an alias
+/snippet           # List saved code snippets
+/snippet add <n>   # Add snippet (prompts for code)
+/snippet use <n>   # Copy snippet to use in message
+/template          # List message templates
+/template use <n>  # Apply a template
+```
+
+### Keybindings
+
+| Keybinding | Action |
+|------------|--------|
+| `Tab` | Cycle to next agent |
+| `Shift+Tab` | Cycle to previous agent |
+| `Ctrl+X n` | New session |
+| `Ctrl+X m` | Model picker |
+| `Ctrl+X a` | List agents |
+| `Ctrl+X s` | Show status |
+| `Ctrl+X h` | Show help |
+| `Ctrl+L` | Clear screen |
+
 ## Environment Variables
 
 ### Required Variables

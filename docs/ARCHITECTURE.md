@@ -200,6 +200,156 @@ flowchart TB
 ## Permission System Flow
 
 ```mermaid
+flowchart TB
+    Start([Tool Execution]) --> CheckPerm[Check Permission Manager]
+    CheckPerm --> GetRules[Retrieve Matching Rules]
+    GetRules --> SortRules[Sort by Priority]
+    SortRules --> LastMatch{Last Match Decision?}
+    
+    LastMatch -->|Allow| Execute[Execute Tool]
+    LastMatch -->|Deny| ReturnDenied[Return Permission Denied]
+    LastMatch -->|Ask| PromptUser[Prompt User]
+    
+    PromptUser -->|Approved| Execute
+    PromptUser -->|Denied| ReturnDenied
+    
+    Execute --> RecordResult[Record Tool Result]
+    ReturnDenied --> RecordResult
+    RecordResult --> End([Continue])
+```
+
+## System Prompt Assembly Pipeline
+
+The system prompt is assembled from multiple layered sources, enabling flexible customization at different scopes.
+
+```mermaid
+flowchart LR
+    subgraph Sources["Prompt Sources (in order)"]
+        Soul[1. Soul Prompt<br/>core identity]
+        Model[2. Model-Specific<br/>anthropic/openai/gemini]
+        Env[3. Environment Info<br/>workdir, git, date]
+        Agent[4. Agent Role<br/>code/debug/plan]
+        Instructions[5. Instruction Files<br/>AGENTS.md, ALEXI.md, rules]
+        Custom[6. Custom Rules<br/>user-provided]
+    end
+    
+    Soul --> Model --> Env --> Agent --> Instructions --> Custom
+    Custom --> Output[Assembled System Prompt]
+```
+
+### Instruction File Loading
+
+Instruction files provide persistent customization for AI agents across three scopes:
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific coding conventions, build commands, architecture notes
+   - Wrapped in `<agents-md>` tags in system prompt
+   - Created with `/memory init` command
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - User-wide preferences loaded into every session
+   - Wrapped in `<user-instructions>` tags in system prompt
+   - Edited with `/memory edit user` command
+
+3. **Project-level rule files** (`workdir/.alexi/rules/*.md`)
+   - Scoped instruction files for specific domains (e.g., testing.md, security.md)
+   - Each file wrapped in `<rule file="filename.md">` tags in system prompt
+   - Loaded alphabetically from `.alexi/rules/` directory
+
+**Implementation**: `src/agent/system.ts` → `loadInstructionFiles()`
+
+## TUI Command System
+
+The Terminal UI uses a declarative command registry for slash commands, replacing the monolithic switch statement with an extensible architecture.
+
+```mermaid
+flowchart TB
+    Input[User Input] --> Check{Starts with /?}
+    Check -->|No| SendToLLM[Send to LLM]
+    Check -->|Yes| Parse[Parse Command]
+    Parse --> Match[Match Command]
+    Match --> Found{Command Found?}
+    Found -->|Yes| Execute[Execute Handler]
+    Found -->|No| Unknown[Unknown Command]
+    Execute --> Complete[Mark as Handled]
+    Unknown --> Complete
+    Complete --> Return[Return to Input]
+```
+
+### Command Registry
+
+Commands are defined as `SlashCommand` objects with:
+
+```typescript
+interface SlashCommand {
+  name: string;              // Primary command name
+  aliases?: string[];        // Alternative names
+  description: string;       // Help text
+  category: CommandCategory; // Grouping for help display
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+```
+
+**Categories**: general, session, model, git, debug, config
+
+**Implementation**: `src/cli/tui/hooks/useCommands.ts`
+
+### Autocomplete System
+
+The TUI input box provides inline autocomplete for slash commands:
+
+- Suggestions appear when typing `/`
+- Filtered by partial command name or alias
+- Keyboard navigation: Up/Down/Tab/Shift+Tab
+- Acceptance: Enter or Tab when suggestion is selected
+- Dismissal: Escape key
+
+**Implementation**: `src/cli/tui/components/InputBox.tsx`
+
+## Clipboard Image Support
+
+Platform-specific clipboard image reading with automatic fallback detection.
+
+```mermaid
+flowchart TB
+    Start([Read Clipboard]) --> Detect[Detect Platform]
+    Detect --> macOS{macOS?}
+    Detect --> Linux{Linux?}
+    Detect --> Windows{Windows?}
+    
+    macOS -->|Yes| TryPngPaste[Try pngpaste]
+    TryPngPaste -->|Available| UsePngPaste[Use pngpaste]
+    TryPngPaste -->|Not Found| UseOsascript[Use osascript]
+    
+    Linux -->|X11| UseXclip[Use xclip]
+    Linux -->|Wayland| UseWlPaste[Use wl-paste]
+    
+    Windows -->|Yes| UsePowerShell[Use PowerShell]
+    
+    UsePngPaste --> Validate[Validate Image Format]
+    UseOsascript --> Validate
+    UseXclip --> Validate
+    UseWlPaste --> Validate
+    UsePowerShell --> Validate
+    
+    Validate --> Return([Return Image Buffer])
+```
+
+### Osascript Fallback (macOS)
+
+When `pngpaste` is not installed, Alexi uses AppleScript to read clipboard images:
+
+1. Create temporary file in `os.tmpdir()`
+2. Execute AppleScript to write clipboard as PNG to temp file
+3. Read file contents into buffer
+4. Clean up temporary directory
+5. Validate and return image data
+
+**Implementation**: `src/utils/clipboard.ts` → `readClipboardViaOsascript()`
+
+## Permission System Flow
+
+```mermaid
 flowchart LR
     ToolExec[Tool Execution Request] --> HasPerm{Has Permission Config?}
     HasPerm -->|Yes| GetResource[Get Resource Path]

@@ -435,7 +435,24 @@ Supported diagram types:
 
 ## Automation System
 
-### Autonomous Sync
+### Documentation Workflow
+
+When you create a pull request, the documentation workflow automatically:
+
+1. Analyzes code changes to determine documentation scope
+2. Generates diff summaries and commit history
+3. Invokes Alexi CLI in agent mode to update documentation
+4. Commits documentation changes back to the PR branch
+5. Validates markdown files with markdownlint
+6. Posts a summary comment on the PR
+
+**Key Points**:
+- Documentation commits are tagged with `[alexi-bot]` to avoid recursive analysis
+- Diff previews are limited to 500 lines per file type with truncation indicators
+- The AI agent uses `read`, `grep`, and `glob` tools to examine full source code
+- Validation warnings are reported but do not block the workflow
+
+### Upstream Sync Workflow
 
 Alexi includes an autonomous upstream synchronization system:
 
@@ -455,6 +472,84 @@ The system:
 - Uses AI to analyze and apply relevant changes
 - Creates PRs with detailed change descriptions
 - Auto-merges after CI passes
+
+### Instruction Files for AI Agents
+
+Alexi supports instruction files that are loaded into the system prompt to guide AI agents:
+
+#### Project-Level AGENTS.md
+
+Create an `AGENTS.md` file in the project root to provide project-specific instructions:
+
+```bash
+# Create from template in interactive mode
+/memory init
+
+# Or create manually
+touch AGENTS.md
+```
+
+**Typical Contents**:
+- Project overview and architecture
+- Build and test commands
+- Code style guidelines
+- Important conventions
+- Technology stack notes
+
+Example:
+
+```markdown
+# AGENTS.md
+
+## Project Overview
+
+Alexi is a TypeScript/Node.js CLI application using ES Modules.
+
+## Build & Test Commands
+
+```bash
+npm run build
+npm test
+npm run lint
+```
+
+## Code Style
+
+- Use 2 spaces for indentation
+- Always use explicit types
+- Prefer async/await over promises
+- Use .js extensions for local imports (ES Modules requirement)
+
+## Important Notes
+
+- All LLM calls route through SAP AI Core Orchestration API
+- Session data is stored in ~/.alexi/sessions/
+```
+
+#### User-Level ALEXI.md
+
+Create `~/.alexi/ALEXI.md` for user-wide preferences:
+
+```bash
+# Edit in interactive mode
+/memory edit user
+
+# Or create manually
+mkdir -p ~/.alexi
+touch ~/.alexi/ALEXI.md
+```
+
+#### Project-Level Rule Files
+
+Create scoped instruction files in `.alexi/rules/`:
+
+```bash
+mkdir -p .alexi/rules
+touch .alexi/rules/security.md
+touch .alexi/rules/testing.md
+```
+
+These files are loaded alphabetically and wrapped in `<rule file="...">` tags in the system prompt.
 
 ### Agentic File Operations
 

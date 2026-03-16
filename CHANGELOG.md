@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-03-16
+
+### Added
+
+- Instruction file management system for AI agent customization
+  - User-level instruction file support via `~/.alexi/ALEXI.md`
+  - Project-level rule files in `.alexi/rules/*.md` directory
+  - New `/memory` command to list and edit instruction files
+  - New `/memory edit [target]` command to open instruction files in $EDITOR
+  - New `/memory init` command to create AGENTS.md from template
+  - System prompt assembly now loads three instruction file sources in order: AGENTS.md, ALEXI.md, and rule files
+- Slash command system for TUI with autocomplete
+  - New `useCommands` hook provides declarative command registry
+  - Autocomplete suggestions when typing `/` in TUI input box
+  - Keyboard navigation with Up/Down/Tab/Shift+Tab
+  - Command categories: general, session, model, git, debug, config
+  - 11 registered commands including `/help`, `/exit`, `/model`, `/agent`, `/status`, `/sessions`, `/mcp`, `/theme`, `/image`, `/clear-images`, `/memory`, `/mem`
+
+### Changed
+
+- System prompt assembly pipeline now loads instruction files from three sources
+  - Project-level `AGENTS.md` wrapped in `<agents-md>` tags
+  - User-level `~/.alexi/ALEXI.md` wrapped in `<user-instructions>` tags
+  - Project-level `.alexi/rules/*.md` files wrapped in `<rule file="...">` tags
+- Memory command renamed from `/memory` to `/mem` for stored key-value memories
+  - `/mem` now handles memory list, search, delete, clear, stats, export operations
+  - `/memory` command repurposed for instruction file management
+- Clipboard image paste on macOS improved with osascript fallback
+  - Primary clipboard tool: `pngpaste` (requires installation)
+  - Fallback tool: `osascript` (pre-installed on macOS)
+  - AppleScript-based clipboard reading writes to temporary file and cleans up automatically
+- Documentation workflow enhanced with better diff handling
+  - Increased diff preview limit from 100 to 500 lines per file type
+  - Added truncation indicators when diffs exceed preview limits
+  - Improved documentation commit identification using `[alexi-bot]` tag
+  - Documentation files now excluded from changed file analysis using refined regex patterns
+
+### Fixed
+
+- Clipboard image reading on macOS now works without requiring pngpaste installation
+- Documentation workflow correctly identifies last documentation commit by searching for `[alexi-bot]` tag instead of generic commit message
+- Documentation scope analysis no longer includes documentation files themselves in changed file list
+
 ## [0.2.2] - 2026-03-15
 
 ### Fixed
@@ -97,7 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/ausardcompany/alexi/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/ausardcompany/alexi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ausardcompany/alexi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ausardcompany/alexi/compare/v0.1.3...v0.2.0
