@@ -6,13 +6,14 @@
  *   2. Model-specific instructions
  *   3. Environment info
  *   4. Agent role prompt
- *   5. AGENTS.md (project-specific instructions)
+ *   5. Instruction files (AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
  *   6. Custom rules (user-provided)
  *
  * Each layer is optional and only included when applicable.
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 
@@ -121,20 +122,59 @@ function buildEnvBlock(info: EnvInfo): string {
 }
 
 // ---------------------------------------------------------------------------
-// AGENTS.md loading
+// Instruction file loading (AGENTS.md, ALEXI.md, .alexi/rules/)
 // ---------------------------------------------------------------------------
 
-function loadAgentsMd(workdir: string): string {
+/** Load a single text file, returning empty string on failure. */
+function loadTextFile(filePath: string): string {
   try {
-    const agentsMdPath = path.join(workdir, 'AGENTS.md');
-    const content = fs.readFileSync(agentsMdPath, 'utf-8').trim();
-    if (content) {
-      return `<agents-md>\n${content}\n</agents-md>`;
+    return fs.readFileSync(filePath, 'utf-8').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Load all instruction files and return them as a combined tagged block.
+ *
+ * Sources (in order):
+ *   1. Project-level AGENTS.md  (workdir/AGENTS.md)
+ *   2. User-level ALEXI.md     (~/.alexi/ALEXI.md)
+ *   3. Project-level rule files (workdir/.alexi/rules/*.md)
+ */
+function loadInstructionFiles(workdir: string): string {
+  const parts: string[] = [];
+
+  // 1. Project AGENTS.md
+  const agentsMd = loadTextFile(path.join(workdir, 'AGENTS.md'));
+  if (agentsMd) {
+    parts.push(`<agents-md>\n${agentsMd}\n</agents-md>`);
+  }
+
+  // 2. User-level ~/.alexi/ALEXI.md
+  const userMd = loadTextFile(path.join(os.homedir(), '.alexi', 'ALEXI.md'));
+  if (userMd) {
+    parts.push(`<user-instructions>\n${userMd}\n</user-instructions>`);
+  }
+
+  // 3. Project .alexi/rules/*.md
+  const rulesDir = path.join(workdir, '.alexi', 'rules');
+  try {
+    const ruleFiles = fs
+      .readdirSync(rulesDir)
+      .filter((f) => f.endsWith('.md'))
+      .sort();
+    for (const rf of ruleFiles) {
+      const content = loadTextFile(path.join(rulesDir, rf));
+      if (content) {
+        parts.push(`<rule file="${rf}">\n${content}\n</rule>`);
+      }
     }
   } catch {
-    // AGENTS.md doesn't exist — that's fine
+    // rules directory doesn't exist — that's fine
   }
-  return '';
+
+  return parts.join('\n\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +192,7 @@ export interface AssembleOptions {
   customRules?: string;
   /** Whether to skip environment info block (useful for tests). */
   skipEnv?: boolean;
-  /** Whether to skip AGENTS.md loading (useful for tests). */
+  /** Whether to skip instruction file loading — AGENTS.md, ALEXI.md, rules (useful for tests). */
   skipAgentsMd?: boolean;
 }
 
@@ -164,7 +204,7 @@ export interface AssembleOptions {
  *   2. Model-specific prompt (based on modelId)
  *   3. Environment info block
  *   4. Agent role prompt (based on agentId)
- *   5. AGENTS.md content (if present in workdir)
+ *   5. Instruction files (AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
  *   6. Custom rules (user-provided)
  */
 export function buildAssembledSystemPrompt(options: AssembleOptions = {}): string {
@@ -212,11 +252,11 @@ export function buildAssembledSystemPrompt(options: AssembleOptions = {}): strin
     }
   }
 
-  // 5. AGENTS.md
+  // 5. Instruction files (AGENTS.md, ALEXI.md, .alexi/rules/)
   if (!options.skipAgentsMd) {
-    const agentsMd = loadAgentsMd(workdir);
-    if (agentsMd) {
-      parts.push(agentsMd);
+    const instructions = loadInstructionFiles(workdir);
+    if (instructions) {
+      parts.push(instructions);
     }
   }
 

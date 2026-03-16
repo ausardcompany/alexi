@@ -83,6 +83,7 @@ export const OUR_FEATURES = {
     '/template',
     '/cost',
     '/memory',
+    '/mem',
     '/doctor',
     '/config',
     '/compact',

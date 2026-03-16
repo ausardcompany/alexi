@@ -227,10 +227,20 @@ function printHelp(): void {
     c('yellow', '  /remember <text>') +
       c('gray', '   - Save a memory (use #tags for categorization)')
   );
-  console.log(c('yellow', '  /memory') + c('gray', '            - List all memories'));
-  console.log(c('yellow', '  /memory search <q>') + c('gray', ' - Search memories by text or tag'));
-  console.log(c('yellow', '  /memory stats') + c('gray', '      - Show memory statistics'));
-  console.log(c('yellow', '  /memory export') + c('gray', '     - Export memories to JSON'));
+  console.log(c('yellow', '  /mem') + c('gray', '               - List all stored memories'));
+  console.log(c('yellow', '  /mem search <q>') + c('gray', '    - Search memories by text or tag'));
+  console.log(c('yellow', '  /mem stats') + c('gray', '         - Show memory statistics'));
+  console.log(c('yellow', '  /mem export') + c('gray', '        - Export memories to JSON'));
+  console.log();
+  console.log(c('cyan', '  Instruction Files:'));
+  console.log();
+  console.log(
+    c('yellow', '  /memory') + c('gray', '            - List instruction files (AGENTS.md, etc.)')
+  );
+  console.log(
+    c('yellow', '  /memory edit [target]') + c('gray', ' - Open instruction file in $EDITOR')
+  );
+  console.log(c('yellow', '  /memory init') + c('gray', '       - Create AGENTS.md from template'));
   console.log();
   console.log(c('cyan', '  Data & Export:'));
   console.log();
@@ -1047,7 +1057,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       return true;
     }
 
-    case 'memory': {
+    case 'mem': {
       const memoryManager = getMemoryManager();
       const subCmd = args[0]?.toLowerCase();
 
@@ -1124,9 +1134,165 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         console.log(c('green', `\n  Memories exported to: ${exportPath}\n`));
       } else {
         console.log(
-          c('yellow', '\n  Usage: /memory [list|search <query>|delete <id>|clear|stats|export]\n')
+          c('yellow', '\n  Usage: /mem [list|search <query>|delete <id>|clear|stats|export]\n')
         );
       }
+      return true;
+    }
+
+    case 'memory': {
+      // Claude-like /memory command: list & edit instruction files
+      const subCmd = args[0]?.toLowerCase();
+      const workdir = process.cwd();
+
+      // Gather all instruction file paths
+      const instructionFiles: { label: string; filePath: string; exists: boolean }[] = [];
+
+      // 1. Project-level AGENTS.md
+      const agentsMdPath = path.join(workdir, 'AGENTS.md');
+      instructionFiles.push({
+        label: 'Project instructions',
+        filePath: agentsMdPath,
+        exists: fs.existsSync(agentsMdPath),
+      });
+
+      // 2. User-level ~/.alexi/ALEXI.md
+      const userMdPath = path.join(os.homedir(), '.alexi', 'ALEXI.md');
+      instructionFiles.push({
+        label: 'User instructions',
+        filePath: userMdPath,
+        exists: fs.existsSync(userMdPath),
+      });
+
+      // 3. Project-level .alexi/rules/*.md
+      const rulesDir = path.join(workdir, '.alexi', 'rules');
+      if (fs.existsSync(rulesDir)) {
+        const ruleFiles = fs
+          .readdirSync(rulesDir)
+          .filter((f) => f.endsWith('.md'))
+          .sort();
+        for (const rf of ruleFiles) {
+          instructionFiles.push({
+            label: `Rule: ${rf}`,
+            filePath: path.join(rulesDir, rf),
+            exists: true,
+          });
+        }
+      }
+
+      if (subCmd === 'edit') {
+        // /memory edit [project|user|<filename>]
+        const target = args[1]?.toLowerCase();
+        let targetFile: string | undefined;
+
+        if (!target || target === 'project') {
+          targetFile = agentsMdPath;
+        } else if (target === 'user') {
+          // Ensure ~/.alexi/ directory exists
+          const alexiDir = path.join(os.homedir(), '.alexi');
+          if (!fs.existsSync(alexiDir)) {
+            fs.mkdirSync(alexiDir, { recursive: true });
+          }
+          targetFile = userMdPath;
+        } else {
+          // Try to match a rule file or exact path
+          const match = instructionFiles.find(
+            (f) => f.filePath.endsWith(target) || f.label.toLowerCase().includes(target)
+          );
+          targetFile = match?.filePath;
+        }
+
+        if (!targetFile) {
+          console.log(c('red', `\n  Unknown target: ${args[1]}\n`));
+          console.log(c('dim', '  Usage: /memory edit [project|user|<filename>]'));
+          return true;
+        }
+
+        // Create file if it doesn't exist
+        if (!fs.existsSync(targetFile)) {
+          const dir = path.dirname(targetFile);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+          const header =
+            targetFile === agentsMdPath
+              ? '# AGENTS.md\n\nProject-specific instructions for AI agents.\n'
+              : targetFile === userMdPath
+                ? '# ALEXI.md\n\nUser-level instructions loaded into every session.\n'
+                : '# Rule\n\nScoped rule file.\n';
+          fs.writeFileSync(targetFile, header);
+          console.log(c('green', `\n  Created: ${targetFile}`));
+        }
+
+        // Open in $EDITOR / $VISUAL / vi
+        const editor = process.env.VISUAL || process.env.EDITOR || 'vi';
+        console.log(c('dim', `\n  Opening ${targetFile} in ${editor}...`));
+        try {
+          execSync(`${editor} "${targetFile}"`, { stdio: 'inherit' });
+          console.log(c('green', '  File saved. Changes will take effect on next prompt.\n'));
+        } catch {
+          console.log(c('red', `\n  Failed to open editor: ${editor}\n`));
+        }
+        return true;
+      }
+
+      if (subCmd === 'init') {
+        // /memory init — create AGENTS.md from template if missing
+        if (fs.existsSync(agentsMdPath)) {
+          console.log(c('yellow', `\n  AGENTS.md already exists at: ${agentsMdPath}\n`));
+          console.log(c('dim', '  Use /memory edit project to modify it.'));
+        } else {
+          const template = [
+            '# AGENTS.md',
+            '',
+            '## Project Overview',
+            '',
+            'Describe your project here so AI agents understand the codebase.',
+            '',
+            '## Build & Test Commands',
+            '',
+            '```bash',
+            'npm run build',
+            'npm test',
+            '```',
+            '',
+            '## Code Style',
+            '',
+            '- Add your coding conventions here',
+            '',
+            '## Important Notes',
+            '',
+            '- Add project-specific rules for the AI agent',
+            '',
+          ].join('\n');
+          fs.writeFileSync(agentsMdPath, template);
+          console.log(c('green', `\n  Created AGENTS.md at: ${agentsMdPath}`));
+          console.log(c('dim', '  Use /memory edit project to customize it.\n'));
+        }
+        return true;
+      }
+
+      // Default: /memory — list all instruction files
+      console.log(c('cyan', '\n  Instruction Files:\n'));
+      for (let i = 0; i < instructionFiles.length; i++) {
+        const f = instructionFiles[i];
+        const status = f.exists ? c('green', '[loaded]') : c('dim', '[not found]');
+        const num = c('yellow', `  ${i + 1}.`);
+        console.log(`${num} ${status} ${c('gray', f.label)}`);
+        console.log(c('dim', `     ${f.filePath}`));
+      }
+
+      // Show potential rules directory
+      if (!fs.existsSync(rulesDir)) {
+        console.log(c('dim', `\n  Rules directory not found: ${rulesDir}`));
+        console.log(c('dim', '  Create .alexi/rules/*.md for scoped instruction files.'));
+      }
+
+      console.log();
+      console.log(c('cyan', '  Commands:'));
+      console.log(c('dim', '    /memory edit [project|user]  - Open file in $EDITOR'));
+      console.log(c('dim', '    /memory init                 - Create AGENTS.md from template'));
+      console.log();
       return true;
     }
 

@@ -288,6 +288,29 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         return true;
       },
     },
+
+    // /memory --------------------------------------------------------------
+    {
+      name: 'memory',
+      description: 'List instruction files (AGENTS.md, ALEXI.md)',
+      category: 'config',
+      execute: async (_args, _ctx) => {
+        // TUI cannot open $EDITOR; signal handled and let the TUI
+        // render a status message. Full editing is in the REPL.
+        return true;
+      },
+    },
+
+    // /mem ------------------------------------------------------------------
+    {
+      name: 'mem',
+      description: 'List stored memories (JSON key-value)',
+      category: 'config',
+      execute: async (_args, _ctx) => {
+        // TUI stub — full memory management is in the REPL.
+        return true;
+      },
+    },
   ];
 }
 
