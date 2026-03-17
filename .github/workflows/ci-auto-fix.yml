@@ -1,0 +1,545 @@
+name: CI Auto-Fix
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: ['auto/**']
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'CI workflow run ID to fix'
+        required: true
+        type: number
+      pr_branch:
+        description: 'PR branch name (e.g. auto/my-feature)'
+        required: true
+        type: string
+
+concurrency:
+  group: ci-auto-fix-${{ github.event.workflow_run.head_branch || inputs.pr_branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  auto-fix:
+    name: Auto-Fix CI Failures
+    runs-on: ubuntu-latest
+    # For workflow_run: only run when CI actually failed
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure'
+
+    steps:
+      # ─── Step 1: Determine branch and run ID ─────────────────────────────────
+      - name: Determine branch and run ID
+        id: determine
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            RUN_ID="${{ github.event.workflow_run.id }}"
+          else
+            BRANCH="${{ inputs.pr_branch }}"
+            RUN_ID="${{ inputs.run_id }}"
+          fi
+
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "Branch: $BRANCH"
+          echo "Run ID: $RUN_ID"
+
+          # Guard: only process auto/* branches
+          if [[ "$BRANCH" != auto/* ]]; then
+            echo "[SKIP] Branch '$BRANCH' is not an auto/* branch. Skipping."
+            exit 0
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 2: Check retry count ────────────────────────────────────────────
+      - name: Check retry count
+        id: retry_check
+        run: |
+          BRANCH="${{ steps.determine.outputs.branch }}"
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Find this workflow's ID
+          WORKFLOW_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
+            --jq '.workflows[] | select(.name == "CI Auto-Fix") | .id')
+
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "[WARN] Could not find CI Auto-Fix workflow ID, proceeding anyway"
+            echo "should_skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Count runs today on this branch (exclude in_progress / queued to avoid
+          # counting the current run itself, which may not be listed yet)
+          RUN_COUNT=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_ID/runs?branch=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$BRANCH")&created=>=${TODAY}T00:00:00Z&status=completed&per_page=10" \
+            --jq '.workflow_runs | length')
+
+          echo "Auto-fix runs today for branch '$BRANCH': $RUN_COUNT"
+
+          if [ "${RUN_COUNT:-0}" -ge 2 ]; then
+            echo "[WARN] Already ran $RUN_COUNT time(s) today on '$BRANCH'. Skipping to avoid infinite loop."
+            echo "should_skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_skip=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 3: Collect failed job logs ─────────────────────────────────────
+      - name: Collect failed job logs
+        id: collect_logs
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          RUN_ID="${{ steps.determine.outputs.run_id }}"
+          echo "Collecting failed job logs for run $RUN_ID..."
+
+          # Get all jobs for this run
+          JOBS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[] | select(.conclusion == "failure")]')
+
+          JOB_COUNT=$(echo "$JOBS" | jq 'length')
+          echo "Failed jobs: $JOB_COUNT"
+
+          if [ "$JOB_COUNT" -eq 0 ]; then
+            echo "[INFO] No failed jobs found. Nothing to fix."
+            echo "# CI Failures" > ci-failures.md
+            echo "" >> ci-failures.md
+            echo "No failed jobs were detected in run $RUN_ID." >> ci-failures.md
+            echo "failed_jobs=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Build ci-failures.md
+          {
+            echo "# CI Failure Report"
+            echo ""
+            echo "**Run ID**: $RUN_ID"
+            echo "**Branch**: ${{ steps.determine.outputs.branch }}"
+            echo "**Date**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo ""
+            echo "---"
+            echo ""
+          } > ci-failures.md
+
+          FAILED_JOB_NAMES=""
+
+          # Process each failed job
+          echo "$JOBS" | jq -c '.[]' | while read -r JOB; do
+            JOB_ID=$(echo "$JOB" | jq -r '.id')
+            JOB_NAME=$(echo "$JOB" | jq -r '.name')
+            JOB_URL=$(echo "$JOB" | jq -r '.html_url')
+
+            echo "Processing failed job: $JOB_NAME (ID: $JOB_ID)"
+
+            {
+              echo "## Job: $JOB_NAME"
+              echo ""
+              echo "**URL**: $JOB_URL"
+              echo ""
+              echo "### Failed Steps"
+              echo ""
+            } >> ci-failures.md
+
+            # List failed steps
+            echo "$JOB" | jq -r '.steps[] | select(.conclusion == "failure") | "- **\(.name)** (step \(.number))"' >> ci-failures.md
+            echo "" >> ci-failures.md
+
+            # Fetch job logs (redirect follows automatically, handle 302)
+            echo "### Log Output (last 200 lines)" >> ci-failures.md
+            echo '```' >> ci-failures.md
+
+            LOG_CONTENT=$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID/logs" 2>/dev/null || echo "[Log unavailable]")
+            # Trim to last 200 lines to stay within token budget
+            echo "$LOG_CONTENT" | tail -200 >> ci-failures.md
+
+            echo '```' >> ci-failures.md
+            echo "" >> ci-failures.md
+            echo "---" >> ci-failures.md
+            echo "" >> ci-failures.md
+          done
+
+          # Collect names of failed jobs for the output (used by verify step)
+          FAILED_JOB_NAMES=$(echo "$JOBS" | jq -r '[.[].name] | join(",")')
+          echo "failed_jobs=$FAILED_JOB_NAMES" >> $GITHUB_OUTPUT
+
+          echo "[OK] ci-failures.md generated ($(wc -l < ci-failures.md) lines)"
+          cat ci-failures.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 4: Checkout PR branch ──────────────────────────────────────────
+      - name: Checkout PR branch
+        if: steps.retry_check.outputs.should_skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.determine.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      # ─── Step 5: Configure git ────────────────────────────────────────────────
+      - name: Configure git
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          git config user.name "alexi-bot[bot]"
+          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+
+      # ─── Step 6: Setup Node.js 22 ─────────────────────────────────────────────
+      - name: Setup Node.js 22
+        if: steps.retry_check.outputs.should_skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ─── Step 7: Build Alexi CLI ──────────────────────────────────────────────
+      - name: Build Alexi CLI
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          echo "Installing dependencies..."
+          npm ci
+          echo "Building Alexi CLI..."
+          npm run build
+          echo "[OK] Alexi CLI built successfully"
+
+      # ─── Step 8: Run quick auto-fixes ────────────────────────────────────────
+      - name: Run quick auto-fixes (lint + format)
+        id: quick_fixes
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          echo "Running deterministic auto-fixes..."
+
+          # Track state before fixes
+          git stash --include-untracked 2>/dev/null || true
+          BEFORE=$(git rev-parse HEAD)
+
+          # Restore working tree (stash was just to snapshot — restore immediately)
+          git stash pop 2>/dev/null || true
+
+          # Run lint:fix and format
+          npm run lint:fix || true
+          npm run format || true
+
+          # Check if any files were modified
+          if ! git diff --quiet; then
+            echo "quick_fix_changes=true" >> $GITHUB_OUTPUT
+            echo "[OK] Quick fixes made changes:"
+            git diff --name-only
+          else
+            echo "quick_fix_changes=false" >> $GITHUB_OUTPUT
+            echo "[INFO] No changes from quick fixes"
+          fi
+
+      # ─── Step 9: Build fix prompt ─────────────────────────────────────────────
+      - name: Build fix prompt
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          BRANCH="${{ steps.determine.outputs.branch }}"
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
+
+          # Verify system prompt template exists
+          if [ ! -f ".github/prompts/ci-fix-system.md" ]; then
+            echo "[ERROR] .github/prompts/ci-fix-system.md not found"
+            exit 1
+          fi
+
+          {
+            echo "# CI Fix Task"
+            echo ""
+            echo "You are fixing CI failures on branch: **\`$BRANCH\`**"
+            echo ""
+            echo "## Failed CI Checks"
+            echo ""
+            echo "The following checks failed and need to be fixed:"
+            echo ""
+            if [ -n "$FAILED_JOBS" ]; then
+              IFS=',' read -ra JOB_ARRAY <<< "$FAILED_JOBS"
+              for job in "${JOB_ARRAY[@]}"; do
+                echo "- $job"
+              done
+            fi
+            echo ""
+            echo "## CI Failure Details"
+            echo ""
+            echo "The following file contains the full failure logs with exact error messages,"
+            echo "file paths, and line numbers. Read it carefully before making any changes."
+            echo ""
+            cat ci-failures.md
+            echo ""
+            echo "## Your Task"
+            echo ""
+            echo "1. Read the failure logs above carefully"
+            echo "2. Identify the exact files and lines that need to be changed"
+            echo "3. Read those files using the \`read\` tool"
+            echo "4. Make **minimal, targeted fixes** — only change what is broken"
+            echo "5. After each fix, verify it using the \`bash\` tool:"
+            echo "   - For lint failures: \`npm run lint\`"
+            echo "   - For type errors: \`npm run typecheck\`"
+            echo "   - For format failures: \`npm run format:check\`"
+            echo "   - For test failures: \`npm test\`"
+            echo "   - For build failures: \`npm run build\`"
+            echo ""
+            echo "Focus **only** on the checks listed above. Do not touch unrelated code."
+          } > ci-fix-prompt.md
+
+          echo "[OK] ci-fix-prompt.md built ($(wc -l < ci-fix-prompt.md) lines)"
+
+      # ─── Step 10: Run Alexi agent to fix remaining issues ────────────────────
+      - name: Run Alexi agent to fix CI failures
+        id: bot
+        if: steps.retry_check.outputs.should_skip != 'true'
+        continue-on-error: true
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+        run: |
+          echo "Running Alexi agent..."
+
+          node dist/cli/program.js agent \
+            --message-file ci-fix-prompt.md \
+            --auto-route \
+            --effort high \
+            --max-iterations 20 \
+            --tools "read,write,edit,glob,grep,bash" \
+            --workdir "$(pwd)" \
+            --verbose \
+            --no-auto-commits \
+            --system "$(cat .github/prompts/ci-fix-system.md)" \
+            > bot-output.log 2>&1
+
+          BOT_EXIT_CODE=$?
+          echo "exit_code=$BOT_EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $BOT_EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Alexi agent completed successfully"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Alexi agent exited with code $BOT_EXIT_CODE"
+          fi
+
+          echo "=== Bot Output (last 100 lines) ==="
+          tail -100 bot-output.log
+
+      # ─── Step 11: Verify fixes ────────────────────────────────────────────────
+      - name: Verify fixes
+        id: verify
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
+          ALL_PASSED=true
+          RESULTS=""
+
+          run_check() {
+            local check_name="$1"
+            local command="$2"
+            echo "--- Verifying: $check_name ---"
+            if eval "$command" > /tmp/check-output.log 2>&1; then
+              echo "[PASS] $check_name"
+              RESULTS="$RESULTS\n- ✅ $check_name: passed"
+            else
+              echo "[FAIL] $check_name"
+              cat /tmp/check-output.log
+              RESULTS="$RESULTS\n- ❌ $check_name: still failing"
+              ALL_PASSED=false
+            fi
+          }
+
+          # Only re-verify jobs that originally failed
+          IFS=',' read -ra JOB_ARRAY <<< "$FAILED_JOBS"
+          for job in "${JOB_ARRAY[@]}"; do
+            case "$job" in
+              *Lint*|*lint*)
+                run_check "lint" "npm run lint" ;;
+              *Type*|*type*|*typecheck*)
+                run_check "typecheck" "npm run typecheck" ;;
+              *Format*|*format*)
+                run_check "format" "npm run format:check" ;;
+              *Test*|*test*)
+                run_check "test" "npm run build && npm run test:coverage" ;;
+              *Build*|*build*)
+                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
+            esac
+          done
+
+          echo -e "$RESULTS"
+
+          if [ "$ALL_PASSED" = true ]; then
+            echo "fixes_verified=true" >> $GITHUB_OUTPUT
+            echo "[OK] All originally-failing checks now pass"
+          else
+            echo "fixes_verified=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Some checks are still failing"
+          fi
+
+          # Save results for PR comment
+          echo -e "$RESULTS" > verify-results.txt
+
+      # ─── Step 12: Commit and push fixes ──────────────────────────────────────
+      - name: Commit and push fixes
+        id: commit
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          BRANCH="${{ steps.determine.outputs.branch }}"
+
+          # Stage only src/ and tests/ — never commit workflow files or prompt files
+          git add src/ tests/ 2>/dev/null || true
+
+          STAGED=$(git diff --cached --name-only)
+          if [ -z "$STAGED" ]; then
+            echo "[INFO] No changes to commit"
+            echo "committed=false" >> $GITHUB_OUTPUT
+            echo "changes_count=0" >> $GITHUB_OUTPUT
+          else
+            CHANGES_COUNT=$(echo "$STAGED" | wc -l | tr -d ' ')
+            echo "Committing $CHANGES_COUNT changed file(s):"
+            echo "$STAGED"
+
+            git commit -m "fix(ci): auto-fix CI failures [skip ci] [alexi-bot]"
+            echo "committed=true" >> $GITHUB_OUTPUT
+            echo "changes_count=$CHANGES_COUNT" >> $GITHUB_OUTPUT
+            echo "[OK] Committed $CHANGES_COUNT file(s)"
+          fi
+
+          # Push any local commits (including the new commit if any)
+          LOCAL_HEAD=$(git rev-parse HEAD)
+          REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+
+          if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+            git push origin "$BRANCH"
+            echo "pushed=true" >> $GITHUB_OUTPUT
+            echo "[OK] Pushed changes to $BRANCH"
+          else
+            echo "pushed=false" >> $GITHUB_OUTPUT
+            echo "[INFO] No new commits to push"
+          fi
+
+          # Re-trigger CI if we pushed code changes
+          if [ "${{ steps.commit.outputs.pushed }}" = "true" ] || \
+             ( [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo '')" ] ); then
+            echo "[INFO] Changes were pushed; CI will be triggered by the push event"
+          else
+            # Force-trigger CI via an empty commit when only quick-fixes were applied
+            # and there's nothing new to push (edge case)
+            echo "[INFO] No new commits pushed; CI re-trigger not needed"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      # ─── Step 13: Post PR comment ─────────────────────────────────────────────
+      - name: Post PR comment
+        if: steps.retry_check.outputs.should_skip != 'true' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const branch = '${{ steps.determine.outputs.branch }}';
+            const fixesVerified = '${{ steps.verify.outputs.fixes_verified }}' === 'true';
+            const changesCount = parseInt('${{ steps.commit.outputs.changes_count }}' || '0', 10);
+            const committed = '${{ steps.commit.outputs.committed }}' === 'true';
+            const botSuccess = '${{ steps.bot.outputs.success }}' === 'true';
+
+            // Find the PR for this branch
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${branch}`,
+              state: 'open',
+            });
+
+            if (pulls.length === 0) {
+              console.log(`No open PR found for branch ${branch}`);
+              return;
+            }
+
+            const pr = pulls[0];
+
+            // Read verify results if available
+            let verifyDetails = '';
+            try {
+              verifyDetails = fs.readFileSync('verify-results.txt', 'utf8').trim();
+            } catch (_e) {
+              verifyDetails = '_Verification results not available._';
+            }
+
+            // Read tail of bot output for context
+            let botOutputSnippet = '';
+            try {
+              const botLog = fs.readFileSync('bot-output.log', 'utf8');
+              const lines = botLog.split('\n');
+              botOutputSnippet = lines.slice(-30).join('\n');
+            } catch (_e) {
+              botOutputSnippet = '_Bot output not available._';
+            }
+
+            let comment = '';
+
+            if (fixesVerified) {
+              comment += `## ✅ CI Auto-Fix Succeeded\n\n`;
+              comment += `**Alexi** automatically fixed the CI failures on \`${branch}\`.\n\n`;
+              comment += `- **Files changed**: ${changesCount}\n`;
+              comment += `- **CI re-triggered**: yes (push event)\n\n`;
+            } else {
+              comment += `## ⚠️ CI Auto-Fix Attempted — Not Fully Resolved\n\n`;
+              comment += `**Alexi** attempted to fix CI failures on \`${branch}\` but could not fully resolve all issues.\n\n`;
+              comment += `Manual intervention may be required. See the artifacts for full details.\n\n`;
+            }
+
+            comment += `### Check Results\n\n${verifyDetails}\n\n`;
+
+            comment += `<details>\n<summary>Bot Output (last 30 lines)</summary>\n\n`;
+            comment += `\`\`\`\n${botOutputSnippet}\n\`\`\`\n</details>\n\n`;
+
+            comment += `---\n`;
+            comment += `Auto-fixed by [Alexi](https://github.com/${context.repo.owner}/${context.repo.repo}) · `;
+            comment += `[View run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+
+            // Upsert: update existing auto-fix comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+            });
+
+            const existingComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              (c.body.includes('CI Auto-Fix') || c.body.includes('alexi-bot'))
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: comment,
+              });
+            }
+
+      # ─── Step 14: Upload artifacts ────────────────────────────────────────────
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-auto-fix-artifacts-${{ github.run_id }}
+          path: |
+            ci-failures.md
+            ci-fix-prompt.md
+            bot-output.log
+            verify-results.txt
+          retention-days: 7
+          if-no-files-found: ignore
