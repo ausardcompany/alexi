@@ -511,6 +511,199 @@ GitHub Actions workflows use secrets for SAP AI Core credentials:
   run: npm test
 ```
 
+## Testing New Features
+
+### Testing Agent System
+
+The agent system includes unit tests for agent registration, switching, and tool permissions.
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { getAgentRegistry, switchAgent, getCurrentAgent } from '../src/agent/index.js';
+
+describe('Agent System', () => {
+  beforeEach(() => {
+    // Reset agent registry if needed
+  });
+
+  it('should register built-in agents', () => {
+    const registry = getAgentRegistry();
+    const agents = registry.list();
+    expect(agents.length).toBeGreaterThan(0);
+    expect(agents.some(a => a.id === 'code')).toBe(true);
+  });
+
+  it('should switch agents', () => {
+    const agent = switchAgent('debug', 'Test switch');
+    expect(agent).toBeDefined();
+    expect(agent?.id).toBe('debug');
+    
+    const current = getCurrentAgent();
+    expect(current.id).toBe('debug');
+  });
+
+  it('should prevent removal of native agents', async () => {
+    const { removeAgent, AgentRemoveError } = await import('../src/agent/index.js');
+    await expect(removeAgent('code')).rejects.toThrow(AgentRemoveError);
+  });
+});
+```
+
+### Testing Instruction File Loading
+
+Test the system prompt assembly pipeline with instruction files:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { buildAssembledSystemPrompt } from '../src/agent/system.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+describe('Instruction File Loading', () => {
+  it('should load AGENTS.md when present', () => {
+    const workdir = '/tmp/test-project';
+    fs.mkdirSync(workdir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workdir, 'AGENTS.md'),
+      '# Test Project\nThis is a test.'
+    );
+
+    const prompt = buildAssembledSystemPrompt({ workdir, agentId: 'code' });
+    
+    expect(prompt).toContain('<agents-md>');
+    expect(prompt).toContain('This is a test');
+    
+    fs.rmSync(workdir, { recursive: true, force: true });
+  });
+
+  it('should skip instruction files when flag is set', () => {
+    const prompt = buildAssembledSystemPrompt({
+      workdir: '/tmp',
+      skipAgentsMd: true,
+      agentId: 'code'
+    });
+    
+    expect(prompt).not.toContain('<agents-md>');
+    expect(prompt).not.toContain('<user-instructions>');
+  });
+});
+```
+
+### Testing Clipboard Functionality
+
+Test clipboard image reading with mocked system tools:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readClipboardImage, detectClipboard } from '../src/utils/clipboard.js';
+import { execFile } from 'node:child_process';
+
+vi.mock('node:child_process');
+
+describe('Clipboard Image Reading', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should detect pngpaste on macOS', async () => {
+    vi.mocked(execFile).mockImplementation((cmd, args, cb) => {
+      if (cmd === 'which' && args[0] === 'pngpaste') {
+        cb(null, { stdout: '/usr/local/bin/pngpaste', stderr: '' });
+      }
+    });
+
+    const capability = await detectClipboard();
+    expect(capability.available).toBe(true);
+    expect(capability.tool).toBe('pngpaste');
+  });
+
+  it('should return error when no image in clipboard', async () => {
+    vi.mocked(execFile).mockImplementation((cmd, args, cb) => {
+      const error = new Error('exit code 1');
+      cb(error, { stdout: Buffer.from(''), stderr: '' });
+    });
+
+    const result = await readClipboardImage();
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No image found');
+  });
+});
+```
+
+### Testing TUI Slash Commands
+
+Test the declarative command system:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { renderHook } from 'ink-testing-library';
+import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
+
+describe('TUI Slash Commands', () => {
+  it('should register all commands', () => {
+    const { result } = renderHook(() => useCommands());
+    const { commands } = result.current;
+    
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.some(c => c.name === 'help')).toBe(true);
+    expect(commands.some(c => c.name === 'exit')).toBe(true);
+    expect(commands.some(c => c.name === 'memory')).toBe(true);
+  });
+
+  it('should handle slash commands', async () => {
+    const { result } = renderHook(() => useCommands());
+    const { handleCommand } = result.current;
+    
+    const handled = await handleCommand('/help');
+    expect(handled).toBe(true);
+  });
+
+  it('should not handle non-slash input', async () => {
+    const { result } = renderHook(() => useCommands());
+    const { handleCommand } = result.current;
+    
+    const handled = await handleCommand('regular message');
+    expect(handled).toBe(false);
+  });
+});
+```
+
+### Testing Bash Hierarchy Permissions
+
+Test the hierarchical bash command permission system:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { BashHierarchy } from '../src/tool/bash-hierarchy.js';
+
+describe('BashHierarchy', () => {
+  it('should generate progressive rules', () => {
+    const rules = new Set<string>();
+    BashHierarchy.addAll(rules, ['npm', 'install', 'lodash'], 'npm install lodash');
+    
+    expect(rules.has('npm *')).toBe(true);
+    expect(rules.has('npm install *')).toBe(true);
+    expect(rules.has('npm install lodash')).toBe(true);
+  });
+
+  it('should match wildcard patterns', () => {
+    const approved = new Set(['npm install *']);
+    
+    expect(BashHierarchy.matches('npm install lodash', approved)).toBe(true);
+    expect(BashHierarchy.matches('npm install express', approved)).toBe(true);
+    expect(BashHierarchy.matches('npm uninstall lodash', approved)).toBe(false);
+  });
+
+  it('should match exact commands', () => {
+    const approved = new Set(['git status']);
+    
+    expect(BashHierarchy.matches('git status', approved)).toBe(true);
+    expect(BashHierarchy.matches('git commit', approved)).toBe(false);
+  });
+});
+```
+
 ## Continuous Integration
 
 Tests run automatically on:

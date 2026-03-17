@@ -254,6 +254,87 @@ flowchart TB
     Deny --> Result
 ```
 
+## System Prompt Assembly Pipeline
+
+Alexi assembles system prompts from multiple layers, allowing project-specific and user-specific customization:
+
+```mermaid
+flowchart TB
+    Start([Assemble System Prompt]) --> Soul[1. Soul Prompt]
+    Soul --> ModelPrompt[2. Model-Specific Instructions]
+    ModelPrompt --> EnvInfo[3. Environment Info Block]
+    EnvInfo --> AgentRole[4. Agent Role Prompt]
+    AgentRole --> InstructionFiles[5. Instruction Files]
+    InstructionFiles --> CustomRules[6. Custom Rules]
+    CustomRules --> Assemble[Join All Layers]
+    Assemble --> End([Complete System Prompt])
+    
+    InstructionFiles --> ProjectAgents[AGENTS.md]
+    InstructionFiles --> UserAlexi[~/.alexi/ALEXI.md]
+    InstructionFiles --> ProjectRules[.alexi/rules/*.md]
+```
+
+### Instruction File Hierarchy
+
+Instruction files are loaded in the following order:
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific instructions for AI agents
+   - Wrapped in `<agents-md>` tags
+   - Describes project structure, build commands, coding standards
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - User-wide instructions loaded into every session
+   - Wrapped in `<user-instructions>` tags
+   - Personal preferences, coding style, common patterns
+
+3. **Project-level rules** (`workdir/.alexi/rules/*.md`)
+   - Scoped rule files for specific contexts
+   - Each file wrapped in `<rule file="filename.md">` tags
+   - Alphabetically sorted and merged
+
+All instruction files are automatically loaded and merged into the system prompt for every LLM call. This enables:
+
+- Project-specific context without modifying code
+- User-wide preferences across all projects
+- Fine-grained rules for different scenarios
+
+### Agent System
+
+Agents are specialized personas with different capabilities and prompts:
+
+```typescript
+interface Agent {
+  id: string;
+  name: string;
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  tools?: string[];          // Allowed tools
+  disabledTools?: string[];  // Explicitly disabled tools
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];
+  native?: boolean;          // Built-in vs custom agent
+}
+```
+
+Built-in agents:
+
+- **code**: General-purpose coding agent (default)
+- **debug**: Specialized for debugging and fixing issues
+- **plan**: Creates detailed implementation plans (read-only tools)
+- **explore**: Fast codebase exploration (read-only tools, low temperature)
+- **orchestrator**: Coordinates work across multiple agents (task tool only)
+
+Agents can be switched using `@syntax` in messages:
+
+```
+@debug Fix the authentication bug in login.ts
+@plan Create a plan for implementing user profiles
+```
+
 ## Configuration
 
 ### Environment Variables

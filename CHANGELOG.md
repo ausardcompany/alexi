@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-03-17
+
+### Added
+
+- New `/memory` command for managing instruction files in interactive REPL
+  - List all instruction files: AGENTS.md (project), ALEXI.md (user), and .alexi/rules/*.md (project rules)
+  - Edit instruction files with `$EDITOR` via `/memory edit [project|user|<filename>]`
+  - Initialize AGENTS.md from template with `/memory init`
+  - Display file paths and existence status for all instruction sources
+- Enhanced system prompt assembly pipeline with multi-layer instruction file support
+  - Project-level AGENTS.md loaded as `<agents-md>` block
+  - User-level ~/.alexi/ALEXI.md loaded as `<user-instructions>` block
+  - Project-level .alexi/rules/*.md files loaded as individual `<rule>` blocks
+  - All instruction files automatically merged into system prompts for every LLM call
+- Hierarchical bash command permission system
+  - New `BashHierarchy` utility for generating progressive permission rules
+  - Supports approval at multiple granularity levels (e.g., "npm", "npm install", "npm install lodash")
+  - Wildcard pattern matching for command prefixes
+- TUI slash command system refactored with declarative command registry
+  - New `useCommands` hook centralizes slash command definitions
+  - Commands include `/help`, `/exit`, `/clear`, `/model`, `/agent`, `/status`, `/sessions`, `/mcp`, `/theme`, `/image`, `/clear-images`, `/memory`, `/mem`
+  - Extensible `SlashCommand` interface for adding new commands
+  - Inline autocomplete for slash commands with keyboard navigation
+- Enhanced clipboard image support with macOS osascript fallback
+  - Native AppleScript-based clipboard reading when `pngpaste` is not installed
+  - Temporary file-based flow for reading PNG data from clipboard
+  - Automatic cleanup of temporary files
+  - Works without external dependencies on macOS
+
+### Changed
+
+- Separated `/memory` (instruction files) from `/mem` (stored memories) in interactive REPL
+  - `/memory` now exclusively manages AGENTS.md, ALEXI.md, and rule files
+  - `/mem` continues to handle JSON-based memory storage (list, search, stats, export)
+- Updated agent system to track native vs custom agents
+  - Built-in agents marked with `native: true` flag
+  - Custom agents can be removed, native agents cannot
+  - Agent removal now validates against native flag
+- Enhanced `readClipboardImage` function with platform-specific tool detection
+  - Improved error messages for missing clipboard tools
+  - Better handling of "no image in clipboard" scenarios
+  - Unified error handling across all clipboard tools
+- Updated dependency versions
+  - vitest: 4.0.0 → 4.1.0
+  - @vitest/coverage-v8: 4.0.0 → 4.1.0
+  - @vitejs/plugin-react: 5.2.0 → 6.0.1
+  - @types/node: 25.3.5 → 25.5.0
+  - @typescript-eslint/parser: 8.56.1 → 8.57.0
+  - @commitlint/config-conventional: 20.4.3 → 20.5.0
+  - puppeteer: 24.38.0 → 24.39.1
+  - hono: 4.12.5 → 4.12.8
+  - nanoid: 5.1.6 → 5.1.7
+  - @inquirer/prompts: 8.3.0 → 8.3.2
+  - simple-git: 3.32.3 → 3.33.0
+
+### Fixed
+
+- TUI slash commands now properly intercepted before being sent to LLM
+  - Commands like `/help`, `/exit`, `/model` no longer leak to the AI
+  - `useCommands` hook wired into App.tsx to handle all slash commands
+- Command Palette (Ctrl+K) now displays all registered slash commands
+  - Fixed empty command list issue
+  - Commands populated from `useCommands` hook registry
+
+## [0.2.3] - 2026-03-16
+
+### Changed
+
+- Applied upstream synchronization changes from kilocode, opencode, and claude-code repositories
+- Updated documentation workflow with improved diff truncation and validation
+
 ## [0.2.2] - 2026-03-15
 
 ### Fixed

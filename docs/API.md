@@ -197,6 +197,97 @@ alexi session-delete -s <session-id>
 |--------|------|-------------|
 | `-s, --session <id>` | string | Session ID to delete (required) |
 
+## Interactive REPL Commands
+
+The interactive REPL (`alexi interactive` or `alexi i`) provides a rich set of slash commands for managing sessions, configuration, and instruction files.
+
+### Instruction File Management
+
+#### /memory
+
+List all instruction files that are automatically loaded into system prompts.
+
+```bash
+/memory
+```
+
+Displays:
+- **Project instructions** (`AGENTS.md`) - Project-specific AI agent instructions
+- **User instructions** (`~/.alexi/ALEXI.md`) - User-wide instructions for all sessions
+- **Rule files** (`.alexi/rules/*.md`) - Scoped project rules
+
+#### /memory edit [target]
+
+Open an instruction file in `$EDITOR` or `$VISUAL`.
+
+```bash
+/memory edit project    # Edit AGENTS.md
+/memory edit user       # Edit ~/.alexi/ALEXI.md
+/memory edit <filename> # Edit specific rule file
+```
+
+Creates the file if it does not exist. Changes take effect on the next prompt.
+
+#### /memory init
+
+Create `AGENTS.md` from a template if it does not exist.
+
+```bash
+/memory init
+```
+
+Template includes:
+- Project overview section
+- Build and test commands
+- Code style guidelines
+- Important notes
+
+### Memory Storage Commands
+
+#### /mem
+
+List all stored memories (JSON key-value storage).
+
+```bash
+/mem
+```
+
+#### /mem search <query>
+
+Search memories by text or tag.
+
+```bash
+/mem search #api
+/mem search authentication
+```
+
+#### /mem stats
+
+Show memory statistics (count, tags, size).
+
+```bash
+/mem stats
+```
+
+#### /mem export
+
+Export memories to JSON file.
+
+```bash
+/mem export
+```
+
+#### /remember <text>
+
+Save a memory with optional tags.
+
+```bash
+/remember User prefers TypeScript strict mode #coding-style
+/remember API endpoint: https://api.example.com/v1 #api #config
+```
+
+Tags are automatically extracted from `#tag` syntax.
+
 ## Environment Variables
 
 ### Required Variables
@@ -345,6 +436,80 @@ interface AgenticProgressEvent {
   result?: ToolResult;
   message?: string;
 }
+```
+
+### Agent System Interfaces
+
+#### Agent
+
+Specialized agent with capabilities and prompts.
+
+```typescript
+interface Agent {
+  id: string;
+  name: string;
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  tools?: string[];          // Allowed tool IDs
+  disabledTools?: string[];  // Explicitly disabled tool IDs
+  preferredModel?: string;   // Preferred model for this agent
+  temperature?: number;      // Temperature override
+  maxTokens?: number;        // Max tokens override
+  aliases?: string[];        // Aliases for @syntax switching
+  native?: boolean;          // Whether this is a built-in agent
+  canUseTool(toolId: string): boolean;
+}
+```
+
+#### AgentConfig
+
+Configuration for creating a new agent.
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  description: string;
+  mode?: 'primary' | 'subagent' | 'all'; // Default: 'all'
+  systemPrompt: string;
+  tools?: string[];
+  disabledTools?: string[];
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];
+}
+```
+
+#### Built-in Agents
+
+Alexi includes five built-in agents:
+
+| Agent | ID | Mode | Tools | Description |
+|-------|----|----|-------|-------------|
+| Code | `code` | all | all | General-purpose coding agent (default) |
+| Debug | `debug` | all | all | Specialized for debugging and fixing issues |
+| Plan | `plan` | all | read, glob, grep, webfetch | Creates detailed implementation plans |
+| Explore | `explore` | subagent | read, glob, grep | Fast codebase exploration (low temperature) |
+| Orchestrator | `orchestrator` | primary | task | Coordinates work across multiple agents |
+
+#### Agent Switching
+
+Agents can be switched using `@syntax` in messages:
+
+```typescript
+// Parse and switch agent
+const { message, switched, agent } = parseAgentSwitch('@debug Fix login bug');
+// message: "Fix login bug"
+// switched: true
+// agent: { id: 'debug', ... }
+
+// Switch programmatically
+const agent = switchAgent('plan', 'User requested planning');
+
+// Get current agent
+const current = getCurrentAgent();
 ```
 
 ## Tool System
