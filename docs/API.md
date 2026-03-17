@@ -197,6 +197,119 @@ alexi session-delete -s <session-id>
 |--------|------|-------------|
 | `-s, --session <id>` | string | Session ID to delete (required) |
 
+### interactive
+
+Start an interactive REPL session with streaming responses and slash commands.
+
+```bash
+alexi interactive [options]
+alexi i [options]  # Short alias
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Initial model to use |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--session <id>` | string | Resume existing session |
+| `--system <prompt>` | string | System prompt for conversation |
+
+#### Interactive Slash Commands
+
+The interactive REPL supports slash commands for session management and configuration.
+
+##### General Commands
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/h` | Show available commands |
+| `/exit` | `/quit`, `/q` | Exit the interactive session |
+| `/clear` | - | Clear message history |
+| `/status` | - | Show current session status |
+
+##### Model & Agent Commands
+
+| Command | Description |
+|---------|-------------|
+| `/model [id]` | Show current model or switch to specified model |
+| `/agent [name]` | Show current agent or switch to specified agent |
+
+##### Memory & Instruction Commands
+
+| Command | Description |
+|---------|-------------|
+| `/memory` | List all instruction files (AGENTS.md, ALEXI.md, rules/*.md) |
+| `/memory edit [target]` | Edit instruction file in $EDITOR (target: project, user, or filename) |
+| `/memory init` | Create AGENTS.md from template |
+| `/mem` | List stored memories (JSON key-value storage) |
+| `/mem search <query>` | Search memories by text or tag |
+| `/mem delete <id>` | Delete a memory by ID |
+| `/mem clear` | Clear all memories |
+| `/mem stats` | Show memory statistics |
+| `/mem export` | Export memories to JSON file |
+| `/remember <text>` | Store a memory (use #tags for categorization) |
+
+##### Session Commands
+
+| Command | Description |
+|---------|-------------|
+| `/sessions` | List all saved sessions |
+| `/session <id>` | Switch to a different session |
+| `/export [path]` | Export current session to markdown |
+
+##### Image Attachment Commands
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/image [path]` | `/img` | Attach image from clipboard or file path |
+| `/clear-images` | `/cli` | Remove all pending image attachments |
+
+##### Configuration Commands
+
+| Command | Description |
+|---------|-------------|
+| `/theme [dark\|light]` | Switch theme |
+| `/mcp` | Manage MCP servers |
+
+#### Instruction File System
+
+Alexi supports a three-layer instruction file system:
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific instructions for AI agents
+   - Loaded automatically when present in the working directory
+   - Created with `/memory init` command
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - User-wide instructions loaded into every session
+   - Persists across all projects
+   - Created with `/memory edit user` command
+
+3. **Project-level rule files** (`workdir/.alexi/rules/*.md`)
+   - Multiple scoped instruction files
+   - Loaded alphabetically
+   - Useful for organizing different aspects of project rules
+
+All instruction files are loaded into the system prompt automatically and can be edited using the `/memory edit` command.
+
+#### Example Session
+
+```bash
+# Start interactive session with auto-routing
+alexi interactive --auto-route
+
+# Inside the REPL:
+> /help
+> /model gpt-4o
+> /memory init
+> /memory edit project
+> Hello, can you help me with TypeScript?
+> /remember This project uses strict TypeScript #typescript #config
+> /export session-export.md
+> /exit
+```
+
 ## Environment Variables
 
 ### Required Variables

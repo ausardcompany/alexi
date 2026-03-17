@@ -352,6 +352,133 @@ Sessions provide:
 - Persistence across CLI invocations
 - Export and sharing capabilities
 
+### 6. Instruction File System
+
+Alexi implements a three-layer instruction file system for customizing AI agent behavior:
+
+```mermaid
+flowchart TB
+    subgraph System["System Prompt Assembly"]
+        Soul[Soul Prompt<br/>Core Identity]
+        Model[Model-Specific Prompt]
+        Env[Environment Info]
+        Agent[Agent Role Prompt]
+    end
+    
+    subgraph Instructions["Instruction Files"]
+        ProjectMd[AGENTS.md<br/>Project Instructions]
+        UserMd[~/.alexi/ALEXI.md<br/>User Instructions]
+        Rules[.alexi/rules/*.md<br/>Rule Files]
+    end
+    
+    subgraph Custom["Custom Rules"]
+        CLI[--system flag]
+        Command[/system command]
+    end
+    
+    Soul --> Model
+    Model --> Env
+    Env --> Agent
+    Agent --> ProjectMd
+    ProjectMd --> UserMd
+    UserMd --> Rules
+    Rules --> CLI
+    CLI --> Command
+    Command --> Final[Final System Prompt]
+```
+
+#### Instruction File Layers
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific instructions for AI agents
+   - Loaded automatically when present in working directory
+   - Created with `/memory init` command in interactive REPL
+   - Tagged with `<agents-md>` in system prompt
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - User-wide instructions loaded into every session
+   - Persists across all projects
+   - Useful for personal coding preferences and conventions
+   - Tagged with `<user-instructions>` in system prompt
+
+3. **Project-level rule files** (`workdir/.alexi/rules/*.md`)
+   - Multiple scoped instruction files
+   - Loaded alphabetically and sorted
+   - Each file tagged with `<rule file="filename.md">` in system prompt
+   - Useful for organizing different aspects of project rules
+
+All instruction files are loaded by `src/agent/system.ts` during system prompt assembly and can be managed using the `/memory` command in interactive mode.
+
+### 7. TUI Command System
+
+The Terminal User Interface (TUI) implements a declarative command system using React hooks:
+
+```typescript
+// src/cli/tui/hooks/useCommands.ts
+export interface SlashCommand {
+  name: string;
+  aliases?: string[];
+  description: string;
+  category: CommandCategory;
+  execute: (args: string, context: CommandContext) => Promise<boolean>;
+}
+```
+
+Commands are registered in a centralized array and support:
+- Aliases for common commands (e.g., `/q` for `/quit`)
+- Categorization (general, session, model, git, debug, config)
+- Autocomplete with keyboard navigation
+- Context-aware execution with session state
+
+The command system intercepts slash commands before they reach the LLM, preventing command leakage and enabling proper local handling.
+
+### 8. Clipboard Image Support
+
+Alexi supports pasting images from the system clipboard for multimodal LLM interactions. The clipboard system is implemented in `src/utils/clipboard.ts` with platform-specific tool detection:
+
+```mermaid
+flowchart TB
+    Start[User Presses Ctrl+V] --> Detect[Detect Platform]
+    
+    Detect -->|macOS| MacTools{Check Tools}
+    Detect -->|Linux X11| X11Tools{Check xclip}
+    Detect -->|Linux Wayland| WaylandTools{Check wl-paste}
+    Detect -->|Windows| WinTools{Check PowerShell}
+    
+    MacTools -->|pngpaste found| UsePngpaste[Use pngpaste]
+    MacTools -->|pngpaste not found| UseOsascript[Use osascript fallback]
+    
+    X11Tools -->|found| UseXclip[Use xclip]
+    X11Tools -->|not found| Error[Show Install Hint]
+    
+    WaylandTools -->|found| UseWlPaste[Use wl-paste]
+    WaylandTools -->|not found| Error
+    
+    WinTools -->|found| UsePowerShell[Use PowerShell]
+    WinTools -->|not found| Error
+    
+    UsePngpaste --> Read[Read Image Data]
+    UseOsascript --> Read
+    UseXclip --> Read
+    UseWlPaste --> Read
+    UsePowerShell --> Read
+    
+    Read --> Validate[Validate Image Format]
+    Validate --> Attach[Attach to Message]
+```
+
+#### Platform-Specific Tools
+
+| Platform | Tool | Priority | Installation |
+|----------|------|----------|--------------|
+| macOS | `pngpaste` | 1st | `brew install pngpaste` |
+| macOS | `osascript` | 2nd (fallback) | Pre-installed |
+| Linux (Wayland) | `wl-paste` | 1st | `apt install wl-clipboard` |
+| Linux (X11) | `xclip` | 1st | `apt install xclip` |
+| Windows | PowerShell | 1st | Pre-installed |
+
+The macOS `osascript` fallback uses AppleScript to read clipboard images without requiring any external dependencies, making clipboard paste work out-of-the-box on macOS.
+
 ## Security Considerations
 
 1. **Secrets Management**: Secrets are redacted in exports and logs

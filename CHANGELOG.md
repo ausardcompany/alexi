@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-03-17
+
+### Added
+
+- New `/memory` command for managing instruction files in interactive REPL
+  - List all instruction files with `/memory` (AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
+  - Edit instruction files with `/memory edit [project|user|filename]` using $EDITOR
+  - Initialize project AGENTS.md with `/memory init` from template
+- New `/mem` command for memory management (renamed from `/memory` to avoid conflict)
+  - List stored memories with `/mem` or `/mem list`
+  - Search memories with `/mem search <query>`
+  - Delete memories with `/mem delete <id>`
+  - Clear all memories with `/mem clear`
+  - Show statistics with `/mem stats`
+  - Export to JSON with `/mem export`
+- User-level instruction file support at `~/.alexi/ALEXI.md`
+  - Loaded into every session automatically
+  - Separate from project-level AGENTS.md
+- Project-level rule files support at `.alexi/rules/*.md`
+  - Multiple scoped instruction files
+  - Alphabetically sorted and loaded in order
+- Inline autocomplete for slash commands in TUI input box
+  - Shows filtered suggestions when typing `/`
+  - Keyboard navigation with Up/Down/Tab
+  - Accept suggestions with Enter or Tab
+  - Dismiss with Escape
+- CI Auto-Fix workflow for autonomous PR failure resolution
+  - Automatically triggered when CI fails on `auto/*` branches
+  - Collects failed job logs and error messages
+  - Runs Alexi agent to fix lint, type, format, test, and build failures
+  - Commits fixes and re-triggers CI
+  - Rate-limited to 2 runs per day per branch to prevent loops
+  - Manual dispatch support for targeted fixes
+- Native macOS clipboard image support via `osascript`
+  - Fallback when `pngpaste` is not installed
+  - Uses AppleScript to read clipboard images
+  - No external dependencies required on macOS
+
+### Changed
+
+- System prompt assembly now loads three layers of instruction files
+  - Project-level AGENTS.md (workdir/AGENTS.md)
+  - User-level ALEXI.md (~/.alexi/ALEXI.md)
+  - Project-level rule files (workdir/.alexi/rules/*.md)
+- Help text in interactive REPL updated to reflect new command structure
+  - `/memory` for instruction file management
+  - `/mem` for stored memory management
+- TUI command system refactored with declarative `useCommands` hook
+  - Slash commands now intercepted before sending to LLM
+  - Extensible command registry with categories
+  - Proper command context with session state
+- Clipboard detection now tries multiple tools in preference order
+  - macOS: pngpaste (preferred), osascript (fallback)
+  - Linux: wl-paste (Wayland), xclip (X11)
+  - Windows: PowerShell
+
+### Fixed
+
+- Slash commands in TUI were leaking to LLM instead of being handled locally
+- Command Palette showing empty command list
+- Missing instruction file support in system prompt assembly
+
 ## [0.2.2] - 2026-03-15
 
 ### Fixed
@@ -97,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/ausardcompany/alexi/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/ausardcompany/alexi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ausardcompany/alexi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ausardcompany/alexi/compare/v0.1.3...v0.2.0

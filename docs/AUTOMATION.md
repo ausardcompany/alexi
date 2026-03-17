@@ -248,7 +248,159 @@ Manual trigger with `dry_run: true` will:
 - NOT create a pull request
 - NOT commit any changes
 
-### 3. Continuous Integration Workflow
+### 3. CI Auto-Fix Workflow
+
+**File**: `.github/workflows/ci-auto-fix.yml`
+
+**Triggers**:
+- Workflow run completion (when CI fails on `auto/*` branches)
+- Manual workflow dispatch with run ID and branch name
+
+**Purpose**: Automatically diagnose and fix CI failures on autonomous PR branches using Alexi's agent mode.
+
+#### Workflow Architecture
+
+```mermaid
+sequenceDiagram
+    participant CI as CI Workflow
+    participant AutoFix as CI Auto-Fix
+    participant GH as GitHub API
+    participant Alexi as Alexi Agent
+    participant PR as Pull Request
+    
+    CI->>CI: Run tests, lint, build
+    CI->>AutoFix: Trigger on failure (auto/* branch)
+    AutoFix->>AutoFix: Check retry count (max 2/day)
+    AutoFix->>GH: Fetch failed job logs
+    AutoFix->>GH: Download error messages
+    AutoFix->>AutoFix: Build fix prompt
+    AutoFix->>Alexi: Run agent mode with fix task
+    Alexi->>Alexi: Read files, identify issues
+    Alexi->>Alexi: Apply targeted fixes
+    Alexi->>Alexi: Verify fixes locally
+    AutoFix->>PR: Commit and push fixes
+    AutoFix->>CI: Re-trigger CI via push event
+    AutoFix->>PR: Post status comment
+```
+
+#### Key Features
+
+1. **Intelligent Failure Analysis**
+   - Collects logs from all failed CI jobs
+   - Extracts error messages, file paths, and line numbers
+   - Builds comprehensive failure report (`ci-failures.md`)
+   - Identifies specific check types (lint, typecheck, format, test, build)
+
+2. **Targeted Fix Execution**
+   - Runs quick deterministic fixes first (lint:fix, format)
+   - Uses Alexi agent mode for complex issues
+   - Reads failure logs to identify exact problems
+   - Makes minimal, targeted changes to broken code
+   - Verifies fixes locally before committing
+
+3. **Safety Mechanisms**
+   - Only processes `auto/*` branches (prevents accidental runs)
+   - Rate-limited to 2 runs per day per branch (prevents infinite loops)
+   - Commits only to `src/` and `tests/` directories (never workflows)
+   - Uses `[skip ci]` and `[alexi-bot]` tags in commit messages
+   - Posts detailed status comments to PRs
+
+4. **Verification Steps**
+   - Re-runs only the checks that originally failed
+   - Reports pass/fail status for each check
+   - Generates verification summary for PR comments
+
+#### Workflow Steps
+
+**Stage 1: Validation and Setup**
+1. Determine branch name and CI run ID
+2. Verify branch matches `auto/*` pattern
+3. Check retry count (max 2 per day)
+4. Exit early if rate limit exceeded
+
+**Stage 2: Failure Analysis**
+1. Query GitHub API for failed jobs in CI run
+2. Download logs for each failed job (last 200 lines)
+3. Extract failed step names and error messages
+4. Generate `ci-failures.md` with full context
+
+**Stage 3: Quick Fixes**
+1. Run `npm run lint:fix` for auto-fixable lint issues
+2. Run `npm run format` for formatting issues
+3. Check if quick fixes resolved any problems
+
+**Stage 4: AI-Powered Fixes**
+1. Build fix prompt from failure report
+2. Load system prompt from `.github/prompts/ci-fix-system.md`
+3. Run Alexi agent with:
+   - `--max-iterations 20`
+   - `--tools read,write,edit,glob,grep,bash`
+   - `--no-auto-commits` (manual commit control)
+4. Agent reads files, identifies issues, applies fixes
+5. Agent verifies fixes using bash tool
+
+**Stage 5: Verification and Commit**
+1. Re-run only the checks that originally failed
+2. Generate verification report
+3. Stage changes in `src/` and `tests/` only
+4. Commit with `fix(ci): auto-fix CI failures [skip ci] [alexi-bot]`
+5. Push to PR branch
+6. Post status comment to PR
+
+#### Configuration Files
+
+The workflow uses two configuration files:
+
+1. **`.github/prompts/ci-fix-system.md`**: System prompt for the fix agent
+   - Instructs agent to make minimal, targeted fixes
+   - Emphasizes reading failure logs carefully
+   - Guides verification using bash commands
+
+2. **`.github/last-sync-commits.json`**: Tracks workflow metadata
+   - Stores last run timestamp
+   - Used for rate limiting calculations
+
+#### Example Fix Scenarios
+
+**Scenario 1: Lint Failures**
+```bash
+# Quick fix resolves automatically
+npm run lint:fix
+# Commits changes if files modified
+```
+
+**Scenario 2: Type Errors**
+```bash
+# Agent reads error log:
+# "Property 'foo' does not exist on type 'Bar'"
+# Agent reads the file, identifies missing import
+# Agent uses edit tool to add import
+# Agent verifies: npm run typecheck
+```
+
+**Scenario 3: Test Failures**
+```bash
+# Agent reads test output:
+# "Expected 5 but received 4"
+# Agent reads test file and implementation
+# Agent identifies off-by-one error
+# Agent fixes implementation
+# Agent verifies: npm test
+```
+
+#### Manual Dispatch
+
+The workflow can be triggered manually for targeted fixes:
+
+```bash
+# Get the failed CI run ID from GitHub UI
+# Trigger the workflow with:
+gh workflow run ci-auto-fix.yml \
+  -f run_id=123456789 \
+  -f pr_branch=auto/my-feature
+```
+
+### 4. Continuous Integration Workflow
 
 **File**: `.github/workflows/ci.yml`
 
@@ -266,7 +418,7 @@ Manual trigger with `dry_run: true` will:
 5. Run tests
 6. Run linters
 
-### 4. Release Workflows
+### 5. Release Workflows
 
 **Files**: 
 - `.github/workflows/release.yml`
@@ -281,8 +433,8 @@ The automation workflows require the following secrets to be configured in the r
 
 | Secret | Purpose | Required For |
 |--------|---------|--------------|
-| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync |
-| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync |
+| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync, CI Auto-Fix |
+| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync, CI Auto-Fix |
 | `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
 | `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
 
