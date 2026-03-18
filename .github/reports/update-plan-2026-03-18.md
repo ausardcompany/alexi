@@ -1,9 +1,3 @@
-# Execution Task: Apply Update Plan to Alexi
-
-You are an expert software developer. Your task is to execute the update plan below precisely.
-
-## Update Plan to Execute
-
 [2026-03-18T07:03:58.338Z] [32mINFO[39m     (context): Found a service key in environment variable "AICORE_SERVICE_KEY". Using a service key is recommended for local testing only. Bind the AI Core service to the application for productive usage.
 # Update Plan for Alexi
 
@@ -502,24 +496,3 @@ describe("PermissionNext.toConfig", () => {
 
 [Session: 24edc137-c011-4865-99dc-9ded89fb38f4]
 [Messages: 2, Tokens: 33091]
-
-## Execution Instructions
-
-1. **Execute each change** in the plan above in order of priority (critical → high → medium → low)
-2. **Make exact code changes** as specified in the plan
-3. **Maintain SAP AI Core compatibility** - do not break existing integrations
-4. **Follow existing code style** in this repository
-5. **Create changes summary** at `.github/reports/changes-summary.md` with:
-   - List of files modified
-   - Summary of each change made
-   - Any issues encountered
-
-## Important
-
-- Do NOT skip any items in the plan
-- Do NOT add extra changes not in the plan
-- Do NOT ask questions - just execute
-- If a file doesn't exist, create it
-- If code context is unclear, use your best judgment based on the plan
-
-Execute the entire plan now.

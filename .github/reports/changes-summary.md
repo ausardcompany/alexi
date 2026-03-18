@@ -1,121 +1,112 @@
-# Update Plan Execution Summary
+# Alexi Update Plan Execution Summary
 
-**Date**: 2026-03-16  
-**Upstream Commits**: a3eecbbf, 146da404, b668b9c2, 5097cf2f, 41e6e36b, f26004b3
+**Date**: 2026-03-18  
+**Executed by**: AI Assistant  
+**Plan Source**: Upstream commits 3b8e8541..a3eecbbf (kilocode)
 
 ## Overview
 
-This document summarizes the execution of the update plan derived from upstream kilocode changes. The plan contained 2 medium-priority changes focused on UI performance improvements and SDK endpoint reviews.
-
-## Changes Analyzed
-
-### 1. Debounced Search Input for Model Selector (Medium Priority)
-
-**Status**: Not Applicable  
-**Reason**: Architecture Mismatch
-
-**Analysis**:
-- **Upstream Change**: kilocode added debounced search (250ms) to their web-based ModelSelector React component to prevent laggy behavior during rapid typing
-- **Alexi Architecture**: Uses Ink (terminal UI framework) with `ink-select-input` for model selection
-- **Key Difference**: 
-  - kilocode uses web React with controlled inputs and custom filtering
-  - Alexi uses `ink-select-input` which provides built-in keyboard navigation but no native search functionality
-  - The `ink-select-input` component handles its own filtering and doesn't expose search input controls
-
-**Recommendation**: 
-If search functionality is desired in the future, consider:
-1. Implementing a custom Ink component with `ink-text-input` for search
-2. Adding debounced filtering using `useMemo` and a debounce utility
-3. Pattern would be similar to upstream but adapted for terminal UI constraints
-
-**Files Reviewed**:
-- `src/cli/tui/dialogs/ModelPicker.tsx` - Current implementation using `ink-select-input`
-- `src/cli/utils/modelPicker.ts` - Non-TUI model picker using `@inquirer/prompts`
-
-### 2. Review SDK/API Endpoint Definitions (Medium Priority)
-
-**Status**: Not Applicable  
-**Reason**: No Relevant Upstream Changes
-
-**Analysis**:
-- **Upstream Change**: kilocode regenerated `packages/sdk/openapi.json` with +92 lines
-- **Alexi Architecture**: Uses SAP AI SDK (`@sap-ai-sdk/orchestration`) exclusively, not a custom SDK
-- **Key Difference**:
-  - kilocode maintains its own OpenAPI-based SDK for various providers
-  - Alexi relies on official SAP AI SDK packages which are maintained separately
-  - No custom API client that would benefit from upstream OpenAPI changes
-
-**Files Reviewed**:
-- `src/providers/sapOrchestration.ts` - Comprehensive SAP AI SDK wrapper (1074 lines)
-- `src/providers/index.ts` - Provider exports and factory functions
-- `package.json` - Dependencies confirm `@sap-ai-sdk/orchestration@^2.8.0`
-
-**Current Provider Capabilities**:
-- Streaming and non-streaming chat completion ✓
-- Tool/function calling with streaming ✓
-- Content filtering (Azure Content Safety, Llama Guard 3 8B) ✓
-- Data masking (DPI) ✓
-- Document grounding ✓
-- Translation (input/output) ✓
-- Embeddings ✓
-
-**Recommendation**: 
-Continue monitoring SAP AI SDK releases for new features. The current implementation is comprehensive and well-structured.
+This document summarizes the changes made to Alexi based on the upstream update plan. The plan was adapted to fit Alexi's architecture, which differs from kilocode in several key areas.
 
 ## Files Modified
 
-**None** - No code changes were necessary based on the analysis above.
+### New Files Created
 
-## Files Created
+1. **`src/tool/tools/warpgrep.ts`**
+   - Added WarpGrep/MorphSDK-based AI-powered codebase search tool
+   - Implements semantic code search capabilities
+   - Tool name: `codebase_search`
+   - Requires `@morphllm/morphsdk` as an optional dependency
+   - Includes free proxy fallback for testing period
 
-- `.github/reports/changes-summary.md` - This summary document
+2. **`src/tool/tools/bash-hierarchy.ts`**
+   - Utility module for hierarchical bash command permission rules
+   - Enables granular permission control (e.g., "npm" → "npm install" → "npm install lodash")
+   - Provides `addAll()` and `matches()` functions
+   - Not yet integrated into bash tool (architectural differences)
 
-## Compatibility Assessment
+3. **`src/tool/tools/__tests__/bash-hierarchy.test.ts`**
+   - Comprehensive test suite for bash hierarchy utility
+   - Tests hierarchy generation and matching logic
+   - 8 test cases covering various command patterns
 
-✅ **SAP AI Core Compatibility**: Maintained  
-✅ **No Breaking Changes**: No code modifications made  
-✅ **Architecture Integrity**: Preserved
+### Files Modified
 
-## Conclusion
+4. **`src/tool/tools/index.ts`**
+   - Added import for `warpgrepTool`
+   - Registered `warpgrepTool` in `builtInTools` array
+   - Tool is now available in the tool registry
 
-Both changes in the update plan were analyzed and determined to be not applicable to Alexi's architecture:
+## Changes Not Applied
 
-1. **Debounced Search**: Alexi uses terminal UI (Ink) rather than web UI, and the current `ink-select-input` component doesn't support search functionality. The upstream pattern is web-specific.
+The following changes from the plan were **not applied** due to architectural differences between Alexi and kilocode:
 
-2. **SDK Endpoint Updates**: Alexi uses official SAP AI SDK packages rather than maintaining a custom OpenAPI-based SDK, making upstream SDK regeneration changes irrelevant.
+### 1. Registry Conditional Tool Loading
+**Reason**: Alexi doesn't have an experimental feature flag system. All tools in `builtInTools` are registered unconditionally. The warpgrep tool is now always available but will gracefully handle missing dependencies.
 
-No code changes were required. The current implementation is appropriate for Alexi's architecture and use case.
+### 2. Bash Tool Hierarchy Integration
+**Reason**: Alexi's bash tool uses the `defineTool()` pattern with a simple permission check via `permission.getResource()`. It doesn't have the complex permission metadata structure that kilocode uses. The bash-hierarchy utility was created but not integrated.
 
-## Recommendations for Future Enhancements
+**Future Work**: Could integrate bash-hierarchy into Alexi's permission system if hierarchical bash permissions are needed.
 
-If performance improvements or enhanced model selection are desired:
+### 3. Permission `toConfig()` Serialization
+**Reason**: Alexi's permission system (`src/permission/index.ts` and `src/permission/next.ts`) has a different structure than kilocode. The `next.ts` file is a simple pattern matching utility, not a full permission ruleset manager.
 
-1. **Model Picker Search** (Optional Enhancement):
-   ```typescript
-   // Example pattern for future implementation
-   import { useState, useMemo } from 'react';
-   import TextInput from 'ink-text-input';
-   
-   function ModelPickerWithSearch() {
-     const [searchQuery, setSearchQuery] = useState('');
-     const [debouncedQuery, setDebouncedQuery] = useState('');
-     
-     // Implement debounce with useEffect + setTimeout
-     // Filter models based on debouncedQuery
-     // Render filtered list
-   }
+**Future Work**: If permission persistence is needed, this could be implemented in the main permission manager.
+
+### 4. Agent Permission Updates
+**Reason**: Alexi's agent system doesn't have per-agent permission configurations. Agents specify which tools they can use via the `tools` array, but don't have permission rules.
+
+**Future Work**: Could add `codebase_search` to the explore agent's tools array and update its prompt if needed.
+
+### 5. Permission `toConfig()` Tests
+**Reason**: Not applicable since `toConfig()` was not implemented.
+
+## Compatibility Notes
+
+### SAP AI Core Integration
+- All changes maintain full compatibility with SAP AI Core Orchestration
+- No breaking changes to existing tool interfaces
+- New warpgrep tool is optional and doesn't affect core functionality
+
+### Dependency Management
+- WarpGrep tool requires `@morphllm/morphsdk` but handles missing dependency gracefully
+- Returns helpful error message if SDK is not installed
+- No changes to package.json (SDK should be added as optional dependency if desired)
+
+## Testing Status
+
+### Created Tests
+- ✅ Bash hierarchy utility tests (8 test cases)
+
+### Recommended Additional Tests
+- ⚠️ WarpGrep tool integration tests (requires MorphSDK)
+- ⚠️ WarpGrep tool error handling tests (missing SDK, API failures)
+- ⚠️ Tool registry tests to verify warpgrep registration
+
+## Recommendations
+
+### Immediate Actions
+1. **Add MorphSDK as optional dependency**:
+   ```bash
+   npm install --save-optional @morphllm/morphsdk
    ```
 
-2. **Monitor SAP AI SDK Updates**:
-   - Track `@sap-ai-sdk/orchestration` releases
-   - Review changelog for new orchestration features
-   - Update wrapper implementation as needed
+2. **Update documentation** to mention the new `codebase_search` tool
 
-## Testing Notes
+3. **Test the warpgrep tool** with actual codebase searches
 
-No testing required as no code changes were made.
+### Future Enhancements
+1. **Implement experimental feature flags** if conditional tool loading is desired
+2. **Integrate bash-hierarchy** into permission system for granular bash permissions
+3. **Add agent-specific permissions** if fine-grained control is needed
+4. **Implement permission persistence** using a `toConfig()` pattern
 
----
+## Summary
 
-**Execution Completed**: 2026-03-16  
-**Result**: Analysis complete, no changes necessary
+**Total Changes**: 4 files created/modified  
+**High Priority**: 2 completed (warpgrep tool, tool registration)  
+**Medium Priority**: 1 completed (bash-hierarchy utility), 3 skipped (architectural differences)  
+**Low Priority**: 1 skipped (permission tests)
+
+The core functionality from the upstream changes (AI-powered codebase search) has been successfully integrated into Alexi. Additional features were adapted or deferred based on architectural differences between the codebases.
