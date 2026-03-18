@@ -195,7 +195,7 @@ export function formatHintsBar(_agentId: string | undefined, isLeaderMode: boole
 
   return (
     c('dim', '  Tab') +
-    c('gray', ' switch agent · ') +
+    c('gray', ' complete/switch · ') +
     c('dim', 'Ctrl+X') +
     c('gray', ' leader · ') +
     c('dim', '/help') +

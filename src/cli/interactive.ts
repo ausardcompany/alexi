@@ -27,6 +27,7 @@ import {
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { getCheckpointManager } from '../core/checkpoints.js';
+import { completeLine } from './utils/completer.js';
 import { compactConversation, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
 import { getStageManager, type ConversationStage } from '../core/stageManager.js';
@@ -1869,11 +1870,21 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     prompt: formatAgentPrompt(state.agent),
     terminal: true,
     // Use readline's completer hook to intercept Tab completely.
-    // Returning an empty completions array prevents readline from inserting \t
-    // while still firing so we can cycle agents.
-    completer: (_line: string, callback: (err: null, result: [string[], string]) => void) => {
-      _tabCycleRef?.(false); // forward Tab → cycle forward
-      callback(null, [[], _line]); // no completions → nothing inserted
+    // If the line matches a completable pattern (slash commands, /model, @file),
+    // return real completions. Otherwise cycle agents as before.
+    completer: (line: string, callback: (err: null, result: [string[], string]) => void) => {
+      const result = completeLine(line, process.cwd());
+      if (result.items.length > 0) {
+        const prefix = line.slice(0, result.replacementStart);
+        const completions = result.items.map((item) => `${prefix}${item.text}`);
+        // If exactly one match, readline auto-inserts it.
+        // If multiple, readline prints them and re-prompts.
+        callback(null, [completions, line]);
+      } else {
+        // No completions → cycle agents (Tab as agent switch)
+        _tabCycleRef?.(false);
+        callback(null, [[], line]);
+      }
     },
   });
 

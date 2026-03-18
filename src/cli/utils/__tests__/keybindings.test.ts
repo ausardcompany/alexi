@@ -71,7 +71,7 @@ describe('keybindings', () => {
     it('should show normal hints when not in leader mode', () => {
       const bar = formatHintsBar('code', false);
       expect(bar).toContain('Tab');
-      expect(bar).toContain('switch agent');
+      expect(bar).toContain('complete/switch');
       expect(bar).toContain('Ctrl+X');
       expect(bar).toContain('leader');
       expect(bar).toContain('/help');

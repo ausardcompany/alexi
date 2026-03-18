@@ -3,7 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 
 import type { InputBoxProps } from '../types/props.js';
-import type { SlashCommand } from '../hooks/useCommands.js';
+import { fuzzyMatch, completeModelName } from '../../utils/completer.js';
 import { useClipboardImage } from '../hooks/useClipboardImage.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { AttachmentBar } from './AttachmentBar.js';
@@ -47,22 +47,61 @@ export function InputBox({
   const { pending, clearAll: clearAttachments } = useAttachments();
 
   // Autocomplete: compute filtered suggestions when value starts with '/'
-  const suggestions: SlashCommand[] = useMemo(() => {
+  interface Suggestion {
+    text: string;
+    display: string;
+    description: string;
+    aliases?: string;
+    score: number;
+  }
+
+  const suggestions: Suggestion[] = useMemo(() => {
+    // Model name completion after /model
+    if (value.startsWith('/model ')) {
+      const partial = value.slice('/model '.length);
+      const result = completeModelName(partial);
+      return result.items.slice(0, MAX_SUGGESTIONS).map((item) => ({
+        text: `/model ${item.text}`,
+        display: item.text,
+        description: '',
+        score: item.score,
+      }));
+    }
+
+    // Slash command completion
     if (!value.startsWith('/') || value.includes(' ')) {
       return [];
     }
     const partial = value.slice(1).toLowerCase();
     if (partial.length === 0) {
       // Show all commands when just '/' is typed
-      return commands.slice(0, MAX_SUGGESTIONS);
+      return commands.slice(0, MAX_SUGGESTIONS).map((cmd) => ({
+        text: `/${cmd.name} `,
+        display: `/${cmd.name}`,
+        description: cmd.description,
+        aliases: cmd.aliases?.length ? `(${cmd.aliases.join(', ')})` : undefined,
+        score: 0,
+      }));
     }
-    return commands
-      .filter(
-        (cmd) =>
-          cmd.name.toLowerCase().startsWith(partial) ||
-          (cmd.aliases?.some((a) => a.toLowerCase().startsWith(partial)) ?? false)
-      )
-      .slice(0, MAX_SUGGESTIONS);
+
+    // Fuzzy match commands
+    const matches: Suggestion[] = [];
+    for (const cmd of commands) {
+      const nameResult = fuzzyMatch(partial, cmd.name);
+      const aliasResult = cmd.aliases?.map((a) => fuzzyMatch(partial, a)).find((r) => r.match);
+      const best = nameResult.match ? nameResult : aliasResult;
+      if (best && best.match) {
+        matches.push({
+          text: `/${cmd.name} `,
+          display: `/${cmd.name}`,
+          description: cmd.description,
+          aliases: cmd.aliases?.length ? `(${cmd.aliases.join(', ')})` : undefined,
+          score: best.score,
+        });
+      }
+    }
+    matches.sort((a, b) => b.score - a.score);
+    return matches.slice(0, MAX_SUGGESTIONS);
   }, [value, commands]);
 
   // Handle Up/Down arrow keys, Tab for autocomplete, and Escape.
@@ -94,7 +133,7 @@ export function InputBox({
         } else if (selectedSuggestion >= 0) {
           // Tab with active selection — accept the suggestion
           const chosen = suggestions[selectedSuggestion];
-          setValue(`/${chosen.name} `);
+          setValue(chosen.text);
           setSelectedSuggestion(-1);
         } else {
           // Tab with no selection — select first
@@ -167,7 +206,7 @@ export function InputBox({
       // If a suggestion is selected and Enter is pressed, accept the suggestion
       if (selectedSuggestion >= 0 && suggestions.length > 0) {
         const chosen = suggestions[selectedSuggestion];
-        setValue(`/${chosen.name} `);
+        setValue(chosen.text);
         setSelectedSuggestion(-1);
         return;
       }
@@ -228,22 +267,23 @@ export function InputBox({
       {/* Autocomplete suggestion list */}
       {suggestions.length > 0 && (
         <Box flexDirection="column" paddingX={1}>
-          {suggestions.map((cmd, idx) => {
+          {suggestions.map((sug, idx) => {
             const isSelected = idx === selectedSuggestion;
-            const aliases = cmd.aliases?.length ? ` (${cmd.aliases.join(', ')})` : '';
             return (
-              <Text key={cmd.name}>
+              <Text key={sug.display + idx}>
                 <Text color={isSelected ? agentColor : 'gray'} bold={isSelected}>
                   {isSelected ? '❯ ' : '  '}
                 </Text>
                 <Text color={isSelected ? agentColor : 'white'} bold={isSelected}>
-                  /{cmd.name}
+                  {sug.display}
                 </Text>
-                <Text color="gray">{aliases}</Text>
-                <Text color="gray" dimColor>
-                  {' '}
-                  {cmd.description}
-                </Text>
+                {sug.aliases && <Text color="gray"> {sug.aliases}</Text>}
+                {sug.description && (
+                  <Text color="gray" dimColor>
+                    {' '}
+                    {sug.description}
+                  </Text>
+                )}
               </Text>
             );
           })}
