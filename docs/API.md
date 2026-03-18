@@ -153,6 +153,101 @@ Confidence: 100%
 Rule Applied: reasoning-for-math
 ```
 
+### interactive
+
+Start interactive REPL with streaming responses and slash commands.
+
+```bash
+alexi interactive [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Override model selection |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
+| `--session <id>` | string | Continue existing session |
+| `--system <prompt>` | string | System prompt for conversation |
+
+#### Interactive Commands
+
+The interactive REPL supports slash commands for session management and configuration:
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/h` | Show available commands |
+| `/exit` | `/quit`, `/q` | Exit the TUI |
+| `/clear` | - | Clear message history |
+| `/model [id]` | - | Show or switch the current model |
+| `/agent [name]` | - | Show or switch the current agent |
+| `/status` | - | Show current session status |
+| `/sessions` | - | Open session list dialog |
+| `/mcp` | - | Manage MCP servers |
+| `/theme [dark\|light]` | - | Switch theme |
+| `/image [path]` | `/img` | Attach image from clipboard or file |
+| `/clear-images` | `/cli` | Remove all pending image attachments |
+| `/memory [edit\|init]` | - | List or edit instruction files (AGENTS.md, ALEXI.md) |
+| `/mem [search\|stats\|export]` | - | Manage JSON-based memories |
+
+#### Memory Command
+
+The `/memory` command manages instruction files that are loaded into the system prompt:
+
+```bash
+# List all instruction files with status
+/memory
+
+# Edit instruction files in $EDITOR
+/memory edit project    # Opens AGENTS.md
+/memory edit user       # Opens ~/.alexi/ALEXI.md
+
+# Create AGENTS.md from template
+/memory init
+```
+
+Instruction files are loaded from:
+1. Project-level: `workdir/AGENTS.md`
+2. User-level: `~/.alexi/ALEXI.md`
+3. Project rules: `workdir/.alexi/rules/*.md`
+
+#### Mem Command
+
+The `/mem` command manages JSON-based key-value memories:
+
+```bash
+# List all memories
+/mem
+
+# Search memories by text or tag
+/mem search <query>
+
+# Show memory statistics
+/mem stats
+
+# Export memories to JSON
+/mem export
+```
+
+#### Example Session
+
+```bash
+alexi interactive --auto-route
+
+> /model
+# Opens model picker dialog
+
+> /agent code
+# Switches to code agent
+
+> /memory init
+# Creates AGENTS.md from template
+
+> Write a function to sort an array
+# Sends message to LLM with streaming response
+```
+
 ### sessions
 
 List all saved sessions.

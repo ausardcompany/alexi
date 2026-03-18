@@ -112,11 +112,13 @@ graph TB
 | Tool | File | Description |
 |------|------|-------------|
 | Bash | `src/tool/tools/bash.ts` | Execute shell commands |
+| BashHierarchy | `src/tool/tools/bash-hierarchy.ts` | Hierarchical permission rules for bash commands |
 | Read | `src/tool/tools/read.ts` | Read files and directories |
 | Write | `src/tool/tools/write.ts` | Write files |
 | Edit | `src/tool/tools/edit.ts` | Edit files with string replacement |
 | Glob | `src/tool/tools/glob.ts` | Find files by pattern |
 | Grep | `src/tool/tools/grep.ts` | Search file contents |
+| WarpGrep | `src/tool/tools/warpgrep.ts` | AI-powered semantic code search |
 | Task | `src/tool/tools/task.ts` | Launch sub-agents |
 | WebFetch | `src/tool/tools/webfetch.ts` | Fetch web content |
 | Question | `src/tool/tools/question.ts` | Ask user questions |
@@ -129,11 +131,13 @@ graph TB
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
+| Agent System | `src/agent/system.ts` | System prompt assembly and instruction file loading |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Clipboard | `src/utils/clipboard.ts` | Platform-specific clipboard image reading |
 
 ## Data Flow
 
@@ -252,6 +256,104 @@ flowchart TB
     
     Execute --> Result[Return Result]
     Deny --> Result
+```
+
+## Instruction File System
+
+Alexi loads multiple instruction sources to build context for AI agents. The system prompt is assembled from layered instruction files in the following order:
+
+```mermaid
+flowchart TB
+    Start([Build System Prompt]) --> Soul[1. Core Soul Prompt]
+    Soul --> Model[2. Model-Specific Instructions]
+    Model --> Env[3. Environment Info]
+    Env --> Agent[4. Agent Role Prompt]
+    Agent --> Project[5. Project AGENTS.md]
+    Project --> User[6. User ALEXI.md]
+    User --> Rules[7. Project Rules Files]
+    Rules --> Custom[8. Custom Rules]
+    Custom --> Assemble[Assemble Final Prompt]
+    
+    style Project fill:#4CAF50
+    style User fill:#2196F3
+    style Rules fill:#FF9800
+```
+
+### Instruction File Sources
+
+The system loads instruction files from three locations:
+
+1. **Project-level AGENTS.md** (`workdir/AGENTS.md`)
+   - Project-specific instructions for AI agents
+   - Wrapped in `<agents-md>` tags
+   - Contains coding standards, build commands, project structure
+
+2. **User-level ALEXI.md** (`~/.alexi/ALEXI.md`)
+   - Personal instructions loaded into every session
+   - Wrapped in `<user-instructions>` tags
+   - User preferences, global coding style, common patterns
+
+3. **Project-level rule files** (`workdir/.alexi/rules/*.md`)
+   - Scoped instruction files for specific contexts
+   - Wrapped in `<rule file="filename.md">` tags
+   - Loaded alphabetically, merged into system prompt
+
+### Instruction File Management
+
+The `/memory` command in interactive REPL provides instruction file management:
+
+```typescript
+// List all instruction files with status
+/memory
+
+// Edit instruction files in $EDITOR
+/memory edit project    // Opens AGENTS.md
+/memory edit user       // Opens ~/.alexi/ALEXI.md
+
+// Create AGENTS.md from template
+/memory init
+```
+
+### System Prompt Assembly Flow
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent System
+    participant FS as File System
+    participant Prompt as System Prompt
+    
+    Agent->>FS: Read workdir/AGENTS.md
+    FS-->>Agent: Project instructions
+    Agent->>Prompt: Add <agents-md> block
+    
+    Agent->>FS: Read ~/.alexi/ALEXI.md
+    FS-->>Agent: User instructions
+    Agent->>Prompt: Add <user-instructions> block
+    
+    Agent->>FS: List .alexi/rules/*.md
+    FS-->>Agent: Rule files
+    loop For each rule file
+        Agent->>FS: Read rule file
+        FS-->>Agent: Rule content
+        Agent->>Prompt: Add <rule file="..."> block
+    end
+    
+    Agent->>Prompt: Return assembled prompt
+```
+
+### TypeScript Interface
+
+```typescript
+interface AssembleOptions {
+  agentId?: string;           // Agent role (code, debug, plan, etc.)
+  modelId?: string;           // SAP AI Core model ID
+  workdir?: string;           // Working directory for file resolution
+  customRules?: string;       // Additional custom rules
+  skipEnv?: boolean;          // Skip environment info block
+  skipAgentsMd?: boolean;     // Skip instruction file loading
+}
+
+function buildAssembledSystemPrompt(options: AssembleOptions): string;
 ```
 
 ## Configuration
