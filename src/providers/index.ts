@@ -6,6 +6,7 @@
  */
 
 import { env } from '../config/env.js';
+import { getConfigDefaultModel } from '../config/userConfig.js';
 import { SapOrchestrationProvider } from './sapOrchestration.js';
 
 // Re-export everything from sapOrchestration
@@ -54,8 +55,13 @@ export function getProviderForModel(modelId: string): SapOrchestrationProvider {
 }
 
 /**
- * Get the default model from environment
+ * Get the default model.
+ *
+ * Resolution order (first non-empty wins):
+ *   1. AICORE_MODEL environment variable  (explicit env always wins)
+ *   2. defaultModel in ~/.alexi/config.json (persistent user preference)
+ *   3. Hardcoded 'gpt-4o' fallback
  */
 export function getDefaultModel(): string {
-  return env('AICORE_MODEL') ?? 'gpt-4o';
+  return env('AICORE_MODEL') ?? getConfigDefaultModel() ?? 'gpt-4o';
 }

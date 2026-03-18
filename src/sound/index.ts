@@ -4,10 +4,8 @@
  * Features: configurable sound events, EventBus integration, persistent config
  */
 
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import type { BusEvent } from '../bus/index.js';
+import { CONFIG_DIR, CONFIG_FILE, loadFullConfig, saveFullConfig } from '../config/userConfig.js';
 
 // ============ Type Definitions ============
 
@@ -28,9 +26,6 @@ export interface SoundConfig {
 
 // ============ Constants ============
 
-const CONFIG_DIR = path.join(os.homedir(), '.alexi');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-
 const DEFAULT_CONFIG: SoundConfig = {
   enabled: false, // Disabled by default
   events: {
@@ -46,42 +41,6 @@ const DEFAULT_CONFIG: SoundConfig = {
 };
 
 // ============ Helper Functions ============
-
-/**
- * Ensure the config directory exists
- */
-function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-}
-
-/**
- * Load the full config file from disk
- */
-function loadFullConfig(): Record<string, unknown> {
-  ensureConfigDir();
-
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return {};
-  }
-
-  try {
-    const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-    return JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    // Return empty config on parse error
-    return {};
-  }
-}
-
-/**
- * Save the full config file to disk
- */
-function saveFullConfig(config: Record<string, unknown>): void {
-  ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-}
 
 /**
  * Load sound config from disk
