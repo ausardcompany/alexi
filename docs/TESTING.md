@@ -10,7 +10,6 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Tool System](#testing-tool-system)
 - [Testing Providers](#testing-providers)
 - [Testing Routing](#testing-routing)
-- [Testing TUI Components](#testing-tui-components)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -30,13 +29,11 @@ graph TB
         Providers[Provider Tests]
         Router[Router Tests]
         Core[Core Logic Tests]
-        TUI[TUI Component Tests]
     end
     
     Unit --> Tools
     Unit --> Router
     Unit --> Core
-    Unit --> TUI
     Integration --> Providers
     Integration --> Tools
     E2E --> Core
@@ -53,7 +50,6 @@ graph TB
    - Routing logic
    - Utility functions
    - Permission management
-   - TUI hooks and components
 
 2. **Integration Tests**: Test interactions between components
    - Provider integrations with SAP AI Core
@@ -94,9 +90,6 @@ npm test -- tests/tool/tools/
 # Run specific test file
 npm test -- tests/tool/tools/write.test.ts
 
-# Run TUI command tests
-npm test -- tests/commands-image.test.tsx
-
 # Run tests matching pattern
 npm test -- --grep "write tool"
 ```
@@ -120,7 +113,6 @@ Alexi uses **Vitest** as its testing framework, chosen for:
 | Providers | 80%+ | 🔄 In Progress |
 | Router | 90%+ | 🔄 In Progress |
 | CLI | 70%+ | 🔄 In Progress |
-| TUI Components | 75%+ | 🔄 In Progress |
 
 ### Coverage Reports
 
@@ -238,6 +230,14 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
+### TUI Command Test Coverage
+
+TUI slash commands are tested through the `useCommands` hook with React context mocking:
+
+| Command | Test File | Test Cases |
+|---------|-----------|------------|
+| `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+
 ### Test Categories
 
 Each tool is tested across multiple categories:
@@ -264,33 +264,39 @@ Each tool is tested across multiple categories:
    - Description presence
    - Schema generation
 
-### Testing Edit Tool Line Endings
+5. **Line Ending Preservation** (Edit Tool)
+   - Detect and preserve CRLF vs LF line endings
+   - Normalize parameters to match file's line ending style
+   - Ensure replacements maintain original file format
 
-The edit tool now handles line endings correctly across platforms:
+#### Testing Line Ending Preservation
+
+The edit tool preserves line endings when performing replacements:
 
 ```typescript
-describe('Edit Tool - Line Endings', () => {
-  it('should preserve Windows line endings (CRLF)', async () => {
+describe('edit tool line endings', () => {
+  it('should preserve CRLF line endings', async () => {
+    // Create file with CRLF endings
     const content = 'line1\r\nline2\r\nline3\r\n';
-    const filePath = path.join(tempDir, 'windows.txt');
     await fs.writeFile(filePath, content, 'utf-8');
 
+    // Perform edit with LF in parameters
     const result = await editTool.execute({
       filePath,
-      oldString: 'line2',
-      newString: 'modified'
+      oldString: 'line2\n',
+      newString: 'modified\n'
     }, context);
 
     expect(result.success).toBe(true);
-    
-    const newContent = await fs.readFile(filePath, 'utf-8');
-    expect(newContent).toBe('line1\r\nmodified\r\nline3\r\n');
-    expect(newContent.includes('\r\n')).toBe(true);
+
+    // Verify CRLF preserved in output
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toContain('\r\n');
+    expect(updated).toBe('line1\r\nmodified\r\nline3\r\n');
   });
 
-  it('should preserve Unix line endings (LF)', async () => {
+  it('should preserve LF line endings', async () => {
     const content = 'line1\nline2\nline3\n';
-    const filePath = path.join(tempDir, 'unix.txt');
     await fs.writeFile(filePath, content, 'utf-8');
 
     const result = await editTool.execute({
@@ -300,10 +306,10 @@ describe('Edit Tool - Line Endings', () => {
     }, context);
 
     expect(result.success).toBe(true);
-    
-    const newContent = await fs.readFile(filePath, 'utf-8');
-    expect(newContent).toBe('line1\nmodified\nline3\n');
-    expect(newContent.includes('\r\n')).toBe(false);
+
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).not.toContain('\r\n');
+    expect(updated).toBe('line1\nmodified\nline3\n');
   });
 });
 ```
@@ -417,112 +423,6 @@ describe('Auto Router', () => {
 });
 ```
 
-## Testing TUI Components
-
-TUI components are tested using Ink's testing library with mocked React contexts.
-
-### TUI Test Architecture
-
-```mermaid
-graph LR
-    subgraph "Mock Setup"
-        MockContext[Mock React Contexts]
-        MockHooks[Mock Custom Hooks]
-        MockFunctions[Mock Functions]
-    end
-    
-    subgraph "Test Execution"
-        Render[Render Component]
-        Interact[Simulate Interaction]
-        Assert[Assert Behavior]
-    end
-    
-    MockContext --> Render
-    MockHooks --> Render
-    MockFunctions --> Render
-    Render --> Interact
-    Interact --> Assert
-    
-    style Render fill:#4CAF50
-    style Assert fill:#2196F3
-```
-
-### Example: Testing Image Commands
-
-```typescript
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import React from 'react';
-import { render } from 'ink-testing-library';
-import { Text } from 'ink';
-
-// Mock React contexts before importing component
-const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
-const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
-const mockClearAll = vi.fn();
-
-vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
-  useAttachments: () => ({
-    pending: [],
-    reading: false,
-    error: null,
-    pasteFromClipboard: mockPasteFromClipboard,
-    addFromFile: mockAddFromFile,
-    remove: vi.fn(),
-    clearAll: mockClearAll,
-    consumeAll: vi.fn().mockReturnValue([]),
-  }),
-}));
-
-// Import after mocks
-import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
-
-describe('/image command', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should call pasteFromClipboard when no args given', async () => {
-    let captured: any = null;
-    
-    function CommandCapture() {
-      captured = useCommands();
-      return <Text>ready</Text>;
-    }
-    
-    render(<CommandCapture />);
-    
-    const handled = await captured.handleCommand('/image');
-    expect(handled).toBe(true);
-    expect(mockPasteFromClipboard).toHaveBeenCalledOnce();
-    expect(mockAddFromFile).not.toHaveBeenCalled();
-  });
-
-  it('should call addFromFile when path is provided', async () => {
-    let captured: any = null;
-    
-    function CommandCapture() {
-      captured = useCommands();
-      return <Text>ready</Text>;
-    }
-    
-    render(<CommandCapture />);
-    
-    const handled = await captured.handleCommand('/image ./screenshot.png');
-    expect(handled).toBe(true);
-    expect(mockAddFromFile).toHaveBeenCalledOnce();
-    expect(mockAddFromFile).toHaveBeenCalledWith('./screenshot.png');
-  });
-});
-```
-
-### TUI Testing Best Practices
-
-1. **Mock All React Contexts**: Mock SessionContext, DialogContext, ThemeContext, AttachmentContext
-2. **Mock Before Import**: Define mocks before importing components that use them
-3. **Use Ink Testing Library**: Use `render` from `ink-testing-library` for component rendering
-4. **Test Command Dispatch**: Verify commands are handled correctly with proper arguments
-5. **Test Aliases**: Verify command aliases work as expected
-
 ## Best Practices
 
 ### 1. Test Isolation
@@ -598,7 +498,6 @@ describe('edge cases', () => {
   it('should handle unicode content', async () => { /* ... */ });
   it('should handle files with spaces in name', async () => { /* ... */ });
   it('should handle deeply nested directories', async () => { /* ... */ });
-  it('should preserve line endings', async () => { /* ... */ });
 });
 ```
 
@@ -632,6 +531,77 @@ describe('tool metadata', () => {
   });
 });
 ```
+
+### 8. Test TUI Commands with Context Mocking
+
+TUI commands require mocking React contexts and using ink-testing-library:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock contexts before importing hooks
+const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
+const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
+const mockClearAll = vi.fn();
+
+vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: mockPasteFromClipboard,
+    addFromFile: mockAddFromFile,
+    clearAll: mockClearAll,
+  }),
+}));
+
+// Import after mocks
+import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
+
+describe('/image command', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should call pasteFromClipboard when no args given', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
+      return <Text>ready</Text>;
+    }
+    
+    render(<CommandCapture />);
+    
+    const handled = await captured.handleCommand('/image');
+    expect(handled).toBe(true);
+    expect(mockPasteFromClipboard).toHaveBeenCalledOnce();
+  });
+
+  it('should call addFromFile when path provided', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
+      return <Text>ready</Text>;
+    }
+    
+    render(<CommandCapture />);
+    
+    await captured.handleCommand('/image ./screenshot.png');
+    expect(mockAddFromFile).toHaveBeenCalledWith('./screenshot.png');
+  });
+});
+```
+
+Key patterns for TUI command testing:
+
+1. **Mock Before Import**: Declare all vi.mock() calls before importing the hook
+2. **Capture Hook Return**: Use a component to capture the hook's return value
+3. **Render with Ink**: Use ink-testing-library's render() function
+4. **Test Command Dispatch**: Call handleCommand() and verify behavior
+5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
 
 ## Testing with SAP AI Core
 
@@ -712,11 +682,6 @@ graph LR
    - Use proper cleanup in `afterEach`
    - Avoid shared state between tests
    - Use unique temporary directories per test
-
-5. **React context mocking errors**
-   - Ensure mocks are defined before importing components
-   - Mock all required contexts used by the component
-   - Use `vi.clearAllMocks()` in `beforeEach`
 
 ## Contributing Tests
 

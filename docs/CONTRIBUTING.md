@@ -199,6 +199,28 @@ graph LR
    const value = context && context.workdir ? context.workdir : process.cwd();
    ```
 
+6. **Graceful Degradation**: Handle optional dependencies gracefully
+   ```typescript
+   // Good - Return null if initialization fails
+   function getTsParser(): Parser | null {
+     if (!Parser) {
+       return null;
+     }
+     if (!tsParser) {
+       tsParser = new Parser();
+       tsParser.setLanguage(TypeScript.typescript);
+     }
+     return tsParser;
+   }
+   
+   // Usage - Check for null before using
+   const parser = getTsParser();
+   if (!parser) {
+     return null; // Skip parsing, don't fail
+   }
+   const tree = parser.parse(source);
+   ```
+
 ### File Organization
 
 ```
@@ -300,19 +322,22 @@ npm test
 # Run specific test file
 npm test -- tool.test.ts
 
-# Run TUI component tests
-npm test -- tests/commands-image.test.tsx
-
 # Run with coverage
 npm test -- --coverage
 
 # Watch mode
 npm test -- --watch
+
+# Run TUI command tests
+npm test -- tests/commands-image.test.tsx
+
+# Run tests matching a pattern
+npm test -- --grep "line endings"
 ```
 
-### Testing TUI Components
+### Testing TUI Commands
 
-When testing TUI components built with Ink:
+TUI commands require special testing patterns with React context mocking:
 
 ```typescript
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -320,45 +345,48 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 
-// Mock React contexts BEFORE importing components
-const mockFunction = vi.fn();
+// Mock contexts BEFORE importing hooks
+const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
+const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('../src/cli/tui/context/SomeContext.js', () => ({
-  useSomeContext: () => ({
-    someValue: 'test',
-    someFunction: mockFunction,
+vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pasteFromClipboard: mockPasteFromClipboard,
+    addFromFile: mockAddFromFile,
+    clearAll: vi.fn(),
   }),
 }));
 
 // Import AFTER mocks
-import { useCustomHook } from '../src/cli/tui/hooks/useCustomHook.js';
+import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
 
-describe('TUI Component', () => {
+describe('TUI commands', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('should call mocked function', () => {
-    let captured: any = null;
-    
-    function TestComponent() {
-      captured = useCustomHook();
+  it('should handle /image command', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
       return <Text>ready</Text>;
     }
     
-    render(<TestComponent />);
+    render(<CommandCapture />);
     
-    captured.someFunction();
-    expect(mockFunction).toHaveBeenCalledOnce();
+    const handled = await captured.handleCommand('/image ./photo.png');
+    expect(handled).toBe(true);
+    expect(mockAddFromFile).toHaveBeenCalledWith('./photo.png');
   });
 });
 ```
 
-**Key Points**:
-1. Mock React contexts before importing components
-2. Use `ink-testing-library` for rendering
-3. Use `vi.clearAllMocks()` in `beforeEach`
-4. Capture hook returns for testing
+Key principles for TUI testing:
+1. Mock all React contexts before importing hooks
+2. Use ink-testing-library for rendering
+3. Capture hook return values through a component
+4. Clear mocks between tests with vi.clearAllMocks()
+5. Test both command dispatch and context interactions
 
 ## Pull Request Process
 
@@ -425,7 +453,6 @@ Pull requests trigger automated workflows:
    - Updates CHANGELOG.md
 3. **CI Auto-Fix** (for auto/* branches): Automatically fixes CI failures
    - Collects failure logs
-   - Preserves ci-failures.md across checkout operations
    - Applies quick fixes (lint:fix, format)
    - Uses Alexi agent to fix remaining issues
    - Verifies fixes and commits changes
@@ -438,7 +465,6 @@ The documentation update workflow will automatically:
 
 For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
 - Analyze failure logs with exact error messages
-- Preserve ci-failures.md to prevent data loss during checkout
 - Apply deterministic fixes (linting, formatting)
 - Use Alexi agent mode to fix complex issues
 - Verify all fixes pass the original checks

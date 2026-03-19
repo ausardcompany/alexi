@@ -50,15 +50,11 @@ export AICORE_MODEL=gpt-4o
 
 #### ALEXI_MAX_IMAGE_SIZE_MB
 
-Maximum image attachment size in megabytes. Controls the size limit for image attachments in multimodal conversations.
+Maximum size in megabytes for image attachments. Defaults to 20MB if not specified.
 
 ```bash
 export ALEXI_MAX_IMAGE_SIZE_MB=20
 ```
-
-**Default**: 20 MB
-
-**Purpose**: Prevents excessive memory usage and API payload sizes when attaching images to prompts.
 
 #### SAP_PROXY_BASE_URL
 
@@ -142,8 +138,7 @@ import {
   getConfigValue,
   setConfigValue,
   getConfigDefaultModel,
-  setConfigDefaultModel,
-  updateGlobal
+  setConfigDefaultModel
 } from './config/userConfig.js';
 
 // Load entire config
@@ -154,15 +149,6 @@ const defaultModel = getConfigDefaultModel();
 
 // Set and persist value
 setConfigDefaultModel('claude-4-sonnet');
-
-// Batch update multiple keys
-updateGlobal(
-  { 
-    defaultModel: 'gpt-4o',
-    soundEnabled: true 
-  },
-  { dispose: true }
-);
 ```
 
 ### Configuration API
@@ -189,7 +175,7 @@ function setConfigDefaultModel(model: string): void
 
 // Batch update with options
 interface UpdateGlobalOptions {
-  dispose?: boolean;  // Default: true
+  dispose?: boolean;
 }
 
 function updateGlobal(
@@ -198,31 +184,28 @@ function updateGlobal(
 ): void
 ```
 
-#### Batch Update API
+#### Batch Configuration Updates
 
-The `updateGlobal` function allows updating multiple configuration keys at once:
+The `updateGlobal` function allows updating multiple configuration keys atomically:
 
 ```typescript
 import { updateGlobal } from './config/userConfig.js';
 
-// Update multiple settings atomically
+// Update multiple settings at once
 updateGlobal({
-  defaultModel: 'anthropic--claude-4-sonnet',
+  defaultModel: 'gpt-4o',
   soundEnabled: false,
   autoRoute: true
 });
 
-// Update with custom options
+// Update with disposal control
 updateGlobal(
-  {
-    defaultModel: 'gpt-4o',
-    theme: 'dark'
-  },
-  { dispose: false }  // Skip disposal logic
+  { defaultModel: 'anthropic--claude-4.5-sonnet' },
+  { dispose: false }
 );
 ```
 
-The `dispose` option is a placeholder for future configuration instance management. Currently, Alexi does not maintain config instances, so this is a no-op.
+The `dispose` option controls whether cached configuration instances should be disposed after update. Default behavior preserves backward compatibility with `dispose: true`.
 
 ## Routing Configuration
 
