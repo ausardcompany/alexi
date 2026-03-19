@@ -192,6 +192,24 @@ jobs:
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
+      # ─── Step 5b: Ensure prompt files from master are available ─────────────
+      - name: Ensure prompt files from master
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          # The PR branch may not include .github/prompts/ files.
+          # Checkout them from origin/master so the agent step can use them.
+          if [ ! -f ".github/prompts/ci-fix-system.md" ]; then
+            echo "[INFO] ci-fix-system.md not on branch, fetching from origin/master..."
+            git checkout origin/master -- .github/prompts/ci-fix-system.md 2>/dev/null || {
+              echo "[WARN] Could not fetch ci-fix-system.md from master"
+            }
+            # Unstage it so it doesn't get committed to the PR branch
+            git reset HEAD .github/prompts/ci-fix-system.md 2>/dev/null || true
+            echo "[OK] ci-fix-system.md available for agent use"
+          else
+            echo "[OK] ci-fix-system.md already exists on branch"
+          fi
+
       # ─── Step 6: Setup Node.js 22 ─────────────────────────────────────────────
       - name: Setup Node.js 22
         if: steps.retry_check.outputs.should_skip != 'true'
@@ -237,17 +255,95 @@ jobs:
             echo "[INFO] No changes from quick fixes"
           fi
 
+      # ─── Step 8b: Commit and push quick fixes immediately ───────────────────
+      - name: Commit and push quick fixes
+        id: quick_commit
+        if: steps.retry_check.outputs.should_skip != 'true' && steps.quick_fixes.outputs.quick_fix_changes == 'true'
+        run: |
+          BRANCH="${{ steps.determine.outputs.branch }}"
+
+          # Stage only src/ and tests/ — never commit workflow files
+          git add src/ tests/ 2>/dev/null || true
+
+          STAGED=$(git diff --cached --name-only)
+          if [ -z "$STAGED" ]; then
+            echo "[INFO] No quick-fix changes to commit"
+            echo "committed=false" >> $GITHUB_OUTPUT
+          else
+            CHANGES_COUNT=$(echo "$STAGED" | wc -l | tr -d ' ')
+            echo "Committing $CHANGES_COUNT quick-fix file(s):"
+            echo "$STAGED"
+
+            git commit -m "style(ci): auto-fix lint/format issues [skip ci] [alexi-bot]"
+            git push origin "$BRANCH"
+
+            echo "committed=true" >> $GITHUB_OUTPUT
+            echo "[OK] Quick fixes committed and pushed ($CHANGES_COUNT file(s))"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      # ─── Step 8c: Re-verify after quick fixes ─────────────────────────────
+      - name: Re-verify after quick fixes
+        id: quick_verify
+        if: steps.retry_check.outputs.should_skip != 'true' && steps.quick_commit.outputs.committed == 'true'
+        run: |
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
+          ALL_PASSED=true
+
+          run_check() {
+            local check_name="$1"
+            local command="$2"
+            echo "--- Verifying: $check_name ---"
+            if eval "$command" > /tmp/check-output.log 2>&1; then
+              echo "[PASS] $check_name"
+            else
+              echo "[FAIL] $check_name"
+              ALL_PASSED=false
+            fi
+          }
+
+          IFS=',' read -ra JOB_ARRAY <<< "$FAILED_JOBS"
+          for job in "${JOB_ARRAY[@]}"; do
+            case "$job" in
+              *Lint*|*lint*)
+                run_check "lint" "npm run lint" ;;
+              *Type*|*type*|*typecheck*)
+                run_check "typecheck" "npm run typecheck" ;;
+              *Format*|*format*)
+                run_check "format" "npm run format:check" ;;
+              *Test*|*test*)
+                run_check "test" "npm run build && npm run test:coverage" ;;
+              *Build*|*build*)
+                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
+            esac
+          done
+
+          if [ "$ALL_PASSED" = true ]; then
+            echo "all_fixed=true" >> $GITHUB_OUTPUT
+            echo "[OK] All checks pass after quick fixes — agent step not needed"
+          else
+            echo "all_fixed=false" >> $GITHUB_OUTPUT
+            echo "[INFO] Some checks still failing — agent step will run"
+          fi
+
       # ─── Step 9: Build fix prompt ─────────────────────────────────────────────
       - name: Build fix prompt
-        if: steps.retry_check.outputs.should_skip != 'true'
+        if: >
+          steps.retry_check.outputs.should_skip != 'true' &&
+          steps.quick_verify.outputs.all_fixed != 'true'
         run: |
           BRANCH="${{ steps.determine.outputs.branch }}"
           FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
 
-          # Verify system prompt template exists
+          # Verify system prompt template exists (should already be available via Step 5b)
           if [ ! -f ".github/prompts/ci-fix-system.md" ]; then
-            echo "[ERROR] .github/prompts/ci-fix-system.md not found"
-            exit 1
+            echo "[WARN] .github/prompts/ci-fix-system.md not found, attempting fetch from master..."
+            git checkout origin/master -- .github/prompts/ci-fix-system.md 2>/dev/null || {
+              echo "[ERROR] Could not fetch ci-fix-system.md from master. Skipping agent step."
+              exit 1
+            }
+            git reset HEAD .github/prompts/ci-fix-system.md 2>/dev/null || true
           fi
 
           {
@@ -294,7 +390,9 @@ jobs:
       # ─── Step 10: Run Alexi agent to fix remaining issues ────────────────────
       - name: Run Alexi agent to fix CI failures
         id: bot
-        if: steps.retry_check.outputs.should_skip != 'true'
+        if: >
+          steps.retry_check.outputs.should_skip != 'true' &&
+          steps.quick_verify.outputs.all_fixed != 'true'
         continue-on-error: true
         env:
           AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
@@ -331,7 +429,9 @@ jobs:
       # ─── Step 11: Verify fixes ────────────────────────────────────────────────
       - name: Verify fixes
         id: verify
-        if: steps.retry_check.outputs.should_skip != 'true'
+        if: >
+          steps.retry_check.outputs.should_skip != 'true' &&
+          steps.quick_verify.outputs.all_fixed != 'true'
         run: |
           FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
           ALL_PASSED=true
@@ -385,7 +485,9 @@ jobs:
       # ─── Step 12: Commit and push fixes ──────────────────────────────────────
       - name: Commit and push fixes
         id: commit
-        if: steps.retry_check.outputs.should_skip != 'true'
+        if: >
+          steps.retry_check.outputs.should_skip != 'true' &&
+          steps.quick_verify.outputs.all_fixed != 'true'
         run: |
           BRANCH="${{ steps.determine.outputs.branch }}"
 
@@ -442,10 +544,14 @@ jobs:
           script: |
             const fs = require('fs');
             const branch = '${{ steps.determine.outputs.branch }}';
-            const fixesVerified = '${{ steps.verify.outputs.fixes_verified }}' === 'true';
-            const changesCount = parseInt('${{ steps.commit.outputs.changes_count }}' || '0', 10);
-            const committed = '${{ steps.commit.outputs.committed }}' === 'true';
-            const botSuccess = '${{ steps.bot.outputs.success }}' === 'true';
+            const quickFixOnly = '${​{ steps.quick_verify.outputs.all_fixed }}' === 'true';
+            const quickFixCommitted = '${​{ steps.quick_commit.outputs.committed }}' === 'true';
+            const fixesVerified = quickFixOnly || '${​{ steps.verify.outputs.fixes_verified }}' === 'true';
+            const changesCount = quickFixOnly
+              ? (quickFixCommitted ? 1 : 0)
+              : parseInt('${​{ steps.commit.outputs.changes_count }}' || '0', 10);
+            const committed = quickFixOnly ? quickFixCommitted : '${​{ steps.commit.outputs.committed }}' === 'true';
+            const botSuccess = quickFixOnly || '${​{ steps.bot.outputs.success }}' === 'true';
 
             // Find the PR for this branch
             const { data: pulls } = await github.rest.pulls.list({
@@ -484,7 +590,11 @@ jobs:
 
             if (fixesVerified) {
               comment += `## ✅ CI Auto-Fix Succeeded\n\n`;
-              comment += `**Alexi** automatically fixed the CI failures on \`${branch}\`.\n\n`;
+              if (quickFixOnly) {
+                comment += `**Alexi** resolved all CI failures on \`${branch}\` using deterministic fixes (lint:fix + format).\n\n`;
+              } else {
+                comment += `**Alexi** automatically fixed the CI failures on \`${branch}\`.\n\n`;
+              }
               comment += `- **Files changed**: ${changesCount}\n`;
               comment += `- **CI re-triggered**: yes (push event)\n\n`;
             } else {
