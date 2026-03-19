@@ -48,6 +48,18 @@ Default model to use when no model is specified. Can be overridden by user confi
 export AICORE_MODEL=gpt-4o
 ```
 
+#### ALEXI_MAX_IMAGE_SIZE_MB
+
+Maximum image attachment size in megabytes. Controls the size limit for image attachments in multimodal conversations.
+
+```bash
+export ALEXI_MAX_IMAGE_SIZE_MB=20
+```
+
+**Default**: 20 MB
+
+**Purpose**: Prevents excessive memory usage and API payload sizes when attaching images to prompts.
+
 #### SAP_PROXY_BASE_URL
 
 Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
@@ -130,7 +142,8 @@ import {
   getConfigValue,
   setConfigValue,
   getConfigDefaultModel,
-  setConfigDefaultModel
+  setConfigDefaultModel,
+  updateGlobal
 } from './config/userConfig.js';
 
 // Load entire config
@@ -141,6 +154,15 @@ const defaultModel = getConfigDefaultModel();
 
 // Set and persist value
 setConfigDefaultModel('claude-4-sonnet');
+
+// Batch update multiple keys
+updateGlobal(
+  { 
+    defaultModel: 'gpt-4o',
+    soundEnabled: true 
+  },
+  { dispose: true }
+);
 ```
 
 ### Configuration API
@@ -164,7 +186,43 @@ function deleteConfigValue(key: string): void
 // Typed accessors
 function getConfigDefaultModel(): string | undefined
 function setConfigDefaultModel(model: string): void
+
+// Batch update with options
+interface UpdateGlobalOptions {
+  dispose?: boolean;  // Default: true
+}
+
+function updateGlobal(
+  updates: Partial<Record<string, unknown>>,
+  options?: UpdateGlobalOptions
+): void
 ```
+
+#### Batch Update API
+
+The `updateGlobal` function allows updating multiple configuration keys at once:
+
+```typescript
+import { updateGlobal } from './config/userConfig.js';
+
+// Update multiple settings atomically
+updateGlobal({
+  defaultModel: 'anthropic--claude-4-sonnet',
+  soundEnabled: false,
+  autoRoute: true
+});
+
+// Update with custom options
+updateGlobal(
+  {
+    defaultModel: 'gpt-4o',
+    theme: 'dark'
+  },
+  { dispose: false }  // Skip disposal logic
+);
+```
+
+The `dispose` option is a placeholder for future configuration instance management. Currently, Alexi does not maintain config instances, so this is a no-op.
 
 ## Routing Configuration
 

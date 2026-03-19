@@ -348,9 +348,17 @@ graph TB
 - Downloads full logs for each failed job
 - Generates `ci-failures.md` with structured failure report
 
+**Step 3b: Preserve ci-failures.md**
+- Saves `ci-failures.md` to `/tmp/ci-failures.md` before checkout
+- Prevents file loss during branch checkout
+
 **Step 4: Checkout PR Branch**
 - Checks out the auto/* branch that triggered the failure
 - Configures git with alexi-bot identity
+
+**Step 4b: Restore ci-failures.md**
+- Restores `ci-failures.md` from `/tmp` after checkout
+- Ensures failure logs are available for analysis
 
 **Step 5: Build Alexi CLI**
 - Installs dependencies

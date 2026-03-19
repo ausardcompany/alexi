@@ -300,12 +300,65 @@ npm test
 # Run specific test file
 npm test -- tool.test.ts
 
+# Run TUI component tests
+npm test -- tests/commands-image.test.tsx
+
 # Run with coverage
 npm test -- --coverage
 
 # Watch mode
 npm test -- --watch
 ```
+
+### Testing TUI Components
+
+When testing TUI components built with Ink:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock React contexts BEFORE importing components
+const mockFunction = vi.fn();
+
+vi.mock('../src/cli/tui/context/SomeContext.js', () => ({
+  useSomeContext: () => ({
+    someValue: 'test',
+    someFunction: mockFunction,
+  }),
+}));
+
+// Import AFTER mocks
+import { useCustomHook } from '../src/cli/tui/hooks/useCustomHook.js';
+
+describe('TUI Component', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should call mocked function', () => {
+    let captured: any = null;
+    
+    function TestComponent() {
+      captured = useCustomHook();
+      return <Text>ready</Text>;
+    }
+    
+    render(<TestComponent />);
+    
+    captured.someFunction();
+    expect(mockFunction).toHaveBeenCalledOnce();
+  });
+});
+```
+
+**Key Points**:
+1. Mock React contexts before importing components
+2. Use `ink-testing-library` for rendering
+3. Use `vi.clearAllMocks()` in `beforeEach`
+4. Capture hook returns for testing
 
 ## Pull Request Process
 
@@ -372,6 +425,7 @@ Pull requests trigger automated workflows:
    - Updates CHANGELOG.md
 3. **CI Auto-Fix** (for auto/* branches): Automatically fixes CI failures
    - Collects failure logs
+   - Preserves ci-failures.md across checkout operations
    - Applies quick fixes (lint:fix, format)
    - Uses Alexi agent to fix remaining issues
    - Verifies fixes and commits changes
@@ -384,6 +438,7 @@ The documentation update workflow will automatically:
 
 For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
 - Analyze failure logs with exact error messages
+- Preserve ci-failures.md to prevent data loss during checkout
 - Apply deterministic fixes (linting, formatting)
 - Use Alexi agent mode to fix complex issues
 - Verify all fixes pass the original checks

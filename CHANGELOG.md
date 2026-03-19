@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-03-19
+
+### Added
+
+- Comprehensive test suite for image attachment slash commands
+  - Unit tests for /image command with clipboard paste and file path support
+  - Unit tests for /clear-images command with alias support
+  - Tests verify command registration, execution, and alias handling
+- User configuration batch update API with disposal options
+  - New updateGlobal function for atomic multi-key updates
+  - UpdateGlobalOptions interface with dispose flag
+  - Placeholder for future config instance management
+
+### Changed
+
+- Tree-sitter parser initialization now handles missing Parser gracefully
+  - Parser getter functions return null if Parser is unavailable
+  - parseSource returns null when parser initialization fails
+  - Improves reliability in environments without native dependencies
+- Edit tool line ending handling improved for cross-platform compatibility
+  - Detects file line ending style (LF vs CRLF)
+  - Normalizes oldString and newString to match file line endings
+  - Preserves original line ending style after edits
+- CI Auto-Fix workflow enhanced with file preservation logic
+  - ci-failures.md preserved to /tmp before branch checkout
+  - ci-failures.md restored after checkout to prevent data loss
+- Documentation workflow expression syntax corrected
+  - Removed zero-width space characters from workflow variable references
+
+### Fixed
+
+- CI Auto-Fix workflow no longer loses ci-failures.md during branch checkout
+- Documentation workflow variable expressions now parse correctly without zero-width spaces
+
 ## [0.2.5] - 2026-03-19
 
 ### Added
@@ -156,7 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/ausardcompany/alexi/compare/v0.2.2...v0.2.3
