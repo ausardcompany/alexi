@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-03-19
+
+### Added
+
+- Unit tests for TUI slash commands (`/image` and `/clear-images`)
+  - Tests command registration with correct names and aliases
+  - Tests clipboard paste functionality when no arguments provided
+  - Tests file path handling for image attachments
+  - Uses ink-testing-library with React context mocking
+  - Comprehensive coverage of command dispatch logic
+- Support for graceful tree-sitter parser initialization failures
+  - Parser functions now return null instead of throwing when Parser is unavailable
+  - Enables operation in environments without native bindings
+
+### Changed
+
+- Enhanced user configuration API with batch update support
+  - Added `updateGlobal()` function for atomic multi-key updates
+  - Added `UpdateGlobalOptions` interface with disposal control
+  - Maintains backward compatibility with default dispose behavior
+- Edit tool now preserves line endings during replacements
+  - Automatically detects CRLF vs LF line endings in target files
+  - Normalizes oldString and newString parameters to match file format
+  - Ensures consistent line ending style throughout edited files
+
+### Fixed
+
+- Tree-sitter parser initialization no longer fails in environments without native support
+- Edit tool correctly handles multiline replacements with different line ending styles
+
 ## [0.2.5] - 2026-03-19
 
 ### Added
@@ -156,7 +186,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/ausardcompany/alexi/compare/v0.2.2...v0.2.3

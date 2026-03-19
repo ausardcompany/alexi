@@ -230,6 +230,14 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
+### TUI Command Test Coverage
+
+TUI slash commands are tested through the `useCommands` hook with React context mocking:
+
+| Command | Test File | Test Cases |
+|---------|-----------|------------|
+| `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+
 ### Test Categories
 
 Each tool is tested across multiple categories:
@@ -255,6 +263,56 @@ Each tool is tested across multiple categories:
    - Correct tool names
    - Description presence
    - Schema generation
+
+5. **Line Ending Preservation** (Edit Tool)
+   - Detect and preserve CRLF vs LF line endings
+   - Normalize parameters to match file's line ending style
+   - Ensure replacements maintain original file format
+
+#### Testing Line Ending Preservation
+
+The edit tool preserves line endings when performing replacements:
+
+```typescript
+describe('edit tool line endings', () => {
+  it('should preserve CRLF line endings', async () => {
+    // Create file with CRLF endings
+    const content = 'line1\r\nline2\r\nline3\r\n';
+    await fs.writeFile(filePath, content, 'utf-8');
+
+    // Perform edit with LF in parameters
+    const result = await editTool.execute({
+      filePath,
+      oldString: 'line2\n',
+      newString: 'modified\n'
+    }, context);
+
+    expect(result.success).toBe(true);
+
+    // Verify CRLF preserved in output
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toContain('\r\n');
+    expect(updated).toBe('line1\r\nmodified\r\nline3\r\n');
+  });
+
+  it('should preserve LF line endings', async () => {
+    const content = 'line1\nline2\nline3\n';
+    await fs.writeFile(filePath, content, 'utf-8');
+
+    const result = await editTool.execute({
+      filePath,
+      oldString: 'line2',
+      newString: 'modified'
+    }, context);
+
+    expect(result.success).toBe(true);
+
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).not.toContain('\r\n');
+    expect(updated).toBe('line1\nmodified\nline3\n');
+  });
+});
+```
 
 ## Testing Providers
 
@@ -473,6 +531,77 @@ describe('tool metadata', () => {
   });
 });
 ```
+
+### 8. Test TUI Commands with Context Mocking
+
+TUI commands require mocking React contexts and using ink-testing-library:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock contexts before importing hooks
+const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
+const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
+const mockClearAll = vi.fn();
+
+vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: mockPasteFromClipboard,
+    addFromFile: mockAddFromFile,
+    clearAll: mockClearAll,
+  }),
+}));
+
+// Import after mocks
+import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
+
+describe('/image command', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should call pasteFromClipboard when no args given', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
+      return <Text>ready</Text>;
+    }
+    
+    render(<CommandCapture />);
+    
+    const handled = await captured.handleCommand('/image');
+    expect(handled).toBe(true);
+    expect(mockPasteFromClipboard).toHaveBeenCalledOnce();
+  });
+
+  it('should call addFromFile when path provided', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
+      return <Text>ready</Text>;
+    }
+    
+    render(<CommandCapture />);
+    
+    await captured.handleCommand('/image ./screenshot.png');
+    expect(mockAddFromFile).toHaveBeenCalledWith('./screenshot.png');
+  });
+});
+```
+
+Key patterns for TUI command testing:
+
+1. **Mock Before Import**: Declare all vi.mock() calls before importing the hook
+2. **Capture Hook Return**: Use a component to capture the hook's return value
+3. **Render with Ink**: Use ink-testing-library's render() function
+4. **Test Command Dispatch**: Call handleCommand() and verify behavior
+5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
 
 ## Testing with SAP AI Core
 

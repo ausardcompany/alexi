@@ -48,6 +48,14 @@ Default model to use when no model is specified. Can be overridden by user confi
 export AICORE_MODEL=gpt-4o
 ```
 
+#### ALEXI_MAX_IMAGE_SIZE_MB
+
+Maximum size in megabytes for image attachments. Defaults to 20MB if not specified.
+
+```bash
+export ALEXI_MAX_IMAGE_SIZE_MB=20
+```
+
 #### SAP_PROXY_BASE_URL
 
 Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
@@ -164,7 +172,40 @@ function deleteConfigValue(key: string): void
 // Typed accessors
 function getConfigDefaultModel(): string | undefined
 function setConfigDefaultModel(model: string): void
+
+// Batch update with options
+interface UpdateGlobalOptions {
+  dispose?: boolean;
+}
+
+function updateGlobal(
+  updates: Partial<Record<string, unknown>>,
+  options?: UpdateGlobalOptions
+): void
 ```
+
+#### Batch Configuration Updates
+
+The `updateGlobal` function allows updating multiple configuration keys atomically:
+
+```typescript
+import { updateGlobal } from './config/userConfig.js';
+
+// Update multiple settings at once
+updateGlobal({
+  defaultModel: 'gpt-4o',
+  soundEnabled: false,
+  autoRoute: true
+});
+
+// Update with disposal control
+updateGlobal(
+  { defaultModel: 'anthropic--claude-4.5-sonnet' },
+  { dispose: false }
+);
+```
+
+The `dispose` option controls whether cached configuration instances should be disposed after update. Default behavior preserves backward compatibility with `dispose: true`.
 
 ## Routing Configuration
 
