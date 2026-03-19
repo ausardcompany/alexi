@@ -7,22 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-03-19
+
+### Added
+
+- Persistent default model configuration saved to user config file
+- Autocomplete engine for slash commands, model names, and file paths in interactive mode
+- Instruction file management system with multi-layer prompt assembly
+  - Project-level AGENTS.md support
+  - User-level ~/.alexi/ALEXI.md for global instructions
+  - Project-level .alexi/rules/*.md for scoped rules
+- /memory command for managing instruction files (list, edit, init)
+- /mem command for memory management (list, search, delete, clear, stats, export)
+- CI Auto-Fix workflow that automatically fixes failing CI checks on auto/* branches
+  - Collects failed job logs and error messages
+  - Uses Alexi agent mode to apply targeted fixes
+  - Verifies fixes and commits changes automatically
+  - Rate-limited to prevent infinite loops (max 2 runs per branch per day)
+- New tools:
+  - bash-hierarchy: Hierarchical permission rules for bash commands
+  - warpgrep: AI-powered semantic code search using WarpGrep/Morph SDK
+- Tab completion in readline REPL for commands, models, and file paths
+
+### Changed
+
+- Model switching now persists selection to ~/.alexi/config.json as default
+- System prompt assembly now loads instruction files in layered order
+- Autocomplete system unified between readline REPL and Ink TUI
+- Documentation workflow improved with better file path handling
+- Enhanced clipboard utilities with osascript fallback for macOS
+- Updated dependencies:
+  - @inquirer/prompts from 8.3.0 to 8.3.2
+  - @commitlint/config-conventional from 20.4.3 to 20.5.0
+  - @typescript-eslint/parser from 8.34.1 to 8.57.0
+  - @vitejs/plugin-react from 5.2.0 to 6.0.1
+  - @vitest/coverage-v8 from 4.0.0 to 4.1.0
+  - hono from 4.12.5 to 4.12.8
+  - nanoid from 5.1.6 to 5.1.7
+  - puppeteer from 24.38.0 to 24.39.1
+  - simple-git from 3.32.3 to 3.33.0
+  - vitest from 4.0.0 to 4.1.0
+
+### Fixed
+
+- Slash commands now properly intercepted in TUI instead of leaking to LLM
+- Command Palette no longer shows empty command list
+- Edit tool now handles multiline strings correctly in exact replacements
+
+## [0.2.4] - 2026-03-18
+
+### Added
+
+- Upstream sync improvements with better analysis and conflict resolution
+
+## [0.2.3] - 2026-03-16
+
+### Added
+
+- Enhanced sync workflow with improved upstream tracking
+
 ## [0.2.2] - 2026-03-15
 
 ### Fixed
 
-- `Ctrl+V` screenshot paste on macOS now works without installing `pngpaste` — added native `osascript` fallback that uses AppleScript to read clipboard images
+- Ctrl+V screenshot paste on macOS now works without installing pngpaste — added native osascript fallback that uses AppleScript to read clipboard images
 
 ## [0.2.1] - 2026-03-15
 
 ### Fixed
 
-- Slash commands (`/help`, `/model`, `/exit`, etc.) were leaking directly to the LLM in the TUI instead of being intercepted by the command handler
-- Command Palette (`Ctrl+K`) was opening with an empty command list
+- Slash commands (/help, /model, /exit, etc.) were leaking directly to the LLM in the TUI instead of being intercepted by the command handler
+- Command Palette (Ctrl+K) was opening with an empty command list
 
 ### Added
 
-- Inline autocomplete for slash commands in the TUI input box — shows filtered suggestions when typing `/`
+- Inline autocomplete for slash commands in the TUI input box — shows filtered suggestions when typing /
 - Keyboard navigation (Up/Down/Tab) and acceptance (Enter/Tab) for autocomplete suggestions
 - Command Palette now displays all 11 registered slash commands
 
@@ -42,12 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Query deployments directly from SAP AI Core using DeploymentApi
   - Filter deployments by status (RUNNING, PENDING, STOPPED, etc.)
   - Filter deployments by scenario ID
-  - Specify custom resource group with `-g, --resource-group` option
-  - JSON output support with `-j, --json` flag
+  - Specify custom resource group with -g, --resource-group option
+  - JSON output support with -j, --json flag
   - Color-coded status display with formatted table output
-  - Fallback to proxy endpoint with `--proxy` flag
+  - Fallback to proxy endpoint with --proxy flag
   - Display deployment URLs for running deployments
-- New dependency: `@sap-ai-sdk/ai-api` version 2.7.0 for direct AI Core API access
+- New dependency: @sap-ai-sdk/ai-api version 2.7.0 for direct AI Core API access
 - Agentic file write capabilities with autonomous permission management
   - Automatic permission rules for write operations in workdir
   - Automatic permission rules for execute operations
@@ -97,7 +156,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/ausardcompany/alexi/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/ausardcompany/alexi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ausardcompany/alexi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ausardcompany/alexi/compare/v0.1.3...v0.2.0
