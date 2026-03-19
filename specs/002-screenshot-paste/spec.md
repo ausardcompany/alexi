@@ -34,6 +34,11 @@ tools:
 The capture must be non-blocking and return raw image bytes (or base64) without
 writing temp files to disk if possible.
 
+If the required clipboard tool is not installed or not found on `$PATH`:
+- Auto-run `/doctor` diagnostics to identify the missing dependency.
+- Show a generic error: "Clipboard image reading not available on this
+  platform" with the `/doctor` output indicating which tool to install.
+
 ### R2 — Keybinding: Ctrl+V Image Paste
 
 When the user presses Ctrl+V (or a configurable keybinding):
@@ -85,12 +90,21 @@ When displaying a user message that contains images:
 - Supported formats: PNG, JPEG, GIF, WebP.
 - Validate image data before attaching (check magic bytes / file signature).
 - If the image is too large, show an error and do not attach.
+- No automatic compression or resizing — images are sent at original
+  resolution and quality within the size cap.
 
 ### R8 — Abort / Remove Attachment
 
 Before submitting, the user can remove the attached image:
 - Press Escape while the attachment indicator is shown.
 - Or use a `/remove-image` slash command (or `/clear-images`).
+
+## Clarifications
+
+### Session 2025-03-19
+
+- Q: When the required clipboard tool is not installed, what should Alexi do? → A: Auto-run `/doctor` diagnostics and show a generic error message ("Clipboard image reading not available on this platform").
+- Q: Should Alexi compress or resize large images before sending to the LLM API? → A: No processing — send images as-is within the 20 MB cap.
 
 ## Non-Requirements (explicitly out of scope)
 
