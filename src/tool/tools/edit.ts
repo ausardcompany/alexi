@@ -52,8 +52,20 @@ Usage:
       // Read existing file
       const content = await fs.readFile(filePath, 'utf-8');
 
+      // Detect and preserve line endings
+      const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
+      const normalizeLineEndings = (text: string): string => text.replaceAll('\r\n', '\n');
+      const convertToLineEnding = (text: string, ending: '\n' | '\r\n'): string => {
+        if (ending === '\n') return text;
+        return text.replaceAll('\n', '\r\n');
+      };
+
+      // Normalize parameters to match file's line ending style
+      const oldString = convertToLineEnding(normalizeLineEndings(params.oldString), lineEnding);
+      const newString = convertToLineEnding(normalizeLineEndings(params.newString), lineEnding);
+
       // Check for matches
-      const matches = content.split(params.oldString).length - 1;
+      const matches = content.split(oldString).length - 1;
 
       if (matches === 0) {
         return {
@@ -74,10 +86,10 @@ Usage:
       let replacements: number;
 
       if (params.replaceAll) {
-        newContent = content.split(params.oldString).join(params.newString);
+        newContent = content.split(oldString).join(newString);
         replacements = matches;
       } else {
-        newContent = content.replace(params.oldString, params.newString);
+        newContent = content.replace(oldString, newString);
         replacements = 1;
       }
 

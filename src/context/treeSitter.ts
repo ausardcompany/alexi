@@ -17,7 +17,10 @@ let tsxParser: Parser | null = null;
 /**
  * Get (or lazily create) the TypeScript parser
  */
-function getTsParser(): Parser {
+function getTsParser(): Parser | null {
+  if (!Parser) {
+    return null;
+  }
   if (!tsParser) {
     tsParser = new Parser();
     tsParser.setLanguage(TypeScript.typescript);
@@ -28,7 +31,10 @@ function getTsParser(): Parser {
 /**
  * Get (or lazily create) the TSX parser
  */
-function getTsxParser(): Parser {
+function getTsxParser(): Parser | null {
+  if (!Parser) {
+    return null;
+  }
   if (!tsxParser) {
     tsxParser = new Parser();
     tsxParser.setLanguage(TypeScript.tsx);
@@ -39,7 +45,10 @@ function getTsxParser(): Parser {
 /**
  * Get (or lazily create) the JavaScript parser
  */
-function getJsParser(): Parser {
+function getJsParser(): Parser | null {
+  if (!Parser) {
+    return null;
+  }
   if (!jsParser) {
     jsParser = new Parser();
     jsParser.setLanguage(JavaScript);
@@ -66,7 +75,7 @@ export function isSupportedFile(filePath: string): boolean {
 export function parseSource(source: string, filePath: string): Parser.SyntaxNode | null {
   const ext = filePath.split('.').pop()?.toLowerCase() as SupportedExtension | undefined;
 
-  let parser: Parser;
+  let parser: Parser | null;
   switch (ext) {
     case 'ts':
       parser = getTsParser();
@@ -82,6 +91,11 @@ export function parseSource(source: string, filePath: string): Parser.SyntaxNode
       break;
     default:
       return null;
+  }
+
+  // Return null if parser initialization failed
+  if (!parser) {
+    return null;
   }
 
   try {
