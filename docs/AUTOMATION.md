@@ -266,7 +266,234 @@ Manual trigger with `dry_run: true` will:
 5. Run tests
 6. Run linters
 
-### 4. Release Workflows
+### 4. CI Auto-Fix Workflow
+
+**File**: `.github/workflows/ci-auto-fix.yml`
+
+**Triggers**:
+- Workflow run completion (when CI workflow fails on auto/* branches)
+- Manual workflow dispatch with run ID and branch name
+
+**Purpose**: Automatically diagnoses and fixes CI failures on auto/* branches using Alexi's agentic capabilities.
+
+#### Workflow Architecture
+
+```mermaid
+graph TB
+    subgraph Trigger[\"Workflow Triggers\"]
+        CIFail[CI Failure on auto/*]
+        Manual[Manual Dispatch]
+    end
+    
+    subgraph Analysis[\"Failure Analysis\"]
+        Collect[Collect Failed Job Logs]
+        Parse[Parse Error Messages]
+        Build[Build Fix Prompt]
+    end
+    
+    subgraph Fixing[\"Auto-Fix Process\"]
+        QuickFix[Quick Fixes<br/>lint:fix, format]
+        AgentFix[Alexi Agent Fix<br/>read, write, edit, bash]
+        Verify[Verify Fixes]
+    end
+    
+    subgraph Output[\"PR Update\"]
+        Commit[Commit Changes]
+        Push[Push to Branch]
+        Comment[Post PR Comment]
+    end
+    
+    CIFail --> Collect
+    Manual --> Collect
+    Collect --> Parse
+    Parse --> Build
+    Build --> QuickFix
+    QuickFix --> AgentFix
+    AgentFix --> Verify
+    Verify --> Commit
+    Commit --> Push
+    Push --> Comment
+    
+    style AgentFix fill:#4CAF50
+    style Verify fill:#2196F3
+```
+
+#### Key Features
+
+1. **Intelligent Failure Detection**: Collects logs from all failed CI jobs with exact error messages, file paths, and line numbers
+
+2. **Two-Stage Fix Process**:
+   - **Quick Fixes**: Runs `npm run lint:fix` and `npm run format` for deterministic auto-fixes
+   - **AI Agent Fixes**: Uses Alexi agent mode with tools (read, write, edit, glob, grep, bash) to apply targeted fixes
+
+3. **Targeted Verification**: Re-runs only the checks that originally failed to verify fixes
+
+4. **Rate Limiting**: Maximum 2 auto-fix runs per branch per day to prevent infinite loops
+
+5. **Branch Filtering**: Only processes branches matching `auto/*` pattern
+
+#### Workflow Steps
+
+**Step 1: Determine Branch and Run ID**
+- Extracts branch name and CI run ID from workflow trigger
+- Guards against non-auto/* branches
+
+**Step 2: Check Retry Count**
+- Queries GitHub API for previous auto-fix runs on the branch
+- Skips if already ran 2+ times today on the same branch
+
+**Step 3: Collect Failed Job Logs**
+- Fetches all jobs from the failed CI run
+- Filters for jobs with `conclusion == "failure"`
+- Downloads full logs for each failed job
+- Generates `ci-failures.md` with structured failure report
+
+**Step 3b: Preserve ci-failures.md**
+- Saves `ci-failures.md` to `/tmp/ci-failures.md` before checkout
+- Prevents file loss during branch checkout
+
+**Step 4: Checkout PR Branch**
+- Checks out the auto/* branch that triggered the failure
+- Configures git with alexi-bot identity
+
+**Step 4b: Restore ci-failures.md**
+- Restores `ci-failures.md` from `/tmp` after checkout
+- Ensures failure logs are available for analysis
+
+**Step 5: Build Alexi CLI**
+- Installs dependencies
+- Builds Alexi CLI from source
+
+**Step 6: Run Quick Auto-Fixes**
+- Runs `npm run lint:fix` to fix linting issues
+- Runs `npm run format` to fix formatting issues
+- Tracks if any changes were made
+
+**Step 7: Build Fix Prompt**
+- Assembles comprehensive fix prompt with:
+  - Failed check names
+  - Full error logs with file paths and line numbers
+  - Specific verification commands for each check type
+  - Instructions to make minimal, targeted fixes
+
+**Step 8: Run Alexi Agent**
+- Invokes Alexi agent mode with:
+  - System prompt: `.github/prompts/ci-fix-system.md`
+  - Message: `ci-fix-prompt.md` (failure details)
+  - Tools: read, write, edit, glob, grep, bash
+  - Max iterations: 20
+  - High effort level
+  - Auto-routing enabled
+
+**Step 9: Verify Fixes**
+- Re-runs only the checks that originally failed:
+  - Lint failures → `npm run lint`
+  - Type errors → `npm run typecheck`
+  - Format failures → `npm run format:check`
+  - Test failures → `npm run test:coverage`
+  - Build failures → `npm run build`
+- Generates verification results summary
+
+**Step 10: Commit and Push**
+- Stages changes in `src/` and `tests/` directories only
+- Commits with message: `fix(ci): auto-fix CI failures [skip ci] [alexi-bot]`
+- Pushes to the auto/* branch
+- CI re-triggers automatically on push
+
+**Step 11: Post PR Comment**
+- Posts detailed comment to PR with:
+  - Success/failure status
+  - Number of files changed
+  - Verification results
+  - Bot output snippet
+  - Link to workflow run
+
+#### Example Fix Prompt
+
+```markdown
+# CI Fix Task
+
+You are fixing CI failures on branch: **`auto/feature-name`**
+
+## Failed CI Checks
+
+The following checks failed and need to be fixed:
+
+- Lint
+- Type Check
+
+## CI Failure Details
+
+### Job: Lint
+
+**URL**: https://github.com/.../actions/runs/123/jobs/456
+
+### Failed Steps
+
+- **Run linting** (step 5)
+
+### Log Output (last 200 lines)
+```
+/home/runner/work/alexi/alexi/src/tool/tools/edit.ts
+  45:7  error  'oldString' is defined but never used  @typescript-eslint/no-unused-vars
+
+✖ 1 problem (1 error, 0 warnings)
+```
+
+## Your Task
+
+1. Read the failure logs above carefully
+2. Identify the exact files and lines that need to be changed
+3. Read those files using the `read` tool
+4. Make **minimal, targeted fixes** — only change what is broken
+5. After each fix, verify it using the `bash` tool:
+   - For lint failures: `npm run lint`
+   - For type errors: `npm run typecheck`
+
+Focus **only** on the checks listed above. Do not touch unrelated code.
+```
+
+#### Rate Limiting Logic
+
+```typescript
+// Count completed auto-fix runs today on this branch
+const today = new Date().toISOString().split('T')[0];
+const runCount = await gh.api(
+  `repos/${repo}/actions/workflows/${workflowId}/runs?branch=${branch}&created=>=${today}T00:00:00Z&status=completed`
+);
+
+if (runCount >= 2) {
+  console.log('Already ran 2 times today. Skipping to avoid infinite loop.');
+  exit(0);
+}
+```
+
+#### System Prompt
+
+Located at `.github/prompts/ci-fix-system.md`:
+
+```markdown
+You are an expert software engineer fixing CI failures in the Alexi codebase.
+
+Your role:
+- Read CI failure logs carefully
+- Identify exact files and lines causing failures
+- Make minimal, targeted fixes
+- Verify each fix using bash tool
+- Do NOT make unrelated changes
+
+Available tools:
+- read: Read file contents
+- write: Create or overwrite files
+- edit: Make exact string replacements
+- glob: Find files by pattern
+- grep: Search file contents
+- bash: Run verification commands
+
+Always verify fixes before completing the task.
+```
+
+### 5. Release Workflows
 
 **Files**: 
 - `.github/workflows/release.yml`
@@ -281,8 +508,8 @@ The automation workflows require the following secrets to be configured in the r
 
 | Secret | Purpose | Required For |
 |--------|---------|--------------|
-| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync |
-| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync |
+| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync, CI Auto-Fix |
+| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync, CI Auto-Fix |
 | `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
 | `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
 

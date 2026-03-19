@@ -197,6 +197,175 @@ alexi session-delete -s <session-id>
 |--------|------|-------------|
 | `-s, --session <id>` | string | Session ID to delete (required) |
 
+## Interactive Mode Commands
+
+The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions.
+
+### General Commands
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `/help` | `/h` | Show help message with all available commands |
+| `/exit` | `/quit`, `/q` | Exit the interactive REPL |
+| `/clear` | | Clear the terminal screen |
+| `/agent` | | Switch to a different agent (code, debug, plan, explore) |
+| `/stage` | | Switch development stage |
+| `/dod` | | Run Definition of Done checks |
+| `/map` | | Show repository map |
+| `/map-refresh` | | Rebuild repository map from scratch |
+| `/map-tokens` | | Set token budget for repository map |
+
+### Model Management
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/model <model-id>` | Switch to a different model and save as default | `/model gpt-4o` |
+| `/models` | Open interactive model picker | `/models` |
+| `/autoroute` | Toggle automatic model routing | `/autoroute` |
+
+**Note**: When you switch models with `/model`, the selection is persisted to `~/.alexi/config.json` as your default model.
+
+### Session Commands
+
+| Command | Description |
+|---------|-------------|
+| `/session` | Show current session information |
+| `/sessions` | List all saved sessions |
+| `/history` | Show conversation history |
+| `/tokens` | Show token usage statistics |
+| `/compact` | Trigger manual context compaction |
+| `/context` | Show context usage |
+| `/status` | Show current status |
+| `/fork` | Fork current session |
+| `/rename` | Rename current session |
+| `/clear-history` | Clear conversation history |
+| `/cost` | Show cost summary |
+| `/stats` | Show usage statistics |
+
+### Memory Management
+
+#### Instruction Files (/memory)
+
+Manage instruction files that provide context to AI agents.
+
+```bash
+# List all instruction files
+/memory
+
+# Edit project instructions (AGENTS.md)
+/memory edit project
+
+# Edit user instructions (~/.alexi/ALEXI.md)
+/memory edit user
+
+# Create AGENTS.md from template
+/memory init
+```
+
+**Instruction File Hierarchy**:
+1. Project AGENTS.md (./AGENTS.md)
+2. User ALEXI.md (~/.alexi/ALEXI.md)
+3. Project rules (.alexi/rules/*.md)
+
+#### Memories (/mem)
+
+Manage short-term memories with tagging support.
+
+```bash
+# List all memories
+/mem
+
+# Search memories by text or tag
+/mem search <query>
+
+# Delete a memory by ID
+/mem delete <id>
+
+# Clear all memories
+/mem clear
+
+# Show memory statistics
+/mem stats
+
+# Export memories to JSON
+/mem export
+```
+
+### Remember Command
+
+Save information to memory with optional tags.
+
+```bash
+/remember <text> [#tag1 #tag2]
+
+# Example
+/remember The API endpoint is /v1/chat/completions #api #endpoint
+```
+
+### Configuration Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/system <prompt>` | Set system prompt | `/system You are a helpful assistant` |
+| `/config show` | Show current configuration | `/config show` |
+| `/config set <key> <value>` | Set configuration value | `/config set soundEnabled true` |
+| `/config path` | Show configuration file paths | `/config path` |
+| `/permissions` | List/reset permission rules | `/permissions` |
+| `/mcp` | Manage MCP servers | `/mcp` |
+| `/think` | Toggle extended thinking mode | `/think` |
+| `/effort <level>` | Set effort level (low/medium/high/max) | `/effort high` |
+| `/doctor` | Run environment health checks | `/doctor` |
+
+### Git Commands
+
+| Command | Description |
+|---------|-------------|
+| `/diff` | Show files changed in current session |
+| `/undo` | Undo last file change |
+| `/redo` | Redo last undone change |
+| `/commit` | Force commit pending changes |
+| `/git <command>` | Run a git command |
+| `/git-log` | Show recent AI commits |
+
+### Data Export/Import
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/export <file>` | Export data to file | `/export session.json` |
+| `/import <file>` | Import data from file | `/import session.json` |
+
+### Autocomplete Support
+
+The interactive REPL provides Tab completion for:
+- **Slash commands**: Type `/` and press Tab to see available commands
+- **Model names**: After `/model `, press Tab to see available models
+- **File paths**: After `/export ` or `/import `, press Tab for file completion
+
+```bash
+# Autocomplete slash commands
+/mod<Tab>  → /model
+
+# Autocomplete model names
+/model gpt<Tab>  → /model gpt-4o
+
+# Autocomplete file paths
+/export session<Tab>  → /export session.json
+```
+
+### session-delete
+
+Delete a session.
+
+```bash
+alexi session-delete -s <session-id>
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-s, --session <id>` | string | Session ID to delete (required) |
+
 ## Environment Variables
 
 ### Required Variables
@@ -246,6 +415,42 @@ SAP_PROXY_API_KEY=your_secret_key
 ## TypeScript Interfaces
 
 ### Core Interfaces
+
+#### UserConfig
+
+User configuration stored in ~/.alexi/config.json
+
+```typescript
+interface UserConfig {
+  defaultModel?: string;          // Persistent default model
+  soundEnabled?: boolean;         // Enable notification sounds
+  autoRoute?: boolean;            // Auto-routing preference
+  [key: string]: unknown;         // Extensible for custom settings
+}
+
+// User configuration API
+import {
+  loadFullConfig,
+  saveFullConfig,
+  getConfigValue,
+  setConfigValue,
+  getConfigDefaultModel,
+  setConfigDefaultModel
+} from './config/userConfig.js';
+
+// Load entire config
+const config = loadFullConfig();
+
+// Get specific value
+const defaultModel = getConfigDefaultModel();
+
+// Set and persist value
+setConfigDefaultModel('claude-4-sonnet');
+
+// Generic key access
+setConfigValue('soundEnabled', true);
+const soundEnabled = getConfigValue('soundEnabled');
+```
 
 #### CompletionResult
 
@@ -513,6 +718,46 @@ Execute shell commands.
   parameters: {
     command: string; // Shell command to execute
   }
+}
+```
+
+#### codebase_search (WarpGrep)
+
+AI-powered semantic code search using WarpGrep.
+
+```typescript
+{
+  name: 'codebase_search',
+  parameters: {
+    query: string; // Descriptive search query
+  }
+}
+```
+
+**Requirements**: Install `@morphllm/morphsdk` as optional dependency
+**Configuration**: Set `MORPH_API_KEY` environment variable (optional during free period)
+
+**Example**:
+```bash
+# Search for authentication logic
+codebase_search("Find the authentication middleware that validates JWT tokens")
+
+# Find error handling patterns
+codebase_search("Show me how errors are handled in API routes")
+```
+
+**Result Format**:
+```typescript
+interface CodeSpan {
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  content: string;
+}
+
+interface WarpGrepResult {
+  spans: CodeSpan[];
+  query: string;
 }
 ```
 

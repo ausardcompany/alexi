@@ -104,3 +104,32 @@ export function getConfigDefaultModel(): string | undefined {
 export function setConfigDefaultModel(modelId: string): void {
   setConfigValue('defaultModel', modelId);
 }
+
+// ============ Batch update with options ============
+
+export interface UpdateGlobalOptions {
+  dispose?: boolean;
+}
+
+/**
+ * Update multiple config keys at once.
+ * The `dispose` option controls whether any config instances should be disposed after update.
+ * Default behavior (dispose=true) is preserved for backward compatibility.
+ */
+export function updateGlobal(
+  updates: Partial<Record<string, unknown>>,
+  options: UpdateGlobalOptions = {}
+): void {
+  const { dispose = true } = options;
+
+  const config = loadFullConfig();
+  Object.assign(config, updates);
+  saveFullConfig(config);
+
+  // Disposal logic would go here if needed
+  // For now, this is a placeholder for future config instance management
+  if (dispose) {
+    // In a more complex system, this would dispose of cached config instances
+    // Currently, Alexi doesn't maintain config instances, so this is a no-op
+  }
+}

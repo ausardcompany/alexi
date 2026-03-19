@@ -84,6 +84,8 @@ graph TB
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
 | Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
+| Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
 
 ### Core Layer
 
@@ -112,11 +114,13 @@ graph TB
 | Tool | File | Description |
 |------|------|-------------|
 | Bash | `src/tool/tools/bash.ts` | Execute shell commands |
+| Bash Hierarchy | `src/tool/tools/bash-hierarchy.ts` | Hierarchical permission rules for bash commands |
 | Read | `src/tool/tools/read.ts` | Read files and directories |
 | Write | `src/tool/tools/write.ts` | Write files |
 | Edit | `src/tool/tools/edit.ts` | Edit files with string replacement |
 | Glob | `src/tool/tools/glob.ts` | Find files by pattern |
 | Grep | `src/tool/tools/grep.ts` | Search file contents |
+| WarpGrep | `src/tool/tools/warpgrep.ts` | AI-powered semantic code search |
 | Task | `src/tool/tools/task.ts` | Launch sub-agents |
 | WebFetch | `src/tool/tools/webfetch.ts` | Fetch web content |
 | Question | `src/tool/tools/question.ts` | Ask user questions |
@@ -129,10 +133,12 @@ graph TB
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
+| Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
+| User Config | `src/config/userConfig.ts` | Persistent user configuration |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
 
 ## Data Flow
@@ -252,6 +258,75 @@ flowchart TB
     
     Execute --> Result[Return Result]
     Deny --> Result
+```
+
+## Instruction File System
+
+Alexi uses a multi-layer instruction file system to provide context to AI agents:
+
+```mermaid
+graph TB
+    subgraph Sources[\"Instruction Sources\"]
+        Soul[Soul Prompt<br/>core identity]
+        Model[Model Prompt<br/>Anthropic/OpenAI/Gemini]
+        Env[Environment Info<br/>workdir, git, platform]
+        Agent[Agent Prompt<br/>code/debug/plan/explore]
+        Project[Project AGENTS.md<br/>./AGENTS.md]
+        User[User ALEXI.md<br/>~/.alexi/ALEXI.md]
+        Rules[Project Rules<br/>.alexi/rules/*.md]
+        Custom[Custom Rules<br/>user-provided]
+    end
+    
+    subgraph Assembly[\"System Prompt Assembly\"]
+        Assemble[buildAssembledSystemPrompt]
+    end
+    
+    subgraph Output[\"Final Prompt\"]
+        System[Complete System Prompt]
+    end
+    
+    Soul --> Assemble
+    Model --> Assemble
+    Env --> Assemble
+    Agent --> Assemble
+    Project --> Assemble
+    User --> Assemble
+    Rules --> Assemble
+    Custom --> Assemble
+    
+    Assemble --> System
+    
+    style Soul fill:#E3F2FD
+    style Model fill:#E8F5E9
+    style Agent fill:#FFF3E0
+    style Project fill:#F3E5F5
+    style User fill:#FCE4EC
+    style Rules fill:#E0F2F1
+    style System fill:#4CAF50
+```
+
+### Instruction File Locations
+
+| File | Path | Purpose |
+|------|------|---------|
+| Project Instructions | `./AGENTS.md` | Project-specific context, coding standards, build commands |
+| User Instructions | `~/.alexi/ALEXI.md` | Global user preferences applied to all projects |
+| Project Rules | `./.alexi/rules/*.md` | Scoped rules for specific aspects (API design, security, etc.) |
+
+### Managing Instruction Files
+
+```bash
+# List all instruction files
+/memory
+
+# Edit project instructions
+/memory edit project
+
+# Edit user instructions
+/memory edit user
+
+# Create AGENTS.md from template
+/memory init
 ```
 
 ## Configuration

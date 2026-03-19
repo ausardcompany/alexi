@@ -199,6 +199,28 @@ graph LR
    const value = context && context.workdir ? context.workdir : process.cwd();
    ```
 
+6. **Graceful Degradation**: Handle optional dependencies gracefully
+   ```typescript
+   // Good - Return null if initialization fails
+   function getTsParser(): Parser | null {
+     if (!Parser) {
+       return null;
+     }
+     if (!tsParser) {
+       tsParser = new Parser();
+       tsParser.setLanguage(TypeScript.typescript);
+     }
+     return tsParser;
+   }
+   
+   // Usage - Check for null before using
+   const parser = getTsParser();
+   if (!parser) {
+     return null; // Skip parsing, don't fail
+   }
+   const tree = parser.parse(source);
+   ```
+
 ### File Organization
 
 ```
@@ -305,7 +327,66 @@ npm test -- --coverage
 
 # Watch mode
 npm test -- --watch
+
+# Run TUI command tests
+npm test -- tests/commands-image.test.tsx
+
+# Run tests matching a pattern
+npm test -- --grep "line endings"
 ```
+
+### Testing TUI Commands
+
+TUI commands require special testing patterns with React context mocking:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock contexts BEFORE importing hooks
+const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
+const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
+
+vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pasteFromClipboard: mockPasteFromClipboard,
+    addFromFile: mockAddFromFile,
+    clearAll: vi.fn(),
+  }),
+}));
+
+// Import AFTER mocks
+import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
+
+describe('TUI commands', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should handle /image command', async () => {
+    let captured;
+    function CommandCapture() {
+      captured = useCommands();
+      return <Text>ready</Text>;
+    }
+    
+    render(<CommandCapture />);
+    
+    const handled = await captured.handleCommand('/image ./photo.png');
+    expect(handled).toBe(true);
+    expect(mockAddFromFile).toHaveBeenCalledWith('./photo.png');
+  });
+});
+```
+
+Key principles for TUI testing:
+1. Mock all React contexts before importing hooks
+2. Use ink-testing-library for rendering
+3. Capture hook return values through a component
+4. Clear mocks between tests with vi.clearAllMocks()
+5. Test both command dispatch and context interactions
 
 ## Pull Request Process
 
@@ -370,12 +451,25 @@ Pull requests trigger automated workflows:
    - Updates relevant documentation files
    - Generates Mermaid diagrams
    - Updates CHANGELOG.md
+3. **CI Auto-Fix** (for auto/* branches): Automatically fixes CI failures
+   - Collects failure logs
+   - Applies quick fixes (lint:fix, format)
+   - Uses Alexi agent to fix remaining issues
+   - Verifies fixes and commits changes
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
 - Generate accurate technical documentation using Claude AI
 - Commit documentation changes to your PR branch
 - Ensure documentation stays in sync with code
+
+For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
+- Analyze failure logs with exact error messages
+- Apply deterministic fixes (linting, formatting)
+- Use Alexi agent mode to fix complex issues
+- Verify all fixes pass the original checks
+- Commit fixes back to the PR branch
+- Rate-limited to 2 runs per branch per day
 
 ### Code Review
 

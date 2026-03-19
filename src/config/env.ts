@@ -7,6 +7,7 @@
  * Optional environment variables:
  * - AICORE_RESOURCE_GROUP: SAP AI Core resource group (default: undefined)
  * - AICORE_MODEL: Default model to use (default: gpt-4o)
+ * - ALEXI_MAX_IMAGE_SIZE_MB: Maximum image attachment size in MB (default: 20)
  */
 
 import dotenv from 'dotenv';
