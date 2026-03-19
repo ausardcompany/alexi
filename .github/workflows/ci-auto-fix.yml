@@ -176,6 +176,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ─── Step 3b: Preserve ci-failures.md before checkout ─────────────────────
+      - name: Preserve ci-failures.md
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          if [ -f ci-failures.md ]; then
+            cp ci-failures.md /tmp/ci-failures.md
+            echo "[OK] Saved ci-failures.md to /tmp before checkout"
+          fi
+
       # ─── Step 4: Checkout PR branch ──────────────────────────────────────────
       - name: Checkout PR branch
         if: steps.retry_check.outputs.should_skip != 'true'
@@ -184,6 +193,15 @@ jobs:
           ref: ${{ steps.determine.outputs.branch }}
           fetch-depth: 0
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      # ─── Step 4b: Restore ci-failures.md after checkout ─────────────────────
+      - name: Restore ci-failures.md
+        if: steps.retry_check.outputs.should_skip != 'true'
+        run: |
+          if [ -f /tmp/ci-failures.md ]; then
+            cp /tmp/ci-failures.md ci-failures.md
+            echo "[OK] Restored ci-failures.md after checkout"
+          fi
 
       # ─── Step 5: Configure git ────────────────────────────────────────────────
       - name: Configure git

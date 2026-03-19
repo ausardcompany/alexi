@@ -538,7 +538,7 @@ jobs:
         id: validate
         continue-on-error: true
         run: |
-          DOCS_TO_UPDATE="${​{ steps.scope.outputs.docs_to_update }}"
+          DOCS_TO_UPDATE="${{ steps.scope.outputs.docs_to_update }}"
           EXISTING_DOCS=""
           for f in $DOCS_TO_UPDATE; do
             [ -f "$f" ] && EXISTING_DOCS="$EXISTING_DOCS $f"
