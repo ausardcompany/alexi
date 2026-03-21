@@ -227,20 +227,26 @@ graph LR
 src/
 ├── cli/              # CLI-related code
 │   ├── program.ts    # Main CLI entry point
-│   └── commands/     # Individual CLI commands
+│   ├── commands/     # Individual CLI commands
+│   └── tui/          # Terminal UI (Ink + React)
+│       ├── App.tsx   # Main TUI application
+│       ├── components/ # UI components (MessageArea, MessageBubble, etc.)
+│       ├── context/  # React contexts (Chat, Session, Theme, Dialog)
+│       ├── hooks/    # Custom React hooks
+│       └── dialogs/  # Modal dialogs (ModelPicker, AgentSelector, etc.)
 ├── core/             # Core orchestration logic
 │   ├── orchestrator.ts
 │   ├── router.ts
 │   └── agenticChat.ts
 ├── providers/        # LLM provider implementations
-│   ├── openai/
-│   ├── bedrock/
-│   └── anthropic/
+│   ├── sapOrchestration.ts
+│   └── ...
 ├── tool/             # Tool system
 │   ├── index.ts      # Tool framework
 │   └── tools/        # Individual tool implementations
 ├── permission/       # Permission system
-│   └── index.ts
+│   ├── index.ts
+│   └── next.ts       # Pattern matching and config utilities
 ├── session/          # Session management
 └── bus/              # Event bus system
 ```

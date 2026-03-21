@@ -11,31 +11,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
-  - Persistent full-screen layout: header, scrollable message area, input box, status bar
-  - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
-  - Collapsible tool call blocks with red/green diff view for file edits
-  - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
-  - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
-  - Dark/light theme support via ThemeContext with `/theme` command
-  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
-  - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
-  - Event bus integration for real-time tool execution and permission prompt display
-- 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
-- TUI design contracts documenting component props, context APIs, and hook APIs
-- UX requirements quality checklist (30 items)
+- **TUI Static Rendering Architecture** — completed messages now scroll into terminal scrollback
+  - Messages rendered once with Ink Static component for performance optimization
+  - Dynamic viewport at bottom displays only active streaming content and tool calls
+  - Eliminates re-rendering of historical messages during streaming
+  - Full padding chain calculation for MarkdownRenderer (6 chars + 2 safety = 8 total)
+  - Separation of concerns: Static for history, Box for active content
+- **Permission System Null Sentinel Handling** — config patches can now delete rules
+  - Null values in PermissionConfig act as delete sentinels
+  - PermissionNext.fromConfig filters out null entries during parsing
+  - PermissionNext.toConfig converts rulesets back to config format
+  - Comprehensive test coverage for null handling edge cases
+- **CI Auto-Fix Workflow Improvements**
+  - Deterministic quick fixes run first (lint:fix, format) before AI agent
+  - Quick fixes committed independently with immediate push
+  - Re-verification after quick fixes to skip AI agent if all checks pass
+  - Preservation of ci-failures.md across checkout operations
+  - Prompt files fetched from master branch if missing on PR branch
+  - Retry logic with 30-second delay for transient network errors
+  - Improved comment condition to handle both failure outcomes and errors
+- **Alexi Presentation Generator** — automated PowerPoint generation script
+  - SAP corporate branding with Georgia/Calibri font pairing
+  - 17 slides covering architecture, features, capabilities, and roadmap
+  - Automated JPEG export for all slides
+  - Professional design with shadows, gradients, and consistent spacing
 
 ### Changed
 
-- Interactive mode (`alexi interactive`) now launches the TUI instead of the legacy readline REPL
-- `src/cli/interactive.ts` marked as `@deprecated` in favor of `src/cli/tui/`
+- **TUI Message Display Architecture** — refactored for performance and scrollback
+  - App.tsx now uses Static component for completed messages
+  - MessageArea.tsx simplified to only handle streaming content
+  - MessageBubble.tsx improved text wrapping with paddingLeft(2) for user messages
+  - MarkdownRenderer.tsx accepts maxWidth prop for precise width control
+  - Completed tool calls moved to Static rendering with message history
+  - ChatContext.tsx added clearCompletedToolCalls action
+- **CI Auto-Fix Workflow Execution Order**
+  - Quick fixes (lint:fix, format) now run before agent step
+  - Agent step skipped if quick fixes resolve all failures
+  - Deterministic fixes separated from AI-powered fixes
+  - Better handling of ci-failures.md file lifecycle
+- **Documentation Update Workflow Reliability**
+  - Added retry logic for transient network failures (socket hang up, ECONNRESET)
+  - Maximum 2 retry attempts with 30-second delay between retries
+  - Fixed comment posting condition to handle both failure and error outcomes
+
+### Fixed
+
+- TUI message area no longer re-renders completed messages during streaming
+- MarkdownRenderer width calculation now accounts for full padding chain
+- Permission config parsing correctly handles null delete sentinels
+- CI Auto-Fix workflow preserves ci-failures.md across branch checkout
+- Documentation workflow handles transient network errors gracefully
 
 ### Dependencies
 
-- Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
-- Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
-- Added dev: `ink-testing-library`, `@types/diff`
-- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
+- Added runtime: pptxgenjs (v4.0.1) for presentation generation
 
 ## [0.2.6] - 2026-03-19
 
@@ -216,7 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

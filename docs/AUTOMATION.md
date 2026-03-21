@@ -99,6 +99,12 @@ sequenceDiagram
 
 4. **Force Regeneration**: Manual trigger option to regenerate all documentation
 
+5. **Retry Logic for Transient Failures**: Handles network errors gracefully
+   - Maximum 2 retry attempts with 30-second delay
+   - Detects transient errors: socket hang up, ECONNRESET, ETIMEDOUT, ENOTFOUND
+   - Non-transient errors fail immediately without retries
+   - Logs attempt count in output messages
+
 #### Environment Variables
 
 ```bash
@@ -322,15 +328,21 @@ graph TB
 
 1. **Intelligent Failure Detection**: Collects logs from all failed CI jobs with exact error messages, file paths, and line numbers
 
-2. **Two-Stage Fix Process**:
+2. **Three-Stage Fix Process**:
    - **Quick Fixes**: Runs `npm run lint:fix` and `npm run format` for deterministic auto-fixes
-   - **AI Agent Fixes**: Uses Alexi agent mode with tools (read, write, edit, glob, grep, bash) to apply targeted fixes
+   - **Quick Fix Commit**: Commits and pushes quick fixes immediately if any changes made
+   - **Re-verification**: Re-runs failed checks after quick fixes to determine if AI agent is needed
+   - **AI Agent Fixes**: Uses Alexi agent mode with tools (read, write, edit, glob, grep, bash) only if quick fixes insufficient
 
 3. **Targeted Verification**: Re-runs only the checks that originally failed to verify fixes
 
 4. **Rate Limiting**: Maximum 2 auto-fix runs per branch per day to prevent infinite loops
 
 5. **Branch Filtering**: Only processes branches matching `auto/*` pattern
+
+6. **File Preservation**: Saves and restores ci-failures.md across branch checkout operations
+
+7. **Prompt File Management**: Fetches prompt files from master branch if missing on PR branch
 
 #### Workflow Steps
 
@@ -360,23 +372,49 @@ graph TB
 - Restores `ci-failures.md` from `/tmp` after checkout
 - Ensures failure logs are available for analysis
 
-**Step 5: Build Alexi CLI**
-- Installs dependencies
-- Builds Alexi CLI from source
+**Step 5: Configure Git**
+- Sets up git user identity for commits
 
-**Step 6: Run Quick Auto-Fixes**
-- Runs `npm run lint:fix` to fix linting issues
-- Runs `npm run format` to fix formatting issues
-- Tracks if any changes were made
+**Step 5b: Ensure Prompt Files from Master**
+- Checks if `.github/prompts/ci-fix-system.md` exists on branch
+- Fetches from origin/master if missing
+- Unstages file to avoid committing to PR branch
+- Ensures agent step has access to system prompt
 
-**Step 7: Build Fix Prompt**
-- Assembles comprehensive fix prompt with:
-  - Failed check names
-  - Full error logs with file paths and line numbers
-  - Specific verification commands for each check type
-  - Instructions to make minimal, targeted fixes
+**Step 6: Setup Node.js 22**
+- Installs Node.js runtime for building Alexi CLI
 
-**Step 8: Run Alexi Agent**
+**Step 7: Install Dependencies**
+- Runs `npm ci` to install exact versions from package-lock.json
+
+**Step 8: Build Alexi CLI**
+- Runs `npm run build` to compile TypeScript to JavaScript
+
+**Step 8a: Run Quick Auto-Fixes**
+- Runs `npm run lint:fix` to automatically fix linting issues
+- Runs `npm run format` to automatically format code
+- Tracks whether any changes were made via git status
+
+**Step 8b: Commit and Push Quick Fixes**
+- Stages only `src/` and `tests/` directories (never commits workflow files)
+- Commits with message: `style(ci): auto-fix lint/format issues [skip ci] [alexi-bot]`
+- Pushes immediately to PR branch if changes detected
+- Outputs `committed=true/false` for downstream steps
+
+**Step 8c: Re-verify After Quick Fixes**
+- If quick fixes were committed, re-runs all originally failed checks
+- Determines if all failures resolved by deterministic fixes
+- Outputs `all_fixed=true/false` to control agent step execution
+- Skips AI agent step if all checks now pass
+
+**Step 9: Build Fix Prompt**
+- Only runs if `all_fixed != 'true'` (some checks still failing)
+- Verifies system prompt template exists (`.github/prompts/ci-fix-system.md`)
+- Fetches from master if missing
+- Assembles comprehensive fix prompt with failure details
+
+**Step 10: Run Alexi Agent to Fix Remaining Issues**
+- Only runs if `all_fixed != 'true'` (quick fixes insufficient)
 - Invokes Alexi agent mode with:
   - System prompt: `.github/prompts/ci-fix-system.md`
   - Message: `ci-fix-prompt.md` (failure details)
@@ -384,8 +422,10 @@ graph TB
   - Max iterations: 20
   - High effort level
   - Auto-routing enabled
+- Agent reads failure logs and applies targeted fixes
 
-**Step 9: Verify Fixes**
+**Step 11: Verify Fixes**
+- Only runs if agent step executed
 - Re-runs only the checks that originally failed:
   - Lint failures → `npm run lint`
   - Type errors → `npm run typecheck`
@@ -393,19 +433,29 @@ graph TB
   - Test failures → `npm run test:coverage`
   - Build failures → `npm run build`
 - Generates verification results summary
+- Outputs `fixes_verified=true/false`
 
-**Step 10: Commit and Push**
+**Step 12: Commit and Push Fixes**
+- Only runs if agent step executed
 - Stages changes in `src/` and `tests/` directories only
 - Commits with message: `fix(ci): auto-fix CI failures [skip ci] [alexi-bot]`
 - Pushes to the auto/* branch
 - CI re-triggers automatically on push
+- Outputs number of files changed
 
-**Step 11: Post PR Comment**
+**Step 13: Post PR Comment**
+- Determines success based on:
+  - Quick fixes only: `quickFixOnly=true` and `quickFixCommitted=true`
+  - Agent fixes: `fixes_verified=true` and `committed=true`
 - Posts detailed comment to PR with:
   - Success/failure status
   - Number of files changed
   - Verification results
-  - Bot output snippet
+  - Bot output snippet (last 50 lines)
+  - Link to workflow run
+  - Encouragement message for successful fixes
+
+#### Example Fix Prompt
   - Link to workflow run
 
 #### Example Fix Prompt

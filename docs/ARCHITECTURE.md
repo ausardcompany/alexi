@@ -83,7 +83,11 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI (deprecated) |
+| TUI App | `src/cli/tui/App.tsx` | Ink-based terminal UI with React components |
+| TUI Components | `src/cli/tui/components/` | MessageArea, MessageBubble, MarkdownRenderer, etc. |
+| TUI Contexts | `src/cli/tui/context/` | React contexts for chat, session, theme, dialogs |
+| TUI Hooks | `src/cli/tui/hooks/` | Custom React hooks for streaming, permissions, tools |
 | Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
 | Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
 
@@ -231,6 +235,218 @@ flowchart LR
     DirectExec --> Result[Return Result]
     RetErr --> Result
 ```
+
+### Permission Configuration with Null Sentinels
+
+The permission system supports configuration patches that can delete rules using null sentinels:
+
+```typescript
+// Permission configuration types
+export type Action = 'allow' | 'deny' | 'ask';
+export type PermissionRule = Action | { [pattern: string]: Action | null } | null;
+
+export interface PermissionConfig {
+  [permission: string]: PermissionRule;
+}
+
+// Null values act as delete sentinels
+const configPatch = {
+  bash: {
+    '*': 'ask',
+    'npm *': null  // Delete this rule
+  }
+};
+
+// PermissionNext.fromConfig filters out null entries
+const rules = PermissionNext.fromConfig(configPatch);
+// Result: [{ permission: 'bash', pattern: '*', action: 'ask' }]
+```
+
+**Null Sentinel Behavior**:
+- Null values in PermissionConfig indicate rules to be removed
+- `PermissionNext.fromConfig()` filters out null entries during parsing
+- `PermissionNext.toConfig()` converts rulesets back to config format
+- Enables declarative rule deletion in configuration patches
+- Used by permission management UI to remove unwanted rules
+
+## TUI Rendering Architecture
+
+The Terminal User Interface (TUI) uses a hybrid rendering approach combining Ink's Static component for historical messages with dynamic rendering for active content.
+
+```mermaid
+graph TB
+    subgraph Terminal[\"Terminal Display\"]
+        Scrollback[Terminal Scrollback<br/>Historical Messages]
+        Viewport[Dynamic Viewport<br/>24 rows fixed height]
+    end
+    
+    subgraph Static[\"Static Rendering\"]
+        CompletedMsgs[Completed Messages]
+        CompletedTools[Completed Tool Calls]
+        Separators[Message Separators]
+    end
+    
+    subgraph Dynamic[\"Dynamic Rendering\"]
+        Header[Header - 3 rows]
+        StreamArea[Streaming Message Area]
+        ActiveTools[Active Tool Calls]
+        InputBox[Input Box]
+        StatusBar[Status Bar - 1 row]
+    end
+    
+    Static --> Scrollback
+    Dynamic --> Viewport
+    
+    CompletedMsgs --> Static
+    CompletedTools --> Static
+    Separators --> Static
+    
+    Header --> Dynamic
+    StreamArea --> Dynamic
+    ActiveTools --> Dynamic
+    InputBox --> Dynamic
+    StatusBar --> Dynamic
+    
+    style Static fill:#4CAF50
+    style Dynamic fill:#2196F3
+    style Scrollback fill:#FFF3E0
+    style Viewport fill:#E3F2FD
+```
+
+### Static vs Dynamic Rendering
+
+**Static Component (Scrollback)**:
+- Renders completed messages once using Ink's `<Static>` component
+- Messages scroll into terminal scrollback buffer
+- No re-rendering during streaming — performance optimization
+- Includes completed MessageBubble and ToolCallBlock components
+- Permanent terminal history accessible via scrollback
+
+**Dynamic Viewport (24 rows)**:
+- Fixed height box at bottom of terminal
+- Re-renders only active content during streaming
+- Contains header, streaming area, input, and status bar
+- Uses flexGrow and flexShrink for responsive layout
+- Active tool calls shown with live status updates
+
+### TUI Component Architecture
+
+```mermaid
+graph LR
+    subgraph App[\"App.tsx\"]
+        Static[Static Messages]
+        Viewport[Dynamic Viewport]
+    end
+    
+    subgraph StaticContent[\"Static Content\"]
+        MsgBubble[MessageBubble]
+        ToolBlock[ToolCallBlock]
+    end
+    
+    subgraph ViewportContent[\"Viewport Content\"]
+        Header[Header]
+        MsgArea[MessageArea]
+        Input[InputBox]
+        Status[StatusBar]
+    end
+    
+    subgraph Contexts[\"React Contexts\"]
+        Chat[ChatContext]
+        Session[SessionContext]
+        Theme[ThemeContext]
+        Dialog[DialogContext]
+        Keybind[KeybindContext]
+        Attachment[AttachmentContext]
+    end
+    
+    App --> Static
+    App --> Viewport
+    Static --> MsgBubble
+    Static --> ToolBlock
+    Viewport --> Header
+    Viewport --> MsgArea
+    Viewport --> Input
+    Viewport --> Status
+    
+    MsgBubble --> Contexts
+    ToolBlock --> Contexts
+    MsgArea --> Contexts
+    Input --> Contexts
+    Status --> Contexts
+    
+    style Static fill:#4CAF50
+    style Viewport fill:#2196F3
+    style Contexts fill:#FF9800
+```
+
+### Message Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Input as InputBox
+    participant Chat as ChatContext
+    participant Stream as StreamingOrch
+    participant Static as Static Component
+    participant Viewport as Dynamic Viewport
+    
+    User->>Input: Type message
+    Input->>Chat: Submit message
+    Chat->>Stream: Start streaming
+    
+    loop Streaming
+        Stream->>Chat: Append stream text
+        Chat->>Viewport: Update streamingText
+        Viewport->>Viewport: Render partial markdown
+    end
+    
+    Stream->>Chat: Stream complete
+    Chat->>Chat: Move to completedToolCalls
+    Chat->>Static: Render completed message
+    Static->>Static: Scroll into terminal
+    Chat->>Chat: Clear streamingText
+    Chat->>Viewport: Remove from active area
+    
+    Note over Static: Message now in scrollback
+    Note over Viewport: Ready for next message
+```
+
+### Markdown Rendering Width Calculation
+
+The MarkdownRenderer component calculates effective width accounting for the full padding chain:
+
+```typescript
+// Full padding chain calculation
+// App.tsx:     Static/Box containers (no padding)
+// MessageArea: Box paddingX(1) = 2 chars
+// MessageBubble: Box paddingLeft(2) = 2 chars  
+// MessageBubble: Box paddingX(1) = 2 chars
+// Total padding: 2 + 2 + 2 = 6 chars
+// Safety margin: 2 chars
+// Effective width: terminal_columns - 8
+
+const effectiveWidth = maxWidth ?? Math.max(40, columns - 8);
+```
+
+This ensures markdown content wraps correctly without overflow or excessive wrapping.
+
+### Performance Characteristics
+
+| Aspect | Static Rendering | Dynamic Rendering |
+|--------|------------------|-------------------|
+| **Re-render frequency** | Once (on message complete) | Every stream chunk |
+| **Memory usage** | Low (rendered to terminal) | Moderate (React state) |
+| **Scrollback** | Yes (terminal native) | No (viewport only) |
+| **Performance impact** | None after render | Minimal (small viewport) |
+| **Message count limit** | Unlimited (terminal buffer) | N/A (only active content) |
+
+### Key Implementation Details
+
+1. **Completed Message Detection**: `wasStreamingRef` tracks streaming state to detect completion
+2. **Tool Call Migration**: Completed tool calls moved from `activeToolCalls` to `completedToolCalls`
+3. **Clear Operations**: Separate clear functions for stream text and completed tool calls
+4. **FlexShrink**: Input and status bar use `flexShrink={0}` to prevent squeezing
+5. **Separator Rendering**: Message separators rendered in Static component for consistency
 
 ## Tool System with Context Resolution
 
