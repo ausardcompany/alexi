@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-21
+
+### Added
+
+- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+  - Persistent full-screen layout: header, scrollable message area, input box, status bar
+  - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
+  - Collapsible tool call blocks with red/green diff view for file edits
+  - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
+  - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
+  - Dark/light theme support via ThemeContext with `/theme` command
+  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
+  - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
+  - Event bus integration for real-time tool execution and permission prompt display
+- 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
+- TUI design contracts documenting component props, context APIs, and hook APIs
+- UX requirements quality checklist (30 items)
+
+### Changed
+
+- Interactive mode (`alexi interactive`) now launches the TUI instead of the legacy readline REPL
+- `src/cli/interactive.ts` marked as `@deprecated` in favor of `src/cli/tui/`
+
+### Dependencies
+
+- Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
+- Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
+- Added dev: `ink-testing-library`, `@types/diff`
+- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
+
 ## [0.2.6] - 2026-03-19
 
 ### Added
