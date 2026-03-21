@@ -496,34 +496,60 @@ jobs:
           # Role-only system prompt — detailed instructions are in the template prompt
           SYSTEM_PROMPT="You are a technical documentation writer for the Alexi project. Read source code files using the provided tools before writing documentation. Write to the exact file paths specified in the Documentation Scope section."
           
-          # Use 'agent' command which enables tool execution loop
-          # This allows the LLM to write/edit files directly
-          # --no-auto-commits: The workflow handles git commit/push itself.
-          #   Without this flag the git auto-commit manager commits changes
-          #   mid-run, leaving the working tree clean so the workflow's own
-          #   commit step sees "No documentation changes" and never pushes.
-          node dist/cli/program.js agent \
-            --message-file kilo-prompt.md \
-            --auto-route \
-            --effort high \
-            --max-iterations 30 \
-            --tools "read,write,edit,glob,grep" \
-            --workdir "$(pwd)" \
-            --verbose \
-            --no-auto-commits \
-            --system "$SYSTEM_PROMPT" \
-            > bot-output.log 2>&1
+          MAX_RETRIES=2
+          ATTEMPT=0
+          BOT_EXIT_CODE=1
           
-          BOT_EXIT_CODE=$?
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "=== Attempt $ATTEMPT of $MAX_RETRIES ==="
+            
+            # Use 'agent' command which enables tool execution loop
+            # This allows the LLM to write/edit files directly
+            # --no-auto-commits: The workflow handles git commit/push itself.
+            #   Without this flag the git auto-commit manager commits changes
+            #   mid-run, leaving the working tree clean so the workflow's own
+            #   commit step sees "No documentation changes" and never pushes.
+            node dist/cli/program.js agent \
+              --message-file kilo-prompt.md \
+              --auto-route \
+              --effort high \
+              --max-iterations 30 \
+              --tools "read,write,edit,glob,grep" \
+              --workdir "$(pwd)" \
+              --verbose \
+              --no-auto-commits \
+              --system "$SYSTEM_PROMPT" \
+              > bot-output.log 2>&1
+            
+            BOT_EXIT_CODE=$?
+            
+            if [ $BOT_EXIT_CODE -eq 0 ]; then
+              break
+            fi
+            
+            # Check if failure is transient (socket hang up, ECONNRESET, etc.)
+            if grep -qiE "socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed" bot-output.log 2>/dev/null; then
+              if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+                echo "[WARN] Transient network error detected. Retrying in 30 seconds..."
+                sleep 30
+                continue
+              fi
+            fi
+            
+            # Non-transient error or last attempt — stop retrying
+            break
+          done
           
           echo "exit_code=$BOT_EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "attempts=$ATTEMPT" >> $GITHUB_OUTPUT
           
           if [ $BOT_EXIT_CODE -eq 0 ]; then
             echo "success=true" >> $GITHUB_OUTPUT
-            echo "[OK] Documentation generation completed successfully"
+            echo "[OK] Documentation generation completed successfully (attempt $ATTEMPT)"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[ERROR] Documentation generation failed with exit code $BOT_EXIT_CODE"
+            echo "[ERROR] Documentation generation failed with exit code $BOT_EXIT_CODE after $ATTEMPT attempt(s)"
           fi
           
           # Show output (last 100 lines to avoid overwhelming logs)
@@ -647,7 +673,7 @@ jobs:
             });
       
       - name: Post failure comment
-        if: steps.check_needed.outputs.skip != 'true' && steps.bot.outputs.success == 'false'
+        if: steps.check_needed.outputs.skip != 'true' && (steps.bot.outcome == 'failure' || steps.bot.outputs.success == 'false')
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
