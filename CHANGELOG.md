@@ -11,22 +11,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Comprehensive test suite for agent system prompt files (161 tests)
+  - Validates existence and content of all 11 prompt files
+  - Checks for credential leaks in prompt templates
+  - Tests model prompt key mapping for Anthropic, OpenAI, and Gemini models
+  - Verifies prompt accessor functions return non-empty strings
+  - Tests system prompt assembly for all agent and model combinations
+- Presentation generation system with pptxgenjs dependency
+  - Script to generate alexi-presentation.pptx with 17 slides
+  - PDF export of presentation (alexi-presentation.pdf)
+  - JPEG slide exports for documentation and sharing
+- Permission system null sentinel handling
+  - Null entries in permission configuration treated as delete sentinels
+  - Proper filtering of null rules during config parsing
+  - Tests for null sentinel handling in PermissionNext utility
+- TUI component test coverage expansion
+  - AttachmentBar component tests (154 tests)
+  - ChatContext integration tests (143 tests)
+  - MarkdownRenderer tests (15 tests)
+  - McpManager dialog tests (143 tests)
+  - MessageBubble component tests (85 tests)
+  - SessionList dialog tests (161 tests)
+  - StatusBar component tests (91 tests)
+  - useClipboardImage hook tests (133 tests)
+  - useCommands hook tests (210 tests)
 - Implementation plan, research, data model, and quickstart for TUI text display fix (005-tui-text-display)
 - TUI layout requirements quality checklist (35 items)
 - Task breakdown for 005-tui-text-display (26 tasks across 6 phases)
+
+### Changed
+
+- Overhauled all 11 system prompt files with best-practice patterns
+  - soul.txt: Enhanced personality guidelines, brevity rules, and professional objectivity
+  - code.txt: Improved file editing protocol, bash usage guidelines, and tool usage policy
+  - debug.txt: Enhanced debugging workflow and error analysis patterns
+  - plan.txt: Refined planning methodology and task breakdown strategies
+  - explore.txt: Improved codebase exploration and context gathering
+  - ask.txt: Clarified question-answering and explanation patterns
+  - orchestrator.txt: Enhanced agent coordination and delegation logic
+  - anthropic.txt: Model-specific instructions for Claude models
+  - openai.txt: Model-specific instructions for GPT models
+  - gemini.txt: Model-specific instructions for Gemini models
+  - default.txt: Fallback instructions for unknown models
+- TUI message rendering moved inside viewport for better visibility
+  - Messages now rendered inside dynamic viewport instead of Static component
+  - Ensures messages remain visible on screen during scrolling
+  - Improved text wrapping and layout with flexShrink={0} on input and status bar
+- MarkdownRenderer width calculation improved
+  - Added maxWidth prop for explicit width control
+  - Accounts for full padding chain (8 chars total: paddingX(1)=2 + paddingLeft(2)=2 + paddingX(1)=2 + 2 safety margin)
+  - Effective width calculation: Math.max(40, columns - 8)
+- MessageBubble user message layout improved
+  - User prompt now wraps properly with paddingLeft={2} on content box
+  - Better visual separation between prompt label and content
+- CI Auto-Fix workflow enhanced with two-stage fix process
+  - Stage 1: Quick deterministic fixes (lint:fix, format) committed immediately
+  - Stage 2: AI agent fixes only run if quick fixes don't resolve all failures
+  - Prompt files from master branch fetched before agent step
+  - ci-failures.md preserved across checkout operations
+  - Re-verification after quick fixes to skip agent step when possible
+- Documentation Update workflow improved with retry logic
+  - Maximum 2 retry attempts for transient network errors
+  - Detects socket hang up, ECONNRESET, ETIMEDOUT, ENOTFOUND, fetch failed
+  - 30-second delay between retry attempts
+  - Failure comment condition fixed to handle workflow outcome states
+
+### Fixed
+
+- TUI messages inside viewport instead of Static component for better scrolling behavior
+- CI Auto-Fix workflow losing ci-failures.md file during branch checkout
+- Documentation workflow failure comment condition not triggering on workflow outcome failure
 
 ## [0.3.0] - 2026-03-21
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- Full TUI (Terminal User Interface) component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
   - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
   - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
-  - Dark/light theme support via ThemeContext with `/theme` command
-  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
+  - Dark/light theme support via ThemeContext with /theme command
+  - Image attachment support: Ctrl+V clipboard paste and /image file attachment
   - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
   - Event bus integration for real-time tool execution and permission prompt display
 - 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
@@ -35,21 +102,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Interactive mode (`alexi interactive`) now launches the TUI instead of the legacy readline REPL
-- `src/cli/interactive.ts` marked as `@deprecated` in favor of `src/cli/tui/`
+- Interactive mode (alexi interactive) now launches the TUI instead of the legacy readline REPL
+- src/cli/interactive.ts marked as deprecated in favor of src/cli/tui/
 
 ### Dependencies
 
-- Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
-- Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
-- Added dev: `ink-testing-library`, `@types/diff`
-- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
+- Added runtime: marked, marked-terminal, cli-highlight, diff, terminal-link
+- Added runtime: ink-text-input, ink-select-input, ink-spinner
+- Added runtime: pptxgenjs (for presentation generation)
+- Added dev: ink-testing-library, @types/diff
+- Existing: ink (v6.8.0) and react (v19.2.4) now actively used
 
 ## [0.2.6] - 2026-03-19
 
 ### Added
 
-- Unit tests for TUI slash commands (`/image` and `/clear-images`)
+- Unit tests for TUI slash commands (/image and /clear-images)
   - Tests command registration with correct names and aliases
   - Tests clipboard paste functionality when no arguments provided
   - Tests file path handling for image attachments
@@ -62,8 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Enhanced user configuration API with batch update support
-  - Added `updateGlobal()` function for atomic multi-key updates
-  - Added `UpdateGlobalOptions` interface with disposal control
+  - Added updateGlobal() function for atomic multi-key updates
+  - Added UpdateGlobalOptions interface with disposal control
   - Maintains backward compatibility with default dispose behavior
 - Edit tool now preserves line endings during replacements
   - Automatically detects CRLF vs LF line endings in target files
@@ -224,7 +292,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

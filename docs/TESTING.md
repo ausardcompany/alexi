@@ -230,13 +230,99 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
+### Agent System Test Coverage
+
+The agent system has comprehensive test coverage (161 tests):
+
+| Test Suite | Test File | Test Cases | Coverage |
+|------------|-----------|------------|----------|
+| Prompt System | `src/agent/system.test.ts` | 161 | Prompt files, model mapping, assembly |
+
+The agent system tests validate all 11 prompt files and system prompt assembly:
+
+```typescript
+// src/agent/system.test.ts
+describe('Prompt System', () => {
+  describe('Prompt files', () => {
+    // Validates all 11 prompt files exist and are non-empty
+    it.each(PROMPT_FILES)('%s exists and is non-empty', (filename) => {
+      const filePath = path.join(promptsDir, filename);
+      expect(fs.existsSync(filePath)).toBe(true);
+      const content = fs.readFileSync(filePath, 'utf-8').trim();
+      expect(content.length).toBeGreaterThan(0);
+    });
+
+    // Security check: no credentials in prompt templates
+    it.each(PROMPT_FILES)('%s does not contain credential-like patterns', (filename) => {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      expect(content).not.toMatch(/sk-[a-zA-Z0-9]{20,}/); // OpenAI keys
+      expect(content).not.toMatch(/AKIA[A-Z0-9]{16}/); // AWS keys
+      expect(content).not.toMatch(/ghp_[a-zA-Z0-9]{36}/); // GitHub tokens
+    });
+  });
+
+  describe('Model prompt key mapping', () => {
+    // Tests model ID to prompt file mapping
+    it('maps anthropic model IDs correctly', () => {
+      expect(getModelPromptKey('anthropic--claude-3.5-sonnet')).toBe('anthropic');
+    });
+
+    it('maps OpenAI model IDs correctly', () => {
+      expect(getModelPromptKey('gpt-4o')).toBe('openai');
+    });
+
+    it('maps Gemini model IDs correctly', () => {
+      expect(getModelPromptKey('gemini-1.5-pro')).toBe('gemini');
+    });
+
+    it('maps unknown models to default', () => {
+      expect(getModelPromptKey('some-unknown-model')).toBe('default');
+    });
+  });
+
+  describe('System prompt assembly', () => {
+    // Tests prompt assembly for all agent and model combinations
+    it('produces valid output for all agent + model combinations', () => {
+      for (const agentId of AGENT_IDS) {
+        for (const modelId of MODEL_IDS) {
+          const prompt = buildAssembledSystemPrompt({ agentId, modelId });
+          expect(prompt.length).toBeGreaterThan(0);
+          expect(prompt).toContain(getSoulPrompt());
+          expect(prompt).toContain(getAgentPrompt(agentId));
+        }
+      }
+    });
+  });
+});
+```
+
+Prompt files tested:
+- `soul.txt`: Core personality and behavior
+- `anthropic.txt`, `openai.txt`, `gemini.txt`, `default.txt`: Model-specific instructions
+- `code.txt`, `debug.txt`, `plan.txt`, `explore.txt`, `ask.txt`, `orchestrator.txt`: Agent roles
+
 ### TUI Command Test Coverage
 
 TUI slash commands are tested through the `useCommands` hook with React context mocking:
 
 | Command | Test File | Test Cases |
 |---------|-----------|------------|
-| `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+| `/image`, `/clear-images` | `tests/cli/tui/useCommands.test.tsx` | 210+ cases |
+
+TUI component tests (29 test files, 1664 total tests):
+
+| Component | Test File | Tests | Coverage |
+|-----------|-----------|-------|----------|
+| AttachmentBar | `tests/cli/tui/AttachmentBar.test.tsx` | 154 | Component rendering, attachment display |
+| ChatContext | `tests/cli/tui/ChatContext.test.tsx` | 143 | State management, message handling |
+| MarkdownRenderer | `tests/cli/tui/MarkdownRenderer.test.tsx` | 15 | Markdown parsing, width calculation |
+| McpManager | `tests/cli/tui/McpManager.test.tsx` | 143 | MCP server management dialog |
+| MessageArea | `tests/cli/tui/MessageArea.test.tsx` | Various | Message display, streaming |
+| MessageBubble | `tests/cli/tui/MessageBubble.test.tsx` | 85 | Individual message rendering |
+| SessionList | `tests/cli/tui/SessionList.test.tsx` | 161 | Session list dialog |
+| StatusBar | `tests/cli/tui/StatusBar.test.tsx` | 91 | Status display, cost tracking |
+| useClipboardImage | `tests/cli/tui/useClipboardImage.test.tsx` | 133 | Clipboard paste functionality |
+| useCommands | `tests/cli/tui/useCommands.test.tsx` | 210 | Slash command dispatch |
 
 ### Test Categories
 

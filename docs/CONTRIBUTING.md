@@ -329,7 +329,10 @@ npm test -- --coverage
 npm test -- --watch
 
 # Run TUI command tests
-npm test -- tests/commands-image.test.tsx
+npm test -- tests/cli/tui/useCommands.test.tsx
+
+# Run agent system tests
+npm test -- src/agent/system.test.ts
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"

@@ -132,14 +132,17 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Next | `src/permission/next.ts` | Pattern matching and null sentinel handling |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Agent Tests | `src/agent/system.test.ts` | Comprehensive prompt system validation (161 tests) |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+| TUI | `src/cli/tui/` | Ink-based Terminal User Interface |
 
 ## Data Flow
 
@@ -260,6 +263,126 @@ flowchart TB
     Deny --> Result
 ```
 
+## Agent System Prompts
+
+Alexi uses a sophisticated multi-layer prompt system with 11 specialized prompt files:
+
+### Prompt File Architecture
+
+```mermaid
+graph TB
+    subgraph Core[\"Core Prompts\"]
+        Soul[soul.txt<br/>Core Identity]
+    end
+    
+    subgraph Model[\"Model-Specific Prompts\"]
+        Anthropic[anthropic.txt<br/>Claude Models]
+        OpenAI[openai.txt<br/>GPT Models]
+        Gemini[gemini.txt<br/>Gemini Models]
+        Default[default.txt<br/>Fallback]
+    end
+    
+    subgraph Agent[\"Agent Role Prompts\"]
+        Code[code.txt<br/>Implementation]
+        Debug[debug.txt<br/>Debugging]
+        Plan[plan.txt<br/>Planning]
+        Explore[explore.txt<br/>Exploration]
+        Ask[ask.txt<br/>Q&A]
+        Orchestrator[orchestrator.txt<br/>Coordination]
+    end
+    
+    Soul --> Model
+    Model --> Agent
+    
+    style Soul fill:#E3F2FD
+    style Anthropic fill:#E8F5E9
+    style Code fill:#FFF3E0
+```
+
+### Prompt Files
+
+| File | Purpose | Key Features |
+|------|---------|--------------|
+| `soul.txt` | Core personality and behavior | Brevity rules, professional objectivity, code conventions, security boundaries |
+| `anthropic.txt` | Claude model instructions | Claude-specific patterns and capabilities |
+| `openai.txt` | GPT model instructions | GPT-specific patterns and capabilities |
+| `gemini.txt` | Gemini model instructions | Gemini-specific patterns and capabilities |
+| `default.txt` | Fallback for unknown models | Generic best practices |
+| `code.txt` | General implementation tasks | File editing protocol, bash usage, testing behavior |
+| `debug.txt` | Debugging and error analysis | Error investigation, root cause analysis |
+| `plan.txt` | Planning and task breakdown | Task decomposition, milestone planning |
+| `explore.txt` | Codebase exploration | Context gathering, pattern discovery |
+| `ask.txt` | Question answering | Explanation strategies, clarification |
+| `orchestrator.txt` | Agent coordination | Sub-agent delegation, task routing |
+
+### Prompt System Testing
+
+The agent system includes comprehensive test coverage (161 tests):
+
+```typescript
+// src/agent/system.test.ts
+describe('Prompt System', () => {
+  // Validates all 11 prompt files exist and are non-empty
+  it.each(PROMPT_FILES)('%s exists and is non-empty', (filename) => {
+    const filePath = path.join(promptsDir, filename);
+    expect(fs.existsSync(filePath)).toBe(true);
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    expect(content.length).toBeGreaterThan(0);
+  });
+
+  // Checks for credential leaks in prompt templates
+  it.each(PROMPT_FILES)('%s does not contain credential-like patterns', (filename) => {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    expect(content).not.toMatch(/sk-[a-zA-Z0-9]{20,}/); // OpenAI API keys
+    expect(content).not.toMatch(/AKIA[A-Z0-9]{16}/); // AWS access keys
+    expect(content).not.toMatch(/ghp_[a-zA-Z0-9]{36}/); // GitHub tokens
+  });
+
+  // Tests model prompt key mapping
+  it('maps anthropic model IDs correctly', () => {
+    expect(getModelPromptKey('anthropic--claude-3.5-sonnet')).toBe('anthropic');
+  });
+
+  // Verifies system prompt assembly for all combinations
+  it('produces valid output for all agent + model combinations', () => {
+    for (const agentId of AGENT_IDS) {
+      for (const modelId of MODEL_IDS) {
+        const prompt = buildAssembledSystemPrompt({ agentId, modelId });
+        expect(prompt.length).toBeGreaterThan(0);
+        expect(prompt).toContain(getSoulPrompt());
+        expect(prompt).toContain(getAgentPrompt(agentId));
+      }
+    }
+  });
+});
+```
+
+### Prompt Assembly
+
+The system prompt is assembled in layers:
+
+1. Soul prompt (core identity)
+2. Model-specific instructions (Anthropic/OpenAI/Gemini/default)
+3. Environment info (workdir, git repo, platform, date)
+4. Agent role prompt (code/debug/plan/explore/ask/orchestrator)
+5. Project AGENTS.md (if exists)
+6. User ~/.alexi/ALEXI.md (if exists)
+7. Project .alexi/rules/*.md (if exist)
+8. Custom rules (user-provided via API)
+
+```typescript
+import { buildAssembledSystemPrompt } from './agent/system.js';
+
+const systemPrompt = buildAssembledSystemPrompt({
+  agentId: 'code',
+  modelId: 'anthropic--claude-4-sonnet',
+  workdir: process.cwd(),
+  customRules: 'Additional instructions here',
+  skipEnv: false,
+  skipAgentsMd: false
+});
+```
+
 ## Instruction File System
 
 Alexi uses a multi-layer instruction file system to provide context to AI agents:
@@ -366,6 +489,164 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   └── tui/       # Terminal User Interface (Ink + React)
+│   │       ├── components/   # UI components (Header, StatusBar, MessageArea, etc.)
+│   │       ├── context/      # React contexts (Chat, Session, Theme, etc.)
+│   │       ├── dialogs/      # Modal dialogs (ModelPicker, AgentSelector, etc.)
+│   │       ├── hooks/        # Custom hooks (useStreamChat, useCommands, etc.)
+│   │       └── theme/        # Theme configuration and types
+│   ├── core/          # Core orchestration
+│   ├── providers/     # LLM providers
+│   ├── tool/          # Tool system
+│   │   └── tools/     # Individual tools
+│   ├── agent/         # Agent system
+│   │   └── prompts/   # System prompt files (11 files)
+│   ├── bus/           # Event bus
+│   ├── permission/    # Permission system
+│   ├── mcp/           # MCP integration
+│   ├── skill/         # Skill system
+│   ├── config/        # Configuration
+│   ├── log/           # Logging
+│   ├── profile/       # Profile management
+│   └── ...
+├── tests/             # Test files
+│   └── cli/
+│       └── tui/       # TUI component tests (29 test files, 1664 tests)
+├── dist/              # Compiled output
+└── docs/              # Documentation
+```
+
+## Terminal User Interface (TUI) Architecture
+
+Alexi includes a full-featured Terminal User Interface built with Ink v6 and React 19.
+
+### TUI Component Hierarchy
+
+```mermaid
+graph TB
+    App[App.tsx<br/>Main Application] --> Providers[Context Providers]
+    
+    Providers --> Theme[ThemeProvider]
+    Providers --> Session[SessionProvider]
+    Providers --> Chat[ChatProvider]
+    Providers --> Keybind[KeybindProvider]
+    Providers --> Dialog[DialogProvider]
+    Providers --> Attachment[AttachmentProvider]
+    
+    App --> Layout[Layout Components]
+    
+    Layout --> Header[Header<br/>Agent & Model Display]
+    Layout --> MessageArea[MessageArea<br/>Conversation History]
+    Layout --> InputBox[InputBox<br/>User Input]
+    Layout --> StatusBar[StatusBar<br/>Cost & Status]
+    
+    MessageArea --> MessageBubble[MessageBubble<br/>Individual Messages]
+    MessageArea --> ToolCallBlock[ToolCallBlock<br/>Tool Execution Display]
+    
+    MessageBubble --> MarkdownRenderer[MarkdownRenderer<br/>Formatted Output]
+    
+    App --> Dialogs[Dialog System]
+    
+    Dialogs --> ModelPicker[ModelPicker]
+    Dialogs --> AgentSelector[AgentSelector]
+    Dialogs --> PermissionDialog[PermissionDialog]
+    Dialogs --> SessionList[SessionList]
+    Dialogs --> McpManager[McpManager]
+    Dialogs --> CommandPalette[CommandPalette]
+    
+    style App fill:#4CAF50
+    style Providers fill:#2196F3
+    style Layout fill:#FF9800
+    style Dialogs fill:#9C27B0
+```
+
+### TUI Features
+
+1. **Persistent Full-Screen Layout**
+   - Header with agent and model display
+   - Scrollable message area with streaming support
+   - Input box with autocomplete
+   - Status bar with cost tracking
+
+2. **Message Rendering**
+   - Messages rendered inside dynamic viewport (not Static component)
+   - Streaming markdown rendering with syntax highlighting
+   - Collapsible tool call blocks with diff view
+   - Image attachment previews
+
+3. **Interactive Components**
+   - 5 modal dialog overlays
+   - Command palette (Ctrl+K)
+   - Keybinding system (Tab/Shift-Tab, Ctrl+X)
+   - 12 slash commands
+
+4. **React Context Architecture**
+   - `ThemeContext`: Dark/light theme management
+   - `SessionContext`: Session state and management
+   - `ChatContext`: Message history and streaming
+   - `KeybindContext`: Keyboard shortcut handling
+   - `DialogContext`: Modal dialog system
+   - `AttachmentContext`: Image attachment management
+
+### TUI Message Rendering Improvements
+
+The message rendering system was enhanced in v0.3.1 to fix text display issues:
+
+```typescript
+// src/cli/tui/App.tsx
+export function AppLayout(): React.JSX.Element {
+  return (
+    <Box flexDirection="column" height="100%">
+      {/* Message history + streaming area */}
+      <MessageArea
+        messages={messages}
+        streamingText={chat.streamingText}
+        // ... other props
+      />
+
+      {/* Input Box — flexShrink={0} prevents squeezing */}
+      <Box flexShrink={0}>
+        <InputBox {...inputProps} />
+      </Box>
+
+      {/* Status Bar — flexShrink={0} prevents squeezing */}
+      <Box flexShrink={0}>
+        <StatusBar {...statusProps} />
+      </Box>
+    </Box>
+  );
+}
+```
+
+Key improvements:
+- Messages rendered inside viewport instead of Static component
+- flexShrink={0} on input and status bar prevents layout squeezing
+- MarkdownRenderer width calculation accounts for full padding chain (8 chars)
+- User message layout improved with proper text wrapping
+
+### TUI Test Coverage
+
+The TUI system has comprehensive test coverage (29 test files, 1664 tests):
+
+| Component | Test File | Tests | Coverage |
+|-----------|-----------|-------|----------|
+| AttachmentBar | `AttachmentBar.test.tsx` | 154 | Component rendering, attachment display |
+| ChatContext | `ChatContext.test.tsx` | 143 | State management, message handling |
+| MarkdownRenderer | `MarkdownRenderer.test.tsx` | 15 | Markdown parsing, width calculation |
+| McpManager | `McpManager.test.tsx` | 143 | MCP server management dialog |
+| MessageArea | `MessageArea.test.tsx` | Various | Message display, streaming |
+| MessageBubble | `MessageBubble.test.tsx` | 85 | Individual message rendering |
+| SessionList | `SessionList.test.tsx` | 161 | Session list dialog |
+| StatusBar | `StatusBar.test.tsx` | 91 | Status display, cost tracking |
+| useClipboardImage | `useClipboardImage.test.tsx` | 133 | Clipboard paste functionality |
+| useCommands | `useCommands.test.tsx` | 210 | Slash command dispatch |
+
+## Directory Structure
+
+```
+alexi/
+├── src/
+│   ├── cli/           # CLI entry points
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -382,6 +663,76 @@ alexi/
 ├── tests/             # Test files
 ├── dist/              # Compiled output
 └── docs/              # Documentation
+```
+
+## Permission System with Null Sentinel Handling
+
+The permission system supports pattern matching and configuration patching with null sentinels:
+
+```mermaid
+flowchart LR
+    Config[Permission Config] --> Parse[PermissionNext.fromConfig]
+    Parse --> Filter[Filter Null Sentinels]
+    Filter --> Ruleset[Ruleset Array]
+    
+    Ruleset --> Eval[evaluatePatternRules]
+    Eval --> Match[Pattern Matching]
+    Match --> Decision{Decision}
+    
+    Decision -->|allow| Grant[Grant Permission]
+    Decision -->|deny| Reject[Deny Permission]
+    Decision -->|undefined| Default[Use Default]
+    
+    style Config fill:#E3F2FD
+    style Filter fill:#FFF3E0
+    style Decision fill:#4CAF50
+```
+
+### Null Sentinel Handling
+
+Permission configuration supports null sentinels for deletion in config patches:
+
+```typescript
+// src/permission/next.ts
+export const PermissionNext = {
+  fromConfig(config: PermissionConfig): Ruleset {
+    const ruleset: Ruleset = [];
+    for (const [key, value] of Object.entries(config)) {
+      // null is a delete sentinel — skip it
+      if (value === null) {
+        continue;
+      }
+      // Filter out null entries (delete sentinels)
+      if (typeof value === 'object') {
+        ruleset.push(
+          ...Object.entries(value)
+            .filter(([, action]) => action !== null)
+            .map(([pattern, action]) => ({
+              permission: key,
+              pattern: expand(pattern),
+              action: action as Action,
+            }))
+        );
+      }
+    }
+    return ruleset;
+  }
+};
+```
+
+Example usage:
+
+```typescript
+// Null entries are skipped during parsing
+const config = {
+  bash: {
+    '*': 'ask' as const,
+    'npm *': null, // Delete sentinel - removes this rule
+  }
+};
+
+const rules = PermissionNext.fromConfig(config);
+// Result: [{ permission: 'bash', pattern: '*', action: 'ask' }]
 ```
 
 ## Key Design Decisions
