@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-03-20
+
+### Added
+
+- Permission configuration parsing and serialization utilities in `src/permission/next.ts`
+  - `PermissionNext.fromConfig()` converts permission configuration objects to internal ruleset format
+  - `PermissionNext.toConfig()` converts internal rulesets back to configuration objects
+  - Support for null sentinels in permission configuration patches to mark entries for deletion
+  - Comprehensive test coverage for null sentinel handling and config transformations
+- Retry logic for documentation generation workflow
+  - Automatically retries failed documentation generation runs up to 2 times
+  - Detects transient network errors (socket hang up, ECONNRESET, ETIMEDOUT, ENOTFOUND)
+  - Waits 30 seconds between retry attempts for network recovery
+- Quick fix optimization in CI Auto-Fix workflow
+  - Runs deterministic fixes (lint:fix, format) before invoking AI agent
+  - Commits and pushes quick fixes immediately if they resolve all failures
+  - Skips AI agent step when quick fixes resolve all issues
+  - Re-verifies checks after quick fixes to determine if agent is needed
+
+### Changed
+
+- Enhanced CI Auto-Fix workflow with improved reliability
+  - Preserves ci-failures.md file across git checkout operations
+  - Fetches prompt template files from master branch if not present on PR branch
+  - Commits quick fixes separately from AI agent fixes for clearer attribution
+  - Improved verification logic to handle both quick-fix-only and agent-assisted scenarios
+  - Enhanced PR comment generation to distinguish between quick fixes and agent fixes
+- Documentation workflow failure detection improved
+  - Changed failure comment condition from `steps.bot.outputs.success == 'false'` to `steps.bot.outcome == 'failure' || steps.bot.outputs.success == 'false'`
+  - More reliable detection of workflow step failures
+  - Ensures failure comments are posted even when step outcome indicates failure
+
+### Fixed
+
+- CI Auto-Fix workflow no longer loses ci-failures.md during branch checkout
+- Documentation workflow retry mechanism properly handles transient network errors
+- CI Auto-Fix workflow correctly handles zero-width space characters in template expressions
+
 ## [0.2.6] - 2026-03-19
 
 ### Added
@@ -186,7 +224,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

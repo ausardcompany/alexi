@@ -238,6 +238,16 @@ TUI slash commands are tested through the `useCommands` hook with React context 
 |---------|-----------|------------|
 | `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
 
+### Permission System Test Coverage
+
+Permission configuration parsing and serialization has comprehensive test coverage:
+
+| Module | Test File | Test Cases |
+|--------|-----------|------------|
+| Pattern matching | `src/permission/next.test.ts` | 10+ cases |
+| Config parsing | `src/permission/next.test.ts` | 15+ cases |
+| Null sentinel handling | `src/permission/next.test.ts` | 6+ cases |
+
 ### Test Categories
 
 Each tool is tested across multiple categories:

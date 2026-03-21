@@ -451,22 +451,27 @@ Pull requests trigger automated workflows:
    - Updates relevant documentation files
    - Generates Mermaid diagrams
    - Updates CHANGELOG.md
+   - Automatically retries on transient network errors (up to 2 attempts)
 3. **CI Auto-Fix** (for auto/* branches): Automatically fixes CI failures
    - Collects failure logs
-   - Applies quick fixes (lint:fix, format)
-   - Uses Alexi agent to fix remaining issues
+   - Applies quick fixes (lint:fix, format) first
+   - Commits and verifies quick fixes immediately
+   - Uses Alexi agent to fix remaining issues if needed
    - Verifies fixes and commits changes
+   - Rate-limited to 2 runs per branch per day
 
 The documentation update workflow will automatically:
 - Detect which documentation files need updating based on changed code
 - Generate accurate technical documentation using Claude AI
 - Commit documentation changes to your PR branch
 - Ensure documentation stays in sync with code
+- Retry failed generations caused by transient network issues
 
 For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
 - Analyze failure logs with exact error messages
-- Apply deterministic fixes (linting, formatting)
-- Use Alexi agent mode to fix complex issues
+- Apply deterministic fixes (linting, formatting) immediately
+- Commit quick fixes if they resolve all issues
+- Use Alexi agent mode only for complex issues that quick fixes can't resolve
 - Verify all fixes pass the original checks
 - Commit fixes back to the PR branch
 - Rate-limited to 2 runs per branch per day

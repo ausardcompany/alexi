@@ -184,6 +184,82 @@ function updateGlobal(
 ): void
 ```
 
+### Permission Configuration API
+
+Permission configuration supports granular control over tool permissions with pattern-based rules:
+
+```typescript
+// Permission configuration types
+type Action = 'allow' | 'deny' | 'ask';
+type PermissionRule = Action | { [pattern: string]: Action | null } | null;
+
+interface PermissionConfig {
+  [permission: string]: PermissionRule;
+}
+
+interface Rule {
+  permission: string;
+  pattern: string;
+  action: Action;
+}
+
+type Ruleset = Rule[];
+```
+
+#### PermissionNext Utilities
+
+The `PermissionNext` object provides utilities for parsing and serializing permission configurations:
+
+```typescript
+import { PermissionNext } from './permission/next.js';
+
+// Convert configuration object to internal ruleset
+const rules = PermissionNext.fromConfig({
+  read: { '*': 'ask', 'src/*': 'allow' },
+  write: 'deny',
+  bash: { 'npm *': 'allow' }
+});
+// Result: [
+//   { permission: 'read', pattern: '*', action: 'ask' },
+//   { permission: 'read', pattern: 'src/*', action: 'allow' },
+//   { permission: 'write', pattern: '*', action: 'deny' },
+//   { permission: 'bash', pattern: 'npm *', action: 'allow' }
+// ]
+
+// Convert ruleset back to configuration object
+const config = PermissionNext.toConfig(rules);
+// Result: {
+//   read: { '*': 'ask', 'src/*': 'allow' },
+//   write: { '*': 'deny' },
+//   bash: { 'npm *': 'allow' }
+// }
+```
+
+#### Null Sentinel Handling
+
+Permission configurations support null sentinels to mark entries for deletion in configuration patches:
+
+```typescript
+// Null values are treated as delete markers
+const config = {
+  bash: {
+    '*': 'ask',
+    'npm *': null  // This entry will be removed
+  }
+};
+
+const rules = PermissionNext.fromConfig(config);
+// Result: [{ permission: 'bash', pattern: '*', action: 'ask' }]
+// The 'npm *' entry is skipped because it's marked for deletion
+
+// Top-level null values are also skipped
+const config2 = { bash: null };
+const rules2 = PermissionNext.fromConfig(config2);
+// Result: []
+```
+
+This feature enables incremental permission configuration updates where null values indicate permissions to be removed from the stored configuration.
+
 #### Batch Configuration Updates
 
 The `updateGlobal` function allows updating multiple configuration keys atomically:
