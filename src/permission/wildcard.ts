@@ -121,3 +121,32 @@ export function matchCommand(command: string, allowedCommands: string[]): boolea
     return false;
   });
 }
+
+/**
+ * Wildcard namespace for simplified pattern matching API
+ * Compatible with upstream permission drain functionality
+ */
+export namespace Wildcard {
+  /**
+   * Match a value against a wildcard pattern.
+   * Supports '*' as a wildcard character that matches any sequence.
+   *
+   * @param value - The value to test
+   * @param pattern - The pattern with optional wildcards
+   * @returns true if the value matches the pattern
+   */
+  export function match(value: string, pattern: string): boolean {
+    return matchPattern(pattern, value).matched;
+  }
+
+  /**
+   * Check if a pattern matches any item in a list.
+   *
+   * @param patterns - List of patterns to check
+   * @param value - The value to match against
+   * @returns true if any pattern matches the value
+   */
+  export function matchAny(patterns: string[], value: string): boolean {
+    return patterns.some((pattern) => match(value, pattern));
+  }
+}
