@@ -123,10 +123,10 @@ export function matchCommand(command: string, allowedCommands: string[]): boolea
 }
 
 /**
- * Wildcard namespace for simplified pattern matching API
+ * Wildcard object for simplified pattern matching API
  * Compatible with upstream permission drain functionality
  */
-export namespace Wildcard {
+export const Wildcard = {
   /**
    * Match a value against a wildcard pattern.
    * Supports '*' as a wildcard character that matches any sequence.
@@ -135,9 +135,9 @@ export namespace Wildcard {
    * @param pattern - The pattern with optional wildcards
    * @returns true if the value matches the pattern
    */
-  export function match(value: string, pattern: string): boolean {
+  match(value: string, pattern: string): boolean {
     return matchPattern(pattern, value).matched;
-  }
+  },
 
   /**
    * Check if a pattern matches any item in a list.
@@ -146,7 +146,7 @@ export namespace Wildcard {
    * @param value - The value to match against
    * @returns true if any pattern matches the value
    */
-  export function matchAny(patterns: string[], value: string): boolean {
-    return patterns.some((pattern) => match(value, pattern));
-  }
-}
+  matchAny(patterns: string[], value: string): boolean {
+    return patterns.some((pattern) => this.match(value, pattern));
+  },
+} as const;
