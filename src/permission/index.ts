@@ -362,7 +362,7 @@ export class PermissionManager {
   /**
    * Add multiple permission rules at once
    * Triggers a single drain operation to auto-resolve pending permissions
-   * 
+   *
    * @param rules - Array of rules to add
    * @param excludeRequestId - Optional request ID to exclude from drain
    */

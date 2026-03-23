@@ -1,11 +1,11 @@
 /**
  * Permission Drain Module
  * Auto-resolves pending permissions when rules change
- * 
+ *
  * When a user approves/denies a permission rule, other pending permissions
  * for the same or similar patterns should auto-resolve to prevent redundant
  * permission prompts and improve UX consistency.
- * 
+ *
  * Note: This implementation is adapted for Alexi's PermissionManager architecture.
  * It provides the foundation for cross-subagent permission resolution when
  * subagents are fully implemented with independent permission states.
@@ -141,17 +141,14 @@ function evaluateWithRules(
 
 /**
  * Auto-resolve pending permissions now fully covered by approved or denied rules.
- * 
+ *
  * When the user approves/denies a rule, sibling pending permissions
  * for the same pattern resolve or reject automatically.
- * 
+ *
  * @param newRules - Newly added or updated rules
  * @param excludeId - Request ID to exclude (the one that triggered this drain)
  */
-export async function drainCovered(
-  newRules: PermissionRule[],
-  excludeId?: string
-): Promise<void> {
+export async function drainCovered(newRules: PermissionRule[], excludeId?: string): Promise<void> {
   const toResolve: Array<{ id: string; granted: boolean }> = [];
   const toReject: Array<{ id: string; error: Error }> = [];
 
