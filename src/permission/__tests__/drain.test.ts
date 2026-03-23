@@ -12,7 +12,7 @@ import {
   cleanupExpired,
   type PendingPermission,
 } from '../drain.js';
-import type { PermissionRule, PermissionContext } from '../index.js';
+import type { PermissionRule } from '../index.js';
 
 describe('Permission Drain Module', () => {
   beforeEach(() => {
