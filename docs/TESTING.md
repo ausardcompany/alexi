@@ -230,6 +230,22 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
+### Permission System Test Coverage
+
+Permission system components have comprehensive test coverage:
+
+| Component | Test File | Test Cases |
+|-----------|-----------|------------|
+| `drain` | `src/permission/__tests__/drain.test.ts` | 10+ cases |
+
+The permission drain tests cover:
+- Auto-approval of pending permissions covered by new allow rules
+- Auto-denial of pending permissions covered by new deny rules
+- Skipping excluded request IDs
+- Handling partially covered permissions (not fully resolved)
+- Processing multiple pending permissions simultaneously
+- Event publishing for approval/denial actions
+
 ### TUI Command Test Coverage
 
 TUI slash commands are tested through the `useCommands` hook with React context mocking:
@@ -458,7 +474,133 @@ vi.mock('../../../src/tool/index.js', async () => {
 });
 ```
 
-### 3. Test Both Success and Failure Cases
+### 3. Test Permission System Components
+
+Test permission drain and pattern matching:
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { drainCovered } from '../src/permission/drain.js';
+import { matchesPattern } from '../src/permission/next.js';
+
+describe('Permission Drain', () => {
+  it('should auto-approve covered permissions', async () => {
+    const resolve = vi.fn();
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['/project/src/*']
+        },
+        ruleset: [],
+        resolve,
+        reject: vi.fn()
+      }
+    };
+
+    const approved = [
+      { permission: 'file:write', pattern: '/project/**', action: 'allow' }
+    ];
+
+    const mockEvaluate = vi.fn().mockReturnValue({ action: 'allow' });
+
+    await drainCovered(
+      pending,
+      approved,
+      mockEvaluate,
+      { Replied: 'permission.replied' },
+      class extends Error {}
+    );
+
+    expect(resolve).toHaveBeenCalled();
+    expect(pending['req-1']).toBeUndefined();
+  });
+});
+
+describe('Pattern Matching', () => {
+  it('should match glob patterns', () => {
+    expect(matchesPattern('src/**/*.ts', 'src/core/router.ts')).toBe(true);
+    expect(matchesPattern('*.md', 'README.md')).toBe(true);
+    expect(matchesPattern('src/*', 'src/nested/file.ts')).toBe(false);
+  });
+});
+```
+
+### 4. Test Error Backoff System
+
+Test circuit breaker and exponential backoff:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ErrorBackoff, extractStatusCode } from '../src/core/error-backoff.js';
+
+describe('Error Backoff', () => {
+  it('should apply exponential backoff', () => {
+    const backoff = new ErrorBackoff({
+      initialDelayMs: 1000,
+      multiplier: 2
+    });
+
+    backoff.recordError();
+    expect(backoff.shouldBackoff()).toBe(true);
+    expect(backoff.getConsecutiveErrors()).toBe(1);
+
+    backoff.recordSuccess();
+    expect(backoff.shouldBackoff()).toBe(false);
+    expect(backoff.getConsecutiveErrors()).toBe(0);
+  });
+
+  it('should mark 4xx errors as fatal', () => {
+    const backoff = new ErrorBackoff();
+    backoff.recordError(404);
+    expect(backoff.isFatal()).toBe(true);
+  });
+
+  it('should extract status codes from error messages', () => {
+    expect(extractStatusCode('API error: status: 404')).toBe(404);
+    expect(extractStatusCode('Server error: status: 500')).toBe(500);
+    expect(extractStatusCode('No status code')).toBeUndefined();
+  });
+});
+```
+
+### 5. Test Organization Mode Migration
+
+Test agent registry with organization modes:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { migrateOrgModes, isOrgManagedMode } from '../src/config/modes-migrator.js';
+import { getAgentRegistry } from '../src/agent/index.js';
+
+describe('Organization Modes', () => {
+  it('should migrate organization modes', async () => {
+    await migrateOrgModes([
+      {
+        name: 'org-mode',
+        displayName: 'Organization Mode',
+        description: 'Custom org mode',
+        options: { source: 'organization' }
+      }
+    ]);
+
+    const agent = getAgentRegistry().get('org-mode');
+    expect(agent).toBeDefined();
+    expect(agent.displayName).toBe('Organization Mode');
+    expect(isOrgManagedMode(agent)).toBe(true);
+  });
+
+  it('should prevent removal of org-managed agents', () => {
+    expect(() => {
+      getAgentRegistry().remove('org-mode');
+    }).toThrow('Cannot remove organization agent');
+  });
+});
+```
+
+### 6. Test Both Success and Failure Cases
 
 ```typescript
 describe('error handling', () => {

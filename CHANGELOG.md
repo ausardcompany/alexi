@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-03-25
+
+### Added
+
+- Organization-managed agent modes with cloud synchronization support
+- Agent registry now supports `displayName` field for human-readable names
+- Agent removal protection for built-in and organization-managed agents
+- Error backoff system with circuit breaker pattern for graceful API error handling
+- Permission drain utility for auto-resolving pending permissions across sessions
+- Pattern matching utilities for glob-based permission control
+- Graceful MCP server initialization with failure handling and summary logging
+
+### Changed
+
+- Agent schema extended with `displayName` and `options` fields for organization modes
+- Agent registry `remove()` method now prevents removal of built-in and org-managed agents
+- MCP client initialization now handles server failures gracefully without blocking startup
+- Git commit message generation switched to non-streaming completion to prevent infinite loading
+- Zod schema compatibility updated for Zod 4.x with 2-argument `z.record()` usage
+
+### Fixed
+
+- Agent registry now properly populates `displayName` from organization mode options
+- MCP server initialization failures no longer block application startup
+- Git commit message generation no longer hangs with streaming responses
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +250,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.3
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

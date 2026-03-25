@@ -626,6 +626,188 @@ interface Session {
 5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
 6. **Keep User Files Private**: Never commit ~/.alexi/ directory
 
+## Agent Configuration
+
+### Organization-Managed Agents
+
+Alexi supports organization-managed agent modes synchronized from cloud configuration. These agents are protected from removal and can be customized with organization-specific settings.
+
+#### Organization Mode Structure
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string; // Human-readable name
+  description?: string;
+  steps?: string[]; // Workflow steps
+  options?: Record<string, unknown>; // Custom options
+  permission?: Record<string, unknown>; // Permission config
+}
+```
+
+#### Syncing Organization Modes
+
+```typescript
+import { migrateOrgModes } from './config/modes-migrator.js';
+
+await migrateOrgModes([
+  {
+    name: 'review-mode',
+    displayName: 'Code Review Mode',
+    description: 'Specialized for code review tasks',
+    options: {
+      source: 'organization',
+      reviewChecklist: ['security', 'performance', 'style']
+    }
+  }
+]);
+```
+
+Organization modes are:
+- Automatically registered in the agent registry
+- Protected from removal (like built-in agents)
+- Identified by `options.source === 'organization'`
+- Support custom display names for better UX
+
+#### Agent Registry Configuration
+
+```typescript
+import { getAgentRegistry } from './agent/index.js';
+
+const registry = getAgentRegistry();
+
+// Register custom agent
+registry.register({
+  id: 'custom-agent',
+  name: 'Custom Agent',
+  description: 'My custom agent',
+  mode: 'all',
+  systemPrompt: 'You are a helpful assistant...',
+  aliases: ['ca', 'custom']
+});
+
+// Switch agents
+registry.switchTo('debug', 'Debugging issue');
+
+// List agents by mode
+const primaryAgents = registry.list('primary');
+
+// Remove agent (protected agents throw error)
+try {
+  registry.remove('custom-agent'); // OK
+  registry.remove('code'); // Throws: Cannot remove built-in agent
+  registry.remove('org-mode'); // Throws: Cannot remove organization agent
+} catch (error) {
+  console.error(error.message);
+}
+```
+
+## Error Handling Configuration
+
+### Error Backoff Configuration
+
+The error backoff system provides circuit breaker and exponential backoff for API errors:
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number; // Initial delay (default: 1000ms)
+  maxDelayMs: number; // Maximum delay (default: 60000ms)
+  multiplier: number; // Delay multiplier (default: 2)
+  maxRetries: number; // Maximum retries (default: 5)
+}
+```
+
+#### Usage Example
+
+```typescript
+import { ErrorBackoff } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 2000,
+  maxDelayMs: 120000,
+  multiplier: 1.5,
+  maxRetries: 10
+});
+
+// In API call handler
+try {
+  if (backoff.shouldBackoff()) {
+    const delay = backoff.getRemainingBackoffMs();
+    await sleep(delay);
+  }
+  
+  const result = await apiCall();
+  backoff.recordSuccess(); // Reset on success
+  
+} catch (error) {
+  const statusCode = extractStatusCode(error.message);
+  backoff.recordError(statusCode);
+  
+  if (backoff.isFatal()) {
+    // 4xx error - don't retry
+    throw error;
+  }
+  
+  // Will backoff on next call
+}
+```
+
+The backoff system:
+- Exponentially increases delay after each consecutive error
+- Resets immediately on successful request
+- Marks 4xx errors as fatal (no retry)
+- Caps delay at `maxDelayMs`
+- Tracks consecutive error count
+
+## Permission System Configuration
+
+### Permission Pattern Matching
+
+The permission system supports glob patterns for granular control:
+
+```typescript
+// Pattern matching examples
+'*' // Matches any single path segment
+'**' // Matches any number of path segments (recursive)
+'*.ts' // Matches TypeScript files in current directory
+'src/**/*.ts' // Matches TypeScript files anywhere under src/
+'test?.ts' // Matches test1.ts, test2.ts, etc.
+```
+
+### Permission Drain Configuration
+
+The permission drain system automatically resolves pending permissions when rules are updated. This prevents duplicate prompts when multiple agents request the same permission.
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+
+// When user approves a rule, drain covered pending permissions
+await drainCovered(
+  pendingRequests,
+  approvedRules,
+  evaluateFunction,
+  events,
+  DeniedError,
+  excludeRequestId // Optional: skip the request that triggered the drain
+);
+```
+
+The drain system:
+- Evaluates all pending permissions against new rules
+- Auto-approves requests fully covered by allow rules
+- Auto-denies requests covered by deny rules
+- Skips partially covered requests (still need user input)
+- Publishes events via the event bus
+
+## Configuration Best Practices
+
+1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control
+2. **Use User Config for Preferences**: Store personal preferences in ~/.alexi/config.json
+3. **Use Routing Config for Model Selection**: Define routing rules in routing-config.json
+4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
+5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
+6. **Keep User Files Private**: Never commit ~/.alexi/ directory
+
 ## Configuration Validation
 
 Alexi validates configuration files on startup and provides helpful error messages:

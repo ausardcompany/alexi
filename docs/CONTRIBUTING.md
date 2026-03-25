@@ -165,7 +165,24 @@ graph LR
    type PermissionAction = 'read' | 'write' | 'execute';
    ```
 
-3. **Async/Await**: Use async/await over raw promises
+3. **Zod Schema Compatibility**: Use Zod 4.x compatible syntax
+   ```typescript
+   // Good - Zod 4.x compatible
+   z.record(z.string(), z.unknown())
+   
+   // Bad - Zod 3.x syntax (deprecated)
+   z.record(z.unknown())
+   
+   // Example from agent schema
+   const AgentSchema = z.object({
+     id: z.string(),
+     name: z.string(),
+     displayName: z.string().optional(),
+     options: z.record(z.string(), z.unknown()).optional(),
+   });
+   ```
+
+4. **Async/Await**: Use async/await over raw promises
    ```typescript
    // Good
    async function fetchData(): Promise<Data> {
@@ -219,6 +236,43 @@ graph LR
      return null; // Skip parsing, don't fail
    }
    const tree = parser.parse(source);
+   ```
+
+7. **Graceful Failure Handling**: Use Promise.allSettled for parallel operations
+   ```typescript
+   // Good - Handle failures gracefully
+   const results = await Promise.allSettled(
+     servers.map(async (server) => {
+       try {
+         return await connectToServer(server);
+       } catch (error) {
+         console.warn(`Failed to connect to ${server.name}:`, error);
+         return { status: 'failed', error: error.message };
+       }
+     })
+   );
+   
+   // Log summary
+   const successful = results.filter(r => r.status === 'fulfilled').length;
+   const failed = results.filter(r => r.status === 'rejected').length;
+   console.log(`Connected: ${successful}, Failed: ${failed}`);
+   
+   // Bad - One failure blocks everything
+   const results = await Promise.all(
+     servers.map(server => connectToServer(server))
+   );
+   ```
+
+8. **Non-Streaming for Critical Operations**: Use non-streaming completion for operations that must complete
+   ```typescript
+   // Good - Non-streaming for commit messages
+   const result = await provider.complete(messages, { maxTokens: 100 });
+   
+   // Avoid - Streaming can cause infinite loading states
+   const stream = await provider.stream(messages);
+   for await (const chunk of stream) {
+     // May hang if stream doesn't complete properly
+   }
    ```
 
 ### File Organization

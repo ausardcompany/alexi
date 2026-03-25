@@ -416,6 +416,135 @@ SAP_PROXY_API_KEY=your_secret_key
 
 ### Core Interfaces
 
+#### AgentConfig
+
+Agent configuration with organization mode support.
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string; // Human-readable name for org modes
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  tools?: string[]; // Tool IDs this agent can use
+  disabledTools?: string[]; // Explicitly disabled tools
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[]; // Aliases for @syntax switching
+  options?: Record<string, unknown>; // Options for organization-managed agents
+}
+
+// Agent registry API
+import { getAgentRegistry, removeAgent } from './agent/index.js';
+
+const registry = getAgentRegistry();
+
+// Register an agent
+registry.register(agentConfig);
+
+// Get agent by ID or alias
+const agent = registry.get('code');
+
+// Switch to agent
+const switched = registry.switchTo('debug', 'Debugging issue');
+
+// List agents by mode
+const primaryAgents = registry.list('primary');
+
+// Remove agent (throws for built-in and org-managed agents)
+try {
+  registry.remove('custom-agent');
+} catch (error) {
+  // Cannot remove built-in or organization agents
+}
+```
+
+#### ErrorBackoff
+
+Circuit breaker and exponential backoff for API error handling.
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number; // Default: 1000
+  maxDelayMs: number; // Default: 60000
+  multiplier: number; // Default: 2
+  maxRetries: number; // Default: 5
+}
+
+class ErrorBackoff {
+  constructor(config?: Partial<BackoffConfig>);
+  
+  recordError(statusCode?: number): void;
+  recordSuccess(): void;
+  reset(): void;
+  shouldBackoff(): boolean;
+  getRemainingBackoffMs(): number;
+  isFatal(): boolean;
+  getConsecutiveErrors(): number;
+}
+
+// Extract status code from error messages
+function extractStatusCode(errorMessage: string): number | undefined;
+
+// Usage example
+import { ErrorBackoff, extractStatusCode } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff();
+
+try {
+  const result = await apiCall();
+  backoff.recordSuccess();
+} catch (error) {
+  const statusCode = extractStatusCode(error.message);
+  backoff.recordError(statusCode);
+  
+  if (backoff.isFatal()) {
+    throw error; // Don't retry 4xx errors
+  }
+  
+  if (backoff.shouldBackoff()) {
+    await sleep(backoff.getRemainingBackoffMs());
+  }
+}
+```
+
+#### OrgMode
+
+Organization-managed agent mode configuration.
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Modes migrator API
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+await migrateOrgModes([
+  {
+    name: 'org-mode',
+    displayName: 'Organization Mode',
+    description: 'Custom organization agent',
+    options: { source: 'organization' }
+  }
+]);
+
+// Check if agent is org-managed
+const agent = getAgentRegistry().get('org-mode');
+if (isOrgManagedMode(agent)) {
+  console.log('Cannot remove organization-managed agent');
+}
+```
+
 #### UserConfig
 
 User configuration stored in ~/.alexi/config.json
@@ -773,6 +902,97 @@ type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 
 ```typescript
 type PermissionDecision = 'allow' | 'deny' | 'ask';
+```
+
+### Permission Pattern Matching
+
+The permission system supports glob-based pattern matching for granular control:
+
+```typescript
+import { matchesPattern, evaluatePatternRules } from './permission/next.js';
+
+// Check if pattern matches path
+matchesPattern('src/**/*.ts', 'src/core/router.ts'); // true
+matchesPattern('*.md', 'README.md'); // true
+matchesPattern('src/*', 'src/nested/file.ts'); // false (use src/** for recursive)
+
+// Evaluate rules in order
+const rules = [
+  { pattern: 'src/**', action: 'allow' },
+  { pattern: '*.env', action: 'deny' }
+];
+
+const action = evaluatePatternRules(rules, 'src/config.ts'); // 'allow'
+```
+
+### Permission Drain System
+
+Auto-resolve pending permissions when rules are updated:
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+import { PermissionNext } from './permission/next.js';
+
+// Pending permission requests
+const pending = {
+  'req-1': {
+    info: {
+      id: 'req-1',
+      sessionID: 'session-1',
+      permission: 'file:write',
+      patterns: ['/project/src/*']
+    },
+    ruleset: [],
+    resolve: () => console.log('Approved'),
+    reject: (e) => console.error('Denied', e)
+  }
+};
+
+// New approved rules
+const approved = [
+  { permission: 'file:write', pattern: '/project/**', action: 'allow' }
+];
+
+// Drain covered permissions
+await drainCovered(
+  pending,
+  approved,
+  PermissionNext.evaluate,
+  PermissionNext.Event,
+  PermissionNext.DeniedError
+);
+// req-1 is auto-approved since /project/src/* is covered by /project/**
+```
+
+### Permission Configuration Types
+
+```typescript
+type Action = 'allow' | 'deny' | 'ask';
+
+type PermissionRule = Action | { [pattern: string]: Action | null } | null;
+
+interface PermissionConfig {
+  [permission: string]: PermissionRule;
+}
+
+interface Rule {
+  permission: string;
+  pattern: string;
+  action: Action;
+}
+
+type Ruleset = Rule[];
+
+// Convert between config and ruleset formats
+const ruleset = PermissionNext.fromConfig({
+  'file:write': {
+    'src/**': 'allow',
+    '*.env': 'deny'
+  },
+  'bash': 'ask'
+});
+
+const config = PermissionNext.toConfig(ruleset);
 ```
 
 ### Permission Rule

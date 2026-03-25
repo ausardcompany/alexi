@@ -132,9 +132,14 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
+| Permission Pattern | `src/permission/next.ts` | Glob-based pattern matching |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Modes Migrator | `src/config/modes-migrator.ts` | Organization mode synchronization |
+| Error Backoff | `src/core/error-backoff.ts` | Circuit breaker and exponential backoff |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
+| MCP Client | `src/mcp/client.ts` | MCP server connection management |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
@@ -549,3 +554,167 @@ flowchart LR
 - [ ] Add metrics and telemetry
 - [ ] Implement caching layer
 - [ ] Add web UI option
+
+## Error Handling and Resilience
+
+### Error Backoff System
+
+Alexi includes a circuit breaker pattern with exponential backoff for handling API errors gracefully:
+
+```mermaid
+flowchart TB
+    Request[API Request] --> Check{Should Backoff?}
+    Check -->|Yes| Wait[Wait for Backoff Period]
+    Wait --> Retry[Retry Request]
+    Check -->|No| Execute[Execute Request]
+    
+    Execute --> Success{Success?}
+    Success -->|Yes| RecordSuccess[Record Success]
+    Success -->|No| CheckStatus{Check Status Code}
+    
+    CheckStatus -->|4xx| Fatal[Mark as Fatal]
+    CheckStatus -->|5xx| RecordError[Record Error]
+    
+    Fatal --> IncrementErrors[Increment Error Count]
+    RecordError --> IncrementErrors
+    IncrementErrors --> CalcDelay[Calculate Exponential Delay]
+    CalcDelay --> SetBackoff[Set Backoff Until]
+    
+    RecordSuccess --> Reset[Reset Error Count]
+    Reset --> Continue[Continue]
+    SetBackoff --> Continue
+    
+    style Fatal fill:#f44336
+    style RecordSuccess fill:#4CAF50
+    style Wait fill:#FF9800
+```
+
+The error backoff system provides:
+- Exponential backoff with configurable initial delay, max delay, and multiplier
+- Circuit breaker pattern to prevent cascading failures
+- Fatal error detection for 4xx client errors
+- Automatic recovery on successful requests
+
+```typescript
+import { ErrorBackoff } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record an error
+backoff.recordError(statusCode);
+
+// Check if should backoff
+if (backoff.shouldBackoff()) {
+  const remainingMs = backoff.getRemainingBackoffMs();
+  await sleep(remainingMs);
+}
+
+// Record success to reset
+backoff.recordSuccess();
+```
+
+### Permission Drain System
+
+The permission drain system automatically resolves pending permissions when rules are updated:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant SubagentA
+    participant SubagentB
+    participant PermSystem as Permission System
+    participant Drain as Drain Utility
+    
+    SubagentA->>PermSystem: Request permission for pattern X
+    PermSystem->>SubagentA: Ask user (pending)
+    
+    SubagentB->>PermSystem: Request permission for pattern X
+    PermSystem->>SubagentB: Ask user (pending)
+    
+    User->>PermSystem: Approve pattern X
+    PermSystem->>Drain: Drain covered permissions
+    
+    Drain->>Drain: Evaluate SubagentA request
+    Drain->>SubagentA: Auto-approve (pattern covered)
+    
+    Drain->>Drain: Evaluate SubagentB request
+    Drain->>SubagentB: Auto-approve (pattern covered)
+    
+    Note over Drain: Prevents duplicate prompts<br/>for same pattern
+```
+
+When a user approves or denies a permission rule, the drain system:
+1. Evaluates all pending permission requests
+2. Auto-resolves requests fully covered by the new rule
+3. Publishes approval/denial events via the event bus
+4. Removes resolved requests from the pending queue
+
+## Organization-Managed Agents
+
+Alexi supports organization-managed agent modes synchronized from cloud configuration:
+
+```mermaid
+flowchart LR
+    Cloud[Cloud Configuration] --> Sync[Modes Migrator]
+    Sync --> Registry[Agent Registry]
+    
+    subgraph "Organization Modes"
+        OrgMode1[Mode 1]
+        OrgMode2[Mode 2]
+        OrgMode3[Mode 3]
+    end
+    
+    subgraph "Built-in Agents"
+        Code[Code Agent]
+        Debug[Debug Agent]
+        Plan[Plan Agent]
+    end
+    
+    Registry --> OrgMode1
+    Registry --> OrgMode2
+    Registry --> OrgMode3
+    Registry --> Code
+    Registry --> Debug
+    Registry --> Plan
+    
+    OrgMode1 -.->|Cannot Remove| Protected[Protected]
+    Code -.->|Cannot Remove| Protected
+    
+    style OrgMode1 fill:#9C27B0
+    style OrgMode2 fill:#9C27B0
+    style OrgMode3 fill:#9C27B0
+    style Code fill:#4CAF50
+    style Protected fill:#f44336
+```
+
+Organization modes are:
+- Synchronized from cloud configuration via `migrateOrgModes()`
+- Protected from removal (like built-in agents)
+- Identified by `options.source === 'organization'`
+- Support custom `displayName` for human-readable names
+- Registered in the global agent registry
+
+```typescript
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+await migrateOrgModes([
+  {
+    name: 'custom-mode',
+    displayName: 'Custom Organization Mode',
+    description: 'Organization-specific agent',
+    options: { source: 'organization' }
+  }
+]);
+
+// Check if agent is org-managed
+const agent = getAgentRegistry().get('custom-mode');
+if (isOrgManagedMode(agent)) {
+  console.log('This is an organization-managed agent');
+}
+```
