@@ -58,6 +58,7 @@ export function buildHeuristicMessage(files: ChangedFile[], conventional: boolea
 
 /**
  * Generate commit message via LLM (cheap model)
+ * Uses non-streaming completion to ensure full message is received
  */
 async function generateWithLLM(files: ChangedFile[], config: GitConfig): Promise<string | null> {
   try {
@@ -79,6 +80,8 @@ async function generateWithLLM(files: ChangedFile[], config: GitConfig): Promise
       ? `Generate a single Conventional Commits message (type(scope): description) for these AI-edited files. Be concise, max 72 chars, no quotes:\n${fileList}`
       : `Generate a single short git commit message (max 72 chars, no quotes) describing these AI-edited files:\n${fileList}`;
 
+    // Use non-streaming complete() to ensure full response is received
+    // This prevents infinite loading states that can occur with streaming
     const result = await provider.complete(
       [
         {

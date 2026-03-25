@@ -179,13 +179,50 @@ export class McpClientManager {
 
   /**
    * Connect to all enabled servers from config
+   * Enhanced with graceful failure handling and summary logging
    */
   async connectFromConfig(): Promise<void> {
     const config = loadMcpConfig();
 
-    for (const server of config.servers) {
-      if (server.enabled && server.autoConnect) {
-        await this.connect(server);
+    // Add graceful handling for server initialization failures
+    const servers = config.servers.filter((s) => s.enabled && s.autoConnect);
+    const results = await Promise.allSettled(
+      servers.map(async (server) => {
+        try {
+          const connection = await this.connect(server);
+          if (connection.status === 'connected') {
+            return { server: server.name, status: 'connected', tools: connection.tools.length };
+          } else {
+            return {
+              server: server.name,
+              status: 'failed',
+              error: connection.error || 'Unknown error',
+            };
+          }
+        } catch (error) {
+          console.warn(`Failed to initialize MCP server ${server.name}:`, error);
+          return {
+            server: server.name,
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })
+    );
+
+    // Log initialization summary
+    const successful = results.filter(
+      (r) => r.status === 'fulfilled' && r.value.status === 'connected'
+    ).length;
+    const failed = results.filter(
+      (r) => r.status === 'rejected' || (r.status === 'fulfilled' && r.value.status === 'failed')
+    ).length;
+
+    if (servers.length > 0) {
+      if (failed > 0) {
+        console.warn(`MCP initialization: ${successful} connected, ${failed} failed`);
+      } else {
+        console.log(`MCP initialization: ${successful} server(s) connected`);
       }
     }
   }

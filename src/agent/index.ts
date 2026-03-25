@@ -15,6 +15,7 @@ export type AgentMode = 'primary' | 'subagent' | 'all';
 export const AgentSchema = z.object({
   id: z.string(),
   name: z.string(),
+  displayName: z.string().optional(), // Human-readable name for org modes
   description: z.string(),
   mode: z.enum(['primary', 'subagent', 'all']).default('all'),
   systemPrompt: z.string(),
@@ -27,6 +28,8 @@ export const AgentSchema = z.object({
   maxTokens: z.number().optional(),
   // Aliases for @syntax switching
   aliases: z.array(z.string()).optional(),
+  // Options for organization-managed agents
+  options: z.record(z.unknown()).optional(),
 });
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
@@ -127,6 +130,16 @@ class AgentRegistry {
    */
   register(config: AgentConfig): Agent {
     const validated = AgentSchema.parse(config);
+    
+    // Populate displayName from org mode options if available
+    if (
+      validated.options?.displayName &&
+      typeof validated.options.displayName === 'string' &&
+      !validated.displayName
+    ) {
+      validated.displayName = validated.options.displayName;
+    }
+    
     const agent = createAgent(validated);
     this.agents.set(agent.id, agent);
 
@@ -190,6 +203,43 @@ class AgentRegistry {
   }
 
   /**
+   * Remove an agent by id or alias
+   * Prevents removal of built-in and organization-managed agents
+   */
+  remove(idOrAlias: string): boolean {
+    const agent = this.get(idOrAlias);
+    if (!agent) {
+      throw new Error(`Agent not found: ${idOrAlias}`);
+    }
+
+    // Check if this is a built-in agent
+    const isBuiltIn = builtInAgents.some((a) => a.id === agent.id);
+    if (isBuiltIn) {
+      throw new Error(`Cannot remove built-in agent: ${agent.id}`);
+    }
+
+    // Prevent removal of organization-managed agents
+    if (agent.options?.source === 'organization') {
+      throw new Error(
+        `Cannot remove organization agent — manage it from the cloud dashboard: ${agent.id}`
+      );
+    }
+
+    // Remove the agent
+    this.agents.delete(agent.id);
+
+    // Remove aliases
+    if (agent.aliases) {
+      for (const alias of agent.aliases) {
+        this.aliasMap.delete(alias.toLowerCase());
+      }
+    }
+    this.aliasMap.delete(agent.id.toLowerCase());
+
+    return true;
+  }
+
+  /**
    * Parse @syntax from message and switch if found
    * Returns the cleaned message
    */
@@ -229,6 +279,10 @@ export function getCurrentAgent(): Agent {
 
 export function switchAgent(idOrAlias: string, reason?: string): Agent | null {
   return getAgentRegistry().switchTo(idOrAlias, reason);
+}
+
+export function removeAgent(idOrAlias: string): boolean {
+  return getAgentRegistry().remove(idOrAlias);
 }
 
 export function parseAgentSwitch(message: string): {

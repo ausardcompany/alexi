@@ -574,15 +574,6 @@ export const defaultRules: PermissionRule[] = [
     decision: 'allow',
     priority: 0,
   },
-  // Security: require explicit approval for bash commands
-  {
-    id: 'ask-bash',
-    name: 'Ask for Bash Commands',
-    description: 'Require explicit approval for bash commands',
-    tools: ['bash'],
-    decision: 'ask',
-    priority: 5,
-  },
   // Deny sensitive files
   {
     id: 'deny-secrets',
