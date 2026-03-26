@@ -132,9 +132,14 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
+| Permission Next | `src/permission/next.ts` | Pattern matching utilities |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Modes Migrator | `src/config/modes-migrator.ts` | Organization mode synchronization |
+| Error Backoff | `src/core/error-backoff.ts` | Circuit breaker and exponential backoff |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
+| MCP Client | `src/mcp/client.ts` | MCP server connection management |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
@@ -541,6 +546,323 @@ flowchart LR
     Deploy -->|No| Fix[Fix Issues]
     Fix --> Code
 ```
+
+## Organization-Managed Agents
+
+Alexi supports organization-managed agent modes that sync from cloud configuration, enabling centralized agent management across teams.
+
+### Organization Mode Architecture
+
+```mermaid
+graph TB
+    subgraph Cloud[\"Cloud Configuration\"]
+        OrgModes[Organization Modes]
+    end
+    
+    subgraph Local[\"Local Agent Registry\"]
+        Registry[Agent Registry]
+        BuiltIn[Built-in Agents]
+        OrgAgents[Organization Agents]
+    end
+    
+    OrgModes -->|Sync| Migrator[Modes Migrator]
+    Migrator -->|Register| Registry
+    BuiltIn -->|Protected| Registry
+    OrgAgents -->|Protected| Registry
+    
+    Registry -->|Switch| CurrentAgent[Current Agent]
+    
+    style OrgModes fill:#E3F2FD
+    style Migrator fill:#4CAF50
+    style Registry fill:#FFF3E0
+```
+
+### Organization Mode Features
+
+1. **Cloud Synchronization**: Organization modes are synced from cloud configuration
+2. **Display Names**: Human-readable names for better UX
+3. **Protection**: Organization agents cannot be removed locally
+4. **Metadata**: Options field tracks source and additional configuration
+5. **Dashboard Management**: Changes must be made through cloud dashboard
+
+```typescript
+// Organization mode structure
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Migrated to agent config
+const agentConfig: AgentConfig = {
+  id: mode.name,
+  name: mode.displayName ?? mode.name,
+  displayName: mode.displayName,
+  description: mode.description ?? '',
+  mode: 'all',
+  systemPrompt: '',
+  options: {
+    ...mode.options,
+    source: 'organization',
+    displayName: mode.displayName,
+  },
+};
+```
+
+## Error Backoff System
+
+The error backoff system provides resilient API error handling with circuit breaker pattern and exponential backoff.
+
+### Error Backoff Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Error: API Error
+    Error --> Backoff: Record Error
+    Backoff --> CheckStatus: Time Elapsed
+    CheckStatus --> Normal: Success
+    CheckStatus --> Backoff: Still Backing Off
+    CheckStatus --> Fatal: 4xx Error
+    Fatal --> [*]
+    
+    note right of Backoff
+        Exponential delay:
+        initialDelay * multiplier^(errors-1)
+        Max: maxDelayMs
+    end note
+```
+
+### Backoff Configuration
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Default: 1000ms
+  maxDelayMs: number;      // Default: 60000ms
+  multiplier: number;      // Default: 2
+  maxRetries: number;      // Default: 5
+}
+
+// Usage
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record error (with optional status code)
+backoff.recordError(503);
+
+// Check if should wait
+if (backoff.shouldBackoff()) {
+  const remainingMs = backoff.getRemainingBackoffMs();
+  await sleep(remainingMs);
+}
+
+// Check for fatal errors
+if (backoff.isFatal()) {
+  throw new Error('Fatal API error - client issue');
+}
+
+// Record success to reset
+backoff.recordSuccess();
+```
+
+### Fatal Error Detection
+
+The backoff system detects fatal 4xx client errors that should not be retried:
+
+- 400 Bad Request
+- 401 Unauthorized
+- 403 Forbidden
+- 404 Not Found
+
+These errors indicate client-side issues that won't be resolved by retrying.
+
+## Permission Drain System
+
+The permission drain system automatically resolves pending permissions when new rules are approved or denied, enabling seamless cross-session permission synchronization.
+
+### Permission Drain Flow
+
+```mermaid
+sequenceDiagram
+    participant SubA as Subagent A
+    participant User
+    participant Drain as Permission Drain
+    participant SubB as Subagent B
+    
+    SubA->>User: Request Permission (file:write /project/*)
+    User->>SubA: Approve Rule
+    SubA->>Drain: Trigger Drain (approved rules)
+    
+    Note over Drain,SubB: SubB has pending permission<br/>for same pattern
+    
+    Drain->>Drain: Evaluate SubB's pending<br/>against new rules
+    Drain->>SubB: Auto-approve (covered by rule)
+    SubB->>SubB: Resume execution
+```
+
+### Drain Algorithm
+
+```typescript
+// Auto-resolve pending permissions
+await drainCovered(
+  pending,           // Pending permission requests
+  approved,          // Newly approved/denied rules
+  evaluate,          // Rule evaluation function
+  events,            // Event bus for notifications
+  DeniedError,       // Error class for denials
+  exclude            // Optional: exclude triggering request
+);
+
+// Evaluation logic
+for (const [id, entry] of Object.entries(pending)) {
+  // Evaluate all patterns against current rules
+  const actions = entry.info.patterns.map((pattern) =>
+    evaluate(entry.info.permission, pattern, entry.ruleset, approved)
+  );
+  
+  const denied = actions.some((r) => r.action === 'deny');
+  const allowed = !denied && actions.every((r) => r.action === 'allow');
+  
+  if (denied) {
+    entry.reject(new DeniedError(matchingRules));
+  } else if (allowed) {
+    entry.resolve();
+  }
+}
+```
+
+### Pattern Matching
+
+The drain system uses glob pattern matching for granular permission control:
+
+```typescript
+// Pattern matching examples
+matchesPattern('*.md', 'README.md')           // true
+matchesPattern('src/**', 'src/core/file.ts')  // true
+matchesPattern('/project/*', '/project/file') // true
+matchesPattern('*', 'any-file')               // true
+
+// Rule evaluation
+const rules = [
+  { pattern: 'src/**', action: 'allow' },
+  { pattern: '*.test.ts', action: 'deny' }
+];
+
+evaluatePatternRules(rules, 'src/core/file.ts')    // 'allow'
+evaluatePatternRules(rules, 'src/core/file.test.ts') // 'deny'
+```
+
+## MCP Client Resilience
+
+The MCP (Model Context Protocol) client manager provides graceful failure handling for server initialization.
+
+### MCP Connection Flow
+
+```mermaid
+graph TB
+    Config[MCP Config] --> Filter[Filter Enabled Servers]
+    Filter --> Parallel[Parallel Connection]
+    
+    Parallel --> Server1[Server 1]
+    Parallel --> Server2[Server 2]
+    Parallel --> Server3[Server 3]
+    
+    Server1 --> Result1{Success?}
+    Server2 --> Result2{Success?}
+    Server3 --> Result3{Success?}
+    
+    Result1 -->|Yes| Connected1[Connected]
+    Result1 -->|No| Failed1[Failed - Warn]
+    Result2 -->|Yes| Connected2[Connected]
+    Result2 -->|No| Failed2[Failed - Warn]
+    Result3 -->|Yes| Connected3[Connected]
+    Result3 -->|No| Failed3[Failed - Warn]
+    
+    Connected1 --> Summary[Log Summary]
+    Connected2 --> Summary
+    Connected3 --> Summary
+    Failed1 --> Summary
+    Failed2 --> Summary
+    Failed3 --> Summary
+    
+    style Connected1 fill:#4CAF50
+    style Connected2 fill:#4CAF50
+    style Connected3 fill:#4CAF50
+    style Failed1 fill:#FF9800
+    style Failed2 fill:#FF9800
+    style Failed3 fill:#FF9800
+```
+
+### Graceful Failure Handling
+
+```typescript
+// Connect to all enabled servers
+async connectFromConfig(): Promise<void> {
+  const config = loadMcpConfig();
+  const servers = config.servers.filter((s) => s.enabled && s.autoConnect);
+  
+  // Use Promise.allSettled for parallel connections
+  const results = await Promise.allSettled(
+    servers.map(async (server) => {
+      try {
+        const connection = await this.connect(server);
+        if (connection.status === 'connected') {
+          return { 
+            server: server.name, 
+            status: 'connected', 
+            tools: connection.tools.length 
+          };
+        } else {
+          return {
+            server: server.name,
+            status: 'failed',
+            error: connection.error || 'Unknown error',
+          };
+        }
+      } catch (error) {
+        console.warn(`Failed to initialize MCP server ${server.name}:`, error);
+        return {
+          server: server.name,
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    })
+  );
+  
+  // Log initialization summary
+  const successful = results.filter(
+    (r) => r.status === 'fulfilled' && r.value.status === 'connected'
+  ).length;
+  const failed = results.filter(
+    (r) => r.status === 'rejected' || 
+           (r.status === 'fulfilled' && r.value.status === 'failed')
+  ).length;
+  
+  if (servers.length > 0) {
+    if (failed > 0) {
+      console.warn(`MCP initialization: ${successful} connected, ${failed} failed`);
+    } else {
+      console.log(`MCP initialization: ${successful} server(s) connected`);
+    }
+  }
+}
+```
+
+### Benefits
+
+1. **Parallel Initialization**: All servers connect simultaneously
+2. **Isolated Failures**: One server failure doesn't block others
+3. **Detailed Logging**: Summary shows success/failure counts
+4. **Graceful Degradation**: Application continues with available servers
+5. **Error Tracking**: Failed servers logged with error messages
 
 ## Future Improvements
 

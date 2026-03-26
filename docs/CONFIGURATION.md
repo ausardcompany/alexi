@@ -465,6 +465,122 @@ Architectural invariants that should never be violated.
 
 ## Configuration Examples
 
+### Organization Mode Configuration
+
+Organization-managed agent modes can be synced from cloud configuration for centralized team management.
+
+```typescript
+// Organization mode structure
+interface OrgMode {
+  name: string;              // Unique mode identifier
+  displayName?: string;      // Human-readable name
+  description?: string;      // Mode description
+  steps?: string[];          // Workflow steps
+  options?: Record<string, unknown>;  // Additional metadata
+  permission?: Record<string, unknown>; // Permission configuration
+}
+
+// Example organization modes
+const orgModes: OrgMode[] = [
+  {
+    name: 'code-review',
+    displayName: 'Code Review Mode',
+    description: 'Optimized for reviewing pull requests',
+    steps: [
+      'Analyze code changes',
+      'Check for common issues',
+      'Suggest improvements'
+    ],
+    options: {
+      priority: 'high',
+      team: 'engineering'
+    }
+  },
+  {
+    name: 'documentation',
+    displayName: 'Documentation Mode',
+    description: 'Specialized for technical writing',
+    options: {
+      style: 'technical',
+      audience: 'developers'
+    }
+  }
+];
+```
+
+Organization modes are:
+- Protected from local removal
+- Managed through cloud dashboard
+- Automatically synced to local agent registry
+- Identified by `options.source === 'organization'`
+
+### Error Backoff Configuration
+
+Configure API error handling with exponential backoff:
+
+```typescript
+import { ErrorBackoff } from './core/error-backoff.js';
+
+// Default configuration
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,  // Start with 1 second delay
+  maxDelayMs: 60000,     // Cap at 60 seconds
+  multiplier: 2,         // Double delay each time
+  maxRetries: 5          // Give up after 5 errors
+});
+
+// Aggressive retry strategy
+const aggressiveBackoff = new ErrorBackoff({
+  initialDelayMs: 500,   // Start faster
+  maxDelayMs: 30000,     // Lower cap
+  multiplier: 1.5,       // Slower growth
+  maxRetries: 10         // More retries
+});
+
+// Conservative retry strategy
+const conservativeBackoff = new ErrorBackoff({
+  initialDelayMs: 2000,  // Start slower
+  maxDelayMs: 120000,    // Higher cap (2 minutes)
+  multiplier: 3,         // Faster growth
+  maxRetries: 3          // Fewer retries
+});
+```
+
+### Permission Configuration with Drain
+
+Configure automatic permission resolution for multi-agent workflows:
+
+```json
+{
+  "permissions": {
+    "file:write": {
+      "src/**": "allow",
+      "*.test.ts": "deny",
+      "docs/**": "allow"
+    },
+    "bash": {
+      "npm test": "allow",
+      "rm -rf": "deny",
+      "*": "ask"
+    },
+    "file:read": "allow"
+  }
+}
+```
+
+When a permission is approved in one session, pending permissions in other sessions are automatically resolved:
+
+```typescript
+// Session A requests permission
+// User approves: file:write src/**
+
+// Session B has pending permission for file:write src/core/file.ts
+// Automatically approved by drain system
+
+// Session C has pending permission for file:write test.test.ts
+// Automatically denied (matches *.test.ts deny rule)
+```
+
 ### Cost Optimization
 
 Prioritize cheaper models while maintaining quality.

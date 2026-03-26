@@ -577,6 +577,79 @@ getResource: (params, context) => {
 }
 ```
 
+### Error Handling and Resilience
+
+Alexi includes robust error handling systems for production reliability:
+
+**Error Backoff System**:
+```typescript
+import { ErrorBackoff } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record errors and check backoff state
+backoff.recordError(statusCode);
+if (backoff.shouldBackoff()) {
+  await sleep(backoff.getRemainingBackoffMs());
+}
+
+// Check for fatal errors
+if (backoff.isFatal()) {
+  throw new Error('Fatal client error');
+}
+
+// Reset on success
+backoff.recordSuccess();
+```
+
+**Permission Drain System**:
+```typescript
+import { drainCovered } from './permission/drain.js';
+
+// Auto-resolve pending permissions when rules change
+await drainCovered(
+  pending,
+  approved,
+  evaluate,
+  events,
+  DeniedError,
+  exclude
+);
+```
+
+**MCP Client Resilience**:
+```typescript
+// Graceful failure handling for MCP servers
+await mcpManager.connectFromConfig();
+// Logs: "MCP initialization: 2 connected, 1 failed"
+// Application continues with available servers
+```
+
+### Organization-Managed Agents
+
+When working with organization-managed agents:
+
+1. **Do not remove**: Organization agents are protected from local removal
+2. **Dashboard management**: Changes must be made through cloud dashboard
+3. **Sync from cloud**: Use `migrateOrgModes()` to sync from cloud config
+4. **Metadata tracking**: Organization agents have `options.source === 'organization'`
+
+```typescript
+// Check if agent is organization-managed
+import { isOrgManagedMode } from './config/modes-migrator.js';
+
+const agent = getCurrentAgent();
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+  // Cannot be removed locally
+}
+```
+
 ### Contributing to Automation
 
 When modifying workflows:

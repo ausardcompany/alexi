@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-03-26
+
+### Added
+
+- Organization-managed agent modes with cloud synchronization
+  - New modes-migrator module syncs organization-managed modes from cloud configuration
+  - Organization agents support displayName field for human-readable names
+  - Organization agents include options metadata with source tracking
+  - Agent registry prevents removal of organization-managed agents with clear error messages
+- Error backoff system with circuit breaker pattern for API resilience
+  - Exponential backoff with configurable initial delay, max delay, and multiplier
+  - Fatal error detection for 4xx client errors
+  - Backoff state tracking with remaining time calculation
+  - Status code extraction from error messages for targeted retry logic
+- Permission drain system for automatic permission resolution
+  - Auto-approve pending permissions covered by new allow rules
+  - Auto-deny pending permissions covered by new deny rules
+  - Cross-session permission synchronization for sibling subagents
+  - Pattern matching utilities with glob wildcard support
+- Enhanced MCP client initialization with graceful failure handling
+  - Promise.allSettled for parallel server connections
+  - Detailed initialization summary logging with success/failure counts
+  - Individual server failure warnings without blocking other servers
+- Agent removal API with protection for built-in and organization agents
+  - removeAgent function prevents deletion of built-in agents
+  - Protection for organization-managed agents with dashboard reference
+  - Automatic cleanup of agent aliases on removal
+
+### Changed
+
+- Git commit message generation now uses non-streaming completion
+  - Prevents infinite loading states in commit workflows
+  - Ensures full message is received before returning
+  - Improves reliability in automated git operations
+- Agent registry displayName population from organization mode options
+  - Automatically extracts displayName from options.displayName if not set
+  - Maintains backward compatibility with existing agent definitions
+
+### Fixed
+
+- MCP server initialization failures no longer block application startup
+- Permission drain correctly handles partial pattern matches
+- Error backoff system properly identifies fatal 4xx errors
+
+## [0.3.3] - 2026-03-25
+
+### Added
+
+- Enhanced upstream sync workflow with better conflict resolution
+
+## [0.3.2] - 2026-03-24
+
+### Added
+
+- Improved sync workflow automation
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -19,14 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- Full TUI (Terminal User Interface) — component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
   - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
   - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
-  - Dark/light theme support via ThemeContext with `/theme` command
-  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
+  - Dark/light theme support via ThemeContext with /theme command
+  - Image attachment support: Ctrl+V clipboard paste and /image file attachment
   - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
   - Event bus integration for real-time tool execution and permission prompt display
 - 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
@@ -35,21 +91,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Interactive mode (`alexi interactive`) now launches the TUI instead of the legacy readline REPL
-- `src/cli/interactive.ts` marked as `@deprecated` in favor of `src/cli/tui/`
+- Interactive mode (alexi interactive) now launches the TUI instead of the legacy readline REPL
+- src/cli/interactive.ts marked as deprecated in favor of src/cli/tui/
 
 ### Dependencies
 
-- Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
-- Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
-- Added dev: `ink-testing-library`, `@types/diff`
-- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
+- Added runtime: marked, marked-terminal, cli-highlight, diff, terminal-link
+- Added runtime: ink-text-input, ink-select-input, ink-spinner
+- Added dev: ink-testing-library, @types/diff
+- Existing: ink (v6.8.0) and react (v19.2.4) now actively used
 
 ## [0.2.6] - 2026-03-19
 
 ### Added
 
-- Unit tests for TUI slash commands (`/image` and `/clear-images`)
+- Unit tests for TUI slash commands (/image and /clear-images)
   - Tests command registration with correct names and aliases
   - Tests clipboard paste functionality when no arguments provided
   - Tests file path handling for image attachments
@@ -62,8 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Enhanced user configuration API with batch update support
-  - Added `updateGlobal()` function for atomic multi-key updates
-  - Added `UpdateGlobalOptions` interface with disposal control
+  - Added updateGlobal() function for atomic multi-key updates
+  - Added UpdateGlobalOptions interface with disposal control
   - Maintains backward compatibility with default dispose behavior
 - Edit tool now preserves line endings during replacements
   - Automatically detects CRLF vs LF line endings in target files
@@ -224,7 +280,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/ausardcompany/alexi/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/ausardcompany/alexi/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

@@ -44,6 +44,153 @@ alexi chat -m "What is AI?" --auto-route --prefer-cheap
 alexi chat -m "Tell me more" --session abc-123 --auto-route
 ```
 
+### agent
+
+Run agentic chat with tool execution for automated workflows.
+
+```bash
+alexi agent -m <message> [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-m, --message <text>` | string | Message to send (required) |
+| `--model <id>` | string | Override model selection |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
+| `--session <id>` | string | Continue existing session |
+| `--system <prompt>` | string | System prompt for conversation |
+| `--max-iterations <n>` | number | Maximum tool execution iterations (default: 50) |
+| `--workdir <path>` | string | Working directory for file operations (default: cwd) |
+
+#### Examples
+
+```bash
+# Run agentic task with auto-routing
+alexi agent -m "Refactor the authentication module" --auto-route
+
+# Run with specific model
+alexi agent -m "Fix the failing tests" --model anthropic--claude-4-sonnet
+
+# Run with custom iteration limit
+alexi agent -m "Implement the new feature" --max-iterations 100
+```
+
+### Agent Management API
+
+Alexi provides TypeScript APIs for managing agents programmatically.
+
+#### Agent Types
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;        // Human-readable name for org modes
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  tools?: string[];            // Tool IDs this agent can use
+  disabledTools?: string[];    // Explicitly disabled tools
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];          // Aliases for @syntax switching
+  options?: Record<string, unknown>; // Organization mode metadata
+}
+
+interface Agent extends AgentConfig {
+  canUseTool(toolId: string): boolean;
+}
+```
+
+#### Agent Registry Functions
+
+```typescript
+import { 
+  getAgentRegistry, 
+  getCurrentAgent, 
+  switchAgent,
+  removeAgent,
+  parseAgentSwitch,
+  parseAgentMention
+} from './agent/index.js';
+
+// Get the global agent registry
+const registry = getAgentRegistry();
+
+// Register a new agent
+const agent = registry.register({
+  id: 'custom-agent',
+  name: 'Custom Agent',
+  description: 'My custom agent',
+  mode: 'all',
+  systemPrompt: 'You are a helpful assistant...',
+  aliases: ['custom', 'ca']
+});
+
+// Get current agent
+const current = getCurrentAgent();
+console.log(current.id); // 'code'
+
+// Switch to different agent
+const switched = switchAgent('debug', 'User requested debug mode');
+if (switched) {
+  console.log(`Switched to ${switched.name}`);
+}
+
+// Remove an agent (protected for built-in and org agents)
+try {
+  removeAgent('custom-agent'); // OK
+  removeAgent('code');         // Error: Cannot remove built-in agent
+  removeAgent('org-mode');     // Error: Cannot remove organization agent
+} catch (error) {
+  console.error(error.message);
+}
+
+// Parse @syntax from message
+const result = parseAgentSwitch('@debug fix the bug');
+// { message: 'fix the bug', switched: true, agent: {...} }
+
+// Parse @mention without switching
+const mention = parseAgentMention('@plan analyze the code');
+// { agentId: 'plan', cleanMessage: 'analyze the code' }
+```
+
+#### Organization-Managed Agents
+
+Organization-managed agents are synced from cloud configuration and protected from local removal:
+
+```typescript
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+const orgModes = [
+  {
+    name: 'team-mode',
+    displayName: 'Team Collaboration Mode',
+    description: 'Optimized for team workflows',
+    options: { priority: 'high' }
+  }
+];
+
+await migrateOrgModes(orgModes);
+
+// Check if agent is organization-managed
+const agent = getCurrentAgent();
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+}
+```
+
+Organization agents have:
+- `options.source === 'organization'` metadata
+- Protection from local removal
+- Automatic displayName population from options
+- Dashboard-only management
+
 ### models
 
 List available models/deployments from SAP AI Core.
@@ -914,6 +1061,232 @@ try {
   }
   // Handle error
 }
+```
+
+### Error Backoff System
+
+The error backoff system provides resilient API error handling with circuit breaker pattern and exponential backoff.
+
+#### ErrorBackoff Class
+
+```typescript
+import { ErrorBackoff, extractStatusCode } from './core/error-backoff.js';
+
+interface BackoffConfig {
+  initialDelayMs: number;  // Default: 1000ms
+  maxDelayMs: number;      // Default: 60000ms
+  multiplier: number;      // Default: 2
+  maxRetries: number;      // Default: 5
+}
+
+class ErrorBackoff {
+  constructor(config?: Partial<BackoffConfig>);
+  
+  // Record an error occurrence
+  recordError(statusCode?: number): void;
+  
+  // Record a successful operation (resets backoff)
+  recordSuccess(): void;
+  
+  // Reset all state
+  reset(): void;
+  
+  // Check if currently in backoff period
+  shouldBackoff(): boolean;
+  
+  // Get remaining backoff time in milliseconds
+  getRemainingBackoffMs(): number;
+  
+  // Check if error is fatal (4xx client error)
+  isFatal(): boolean;
+  
+  // Get consecutive error count
+  getConsecutiveErrors(): number;
+}
+
+// Extract status code from error messages
+function extractStatusCode(errorMessage: string): number | undefined;
+```
+
+#### Usage Example
+
+```typescript
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+async function retryableOperation() {
+  while (true) {
+    // Check if we should wait before retrying
+    if (backoff.shouldBackoff()) {
+      const delay = backoff.getRemainingBackoffMs();
+      console.log(`Backing off for ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      continue;
+    }
+    
+    // Check if we've hit a fatal error
+    if (backoff.isFatal()) {
+      throw new Error('Fatal error - cannot retry');
+    }
+    
+    try {
+      const result = await apiCall();
+      backoff.recordSuccess(); // Reset on success
+      return result;
+    } catch (error) {
+      const statusCode = extractStatusCode(error.message);
+      backoff.recordError(statusCode);
+      
+      // Check if max retries exceeded
+      if (backoff.getConsecutiveErrors() >= 5) {
+        throw new Error('Max retries exceeded');
+      }
+    }
+  }
+}
+```
+
+#### Backoff Behavior
+
+The backoff delay grows exponentially with each consecutive error:
+
+| Error Count | Delay (ms) | Calculation |
+|-------------|------------|-------------|
+| 1 | 1000 | 1000 * 2^0 |
+| 2 | 2000 | 1000 * 2^1 |
+| 3 | 4000 | 1000 * 2^2 |
+| 4 | 8000 | 1000 * 2^3 |
+| 5 | 16000 | 1000 * 2^4 |
+| 6+ | 60000 | Capped at maxDelayMs |
+
+Fatal errors (4xx status codes) set the `isFatal()` flag and should not be retried.
+
+### Permission Drain System
+
+The permission drain system automatically resolves pending permissions when new rules are approved or denied.
+
+#### Permission Drain API
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+import { matchesPattern, evaluatePatternRules } from './permission/next.js';
+
+// Auto-resolve pending permissions
+await drainCovered(
+  pending,      // Record<string, PendingRequest>
+  approved,     // Array<{ permission, pattern, action }>
+  evaluate,     // Evaluation function
+  events,       // Event bus configuration
+  DeniedError,  // Error constructor for denials
+  exclude       // Optional: request ID to exclude
+);
+
+// Pattern matching utilities
+function matchesPattern(pattern: string, targetPath: string): boolean;
+
+function evaluatePatternRules(
+  rules: Array<{ pattern: string; action: 'allow' | 'deny' }>,
+  targetPath: string
+): 'allow' | 'deny' | undefined;
+```
+
+#### Permission Next Utilities
+
+```typescript
+import { PermissionNext } from './permission/next.js';
+
+// Convert permission config to ruleset
+const ruleset = PermissionNext.fromConfig({
+  'file:write': {
+    'src/**': 'allow',
+    '*.test.ts': 'deny'
+  },
+  'bash': 'ask'
+});
+
+// Convert ruleset to config
+const config = PermissionNext.toConfig(ruleset);
+
+// Evaluate permission
+const result = PermissionNext.evaluate(
+  'file:write',           // Permission type
+  'src/core/file.ts',     // Pattern to check
+  localRuleset,           // Local rules
+  approvedRules           // Approved rules (higher priority)
+);
+// result.action: 'allow' | 'deny' | 'ask'
+
+// Pattern matching
+matchesPattern('*.md', 'README.md');           // true
+matchesPattern('src/**', 'src/core/file.ts'); // true
+matchesPattern('/project/*', '/project/file'); // true
+
+// Rule evaluation
+evaluatePatternRules([
+  { pattern: 'src/**', action: 'allow' },
+  { pattern: '*.test.ts', action: 'deny' }
+], 'src/core/file.ts'); // 'allow'
+```
+
+#### Pending Request Structure
+
+```typescript
+interface PendingRequest {
+  info: {
+    id: string;
+    sessionID: string;
+    permission: string;
+    patterns: string[];
+  };
+  ruleset: Ruleset;
+  resolve: () => void;
+  reject: (error: any) => void;
+}
+
+type Ruleset = Array<{
+  permission: string;
+  pattern: string;
+  action: 'allow' | 'deny' | 'ask';
+}>;
+```
+
+#### Usage Example
+
+```typescript
+// Pending permissions map
+const pending: Record<string, PendingRequest> = {
+  'req-1': {
+    info: {
+      id: 'req-1',
+      sessionID: 'session-1',
+      permission: 'file:write',
+      patterns: ['/project/src/*']
+    },
+    ruleset: [],
+    resolve: () => console.log('Approved'),
+    reject: (err) => console.error('Denied:', err)
+  }
+};
+
+// User approves a new rule
+const approved = [
+  { permission: 'file:write', pattern: '/project/*', action: 'allow' }
+];
+
+// Drain covered permissions
+await drainCovered(
+  pending,
+  approved,
+  PermissionNext.evaluate,
+  PermissionNext.Event,
+  PermissionNext.DeniedError
+);
+
+// req-1 is automatically approved and removed from pending
 ```
 
 ## Streaming Support

@@ -238,6 +238,110 @@ TUI slash commands are tested through the `useCommands` hook with React context 
 |---------|-----------|------------|
 | `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
 
+### Permission System Test Coverage
+
+The permission system has comprehensive test coverage for drain functionality:
+
+| Module | Test File | Test Cases |
+|--------|-----------|------------|
+| Permission Drain | `src/permission/__tests__/drain.test.ts` | 10+ cases |
+
+Permission drain tests cover:
+- Auto-approval of pending permissions covered by allow rules
+- Auto-denial of pending permissions covered by deny rules
+- Exclusion of triggering request from drain
+- Partial coverage detection (some patterns allowed, some ask)
+- Multiple pending permissions across sessions
+- Pattern matching with glob wildcards
+
+#### Testing Permission Drain
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { drainCovered } from '../drain.js';
+
+describe('drainCovered', () => {
+  const mockEvents = { Replied: 'permission.replied' };
+  
+  class MockDeniedError extends Error {
+    constructor(public rules: any[]) {
+      super('Permission denied');
+    }
+  }
+  
+  const mockEvaluate = vi.fn();
+  
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  
+  it('should auto-approve pending permissions covered by new allow rules', async () => {
+    const resolve = vi.fn();
+    const reject = vi.fn();
+    
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['/project/src/*'],
+        },
+        ruleset: [],
+        resolve,
+        reject,
+      },
+    };
+    
+    const approved = [
+      { permission: 'file:write', pattern: '/project/*', action: 'allow' }
+    ];
+    
+    mockEvaluate.mockReturnValue({ action: 'allow' });
+    
+    await drainCovered(pending, approved, mockEvaluate, mockEvents, MockDeniedError);
+    
+    expect(resolve).toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+    expect(pending['req-1']).toBeUndefined();
+  });
+  
+  it('should not resolve partially covered permissions', async () => {
+    const resolve = vi.fn();
+    const reject = vi.fn();
+    
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['/project/src/*', '/project/config/*'],
+        },
+        ruleset: [],
+        resolve,
+        reject,
+      },
+    };
+    
+    const approved = [
+      { permission: 'file:write', pattern: '/project/src/*', action: 'allow' }
+    ];
+    
+    // First pattern allowed, second asks
+    mockEvaluate
+      .mockReturnValueOnce({ action: 'allow' })
+      .mockReturnValueOnce({ action: 'ask' });
+    
+    await drainCovered(pending, approved, mockEvaluate, mockEvents, MockDeniedError);
+    
+    expect(resolve).not.toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+    expect(pending['req-1']).toBeDefined();
+  });
+});
+```
+
 ### Test Categories
 
 Each tool is tested across multiple categories:
@@ -602,6 +706,149 @@ Key patterns for TUI command testing:
 3. **Render with Ink**: Use ink-testing-library's render() function
 4. **Test Command Dispatch**: Call handleCommand() and verify behavior
 5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
+
+### 9. Test Error Backoff and Retry Logic
+
+Test exponential backoff and circuit breaker patterns:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { ErrorBackoff, extractStatusCode } from '../src/core/error-backoff.js';
+
+describe('ErrorBackoff', () => {
+  let backoff: ErrorBackoff;
+  
+  beforeEach(() => {
+    backoff = new ErrorBackoff({
+      initialDelayMs: 1000,
+      maxDelayMs: 60000,
+      multiplier: 2,
+      maxRetries: 5
+    });
+  });
+  
+  it('should increase delay exponentially', () => {
+    backoff.recordError();
+    expect(backoff.getRemainingBackoffMs()).toBeGreaterThan(0);
+    expect(backoff.getRemainingBackoffMs()).toBeLessThanOrEqual(1000);
+    
+    backoff.recordError();
+    expect(backoff.getRemainingBackoffMs()).toBeGreaterThan(1000);
+    expect(backoff.getRemainingBackoffMs()).toBeLessThanOrEqual(2000);
+  });
+  
+  it('should detect fatal 4xx errors', () => {
+    backoff.recordError(403);
+    expect(backoff.isFatal()).toBe(true);
+  });
+  
+  it('should not mark 5xx errors as fatal', () => {
+    backoff.recordError(503);
+    expect(backoff.isFatal()).toBe(false);
+  });
+  
+  it('should reset on success', () => {
+    backoff.recordError();
+    backoff.recordError();
+    expect(backoff.getConsecutiveErrors()).toBe(2);
+    
+    backoff.recordSuccess();
+    expect(backoff.getConsecutiveErrors()).toBe(0);
+    expect(backoff.shouldBackoff()).toBe(false);
+  });
+  
+  it('should cap delay at maxDelayMs', () => {
+    // Record many errors
+    for (let i = 0; i < 10; i++) {
+      backoff.recordError();
+    }
+    
+    expect(backoff.getRemainingBackoffMs()).toBeLessThanOrEqual(60000);
+  });
+});
+
+describe('extractStatusCode', () => {
+  it('should extract 4xx status codes', () => {
+    expect(extractStatusCode('Error: status: 404')).toBe(404);
+    expect(extractStatusCode('Request failed with status: 403')).toBe(403);
+  });
+  
+  it('should extract 5xx status codes', () => {
+    expect(extractStatusCode('Error: status: 503')).toBe(503);
+    expect(extractStatusCode('Server error status: 500')).toBe(500);
+  });
+  
+  it('should return undefined for non-error status codes', () => {
+    expect(extractStatusCode('Success: status: 200')).toBeUndefined();
+    expect(extractStatusCode('No status code here')).toBeUndefined();
+  });
+});
+```
+
+### 10. Test MCP Client Resilience
+
+Test graceful failure handling for MCP server connections:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { McpClientManager } from '../src/mcp/client.js';
+
+describe('McpClientManager', () => {
+  let manager: McpClientManager;
+  
+  beforeEach(() => {
+    manager = new McpClientManager();
+  });
+  
+  it('should handle individual server failures gracefully', async () => {
+    // Mock config with multiple servers
+    vi.mock('../src/mcp/config.js', () => ({
+      loadMcpConfig: () => ({
+        servers: [
+          { name: 'server1', enabled: true, autoConnect: true },
+          { name: 'server2', enabled: true, autoConnect: true },
+          { name: 'server3', enabled: true, autoConnect: true }
+        ]
+      })
+    }));
+    
+    // Mock connect to fail for server2
+    const connectSpy = vi.spyOn(manager, 'connect');
+    connectSpy.mockImplementation(async (config) => {
+      if (config.name === 'server2') {
+        throw new Error('Connection failed');
+      }
+      return {
+        config,
+        client: {} as any,
+        tools: [],
+        status: 'connected'
+      };
+    });
+    
+    // Should not throw
+    await expect(manager.connectFromConfig()).resolves.not.toThrow();
+    
+    // Verify other servers connected
+    const status = manager.getStatus();
+    expect(status.find(s => s.name === 'server1')?.status).toBe('connected');
+    expect(status.find(s => s.name === 'server3')?.status).toBe('connected');
+  });
+  
+  it('should log summary of connection results', async () => {
+    const consoleSpy = vi.spyOn(console, 'log');
+    const warnSpy = vi.spyOn(console, 'warn');
+    
+    // Test with mixed success/failure
+    await manager.connectFromConfig();
+    
+    // Should log summary
+    expect(consoleSpy.mock.calls.some(
+      call => call[0].includes('MCP initialization')
+    )).toBe(true);
+  });
+});
+```
 
 ## Testing with SAP AI Core
 
