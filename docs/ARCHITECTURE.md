@@ -132,9 +132,14 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
+| Permission Next | `src/permission/next.ts` | Pattern matching and rule evaluation |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Modes Migrator | `src/config/modes-migrator.ts` | Organization mode synchronization |
+| Error Backoff | `src/core/error-backoff.ts` | Circuit breaker and exponential backoff |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
+| MCP Client | `src/mcp/client.ts` | MCP server connection management |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
@@ -232,6 +237,40 @@ flowchart LR
     RetErr --> Result
 ```
 
+## Permission Drain System
+
+The permission drain system automatically resolves pending permissions when new rules are added that cover them. This enables cross-session permission synchronization.
+
+```mermaid
+flowchart TB
+    NewRule[New Permission Rule Added] --> Drain[drainCovered Function]
+    Drain --> CheckPending{Pending Permissions?}
+    
+    CheckPending -->|Yes| Evaluate[Evaluate Each Pattern]
+    CheckPending -->|No| Done[Complete]
+    
+    Evaluate --> AllPatterns{All Patterns Covered?}
+    AllPatterns -->|Yes, Allow| AutoApprove[Auto-Approve Request]
+    AllPatterns -->|Yes, Deny| AutoDeny[Auto-Deny Request]
+    AllPatterns -->|No| KeepPending[Keep in Pending Queue]
+    
+    AutoApprove --> RemoveFromQueue[Remove from Pending]
+    AutoDeny --> RemoveFromQueue
+    KeepPending --> Done
+    RemoveFromQueue --> Done
+    
+    style AutoApprove fill:#4CAF50
+    style AutoDeny fill:#F44336
+```
+
+### Permission Drain Features
+
+1. **Cross-Session Synchronization**: When user approves/denies a rule on subagent A, sibling subagent B's pending permission for the same pattern resolves automatically
+2. **Pattern Matching**: Uses glob pattern matching with wildcard support (`*`, `**`, `?`)
+3. **Full Coverage Required**: All patterns in a pending request must be covered before auto-resolution
+4. **Event Publishing**: Publishes permission reply events for audit trail
+5. **Exclusion Support**: Can exclude specific request IDs from drain process
+
 ## Tool System with Context Resolution
 
 The tool system resolves relative paths using the workdir context:
@@ -258,6 +297,74 @@ flowchart TB
     
     Execute --> Result[Return Result]
     Deny --> Result
+```
+
+## Error Backoff System
+
+The error backoff system provides circuit breaker and exponential backoff functionality for handling API errors gracefully.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Error: API Error Occurs
+    Error --> Backoff: Record Error
+    Backoff --> Waiting: Calculate Delay
+    Waiting --> Healthy: Backoff Expires
+    Waiting --> Fatal: 4xx Client Error
+    Fatal --> [*]: Stop Retries
+    Error --> Fatal: Max Retries Reached
+    
+    note right of Backoff
+        Exponential backoff:
+        delay = initial * multiplier^(errors-1)
+        capped at maxDelay
+    end note
+    
+    note right of Fatal
+        4xx errors are fatal
+        Stop retrying immediately
+    end note
+```
+
+### Error Backoff Features
+
+1. **Exponential Backoff**: Delay increases exponentially with each consecutive error
+   - Initial delay: 1000ms (configurable)
+   - Multiplier: 2x (configurable)
+   - Max delay: 60000ms (configurable)
+2. **Circuit Breaker**: Prevents cascading failures by backing off after errors
+3. **Fatal Error Detection**: Identifies 4xx client errors as fatal and stops retrying
+4. **Status Code Extraction**: Parses HTTP status codes from error messages
+5. **Automatic Reset**: Resets backoff state on successful requests
+
+### Error Backoff Configuration
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Default: 1000
+  maxDelayMs: number;      // Default: 60000
+  multiplier: number;      // Default: 2
+  maxRetries: number;      // Default: 5
+}
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record an error
+backoff.recordError(statusCode);
+
+// Check if should backoff
+if (backoff.shouldBackoff()) {
+  const remainingMs = backoff.getRemainingBackoffMs();
+  await sleep(remainingMs);
+}
+
+// Record success
+backoff.recordSuccess();
 ```
 
 ## Instruction File System
@@ -327,6 +434,64 @@ graph TB
 
 # Create AGENTS.md from template
 /memory init
+```
+
+## Organization-Managed Agent Modes
+
+Alexi supports organization-managed agent modes that are synchronized from cloud configuration.
+
+```mermaid
+flowchart LR
+    Cloud[Organization Config] --> Sync[migrateOrgModes]
+    Sync --> Registry[Agent Registry]
+    Registry --> Agent1[Org Agent 1]
+    Registry --> Agent2[Org Agent 2]
+    Registry --> BuiltIn[Built-in Agents]
+    
+    User[User Action] --> Remove{Remove Agent?}
+    Remove -->|Built-in| Blocked[Error: Cannot Remove]
+    Remove -->|Org-Managed| Blocked2[Error: Manage from Dashboard]
+    Remove -->|Custom| Success[Agent Removed]
+    
+    style Blocked fill:#F44336
+    style Blocked2 fill:#FF9800
+    style Success fill:#4CAF50
+```
+
+### Organization Mode Features
+
+1. **Cloud Synchronization**: Modes are synced from organization configuration
+2. **Display Names**: Human-readable names for UI display
+3. **Protected Removal**: Cannot be removed by users (managed from cloud dashboard)
+4. **Source Tracking**: Marked with `source: 'organization'` in options
+5. **Automatic Registration**: Synced modes are automatically registered in agent registry
+
+### Organization Mode Configuration
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Migrate organization modes
+await migrateOrgModes(orgModes);
+
+// Check if agent is organization-managed
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+}
+
+// Attempt to remove organization agent (will fail)
+try {
+  removeAgent('org-agent-id');
+} catch (error) {
+  // Error: Cannot remove organization agent — manage it from the cloud dashboard
+}
 ```
 
 ## Configuration

@@ -452,6 +452,143 @@ setConfigValue('soundEnabled', true);
 const soundEnabled = getConfigValue('soundEnabled');
 ```
 
+#### AgentConfig
+
+Agent configuration for defining specialized agents with different capabilities and prompts.
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;  // Human-readable name for org modes
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';  // When agent is available
+  systemPrompt: string;
+  // Tool configuration
+  tools?: string[];  // Tool IDs this agent can use
+  disabledTools?: string[];  // Explicitly disabled tools
+  // Model preferences
+  preferredModel?: string;
+  temperature?: number;  // 0-2
+  maxTokens?: number;
+  // Aliases for @syntax switching
+  aliases?: string[];
+  // Options for organization-managed agents
+  options?: Record<string, unknown>;
+}
+
+// Agent interface with utility methods
+interface Agent extends AgentConfig {
+  canUseTool(toolId: string): boolean;
+}
+
+// Agent management API
+import {
+  getAgentRegistry,
+  getCurrentAgent,
+  switchAgent,
+  removeAgent,
+  parseAgentSwitch,
+  parseAgentMention
+} from './agent/index.js';
+
+// Get current agent
+const agent = getCurrentAgent();
+console.log(agent.name);  // "Code Agent"
+
+// Switch to a different agent
+const debugAgent = switchAgent('debug', 'User requested debugging');
+if (debugAgent) {
+  console.log(`Switched to ${debugAgent.name}`);
+}
+
+// List all agents
+const registry = getAgentRegistry();
+const allAgents = registry.list();
+const primaryAgents = registry.list('primary');
+
+// Remove custom agent (fails for built-in and org agents)
+try {
+  removeAgent('custom-agent');
+} catch (error) {
+  console.error(error.message);
+}
+
+// Parse @mention syntax
+const { agentId, cleanMessage } = parseAgentMention('@debug fix the bug');
+// agentId: 'debug', cleanMessage: 'fix the bug'
+```
+
+#### OrgMode
+
+Organization-managed mode configuration synchronized from cloud.
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Organization mode migration
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+await migrateOrgModes(orgModes);
+
+// Check if agent is organization-managed
+const agent = getCurrentAgent();
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+}
+```
+
+#### BackoffConfig
+
+Configuration for error backoff and circuit breaker system.
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Initial backoff delay (default: 1000)
+  maxDelayMs: number;      // Maximum backoff delay (default: 60000)
+  multiplier: number;      // Backoff multiplier (default: 2)
+  maxRetries: number;      // Maximum retry attempts (default: 5)
+}
+
+// Error backoff usage
+import { ErrorBackoff, extractStatusCode } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record an error with status code
+try {
+  await apiCall();
+  backoff.recordSuccess();
+} catch (error) {
+  const statusCode = extractStatusCode(error.message);
+  backoff.recordError(statusCode);
+  
+  // Check if should backoff
+  if (backoff.shouldBackoff()) {
+    const remainingMs = backoff.getRemainingBackoffMs();
+    await new Promise(resolve => setTimeout(resolve, remainingMs));
+  }
+  
+  // Check if fatal error (4xx)
+  if (backoff.isFatal()) {
+    throw new Error('Fatal error, stopping retries');
+  }
+}
+```
+
 #### CompletionResult
 
 Result from LLM completion request.

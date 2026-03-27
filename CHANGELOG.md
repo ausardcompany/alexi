@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-03-27
+
+### Added
+
+- Organization-managed agent modes with cloud configuration synchronization
+  - New `modes-migrator.ts` module for syncing organization modes into agent registry
+  - Support for `displayName` field in agent schema for human-readable names
+  - Agent options field for storing organization metadata
+  - Protection against removal of organization-managed agents
+- Error backoff system with circuit breaker for API resilience
+  - Exponential backoff with configurable delays and retry limits
+  - Fatal error detection for 4xx client errors
+  - Status code extraction from error messages
+  - Automatic retry logic for transient failures
+- Permission system enhancements with automated drain functionality
+  - Auto-resolve pending permissions when covered by approved or denied rules
+  - Cross-session permission synchronization for sibling subagents
+  - Pattern matching utilities with glob wildcard support
+  - Permission rule evaluation with priority-based resolution
+- MCP server initialization improvements
+  - Graceful failure handling for server connection errors
+  - Summary logging for successful and failed connections
+  - Enhanced error reporting with Promise.allSettled pattern
+
+### Changed
+
+- Agent registry now supports organization-managed agents
+  - `removeAgent()` function prevents deletion of built-in and organization agents
+  - Agent registration populates displayName from organization options
+  - Enhanced agent metadata with source tracking
+- Commit message generation now uses non-streaming completion
+  - Prevents infinite loading states in git auto-commit workflows
+  - Ensures full message is received before processing
+  - Improved reliability for CI/CD environments
+- Upstream sync workflow enhanced with force sync for fork repositories
+  - Added `--force` flag to `gh repo sync` commands for kilocode and opencode
+  - Changed opencode sync branch from `main` to `dev`
+  - Improved handling of already-synced repositories
+
+### Fixed
+
+- MCP server initialization failures no longer block application startup
+- Permission drain correctly handles pattern matching for nested paths
+- Agent removal now properly validates against organization-managed agents
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +269,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.5
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

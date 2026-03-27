@@ -176,7 +176,15 @@ graph LR
 
 #### Sync Process
 
-The upstream sync workflow follows a sophisticated two-stage AI-powered process:
+The upstream sync workflow follows a sophisticated two-stage AI-powered process with enhanced fork synchronization:
+
+**Stage 0: Fork Synchronization (with Force Sync)**
+1. Sync kilocode fork from Kilo-Org/kilocode to ausard/kilocode (main branch, --force flag)
+2. Sync opencode fork from anomalyco/opencode to ausard/opencode (dev branch, --force flag)
+3. Gracefully handle already-synced repositories with warning messages
+4. Continue on error to ensure all forks are attempted
+
+The `--force` flag ensures forks are synchronized even if they have diverged from upstream, preventing sync failures due to branch conflicts.
 
 **Stage 1: Planning (Claude 4.5 Opus)**
 1. Clone upstream repositories

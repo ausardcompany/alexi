@@ -230,6 +230,62 @@ All file operation tools have comprehensive test coverage:
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 
+### Permission System Test Coverage
+
+The permission system has comprehensive test coverage for automated permission resolution:
+
+| Component | Test File | Test Cases |
+|-----------|-----------|------------|
+| Permission Drain | `src/permission/__tests__/drain.test.ts` | 10+ cases |
+
+#### Permission Drain Tests
+
+The permission drain system tests cover:
+
+1. **Auto-Approval**: Pending permissions covered by new allow rules are automatically approved
+2. **Auto-Denial**: Pending permissions covered by new deny rules are automatically denied
+3. **Exclusion Handling**: Specific request IDs can be excluded from drain process
+4. **Partial Coverage**: Permissions with partially covered patterns remain pending
+5. **Multi-Request Handling**: Multiple pending requests are processed correctly
+6. **Pattern Matching**: Glob pattern matching with wildcards (`*`, `**`, `?`)
+
+Example permission drain test:
+
+```typescript
+describe('drainCovered', () => {
+  it('should auto-approve pending permissions covered by new allow rules', async () => {
+    const resolve = vi.fn();
+    const reject = vi.fn();
+
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['/project/src/*'],
+        },
+        ruleset: [],
+        resolve,
+        reject,
+      },
+    };
+
+    const approved = [
+      { permission: 'file:write', pattern: '/project/*', action: 'allow' }
+    ];
+
+    mockEvaluate.mockReturnValue({ action: 'allow' });
+
+    await drainCovered(pending, approved, mockEvaluate, mockEvents, MockDeniedError);
+
+    expect(resolve).toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+    expect(pending['req-1']).toBeUndefined();
+  });
+});
+```
+
 ### TUI Command Test Coverage
 
 TUI slash commands are tested through the `useCommands` hook with React context mocking:

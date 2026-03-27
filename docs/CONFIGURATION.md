@@ -425,6 +425,84 @@ const systemPrompt = buildAssembledSystemPrompt({
 });
 ```
 
+## Agent Configuration
+
+### Built-in Agents
+
+Alexi includes several built-in agents with specialized capabilities:
+
+| Agent ID | Name | Mode | Description |
+|----------|------|------|-------------|
+| `code` | Code Agent | all | General-purpose coding agent for implementation tasks |
+| `debug` | Debug Agent | all | Specialized for debugging and fixing issues |
+| `plan` | Plan Agent | all | Creates detailed implementation plans |
+| `explore` | Explore Agent | subagent | Fast codebase exploration and search |
+| `orchestrator` | Orchestrator Agent | primary | Coordinates work across multiple agents |
+
+### Organization-Managed Agents
+
+Organizations can define custom agents synchronized from cloud configuration:
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+```
+
+#### Organization Agent Features
+
+1. **Cloud Synchronization**: Agents are automatically synced from organization settings
+2. **Protected Removal**: Cannot be removed by users (managed from cloud dashboard)
+3. **Custom Capabilities**: Organization-specific tools and permissions
+4. **Display Names**: Human-readable names for UI display
+
+#### Managing Organization Agents
+
+```typescript
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+await migrateOrgModes(orgModes);
+
+// Check if agent is organization-managed
+const agent = getCurrentAgent();
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+}
+
+// Attempt to remove (will fail for org agents)
+try {
+  removeAgent('org-agent-id');
+} catch (error) {
+  // Error: Cannot remove organization agent — manage it from the cloud dashboard
+}
+```
+
+### Agent Switching
+
+Agents can be switched using the `@syntax`:
+
+```bash
+# In interactive mode
+@debug find the bug in the code
+@plan create a feature implementation plan
+@code implement the feature
+
+# Programmatically
+import { switchAgent, parseAgentMention } from './agent/index.js';
+
+// Switch to debug agent
+switchAgent('debug', 'User requested debugging');
+
+// Parse @mention without switching
+const { agentId, cleanMessage } = parseAgentMention('@debug fix the bug');
+```
+
 ## Project Context
 
 Project context provides additional information about the codebase structure and architecture.
