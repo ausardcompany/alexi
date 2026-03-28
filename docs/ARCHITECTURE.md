@@ -131,9 +131,14 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
-| Permission | `src/permission/index.ts` | File access control |
-| Agent | `src/agent/index.ts` | Autonomous agent system |
+| Permission | `src/permission/index.ts` | File access control with config protection |
+| Permission Config Paths | `src/permission/config-paths.ts` | Config file detection and protection |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
+| Permission Pattern Matching | `src/permission/next.ts` | Glob pattern matching for permissions |
+| Agent | `src/agent/index.ts` | Autonomous agent system with org support |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Modes Migrator | `src/config/modes-migrator.ts` | Organization mode synchronization |
+| Error Backoff | `src/core/error-backoff.ts` | Circuit breaker and exponential backoff |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
@@ -206,21 +211,37 @@ flowchart TB
 ## Permission System Flow
 
 ```mermaid
-flowchart LR
+flowchart TB
     ToolExec[Tool Execution Request] --> HasPerm{Has Permission Config?}
     HasPerm -->|Yes| GetResource[Get Resource Path]
     HasPerm -->|No| DirectExec[Execute Directly]
     
     GetResource --> ResolveCtx[Resolve with Context]
-    ResolveCtx --> CheckRules[Check Permission Rules]
+    ResolveCtx --> CheckDoom[Check Doom Loop]
+    
+    CheckDoom --> IsLoop{Doom Loop?}
+    IsLoop -->|Yes| HandleLoop[Handle Doom Loop]
+    HandleLoop --> BlockOrAsk{Config Action}
+    BlockOrAsk -->|Block| Reject[Deny Permission]
+    BlockOrAsk -->|Ask| Interactive[Interactive Prompt]
+    
+    IsLoop -->|No| CheckExt[Check External Path]
+    CheckExt --> IsExternal{External Path?}
+    IsExternal -->|Yes + Denied| Reject
+    IsExternal -->|No or Allowed| CheckConfig[Check Config Protection]
+    
+    CheckConfig --> IsConfig{Config File?}
+    IsConfig -->|Yes| ForceAsk[Force Ask + Disable Always]
+    IsConfig -->|No| CheckRules[Check Permission Rules]
     
     CheckRules --> EvalRules[Evaluate Rules by Priority]
     EvalRules --> LastMatch[Last Match Wins]
     
     LastMatch --> Decision{Decision?}
     Decision -->|Allow| Grant[Grant Permission]
-    Decision -->|Deny| Reject[Deny Permission]
-    Decision -->|Ask| Interactive[Interactive Prompt]
+    Decision -->|Deny| Reject
+    Decision -->|Ask| Interactive
+    ForceAsk --> Interactive
     
     Interactive --> UserResp{User Response}
     UserResp -->|Allow| Grant
@@ -230,6 +251,11 @@ flowchart LR
     Reject --> RetErr[Return Error]
     DirectExec --> Result[Return Result]
     RetErr --> Result
+    
+    style CheckDoom fill:#FFE0B2
+    style CheckConfig fill:#F8BBD0
+    style IsLoop fill:#FFF9C4
+    style IsConfig fill:#FCE4EC
 ```
 
 ## Tool System with Context Resolution
@@ -328,6 +354,342 @@ graph TB
 # Create AGENTS.md from template
 /memory init
 ```
+
+## Organization-Managed Agents
+
+Alexi supports organization-managed agents that sync from cloud configuration:
+
+```mermaid
+graph LR
+    Cloud[Cloud Dashboard] --> Config[Organization Config]
+    Config --> Migrator[Modes Migrator]
+    Migrator --> Registry[Agent Registry]
+    
+    Registry --> BuiltIn[Built-in Agents]
+    Registry --> Custom[Custom Agents]
+    Registry --> Org[Organization Agents]
+    
+    style Org fill:#E1F5FE
+    style Cloud fill:#B2EBF2
+```
+
+### Organization Agent Features
+
+1. **Cloud Synchronization**: Agents defined in organization dashboard automatically sync to local registry
+2. **Protected Removal**: Organization-managed agents cannot be removed locally
+3. **Display Names**: Support for human-readable names separate from agent IDs
+4. **Metadata Options**: Extensible options field for organization-specific configuration
+
+### Organization Agent Schema
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Migrated to agent registry as:
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  options?: {
+    source: 'organization';
+    displayName?: string;
+    [key: string]: unknown;
+  };
+}
+```
+
+### Agent Removal Protection
+
+```typescript
+// Attempting to remove organization agent
+removeAgent('org-mode-id');
+// Throws: "Cannot remove organization agent — manage it from the cloud dashboard: org-mode-id"
+
+// Attempting to remove built-in agent
+removeAgent('code');
+// Throws: "Cannot remove built-in agent: code"
+
+// Custom agents can be removed
+removeAgent('my-custom-agent');
+// Returns: true
+```
+
+## Error Backoff System
+
+Alexi includes a circuit breaker pattern for handling API errors gracefully:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal: Initial State
+    Normal --> Backoff: Error Occurs
+    Backoff --> Normal: Success
+    Backoff --> Backoff: Consecutive Errors
+    Backoff --> Fatal: 4xx Client Error
+    Fatal --> [*]: Abort
+    
+    note right of Backoff
+        Exponential delay
+        multiplier: 2
+        max delay: 60s
+    end note
+    
+    note right of Fatal
+        4xx errors are
+        unrecoverable
+    end note
+```
+
+### Error Backoff Configuration
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Default: 1000ms
+  maxDelayMs: number;      // Default: 60000ms
+  multiplier: number;      // Default: 2
+  maxRetries: number;      // Default: 5
+}
+
+const backoff = new ErrorBackoff({
+  initialDelayMs: 2000,
+  maxDelayMs: 120000,
+  multiplier: 2,
+  maxRetries: 3
+});
+
+// Record errors
+backoff.recordError(500); // Transient error
+backoff.recordError(429); // Rate limit
+
+// Check if should backoff
+if (backoff.shouldBackoff()) {
+  const delayMs = backoff.getRemainingBackoffMs();
+  await sleep(delayMs);
+}
+
+// Record success to reset
+backoff.recordSuccess();
+
+// Check for fatal errors (4xx)
+if (backoff.isFatal()) {
+  throw new Error('Unrecoverable client error');
+}
+```
+
+### Backoff Delay Calculation
+
+| Attempt | Delay (1s initial, 2x multiplier) |
+|---------|-----------------------------------|
+| 1 | 1 second |
+| 2 | 2 seconds |
+| 3 | 4 seconds |
+| 4 | 8 seconds |
+| 5 | 16 seconds |
+| 6+ | 60 seconds (max) |
+
+## Config File Protection
+
+The permission system includes special protection for configuration files:
+
+```mermaid
+graph TB
+    Request[Permission Request] --> CheckType{Write/Edit/Delete?}
+    CheckType -->|No| NormalFlow[Normal Permission Flow]
+    CheckType -->|Yes| CheckPath[Check Path Pattern]
+    
+    CheckPath --> IsConfig{Config File?}
+    IsConfig -->|No| NormalFlow
+    IsConfig -->|Yes| ForceAsk[Force Interactive Prompt]
+    
+    ForceAsk --> DisableAlways[Disable 'Allow Always' Option]
+    DisableAlways --> UserPrompt[Show Permission Prompt]
+    
+    UserPrompt --> UserDecision{User Decision}
+    UserDecision -->|Allow Once| Grant[Grant Permission]
+    UserDecision -->|Deny| Reject[Deny Permission]
+    
+    style IsConfig fill:#F8BBD0
+    style DisableAlways fill:#FCE4EC
+```
+
+### Protected Configuration Paths
+
+**Config Directories** (at any depth):
+- `.alexi/`
+- `.kilo/`
+- `.kilocode/`
+- `.opencode/`
+
+**Excluded Subdirectories** (not protected):
+- `.alexi/plans/`
+- `.kilocode/plans/`
+
+**Root-Level Config Files**:
+- `alexi.json`, `alexi.jsonc`
+- `kilo.json`, `kilo.jsonc`
+- `opencode.json`, `opencode.jsonc`
+- `AGENTS.md`
+
+### Config Protection API
+
+```typescript
+import { ConfigProtection } from './permission/config-paths.js';
+
+// Check if relative path is config file
+ConfigProtection.isRelative('.alexi/config.json'); // true
+ConfigProtection.isRelative('.alexi/plans/feature.md'); // false (excluded)
+ConfigProtection.isRelative('AGENTS.md'); // true
+ConfigProtection.isRelative('src/index.ts'); // false
+
+// Check if absolute path is config file
+const cwd = process.cwd();
+ConfigProtection.isAbsolute(`${cwd}/.alexi/config.json`, cwd); // true
+ConfigProtection.isAbsolute(`${cwd}/src/index.ts`, cwd); // false
+
+// Check if permission request targets config files
+ConfigProtection.isRequest({
+  permission: 'write',
+  patterns: ['.alexi/config.json']
+}); // true
+
+ConfigProtection.isRequest({
+  permission: 'read',
+  patterns: ['.alexi/config.json']
+}); // false (read is allowed)
+
+// Metadata key for disabling "always" option
+const key = ConfigProtection.DISABLE_ALWAYS_KEY; // 'disableAlways'
+```
+
+## Permission Drain System
+
+The drain system automatically resolves pending permissions when new rules are added:
+
+```mermaid
+sequenceDiagram
+    participant UserA as Subagent A
+    participant UserB as Subagent B
+    participant Rules as Permission Rules
+    participant Drain as Drain System
+    
+    UserA->>Rules: Request write to file.ts
+    Note over UserA: Permission pending
+    
+    UserB->>Rules: Request write to file.ts
+    Note over UserB: Permission pending
+    
+    User->>Rules: Approve write to *.ts
+    Rules->>Drain: New rule added
+    
+    Drain->>Drain: Check pending permissions
+    Drain->>Drain: Evaluate against new rules
+    
+    Drain->>UserA: Auto-approve (matches *.ts)
+    Drain->>UserB: Auto-approve (matches *.ts)
+    
+    Note over UserA,UserB: Permissions drained
+```
+
+### Drain System Features
+
+1. **Automatic Resolution**: Pending permissions automatically resolve when covered by new rules
+2. **Config File Exemption**: Config file edits never auto-resolve (always require explicit approval)
+3. **Sibling Coordination**: When one subagent gets permission, siblings with same request auto-approve
+4. **Denial Propagation**: When permission is denied, matching pending requests auto-reject
+
+### Drain API
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+
+await drainCovered(
+  pendingRequests,      // Map of pending permission requests
+  approvedRules,        // Newly approved rules
+  evaluateFunction,     // Permission evaluation function
+  events,               // Event system for notifications
+  DeniedError,          // Error class for rejections
+  excludeRequestId      // Optional: exclude specific request from drain
+);
+```
+
+## Pattern Matching System
+
+The permission system uses glob patterns for flexible matching:
+
+```mermaid
+graph LR
+    Pattern[Pattern: src/**/*.ts] --> Parse[Parse Pattern]
+    Parse --> Regex[Convert to Regex]
+    Regex --> Match[Match Against Path]
+    
+    Target[Path: src/core/index.ts] --> Match
+    Match --> Result{Matches?}
+    Result -->|Yes| Allow[Apply Rule]
+    Result -->|No| Next[Try Next Pattern]
+    
+    style Pattern fill:#E3F2FD
+    style Target fill:#E8F5E9
+```
+
+### Supported Wildcards
+
+| Wildcard | Meaning | Example |
+|----------|---------|---------|
+| `*` | Match any characters except `/` | `*.ts` matches `file.ts` but not `dir/file.ts` |
+| `**` | Match any characters including `/` | `src/**/*.ts` matches `src/a/b/file.ts` |
+| `?` | Match single character | `file?.ts` matches `file1.ts` but not `file10.ts` |
+
+### Pattern Matching Examples
+
+```typescript
+import { matchesPattern } from './permission/next.js';
+
+// Exact match
+matchesPattern('file.ts', 'file.ts'); // true
+
+// Wildcard match
+matchesPattern('*.ts', 'index.ts'); // true
+matchesPattern('*.ts', 'dir/index.ts'); // false
+
+// Globstar match
+matchesPattern('src/**/*.ts', 'src/core/index.ts'); // true
+matchesPattern('src/**/*.ts', 'src/a/b/c/file.ts'); // true
+
+// Question mark match
+matchesPattern('file?.ts', 'file1.ts'); // true
+matchesPattern('file?.ts', 'file10.ts'); // false
+
+// Catch-all
+matchesPattern('*', 'anything'); // true
+```
+
+### Rule Evaluation
+
+```typescript
+import { evaluatePatternRules } from './permission/next.js';
+
+const rules = [
+  { pattern: 'src/**/*.ts', action: 'allow' },
+  { pattern: 'src/**/test/*.ts', action: 'deny' },
+  { pattern: 'src/core/*.ts', action: 'allow' }
+];
+
+// First matching rule wins
+evaluatePatternRules(rules, 'src/core/index.ts'); // 'allow'
+evaluatePatternRules(rules, 'src/test/file.ts'); // 'deny'
+evaluatePatternRules(rules, 'docs/README.md'); // undefined
+```
+
+
 
 ## Configuration
 

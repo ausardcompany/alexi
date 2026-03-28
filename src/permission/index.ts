@@ -20,6 +20,7 @@ import {
   waitForEvent,
   defineEvent,
 } from '../bus/index.js';
+import { ConfigProtection } from './config-paths.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -438,7 +439,7 @@ export class PermissionManager {
 
   /**
    * Check permission with interactive ask flow
-   * Enhanced with doom loop detection and external path checking
+   * Enhanced with doom loop detection, external path checking, and config protection
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
     // Check for doom loop first
@@ -462,7 +463,18 @@ export class PermissionManager {
       return externalResult;
     }
 
+    // Check for config file protection - force "ask" for config file modifications
+    const isConfigProtected = ConfigProtection.isRequest({
+      permission: ctx.action,
+      patterns: [ctx.resource],
+    });
+
     const { decision, rule } = this.evaluate(ctx);
+
+    // Override "allow" to "ask" for config file modifications
+    if (isConfigProtected && decision === 'allow') {
+      return this.askUser(ctx, true); // Pass flag to disable "remember" option
+    }
 
     if (decision === 'allow') {
       // Reset operation tracking on success
@@ -484,7 +496,10 @@ export class PermissionManager {
   /**
    * Interactive ask flow - publishes event and waits for response
    */
-  private async askUser(ctx: PermissionContext): Promise<PermissionResult> {
+  private async askUser(
+    ctx: PermissionContext,
+    disableRemember: boolean = false
+  ): Promise<PermissionResult> {
     const requestId = nanoid();
 
     // Publish permission request event
@@ -495,6 +510,7 @@ export class PermissionManager {
       resource: ctx.resource,
       description: ctx.description ?? `${ctx.action} on ${ctx.resource}`,
       timestamp: Date.now(),
+      metadata: disableRemember ? { [ConfigProtection.DISABLE_ALWAYS_KEY]: true } : undefined,
     });
 
     try {
@@ -505,8 +521,8 @@ export class PermissionManager {
         this.askTimeoutMs
       );
 
-      // Remember for session if requested
-      if (response.remember) {
+      // Remember for session if requested and not disabled
+      if (response.remember && !disableRemember) {
         const sessionKey = `${ctx.toolName}:${ctx.action}:${ctx.resource}`;
         this.sessionGrants.set(sessionKey, response.granted);
       }

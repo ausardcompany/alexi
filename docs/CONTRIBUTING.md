@@ -594,6 +594,66 @@ When modifying workflows:
 - Check existing issues before creating new ones
 - Provide minimal reproducible examples for bugs
 
+## Testing New Features
+
+### Permission System Tests
+
+When contributing permission-related features, include tests for:
+
+```typescript
+import { ConfigProtection } from '../src/permission/config-paths.js';
+import { matchesPattern } from '../src/permission/next.js';
+import { drainCovered } from '../src/permission/drain.js';
+
+// Config file detection
+expect(ConfigProtection.isRelative('.alexi/config.json')).toBe(true);
+
+// Pattern matching
+expect(matchesPattern('src/**/*.ts', 'src/core/index.ts')).toBe(true);
+
+// Permission drain
+await drainCovered(pending, approved, evaluate, events, DeniedError);
+```
+
+### Agent System Tests
+
+When contributing agent features, test:
+
+```typescript
+import { getAgentRegistry, removeAgent } from '../src/agent/index.js';
+
+// Agent removal protection
+expect(() => removeAgent('code')).toThrow('Cannot remove built-in agent');
+expect(() => removeAgent('org-agent')).toThrow('Cannot remove organization agent');
+
+// Organization agent registration
+const agent = registry.register({
+  id: 'org-mode',
+  options: { source: 'organization', displayName: 'Org Mode' }
+});
+expect(agent.displayName).toBe('Org Mode');
+```
+
+### Error Backoff Tests
+
+When contributing error handling features, test:
+
+```typescript
+import { ErrorBackoff, extractStatusCode } from '../src/core/error-backoff.js';
+
+// Exponential backoff
+const backoff = new ErrorBackoff();
+backoff.recordError();
+expect(backoff.shouldBackoff()).toBe(true);
+
+// Fatal error detection
+backoff.recordError(400);
+expect(backoff.isFatal()).toBe(true);
+
+// Status code extraction
+expect(extractStatusCode('Error: status: 429')).toBe(429);
+```
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project.

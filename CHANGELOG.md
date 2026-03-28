@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-03-28
+
+### Added
+
+- Organization-managed agent support with cloud configuration sync
+  - `displayName` field for human-readable agent names
+  - `options` field for organization-specific metadata
+  - `migrateOrgModes()` function to sync organization modes from cloud
+  - Protection against removal of organization-managed agents
+- Enhanced permission system with config file protection
+  - `ConfigProtection` namespace for detecting configuration file modifications
+  - Automatic denial of "allow always" option for config file edits
+  - Support for `.alexi/`, `.kilocode/`, `.opencode/` config directories
+  - Root-level config file detection (alexi.json, AGENTS.md, etc.)
+  - Plans directory exclusion from config protection
+- Permission drain system for auto-resolving pending permissions
+  - `drainCovered()` function to resolve permissions covered by new rules
+  - Automatic approval when sibling subagent permissions are granted
+  - Automatic rejection when sibling subagent permissions are denied
+  - Config file edit exemption from auto-resolution
+- Pattern matching utilities for permission rules
+  - `matchesPattern()` function with glob wildcard support
+  - `evaluatePatternRules()` for rule-based pattern evaluation
+  - Support for `*`, `**`, and `?` wildcards in patterns
+- Error backoff system with circuit breaker pattern
+  - `ErrorBackoff` class for exponential backoff with configurable delays
+  - Fatal error detection for 4xx client errors
+  - Consecutive error tracking with automatic success reset
+  - `extractStatusCode()` helper for parsing HTTP status codes
+- Enhanced MCP server initialization
+  - Graceful failure handling with `Promise.allSettled()`
+  - Summary logging for successful and failed server connections
+  - Individual server error warnings without stopping initialization
+- Agent removal API
+  - `removeAgent()` function for deleting custom agents
+  - Protection against removing built-in agents
+  - Protection against removing organization-managed agents
+  - Automatic alias cleanup on agent removal
+- Enhanced permission metadata
+  - Optional `metadata` field in `PermissionRequested` event
+  - Support for UI hints (e.g., disabling "allow always" option)
+
+### Changed
+
+- Agent registry now supports organization-managed agents
+  - `displayName` automatically populated from org mode options
+  - Registration validates and preserves organization metadata
+  - Agent removal checks for organization source before allowing deletion
+- Git commit message generation now uses non-streaming completion
+  - Prevents infinite loading states in TUI
+  - Ensures full commit message is received before returning
+  - More reliable commit message generation in automated workflows
+- MCP client initialization improved with better error handling
+  - Multiple server failures no longer stop entire initialization
+  - Clear success/failure counts logged after initialization
+  - Individual server errors logged with warnings instead of failures
+- Permission system enhanced with metadata support
+  - `PermissionRequested` event includes optional metadata field
+  - Metadata can control UI behavior (e.g., disable "allow always")
+  - Config file modifications automatically set metadata flags
+- Upstream sync workflow improvements
+  - Added `--force` flag to kilocode sync for conflict resolution
+  - Changed opencode sync to use `dev` branch instead of `main`
+  - Updated last sync commit tracking to version 0.3.6
+
+### Fixed
+
+- Organization-managed agents can no longer be accidentally removed
+- Config file modifications now properly prompt for permission each time
+- MCP server initialization failures no longer prevent other servers from connecting
+- Permission drain system now respects config file protection rules
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +296,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.6
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

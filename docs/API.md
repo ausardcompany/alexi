@@ -225,6 +225,130 @@ The interactive REPL provides slash commands for managing sessions, configuratio
 
 **Note**: When you switch models with `/model`, the selection is persisted to `~/.alexi/config.json` as your default model.
 
+### Agent Management
+
+#### Switching Agents
+
+```bash
+# Switch to debug agent
+/agent debug
+
+# Switch using alias
+/agent @d
+
+# Switch with @syntax in message
+@plan Create a detailed implementation plan
+```
+
+#### Listing Agents
+
+```typescript
+import { getAgentRegistry } from './agent/index.js';
+
+const registry = getAgentRegistry();
+
+// List all agents
+const allAgents = registry.list();
+
+// List by mode
+const primaryAgents = registry.list('primary');
+const subagents = registry.list('subagent');
+```
+
+#### Removing Custom Agents
+
+```typescript
+import { removeAgent } from './agent/index.js';
+
+// Remove custom agent (returns true on success)
+const removed = removeAgent('my-custom-agent');
+
+// Attempting to remove built-in agent throws error
+try {
+  removeAgent('code');
+} catch (error) {
+  // Error: "Cannot remove built-in agent: code"
+}
+
+// Attempting to remove organization agent throws error
+try {
+  removeAgent('org-mode-id');
+} catch (error) {
+  // Error: "Cannot remove organization agent — manage it from the cloud dashboard: org-mode-id"
+}
+```
+
+#### Organization-Managed Agents
+
+Organization agents are synced from cloud configuration and cannot be removed locally:
+
+```typescript
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+const orgModes = [
+  {
+    name: 'enterprise-code',
+    displayName: 'Enterprise Code Agent',
+    description: 'Company-specific coding standards',
+    options: { team: 'platform' }
+  }
+];
+
+await migrateOrgModes(orgModes);
+
+// Check if agent is organization-managed
+const agent = registry.get('enterprise-code');
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+}
+```
+
+### Agent Configuration
+
+#### AgentConfig Interface
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;              // Human-readable name for UI
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  tools?: string[];                  // Allowed tool IDs
+  disabledTools?: string[];          // Explicitly disabled tools
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];                // Alternative names for @syntax
+  options?: {                        // Organization-specific options
+    source?: 'organization';
+    displayName?: string;
+    [key: string]: unknown;
+  };
+}
+```
+
+#### Registering Custom Agents
+
+```typescript
+import { getAgentRegistry } from './agent/index.js';
+
+const registry = getAgentRegistry();
+
+const customAgent = registry.register({
+  id: 'security-audit',
+  name: 'Security Audit Agent',
+  description: 'Specialized in security code review',
+  mode: 'subagent',
+  systemPrompt: 'You are a security expert...',
+  tools: ['read', 'grep', 'glob'],
+  aliases: ['sec', 'audit'],
+  temperature: 0.1
+});
+```
+
 ### Session Commands
 
 | Command | Description |
@@ -785,7 +909,7 @@ interface PermissionRule {
   // Matching criteria
   tools?: string[];    // Tool name patterns
   actions?: PermissionAction[];
-  paths?: string[];    // File path patterns
+  paths?: string[];    // File path patterns (supports glob)
   commands?: string[]; // Command patterns
   hosts?: string[];    // Network host patterns
   // Decision
@@ -806,6 +930,327 @@ interface PermissionContext {
   action: PermissionAction;
   resource: string; // Path, command, URL, etc.
   description?: string;
+}
+```
+
+### Permission Manager
+
+```typescript
+import { PermissionManager, defaultRules } from './permission/index.js';
+
+// Create manager with default rules
+const manager = new PermissionManager(defaultRules);
+
+// Add custom rule
+manager.addRule({
+  id: 'allow-docs-write',
+  name: 'Allow Documentation Writes',
+  description: 'Allow writing to docs directory',
+  actions: ['write'],
+  paths: ['docs/**'],
+  decision: 'allow',
+  priority: 150
+});
+
+// Check permission
+const result = await manager.check({
+  toolName: 'write',
+  action: 'write',
+  resource: '/path/to/file.ts',
+  description: 'Create new TypeScript file'
+});
+
+if (result.granted) {
+  // Permission granted
+} else {
+  // Permission denied
+}
+```
+
+### Config File Protection
+
+The permission system automatically protects configuration files:
+
+```typescript
+import { ConfigProtection } from './permission/config-paths.js';
+
+// Check if path is a config file
+const isConfig = ConfigProtection.isRelative('.alexi/config.json'); // true
+
+// Check if permission request targets config files
+const isConfigRequest = ConfigProtection.isRequest({
+  permission: 'write',
+  patterns: ['.alexi/config.json']
+}); // true
+
+// Config file modifications always prompt user
+// "Allow always" option is automatically disabled
+```
+
+**Protected Paths**:
+- Config directories: `.alexi/`, `.kilo/`, `.kilocode/`, `.opencode/`
+- Root config files: `alexi.json`, `AGENTS.md`, `kilo.json`, etc.
+- Excludes plan directories: `.alexi/plans/`, `.kilocode/plans/`
+
+### Doom Loop Detection
+
+Prevent infinite retry loops with automatic detection:
+
+```typescript
+// Configure doom loop detection
+manager.configureDoomLoop({
+  maxRetries: 3,        // Max attempts in time window
+  windowMs: 60000,      // 60 second window
+  onDetected: 'warn'    // 'warn', 'block', or 'ask'
+});
+
+// Check for doom loop
+const loopCheck = manager.checkDoomLoop(context);
+if (loopCheck.isLoop) {
+  console.warn(`Doom loop detected: ${loopCheck.attempts} attempts`);
+}
+
+// Reset tracking
+manager.resetDoomLoopTracking();
+```
+
+### External Directory Control
+
+Control access to files outside the project directory:
+
+```typescript
+// Set project root
+manager.setProjectRoot('/path/to/project');
+
+// Enable/disable external directory access
+manager.setAllowExternalDirectories(true);
+
+// Check if path is external
+const isExternal = manager.isExternalPath('/tmp/file.txt'); // true
+```
+
+### Pattern Matching
+
+Permission paths support glob patterns:
+
+```typescript
+import { matchesPattern } from './permission/next.js';
+
+// Wildcard matching
+matchesPattern('*.ts', 'index.ts');           // true
+matchesPattern('src/**/*.ts', 'src/a/b.ts');  // true
+matchesPattern('file?.ts', 'file1.ts');       // true
+
+// Use in permission rules
+manager.addRule({
+  paths: ['src/**/*.ts', 'tests/**/*.test.ts'],
+  decision: 'allow',
+  priority: 100
+});
+```
+
+### Permission Events
+
+The permission system publishes events through the event bus:
+
+```typescript
+import { 
+  PermissionRequested, 
+  PermissionResponse,
+  DoomLoopDetected,
+  ExternalAccessAttempted 
+} from './bus/index.js';
+
+// Listen for permission requests
+PermissionRequested.subscribe((event) => {
+  console.log(`Permission requested: ${event.action} on ${event.resource}`);
+  
+  // Check metadata for UI hints
+  if (event.metadata?.disableAlways) {
+    console.log('Config file - "always" option disabled');
+  }
+});
+
+// Respond to permission request
+PermissionResponse.publish({
+  id: requestId,
+  granted: true,
+  remember: false,
+  timestamp: Date.now()
+});
+
+// Monitor doom loops
+DoomLoopDetected.subscribe((event) => {
+  console.warn(`Doom loop: ${event.operation} (${event.attempts} attempts)`);
+});
+
+// Monitor external access
+ExternalAccessAttempted.subscribe((event) => {
+  console.log(`External access: ${event.path} - ${event.allowed ? 'allowed' : 'denied'}`);
+});
+```
+
+### Permission Drain System
+
+Automatically resolve pending permissions when rules change:
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+
+// When new rules are added, drain covered permissions
+await drainCovered(
+  pendingRequests,
+  approvedRules,
+  evaluateFunction,
+  events,
+  DeniedError,
+  excludeRequestId // Optional: skip specific request
+);
+```
+
+The drain system:
+- Auto-approves pending requests covered by new allow rules
+- Auto-rejects pending requests covered by new deny rules
+- Skips config file edit requests (always require explicit approval)
+- Coordinates permissions across sibling subagents
+
+## Error Backoff System
+
+The error backoff system implements circuit breaker pattern with exponential backoff:
+
+### ErrorBackoff Class
+
+```typescript
+import { ErrorBackoff, extractStatusCode } from './core/error-backoff.js';
+
+// Create backoff instance with custom config
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,   // Start with 1 second
+  maxDelayMs: 60000,      // Cap at 60 seconds
+  multiplier: 2,          // Double delay each time
+  maxRetries: 5           // Max consecutive errors
+});
+
+// Record an error
+backoff.recordError(500); // Transient server error
+backoff.recordError(429); // Rate limit
+
+// Check if should backoff
+if (backoff.shouldBackoff()) {
+  const delayMs = backoff.getRemainingBackoffMs();
+  console.log(`Backing off for ${delayMs}ms`);
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+// Record success to reset
+backoff.recordSuccess();
+
+// Check for fatal errors (4xx client errors)
+if (backoff.isFatal()) {
+  throw new Error('Unrecoverable client error detected');
+}
+
+// Get consecutive error count
+const errorCount = backoff.getConsecutiveErrors();
+
+// Reset all tracking
+backoff.reset();
+```
+
+### Backoff Configuration
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Initial delay after first error
+  maxDelayMs: number;      // Maximum delay cap
+  multiplier: number;      // Delay multiplier for each consecutive error
+  maxRetries: number;      // Maximum consecutive errors before fatal
+}
+```
+
+### Status Code Extraction
+
+```typescript
+// Extract HTTP status code from error messages
+const statusCode = extractStatusCode('Request failed with status: 429');
+// Returns: 429
+
+const statusCode2 = extractStatusCode('Error: status: 500 Internal Server Error');
+// Returns: 500
+
+const statusCode3 = extractStatusCode('Unknown error');
+// Returns: undefined
+```
+
+### Backoff Delay Schedule
+
+With default config (1s initial, 2x multiplier, 60s max):
+
+| Attempt | Delay |
+|---------|-------|
+| 1 | 1 second |
+| 2 | 2 seconds |
+| 3 | 4 seconds |
+| 4 | 8 seconds |
+| 5 | 16 seconds |
+| 6 | 32 seconds |
+| 7+ | 60 seconds (capped) |
+
+### Fatal Error Detection
+
+4xx status codes (400-499) are considered fatal and unrecoverable:
+
+```typescript
+backoff.recordError(400); // Bad Request - fatal
+backoff.recordError(401); // Unauthorized - fatal
+backoff.recordError(403); // Forbidden - fatal
+backoff.recordError(404); // Not Found - fatal
+
+if (backoff.isFatal()) {
+  // Stop retrying, these are client errors that won't resolve with retries
+  throw new Error('Client error - check request parameters');
+}
+
+// 5xx errors are transient and will be retried
+backoff.recordError(500); // Internal Server Error - transient
+backoff.recordError(502); // Bad Gateway - transient
+backoff.recordError(503); // Service Unavailable - transient
+```
+
+### Integration Example
+
+```typescript
+async function makeAPICallWithBackoff() {
+  const backoff = new ErrorBackoff();
+  
+  while (true) {
+    // Check if should backoff
+    if (backoff.shouldBackoff()) {
+      const delay = backoff.getRemainingBackoffMs();
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    try {
+      const response = await apiClient.call();
+      backoff.recordSuccess(); // Reset on success
+      return response;
+    } catch (error) {
+      const statusCode = extractStatusCode(error.message);
+      backoff.recordError(statusCode);
+      
+      // Check for fatal errors
+      if (backoff.isFatal()) {
+        throw new Error('Fatal API error - cannot recover');
+      }
+      
+      // Check if exceeded max retries
+      if (backoff.getConsecutiveErrors() > backoff.config.maxRetries) {
+        throw new Error('Max retries exceeded');
+      }
+      
+      // Continue loop to retry with backoff
+    }
+  }
 }
 ```
 
