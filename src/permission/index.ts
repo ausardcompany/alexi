@@ -20,6 +20,7 @@ import {
   waitForEvent,
   defineEvent,
 } from '../bus/index.js';
+import { ConfigProtection } from './config-paths.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -441,6 +442,16 @@ export class PermissionManager {
    * Enhanced with doom loop detection and external path checking
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
+    // Force "ask" for config file edits
+    const isConfigEdit =
+      (ctx.action === 'write' || ctx.action === 'admin') &&
+      ConfigProtection.isAbsolute(ctx.resource, this.projectRoot);
+
+    if (isConfigEdit) {
+      // Always ask for config file edits, never auto-approve
+      return this.askUser(ctx, true); // Pass true to disable "always allow"
+    }
+
     // Check for doom loop first
     const loopCheck = this.checkDoomLoop(ctx);
     if (loopCheck.isLoop) {
@@ -484,7 +495,7 @@ export class PermissionManager {
   /**
    * Interactive ask flow - publishes event and waits for response
    */
-  private async askUser(ctx: PermissionContext): Promise<PermissionResult> {
+  private async askUser(ctx: PermissionContext, disableAlways = false): Promise<PermissionResult> {
     const requestId = nanoid();
 
     // Publish permission request event
@@ -495,6 +506,7 @@ export class PermissionManager {
       resource: ctx.resource,
       description: ctx.description ?? `${ctx.action} on ${ctx.resource}`,
       timestamp: Date.now(),
+      metadata: disableAlways ? { [ConfigProtection.DISABLE_ALWAYS_KEY]: true } : undefined,
     });
 
     try {
@@ -505,8 +517,8 @@ export class PermissionManager {
         this.askTimeoutMs
       );
 
-      // Remember for session if requested
-      if (response.remember) {
+      // Don't remember config file permissions even if requested
+      if (response.remember && !disableAlways) {
         const sessionKey = `${ctx.toolName}:${ctx.action}:${ctx.resource}`;
         this.sessionGrants.set(sessionKey, response.granted);
       }

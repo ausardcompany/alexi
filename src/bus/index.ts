@@ -174,6 +174,7 @@ export const PermissionRequested = defineEvent(
     resource: z.string(),
     description: z.string(),
     timestamp: z.number(),
+    metadata: z.record(z.unknown()).optional(),
   })
 );
 

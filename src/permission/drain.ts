@@ -6,6 +6,7 @@
  */
 
 import { matchesPattern } from './next.js';
+import { ConfigProtection } from './config-paths.js';
 
 /**
  * Auto-resolve pending permissions now fully covered by approved or denied rules.
@@ -41,6 +42,11 @@ export async function drainCovered(
   for (const [id, entry] of Object.entries(pending)) {
     // Skip the permission request that triggered this drain
     if (id === exclude) {
+      continue;
+    }
+
+    // Never auto-resolve config file edit permissions
+    if (ConfigProtection.isRequest(entry.info)) {
       continue;
     }
 
