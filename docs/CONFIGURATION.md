@@ -666,3 +666,115 @@ alexi config show
 - [API Documentation](API.md) - CLI commands and TypeScript APIs
 - [Architecture](ARCHITECTURE.md) - System architecture and design
 - [Testing Guide](TESTING.md) - Testing configuration and environment setup
+
+## Organization Configuration
+
+### Organization-Managed Agents
+
+Alexi supports organization-managed agents that sync from cloud configuration:
+
+```typescript
+// Organization mode definition
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+
+// Example organization modes
+const orgModes: OrgMode[] = [
+  {
+    name: 'enterprise-code',
+    displayName: 'Enterprise Code Agent',
+    description: 'Company-specific coding standards and practices',
+    options: {
+      team: 'platform',
+      compliance: 'strict'
+    }
+  },
+  {
+    name: 'security-review',
+    displayName: 'Security Review Agent',
+    description: 'Specialized security code review',
+    options: {
+      team: 'security',
+      auditLevel: 'high'
+    }
+  }
+];
+```
+
+### Syncing Organization Modes
+
+```typescript
+import { migrateOrgModes } from './config/modes-migrator.js';
+
+// Sync organization modes to agent registry
+await migrateOrgModes(orgModes);
+
+// Organization agents are automatically:
+// - Registered in the agent registry
+// - Protected from local removal
+// - Available for @syntax switching
+```
+
+### Organization Agent Features
+
+1. **Cloud Synchronization**: Automatically sync from organization dashboard
+2. **Protected Removal**: Cannot be removed locally (must manage from cloud)
+3. **Display Names**: Support human-readable names for UI
+4. **Metadata Options**: Extensible configuration for organization needs
+5. **Permission Integration**: Can include organization-specific permission rules
+
+### Checking Organization Agents
+
+```typescript
+import { isOrgManagedMode } from './config/modes-migrator.js';
+import { getAgentRegistry } from './agent/index.js';
+
+const registry = getAgentRegistry();
+const agent = registry.get('enterprise-code');
+
+if (isOrgManagedMode(agent)) {
+  console.log('This agent is managed by your organization');
+  console.log('Manage it from the cloud dashboard');
+}
+```
+
+### Organization Configuration File
+
+Organization configuration can be stored in `.alexi/org-config.json`:
+
+```json
+{
+  "organization": {
+    "id": "acme-corp",
+    "name": "ACME Corporation"
+  },
+  "modes": [
+    {
+      "name": "enterprise-code",
+      "displayName": "Enterprise Code Agent",
+      "description": "Company-specific coding standards",
+      "options": {
+        "team": "platform",
+        "compliance": "strict"
+      }
+    }
+  ],
+  "permissions": {
+    "defaultRules": [
+      {
+        "id": "org-allow-docs",
+        "actions": ["write"],
+        "paths": ["docs/**"],
+        "decision": "allow",
+        "priority": 150
+      }
+    ]
+  }
+}
+```

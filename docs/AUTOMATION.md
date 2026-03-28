@@ -134,11 +134,13 @@ The workflow determines documentation scope based on file patterns:
 
 #### Upstream Repositories
 
-| Repository | Purpose | Sync Source |
-|------------|---------|-------------|
-| kilocode | AI coding assistant patterns | Kilo-Org/kilocode |
-| opencode | Open source coding patterns | anomalyco/opencode |
-| claude-code | Anthropic Claude patterns | anthropics/claude-code |
+| Repository | Purpose | Sync Source | Branch |
+|------------|---------|-------------|--------|
+| kilocode | AI coding assistant patterns | Kilo-Org/kilocode | main (with --force) |
+| opencode | Open source coding patterns | anomalyco/opencode | dev |
+| claude-code | Anthropic Claude patterns | anthropics/claude-code | main |
+
+**Note**: The kilocode sync uses `--force` flag to handle divergent histories, and opencode syncs from the `dev` branch instead of `main` for latest development changes.
 
 #### Workflow Architecture
 

@@ -269,6 +269,309 @@ Each tool is tested across multiple categories:
    - Normalize parameters to match file's line ending style
    - Ensure replacements maintain original file format
 
+### Testing Permission System
+
+The permission system includes comprehensive tests for new features:
+
+#### Config File Protection Tests
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ConfigProtection } from '../src/permission/config-paths.js';
+
+describe('ConfigProtection', () => {
+  it('should detect .alexi config directory', () => {
+    expect(ConfigProtection.isRelative('.alexi/config.json')).toBe(true);
+    expect(ConfigProtection.isRelative('.alexi/')).toBe(true);
+  });
+
+  it('should exclude plan directories', () => {
+    expect(ConfigProtection.isRelative('.alexi/plans/feature.md')).toBe(false);
+  });
+
+  it('should detect root-level config files', () => {
+    expect(ConfigProtection.isRelative('alexi.json')).toBe(true);
+    expect(ConfigProtection.isRelative('AGENTS.md')).toBe(true);
+  });
+
+  it('should detect write permission requests', () => {
+    expect(ConfigProtection.isRequest({
+      permission: 'write',
+      patterns: ['.alexi/config.json']
+    })).toBe(true);
+  });
+
+  it('should not detect read permission requests', () => {
+    expect(ConfigProtection.isRequest({
+      permission: 'read',
+      patterns: ['.alexi/config.json']
+    })).toBe(false);
+  });
+});
+```
+
+#### Permission Drain Tests
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { drainCovered } from '../src/permission/drain.js';
+
+describe('drainCovered', () => {
+  it('should auto-approve pending permissions covered by new allow rules', async () => {
+    const mockResolve = vi.fn();
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'write',
+          patterns: ['src/file.ts']
+        },
+        ruleset: [],
+        resolve: mockResolve,
+        reject: vi.fn()
+      }
+    };
+
+    const approved = [
+      { permission: 'write', pattern: 'src/**', action: 'allow' }
+    ];
+
+    await drainCovered(pending, approved, mockEvaluate, mockEvents, MockDeniedError);
+
+    expect(mockResolve).toHaveBeenCalled();
+  });
+
+  it('should not auto-resolve config file edits', async () => {
+    const mockResolve = vi.fn();
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'write',
+          patterns: ['.alexi/config.json']
+        },
+        ruleset: [],
+        resolve: mockResolve,
+        reject: vi.fn()
+      }
+    };
+
+    const approved = [
+      { permission: 'write', pattern: '**', action: 'allow' }
+    ];
+
+    await drainCovered(pending, approved, mockEvaluate, mockEvents, MockDeniedError);
+
+    // Config file edit should NOT be auto-resolved
+    expect(mockResolve).not.toHaveBeenCalled();
+  });
+});
+```
+
+#### Pattern Matching Tests
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { matchesPattern } from '../src/permission/next.js';
+
+describe('matchesPattern', () => {
+  it('should match exact paths', () => {
+    expect(matchesPattern('file.ts', 'file.ts')).toBe(true);
+    expect(matchesPattern('file.ts', 'other.ts')).toBe(false);
+  });
+
+  it('should match wildcard patterns', () => {
+    expect(matchesPattern('*.ts', 'index.ts')).toBe(true);
+    expect(matchesPattern('*.ts', 'dir/index.ts')).toBe(false);
+  });
+
+  it('should match globstar patterns', () => {
+    expect(matchesPattern('src/**/*.ts', 'src/core/index.ts')).toBe(true);
+    expect(matchesPattern('src/**/*.ts', 'src/a/b/c/file.ts')).toBe(true);
+  });
+
+  it('should match question mark patterns', () => {
+    expect(matchesPattern('file?.ts', 'file1.ts')).toBe(true);
+    expect(matchesPattern('file?.ts', 'file10.ts')).toBe(false);
+  });
+});
+```
+
+### Testing Agent System
+
+#### Agent Registration Tests
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { getAgentRegistry } from '../src/agent/index.js';
+
+describe('Agent Registry', () => {
+  it('should register custom agents', () => {
+    const registry = getAgentRegistry();
+    const agent = registry.register({
+      id: 'test-agent',
+      name: 'Test Agent',
+      description: 'Test description',
+      mode: 'all',
+      systemPrompt: 'Test prompt'
+    });
+
+    expect(agent.id).toBe('test-agent');
+    expect(registry.get('test-agent')).toBeDefined();
+  });
+
+  it('should prevent removal of built-in agents', () => {
+    const registry = getAgentRegistry();
+    
+    expect(() => {
+      registry.remove('code');
+    }).toThrow('Cannot remove built-in agent: code');
+  });
+
+  it('should prevent removal of organization agents', () => {
+    const registry = getAgentRegistry();
+    
+    // Register org agent
+    registry.register({
+      id: 'org-agent',
+      name: 'Org Agent',
+      description: 'Organization agent',
+      mode: 'all',
+      systemPrompt: 'Org prompt',
+      options: { source: 'organization' }
+    });
+
+    expect(() => {
+      registry.remove('org-agent');
+    }).toThrow('Cannot remove organization agent');
+  });
+
+  it('should populate displayName from org options', () => {
+    const registry = getAgentRegistry();
+    
+    const agent = registry.register({
+      id: 'org-mode',
+      name: 'Org Mode',
+      description: 'Test',
+      mode: 'all',
+      systemPrompt: 'Test',
+      options: { displayName: 'Organization Mode' }
+    });
+
+    expect(agent.displayName).toBe('Organization Mode');
+  });
+});
+```
+
+### Testing Error Backoff
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { ErrorBackoff, extractStatusCode } from '../src/core/error-backoff.js';
+
+describe('ErrorBackoff', () => {
+  let backoff: ErrorBackoff;
+
+  beforeEach(() => {
+    backoff = new ErrorBackoff({
+      initialDelayMs: 1000,
+      maxDelayMs: 60000,
+      multiplier: 2,
+      maxRetries: 3
+    });
+  });
+
+  it('should calculate exponential backoff delays', () => {
+    expect(backoff.shouldBackoff()).toBe(false);
+
+    backoff.recordError();
+    expect(backoff.shouldBackoff()).toBe(true);
+    expect(backoff.getRemainingBackoffMs()).toBeGreaterThan(0);
+  });
+
+  it('should reset on success', () => {
+    backoff.recordError();
+    backoff.recordError();
+    expect(backoff.getConsecutiveErrors()).toBe(2);
+
+    backoff.recordSuccess();
+    expect(backoff.getConsecutiveErrors()).toBe(0);
+    expect(backoff.shouldBackoff()).toBe(false);
+  });
+
+  it('should detect fatal 4xx errors', () => {
+    backoff.recordError(400);
+    expect(backoff.isFatal()).toBe(true);
+
+    backoff.reset();
+    backoff.recordError(500);
+    expect(backoff.isFatal()).toBe(false);
+  });
+
+  it('should cap delay at maxDelayMs', () => {
+    for (let i = 0; i < 10; i++) {
+      backoff.recordError();
+    }
+
+    const delay = backoff.getRemainingBackoffMs();
+    expect(delay).toBeLessThanOrEqual(60000);
+  });
+});
+
+describe('extractStatusCode', () => {
+  it('should extract 4xx status codes', () => {
+    expect(extractStatusCode('Error: status: 400')).toBe(400);
+    expect(extractStatusCode('Request failed with status: 404')).toBe(404);
+  });
+
+  it('should extract 5xx status codes', () => {
+    expect(extractStatusCode('Error: status: 500')).toBe(500);
+    expect(extractStatusCode('status: 503 Service Unavailable')).toBe(503);
+  });
+
+  it('should return undefined for no status code', () => {
+    expect(extractStatusCode('Unknown error')).toBeUndefined();
+    expect(extractStatusCode('Error: something went wrong')).toBeUndefined();
+  });
+});
+```
+
+### Testing MCP Server Initialization
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { McpClientManager } from '../src/mcp/client.js';
+
+describe('MCP Client Manager', () => {
+  it('should handle graceful server failures', async () => {
+    const manager = new McpClientManager();
+    
+    // Mock config with multiple servers
+    const mockConfig = {
+      servers: [
+        { name: 'server1', enabled: true, autoConnect: true },
+        { name: 'server2', enabled: true, autoConnect: true },
+        { name: 'server3', enabled: true, autoConnect: true }
+      ]
+    };
+
+    // Mock connect to fail for server2
+    const connectSpy = vi.spyOn(manager, 'connect');
+    connectSpy.mockImplementation(async (server) => {
+      if (server.name === 'server2') {
+        throw new Error('Connection failed');
+      }
+      return { status: 'connected', tools: [] };
+    });
+
+    // Should not throw even if one server fails
+    await expect(manager.connectFromConfig()).resolves.not.toThrow();
+  });
+});
+```
+
 #### Testing Line Ending Preservation
 
 The edit tool preserves line endings when performing replacements:
