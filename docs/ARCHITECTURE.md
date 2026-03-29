@@ -132,10 +132,17 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
+| Permission Next | `src/permission/next.ts` | Pattern matching utilities |
+| Config Protection | `src/permission/config-paths.ts` | Config file protection |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
+| Modes Migrator | `src/config/modes-migrator.ts` | Organization mode synchronization |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
+| MCP Client | `src/mcp/client.ts` | MCP server connection manager |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
+| Built-in Skills | `src/skill/skills/index.ts` | 14 pre-configured skills |
+| Error Backoff | `src/core/error-backoff.ts` | Circuit breaker for API errors |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
@@ -211,8 +218,12 @@ flowchart LR
     HasPerm -->|Yes| GetResource[Get Resource Path]
     HasPerm -->|No| DirectExec[Execute Directly]
     
-    GetResource --> ResolveCtx[Resolve with Context]
+    GetResource --> ConfigCheck{Config File?}
+    ConfigCheck -->|Yes| RequireExplicit[Require Explicit Approval]
+    ConfigCheck -->|No| ResolveCtx[Resolve with Context]
+    
     ResolveCtx --> CheckRules[Check Permission Rules]
+    RequireExplicit --> CheckRules
     
     CheckRules --> EvalRules[Evaluate Rules by Priority]
     EvalRules --> LastMatch[Last Match Wins]
@@ -225,6 +236,10 @@ flowchart LR
     Interactive --> UserResp{User Response}
     UserResp -->|Allow| Grant
     UserResp -->|Deny| Reject
+    UserResp -->|Allow Always| AddRule[Add High-Priority Rule]
+    
+    AddRule --> Drain[Drain Covered Permissions]
+    Drain --> Grant
     
     Grant --> DirectExec
     Reject --> RetErr[Return Error]
@@ -402,6 +417,25 @@ Tools are implemented as independent modules that:
 - Resolve relative paths using workdir context for agentic operations
 - Support interactive permission prompts and high-priority allow rules
 - Convert Zod schemas to JSON Schema for LLM function calling with proper type handling
+- Protect configuration files from unauthorized modification
+
+#### Config File Protection
+
+The permission system includes special protection for configuration files:
+
+```typescript
+// Config directories protected at any depth
+const CONFIG_DIRS = ['.kilo/', '.kilocode/', '.opencode/', '.alexi/'];
+
+// Root-level config files
+const CONFIG_ROOT_FILES = ['kilo.json', 'alexi.json', 'AGENTS.md'];
+
+// Check if path is a config file
+ConfigProtection.isRelative(pattern);  // Returns true for config paths
+ConfigProtection.isRequest(request);   // Returns true for write ops on config
+```
+
+Config file modifications always require explicit user approval and cannot be auto-resolved through permission drain.
 
 ### 3. Agentic Execution Mode
 
@@ -426,6 +460,38 @@ Sessions provide:
 - Multi-turn conversation context
 - Persistence across CLI invocations
 - Export and sharing capabilities
+
+### 6. Organization-Managed Agents
+
+The agent system supports cloud-synchronized modes:
+- Agents can be synced from organization configuration
+- Organization agents are protected from local removal
+- Managed through cloud dashboard for team consistency
+- Supports custom display names and metadata
+
+### 7. Skill System
+
+Specialized skills provide domain expertise:
+- 14 built-in skills covering development, security, DevOps
+- Skill registry with category and tag filtering
+- Custom skill loading from markdown files
+- MCP integration for external skill sources
+
+### 8. Error Backoff and Circuit Breaker
+
+Graceful API error handling:
+- Exponential backoff for transient errors
+- Circuit breaker for fatal errors (4xx)
+- Configurable retry delays and limits
+- Status code extraction from error messages
+
+### 9. Permission Drain System
+
+Automatic resolution of pending permissions:
+- When user approves a rule, sibling requests auto-resolve
+- Prevents redundant permission prompts
+- Respects config file protection (never auto-resolves config edits)
+- Pattern matching for granular control
 
 ## Security Considerations
 

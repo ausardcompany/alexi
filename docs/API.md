@@ -44,6 +44,72 @@ alexi chat -m "What is AI?" --auto-route --prefer-cheap
 alexi chat -m "Tell me more" --session abc-123 --auto-route
 ```
 
+### agent
+
+Run agentic chat with autonomous tool execution for automated workflows.
+
+```bash
+alexi agent -m <message> [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-m, --message <text>` | string | Task message (required) |
+| `--model <id>` | string | Override model selection |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
+| `--session <id>` | string | Continue existing session |
+| `--system <prompt>` | string | System prompt override |
+| `--max-iterations <n>` | number | Maximum tool execution iterations (default: 50) |
+| `--workdir <path>` | string | Working directory (default: current directory) |
+| `--tools <list>` | string | Comma-separated list of enabled tools |
+| `--verbose` | boolean | Enable verbose output |
+| `--no-auto-commits` | boolean | Disable automatic git commits |
+| `--no-dirty-commits` | boolean | Skip commits when working directory is dirty |
+
+#### Examples
+
+```bash
+# Run autonomous task with default settings
+alexi agent -m "Implement user authentication"
+
+# Use specific model with iteration limit
+alexi agent -m "Refactor database layer" --model anthropic--claude-4-sonnet --max-iterations 20
+
+# Restrict tools for safety
+alexi agent -m "Analyze codebase" --tools "read,glob,grep"
+
+# Run in specific directory
+alexi agent -m "Update documentation" --workdir /path/to/project
+```
+
+#### Automatic Permission Configuration
+
+In agent mode, the system automatically configures high-priority permission rules:
+
+```typescript
+// Allow write operations in workdir
+{
+  id: 'agentic-allow-write',
+  priority: 200,
+  actions: ['write'],
+  paths: ['<workdir>/**'],
+  decision: 'allow'
+}
+
+// Allow execute operations
+{
+  id: 'agentic-allow-execute',
+  priority: 200,
+  actions: ['execute'],
+  decision: 'allow'
+}
+```
+
+These rules override lower-priority rules (e.g., default ask-write at priority 10) to enable autonomous operation.
+
 ### models
 
 List available models/deployments from SAP AI Core.
@@ -775,6 +841,113 @@ type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 type PermissionDecision = 'allow' | 'deny' | 'ask';
 ```
 
+### Config File Protection
+
+The permission system includes special protection for configuration files to prevent accidental modification:
+
+```typescript
+// ConfigProtection namespace
+namespace ConfigProtection {
+  // Check if a relative path points to a config file
+  function isRelative(pattern: string): boolean;
+  
+  // Check if a permission request involves config files
+  function isRequest(request: { 
+    patterns?: string[]; 
+    permission?: string 
+  }): boolean;
+  
+  // Check if an absolute path points to global config
+  function isGlobalConfig(absolutePath: string): boolean;
+}
+
+// Protected config directories (at any depth)
+const CONFIG_DIRS = ['.kilo/', '.kilocode/', '.opencode/', '.alexi/'];
+
+// Protected root-level config files
+const CONFIG_ROOT_FILES = [
+  'kilo.json', 'kilo.jsonc',
+  'opencode.json', 'opencode.jsonc',
+  'alexi.json', 'alexi.jsonc',
+  'AGENTS.md'
+];
+
+// Plans directories are excluded from protection
+const EXCLUDED_SUBDIRS = ['plans/'];
+```
+
+**Example Usage**:
+
+```typescript
+import { ConfigProtection } from './permission/config-paths.js';
+
+// Check if path is a config file
+const isConfig = ConfigProtection.isRelative('.alexi/config.json');  // true
+const isNotConfig = ConfigProtection.isRelative('src/index.ts');     // false
+
+// Check if permission request involves config
+const request = {
+  patterns: ['alexi.json'],
+  permission: 'write'
+};
+const needsProtection = ConfigProtection.isRequest(request);  // true
+```
+
+Config file modifications always require explicit user approval and cannot be auto-resolved through permission drain.
+
+### Permission Drain System
+
+The permission drain system automatically resolves pending permissions when rules are added:
+
+```typescript
+import { drainCovered } from './permission/drain.js';
+
+// When user approves a rule, sibling requests auto-resolve
+await drainCovered(
+  pendingRequests,
+  approvedRules,
+  evaluateFunction,
+  events,
+  DeniedError,
+  excludeRequestId  // Optional: skip specific request
+);
+```
+
+**Key Features**:
+- Auto-resolves sibling agent permissions when rules are added
+- Prevents redundant permission prompts
+- Never auto-resolves config file edit permissions (safety)
+- Pattern matching for granular control
+
+**Example Scenario**:
+1. Subagent A requests write permission for `src/utils/helper.ts`
+2. User approves and selects "Allow always" for `src/**` pattern
+3. High-priority rule added: `{ pattern: 'src/**', action: 'allow', priority: 200 }`
+4. Subagent B's pending request for `src/components/Button.tsx` auto-resolves
+5. Config file requests (e.g., `.alexi/config.json`) remain pending
+
+### Permission Pattern Matching
+
+```typescript
+import { matchesPattern } from './permission/next.js';
+
+// Glob pattern matching with wildcards
+matchesPattern('*.md', 'README.md');           // true
+matchesPattern('src/**', 'src/utils/log.ts'); // true
+matchesPattern('*.ts', 'index.js');            // false
+
+// Evaluate pattern rules
+import { evaluatePatternRules } from './permission/next.js';
+
+const rules = [
+  { pattern: 'src/**', action: 'allow' },
+  { pattern: 'src/secret/**', action: 'deny' }
+];
+
+const result = evaluatePatternRules(rules, 'src/secret/api-key.ts');
+// Returns 'deny' (last match wins)
+```
+
 ### Permission Rule
 
 ```typescript
@@ -893,6 +1066,232 @@ const customTool = defineTool({
 });
 
 registerTool(customTool);
+```
+
+### Skill System
+
+The skill system provides specialized AI behaviors with pre-configured prompts:
+
+```typescript
+import { 
+  getSkill, 
+  listSkills, 
+  registerSkill,
+  isBuiltinSkill 
+} from './skill/index.js';
+
+// Get a built-in skill
+const codeReviewSkill = getSkill('code-review');
+console.log(codeReviewSkill.prompt);
+
+// List all skills
+const allSkills = listSkills();
+console.log(`Available skills: ${allSkills.length}`);
+
+// List skills by category
+const securitySkills = getSkillRegistry().listByCategory('security');
+
+// Search skills
+const searchResults = getSkillRegistry().search('database');
+
+// Check if skill is built-in
+const isBuiltin = isBuiltinSkill('code-review');  // true
+```
+
+#### Built-in Skills
+
+Alexi includes 14 pre-configured skills:
+
+| Skill ID | Category | Description |
+|----------|----------|-------------|
+| `alexi-config` | configuration | Alexi configuration expert |
+| `code-review` | quality | Strict code reviewer (correctness, security, performance) |
+| `security-audit` | security | OWASP-focused security auditor |
+| `architect` | design | Software architecture and system design |
+| `refactor` | quality | Code improvement without behavior changes |
+| `debug` | debugging | Systematic debugging and root cause analysis |
+| `documentation` | documentation | Technical documentation writer |
+| `test-writer` | testing | Unit and integration test specialist |
+| `devops` | devops | CI/CD, deployment, infrastructure |
+| `api-design` | design | REST/GraphQL API design specialist |
+| `database` | data | Database design, optimization, migrations |
+| `performance` | optimization | Performance profiling and optimization |
+| `explainer` | learning | Code explanation in simple terms |
+| `migration` | maintenance | Code and data migration specialist |
+
+#### Skill Definition
+
+```typescript
+interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  prompts?: {
+    system?: string;
+    review?: string;
+    planning?: string;
+    codeReview?: string;
+  };
+  tools?: string[];
+  disabledTools?: string[];
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  category?: string;
+  tags?: string[];
+  aliases?: string[];
+  source?: 'builtin' | 'file' | 'mcp';
+  sourcePath?: string;
+}
+```
+
+#### Custom Skill Registration
+
+```typescript
+import { defineSkill, registerSkill } from './skill/index.js';
+
+const customSkill = defineSkill({
+  id: 'my-skill',
+  name: 'My Custom Skill',
+  description: 'Custom behavior for specific tasks',
+  category: 'custom',
+  tags: ['specialized', 'domain-specific'],
+  prompt: 'You are an expert in...',
+  tools: ['read', 'glob', 'grep'],
+  temperature: 0.3,
+});
+
+registerSkill(customSkill);
+```
+
+### Error Backoff System
+
+The error backoff system provides circuit breaker and exponential backoff for API errors:
+
+```typescript
+import { ErrorBackoff, extractStatusCode } from './core/error-backoff.js';
+
+// Create backoff instance
+const backoff = new ErrorBackoff({
+  initialDelayMs: 1000,
+  maxDelayMs: 60000,
+  multiplier: 2,
+  maxRetries: 5
+});
+
+// Record errors
+try {
+  await apiCall();
+  backoff.recordSuccess();
+} catch (error) {
+  const statusCode = extractStatusCode(error.message);
+  backoff.recordError(statusCode);
+  
+  if (backoff.isFatal()) {
+    console.error('Fatal error detected (4xx)');
+    throw error;
+  }
+  
+  if (backoff.shouldBackoff()) {
+    const delayMs = backoff.getRemainingBackoffMs();
+    console.log(`Backing off for ${delayMs}ms`);
+    await sleep(delayMs);
+  }
+}
+
+// Check backoff state
+const errorCount = backoff.getConsecutiveErrors();
+console.log(`Consecutive errors: ${errorCount}`);
+
+// Reset backoff state
+backoff.reset();
+```
+
+#### BackoffConfig Interface
+
+```typescript
+interface BackoffConfig {
+  initialDelayMs: number;  // Initial delay (default: 1000)
+  maxDelayMs: number;      // Maximum delay (default: 60000)
+  multiplier: number;      // Backoff multiplier (default: 2)
+  maxRetries: number;      // Maximum retry attempts (default: 5)
+}
+```
+
+#### Error Backoff Methods
+
+```typescript
+class ErrorBackoff {
+  // Record an error occurrence
+  recordError(statusCode?: number): void;
+  
+  // Record a successful operation
+  recordSuccess(): void;
+  
+  // Reset backoff state
+  reset(): void;
+  
+  // Check if currently in backoff period
+  shouldBackoff(): boolean;
+  
+  // Get remaining backoff time in milliseconds
+  getRemainingBackoffMs(): number;
+  
+  // Check if error is fatal (4xx)
+  isFatal(): boolean;
+  
+  // Get consecutive error count
+  getConsecutiveErrors(): number;
+}
+
+// Extract status code from error messages
+function extractStatusCode(errorMessage: string): number | undefined;
+```
+
+### Organization-Managed Agents
+
+Agents can be synchronized from organization cloud configuration:
+
+```typescript
+import { migrateOrgModes, isOrgManagedMode } from './config/modes-migrator.js';
+
+// Sync organization modes
+await migrateOrgModes([
+  {
+    name: 'team-reviewer',
+    displayName: 'Team Code Reviewer',
+    description: 'Organization-wide code review standards',
+    options: {
+      source: 'organization',
+      reviewGuidelines: 'https://internal.example.com/guidelines'
+    }
+  }
+]);
+
+// Check if agent is organization-managed
+const agent = getAgent('team-reviewer');
+const isOrgManaged = isOrgManagedMode(agent);  // true
+
+// Organization agents cannot be removed locally
+try {
+  removeAgent('team-reviewer');
+} catch (error) {
+  // Error: Cannot remove organization agent — manage it from the cloud dashboard
+}
+```
+
+#### OrgMode Interface
+
+```typescript
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
 ```
 
 ## Error Handling

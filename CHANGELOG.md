@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-03-29
+
+### Added
+
+- Organization-managed agent modes with cloud synchronization support
+  - Agents can now be synced from organization cloud configuration
+  - Added `displayName` field for human-readable agent names
+  - Added `options` field for agent metadata (source tracking, custom settings)
+  - Organization agents protected from local removal (managed via cloud dashboard)
+- Permission system enhancements for config file protection
+  - New `ConfigProtection` namespace for config path validation
+  - Automatic detection of config directories (.alexi/, .kilo/, .kilocode/, .opencode/)
+  - Protection for root-level config files (alexi.json, AGENTS.md, etc.)
+  - Config file write operations require explicit approval
+  - Plans directories excluded from config protection
+- Permission drain system for auto-resolving sibling requests
+  - Automatically resolves pending permissions when rules are added
+  - Prevents auto-resolution of config file edit permissions
+  - Pattern matching utilities for granular permission control
+- Error backoff system with circuit breaker pattern
+  - Exponential backoff for API errors with configurable delays
+  - Fatal error detection for 4xx client errors
+  - Status code extraction from error messages
+  - Automatic retry coordination
+- Skill system with 14 built-in skills
+  - Configuration: alexi-config (Alexi configuration expert)
+  - Code quality: code-review, security-audit, refactor
+  - Development: architect, debug, documentation, test-writer
+  - DevOps: devops, api-design, database, performance
+  - Learning: explainer, migration
+  - Skill registry with category and tag filtering
+- MCP (Model Context Protocol) graceful initialization
+  - Enhanced error handling for MCP server initialization failures
+  - Initialization summary logging (successful/failed server counts)
+  - Prevents single server failure from blocking application startup
+
+### Changed
+
+- Agent system now supports organization-managed modes
+  - `migrateOrgModes()` function syncs agents from cloud config
+  - `removeAgent()` prevents removal of built-in and organization agents
+  - Agent registry populates `displayName` from org mode options
+- Git commit message generation now uses non-streaming completion
+  - Prevents infinite loading states during commit message generation
+  - Uses `complete()` instead of streaming for full response guarantee
+- Permission system events now include optional metadata field
+  - `PermissionRequested` event accepts metadata for additional context
+- Upstream sync workflow improved with force flag
+  - Kilocode fork sync now uses `--force` flag for reliable updates
+  - Opencode fork sync switched to `dev` branch with `--force` flag
+
+### Fixed
+
+- MCP server initialization failures no longer block application startup
+- Permission drain now respects config file protection rules
+- Agent removal now properly validates against organization-managed agents
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +281,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.6
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

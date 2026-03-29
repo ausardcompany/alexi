@@ -683,6 +683,232 @@ graph LR
    - Avoid shared state between tests
    - Use unique temporary directories per test
 
+### Testing Permission System
+
+#### Config File Protection Tests
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ConfigProtection } from '../src/permission/config-paths.js';
+
+describe('ConfigProtection', () => {
+  it('should detect config directories', () => {
+    expect(ConfigProtection.isRelative('.alexi/config.json')).toBe(true);
+    expect(ConfigProtection.isRelative('.kilo/settings.json')).toBe(true);
+  });
+
+  it('should exclude plans directories', () => {
+    expect(ConfigProtection.isRelative('.alexi/plans/feature-plan.md')).toBe(false);
+  });
+
+  it('should detect root-level config files', () => {
+    expect(ConfigProtection.isRelative('alexi.json')).toBe(true);
+    expect(ConfigProtection.isRelative('AGENTS.md')).toBe(true);
+  });
+
+  it('should not protect read operations', () => {
+    expect(
+      ConfigProtection.isRequest({
+        patterns: ['alexi.json'],
+        permission: 'read'
+      })
+    ).toBe(false);
+  });
+});
+```
+
+#### Permission Drain Tests
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { drainCovered } from '../src/permission/drain.js';
+
+describe('drainCovered', () => {
+  it('should auto-approve pending permissions covered by new allow rules', async () => {
+    const resolve = vi.fn();
+    const reject = vi.fn();
+
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['/project/src/*']
+        },
+        ruleset: [],
+        resolve,
+        reject
+      }
+    };
+
+    const approved = [
+      { permission: 'file:write', pattern: '/project/*', action: 'allow' }
+    ];
+
+    const mockEvaluate = vi.fn().mockReturnValue({ action: 'allow' });
+
+    await drainCovered(pending, approved, mockEvaluate, {}, Error);
+
+    expect(resolve).toHaveBeenCalled();
+    expect(reject).not.toHaveBeenCalled();
+  });
+
+  it('should not auto-resolve config file permissions', async () => {
+    const resolve = vi.fn();
+    const pending = {
+      'req-1': {
+        info: {
+          id: 'req-1',
+          sessionID: 'session-1',
+          permission: 'file:write',
+          patterns: ['.alexi/config.json']
+        },
+        ruleset: [],
+        resolve,
+        reject: vi.fn()
+      }
+    };
+
+    const approved = [
+      { permission: 'file:write', pattern: '**', action: 'allow' }
+    ];
+
+    await drainCovered(pending, approved, vi.fn(), {}, Error);
+
+    expect(resolve).not.toHaveBeenCalled();
+  });
+});
+```
+
+### Testing Error Backoff
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ErrorBackoff, extractStatusCode } from '../src/core/error-backoff.js';
+
+describe('ErrorBackoff', () => {
+  it('should implement exponential backoff', () => {
+    const backoff = new ErrorBackoff({
+      initialDelayMs: 1000,
+      multiplier: 2,
+      maxDelayMs: 10000
+    });
+
+    backoff.recordError();
+    expect(backoff.shouldBackoff()).toBe(true);
+    expect(backoff.getRemainingBackoffMs()).toBeGreaterThan(0);
+  });
+
+  it('should detect fatal errors', () => {
+    const backoff = new ErrorBackoff();
+    backoff.recordError(404);
+    expect(backoff.isFatal()).toBe(true);
+  });
+
+  it('should reset backoff state', () => {
+    const backoff = new ErrorBackoff();
+    backoff.recordError();
+    backoff.reset();
+    expect(backoff.shouldBackoff()).toBe(false);
+    expect(backoff.getConsecutiveErrors()).toBe(0);
+  });
+});
+
+describe('extractStatusCode', () => {
+  it('should extract status codes from error messages', () => {
+    expect(extractStatusCode('API error: status: 404')).toBe(404);
+    expect(extractStatusCode('Request failed with status: 500')).toBe(500);
+    expect(extractStatusCode('No status code here')).toBeUndefined();
+  });
+});
+```
+
+### Testing Skills System
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { 
+  getSkillRegistry, 
+  defineSkill,
+  isBuiltinSkill 
+} from '../src/skill/index.js';
+
+describe('Skill System', () => {
+  it('should register and retrieve skills', () => {
+    const registry = getSkillRegistry();
+    const skill = defineSkill({
+      id: 'test-skill',
+      name: 'Test Skill',
+      description: 'Test skill description',
+      prompt: 'Test prompt'
+    });
+
+    registry.register(skill);
+    const retrieved = registry.get('test-skill');
+    
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.id).toBe('test-skill');
+  });
+
+  it('should list skills by category', () => {
+    const registry = getSkillRegistry();
+    const securitySkills = registry.listByCategory('security');
+    
+    expect(securitySkills.length).toBeGreaterThan(0);
+    expect(securitySkills.every(s => s.category === 'security')).toBe(true);
+  });
+
+  it('should identify built-in skills', () => {
+    expect(isBuiltinSkill('code-review')).toBe(true);
+    expect(isBuiltinSkill('custom-skill')).toBe(false);
+  });
+});
+```
+
+### Testing Organization Modes
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { 
+  migrateOrgModes, 
+  isOrgManagedMode 
+} from '../src/config/modes-migrator.js';
+import { getAgentRegistry, removeAgent } from '../src/agent/index.js';
+
+describe('Organization Modes', () => {
+  it('should migrate organization modes', async () => {
+    await migrateOrgModes([
+      {
+        name: 'test-org-mode',
+        displayName: 'Test Org Mode',
+        description: 'Test organization mode',
+        options: { source: 'organization' }
+      }
+    ]);
+
+    const agent = getAgentRegistry().get('test-org-mode');
+    expect(agent).toBeDefined();
+    expect(isOrgManagedMode(agent!)).toBe(true);
+  });
+
+  it('should prevent removal of organization modes', async () => {
+    await migrateOrgModes([
+      {
+        name: 'protected-mode',
+        displayName: 'Protected Mode',
+        description: 'Protected organization mode',
+        options: { source: 'organization' }
+      }
+    ]);
+
+    expect(() => removeAgent('protected-mode')).toThrow(
+      'Cannot remove organization agent'
+    );
+  });
+});
+```
+
 ## Contributing Tests
 
 When contributing new features:

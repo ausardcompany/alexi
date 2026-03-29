@@ -134,11 +134,11 @@ The workflow determines documentation scope based on file patterns:
 
 #### Upstream Repositories
 
-| Repository | Purpose | Sync Source |
-|------------|---------|-------------|
-| kilocode | AI coding assistant patterns | Kilo-Org/kilocode |
-| opencode | Open source coding patterns | anomalyco/opencode |
-| claude-code | Anthropic Claude patterns | anthropics/claude-code |
+| Repository | Purpose | Sync Source | Branch |
+|------------|---------|-------------|--------|
+| kilocode | AI coding assistant patterns | Kilo-Org/kilocode | main (with --force) |
+| opencode | Open source coding patterns | anomalyco/opencode | dev (with --force) |
+| claude-code | Anthropic Claude patterns | anthropics/claude-code | main |
 
 #### Workflow Architecture
 
@@ -200,6 +200,13 @@ The upstream sync workflow follows a sophisticated two-stage AI-powered process:
 3. Execute changes in priority order
 4. Maximum 50 iterations for complex updates
 5. Generate execution summary
+6. Automatic retry on transient API errors (up to 3 attempts)
+
+**Key Enhancements**:
+- **Non-streaming commit messages**: Uses `complete()` instead of streaming to prevent infinite loading states
+- **Retry logic**: Handles transient SAP AI Core API errors with exponential backoff
+- **Error backoff**: Circuit breaker pattern for fatal errors (4xx status codes)
+- **Debug logging**: `ALEXI_DEBUG_MESSAGES=1` for troubleshooting API issues
 
 **Stage 3: PR Creation**
 1. Commit all changes made by the AI agent

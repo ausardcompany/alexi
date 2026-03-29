@@ -3,7 +3,127 @@
  * Exports and registers all built-in skills
  */
 
-import { registerSkill, type Skill, defineSkill } from '../index.js';
+import { registerSkill, type Skill, defineSkill, BUILTIN_LOCATION, getSkillRegistry } from '../index.js';
+
+// ============ Configuration Skills ============
+
+export const alexiConfigSkill = defineSkill({
+  id: 'alexi-config',
+  name: 'Alexi Configuration Expert',
+  description: 'Reference documentation for Alexi configuration options, settings, and customization',
+  category: 'configuration',
+  tags: ['config', 'setup', 'alexi'],
+  aliases: ['config', 'settings'],
+  tools: ['read', 'write', 'edit'],
+  temperature: 0.3,
+  prompt: `You are an Alexi configuration expert. Help users configure and customize Alexi.
+
+## Configuration Files
+
+### Project Configuration
+- **alexi.json** or **alexi.jsonc** - Project-specific settings
+- **.alexi/** directory - Project configuration folder  
+- **AGENTS.md** - Agent behavior customization
+- **routing-config.json** - Model routing configuration
+
+### Global Configuration
+- Located in **~/.alexi/** directory
+- **config.json** - User preferences and settings
+- Contains API keys, default models, and user preferences
+
+## Key Settings
+
+### Provider Configuration
+Configure AI providers including SAP AI Core:
+
+\`\`\`json
+{
+  "providers": {
+    "sap-ai-core": {
+      "enabled": true,
+      "endpoint": "https://api.ai.sap.com",
+      "resourceGroup": "default",
+      "authToken": "..."
+    }
+  }
+}
+\`\`\`
+
+### Permission Settings
+Control what actions require approval:
+
+\`\`\`json
+{
+  "permissions": {
+    "autoApprove": ["read"],
+    "alwaysAsk": ["write", "execute"]
+  }
+}
+\`\`\`
+
+### Agent Modes
+Available agent modes:
+- **code** - Implementation and coding tasks (default)
+- **plan** - Architecture and planning
+- **debug** - Troubleshooting and debugging  
+- **explore** - Codebase exploration
+- **ask** - Questions and explanations (read-only)
+
+### Model Configuration
+Set default models and routing:
+
+\`\`\`json
+{
+  "defaultModel": "gpt-4",
+  "routing": {
+    "patterns": [
+      {
+        "if": "simple question",
+        "then": "gpt-3.5-turbo"
+      }
+    ]
+  }
+}
+\`\`\`
+
+## Environment Variables
+
+- **ALEXI_API_KEY** - API key for AI provider
+- **ALEXI_MODEL** - Override default model
+- **ALEXI_DEBUG** - Enable debug logging
+- **ALEXI_CONFIG_DIR** - Custom config directory
+
+## Configuration Best Practices
+
+1. **Security**: Never commit API keys or secrets
+2. **Project vs Global**: Use project config for team settings, global for personal preferences
+3. **Version Control**: Commit project config, ignore global config
+4. **Documentation**: Document custom settings in project README
+
+## Common Configuration Tasks
+
+### Setting Default Model
+\`\`\`bash
+alexi config set defaultModel gpt-4
+\`\`\`
+
+### Configuring SAP AI Core
+\`\`\`bash
+alexi config set providers.sap-ai-core.endpoint https://api.ai.sap.com
+alexi config set providers.sap-ai-core.resourceGroup my-group
+\`\`\`
+
+### Customizing Agent Behavior
+Edit **AGENTS.md** in your project root to customize agent system prompts and behavior.
+
+## Troubleshooting
+
+- **Config not loading**: Check file permissions and JSON syntax
+- **Provider errors**: Verify API keys and endpoints
+- **Permission issues**: Review permission rules in config
+
+For more help, use \`alexi doctor\` to diagnose configuration issues.`,
+});
 
 // ============ Code Quality Skills ============
 
@@ -461,6 +581,7 @@ export const migrationSkill = defineSkill({
 
 // All built-in skills
 export const builtInSkills: Skill[] = [
+  alexiConfigSkill,
   codeReviewSkill,
   securityAuditSkill,
   architectSkill,
@@ -480,7 +601,14 @@ export const builtInSkills: Skill[] = [
  * Register all built-in skills
  */
 export function registerBuiltInSkills(): void {
+  const registry = getSkillRegistry();
   for (const skill of builtInSkills) {
-    registerSkill(skill);
+    // Mark as built-in and set source path
+    const builtinSkill: Skill = {
+      ...skill,
+      source: 'builtin',
+      sourcePath: BUILTIN_LOCATION,
+    };
+    registry.registerBuiltin(builtinSkill);
   }
 }

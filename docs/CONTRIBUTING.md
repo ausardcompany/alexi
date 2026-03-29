@@ -471,6 +471,62 @@ For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
 - Commit fixes back to the PR branch
 - Rate-limited to 2 runs per branch per day
 
+### New Systems to Consider
+
+When contributing, be aware of these key systems:
+
+#### 1. Config File Protection
+
+Configuration files are protected from accidental modification:
+
+```typescript
+// Protected paths
+['.alexi/', '.kilo/', '.kilocode/', '.opencode/']
+['alexi.json', 'AGENTS.md', 'kilo.json']
+
+// Always require explicit approval for config file writes
+ConfigProtection.isRequest({ patterns: ['alexi.json'], permission: 'write' })
+// Returns: true
+```
+
+#### 2. Permission Drain
+
+When implementing permission features:
+- Pending permissions auto-resolve when rules are added
+- Config file permissions never auto-resolve (safety)
+- Use `drainCovered()` to trigger drain after rule updates
+
+#### 3. Organization Modes
+
+When working with agent system:
+- Organization-managed agents cannot be removed locally
+- Check `isOrgManagedMode(agent)` before allowing modifications
+- Sync organization modes via `migrateOrgModes()`
+
+#### 4. Error Backoff
+
+When implementing API calls:
+- Use `ErrorBackoff` class for circuit breaker pattern
+- Extract status codes with `extractStatusCode()`
+- Record errors/successes to enable exponential backoff
+- Check `isFatal()` for 4xx client errors
+
+#### 5. Skills System
+
+When adding new skills:
+- Use `defineSkill()` for consistent structure
+- Register with `registerSkill()` or `registry.registerBuiltin()`
+- Include category, tags, and aliases for discoverability
+- Specify tool constraints if skill has specific requirements
+
+#### 6. MCP Integration
+
+When working with MCP servers:
+- Handle initialization failures gracefully
+- Log summary of successful/failed connections
+- Don't block application startup on MCP failures
+- Use `Promise.allSettled()` for parallel initialization
+
 ### Code Review
 
 All PRs require:

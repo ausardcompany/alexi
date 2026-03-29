@@ -20,6 +20,7 @@ import {
   waitForEvent,
   defineEvent,
 } from '../bus/index.js';
+import { ConfigProtection } from './config-paths.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -438,7 +439,7 @@ export class PermissionManager {
 
   /**
    * Check permission with interactive ask flow
-   * Enhanced with doom loop detection and external path checking
+   * Enhanced with doom loop detection, external path checking, and config protection
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
     // Check for doom loop first
@@ -464,6 +465,17 @@ export class PermissionManager {
 
     const { decision, rule } = this.evaluate(ctx);
 
+    // Force "ask" for config file edits - security protection
+    const isConfigProtected = ConfigProtection.isRequest({
+      patterns: [ctx.resource],
+      permission: ctx.action,
+    });
+
+    if (decision === 'allow' && isConfigProtected) {
+      // Override allow to ask for config files
+      return this.askUser(ctx, true);
+    }
+
     if (decision === 'allow') {
       // Reset operation tracking on success
       const key = this.getOperationKey(ctx);
@@ -478,13 +490,13 @@ export class PermissionManager {
     }
 
     // Ask the user
-    return this.askUser(ctx);
+    return this.askUser(ctx, isConfigProtected);
   }
 
   /**
    * Interactive ask flow - publishes event and waits for response
    */
-  private async askUser(ctx: PermissionContext): Promise<PermissionResult> {
+  private async askUser(ctx: PermissionContext, isConfigProtected = false): Promise<PermissionResult> {
     const requestId = nanoid();
 
     // Publish permission request event
@@ -495,6 +507,7 @@ export class PermissionManager {
       resource: ctx.resource,
       description: ctx.description ?? `${ctx.action} on ${ctx.resource}`,
       timestamp: Date.now(),
+      metadata: isConfigProtected ? { [ConfigProtection.DISABLE_ALWAYS_KEY]: true } : undefined,
     });
 
     try {
@@ -505,8 +518,8 @@ export class PermissionManager {
         this.askTimeoutMs
       );
 
-      // Remember for session if requested
-      if (response.remember) {
+      // Skip "remember" for config-protected files
+      if (response.remember && !isConfigProtected) {
         const sessionKey = `${ctx.toolName}:${ctx.action}:${ctx.resource}`;
         this.sessionGrants.set(sessionKey, response.granted);
       }

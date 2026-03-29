@@ -625,6 +625,119 @@ interface Session {
 4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
 5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
 6. **Keep User Files Private**: Never commit ~/.alexi/ directory
+7. **Protect Config Files**: Config files (.alexi/, alexi.json, AGENTS.md) require explicit approval for modifications
+8. **Organization Modes**: Organization-managed agents cannot be removed locally — manage through cloud dashboard
+
+## Organization-Managed Agents
+
+Alexi supports cloud-synchronized agent modes for team consistency:
+
+### Configuration
+
+Organization modes are synced from cloud configuration and registered automatically:
+
+```typescript
+// Organization mode structure
+interface OrgMode {
+  name: string;
+  displayName?: string;
+  description?: string;
+  steps?: string[];
+  options?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
+}
+```
+
+### Example Organization Mode
+
+```json
+{
+  "name": "team-reviewer",
+  "displayName": "Team Code Reviewer",
+  "description": "Enforces organization-wide code review standards",
+  "options": {
+    "source": "organization",
+    "reviewGuidelines": "https://internal.example.com/guidelines",
+    "strictMode": true
+  },
+  "permission": {
+    "autoApprove": ["read"],
+    "alwaysAsk": ["write", "execute"]
+  }
+}
+```
+
+### Key Features
+
+- **Cloud Synchronization**: Modes synced from organization dashboard
+- **Protected from Removal**: Cannot be deleted locally
+- **Team Consistency**: Ensures all team members use same agent configuration
+- **Custom Metadata**: Supports organization-specific options
+- **Display Names**: Human-readable names for better UX
+
+### Managing Organization Modes
+
+```bash
+# List all agents (including organization modes)
+alexi agents list
+
+# Switch to organization mode
+@team-reviewer implement feature
+
+# Attempt to remove (will fail with helpful message)
+alexi agents remove team-reviewer
+# Error: Cannot remove organization agent — manage it from the cloud dashboard
+```
+
+## Permission Configuration
+
+### Config File Protection
+
+Alexi automatically protects configuration files from unauthorized modification:
+
+#### Protected Paths
+
+```typescript
+// Protected config directories (at any depth)
+['.kilo/', '.kilocode/', '.opencode/', '.alexi/']
+
+// Protected root-level files
+['kilo.json', 'kilo.jsonc', 'opencode.json', 'opencode.jsonc', 
+ 'alexi.json', 'alexi.jsonc', 'AGENTS.md']
+
+// Excluded from protection
+['.alexi/plans/', '.kilo/plans/']
+```
+
+#### Behavior
+
+- Write operations on config files always require explicit user approval
+- Cannot be auto-resolved through permission drain
+- Helps prevent accidental modification of critical configuration
+- Plans directories excluded to allow autonomous planning
+
+### Permission Drain
+
+The permission drain system automatically resolves pending permissions:
+
+```json
+{
+  "permissions": {
+    "autoDrain": true,
+    "drainExclusions": [
+      ".alexi/**",
+      "alexi.json",
+      "AGENTS.md"
+    ]
+  }
+}
+```
+
+**How It Works**:
+1. User approves permission with "Allow always" for pattern `src/**`
+2. High-priority rule added: `{ pattern: 'src/**', action: 'allow', priority: 200 }`
+3. Pending sibling requests for `src/components/*.tsx` auto-resolve
+4. Config file requests remain pending (safety)
 
 ## Configuration Validation
 

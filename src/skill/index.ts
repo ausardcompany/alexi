@@ -9,6 +9,9 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 
+// Constant for built-in skills that don't have filesystem locations
+export const BUILTIN_LOCATION = '<builtin>' as const;
+
 // Skill definition schema
 export const SkillSchema = z.object({
   id: z.string(),
@@ -143,6 +146,7 @@ export function loadSkillsFromDirectory(dirPath: string): Skill[] {
 class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
   private aliasMap: Map<string, string> = new Map();
+  private builtinSkills: Map<string, Skill> = new Map();
 
   /**
    * Register a skill
@@ -156,6 +160,22 @@ class SkillRegistry {
         this.aliasMap.set(alias.toLowerCase(), skill.id);
       }
     }
+  }
+
+  /**
+   * Register a built-in skill
+   */
+  registerBuiltin(skill: Skill): void {
+    this.builtinSkills.set(skill.id, skill);
+    this.register(skill);
+  }
+
+  /**
+   * Check if a skill is built-in
+   */
+  isBuiltin(idOrAlias: string): boolean {
+    const id = this.aliasMap.get(idOrAlias.toLowerCase()) || idOrAlias;
+    return this.builtinSkills.has(id);
   }
 
   /**
@@ -268,6 +288,10 @@ export function getSkill(idOrAlias: string): Skill | undefined {
 
 export function listSkills(): Skill[] {
   return getSkillRegistry().list();
+}
+
+export function isBuiltinSkill(idOrAlias: string): boolean {
+  return getSkillRegistry().isBuiltin(idOrAlias);
 }
 
 // Re-export
