@@ -8,6 +8,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
+import { BuiltinSkills } from './builtin.js';
 
 // Skill definition schema
 export const SkillSchema = z.object({
@@ -144,6 +145,13 @@ class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
   private aliasMap: Map<string, string> = new Map();
 
+  constructor() {
+    // Register built-in skills
+    for (const skill of BuiltinSkills.list()) {
+      this.register(skill);
+    }
+  }
+
   /**
    * Register a skill
    */
@@ -272,3 +280,4 @@ export function listSkills(): Skill[] {
 
 // Re-export
 export { SkillRegistry };
+export { BuiltinSkills } from './builtin.js';

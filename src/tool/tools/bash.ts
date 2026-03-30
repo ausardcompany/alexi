@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
+import { Shell } from '../../shell/shell.js';
 
 const BashParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -71,6 +72,10 @@ Usage:
 
     const timeout = params.timeout ?? DEFAULT_TIMEOUT;
 
+    // Detect the appropriate shell for the platform
+    const shell = Shell.getDefaultShell();
+    const shellArgs = Shell.getShellArgs(shell);
+
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
@@ -80,19 +85,29 @@ Usage:
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
 
-      const proc = spawn(params.command, {
-        shell: true,
+      // Spawn with explicit shell and arguments for better cross-platform support
+      const proc = spawn(shell, [...shellArgs, params.command], {
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
-        detached: true,
+        detached: process.platform !== 'win32', // detached doesn't work well on Windows
       });
 
       // Kill the entire process group (shell + all children)
       const killGroup = (signal: NodeJS.Signals) => {
         try {
-          if (proc.pid !== undefined) {
-            process.kill(-proc.pid, signal);
+          if (process.platform === 'win32') {
+            // On Windows, use taskkill to kill the process tree
+            if (proc.pid !== undefined) {
+              spawn('taskkill', ['/pid', proc.pid.toString(), '/t', '/f'], {
+                windowsHide: true,
+              });
+            }
+          } else {
+            // On Unix, kill the process group
+            if (proc.pid !== undefined) {
+              process.kill(-proc.pid, signal);
+            }
           }
         } catch {
           // Process group may already be gone
