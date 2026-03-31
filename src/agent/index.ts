@@ -19,6 +19,7 @@ export const AgentSchema = z.object({
   description: z.string(),
   mode: z.enum(['primary', 'subagent', 'all']).default('all'),
   systemPrompt: z.string(),
+  deprecated: z.boolean().optional(), // Mark agent as deprecated
   // Tool configuration
   tools: z.array(z.string()).optional(), // Tool IDs this agent can use
   disabledTools: z.array(z.string()).optional(), // Explicitly disabled tools
@@ -315,4 +316,19 @@ export function parseAgentMention(message: string): {
   }
 
   return { agentId: null, cleanMessage: message };
+}
+
+/** Check if an agent is deprecated and should show warning UI */
+export function isDeprecated(agent: Agent): boolean {
+  return agent.deprecated === true;
+}
+
+/** Merge agent configs, preserving deprecated field */
+export function mergeAgentConfig(base: Agent, override: Partial<Agent>): Agent {
+  return {
+    ...base,
+    ...override,
+    // Ensure deprecated propagates correctly
+    deprecated: override.deprecated ?? base.deprecated,
+  };
 }

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
+import { BuiltinSkills } from './skills/builtin.js';
 
 // Skill definition schema
 export const SkillSchema = z.object({
@@ -144,6 +145,13 @@ class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
   private aliasMap: Map<string, string> = new Map();
 
+  constructor() {
+    // Register built-in skills
+    for (const skill of BuiltinSkills.getBuiltinSkills()) {
+      this.register(skill);
+    }
+  }
+
   /**
    * Register a skill
    */
@@ -226,8 +234,13 @@ class SkillRegistry {
    * Remove a skill
    */
   remove(id: string): boolean {
+    // Guard against removing built-in skills
+    BuiltinSkills.guardRemoval(id);
+
     const skill = this.skills.get(id);
-    if (!skill) return false;
+    if (!skill) {
+      return false;
+    }
 
     // Remove aliases
     if (skill.aliases) {
