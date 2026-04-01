@@ -389,4 +389,3 @@ const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
 export function getAskAgentBashRules(): Record<string, 'allow' | 'ask' | 'deny'> {
   return readOnlyBash;
 }
-
