@@ -388,6 +388,109 @@ Key principles for TUI testing:
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
 
+### Testing Config File Protection
+
+When testing permission system changes related to config files:
+
+```typescript
+import { ConfigProtection } from '../src/permission/config-paths.js';
+
+describe('Config file protection', () => {
+  it('should identify config files', () => {
+    expect(ConfigProtection.isRelative('.alexi/config.json')).toBe(true);
+    expect(ConfigProtection.isRelative('alexi.json')).toBe(true);
+    expect(ConfigProtection.isRelative('AGENTS.md')).toBe(true);
+  });
+
+  it('should exclude plans directory', () => {
+    expect(ConfigProtection.isRelative('.alexi/plans/plan.md')).toBe(false);
+  });
+
+  it('should detect config edit requests', () => {
+    const isConfig = ConfigProtection.isRequest({
+      patterns: ['.alexi/config.json'],
+      permission: 'write'
+    });
+    expect(isConfig).toBe(true);
+  });
+
+  it('should provide disable-always metadata', () => {
+    const metadata = ConfigProtection.getMetadata();
+    expect(metadata.disableAlways).toBe(true);
+  });
+});
+```
+
+### Testing MCP Client Caching
+
+When testing MCP client tool caching:
+
+```typescript
+import { McpClientManager } from '../src/mcp/client.js';
+
+describe('MCP client caching', () => {
+  let manager: McpClientManager;
+
+  beforeEach(() => {
+    manager = new McpClientManager();
+  });
+
+  it('should cache tool lists', async () => {
+    // First call - populates cache
+    const tools1 = manager.getServerTools('test-server');
+    
+    // Second call within TTL - returns cached
+    const tools2 = manager.getServerTools('test-server');
+    
+    expect(tools1).toBe(tools2); // Same reference
+  });
+
+  it('should invalidate cache on demand', () => {
+    manager.getServerTools('test-server');
+    manager.invalidateToolCache('test-server');
+    
+    // Next call should fetch fresh data
+    const tools = manager.getServerTools('test-server');
+    expect(tools).toBeDefined();
+  });
+});
+```
+
+### Testing Skill System
+
+When testing skill loading and precedence:
+
+```typescript
+import {
+  loadSkillFromFile,
+  skillDirectories,
+  isBuiltinSkill,
+  removeSkill
+} from '../src/skill/index.js';
+
+describe('Skill system', () => {
+  it('should load skills from file', () => {
+    const skill = loadSkillFromFile('./test-skill.md');
+    expect(skill).toBeDefined();
+    expect(skill?.id).toBe('test-skill');
+  });
+
+  it('should return directories in precedence order', () => {
+    const dirs = skillDirectories('/project');
+    expect(dirs[0]).toContain('.alexi/skills'); // Project first
+    expect(dirs[1]).toContain('.alexi/skills'); // Global second
+  });
+
+  it('should protect built-in skills', () => {
+    expect(isBuiltinSkill('alexi-config')).toBe(true);
+    
+    const result = removeSkill('alexi-config');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Cannot remove built-in skill');
+  });
+});
+```
+
 ## Pull Request Process
 
 ### Before Submitting

@@ -132,13 +132,17 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Config Protection | `src/permission/config-paths.ts` | Config file edit protection |
+| Permission Drain | `src/permission/drain.ts` | Auto-resolve pending permissions |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
+| MCP Client | `src/mcp/client.ts` | MCP client with tool caching |
 | Skill | `src/skill/index.ts` | Specialized prompt skills |
 | Compaction | `src/compaction/index.ts` | Context compression |
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
+| Global Paths | `src/utils/global.ts` | Global configuration paths |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
 
 ## Data Flow
@@ -212,7 +216,10 @@ flowchart LR
     HasPerm -->|No| DirectExec[Execute Directly]
     
     GetResource --> ResolveCtx[Resolve with Context]
-    ResolveCtx --> CheckRules[Check Permission Rules]
+    ResolveCtx --> ConfigCheck{Is Config File?}
+    ConfigCheck -->|Yes| DisableAlways[Disable Always Allow]
+    ConfigCheck -->|No| CheckRules[Check Permission Rules]
+    DisableAlways --> CheckRules
     
     CheckRules --> EvalRules[Evaluate Rules by Priority]
     EvalRules --> LastMatch[Last Match Wins]
@@ -226,7 +233,10 @@ flowchart LR
     UserResp -->|Allow| Grant
     UserResp -->|Deny| Reject
     
-    Grant --> DirectExec
+    Grant --> DrainCheck{Auto-Drain?}
+    DrainCheck -->|Yes| DrainPending[Drain Covered Pending]
+    DrainCheck -->|No| DirectExec[Execute Directly]
+    DrainPending --> DirectExec
     Reject --> RetErr[Return Error]
     DirectExec --> Result[Return Result]
     RetErr --> Result
@@ -431,9 +441,14 @@ Sessions provide:
 
 1. **Secrets Management**: Secrets are redacted in exports and logs
 2. **Permission System**: File access is controlled by configurable rules
-3. **Environment Isolation**: Sensitive config stored in `~/.alexi/`
-4. **Type Safety**: Strict TypeScript configuration with proper type assertions
-5. **Logging**: Centralized logger replaces direct console calls for better control
+3. **Config File Protection**: Configuration files are protected from accidental modification
+   - .kilo/, .kilocode/, .opencode/, .alexi/ directories are protected
+   - Root-level config files (kilo.json, alexi.json, AGENTS.md) are protected
+   - "Always allow" option is disabled for config file edits
+   - Config file permissions are never auto-resolved by drain system
+4. **Environment Isolation**: Sensitive config stored in `~/.alexi/`
+5. **Type Safety**: Strict TypeScript configuration with proper type assertions
+6. **Logging**: Centralized logger replaces direct console calls for better control
 
 ## Logging System
 
@@ -542,10 +557,161 @@ flowchart LR
     Fix --> Code
 ```
 
+## MCP Client Caching System
+
+The MCP client manager implements a caching layer for tool lists to reduce redundant RPC calls:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant McpManager
+    participant Cache
+    participant McpServer
+    
+    Client->>McpManager: getServerTools(serverName)
+    McpManager->>Cache: Check cache for serverName
+    
+    alt Cache Hit (< 30s old)
+        Cache-->>McpManager: Return cached tools
+        McpManager-->>Client: Return tools
+    else Cache Miss or Expired
+        McpManager->>McpServer: listTools() RPC
+        McpServer-->>McpManager: Tool list
+        McpManager->>Cache: Store tools with timestamp
+        McpManager-->>Client: Return tools
+    end
+    
+    Note over Cache: TTL: 30 seconds
+    
+    Client->>McpManager: invalidateToolCache(serverName)
+    McpManager->>Cache: Clear cache for serverName
+```
+
+### Cache Configuration
+
+- **TTL**: 30 seconds (configurable via `CACHE_TTL_MS`)
+- **Scope**: Per-server caching with optional global invalidation
+- **Manual Refresh**: `refreshTools(serverName)` bypasses cache and updates
+
+## Agent System Enhancements
+
+### Agent Deprecation
+
+Agents can now be marked as deprecated to signal phase-out:
+
+```typescript
+interface Agent {
+  id: string;
+  name: string;
+  deprecated?: boolean; // Mark agent as deprecated
+  // ... other fields
+}
+```
+
+### Read-Only Bash Rules for Ask Agent
+
+The ask agent uses a strict read-only bash command ruleset:
+
+```typescript
+const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
+  '*': 'deny', // Default deny for unknown commands
+  'cat *': 'allow',
+  'ls *': 'allow',
+  'grep *': 'allow',
+  'git status *': 'allow',
+  'git log *': 'allow',
+  // Write operations explicitly denied
+  'git add *': 'deny',
+  'git commit *': 'deny',
+  // ... more rules
+};
+```
+
+This ensures the ask agent cannot modify the filesystem while still allowing informational commands.
+
+## Skill System Architecture
+
+The skill system supports precedence-based loading with project and global skill directories:
+
+```mermaid
+graph TB
+    subgraph Loading Order
+        ProjectSkills[Project Skills<br/>.alexi/skills/]
+        GlobalSkills[Global Skills<br/>~/.alexi/skills/]
+    end
+    
+    subgraph Registry
+        SkillRegistry[Skill Registry]
+    end
+    
+    subgraph Protection
+        BuiltIn[Built-in Skills<br/>alexi-config, kilo-config]
+    end
+    
+    ProjectSkills -->|Priority 1| SkillRegistry
+    GlobalSkills -->|Priority 2| SkillRegistry
+    BuiltIn -->|Cannot Remove| SkillRegistry
+    
+    style ProjectSkills fill:#E8F5E9
+    style GlobalSkills fill:#E3F2FD
+    style BuiltIn fill:#FFF3E0
+```
+
+### Skill Precedence
+
+1. **Project Skills** (`.alexi/skills/`): Highest precedence, project-specific
+2. **Global Skills** (`~/.alexi/skills/`): Lower precedence, user-wide
+3. **Built-in Skills**: Protected from removal
+
+### Skill Protection
+
+Built-in skills (`alexi-config`, `kilo-config`) cannot be removed via `removeSkill()` API.
+
+## Global Paths Utility
+
+Centralized configuration path management for consistent directory access:
+
+```typescript
+interface GlobalPaths {
+  config: string;   // ~/.alexi/
+  skills: string;   // ~/.alexi/skills/
+  cache: string;    // ~/.alexi/cache/
+}
+
+function getGlobalPaths(): GlobalPaths {
+  const homeDir = os.homedir();
+  const configDir = path.join(homeDir, '.alexi');
+  
+  return {
+    config: configDir,
+    skills: path.join(configDir, 'skills'),
+    cache: path.join(configDir, 'cache'),
+  };
+}
+```
+
+Used by permission system, skill system, and MCP client for global configuration access.
+
+## Context Compaction Language Support
+
+The context compaction system now preserves the conversation language in summaries:
+
+```typescript
+const SUMMARY_PROMPT = `Summarize this conversation for context continuity.
+...
+Respond in the same language the user used in the conversation.
+
+Conversation:
+{messages}`;
+```
+
+This ensures multilingual conversations maintain language consistency after compaction.
+
 ## Future Improvements
 
 - [ ] Add more provider implementations
 - [ ] Improve test coverage
 - [ ] Add metrics and telemetry
-- [ ] Implement caching layer
+- [ ] Implement additional caching layers
 - [ ] Add web UI option
+- [ ] Extend config protection to more file types

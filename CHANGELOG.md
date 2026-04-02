@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-04-02
+
+### Added
+
+- Agent system now supports deprecated flag for marking agents as deprecated
+- Read-only bash command rules for ask agent with explicit deny for write operations
+- Config file protection system to prevent accidental modification of configuration files
+  - Protects .kilo/, .kilocode/, .opencode/, .alexi/ directories
+  - Protects root-level config files: kilo.json, opencode.json, alexi.json, AGENTS.md
+  - Excludes plans/ subdirectory from protection
+  - Disables "always allow" option in UI for config file edits
+- Global paths utility for consistent configuration directory access
+- Skill system enhancements with precedence-based loading
+  - Project skills directory (.alexi/skills) takes precedence over global skills
+  - Built-in skill protection prevents removal of alexi-config and kilo-config
+  - Skill removal API with validation
+- MCP client tool caching system
+  - 30-second TTL cache for tool lists
+  - Cache invalidation support
+  - Manual tool refresh capability
+  - Reduces redundant RPC calls to MCP servers
+
+### Changed
+
+- Permission system now includes metadata field in PermissionRequested events
+- Context compaction now responds in the same language as the conversation
+- MCP client getAllTools and getServerTools methods now use caching
+- Config file edit permissions are never auto-resolved by drain system
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -19,14 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- Full TUI (Terminal User Interface) — component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
   - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
   - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
-  - Dark/light theme support via ThemeContext with `/theme` command
-  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
+  - Dark/light theme support via ThemeContext with /theme command
+  - Image attachment support: Ctrl+V clipboard paste and /image file attachment
   - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
   - Event bus integration for real-time tool execution and permission prompt display
 - 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
@@ -224,7 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.3.7
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

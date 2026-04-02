@@ -552,7 +552,201 @@ interface AgenticProgressEvent {
 }
 ```
 
-## Tool System
+### Built-in Agents
+
+| Agent | ID | Mode | Description |
+|-------|-----|------|-------------|
+| Code Agent | `code` | all | General-purpose coding agent for implementation tasks |
+| Debug Agent | `debug` | all | Specialized for debugging and fixing issues |
+| Plan Agent | `plan` | all | Creates detailed implementation plans (read-only tools) |
+| Explore Agent | `explore` | subagent | Fast codebase exploration and search (read-only) |
+| Orchestrator Agent | `orchestrator` | primary | Coordinates work across multiple agents |
+
+### Agent Configuration
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;
+  description: string;
+  mode: 'primary' | 'subagent' | 'all';
+  systemPrompt: string;
+  deprecated?: boolean; // Mark agent as deprecated
+  tools?: string[]; // Tool IDs this agent can use
+  disabledTools?: string[]; // Explicitly disabled tools
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];
+  options?: Record<string, unknown>;
+}
+```
+
+### Read-Only Bash Rules for Ask Agent
+
+The ask agent uses strict read-only bash command rules:
+
+```typescript
+import { getAskAgentBashRules } from './agent/index.js';
+
+const bashRules = getAskAgentBashRules();
+// Returns:
+// {
+//   '*': 'deny', // Default deny
+//   'cat *': 'allow',
+//   'ls *': 'allow',
+//   'grep *': 'allow',
+//   'git status *': 'allow',
+//   'git add *': 'deny', // Explicitly deny write operations
+//   // ... more rules
+// }
+```
+
+## Skill System
+
+### Skill Definition
+
+```typescript
+interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  prompts?: {
+    system?: string;
+    review?: string;
+    planning?: string;
+    codeReview?: string;
+  };
+  tools?: string[];
+  disabledTools?: string[];
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  category?: string;
+  tags?: string[];
+  aliases?: string[];
+  source?: 'builtin' | 'file' | 'mcp';
+  sourcePath?: string;
+}
+```
+
+### Skill Loading
+
+```typescript
+import {
+  loadSkillFromFile,
+  loadSkillsFromDirectory,
+  skillDirectories,
+  isBuiltinSkill,
+  removeSkill
+} from './skill/index.js';
+
+// Load skill from markdown file
+const skill = loadSkillFromFile('./my-skill.md');
+
+// Load all skills from directory
+const skills = loadSkillsFromDirectory('./skills');
+
+// Get skill directories in precedence order
+const dirs = skillDirectories(process.cwd());
+// Returns: ['.alexi/skills', '~/.alexi/skills']
+
+// Check if skill is built-in
+const isBuiltin = isBuiltinSkill('alexi-config'); // true
+
+// Remove skill (fails for built-in skills)
+const result = removeSkill('custom-skill');
+// Returns: { success: true } or { success: false, error: string }
+```
+
+## MCP Client System
+
+### MCP Tool Caching
+
+```typescript
+import { getMcpClientManager } from './mcp/client.js';
+
+const mcpManager = getMcpClientManager();
+
+// Get tools with caching (30-second TTL)
+const tools = mcpManager.getServerTools('my-server');
+
+// Invalidate cache for specific server
+mcpManager.invalidateToolCache('my-server');
+
+// Invalidate all caches
+mcpManager.invalidateToolCache();
+
+// Manually refresh tools from server
+await mcpManager.refreshTools('my-server');
+```
+
+### MCP Connection Interface
+
+```typescript
+interface McpConnection {
+  config: McpServerConfig;
+  client: Client;
+  process?: ChildProcess;
+  tools: McpToolInfo[];
+  status: 'connecting' | 'connected' | 'disconnected' | 'error';
+  error?: string;
+  toolsCachedAt?: number;
+}
+```
+
+## Global Paths Utility
+
+Access global configuration directories:
+
+```typescript
+import { getGlobalPaths } from './utils/global.js';
+
+const paths = getGlobalPaths();
+// Returns:
+// {
+//   config: '~/.alexi',
+//   skills: '~/.alexi/skills',
+//   cache: '~/.alexi/cache'
+// }
+```
+
+## Config File Protection
+
+The permission system includes special protection for configuration files:
+
+```typescript
+import { ConfigProtection } from './permission/config-paths.js';
+
+// Check if path is a config file (relative)
+const isConfig = ConfigProtection.isRelative('.alexi/config.json'); // true
+
+// Check if path is a config file (absolute)
+const isConfigAbs = ConfigProtection.isAbsolute(
+  '/path/to/project/.alexi/config.json',
+  '/path/to/project'
+); // true
+
+// Check if permission request involves config files
+const isConfigRequest = ConfigProtection.isRequest({
+  patterns: ['.alexi/config.json'],
+  permission: 'write'
+}); // true
+
+// Get metadata to disable "always allow" option
+const metadata = ConfigProtection.getMetadata();
+// Returns: { disableAlways: true }
+```
+
+### Protected Config Files
+
+- `.kilo/`, `.kilocode/`, `.opencode/`, `.alexi/` directories (except `plans/`)
+- Root-level: `kilo.json`, `opencode.json`, `alexi.json`, `AGENTS.md`
+- Global: `~/.alexi/` directory
+
+## Agent System
 
 ### Tool Definition
 
@@ -806,6 +1000,54 @@ interface PermissionContext {
   action: PermissionAction;
   resource: string; // Path, command, URL, etc.
   description?: string;
+}
+```
+
+### Permission Events
+
+```typescript
+// Permission request event (includes metadata)
+PermissionRequested.publish({
+  id: string,
+  toolName: string,
+  action: string,
+  resource: string,
+  description: string,
+  timestamp: number,
+  metadata?: Record<string, unknown> // e.g., { disableAlways: true }
+});
+
+// Permission response event
+PermissionResponse.publish({
+  id: string,
+  decision: 'allow' | 'deny',
+  remember: boolean,
+  timestamp: number
+});
+```
+
+### Config File Protection
+
+Config file edit requests automatically include metadata to disable the "always allow" option:
+
+```typescript
+// When editing config files, metadata is added
+const metadata = { disableAlways: true };
+
+PermissionRequested.publish({
+  // ... other fields
+  metadata
+});
+```
+
+### Permission Drain System
+
+The drain system auto-resolves pending permissions when rules are added, but excludes config files:
+
+```typescript
+// Config file permissions are never auto-resolved
+if (ConfigProtection.isRequest(entry.info)) {
+  continue; // Skip auto-resolution
 }
 ```
 

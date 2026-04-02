@@ -625,6 +625,195 @@ interface Session {
 4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
 5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
 6. **Keep User Files Private**: Never commit ~/.alexi/ directory
+7. **Protect Config Files**: The permission system automatically protects configuration files from accidental modification
+
+## Global Configuration Paths
+
+Alexi uses standardized global configuration paths:
+
+```typescript
+interface GlobalPaths {
+  config: string;   // ~/.alexi/
+  skills: string;   // ~/.alexi/skills/
+  cache: string;    // ~/.alexi/cache/
+}
+```
+
+### Directory Structure
+
+```
+~/.alexi/
+├── config.json           # User configuration
+├── ALEXI.md             # User-level instructions
+├── routing-config.json  # User routing rules
+├── mcp-servers.json     # MCP server configuration
+├── sessions/            # Saved sessions
+├── skills/              # Global skills
+└── cache/               # Cache directory
+```
+
+## Config File Protection
+
+Alexi automatically protects configuration files from accidental modification:
+
+### Protected Directories
+
+- `.kilo/`, `.kilocode/`, `.opencode/`, `.alexi/` (at any depth)
+- Excludes: `.alexi/plans/` (plan files are not protected)
+
+### Protected Root Files
+
+- `kilo.json`, `kilo.jsonc`
+- `opencode.json`, `opencode.jsonc`
+- `alexi.json`, `alexi.jsonc`
+- `AGENTS.md`
+
+### Protection Behavior
+
+When editing protected config files:
+- Permission prompt shows "Allow" or "Deny" options only
+- "Always allow" option is disabled to prevent accidental permanent grants
+- Config file permissions are never auto-resolved by drain system
+- Each edit requires explicit user approval
+
+### Example
+
+```typescript
+// Attempting to edit .alexi/config.json
+// Permission prompt:
+// 
+// Permission Required: write on .alexi/config.json
+// [ Allow ] [ Deny ]
+// 
+// Note: "Always allow" is disabled for config files
+```
+
+## Skill System Configuration
+
+Skills can be defined at project or global level with precedence:
+
+### Skill Precedence
+
+1. **Project Skills** (`.alexi/skills/`): Highest precedence
+2. **Global Skills** (`~/.alexi/skills/`): Lower precedence
+
+### Skill File Format
+
+Skills are defined in markdown files with frontmatter:
+
+```markdown
+---
+id: my-skill
+name: My Custom Skill
+description: Custom skill for specific tasks
+category: development
+tags:
+  - coding
+  - testing
+preferredModel: gpt-4o
+temperature: 0.7
+tools:
+  - read
+  - write
+  - grep
+---
+
+# Skill Prompt
+
+Your detailed skill instructions here...
+```
+
+### Built-in Skills
+
+The following skills are built-in and cannot be removed:
+- `alexi-config`
+- `kilo-config`
+
+## MCP Client Configuration
+
+MCP clients support tool caching to reduce redundant RPC calls:
+
+### Cache Configuration
+
+```typescript
+const CACHE_TTL_MS = 30000; // 30 seconds
+```
+
+### Cache Behavior
+
+- Tool lists are cached per-server for 30 seconds
+- Cache is automatically invalidated on server disconnect
+- Manual cache invalidation available via `invalidateToolCache()`
+- Manual tool refresh available via `refreshTools()`
+
+### Example MCP Configuration
+
+```json
+{
+  "servers": {
+    "my-server": {
+      "name": "my-server",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["./mcp-server.js"],
+      "enabled": true,
+      "autoConnect": true,
+      "env": {
+        "API_KEY": "${MY_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+## Agent Configuration
+
+### Agent Deprecation
+
+Agents can be marked as deprecated:
+
+```typescript
+interface AgentConfig {
+  id: string;
+  name: string;
+  deprecated?: boolean; // Mark agent as deprecated
+  // ... other fields
+}
+```
+
+### Read-Only Bash Rules
+
+The ask agent uses strict read-only bash command rules to prevent filesystem modification:
+
+```typescript
+const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
+  '*': 'deny', // Default deny for unknown commands
+  'cat *': 'allow',
+  'ls *': 'allow',
+  'grep *': 'allow',
+  'git status *': 'allow',
+  'git log *': 'allow',
+  // Write operations explicitly denied
+  'git add *': 'deny',
+  'git commit *': 'deny',
+  'git push *': 'deny',
+  // ... more rules
+};
+```
+
+## Context Compaction Configuration
+
+Context compaction now preserves the conversation language:
+
+```typescript
+interface CompactionOptions {
+  preserveLastN?: number;      // Keep last N messages intact (default: 4)
+  summaryMaxTokens?: number;   // Max tokens for summary (default: 2000)
+  triggerThreshold?: number;   // Auto-trigger at this % of context (default: 90)
+}
+```
+
+The compaction system automatically detects and preserves the language used in the conversation.
 
 ## Configuration Validation
 
