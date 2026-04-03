@@ -83,7 +83,10 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI (deprecated) |
+| TUI App | `src/cli/tui/App.tsx` | Main TUI application with Ink + React |
+| Chat Page | `src/cli/tui/pages/ChatPage.tsx` | Chat interface with messages and input |
+| Logs Page | `src/cli/tui/pages/LogsPage.tsx` | Debug logs viewer with filtering |
 | Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
 | Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
 
@@ -132,6 +135,7 @@ graph TB
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Pub/sub event system |
 | Permission | `src/permission/index.ts` | File access control |
+| Permission Config Paths | `src/permission/config-paths.ts` | Config file detection and protection |
 | Agent | `src/agent/index.ts` | Autonomous agent system |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
 | MCP | `src/mcp/index.ts` | Model Context Protocol |
@@ -140,6 +144,7 @@ graph TB
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Global Utils | `src/utils/global.ts` | Global path and configuration utilities |
 
 ## Data Flow
 
@@ -366,6 +371,15 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   └── tui/       # Terminal UI (Ink + React)
+│   │       ├── components/  # UI components (Header, Sidebar, MessageArea, etc.)
+│   │       ├── context/     # React contexts (Theme, Session, Chat, Dialog, etc.)
+│   │       ├── dialogs/     # Modal dialogs (ModelPicker, AgentSelector, etc.)
+│   │       ├── hooks/       # Custom React hooks (useStreamChat, useVimMode, etc.)
+│   │       ├── pages/       # Page components (ChatPage, LogsPage)
+│   │       ├── theme/       # Theme definitions (dark, light)
+│   │       ├── types/       # TypeScript type definitions
+│   │       └── utils/       # TUI utilities
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -549,3 +563,173 @@ flowchart LR
 - [ ] Add metrics and telemetry
 - [ ] Implement caching layer
 - [ ] Add web UI option
+
+## TUI Architecture
+
+The Terminal User Interface (TUI) is built with Ink 6 and React 19, providing a full-featured interactive experience.
+
+```mermaid
+graph TB
+    subgraph "TUI Application"
+        App[App.tsx]
+        PageRouter[Page Router]
+        DialogHost[Dialog Host]
+    end
+    
+    subgraph "Pages"
+        ChatPage[ChatPage]
+        LogsPage[LogsPage]
+    end
+    
+    subgraph "Components"
+        Header[Header]
+        MessageArea[MessageArea]
+        InputBox[InputBox]
+        StatusBar[StatusBar]
+        Sidebar[Sidebar]
+        LogViewer[LogViewer]
+    end
+    
+    subgraph "Contexts"
+        Theme[ThemeContext]
+        Session[SessionContext]
+        Chat[ChatContext]
+        Dialog[DialogContext]
+        Page[PageContext]
+        SidebarCtx[SidebarContext]
+        Keybind[KeybindContext]
+    end
+    
+    subgraph "Hooks"
+        StreamChat[useStreamChat]
+        FileChanges[useFileChanges]
+        LogCollector[useLogCollector]
+        VimMode[useVimMode]
+        ScrollPos[useScrollPosition]
+    end
+    
+    App --> PageRouter
+    App --> DialogHost
+    PageRouter --> ChatPage
+    PageRouter --> LogsPage
+    
+    ChatPage --> Header
+    ChatPage --> MessageArea
+    ChatPage --> InputBox
+    ChatPage --> StatusBar
+    ChatPage --> Sidebar
+    
+    LogsPage --> Header
+    LogsPage --> LogViewer
+    LogsPage --> StatusBar
+    
+    App --> Theme
+    App --> Session
+    App --> Chat
+    App --> Dialog
+    App --> Page
+    App --> SidebarCtx
+    App --> Keybind
+    
+    ChatPage --> StreamChat
+    ChatPage --> FileChanges
+    LogsPage --> LogCollector
+    InputBox --> VimMode
+    MessageArea --> ScrollPos
+    
+    style App fill:#4CAF50
+    style ChatPage fill:#2196F3
+    style LogsPage fill:#2196F3
+```
+
+### TUI Page Routing
+
+The TUI implements a page routing system that allows switching between different views:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Keyboard
+    participant PageContext
+    participant App
+    participant ChatPage
+    participant LogsPage
+    
+    User->>Keyboard: Press Ctrl+L
+    Keyboard->>PageContext: togglePage()
+    PageContext->>PageContext: Update page state
+    PageContext->>App: Re-render with new page
+    
+    alt page === 'chat'
+        App->>ChatPage: Render chat interface
+        ChatPage->>User: Display messages & input
+    else page === 'logs'
+        App->>LogsPage: Render logs viewer
+        LogsPage->>User: Display debug logs
+    end
+```
+
+### Sidebar File Tracking
+
+The sidebar tracks file changes made by the agent in real-time:
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Tool
+    participant EventBus
+    participant useFileChanges
+    participant SidebarContext
+    participant Sidebar
+    
+    Agent->>Tool: Execute write operation
+    Tool->>EventBus: Emit ToolExecutionCompleted
+    EventBus->>useFileChanges: Receive event
+    useFileChanges->>useFileChanges: Parse file path from event
+    useFileChanges->>SidebarContext: trackFileChange(change)
+    SidebarContext->>SidebarContext: Update files list
+    SidebarContext->>Sidebar: Re-render with updated files
+    Sidebar->>Sidebar: Display + ~ - indicators
+```
+
+### Log Collection System
+
+The log collector subscribes to event bus events and maintains a structured log history:
+
+```mermaid
+graph LR
+    subgraph "Event Sources"
+        ToolStart[Tool Started]
+        ToolComplete[Tool Completed]
+        ToolFail[Tool Failed]
+        Error[Error Occurred]
+        AgentSwitch[Agent Switched]
+    end
+    
+    subgraph "Log Collector"
+        Collector[useLogCollector]
+        Reducer[Log Reducer]
+        State[Log State]
+    end
+    
+    subgraph "Log Viewer"
+        Filter[Level Filter]
+        Search[Search Query]
+        Display[Log Display]
+    end
+    
+    ToolStart --> Collector
+    ToolComplete --> Collector
+    ToolFail --> Collector
+    Error --> Collector
+    AgentSwitch --> Collector
+    
+    Collector --> Reducer
+    Reducer --> State
+    State --> Filter
+    Filter --> Search
+    Search --> Display
+    
+    style Collector fill:#4CAF50
+    style Display fill:#2196F3
+```

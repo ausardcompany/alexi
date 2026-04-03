@@ -7,7 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-03-21
+## [0.3.7] - 2026-04-03
+
+### Added
+
+- TUI page routing system with dedicated ChatPage and LogsPage
+  - PageContext and PageProvider for managing active page state
+  - Toggle between chat and logs views with Ctrl+L keybinding
+  - LogsPage with real-time event bus log collection and filtering
+  - LogViewer component with level filtering and search capabilities
+- File changes sidebar in TUI for tracking agent modifications
+  - SidebarContext and SidebarProvider for managing sidebar state
+  - Sidebar component with status indicators for added, modified, deleted files
+  - SplitPane layout component for resizable sidebar and main content
+  - useFileChanges hook for tracking file operations via event bus
+  - Keyboard navigation with Up/Down/Enter for file selection
+- Enhanced TUI dialog system
+  - HelpDialog for displaying keybindings and commands
+  - FilePicker for selecting files from filesystem
+  - QuitDialog for confirming exit with session save options
+  - ThemeDialog for switching between dark and light themes
+  - ArgDialog for collecting structured input with multiple fields
+- Vim mode support in TUI with normal, insert, visual, and command modes
+  - useVimMode hook implementing Vim keybindings and state machine
+  - Modal editing with h/j/k/l navigation in normal mode
+  - Command buffer for executing Vim-style commands
+  - Undo/redo support with history management
+- Advanced scroll position management
+  - useScrollPosition hook with viewport-aware scrolling
+  - Page up/down navigation with PgUp/PgDn keys
+  - Auto-scroll to bottom when new content arrives
+  - Scroll indicators showing position in content
+- Log collection system for debugging and monitoring
+  - useLogCollector hook subscribing to event bus events
+  - Real-time log entries from tool execution, errors, and agent switches
+  - Structured log entries with timestamp, level, source, and data
+  - Log filtering by level and search query
+- Config path protection for permission system
+  - isConfigPath function detecting config directories and files
+  - Protection for .kilo, .kilocode, .opencode, .alexi directories
+  - Root-level config file detection for AGENTS.md, kilo.json, etc.
+  - Exclusion rules for plan files and other non-config content
+  - Metadata support for disabling "Allow always" option on sensitive paths
+- Ask agent bash rules with read-only command restrictions
+  - getAskAgentBashRules function providing strict read-only bash allowlist
+  - Explicit deny rules for git write operations
+  - Allow rules for read-only git commands, text processing, and system info
+  - Default deny for unknown commands to prevent filesystem modification
+- Terminal image rendering utilities
+  - renderTerminalImage function for displaying images in TUI
+  - Support for PNG, JPEG, GIF, WEBP formats
+  - Automatic resizing to fit terminal dimensions
+  - Integration with Jimp for image processing
+- Enhanced DiffView component with upstream-matched styling
+  - Background highlighting for added and removed lines
+  - Line number gutter with diffLineNumber color
+  - Change summary in header showing additions and deletions count
+  - Collapsible long diffs showing first 10 lines with "N more" indicator
+- Event bus metadata field for permission requests
+  - Optional metadata field in PermissionRequested event
+  - Enables passing additional context for UI rendering decisions
+
+### Changed
+
+- TUI App component refactored to use page routing architecture
+  - Extracted ChatPage and LogsPage as separate page components
+  - Moved dialog rendering to dedicated DialogHost component
+  - Enhanced provider hierarchy with PageProvider and SidebarProvider
+  - Improved separation of concerns between layout and page logic
+- Header component simplified with reduced prop dependencies
+- StatusBar updated to display page-specific information
+- MessageBubble and ToolCallBlock styling aligned with upstream designs
+- Theme system extended with new color tokens for diff backgrounds
+  - diffAddBg and diffRemoveBg for line-level highlighting
+  - diffLineNumber for gutter text color
+  - Enhanced dark and light theme definitions
+- Documentation workflow now handles PR comment failures gracefully
+  - Added continue-on-error to prevent workflow failures from comment issues
+  - Ensures documentation generation completes even if PR comments fail
+
+### Fixed
+
+- Terminal image rendering now handles missing dependencies gracefully
+- Sidebar file selection bounds checking prevents index out of range errors
+- Log viewer scroll position correctly updates on new entries
+- Dialog overlay z-index properly covers main content
+
+## [0.3.6] - 2026-04-01
 
 ### Added
 
@@ -15,11 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI layout requirements quality checklist (35 items)
 - Task breakdown for 005-tui-text-display (26 tasks across 6 phases)
 
-## [0.3.0] - 2026-03-21
+## [0.3.5] - 2026-03-27
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- Full TUI (Terminal User Interface) — component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
@@ -224,7 +310,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/ausardcompany/alexi/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/ausardcompany/alexi/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.5
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

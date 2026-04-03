@@ -80,6 +80,14 @@ API key for WarpGrep semantic code search (optional).
 export MORPH_API_KEY=your_morph_api_key
 ```
 
+#### ALEXI_VIM_MODE
+
+Enable Vim mode for TUI input editing (optional, defaults to false).
+
+```bash
+export ALEXI_VIM_MODE=true
+```
+
 ## User Configuration
 
 User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.
@@ -97,6 +105,10 @@ interface UserConfig {
   defaultModel?: string;          // Persistent default model
   soundEnabled?: boolean;         // Enable notification sounds
   autoRoute?: boolean;            // Auto-routing preference
+  vimMode?: boolean;              // Enable Vim mode in TUI
+  theme?: 'dark' | 'light';       // TUI theme preference
+  sidebarVisible?: boolean;       // Sidebar visibility state
+  sidebarWidth?: number;          // Sidebar width in columns
   [key: string]: unknown;         // Extensible for custom settings
 }
 ```

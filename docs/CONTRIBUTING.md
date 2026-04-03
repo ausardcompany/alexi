@@ -388,6 +388,82 @@ Key principles for TUI testing:
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
 
+### Testing TUI Page Routing
+
+Page routing tests verify navigation between Chat and Logs pages:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { PageProvider, usePage } from '../src/cli/tui/context/PageContext.js';
+
+describe('PageContext', () => {
+  it('should toggle between chat and logs pages', () => {
+    let captured;
+    function PageCapture() {
+      captured = usePage();
+      return <Text>{captured.page}</Text>;
+    }
+
+    render(
+      <PageProvider>
+        <PageCapture />
+      </PageProvider>
+    );
+
+    expect(captured.page).toBe('chat');
+    
+    captured.togglePage();
+    expect(captured.page).toBe('logs');
+    
+    captured.togglePage();
+    expect(captured.page).toBe('chat');
+  });
+});
+```
+
+### Testing Sidebar File Tracking
+
+Sidebar tests verify file change tracking and selection:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { SidebarProvider, useSidebar } from '../src/cli/tui/context/SidebarContext.js';
+
+describe('SidebarContext', () => {
+  it('should track file changes', () => {
+    let captured;
+    function SidebarCapture() {
+      captured = useSidebar();
+      return <Text>ready</Text>;
+    }
+
+    render(
+      <SidebarProvider>
+        <SidebarCapture />
+      </SidebarProvider>
+    );
+
+    expect(captured.files).toEqual([]);
+
+    captured.trackFileChange({
+      path: 'src/test.ts',
+      status: 'modified',
+      additions: 10,
+      deletions: 5,
+    });
+
+    expect(captured.files).toHaveLength(1);
+    expect(captured.files[0].path).toBe('src/test.ts');
+  });
+});
+```
+
 ## Pull Request Process
 
 ### Before Submitting

@@ -99,6 +99,11 @@ sequenceDiagram
 
 4. **Force Regeneration**: Manual trigger option to regenerate all documentation
 
+5. **Graceful Error Handling**: PR comment failures no longer block workflow completion
+   - Added `continue-on-error: true` to comment steps
+   - Ensures documentation updates complete even if GitHub API issues occur
+   - Prevents workflow failures from transient comment posting errors
+
 #### Environment Variables
 
 ```bash

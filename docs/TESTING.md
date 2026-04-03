@@ -238,6 +238,34 @@ TUI slash commands are tested through the `useCommands` hook with React context 
 |---------|-----------|------------|
 | `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
 
+### TUI Component Test Coverage
+
+TUI components and hooks have comprehensive test coverage:
+
+| Component/Hook | Test File | Test Cases |
+|----------------|-----------|------------|
+| `App` | `tests/cli/tui/App.test.tsx` | 12+ cases |
+| `ChatPage` | `tests/cli/tui/ChatPage.test.tsx` | 6+ cases |
+| `LogsPage` | `tests/cli/tui/LogsPage.test.tsx` | 8+ cases |
+| `Header` | `tests/cli/tui/Header.test.tsx` | 10+ cases |
+| `StatusBar` | `tests/cli/tui/StatusBar.test.tsx` | 8+ cases |
+| `Sidebar` | `tests/cli/tui/Sidebar.test.tsx` | 12+ cases |
+| `SplitPane` | `tests/cli/tui/SplitPane.test.tsx` | 6+ cases |
+| `LogViewer` | `tests/cli/tui/LogViewer.test.tsx` | 10+ cases |
+| `MessageBubble` | `tests/cli/tui/MessageBubble.test.tsx` | 8+ cases |
+| `HelpDialog` | `tests/cli/tui/HelpDialog.test.tsx` | 6+ cases |
+| `FilePicker` | `tests/cli/tui/FilePicker.test.tsx` | 8+ cases |
+| `QuitDialog` | `tests/cli/tui/QuitDialog.test.tsx` | 6+ cases |
+| `ThemeDialog` | `tests/cli/tui/ThemeDialog.test.tsx` | 4+ cases |
+| `ArgDialog` | `tests/cli/tui/ArgDialog.test.tsx` | 6+ cases |
+| `PageContext` | `tests/cli/tui/PageContext.test.tsx` | 8+ cases |
+| `SidebarContext` | `tests/cli/tui/SidebarContext.test.tsx` | 10+ cases |
+| `useKeyboard` | `tests/cli/tui/useKeyboard.test.tsx` | 12+ cases |
+| `useVimMode` | `tests/cli/tui/useVimMode.test.ts` | 15+ cases |
+| `useScrollPosition` | `tests/cli/tui/useScrollPosition.test.tsx` | 14+ cases |
+| `useFileChanges` | `tests/cli/tui/useFileChanges.test.ts` | 8+ cases |
+| Theme system | `tests/cli/tui/theme.test.tsx` | 6+ cases |
+
 ### Test Categories
 
 Each tool is tested across multiple categories:

@@ -199,7 +199,241 @@ alexi session-delete -s <session-id>
 
 ## Interactive Mode Commands
 
-The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions.
+The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions. The TUI supports page routing, vim mode, and advanced keybindings.
+
+### TUI Keybindings
+
+| Key | Action | Context |
+|-----|--------|---------|
+| `Ctrl+L` | Toggle between Chat and Logs pages | Global |
+| `Ctrl+B` | Toggle sidebar visibility | Chat page |
+| `Ctrl+X` | Enter leader mode | Global |
+| `Ctrl+K` | Open command palette | Global |
+| `Ctrl+C` | Exit application | Global |
+| `Tab` | Cycle to next agent | Global |
+| `Shift+Tab` | Cycle to previous agent | Global |
+| `Ctrl+V` | Paste image from clipboard | Chat input |
+| `Up/Down` | Navigate file list | Sidebar (when focused) |
+| `Enter` | Activate selected file | Sidebar (when focused) |
+| `PgUp/PgDn` | Scroll message area | Message area |
+| `Esc` | Close dialog or cancel | Dialog |
+
+### Vim Mode Keybindings
+
+When Vim mode is enabled (via `/vim` command):
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `i` | Normal | Enter insert mode |
+| `Esc` | Insert | Return to normal mode |
+| `h/j/k/l` | Normal | Navigate left/down/up/right |
+| `w/b` | Normal | Move forward/backward by word |
+| `0/# Alexi API Documentation
+
+This document provides comprehensive API documentation for Alexi's CLI commands, configuration options, and TypeScript interfaces.
+
+## Table of Contents
+
+- [CLI Commands](#cli-commands)
+- [Environment Variables](#environment-variables)
+- [TypeScript Interfaces](#typescript-interfaces)
+- [Tool System](#tool-system)
+- [Permission System](#permission-system)
+
+## CLI Commands
+
+### chat
+
+Send messages to LLMs with optional auto-routing and session management.
+
+```bash
+alexi chat -m <message> [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-m, --message <text>` | string | Message to send (required) |
+| `--model <id>` | string | Override model selection (e.g., gpt-4o, claude-4-sonnet) |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
+| `--session <id>` | string | Continue existing session |
+| `--system <prompt>` | string | System prompt for conversation |
+
+#### Examples
+
+```bash
+# Use specific model
+alexi chat -m "Hello" --model gpt-4o-mini
+
+# Auto-route with cost optimization
+alexi chat -m "What is AI?" --auto-route --prefer-cheap
+
+# Continue conversation in session
+alexi chat -m "Tell me more" --session abc-123 --auto-route
+```
+
+### models
+
+List available models/deployments from SAP AI Core.
+
+```bash
+alexi models [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-j, --json` | boolean | Output as JSON |
+| `-s, --status <status>` | string | Filter by status (RUNNING, PENDING, STOPPED, etc.) |
+| `--scenario <scenario>` | string | Filter by scenario ID |
+| `-g, --resource-group <group>` | string | AI Core resource group (default: "default") |
+| `--proxy` | boolean | Use proxy endpoint instead of direct AI Core API |
+
+#### Examples
+
+```bash
+# List all deployments
+alexi models
+
+# Filter by status
+alexi models --status RUNNING
+
+# Filter by scenario
+alexi models --scenario foundation-models
+
+# Output as JSON
+alexi models --json
+
+# Use specific resource group
+alexi models --resource-group production
+
+# Use proxy endpoint
+alexi models --proxy
+```
+
+#### Output Format
+
+The models command displays a formatted table with the following columns:
+
+- **ID**: Deployment ID (UUID)
+- **Configuration**: Configuration name
+- **Scenario**: Scenario ID
+- **Status**: Current status (color-coded)
+  - Green: RUNNING
+  - Yellow: PENDING, STARTING
+  - Red: STOPPED, DEAD, UNKNOWN
+- **Created**: Creation timestamp
+
+For RUNNING deployments, the deployment URL is displayed below the row.
+
+#### TypeScript Interface
+
+```typescript
+interface DeploymentInfo {
+  id: string;
+  configurationId: string;
+  configurationName: string;
+  scenarioId: string | undefined;
+  status: string;
+  targetStatus: string;
+  statusMessage?: string;
+  deploymentUrl?: string;
+  createdAt: string;
+  modifiedAt: string;
+}
+```
+
+### explain
+
+Analyze and explain routing decisions without executing the request.
+
+```bash
+alexi explain -m <message>
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-m, --message <text>` | string | Message to analyze (required) |
+
+#### Example Output
+
+```
+=== Prompt Analysis ===
+Type: deep-reasoning
+Complexity: complex
+Requires Reasoning: true
+Estimated Tokens: 19
+
+=== Matched Rules ===
+• reasoning-for-math (priority: 80): Use reasoning models for math problems
+
+=== Model Candidates (by score) ===
+✓ gpt-4.1              Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
+  claude-4-sonnet      Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
+
+=== Selected Model ===
+Model: gpt-4.1
+Reason: Task type: deep-reasoning, Complexity: complex, requires reasoning
+Confidence: 100%
+Rule Applied: reasoning-for-math
+```
+
+### sessions
+
+List all saved sessions.
+
+```bash
+alexi sessions
+```
+
+Displays a table of all sessions with:
+- Session ID
+- Title (auto-generated from first message)
+- Message count
+- Model used
+- Creation date
+
+### session-export
+
+Export a session to markdown format.
+
+```bash
+alexi session-export -s <session-id> [-o output.md]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-s, --session <id>` | string | Session ID to export (required) |
+| `-o, --output <file>` | string | Output file path (default: stdout) |
+
+### session-delete
+
+Delete a session.
+
+```bash
+alexi session-delete -s <session-id>
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-s, --session <id>` | string | Session ID to delete (required) |
+
+ | Normal | Move to start/end of line |
+| `dd` | Normal | Delete current line |
+| `u` | Normal | Undo |
+| `Ctrl+R` | Normal | Redo |
+| `yy` | Normal | Yank (copy) line |
+| `p` | Normal | Paste |
+| `:` | Normal | Enter command mode |
 
 ### General Commands
 
@@ -214,6 +448,9 @@ The interactive REPL provides slash commands for managing sessions, configuratio
 | `/map` | | Show repository map |
 | `/map-refresh` | | Rebuild repository map from scratch |
 | `/map-tokens` | | Set token budget for repository map |
+| `/vim` | | Toggle Vim mode for input editing |
+| `/page` | | Toggle between chat and logs pages (same as Ctrl+L) |
+| `/sidebar` | | Toggle sidebar visibility (same as Ctrl+B) |
 
 ### Model Management
 
@@ -798,6 +1035,66 @@ interface PermissionRule {
 }
 ```
 
+### Config Path Protection
+
+The permission system automatically protects configuration files and directories:
+
+```typescript
+// Protected config directories
+const CONFIG_DIRS = ['.kilo/', '.kilocode/', '.opencode/', '.alexi/'];
+
+// Protected root-level files
+const CONFIG_ROOT_FILES = [
+  'kilo.json',
+  'kilo.jsonc',
+  'opencode.json',
+  'opencode.jsonc',
+  'alexi.json',
+  'alexi.jsonc',
+  'AGENTS.md',
+];
+
+// Excluded subdirectories (not protected)
+const EXCLUDED_SUBDIRS = ['plans/'];
+```
+
+The `isConfigPath()` function detects config paths and adds metadata to disable the "Allow always" option for sensitive files.
+
+### Ask Agent Bash Rules
+
+The ask agent uses strict read-only bash command restrictions:
+
+```typescript
+import { getAskAgentBashRules } from './agent/index.js';
+
+const rules = getAskAgentBashRules();
+// Returns: Record<string, 'allow' | 'ask' | 'deny'>
+```
+
+Key characteristics:
+- Default policy: `'*': 'deny'` (unknown commands are denied)
+- Read-only commands: `cat`, `ls`, `grep`, `git status`, `git log`, etc. are allowed
+- Text processing: `awk`, `sed`, `jq`, `yq` are allowed (stdout only)
+- Git write operations: Explicitly denied (`git add`, `git commit`, `git push`, etc.)
+- No filesystem modification: Ensures ask agent cannot modify files
+
+Example allowed commands:
+```bash
+# Allowed
+cat file.txt
+ls -la
+git status
+git log --oneline
+grep "pattern" file.txt
+jq '.key' data.json
+
+# Denied
+git add .
+git commit -m "message"
+rm file.txt
+mv file.txt newfile.txt
+```
+
 ### Permission Context
 
 ```typescript
@@ -806,6 +1103,7 @@ interface PermissionContext {
   action: PermissionAction;
   resource: string; // Path, command, URL, etc.
   description?: string;
+  metadata?: Record<string, unknown>; // Optional metadata (e.g., disableAlways)
 }
 ```
 
