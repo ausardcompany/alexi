@@ -83,7 +83,11 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI (deprecated, use TUI) |
+| TUI App | `src/cli/tui/App.tsx` | Main TUI application with React/Ink |
+| Chat Page | `src/cli/tui/pages/ChatPage.tsx` | Main chat interface with sidebar and message area |
+| Logs Page | `src/cli/tui/pages/LogsPage.tsx` | Debug log viewer with filtering |
+| Heap Monitor | `src/cli/heap.ts` | Memory monitoring and heap snapshot utilities |
 | Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
 | Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
 
@@ -130,16 +134,21 @@ graph TB
 
 | Module | File | Description |
 |--------|------|-------------|
-| Event Bus | `src/bus/index.ts` | Pub/sub event system |
-| Permission | `src/permission/index.ts` | File access control |
-| Agent | `src/agent/index.ts` | Autonomous agent system |
+| Event Bus | `src/bus/index.ts` | Pub/sub event system for tool execution and permissions |
+| Permission | `src/permission/index.ts` | File access control with rule-based decisions |
+| Permission Config | `src/permission/config-paths.ts` | Permission rule file management |
+| Permission Drain | `src/permission/drain.ts` | Graceful permission manager shutdown |
+| Agent | `src/agent/index.ts` | Autonomous agent system with specialization |
 | Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
-| MCP | `src/mcp/index.ts` | Model Context Protocol |
-| Skill | `src/skill/index.ts` | Specialized prompt skills |
-| Compaction | `src/compaction/index.ts` | Context compression |
+| MCP | `src/mcp/index.ts` | Model Context Protocol integration |
+| MCP Client | `src/mcp/client.ts` | MCP client with tool discovery |
+| Skill | `src/skill/index.ts` | Reusable AI prompts and behaviors |
+| Compaction | `src/compaction/index.ts` | Context compression for long conversations |
 | Profile | `src/profile/index.ts` | User profile management |
-| User Config | `src/config/userConfig.ts` | Persistent user configuration |
+| User Config | `src/config/userConfig.ts` | Persistent user configuration with MDM support |
+| Session Headers | `src/providers/sessionHeaders.ts` | Session tracking headers for SAP AI Core |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Global Utilities | `src/utils/global.ts` | Global path and configuration helpers |
 
 ## Data Flow
 
@@ -329,6 +338,197 @@ graph TB
 /memory init
 ```
 
+## TUI (Terminal User Interface) Architecture
+
+Alexi features a full-screen interactive TUI built with React and Ink, providing a rich terminal experience with visual parity to Kilo/OpenCode.
+
+### TUI Component Hierarchy
+
+```mermaid
+graph TB
+    subgraph App[\"App.tsx\"]
+        AppLayout[AppLayout Component]
+    end
+    
+    subgraph Providers[\"Context Providers\"]
+        ThemeProvider[ThemeProvider]
+        PageProvider[PageProvider]
+        SessionProvider[SessionProvider]
+        ChatProvider[ChatProvider]
+        AttachmentProvider[AttachmentProvider]
+        SidebarProvider[SidebarProvider]
+        KeybindProvider[KeybindProvider]
+        DialogProvider[DialogProvider]
+    end
+    
+    subgraph Pages[\"Page Components\"]
+        ChatPage[ChatPage]
+        LogsPage[LogsPage]
+    end
+    
+    subgraph ChatComponents[\"Chat Page Components\"]
+        SplitPane[SplitPane]
+        Sidebar[Sidebar]
+        MessageArea[MessageArea]
+        InputBox[InputBox]
+        StatusBar[StatusBar]
+    end
+    
+    subgraph LogComponents[\"Logs Page Components\"]
+        LogViewer[LogViewer]
+        LogStatusBar[StatusBar]
+    end
+    
+    subgraph Dialogs[\"Dialog Components\"]
+        HelpDialog[HelpDialog]
+        ModelPicker[ModelPicker]
+        AgentSelector[AgentSelector]
+        PermissionDialog[PermissionDialog]
+        SessionList[SessionList]
+        McpManager[McpManager]
+        ThemeDialog[ThemeDialog]
+        FilePicker[FilePicker]
+        QuitDialog[QuitDialog]
+        ArgDialog[ArgDialog]
+    end
+    
+    App --> ThemeProvider
+    ThemeProvider --> PageProvider
+    PageProvider --> SessionProvider
+    SessionProvider --> ChatProvider
+    ChatProvider --> AttachmentProvider
+    AttachmentProvider --> SidebarProvider
+    SidebarProvider --> KeybindProvider
+    KeybindProvider --> DialogProvider
+    DialogProvider --> AppLayout
+    
+    AppLayout --> ChatPage
+    AppLayout --> LogsPage
+    AppLayout --> Dialogs
+    
+    ChatPage --> SplitPane
+    SplitPane --> Sidebar
+    SplitPane --> MessageArea
+    ChatPage --> InputBox
+    ChatPage --> StatusBar
+    
+    LogsPage --> LogViewer
+    LogsPage --> LogStatusBar
+```
+
+### TUI Context System
+
+| Context | File | Purpose |
+|---------|------|---------|
+| ThemeContext | `src/cli/tui/context/ThemeContext.tsx` | Dark/light theme switching and color management |
+| PageContext | `src/cli/tui/context/PageContext.tsx` | Page navigation (chat, logs) |
+| SessionContext | `src/cli/tui/context/SessionContext.tsx` | Session state management |
+| ChatContext | `src/cli/tui/context/ChatContext.tsx` | Message history and streaming state |
+| AttachmentContext | `src/cli/tui/context/AttachmentContext.tsx` | Image attachment management |
+| SidebarContext | `src/cli/tui/context/SidebarContext.tsx` | File change tracking and sidebar visibility |
+| KeybindContext | `src/cli/tui/context/KeybindContext.tsx` | Leader key mode and keybinding state |
+| DialogContext | `src/cli/tui/context/DialogContext.tsx` | Modal dialog overlay management |
+
+### TUI Hooks
+
+| Hook | File | Purpose |
+|------|------|---------|
+| useStreamChat | `src/cli/tui/hooks/useStreamChat.ts` | LLM streaming with tool execution |
+| usePermission | `src/cli/tui/hooks/usePermission.ts` | Permission prompt handling |
+| useKeyboard | `src/cli/tui/hooks/useKeyboard.ts` | Global keyboard shortcuts |
+| useCommands | `src/cli/tui/hooks/useCommands.ts` | Slash command registration |
+| useToolEvents | `src/cli/tui/hooks/useToolEvents.ts` | Tool execution event subscriptions |
+| useFileChanges | `src/cli/tui/hooks/useFileChanges.ts` | File modification tracking |
+| useLogCollector | `src/cli/tui/hooks/useLogCollector.ts` | Log entry aggregation from event bus |
+| useScrollPosition | `src/cli/tui/hooks/useScrollPosition.ts` | Scroll state with vim navigation |
+| useVimMode | `src/cli/tui/hooks/useVimMode.ts` | Vim keybinding modes (normal, insert, visual, command) |
+
+### TUI Event Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant TUI
+    participant EventBus
+    participant Core
+    participant Tool
+    
+    User->>TUI: Type message
+    TUI->>Core: Send message via useStreamChat
+    Core->>EventBus: Emit MessageSent
+    Core->>LLM: Stream request
+    
+    loop Streaming
+        LLM-->>Core: Chunk
+        Core->>EventBus: Emit StreamChunkReceived
+        EventBus-->>TUI: Update streaming text
+    end
+    
+    alt Tool calls required
+        Core->>EventBus: Emit ToolExecutionStarted
+        EventBus-->>TUI: Show tool call block
+        Core->>Tool: Execute tool
+        Tool->>EventBus: Emit PermissionRequested (if needed)
+        EventBus-->>TUI: Show permission dialog
+        User->>TUI: Allow/Deny
+        TUI->>Core: Permission response
+        Tool-->>Core: Tool result
+        Core->>EventBus: Emit ToolExecutionCompleted
+        EventBus-->>TUI: Update tool call block
+        EventBus-->>Sidebar: Track file change
+    end
+    
+    Core->>EventBus: Emit MessageReceived
+    EventBus-->>TUI: Display final message
+```
+
+### File Change Tracking
+
+The TUI automatically tracks file modifications made by tools:
+
+```mermaid
+flowchart LR
+    ToolExec[Tool Execution] --> EventBus[Event Bus]
+    EventBus --> FileChangesHook[useFileChanges Hook]
+    FileChangesHook --> CheckTool{write or edit?}
+    CheckTool -->|Yes| ExtractPath[Extract File Path]
+    CheckTool -->|No| Skip[Skip]
+    ExtractPath --> CreateChange[Create FileChange]
+    CreateChange --> SidebarContext[SidebarContext]
+    SidebarContext --> Sidebar[Sidebar Component]
+    Sidebar --> Display[Display +added ~modified -deleted]
+```
+
+### Keyboard Shortcuts
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `Ctrl+X` | Global | Activate leader mode |
+| `Ctrl+X` then `m` | Leader | Open model picker |
+| `Ctrl+X` then `a` | Leader | Open agent selector |
+| `Ctrl+X` then `s` | Leader | Open session list |
+| `Ctrl+X` then `t` | Leader | Open theme dialog |
+| `Ctrl+X` then `h` | Leader | Open help dialog |
+| `Ctrl+X` then `l` | Leader | Switch to logs page |
+| `Ctrl+X` then `c` | Leader | Switch to chat page |
+| `Ctrl+X` then `b` | Leader | Toggle sidebar |
+| `Ctrl+K` | Global | Open command palette |
+| `Ctrl+C` | Global | Exit application |
+| `Ctrl+V` | Input | Paste clipboard image |
+| `Tab` | Global | Cycle to next agent |
+| `Shift+Tab` | Global | Cycle to previous agent |
+
+### Vim Mode Support
+
+The TUI includes optional vim keybinding support via `useVimMode` hook:
+
+- **Normal mode**: Navigation and commands
+- **Insert mode**: Text editing
+- **Visual mode**: Text selection
+- **Command mode**: Ex-style commands
+
+Vim mode can be toggled with `:set vim` command in the TUI.
+
 ## Configuration
 
 ### Environment Variables
@@ -358,6 +558,107 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
     "model": "anthropic--claude-4-sonnet"
   }
 }
+```
+
+## Skill System
+
+The skill system provides reusable AI prompts and behaviors that can be activated during conversations. Skills are defined with structured metadata and can be loaded from multiple sources.
+
+### Skill Definition
+
+```typescript
+interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  
+  // Optional structured prompts
+  prompts?: {
+    system?: string;
+    review?: string;
+    planning?: string;
+    codeReview?: string;
+  };
+  
+  // Tool constraints
+  tools?: string[];
+  disabledTools?: string[];
+  
+  // Model preferences
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  
+  // Metadata
+  category?: string;
+  tags?: string[];
+  aliases?: string[];
+  source?: 'builtin' | 'file' | 'mcp';
+}
+```
+
+### Skill Sources
+
+Skills can be loaded from multiple sources:
+
+1. **Built-in skills**: Defined in code using `defineSkill()`
+2. **File-based skills**: Markdown files with frontmatter in `~/.alexi/skills/` or `.alexi/skills/`
+3. **MCP skills**: Discovered from Model Context Protocol servers
+
+### Skill Discovery Flow
+
+```mermaid
+flowchart TB
+    Start[Skill Discovery] --> BuiltIn[Load Built-in Skills]
+    BuiltIn --> UserDir[Scan ~/.alexi/skills/]
+    UserDir --> ProjectDir[Scan .alexi/skills/]
+    ProjectDir --> MCP[Query MCP Servers]
+    MCP --> Registry[Skill Registry]
+    Registry --> Available[Available Skills]
+    
+    Available --> Activate{Activate Skill?}
+    Activate -->|Yes| Inject[Inject Skill Prompt]
+    Inject --> LLM[Send to LLM]
+    Activate -->|No| Normal[Normal Conversation]
+```
+
+### Skill File Format
+
+Skills are defined in markdown files with YAML frontmatter:
+
+```markdown
+---
+id: code-review
+name: Code Review Expert
+description: Provides detailed code reviews with security and performance insights
+category: development
+tags: [code, review, security]
+preferredModel: anthropic--claude-4-sonnet
+temperature: 0.3
+tools: [read, grep, bash]
+---
+
+You are an expert code reviewer specializing in security, performance, and best practices.
+
+When reviewing code:
+1. Check for security vulnerabilities
+2. Identify performance bottlenecks
+3. Suggest architectural improvements
+4. Verify adherence to coding standards
+```
+
+### Using Skills
+
+```bash
+# List available skills
+/skills
+
+# Activate a skill
+/skill code-review
+
+# Deactivate current skill
+/skill off
 ```
 
 ## Directory Structure

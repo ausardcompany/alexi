@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-04
+
+### Added
+
+- TUI enhancements with exact Kilo/OpenCode visual and functional parity
+  - ChatPage component extracted from AppLayout for better separation of concerns
+  - LogsPage component for dedicated debug log viewing with level filtering
+  - Sidebar component for file change tracking (added, modified, deleted files)
+  - SplitPane component for resizable sidebar and message area layout
+  - PageProvider context for switching between chat and logs pages
+  - SidebarContext for managing file changes and sidebar visibility
+  - useFileChanges hook to track write and edit tool executions
+  - useLogCollector hook to aggregate log entries from event bus
+  - useScrollPosition hook for scroll state management with vim-style navigation
+  - useVimMode hook for vim keybinding support (normal, insert, visual, command modes)
+  - HelpDialog, FilePicker, QuitDialog, ThemeDialog, ArgDialog components
+  - Terminal image rendering utility for inline image display
+  - Enhanced DiffView with background highlighting and collapsible long diffs
+  - Enhanced Header with breadcrumb navigation
+  - Enhanced StatusBar with file change counts
+  - Enhanced ToolCallBlock with improved diff rendering
+- Heap snapshot utilities for debugging memory issues in long-running processes
+  - Automatic heap snapshots when memory usage exceeds 1GB threshold
+  - Rate-limited snapshots (minimum 1 minute interval)
+  - Snapshots saved to .alexi/heap-snapshots directory
+- Agent system enhancements
+  - Read-only bash command rules for ask agent (getAskAgentBashRules)
+  - Deprecated flag for agents to mark legacy agent definitions
+- Event bus enhancements
+  - Added metadata field to PermissionRequested event for additional context
+- User configuration enhancements
+  - macOS managed preferences support via defaults command
+  - MDM integration for enterprise deployments (disableTelemetry, allowedProviders, defaultModel, proxyUrl)
+  - Batch update support with updateGlobal function
+- Skill system for reusable AI prompts and behaviors
+  - Skill definition schema with tool constraints and model preferences
+  - Load skills from markdown files with frontmatter
+  - Built-in skill registry with discovery from multiple sources
+  - Skill activation and deactivation during conversations
+- Session header tracking for SAP AI Core API calls
+  - X-Session-ID and X-Session-Turn headers for observability
+  - Automatic session correlation across multi-turn conversations
+- Permission system enhancements
+  - Config path utilities for permission rule file management
+  - Drain utility for graceful permission manager shutdown
+- Dependencies
+  - Added fzf (v0.5.2) for fuzzy file finding
+  - Added terminal-image (v4.2.0) for inline image rendering
+  - Added @testing-library/react (v16.3.2) for React component testing
+  - Updated @typescript-eslint/eslint-plugin to v8.58.0
+  - Updated @typescript-eslint/parser to v8.58.0
+
+### Changed
+
+- TUI architecture refactored for page-based navigation
+  - App.tsx now uses PageProvider to switch between ChatPage and LogsPage
+  - DialogHost extracted as separate component for overlay rendering
+  - All dialog types now support continue-on-error for workflow robustness
+- Theme system enhancements
+  - Added diffAddBg, diffRemoveBg, diffLineNumber colors to theme types
+  - Enhanced dark and light themes with new color definitions
+- Documentation workflow improvements
+  - Added continue-on-error to PR comment actions to prevent workflow failures
+- TypeScript configuration cleanup
+  - Removed deprecated baseUrl option from tsconfig.json
+
+### Fixed
+
+- Dialog rendering now properly overlays on top of page content
+- Sidebar focus management with dialog and leader mode interactions
+- File change tracking now correctly identifies added vs modified files
+- Memory leak prevention with heap monitoring in long-running TUI sessions
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +297,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
