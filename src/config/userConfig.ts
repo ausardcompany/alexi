@@ -10,11 +10,69 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 
 // ============ Constants ============
 
 export const CONFIG_DIR = path.join(os.homedir(), '.alexi');
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
+// ============ macOS Managed Preferences ============
+
+const MANAGED_DOMAIN = 'ai.alexi.cli';
+
+interface ManagedConfig {
+  disableTelemetry?: boolean;
+  allowedProviders?: string[];
+  defaultModel?: string;
+  proxyUrl?: string;
+}
+
+function readManagedKey(key: string): string | null {
+  try {
+    const result = execSync(`defaults read ${MANAGED_DOMAIN} ${key} 2>/dev/null`, {
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+    return result.trim();
+  } catch {
+    return null;
+  }
+}
+
+export function readManagedPreferences(): ManagedConfig | null {
+  if (os.platform() !== 'darwin') {
+    return null;
+  }
+
+  try {
+    const config: ManagedConfig = {};
+
+    const disableTelemetry = readManagedKey('disableTelemetry');
+    if (disableTelemetry !== null) {
+      config.disableTelemetry = disableTelemetry === '1' || disableTelemetry === 'true';
+    }
+
+    const allowedProviders = readManagedKey('allowedProviders');
+    if (allowedProviders !== null) {
+      config.allowedProviders = allowedProviders.split(',').map((s) => s.trim());
+    }
+
+    const defaultModel = readManagedKey('defaultModel');
+    if (defaultModel !== null) {
+      config.defaultModel = defaultModel;
+    }
+
+    const proxyUrl = readManagedKey('proxyUrl');
+    if (proxyUrl !== null) {
+      config.proxyUrl = proxyUrl;
+    }
+
+    return Object.keys(config).length > 0 ? config : null;
+  } catch {
+    return null;
+  }
+}
 
 // ============ Low-level helpers ============
 
@@ -30,21 +88,41 @@ export function ensureConfigDir(): void {
 /**
  * Load the full config object from disk.
  * Returns an empty object if the file doesn't exist or is corrupt.
+ * Managed preferences (macOS MDM) take precedence over user config.
  */
 export function loadFullConfig(): Record<string, unknown> {
   ensureConfigDir();
 
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return {};
+  let config: Record<string, unknown> = {};
+
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
+      config = JSON.parse(content) as Record<string, unknown>;
+    } catch {
+      // Return empty config on parse error (corrupt file)
+      config = {};
+    }
   }
 
-  try {
-    const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-    return JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    // Return empty config on parse error (corrupt file)
-    return {};
+  // Apply managed preferences (macOS MDM) - these take precedence
+  const managedPrefs = readManagedPreferences();
+  if (managedPrefs) {
+    if (managedPrefs.disableTelemetry !== undefined) {
+      config.telemetryEnabled = !managedPrefs.disableTelemetry;
+    }
+    if (managedPrefs.defaultModel) {
+      config.defaultModel = managedPrefs.defaultModel;
+    }
+    if (managedPrefs.proxyUrl) {
+      config.proxyUrl = managedPrefs.proxyUrl;
+    }
+    if (managedPrefs.allowedProviders) {
+      config.allowedProviders = managedPrefs.allowedProviders;
+    }
   }
+
+  return config;
 }
 
 /**
