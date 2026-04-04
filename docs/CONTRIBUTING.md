@@ -471,6 +471,63 @@ For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
 - Commit fixes back to the PR branch
 - Rate-limited to 2 runs per branch per day
 
+### TUI Development
+
+When working on TUI components:
+
+1. **Component Structure**: Follow Ink + React patterns
+   - Use functional components with hooks
+   - Manage state with React Context
+   - Use custom hooks for complex logic
+   
+2. **Testing TUI Components**: Use ink-testing-library
+   - Mock contexts before importing hooks
+   - Use render() to test components
+   - Capture hook values through wrapper components
+   - Test both rendering and user interactions
+   
+3. **Styling**: Use theme system for colors
+   - Access theme via useTheme() hook
+   - Use semantic color names (primary, success, error, etc.)
+   - Support both dark and light themes
+   
+4. **Keybindings**: Use useInput hook from Ink
+   - Check for leader mode state before handling keys
+   - Respect dialog open state
+   - Document all keybindings in HelpDialog
+
+Example TUI component test:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock contexts BEFORE importing hooks
+vi.mock('../src/cli/tui/context/ThemeContext.js', () => ({
+  useTheme: () => ({
+    theme: {
+      colors: {
+        text: '#ffffff',
+        background: '#000000',
+        primary: '#00ff00',
+      },
+    },
+  }),
+}));
+
+// Import AFTER mocks
+import { MyComponent } from '../src/cli/tui/components/MyComponent.js';
+
+describe('MyComponent', () => {
+  it('should render with correct theme colors', () => {
+    const { lastFrame } = render(<MyComponent />);
+    expect(lastFrame()).toContain('expected text');
+  });
+});
+```
+
 ### Code Review
 
 All PRs require:

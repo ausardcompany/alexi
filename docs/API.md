@@ -199,7 +199,19 @@ alexi session-delete -s <session-id>
 
 ## Interactive Mode Commands
 
-The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions.
+The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions. The TUI (Terminal User Interface) uses Ink + React to provide a full-screen interactive experience with real-time streaming, file change tracking, and comprehensive debugging tools.
+
+### TUI Features
+
+- **Full-screen layout**: Chat interface with messages, sidebar, input box, and status bar
+- **Page routing**: Switch between Chat and Logs pages with Ctrl+L
+- **File change tracking**: Automatic sidebar showing files modified by agents
+- **Real-time streaming**: Live markdown rendering with syntax highlighting
+- **Vim mode**: Optional Vim keybindings (normal, insert, visual, command modes)
+- **Theme support**: Dark and light themes with /theme command
+- **Modal dialogs**: Model picker, agent selector, permission dialogs, help, file picker
+- **Image attachments**: Ctrl+V clipboard paste and /image file attachment
+- **Log viewer**: Dedicated debug logs page with filtering and scrolling
 
 ### General Commands
 
@@ -208,12 +220,16 @@ The interactive REPL provides slash commands for managing sessions, configuratio
 | `/help` | `/h` | Show help message with all available commands |
 | `/exit` | `/quit`, `/q` | Exit the interactive REPL |
 | `/clear` | | Clear the terminal screen |
-| `/agent` | | Switch to a different agent (code, debug, plan, explore) |
+| `/agent` | | Switch to a different agent (code, debug, plan, explore, ask) |
 | `/stage` | | Switch development stage |
 | `/dod` | | Run Definition of Done checks |
 | `/map` | | Show repository map |
 | `/map-refresh` | | Rebuild repository map from scratch |
 | `/map-tokens` | | Set token budget for repository map |
+| `/logs` | | Switch to logs page (TUI only) |
+| `/chat` | | Switch to chat page (TUI only) |
+| `/sidebar` | | Toggle file changes sidebar (TUI only) |
+| `/vim` | | Toggle Vim mode (TUI only) |
 
 ### Model Management
 
@@ -315,6 +331,7 @@ Save information to memory with optional tags.
 | `/think` | Toggle extended thinking mode | `/think` |
 | `/effort <level>` | Set effort level (low/medium/high/max) | `/effort high` |
 | `/doctor` | Run environment health checks | `/doctor` |
+| `/theme` | Switch theme (dark/light) | `/theme` (TUI only) |
 
 ### Git Commands
 

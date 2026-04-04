@@ -83,9 +83,13 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| TUI App | `src/cli/tui/App.tsx` | Main TUI application with Ink + React |
+| Chat Page | `src/cli/tui/pages/ChatPage.tsx` | Chat interface with messages and sidebar |
+| Logs Page | `src/cli/tui/pages/LogsPage.tsx` | Debug logs viewer with filtering |
+| Interactive (deprecated) | `src/cli/interactive.ts` | Legacy readline REPL (superseded by TUI) |
 | Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
 | Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
+| Heap Monitor | `src/cli/heap.ts` | Memory monitoring and heap snapshots |
 
 ### Core Layer
 
@@ -140,6 +144,9 @@ graph TB
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Session Headers | `src/providers/sessionHeaders.ts` | API call context tracking |
+| Permission Paths | `src/permission/config-paths.ts` | Permission configuration path resolution |
+| Permission Drain | `src/permission/drain.ts` | Permission queue management |
 
 ## Data Flow
 
@@ -360,12 +367,192 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 }
 ```
 
+## Terminal User Interface (TUI) Architecture
+
+Alexi features a full-screen terminal UI built with Ink (React for CLIs) that provides an interactive chat interface with real-time streaming, file change tracking, and comprehensive debugging tools.
+
+### TUI Component Hierarchy
+
+```mermaid
+graph TB
+    subgraph App[\"App Component\"]
+        Providers[\"Context Providers<br/>(Theme, Session, Chat, Dialog, etc.)\"]
+        PageRouter[\"Page Router\"]
+    end
+    
+    subgraph ChatPage[\"Chat Page\"]
+        SplitPane[\"Split Pane Layout\"]
+        Messages[\"Message Area\"]
+        Sidebar[\"File Changes Sidebar\"]
+        Input[\"Input Box\"]
+        Status[\"Status Bar\"]
+    end
+    
+    subgraph LogsPage[\"Logs Page\"]
+        LogHeader[\"Header with Filters\"]
+        LogViewer[\"Log Viewer\"]
+        LogStatus[\"Status Bar\"]
+    end
+    
+    subgraph Dialogs[\"Modal Dialogs\"]
+        ModelPicker[\"Model Picker\"]
+        AgentSelector[\"Agent Selector\"]
+        PermissionDialog[\"Permission Dialog\"]
+        HelpDialog[\"Help Dialog\"]
+        FilePicker[\"File Picker\"]
+        ThemeDialog[\"Theme Dialog\"]
+        QuitDialog[\"Quit Dialog\"]
+        ArgDialog[\"Arg Input Dialog\"]
+    end
+    
+    Providers --> PageRouter
+    PageRouter --> ChatPage
+    PageRouter --> LogsPage
+    PageRouter --> Dialogs
+    
+    SplitPane --> Messages
+    SplitPane --> Sidebar
+    
+    style ChatPage fill:#E8F5E9
+    style LogsPage fill:#E3F2FD
+    style Dialogs fill:#FFF3E0
+```
+
+### TUI Context System
+
+The TUI uses React Context for state management across components:
+
+```mermaid
+graph LR
+    subgraph Contexts[\"React Contexts\"]
+        Theme[\"ThemeContext<br/>dark/light themes\"]
+        Session[\"SessionContext<br/>conversation state\"]
+        Chat[\"ChatContext<br/>messages & streaming\"]
+        Dialog[\"DialogContext<br/>modal management\"]
+        Keybind[\"KeybindContext<br/>leader mode & shortcuts\"]
+        Attachment[\"AttachmentContext<br/>image attachments\"]
+        Sidebar[\"SidebarContext<br/>file changes\"]
+        Page[\"PageContext<br/>chat/logs routing\"]
+    end
+    
+    subgraph Components[\"UI Components\"]
+        MessageArea
+        InputBox
+        StatusBar
+        Sidebar
+        LogViewer
+    end
+    
+    Theme --> Components
+    Session --> Components
+    Chat --> Components
+    Dialog --> Components
+    Keybind --> Components
+    Attachment --> Components
+    Sidebar --> Components
+    Page --> Components
+    
+    style Contexts fill:#4CAF50
+    style Components fill:#2196F3
+```
+
+### TUI Page Routing
+
+```mermaid
+stateDiagram-v2
+    [*] --> ChatPage: Default
+    ChatPage --> LogsPage: Ctrl+L
+    LogsPage --> ChatPage: Ctrl+L
+    
+    ChatPage: Chat Interface
+    ChatPage: - Message area with streaming
+    ChatPage: - File changes sidebar
+    ChatPage: - Input box with autocomplete
+    ChatPage: - Status bar
+    
+    LogsPage: Debug Logs
+    LogsPage: - Log viewer with scrolling
+    LogsPage: - Level filter (debug/info/warn/error)
+    LogsPage: - Text search filter
+    LogsPage: - Status bar
+```
+
+### File Change Tracking Flow
+
+```mermaid
+sequenceDiagram
+    participant Tool as Tool Execution
+    participant Bus as Event Bus
+    participant Hook as useFileChanges
+    participant Sidebar as SidebarContext
+    participant UI as Sidebar Component
+    
+    Tool->>Bus: ToolExecutionCompleted
+    Bus->>Hook: Event notification
+    Hook->>Hook: Parse file changes from result
+    Hook->>Sidebar: trackFileChange()
+    Sidebar->>Sidebar: Update file list
+    Sidebar->>UI: Re-render with changes
+    UI->>UI: Display status indicators
+    
+    Note over UI: + added (green)<br/>~ modified (yellow)<br/>- deleted (red)
+```
+
+### Vim Mode Support
+
+The TUI includes optional Vim mode with normal, insert, visual, and command modes:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal: Vim enabled
+    [*] --> Insert: Vim disabled
+    
+    Normal --> Insert: i, a, I, A, o, O
+    Normal --> Visual: v
+    Normal --> Command: :
+    
+    Insert --> Normal: Esc
+    Visual --> Normal: Esc
+    Command --> Normal: Esc, Enter
+    
+    Note right of Normal: Motion: h,j,k,l,w,b,0,$<br/>Operators: x,u,Ctrl+r,y,p,dd
+    Note right of Insert: Regular text input
+    Note right of Visual: Selection mode
+    Note right of Command: Ex commands
+```
+
+### TUI Hooks
+
+Custom React hooks provide specialized functionality:
+
+| Hook | Purpose | Key Features |
+|------|---------|--------------|
+| `useStreamChat` | Streaming message handling | Real-time text streaming, tool call tracking |
+| `useKeyboard` | Keyboard input management | Leader mode, dialog shortcuts, vim mode |
+| `useCommands` | Slash command system | Command registration, autocomplete, dispatch |
+| `usePermission` | Permission request handling | Interactive permission dialogs, auto-approval |
+| `useToolEvents` | Tool execution monitoring | Event bus integration, progress tracking |
+| `useFileChanges` | File change tracking | Sidebar integration, status indicators |
+| `useLogCollector` | Log entry collection | Level filtering, timestamp tracking |
+| `useScrollPosition` | Viewport management | Keyboard navigation, auto-scroll |
+| `useVimMode` | Vim keybindings | Mode management, motion commands |
+
 ## Directory Structure
 
 ```
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   ├── tui/       # Terminal UI (Ink + React)
+│   │   │   ├── components/  # UI components (MessageArea, InputBox, StatusBar, etc.)
+│   │   │   ├── context/     # React contexts (Theme, Session, Chat, Dialog, etc.)
+│   │   │   ├── dialogs/     # Modal dialogs (ModelPicker, AgentSelector, etc.)
+│   │   │   ├── hooks/       # Custom hooks (useKeyboard, useStreamChat, etc.)
+│   │   │   ├── pages/       # Page components (ChatPage, LogsPage)
+│   │   │   ├── theme/       # Theme definitions (dark, light)
+│   │   │   ├── types/       # TypeScript type definitions
+│   │   │   └── utils/       # TUI utilities
+│   │   └── program.ts       # Commander.js CLI program
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -380,6 +567,7 @@ alexi/
 │   ├── profile/       # Profile management
 │   └── ...
 ├── tests/             # Test files
+│   └── cli/tui/       # TUI component tests
 ├── dist/              # Compiled output
 └── docs/              # Documentation
 ```
