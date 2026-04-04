@@ -51,7 +51,7 @@ export const bashTool = defineTool<typeof BashParamsSchema, BashResult>({
 
 Usage:
 - Use for terminal operations like git, npm, docker, etc.
-- Use workdir parameter instead of 'cd && command' patterns.
+- All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. AVOID using 'cd <directory> && <command>' patterns - use workdir instead.
 - Output is truncated if it exceeds 2000 lines or 50KB.
 - Default timeout is 2 minutes.`,
 
