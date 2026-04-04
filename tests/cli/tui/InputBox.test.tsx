@@ -39,14 +39,13 @@ describe('InputBox', () => {
     isFocused: true,
   };
 
-  it('renders agent name and prompt symbol', () => {
+  it('renders prompt symbol', () => {
     const { lastFrame } = render(
       <Wrapper>
         <InputBox {...defaultProps} />
       </Wrapper>
     );
-    expect(lastFrame()).toContain('code');
-    expect(lastFrame()).toContain('❯');
+    expect(lastFrame()).toContain('> ');
   });
 
   it('shows Streaming placeholder when disabled', () => {
@@ -58,24 +57,24 @@ describe('InputBox', () => {
     expect(lastFrame()).toContain('Streaming...');
   });
 
-  it('shows agent prompt even when disabled', () => {
+  it('shows prompt symbol even when disabled', () => {
     const { lastFrame } = render(
       <Wrapper>
         <InputBox {...defaultProps} disabled={true} />
       </Wrapper>
     );
-    expect(lastFrame()).toContain('code');
-    expect(lastFrame()).toContain('❯');
+    expect(lastFrame()).toContain('> ');
   });
 
-  it('renders different agent names', () => {
+  it('renders different agent names without crashing', () => {
     for (const agent of ['debug', 'plan', 'orchestrator'] as const) {
-      const { lastFrame } = render(
-        <Wrapper>
-          <InputBox {...defaultProps} agent={agent} />
-        </Wrapper>
-      );
-      expect(lastFrame()).toContain(agent);
+      expect(() => {
+        render(
+          <Wrapper>
+            <InputBox {...defaultProps} agent={agent} />
+          </Wrapper>
+        );
+      }).not.toThrow();
     }
   });
 
@@ -134,8 +133,7 @@ describe('InputBox', () => {
           <InputBox {...defaultProps} commands={mockCommands} />
         </Wrapper>
       );
-      expect(lastFrame()).toContain('code');
-      expect(lastFrame()).toContain('❯');
+      expect(lastFrame()).toContain('> ');
     });
 
     it('does not show suggestions when input is empty', () => {

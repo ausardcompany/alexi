@@ -54,7 +54,12 @@ export function MessageBubble({
 
   if (role === 'user') {
     return (
-      <Box paddingX={1} flexDirection="column" backgroundColor={colors.backgroundSecondary}>
+      <Box
+        paddingX={1}
+        paddingY={0}
+        flexDirection="column"
+        backgroundColor={colors.backgroundSecondary}
+      >
         {/* Image placeholders */}
         {images && images.length > 0 && (
           <Box gap={1}>
@@ -65,10 +70,10 @@ export function MessageBubble({
             ))}
           </Box>
         )}
-        {/* Header: icon + role + timestamp */}
+        {/* Header: You + timestamp */}
         <Box>
           <Text color={colors.primary} bold>
-            ● You ❯
+            You
           </Text>
           <Text color={colors.dimText}> {timeStr}</Text>
         </Box>
@@ -83,11 +88,11 @@ export function MessageBubble({
   const agentLabel = agent ?? 'assistant';
 
   return (
-    <Box paddingX={1} flexDirection="column">
-      {/* Header: icon + agent + metadata inline */}
+    <Box paddingX={1} paddingY={0} flexDirection="column" backgroundColor={colors.background}>
+      {/* Header: agent name + metadata */}
       <Box>
         <Text color={colors.success} bold>
-          ◆ {agentLabel} ❯
+          {agentLabel}
         </Text>
         <Text color={colors.dimText}>
           {'  '}

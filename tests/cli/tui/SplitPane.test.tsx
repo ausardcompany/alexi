@@ -11,12 +11,12 @@ function renderWithTheme(ui: React.JSX.Element) {
 }
 
 describe('SplitPane', () => {
-  it('renders both panes when leftVisible is true', () => {
+  it('renders both panes when sideVisible is true', () => {
     const { lastFrame } = renderWithTheme(
       <SplitPane
-        left={<Text>LEFT_CONTENT</Text>}
-        right={<Text>RIGHT_CONTENT</Text>}
-        leftVisible={true}
+        main={<Text>LEFT_CONTENT</Text>}
+        side={<Text>RIGHT_CONTENT</Text>}
+        sideVisible={true}
       />
     );
     const frame = lastFrame() ?? '';
@@ -24,43 +24,37 @@ describe('SplitPane', () => {
     expect(frame).toContain('RIGHT_CONTENT');
   });
 
-  it('hides left pane when leftVisible is false', () => {
+  it('hides side pane when sideVisible is false', () => {
     const { lastFrame } = renderWithTheme(
       <SplitPane
-        left={<Text>LEFT_CONTENT</Text>}
-        right={<Text>RIGHT_CONTENT</Text>}
-        leftVisible={false}
+        main={<Text>LEFT_CONTENT</Text>}
+        side={<Text>RIGHT_CONTENT</Text>}
+        sideVisible={false}
       />
     );
     const frame = lastFrame() ?? '';
-    expect(frame).not.toContain('LEFT_CONTENT');
-    expect(frame).toContain('RIGHT_CONTENT');
+    expect(frame).toContain('LEFT_CONTENT');
+    expect(frame).not.toContain('RIGHT_CONTENT');
   });
 
-  it('defaults leftVisible to true', () => {
+  it('defaults sideVisible to false (only main shown)', () => {
     const { lastFrame } = renderWithTheme(
-      <SplitPane left={<Text>LEFT</Text>} right={<Text>RIGHT</Text>} />
+      <SplitPane main={<Text>LEFT</Text>} side={<Text>RIGHT</Text>} />
     );
     const frame = lastFrame() ?? '';
     expect(frame).toContain('LEFT');
-    expect(frame).toContain('RIGHT');
   });
 
   it('renders without crashing with custom width', () => {
     const { lastFrame } = renderWithTheme(
-      <SplitPane left={<Text>L</Text>} right={<Text>R</Text>} leftWidth={20} />
+      <SplitPane main={<Text>L</Text>} side={<Text>R</Text>} sideWidth={20} />
     );
     expect(lastFrame()).toBeDefined();
   });
 
-  it('renders without crashing with custom border style', () => {
+  it('renders without crashing with side panel visible', () => {
     const { lastFrame } = renderWithTheme(
-      <SplitPane
-        left={<Text>L</Text>}
-        right={<Text>R</Text>}
-        borderStyle="round"
-        borderColor="cyan"
-      />
+      <SplitPane main={<Text>L</Text>} side={<Text>R</Text>} sideVisible={true} />
     );
     expect(lastFrame()).toBeDefined();
   });

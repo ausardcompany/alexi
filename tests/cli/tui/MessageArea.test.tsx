@@ -82,7 +82,6 @@ describe('MessageArea', () => {
       </ThemeProvider>
     );
     expect(lastFrame()).toContain('assistant');
-    expect(lastFrame()).toContain('❯');
   });
 
   it('renders multiple active tool calls', () => {

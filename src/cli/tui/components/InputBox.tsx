@@ -6,6 +6,7 @@ import type { InputBoxProps } from '../types/props.js';
 import { fuzzyMatch, completeModelName } from '../../utils/completer.js';
 import { useClipboardImage } from '../hooks/useClipboardImage.js';
 import { useAttachments } from '../context/AttachmentContext.js';
+import { useTheme } from '../context/ThemeContext.js';
 import { AttachmentBar } from './AttachmentBar.js';
 
 export type { InputBoxProps };
@@ -32,6 +33,9 @@ export function InputBox({
   isFocused,
   commands = [],
 }: InputBoxProps): React.JSX.Element {
+  const {
+    theme: { colors },
+  } = useTheme();
   const [value, setValue] = useState('');
   // history[0] = oldest, history[history.length-1] = newest
   const [history, setHistory] = useState<string[]>([]);
@@ -237,15 +241,16 @@ export function InputBox({
         flexDirection="column"
         borderTop
         borderStyle="single"
-        borderColor="gray"
+        borderColor={colors.border}
         borderBottom={false}
         borderLeft={false}
         borderRight={false}
+        backgroundColor={colors.background}
       >
         <AttachmentBar />
         <Box paddingX={1}>
-          <Text color={agentColor} bold>
-            {agent} ❯{' '}
+          <Text color={colors.primary} bold>
+            {'> '}
           </Text>
           <Text dimColor>Streaming...</Text>
         </Box>
@@ -258,10 +263,11 @@ export function InputBox({
       flexDirection="column"
       borderTop
       borderStyle="single"
-      borderColor="gray"
+      borderColor={colors.border}
       borderBottom={false}
       borderLeft={false}
       borderRight={false}
+      backgroundColor={colors.background}
     >
       <AttachmentBar />
       {/* Autocomplete suggestion list */}
@@ -271,27 +277,22 @@ export function InputBox({
             const isSelected = idx === selectedSuggestion;
             return (
               <Text key={sug.display + idx}>
-                <Text color={isSelected ? agentColor : 'gray'} bold={isSelected}>
-                  {isSelected ? '❯ ' : '  '}
+                <Text color={isSelected ? colors.primary : colors.dimText} bold={isSelected}>
+                  {isSelected ? '> ' : '  '}
                 </Text>
-                <Text color={isSelected ? agentColor : 'white'} bold={isSelected}>
+                <Text color={isSelected ? colors.text : colors.dimText} bold={isSelected}>
                   {sug.display}
                 </Text>
-                {sug.aliases && <Text color="gray"> {sug.aliases}</Text>}
-                {sug.description && (
-                  <Text color="gray" dimColor>
-                    {' '}
-                    {sug.description}
-                  </Text>
-                )}
+                {sug.aliases && <Text color={colors.dimText}> {sug.aliases}</Text>}
+                {sug.description && <Text color={colors.dimText}> {sug.description}</Text>}
               </Text>
             );
           })}
         </Box>
       )}
       <Box paddingX={1}>
-        <Text color={agentColor} bold>
-          {agent} ❯{' '}
+        <Text color={colors.primary} bold>
+          {'> '}
         </Text>
         <TextInput
           value={value}

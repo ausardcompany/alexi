@@ -33,7 +33,7 @@ describe('App', () => {
   });
 
   describe('layout regions', () => {
-    it('shows the model name in the header', () => {
+    it('shows the model name in the status bar', () => {
       const { lastFrame } = render(<App model="claude-sonnet-4" autoRoute={false} />);
       expect(lastFrame()).toContain('claude-sonnet-4');
     });
@@ -44,15 +44,15 @@ describe('App', () => {
       expect(lastFrame()).toContain('orchestrator');
     });
 
-    it('shows the input prompt with agent name', () => {
+    it('shows the input prompt', () => {
       const { lastFrame } = render(<App model="claude-sonnet" autoRoute={false} />);
-      // Input prompt has format: "agentname ❯"
-      expect(lastFrame()).toContain('❯');
+      // Input prompt has format: "> "
+      expect(lastFrame()).toContain('> ');
     });
 
     it('shows keybinding hints in status bar', () => {
       const { lastFrame } = render(<App model="claude-sonnet" autoRoute={false} />);
-      expect(lastFrame()).toContain('Tab');
+      expect(lastFrame()).toContain('ctrl+? help');
     });
 
     it('shows session ID truncated to 8 chars when provided', () => {
@@ -64,14 +64,13 @@ describe('App', () => {
   });
 
   describe('provider tree', () => {
-    it('renders all layout regions in correct order (header above input)', () => {
+    it('renders layout regions including status bar and input area', () => {
       const { lastFrame } = render(<App model="my-model" autoRoute={false} />);
       const frame = lastFrame() ?? '';
-      const modelPos = frame.indexOf('my-model');
-      const arrowPos = frame.indexOf('❯');
-      // Model in header appears before the input prompt arrow
-      expect(modelPos).toBeGreaterThanOrEqual(0);
-      expect(arrowPos).toBeGreaterThan(modelPos);
+      // Model appears in status bar
+      expect(frame).toContain('my-model');
+      // Input prompt is rendered
+      expect(frame).toContain('> ');
     });
   });
 });

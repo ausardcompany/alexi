@@ -61,15 +61,17 @@ export function MessageArea({
   } = useTheme();
 
   return (
-    <Box flexDirection="column" flexGrow={1} overflow="hidden">
+    <Box flexDirection="column" flexGrow={1} overflow="hidden" backgroundColor={colors.background}>
+      {/* Empty state */}
+      {messages.length === 0 && !isStreaming && (
+        <Box flexGrow={1} alignItems="center" justifyContent="center">
+          <Text color={colors.dimText}>Start a conversation…</Text>
+        </Box>
+      )}
+
       {/* Completed messages (history) */}
-      {messages.map((msg, idx) => (
+      {messages.map((msg) => (
         <Box key={msg.id} flexDirection="column">
-          {idx > 0 && (
-            <Box paddingX={1}>
-              <Text dimColor>{'─'.repeat(40)}</Text>
-            </Box>
-          )}
           <MessageBubble
             role={msg.role}
             content={msg.content}
@@ -110,24 +112,22 @@ export function MessageArea({
         />
       ))}
 
-      {/* Streaming text (live assistant response) */}
-      {isStreaming && streamingText && (
-        <Box paddingX={1} flexDirection="column">
-          <Box>
-            <Text color={colors.success} bold>
-              assistant ❯
-            </Text>
-          </Box>
-          <Box paddingLeft={2}>
-            <MarkdownRenderer markdown={streamingText} isPartial={true} />
-          </Box>
+      {/* Streaming: spinner while waiting */}
+      {isStreaming && !streamingText && (
+        <Box paddingX={1} paddingY={0}>
+          <Spinner label="thinking…" />
         </Box>
       )}
 
-      {/* Spinner placeholder while streaming but no text yet */}
-      {isStreaming && !streamingText && (
-        <Box paddingX={1}>
-          <Spinner label="thinking…" />
+      {/* Streaming: live markdown as it arrives */}
+      {isStreaming && streamingText && (
+        <Box paddingX={1} flexDirection="column" backgroundColor={colors.background}>
+          <Text color={colors.success} bold>
+            assistant
+          </Text>
+          <Box paddingLeft={2}>
+            <MarkdownRenderer markdown={streamingText} isPartial={true} />
+          </Box>
         </Box>
       )}
     </Box>

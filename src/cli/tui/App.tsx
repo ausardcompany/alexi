@@ -40,7 +40,6 @@ import type { HelpEntry, ArgField } from './types/props.js';
 import { useToolEvents } from './hooks/useToolEvents.js';
 import type { AgentName } from './theme/types.js';
 
-import { Header } from './components/Header.js';
 import type { MessageDisplay } from './components/MessageArea.js';
 // MessageBubble and ToolCallBlock are rendered inside MessageArea
 
@@ -305,24 +304,7 @@ function AppLayout(): React.JSX.Element {
   const agentColor = theme.colors.agents[agent as AgentName] ?? theme.colors.primary;
 
   return (
-    <Box flexDirection="column" height={rows}>
-      {/* Header — height: 3 */}
-      <Box
-        height={3}
-        borderStyle={theme.borderStyle}
-        borderColor={theme.colors.border}
-        paddingX={1}
-      >
-        <Header
-          model={model}
-          agent={agent}
-          agentColor={agentColor}
-          sessionId={sessionId}
-          tokenCount={tokenCount}
-          autoRoute={false}
-        />
-      </Box>
-
+    <Box flexDirection="column" height={rows} backgroundColor={theme.colors.background}>
       {/* Page routing */}
       {page === 'chat' ? (
         <ChatPage
@@ -334,6 +316,8 @@ function AppLayout(): React.JSX.Element {
           agent={agent}
           agentColor={agentColor}
           model={model}
+          tokenCount={tokenCount}
+          sessionId={sessionId}
           cost={{ totalCost: cost.totalCost, currency: cost.currency }}
           leaderActive={keybindState.leaderActive}
           dialogIsOpen={dialogIsOpen}

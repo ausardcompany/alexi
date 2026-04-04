@@ -32,9 +32,9 @@ function renderBubble(overrides: Partial<MessageBubbleExtendedProps> = {}) {
 }
 
 describe('MessageBubble', () => {
-  it('renders user message with "You ❯" label and content', () => {
+  it('renders user message with "You" label and content', () => {
     const { lastFrame } = renderBubble({ role: 'user', content: 'hi there' });
-    expect(lastFrame()).toContain('You ❯');
+    expect(lastFrame()).toContain('You');
     expect(lastFrame()).toContain('hi there');
   });
 
@@ -44,7 +44,7 @@ describe('MessageBubble', () => {
       content: 'some markdown answer',
       agent: 'code',
     });
-    expect(lastFrame()).toContain('code ❯');
+    expect(lastFrame()).toContain('code');
     expect(lastFrame()).toContain('some markdown answer');
   });
 
@@ -81,6 +81,6 @@ describe('MessageBubble', () => {
       role: 'assistant',
       content: 'response',
     });
-    expect(lastFrame()).toContain('assistant ❯');
+    expect(lastFrame()).toContain('assistant');
   });
 });

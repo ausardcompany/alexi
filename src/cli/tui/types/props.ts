@@ -29,6 +29,8 @@ export interface StatusBarProps {
   cost: { totalCost: number; currency: string };
   isStreaming: boolean;
   leaderActive: boolean;
+  tokenCount?: number;
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------

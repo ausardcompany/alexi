@@ -4,66 +4,58 @@ import { Box } from 'ink';
 import { useTheme } from '../context/ThemeContext.js';
 
 export interface SplitPaneProps {
-  /** Left pane content */
-  left: React.ReactNode;
-  /** Right pane content */
-  right: React.ReactNode;
-  /** Left pane width (percentage string or number of columns). Default: '30%' */
-  leftWidth?: string | number;
-  /** Whether the left pane is visible. Default: true */
-  leftVisible?: boolean;
-  /** Border style between panes */
-  borderStyle?: 'single' | 'round' | 'bold' | 'double';
-  /** Border color override */
-  borderColor?: string;
+  /** Main content (left/primary pane) */
+  main: React.ReactNode;
+  /** Side panel content (right pane — e.g., sidebar) */
+  side: React.ReactNode;
+  /** Side panel width (percentage string or number of columns). Default: '25%' */
+  sideWidth?: string | number;
+  /** Whether the side panel is visible. Default: false */
+  sideVisible?: boolean;
 }
 
 /**
- * SplitPane — horizontal split layout with collapsible left pane.
- *
- * Uses Ink's built-in Box flexbox (per research D1). When leftVisible
- * is false, the left pane is hidden and right pane fills 100%.
+ * SplitPane — horizontal split layout with collapsible RIGHT side panel.
+ * Matches upstream OpenCode layout: main content LEFT, sidebar RIGHT.
  */
 export function SplitPane({
-  left,
-  right,
-  leftWidth = '30%',
-  leftVisible = true,
-  borderStyle: borderStyleProp,
-  borderColor: borderColorProp,
+  main,
+  side,
+  sideWidth = '25%',
+  sideVisible = false,
 }: SplitPaneProps): React.JSX.Element {
   const { theme } = useTheme();
-  const resolvedBorderColor = borderColorProp ?? theme.colors.sidebarBorder;
-  const resolvedBorderStyle = borderStyleProp ?? 'single';
+  const { colors } = theme;
 
-  if (!leftVisible) {
+  if (!sideVisible) {
     return (
-      <Box flexDirection="row" flexGrow={1}>
-        {right}
+      <Box flexDirection="row" flexGrow={1} backgroundColor={colors.background}>
+        {main}
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="row" flexGrow={1}>
-      {/* Left pane */}
-      <Box
-        width={leftWidth}
-        flexShrink={0}
-        borderRight
-        borderStyle={resolvedBorderStyle}
-        borderColor={resolvedBorderColor}
-        borderTop={false}
-        borderBottom={false}
-        borderLeft={false}
-        overflowY="hidden"
-      >
-        {left}
+    <Box flexDirection="row" flexGrow={1} backgroundColor={colors.background}>
+      {/* Main content (left) — fills remaining space */}
+      <Box flexGrow={1} overflowY="hidden">
+        {main}
       </Box>
 
-      {/* Right pane — fills remaining space */}
-      <Box flexGrow={1} overflowY="hidden">
-        {right}
+      {/* Side panel (right) — fixed width with left border */}
+      <Box
+        width={sideWidth}
+        flexShrink={0}
+        borderLeft
+        borderStyle="single"
+        borderColor={colors.sidebarBorder}
+        borderTop={false}
+        borderBottom={false}
+        borderRight={false}
+        overflowY="hidden"
+        backgroundColor={colors.sidebarBg}
+      >
+        {side}
       </Box>
     </Box>
   );

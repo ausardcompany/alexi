@@ -24,9 +24,7 @@ describe('StatusBar', () => {
         <StatusBar {...defaultProps} />
       </Wrapper>
     );
-    expect(lastFrame()).toContain('Tab: agent');
-    expect(lastFrame()).toContain('Ctrl+X: leader');
-    expect(lastFrame()).toContain('?: help');
+    expect(lastFrame()).toContain('ctrl+? help');
   });
 
   it('renders agent name', () => {
@@ -77,15 +75,15 @@ describe('StatusBar', () => {
     expect(lastFrame()).toContain('[m]odel');
     expect(lastFrame()).toContain('[a]gent');
     expect(lastFrame()).toContain('[s]essions');
-    expect(lastFrame()).toContain('[Esc] cancel');
+    expect(lastFrame()).toContain('[Esc]cancel');
   });
 
-  it('does not show cost when streaming', () => {
+  it('shows cost even when streaming', () => {
     const { lastFrame } = render(
       <Wrapper>
         <StatusBar {...defaultProps} isStreaming={true} />
       </Wrapper>
     );
-    expect(lastFrame()).not.toContain('$0.0123');
+    expect(lastFrame()).toContain('$0.0123');
   });
 });
