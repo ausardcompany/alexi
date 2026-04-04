@@ -106,6 +106,13 @@ AICORE_SERVICE_KEY      # SAP AI Core service credentials
 AICORE_RESOURCE_GROUP   # SAP AI Core resource group ID
 ```
 
+#### Error Handling
+
+The workflow includes improved error handling with `continue-on-error: true` for PR comments:
+- Skip comment posting prevents workflow failure if PR is not accessible
+- Success comment posts documentation update summary
+- Failure comment posts error details with workflow link
+
 #### Configuration
 
 The workflow determines documentation scope based on file patterns:

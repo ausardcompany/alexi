@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-04
+
+### Added
+
+- **TUI Page System**: Multi-page navigation with ChatPage and LogsPage
+  - PageContext and PageProvider for page state management
+  - ChatPage component with sidebar, message area, input box, and status bar
+  - LogsPage component with real-time log viewer and filtering
+  - Page switching with keyboard shortcuts
+- **Sidebar Component**: File change tracking panel
+  - SidebarContext and SidebarProvider for sidebar state management
+  - Real-time file change tracking from tool execution events
+  - Status indicators for added, modified, and deleted files
+  - Keyboard navigation with Up/Down/Enter
+  - SplitPane component for resizable sidebar layout
+- **Log Collection System**: Real-time log aggregation from event bus
+  - useLogCollector hook subscribing to tool and agent events
+  - LogViewer component with level filtering and search
+  - Log entry display with timestamp, level, source, and message
+  - Level filter cycling with Tab key
+- **File Change Tracking**: Automatic tracking of file modifications
+  - useFileChanges hook monitoring write and edit tool executions
+  - Integration with SidebarContext for UI updates
+  - Timestamp tracking for each file change
+- **Enhanced Dialogs**: New dialog types for improved UX
+  - HelpDialog with categorized keyboard shortcuts
+  - FilePicker for file selection with keyboard navigation
+  - QuitDialog with session save options
+  - ThemeDialog for theme switching
+  - ArgDialog for multi-field input forms
+- **Vim Mode Support**: Full Vim keybindings in TUI
+  - useVimMode hook with normal, insert, visual, and command modes
+  - Vim motion commands (h/j/k/l, w/b, 0/$)
+  - Vim operators (d/y/p, dd/yy)
+  - Command mode with colon commands
+  - Visual mode for text selection
+- **Scroll Position Management**: Smooth scrolling in message area
+  - useScrollPosition hook with auto-scroll and manual scroll detection
+  - Scroll indicators showing position and more content availability
+  - Keyboard shortcuts for scroll navigation (PageUp/PageDown, Home/End)
+- **Heap Monitoring**: Memory debugging utilities
+  - Automatic heap snapshot generation when memory exceeds 1GB
+  - Configurable snapshot interval and threshold
+  - Snapshots saved to .alexi/heap-snapshots directory
+- **Ask Agent Bash Rules**: Read-only bash command restrictions
+  - getAskAgentBashRules function providing read-only command allowlist
+  - Explicit deny for write operations (git add, commit, etc.)
+  - Allow for read operations (cat, ls, git log, etc.)
+- **Terminal Image Support**: Image rendering in TUI
+  - terminal-image dependency for displaying images in terminal
+  - terminalImage utility for converting images to ANSI
+- **Fuzzy Finder Integration**: fzf library for enhanced search
+  - File picker with fuzzy search capabilities
+  - Command palette with fuzzy matching
+
+### Changed
+
+- **TUI Architecture**: Refactored from single-page to multi-page layout
+  - AppLayout now routes between ChatPage and LogsPage based on PageContext
+  - DialogHost extracted as separate component
+  - Enhanced keyboard handling with leader mode and Vim support
+- **Component Organization**: Improved component structure
+  - Pages directory for ChatPage and LogsPage
+  - Enhanced props interfaces in types/props.ts
+  - Better separation of concerns between components and contexts
+- **Theme System**: Expanded theme colors and styling
+  - Additional color properties for diff views and logs
+  - Enhanced dark and light theme definitions
+  - Type-safe theme color access
+- **Dependency Updates**: Upgraded to latest versions
+  - @testing-library/react from 16.0.0 to 16.3.2
+  - @typescript-eslint/eslint-plugin and parser from 8.57.2 to 8.58.0
+  - Added fzf 0.5.2 for fuzzy finding
+  - Added terminal-image 4.2.0 for image rendering
+- **Configuration**: Removed deprecated baseUrl from tsconfig.json
+- **Version Bump**: Updated from 0.3.5 to 0.4.0
+
+### Fixed
+
+- Dialog overlay now properly replaces main content when open
+- Keyboard focus management improved with leader mode
+- Event bus metadata field made optional in PermissionRequested event
+- TUI rendering performance optimized with better React patterns
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +308,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4

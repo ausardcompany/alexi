@@ -84,6 +84,11 @@ graph TB
 |--------|------|-------------|
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js |
 | Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
+| TUI App | `src/cli/tui/App.tsx` | Main TUI application with React/Ink |
+| Chat Page | `src/cli/tui/pages/ChatPage.tsx` | Main chat interface page |
+| Logs Page | `src/cli/tui/pages/LogsPage.tsx` | Debug logs viewer page |
+| Sidebar | `src/cli/tui/components/Sidebar.tsx` | File changes tracking panel |
+| Heap Monitor | `src/cli/heap.ts` | Memory monitoring and heap snapshots |
 | Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
 | Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
 
@@ -140,6 +145,22 @@ graph TB
 | Profile | `src/profile/index.ts` | User profile management |
 | User Config | `src/config/userConfig.ts` | Persistent user configuration |
 | Logger | `src/utils/logger.ts` | Centralized logging utility |
+
+### TUI Components
+
+| Module | File | Description |
+|--------|------|-------------|
+| Page Context | `src/cli/tui/context/PageContext.tsx` | Page routing state (chat/logs) |
+| Sidebar Context | `src/cli/tui/context/SidebarContext.tsx` | File changes tracking state |
+| Vim Mode | `src/cli/tui/hooks/useVimMode.ts` | Vim keybindings implementation |
+| Log Collector | `src/cli/tui/hooks/useLogCollector.ts` | Real-time log aggregation |
+| File Changes | `src/cli/tui/hooks/useFileChanges.ts` | File modification tracking |
+| Scroll Position | `src/cli/tui/hooks/useScrollPosition.ts` | Scroll state management |
+| Help Dialog | `src/cli/tui/dialogs/HelpDialog.tsx` | Keyboard shortcuts reference |
+| File Picker | `src/cli/tui/dialogs/FilePicker.tsx` | File selection dialog |
+| Quit Dialog | `src/cli/tui/dialogs/QuitDialog.tsx` | Session save confirmation |
+| Theme Dialog | `src/cli/tui/dialogs/ThemeDialog.tsx` | Theme switcher dialog |
+| Arg Dialog | `src/cli/tui/dialogs/ArgDialog.tsx` | Multi-field input form |
 
 ## Data Flow
 
@@ -366,6 +387,16 @@ Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.j
 alexi/
 ├── src/
 │   ├── cli/           # CLI entry points
+│   │   ├── tui/       # Terminal UI (Ink + React)
+│   │   │   ├── pages/       # ChatPage, LogsPage
+│   │   │   ├── components/  # UI components
+│   │   │   ├── dialogs/     # Modal dialogs
+│   │   │   ├── context/     # React contexts
+│   │   │   ├── hooks/       # Custom hooks
+│   │   │   ├── theme/       # Theme definitions
+│   │   │   ├── types/       # TypeScript types
+│   │   │   └── utils/       # TUI utilities
+│   │   └── heap.ts    # Memory monitoring
 │   ├── core/          # Core orchestration
 │   ├── providers/     # LLM providers
 │   ├── tool/          # Tool system
@@ -380,6 +411,7 @@ alexi/
 │   ├── profile/       # Profile management
 │   └── ...
 ├── tests/             # Test files
+│   └── cli/tui/       # TUI component tests
 ├── dist/              # Compiled output
 └── docs/              # Documentation
 ```
@@ -542,6 +574,182 @@ flowchart LR
     Fix --> Code
 ```
 
+## TUI Architecture
+
+The Terminal User Interface is built with React and Ink, providing a rich interactive experience.
+
+### TUI Page Routing
+
+```mermaid
+graph TB
+    subgraph App[\"TUI Application\"]
+        PageContext[Page Context<br/>chat | logs]
+        Router{Current Page?}
+    end
+    
+    subgraph Pages[\"Pages\"]
+        ChatPage[Chat Page<br/>Messages + Input + Sidebar]
+        LogsPage[Logs Page<br/>Log Viewer + Filters]
+    end
+    
+    subgraph Components[\"Shared Components\"]
+        Header[Header]
+        StatusBar[Status Bar]
+        Dialogs[Dialog Overlays]
+    end
+    
+    PageContext --> Router
+    Router -->|chat| ChatPage
+    Router -->|logs| LogsPage
+    
+    Header --> ChatPage
+    Header --> LogsPage
+    StatusBar --> ChatPage
+    StatusBar --> LogsPage
+    Dialogs --> ChatPage
+    Dialogs --> LogsPage
+    
+    style ChatPage fill:#4CAF50
+    style LogsPage fill:#2196F3
+    style PageContext fill:#FF9800
+```
+
+### File Change Tracking Flow
+
+```mermaid
+sequenceDiagram
+    participant Tool as Tool Execution
+    participant Bus as Event Bus
+    participant Hook as useFileChanges Hook
+    participant Sidebar as Sidebar Context
+    participant UI as Sidebar Component
+    
+    Tool->>Bus: ToolExecutionCompleted event
+    Bus->>Hook: Notify subscribers
+    Hook->>Hook: Check tool type (write/edit)
+    Hook->>Hook: Extract file path from result
+    Hook->>Sidebar: trackFileChange(change)
+    Sidebar->>Sidebar: Update files array
+    Sidebar->>UI: Re-render with new file list
+    UI->>UI: Display status indicator (+/~/-)
+```
+
+### Log Collection Flow
+
+```mermaid
+flowchart LR
+    subgraph Events[\"Event Sources\"]
+        ToolStart[Tool Started]
+        ToolComplete[Tool Completed]
+        ToolFail[Tool Failed]
+        AgentSwitch[Agent Switched]
+        Error[Error Occurred]
+    end
+    
+    subgraph Collector[\"Log Collector\"]
+        Subscribe[Subscribe to Events]
+        Transform[Transform to LogEntry]
+        Store[Store in State]
+    end
+    
+    subgraph Display[\"Logs Page\"]
+        Filter[Level Filter]
+        Search[Text Search]
+        Viewer[Log Viewer]
+    end
+    
+    ToolStart --> Subscribe
+    ToolComplete --> Subscribe
+    ToolFail --> Subscribe
+    AgentSwitch --> Subscribe
+    Error --> Subscribe
+    
+    Subscribe --> Transform
+    Transform --> Store
+    Store --> Filter
+    Filter --> Search
+    Search --> Viewer
+    
+    style Collector fill:#4CAF50
+    style Display fill:#2196F3
+```
+
+### Vim Mode State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal: Start
+    
+    Normal --> Insert: i, a, o, O
+    Normal --> Visual: v, V
+    Normal --> Command: :
+    
+    Insert --> Normal: Esc
+    Visual --> Normal: Esc
+    Command --> Normal: Esc, Enter
+    
+    Normal --> Normal: h, j, k, l (motion)
+    Normal --> Normal: w, b (word motion)
+    Normal --> Normal: d, y, p (operators)
+    
+    Visual --> Visual: h, j, k, l (extend selection)
+    
+    Command --> Command: Type command
+    
+    state Normal {
+        [*] --> WaitingForOperator
+        WaitingForOperator --> PendingMotion: d, y, c
+        PendingMotion --> WaitingForOperator: Motion completed
+    }
+```
+
+### Memory Monitoring System
+
+The heap monitoring system tracks memory usage and generates snapshots for debugging:
+
+```typescript
+// src/cli/heap.ts
+export function checkAndSnapshot(): void {
+  const heapUsedMB = process.memoryUsage().heapUsed / 1024 / 1024;
+  
+  if (heapUsedMB >= HEAP_THRESHOLD_MB) {
+    v8.writeHeapSnapshot('.alexi/heap-snapshots/heap-${Date.now()}.heapsnapshot');
+  }
+}
+
+export function startHeapMonitoring(intervalMs = 30000): NodeJS.Timeout {
+  return setInterval(checkAndSnapshot, intervalMs);
+}
+```
+
+**Configuration**:
+- Threshold: 1GB heap usage
+- Snapshot interval: 1 minute minimum between snapshots
+- Output directory: `.alexi/heap-snapshots/`
+
+## Ask Agent Bash Restrictions
+
+The Ask agent has read-only bash command restrictions to prevent filesystem modifications:
+
+```typescript
+// src/agent/index.ts
+const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
+  '*': 'deny',
+  'cat *': 'allow',
+  'ls *': 'allow',
+  'git log *': 'allow',
+  'git add *': 'deny',
+  'git commit *': 'deny',
+  // ... more rules
+};
+```
+
+**Key Features**:
+- Default deny for unknown commands
+- Allow read-only operations (cat, ls, grep, git log)
+- Explicit deny for write operations (git add, git commit, rm, mv)
+- Text processing tools allowed (awk, sed, jq)
+
 ## Future Improvements
 
 - [ ] Add more provider implementations
@@ -549,3 +757,7 @@ flowchart LR
 - [ ] Add metrics and telemetry
 - [ ] Implement caching layer
 - [ ] Add web UI option
+- [ ] Vim mode command history
+- [ ] Sidebar diff preview
+- [ ] Log export functionality
+- [ ] Theme customization UI

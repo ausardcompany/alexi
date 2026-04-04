@@ -97,6 +97,10 @@ interface UserConfig {
   defaultModel?: string;          // Persistent default model
   soundEnabled?: boolean;         // Enable notification sounds
   autoRoute?: boolean;            // Auto-routing preference
+  vimModeEnabled?: boolean;       // Enable Vim keybindings in TUI
+  theme?: 'dark' | 'light';       // TUI theme preference
+  sidebarVisible?: boolean;       // Sidebar visibility state
+  logLevel?: 'debug' | 'info' | 'warn' | 'error'; // Log level filter
   [key: string]: unknown;         // Extensible for custom settings
 }
 ```
@@ -195,7 +199,9 @@ import { updateGlobal } from './config/userConfig.js';
 updateGlobal({
   defaultModel: 'gpt-4o',
   soundEnabled: false,
-  autoRoute: true
+  autoRoute: true,
+  vimModeEnabled: true,
+  theme: 'dark'
 });
 
 // Update with disposal control
@@ -206,6 +212,29 @@ updateGlobal(
 ```
 
 The `dispose` option controls whether cached configuration instances should be disposed after update. Default behavior preserves backward compatibility with `dispose: true`.
+
+#### TUI-Specific Configuration
+
+The TUI supports additional configuration options:
+
+```typescript
+// Enable Vim mode in TUI
+setConfigValue('vimModeEnabled', true);
+
+// Set theme preference
+setConfigValue('theme', 'dark');
+
+// Control sidebar visibility
+setConfigValue('sidebarVisible', true);
+
+// Set log level filter
+setConfigValue('logLevel', 'info');
+```
+
+These settings persist across TUI sessions and can be managed via:
+- `/config set` command in interactive mode
+- Direct API calls in code
+- Manual editing of ~/.alexi/config.json
 
 ## Routing Configuration
 

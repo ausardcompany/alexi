@@ -44,6 +44,72 @@ alexi chat -m "What is AI?" --auto-route --prefer-cheap
 alexi chat -m "Tell me more" --session abc-123 --auto-route
 ```
 
+### interactive / i
+
+Start the interactive TUI (Terminal User Interface) with streaming responses and rich features.
+
+```bash
+alexi interactive [options]
+alexi i [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--model <id>` | string | Initial model to use |
+| `--auto-route` | boolean | Enable automatic model routing |
+| `--session <id>` | string | Continue existing session |
+
+#### TUI Features
+
+**Multi-Page Navigation**:
+- Chat Page: Main conversation interface with sidebar
+- Logs Page: Real-time log viewer with filtering
+
+**Keyboard Shortcuts**:
+- `Ctrl+X`: Enter leader mode
+- `Ctrl+X c`: Toggle chat/logs page
+- `Ctrl+X s`: Toggle sidebar
+- `Ctrl+X h`: Show help dialog
+- `Ctrl+X q`: Quit with confirmation
+- `Ctrl+X t`: Theme picker
+- `Ctrl+K`: Command palette
+- `Tab/Shift-Tab`: Cycle through agents
+
+**Vim Mode** (if enabled):
+- Normal mode: `hjkl` navigation, `dd` delete line, `yy` yank line
+- Insert mode: `i`, `a`, `o` to enter
+- Visual mode: `v` to enter, select text
+- Command mode: `:` to enter, execute commands
+
+**Sidebar**:
+- Shows files modified by agent (write/edit tools)
+- Status indicators: `+` added, `~` modified, `-` deleted
+- Navigate with Up/Down, activate with Enter
+
+**Logs Page**:
+- Real-time log collection from event bus
+- Filter by level: debug, info, warn, error
+- Search logs with text query
+- Tab to cycle through log levels
+
+#### Examples
+
+```bash
+# Start interactive mode
+alexi interactive
+
+# Start with specific model
+alexi i --model gpt-4o
+
+# Continue existing session
+alexi i --session abc-123
+
+# Start with auto-routing
+alexi i --auto-route
+```
+
 ### models
 
 List available models/deployments from SAP AI Core.
@@ -837,6 +903,96 @@ In agentic mode, the permission system is automatically configured with high-pri
 ```
 
 These rules override the default `ask-write` rule (priority 10) and `deny-secrets` rule (priority 100).
+
+## Heap Monitoring API
+
+Alexi includes heap monitoring utilities for debugging memory issues in long-running processes.
+
+### checkAndSnapshot
+
+Check current heap usage and generate snapshot if threshold exceeded.
+
+```typescript
+import { checkAndSnapshot } from './cli/heap.js';
+
+// Manually trigger check
+checkAndSnapshot();
+```
+
+**Behavior**:
+- Checks if heap usage exceeds 1GB
+- Generates snapshot only if 1 minute has passed since last snapshot
+- Saves to `.alexi/heap-snapshots/heap-${timestamp}.heapsnapshot`
+- Logs snapshot creation to console
+
+### startHeapMonitoring
+
+Start automatic heap monitoring with periodic checks.
+
+```typescript
+import { startHeapMonitoring } from './cli/heap.js';
+
+// Start monitoring with default 30s interval
+const timer = startHeapMonitoring();
+
+// Start with custom interval (60s)
+const timer = startHeapMonitoring(60000);
+
+// Stop monitoring
+clearInterval(timer);
+```
+
+**Configuration**:
+- Default interval: 30 seconds
+- Heap threshold: 1GB
+- Minimum snapshot interval: 1 minute
+- Output directory: `.alexi/heap-snapshots/`
+
+**Use Cases**:
+- Debug memory leaks in agent mode
+- Monitor long-running TUI sessions
+- Analyze heap growth patterns
+- Profile memory usage during sync operations
+
+## Agent Bash Rules API
+
+The agent system provides bash command restriction rules for read-only agents.
+
+### getAskAgentBashRules
+
+Get bash command rules for the Ask agent (read-only operations only).
+
+```typescript
+import { getAskAgentBashRules } from './agent/index.js';
+
+const rules = getAskAgentBashRules();
+// Returns: Record<string, 'allow' | 'ask' | 'deny'>
+```
+
+**Rule Format**:
+```typescript
+{
+  '*': 'deny',              // Default deny unknown commands
+  'cat *': 'allow',         // Allow read operations
+  'ls *': 'allow',
+  'git log *': 'allow',
+  'git add *': 'deny',      // Explicitly deny write operations
+  'git commit *': 'deny',
+  // ... more rules
+}
+```
+
+**Allowed Commands**:
+- File reading: `cat`, `head`, `tail`, `less`
+- Directory listing: `ls`, `tree`
+- Git read-only: `git log`, `git diff`, `git status`
+- Text processing: `grep`, `awk`, `sed`, `jq`
+- System info: `pwd`, `date`, `whoami`
+
+**Denied Commands**:
+- Git write: `git add`, `git commit`, `git push`
+- File modification: `rm`, `mv`, `cp` (when used for writes)
+- Any unknown command (default deny)
 
 ## Usage Examples
 

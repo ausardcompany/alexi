@@ -227,7 +227,43 @@ graph LR
 src/
 ├── cli/              # CLI-related code
 │   ├── program.ts    # Main CLI entry point
-│   └── commands/     # Individual CLI commands
+│   ├── commands/     # Individual CLI commands
+│   ├── heap.ts       # Memory monitoring utilities
+│   └── tui/          # Terminal UI (Ink + React)
+│       ├── App.tsx           # Main TUI application
+│       ├── pages/            # Page components
+│       │   ├── ChatPage.tsx
+│       │   └── LogsPage.tsx
+│       ├── components/       # Reusable UI components
+│       │   ├── Header.tsx
+│       │   ├── StatusBar.tsx
+│       │   ├── Sidebar.tsx
+│       │   ├── SplitPane.tsx
+│       │   ├── LogViewer.tsx
+│       │   └── ...
+│       ├── dialogs/          # Modal dialogs
+│       │   ├── HelpDialog.tsx
+│       │   ├── FilePicker.tsx
+│       │   ├── QuitDialog.tsx
+│       │   └── ...
+│       ├── context/          # React contexts
+│       │   ├── PageContext.tsx
+│       │   ├── SidebarContext.tsx
+│       │   └── ...
+│       ├── hooks/            # Custom React hooks
+│       │   ├── useVimMode.ts
+│       │   ├── useLogCollector.ts
+│       │   ├── useFileChanges.ts
+│       │   └── ...
+│       ├── theme/            # Theme definitions
+│       │   ├── dark.ts
+│       │   ├── light.ts
+│       │   └── types.ts
+│       ├── types/            # TypeScript types
+│       │   └── props.ts
+│       └── utils/            # TUI utilities
+│           ├── helpEntries.ts
+│           └── terminalImage.ts
 ├── core/             # Core orchestration logic
 │   ├── orchestrator.ts
 │   ├── router.ts
@@ -387,6 +423,126 @@ Key principles for TUI testing:
 3. Capture hook return values through a component
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
+
+### Testing TUI Components
+
+TUI components use standard React testing with Ink:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Sidebar } from '../src/cli/tui/components/Sidebar.js';
+
+describe('Sidebar', () => {
+  it('should display file changes with status indicators', () => {
+    const files = [
+      { 
+        path: '/test/file.ts', 
+        status: 'added', 
+        additions: 10, 
+        deletions: 0, 
+        timestamp: Date.now() 
+      },
+      { 
+        path: '/test/other.ts', 
+        status: 'modified', 
+        additions: 5, 
+        deletions: 3, 
+        timestamp: Date.now() 
+      }
+    ];
+    
+    const { lastFrame } = render(
+      <Sidebar
+        files={files}
+        selectedIndex={0}
+        onSelect={() => {}}
+        onActivate={() => {}}
+        isFocused={true}
+      />
+    );
+    
+    expect(lastFrame()).toContain('file.ts');
+    expect(lastFrame()).toContain('other.ts');
+    expect(lastFrame()).toContain('+'); // added indicator
+    expect(lastFrame()).toContain('~'); // modified indicator
+  });
+});
+```
+
+### Testing TUI Hooks
+
+Custom hooks require a wrapper component:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { useVimMode } from '../src/cli/tui/hooks/useVimMode.js';
+
+describe('useVimMode', () => {
+  it('should handle mode transitions', () => {
+    let capturedState;
+    
+    function TestComponent() {
+      const vim = useVimMode();
+      capturedState = vim;
+      return <Text>test</Text>;
+    }
+    
+    render(<TestComponent />);
+    
+    expect(capturedState.mode).toBe('normal');
+    
+    capturedState.dispatch({ type: 'enter-mode', mode: 'insert' });
+    expect(capturedState.mode).toBe('insert');
+    
+    capturedState.dispatch({ type: 'enter-mode', mode: 'normal' });
+    expect(capturedState.mode).toBe('normal');
+  });
+});
+```
+
+### Testing Context Providers
+
+Test React contexts with provider wrappers:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { PageProvider, usePage } from '../src/cli/tui/context/PageContext.js';
+
+describe('PageContext', () => {
+  it('should manage page state', () => {
+    let capturedContext;
+    
+    function TestComponent() {
+      const page = usePage();
+      capturedContext = page;
+      return <Text>{page.page}</Text>;
+    }
+    
+    const { lastFrame } = render(
+      <PageProvider>
+        <TestComponent />
+      </PageProvider>
+    );
+    
+    expect(lastFrame()).toContain('chat');
+    expect(capturedContext.page).toBe('chat');
+    
+    capturedContext.togglePage();
+    expect(capturedContext.page).toBe('logs');
+    
+    capturedContext.setPage('chat');
+    expect(capturedContext.page).toBe('chat');
+  });
+});
+```
 
 ## Pull Request Process
 

@@ -232,11 +232,32 @@ All file operation tools have comprehensive test coverage:
 
 ### TUI Command Test Coverage
 
-TUI slash commands are tested through the `useCommands` hook with React context mocking:
+TUI slash commands and components are tested through React hooks with context mocking:
 
-| Command | Test File | Test Cases |
-|---------|-----------|------------|
-| `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+| Component/Hook | Test File | Test Cases |
+|----------------|-----------|------------|
+| `/image`, `/clear-images` | `tests/cli/tui/useCommands.test.tsx` | 10+ cases |
+| `App` component | `tests/cli/tui/App.test.tsx` | Layout, dialogs, routing |
+| `ChatPage` | `tests/cli/tui/ChatPage.test.tsx` | Rendering, props |
+| `LogsPage` | `tests/cli/tui/LogsPage.test.tsx` | Log display, filtering |
+| `Header` | `tests/cli/tui/Header.test.tsx` | Title, status, theme |
+| `StatusBar` | `tests/cli/tui/StatusBar.test.tsx` | Agent, model, cost display |
+| `Sidebar` | `tests/cli/tui/Sidebar.test.tsx` | File list, selection, navigation |
+| `SplitPane` | `tests/cli/tui/SplitPane.test.tsx` | Layout, visibility |
+| `LogViewer` | `tests/cli/tui/LogViewer.test.tsx` | Log rendering, filtering |
+| `MessageBubble` | `tests/cli/tui/MessageBubble.test.tsx` | Message display, markdown |
+| `HelpDialog` | `tests/cli/tui/HelpDialog.test.tsx` | Shortcuts display, categories |
+| `QuitDialog` | `tests/cli/tui/QuitDialog.test.tsx` | Confirmation, choices |
+| `ThemeDialog` | `tests/cli/tui/ThemeDialog.test.tsx` | Theme selection |
+| `ArgDialog` | `tests/cli/tui/ArgDialog.test.tsx` | Multi-field input |
+| `FilePicker` | `tests/cli/tui/FilePicker.test.tsx` | File selection, navigation |
+| `PageContext` | `tests/cli/tui/PageContext.test.tsx` | Page routing state |
+| `SidebarContext` | `tests/cli/tui/SidebarContext.test.tsx` | File tracking state |
+| `useVimMode` | `tests/cli/tui/useVimMode.test.ts` | Vim keybindings, modes |
+| `useScrollPosition` | `tests/cli/tui/useScrollPosition.test.tsx` | Scroll management |
+| `useFileChanges` | `tests/cli/tui/useFileChanges.test.ts` | File change tracking |
+| `useKeyboard` | `tests/cli/tui/useKeyboard.test.tsx` | Keyboard handling |
+| Theme system | `tests/cli/tui/theme.test.tsx` | Dark/light themes |
 
 ### Test Categories
 
@@ -532,7 +553,7 @@ describe('tool metadata', () => {
 });
 ```
 
-### 8. Test TUI Commands with Context Mocking
+### Test TUI Commands with Context Mocking
 
 TUI commands require mocking React contexts and using ink-testing-library:
 
@@ -602,6 +623,123 @@ Key patterns for TUI command testing:
 3. **Render with Ink**: Use ink-testing-library's render() function
 4. **Test Command Dispatch**: Call handleCommand() and verify behavior
 5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
+
+### Test TUI Components
+
+TUI components use standard React testing patterns with Ink:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Sidebar } from '../src/cli/tui/components/Sidebar.js';
+
+describe('Sidebar', () => {
+  it('should display file changes', () => {
+    const files = [
+      { path: '/test/file.ts', status: 'added', additions: 10, deletions: 0, timestamp: Date.now() },
+      { path: '/test/other.ts', status: 'modified', additions: 5, deletions: 3, timestamp: Date.now() }
+    ];
+    
+    const { lastFrame } = render(
+      <Sidebar
+        files={files}
+        selectedIndex={0}
+        onSelect={() => {}}
+        onActivate={() => {}}
+        isFocused={true}
+      />
+    );
+    
+    expect(lastFrame()).toContain('file.ts');
+    expect(lastFrame()).toContain('other.ts');
+    expect(lastFrame()).toContain('+'); // added indicator
+    expect(lastFrame()).toContain('~'); // modified indicator
+  });
+});
+```
+
+### Test TUI Hooks
+
+Custom hooks require a wrapper component for testing:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { useVimMode } from '../src/cli/tui/hooks/useVimMode.js';
+
+describe('useVimMode', () => {
+  it('should start in normal mode', () => {
+    let capturedState;
+    
+    function TestComponent() {
+      const vim = useVimMode();
+      capturedState = vim;
+      return <Text>test</Text>;
+    }
+    
+    render(<TestComponent />);
+    
+    expect(capturedState.mode).toBe('normal');
+    expect(capturedState.enabled).toBe(true);
+  });
+  
+  it('should switch to insert mode', () => {
+    let capturedState;
+    
+    function TestComponent() {
+      const vim = useVimMode();
+      capturedState = vim;
+      return <Text>test</Text>;
+    }
+    
+    render(<TestComponent />);
+    
+    capturedState.dispatch({ type: 'enter-mode', mode: 'insert' });
+    expect(capturedState.mode).toBe('insert');
+  });
+});
+```
+
+### Test Context Providers
+
+Test React contexts with provider wrappers:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { PageProvider, usePage } from '../src/cli/tui/context/PageContext.js';
+
+describe('PageContext', () => {
+  it('should toggle between chat and logs', () => {
+    let capturedContext;
+    
+    function TestComponent() {
+      const page = usePage();
+      capturedContext = page;
+      return <Text>{page.page}</Text>;
+    }
+    
+    const { lastFrame } = render(
+      <PageProvider>
+        <TestComponent />
+      </PageProvider>
+    );
+    
+    expect(lastFrame()).toContain('chat');
+    
+    capturedContext.togglePage();
+    expect(capturedContext.page).toBe('logs');
+    
+    capturedContext.togglePage();
+    expect(capturedContext.page).toBe('chat');
+  });
+});
+```
 
 ## Testing with SAP AI Core
 
