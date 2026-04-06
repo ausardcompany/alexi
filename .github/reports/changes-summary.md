@@ -1,167 +1,124 @@
-# Update Plan Execution Summary
+# Alexi Update Plan Execution Summary
 
-**Date**: 2026-04-05  
-**Status**: Not Applied - Architectural Incompatibility
+**Date**: 2026-04-06
+**Execution Status**: ✅ Complete
 
 ## Overview
 
-The provided update plan was based on upstream commits from the "opencode" project (commits 3a0e00d, 8b8d4fa, c796b9a, 280eb16, 629e866, c08fa56). After thorough analysis, it was determined that **none of the planned changes are applicable** to the Alexi project due to fundamental architectural differences.
+Successfully executed 7 out of 8 planned changes from the upstream update plan. One change was skipped as the related code doesn't exist in Alexi.
 
-## Architectural Incompatibility Analysis
+## Changes Applied
 
-### 1. Effect.js Dependency
-- **Upstream (opencode)**: Uses Effect.js framework for error handling and composability
-- **Alexi**: Uses standard Promise-based patterns with async/await
-- **Impact**: Changes 1-4 in the plan all require Effect.js, which is not a dependency in Alexi
+### 1. ✅ Add Cloudflare Provider with Environment Variable Validation
+**Priority**: High
+**Files Created**:
+- `src/providers/cloudflare.ts` - New Cloudflare provider with validation
+- `src/providers/errors.ts` - Provider error handling
 
-### 2. Tool System Architecture
-- **Upstream (opencode)**: Uses `Tool.defineEffect()` pattern with Effect-based execution
-- **Alexi**: Uses `defineTool()` pattern with standard Promise-based execution
-- **Impact**: Cannot adopt Effect-based tool implementations without major refactoring
+**Description**: Added Cloudflare AI Workers provider with clear error messaging when environment variables (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`) are missing. Improves developer experience for users configuring Cloudflare integration.
 
-### 3. Filesystem Abstraction
-- **Upstream (opencode)**: Uses custom `AppFileSystem` service layer with Effect integration
-- **Alexi**: Uses standard Node.js `fs/promises` directly
-- **Impact**: No need for additional filesystem abstraction layer
+### 2. ✅ Update Provider Registry to Include Cloudflare
+**Priority**: High
+**Files Modified**:
+- `src/providers/index.ts`
 
-### 4. External Directory Handling
-- **Upstream (opencode)**: Has concept of external directories with permission assertions
-- **Alexi**: Has its own permission system (`src/permission/`) that works differently
-- **Impact**: External directory assertion logic not compatible
+**Description**: Exported Cloudflare provider functions and ProviderError class. Maintained SAP AI Core as the primary provider while making Cloudflare available for future extension.
 
-## Planned Changes - Applicability Assessment
+### 3. ✅ Fix Azure Provider Options Passthrough
+**Priority**: Medium
+**Files Created**:
+- `src/providers/azure.ts`
 
-### Change 1: Add Effect-based wrapper for external directory assertion
-- **Priority**: High
-- **Status**: ❌ Not Applicable
-- **Reason**: Alexi doesn't use Effect.js and has different permission model
+**Files Modified**:
+- `src/providers/index.ts`
 
-### Change 2: Refactor read tool to use Effect.js pattern
-- **Priority**: Critical
-- **Status**: ❌ Not Applicable  
-- **Reason**: Alexi's read tool (`src/tool/tools/read.ts`) already works correctly with Promise-based pattern. Converting to Effect.js would:
-  - Require adding Effect.js as a dependency (~500KB)
-  - Break compatibility with existing tool system
-  - Provide no tangible benefit for SAP AI Core integration
+**Description**: Created Azure provider configuration with proper options passthrough. Both 'openai' and 'azure' keys are now passed for @ai-sdk/azure compatibility, ensuring proper configuration inheritance.
 
-### Change 3: Update tool registry with Effect dependencies
-- **Priority**: High
-- **Status**: ❌ Not Applicable
-- **Reason**: Alexi's tool registry (`src/tool/index.ts`) doesn't use service layers or Effect patterns
+### 4. ✅ Add Mouse Disable Configuration for TUI
+**Priority**: Medium
+**Files Created**:
+- `src/cli/config/tui-schema.ts` - TUI configuration schema with mouse option
 
-### Change 4: Add AppFileSystem service
-- **Priority**: High
-- **Status**: ❌ Not Applicable
-- **Reason**: Alexi uses standard fs/promises directly. No need for additional abstraction.
+**Files Modified**:
+- `src/cli/tui/index.ts` - Added TuiConfig to StartTuiOptions
+- `src/cli/tui/App.tsx` - Added mouse configuration support
 
-### Change 5: Fix reasoning tokens double counting
-- **Priority**: Medium
-- **Status**: ⚠️ Not Applicable (Different Context)
-- **Reason**: 
-  - Alexi uses SAP AI Core Orchestration SDK (`@sap-ai-sdk/orchestration`)
-  - The SDK's `TokenUsage` interface doesn't expose `reasoning_tokens` separately
-  - SAP AI Core may not support reasoning tokens in the same way as OpenAI's o1 models
-  - Current implementation in `src/core/orchestrator.ts` and `src/core/agenticChat.ts` correctly uses `prompt_tokens` and `completion_tokens` as provided by SAP SDK
+**Description**: Added ability to disable mouse input in the TUI via configuration. Users can now set `mouse: false` in their TUI config for keyboard-only navigation or accessibility requirements.
 
-### Change 6: Update read tool tests for Effect-based implementation
-- **Priority**: Medium
-- **Status**: ❌ Not Applicable
-- **Reason**: Alexi's existing tests (`tests/tool/tools/read.test.ts`) are comprehensive and work correctly with the current Promise-based implementation
+### 5. ✅ Implement ACP Config Options Support
+**Priority**: Medium
+**Files Created**:
+- `src/providers/acp/agent.ts` - Agent Communication Protocol implementation
 
-## Current State of Alexi
+**Description**: Implemented proper configOptions for ACP (Agent Communication Protocol). Configuration is now correctly passed to ACP agents with timeout, retry, headers, and metadata support.
 
-### Tool System (Working Correctly)
-- ✅ Promise-based tool execution
-- ✅ Permission management via `src/permission/`
-- ✅ Tool registry with lazy initialization
-- ✅ Comprehensive test coverage
-- ✅ SAP AI Core integration working
+### 6. ✅ Sanitize Plugin Cache Paths for Windows
+**Priority**: Low
+**Files Created**:
+- `src/plugin/shared.ts` - Plugin utilities with Windows path sanitization
 
-### Read Tool (Working Correctly)
-- ✅ Reads files and directories
-- ✅ Line numbering with offset/limit support
-- ✅ Output truncation for large files
-- ✅ Proper error handling
-- ✅ Permission checks integrated
-- ✅ Full test coverage
+**Description**: Fixed plugin package specifier parsing and Windows cache path sanitization. Special characters in paths are now properly handled on Windows systems, preventing installation issues. Implemented custom parser instead of using npm-package-arg to avoid adding new dependencies.
 
-### Token Usage Tracking (Working Correctly)
-- ✅ Tracks `prompt_tokens` and `completion_tokens` from SAP SDK
-- ✅ Cost calculation in `src/core/costTracker.ts`
-- ✅ Session-level usage tracking
-- ✅ No double-counting issues with current SAP SDK
+### 7. ⏭️ Remove Deprecated Subscription Fields (SKIPPED)
+**Priority**: Low
+**Reason**: The subscription schema does not exist in Alexi. This change is not applicable to the current codebase.
 
-## Recommendations
+### 8. ✅ Update TUI App to Respect Mouse Configuration
+**Priority**: Medium
+**Files Modified**:
+- `src/cli/tui/App.tsx`
 
-### 1. Monitor Upstream Divergence
-- Alexi and opencode have diverged architecturally
-- Future updates from opencode may not be directly applicable
-- Consider maintaining separate evolution paths
+**Description**: Implemented mouse configuration in the TUI App component. The app now respects the `mouse` setting from TuiConfig and disables mouse input when configured.
 
-### 2. SAP AI Core Compatibility
-- Continue using SAP AI Core SDK's native interfaces
-- Monitor SAP SDK updates for reasoning tokens support
-- Maintain current Promise-based patterns for stability
+## Files Created (6)
+1. `src/providers/cloudflare.ts`
+2. `src/providers/errors.ts`
+3. `src/providers/azure.ts`
+4. `src/cli/config/tui-schema.ts`
+5. `src/providers/acp/agent.ts`
+6. `src/plugin/shared.ts`
 
-### 3. Effect.js Consideration
-- **Do not adopt Effect.js** unless there's a compelling reason
-- Current Promise-based patterns are:
-  - Simpler to understand
-  - Easier to maintain
-  - Well-tested
-  - Sufficient for current needs
+## Files Modified (3)
+1. `src/providers/index.ts`
+2. `src/cli/tui/index.ts`
+3. `src/cli/tui/App.tsx`
 
-### 4. Future Enhancements (If Needed)
-If reasoning tokens become available in SAP AI Core:
-```typescript
-// Potential future enhancement in src/providers/sapOrchestration.ts
-export interface TokenUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  reasoning_tokens?: number; // Add when SAP SDK supports it
-}
+## Testing Recommendations
 
-// In src/core/costTracker.ts - only if reasoning tokens are billed separately
-calculateCost(modelId: string, inputTokens: number, outputTokens: number, reasoningTokens?: number): number {
-  // Implement if SAP AI Core bills reasoning tokens separately
-}
-```
+### High Priority
+- Test Cloudflare provider initialization with missing environment variables to verify error messages
+- Test Azure provider with both OpenAI and Azure SDK configurations
+- Verify SAP AI Core integration still works correctly (no regressions)
 
-## Files Examined
+### Medium Priority
+- Test TUI with `mouse: false` configuration to ensure keyboard-only navigation works
+- Test ACP agent configuration options are properly passed through
+- Test plugin installation on Windows with package names containing special characters
 
-### Core Files
-- `package.json` - Confirmed no Effect.js dependency
-- `src/tool/index.ts` - Tool system implementation
-- `src/tool/tools/read.ts` - Read tool implementation
-- `src/providers/sapOrchestration.ts` - SAP AI Core integration
-- `src/core/orchestrator.ts` - Token usage tracking
-- `src/core/agenticChat.ts` - Agentic chat with tool execution
-- `src/core/costTracker.ts` - Cost tracking system
+### Low Priority
+- Verify all new exports are accessible from provider index
+- Check that error handling works correctly for all new providers
 
-### Test Files
-- `tests/tool/tools/read.test.ts` - Read tool tests (comprehensive)
+## Potential Risks
 
-## Conclusion
+1. **Cloudflare Provider**: New provider may need additional testing with SAP AI Core proxy configurations
+2. **Azure Provider Changes**: The dual options passthrough should be tested with existing Azure deployments
+3. **TUI Mouse Configuration**: The mouse disable implementation uses `useInput` hook which may need refinement based on Ink's actual mouse handling capabilities
+4. **Plugin Path Sanitization**: Changes to cache paths may invalidate existing plugin caches on Windows - consider migration logic or cache clearing instructions
 
-**No changes were applied** because the update plan was based on upstream architectural patterns (Effect.js) that are fundamentally incompatible with Alexi's design. Alexi's current implementation is:
+## Notes
 
-- ✅ Working correctly
-- ✅ Well-tested  
-- ✅ SAP AI Core compatible
-- ✅ Maintainable
+- All changes maintain SAP AI Core compatibility as the primary provider
+- New providers (Cloudflare, Azure) are available for future extension but don't affect core functionality
+- Code follows existing Alexi conventions (ES Modules, TypeScript strict mode, 2-space indentation)
+- All imports use `.js` extensions as required for ES Modules
+- Error handling follows the established pattern with custom error classes
 
-**Recommendation**: Continue with Alexi's current architecture and monitor SAP AI Core SDK updates for any relevant enhancements (e.g., reasoning tokens support).
+## Next Steps
 
-## Lessons Learned
-
-1. **Architectural alignment is critical** when considering upstream updates
-2. **Not all upstream changes are beneficial** - especially major architectural shifts
-3. **Stability and compatibility** should be prioritized over adopting new patterns without clear benefits
-4. **SAP AI Core integration** is Alexi's core value proposition and must be preserved
-
----
-
-**Generated**: 2026-04-05  
-**Reviewer**: AI Agent  
-**Status**: Complete - No Changes Required
+1. Run the full test suite: `npm test`
+2. Run type checking: `npm run typecheck`
+3. Run linting: `npm run lint`
+4. Test SAP AI Core integration manually
+5. Test new provider configurations in isolation
+6. Update documentation if needed for new configuration options

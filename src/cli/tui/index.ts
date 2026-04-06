@@ -2,6 +2,7 @@ import React from 'react';
 import { render } from 'ink';
 
 import { App } from './App.js';
+import type { TuiConfig } from '../config/tui-schema.js';
 
 export interface StartTuiOptions {
   model: string;
@@ -11,6 +12,7 @@ export interface StartTuiOptions {
   systemPrompt?: string;
   gitManager?: unknown;
   repoMapManager?: unknown;
+  tuiConfig?: TuiConfig;
 }
 
 export async function startTui(options: StartTuiOptions): Promise<void> {

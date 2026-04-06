@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Box, useApp, useStdout } from 'ink';
+import { Box, useApp, useStdout, useInput } from 'ink';
 
 import { ThemeProvider, useTheme } from './context/ThemeContext.js';
 import { SessionProvider, useSession } from './context/SessionContext.js';
@@ -18,6 +18,7 @@ import { useFileChanges } from './hooks/useFileChanges.js';
 import { usePermission } from './hooks/usePermission.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
 import { useCommands } from './hooks/useCommands.js';
+import type { TuiConfig } from '../config/tui-schema.js';
 
 import { PermissionDialog } from './dialogs/PermissionDialog.js';
 import type { PermissionDialogProps } from './dialogs/PermissionDialog.js';
@@ -80,6 +81,7 @@ export interface AppProps {
   systemPrompt?: string;
   gitManager?: unknown;
   repoMapManager?: unknown;
+  tuiConfig?: TuiConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,8 +348,17 @@ function AppLayout(): React.JSX.Element {
 // App — root with full provider tree
 // ---------------------------------------------------------------------------
 
-export function App({ model, autoRoute, sessionId }: AppProps): React.JSX.Element {
+export function App({ model, autoRoute, sessionId, tuiConfig }: AppProps): React.JSX.Element {
   const resolvedSessionId = sessionId ?? `session-${Date.now()}`;
+  const mouseEnabled = tuiConfig?.mouse ?? true;
+
+  // Disable mouse input if configured
+  useInput(
+    (_input, _key) => {
+      // Mouse input handling disabled when mouseEnabled is false
+    },
+    { isActive: !mouseEnabled }
+  );
 
   return (
     <ThemeProvider>

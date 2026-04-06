@@ -39,6 +39,15 @@ export {
   type ChatMessage,
 } from './sapOrchestration.js';
 
+// Re-export Cloudflare provider (available for future extension)
+export { validateCloudflareEnv, createCloudflareProvider } from './cloudflare.js';
+
+// Re-export Azure provider configuration
+export { createAzureProviderOptions, type AzureConfig } from './azure.js';
+
+// Re-export provider errors
+export { ProviderError } from './errors.js';
+
 /**
  * Get the SAP Orchestration provider for the specified model
  *
