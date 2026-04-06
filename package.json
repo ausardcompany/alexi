@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^8.3.2",
-    "@modelcontextprotocol/sdk": "^1.28.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@sap-ai-sdk/ai-api": "^2.9.0",
     "@sap-ai-sdk/orchestration": "^2.9.0",
     "cli-highlight": "^2.1.11",
