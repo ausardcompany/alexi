@@ -85,6 +85,11 @@ Usage:
       content: params.prompt,
     });
 
+    // TODO: When full session/permission integration is added, inherit edit, bash, and MCP
+    // restrictions from the calling agent to prevent privilege escalation. Sub-agents must
+    // inherit restrictions so they cannot bypass parent agent permissions.
+    // See upstream commit for implementation reference.
+
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
     const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt.`;

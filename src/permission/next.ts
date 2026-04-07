@@ -180,6 +180,18 @@ export const PermissionNext = {
   },
 
   /**
+   * Merge multiple rulesets into one
+   * Later rulesets take precedence
+   */
+  merge(...rulesets: Ruleset[]): Ruleset {
+    const result: Ruleset = [];
+    for (const ruleset of rulesets) {
+      result.push(...ruleset);
+    }
+    return result;
+  },
+
+  /**
    * Error thrown when permission is denied
    */
   DeniedError: class extends Error {

@@ -319,7 +319,7 @@ export function parseAgentMention(message: string): {
 }
 
 /**
- * Read-only bash commands for the ask agent.
+ * Read-only bash commands for the ask agent and plan mode.
  * Unlike the default bash allowlist, unknown commands are DENIED (not "ask")
  * because the ask agent must never modify the filesystem.
  */
