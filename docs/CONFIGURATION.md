@@ -7,6 +7,7 @@ This document describes all configuration options available in Alexi, including 
 - [Environment Variables](#environment-variables)
 - [User Configuration](#user-configuration)
 - [Routing Configuration](#routing-configuration)
+- [Feature Flags](#feature-flags)
 - [Instruction Files](#instruction-files)
 - [Project Context](#project-context)
 - [Configuration Examples](#configuration-examples)
@@ -280,6 +281,129 @@ interface RoutingRule {
   "default": {
     "model": "anthropic--claude-4-sonnet"
   }
+}
+```
+
+## Feature Flags
+
+Feature flags provide runtime control over application behavior without requiring configuration file changes. They are particularly useful for testing, debugging, and enabling experimental features.
+
+### Flag API
+
+The Flag API is available through the `src/flag/` module:
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// Set a flag
+Flag.set('dangerouslySkipPermissions', true);
+
+// Get a flag value
+const skipPermissions = Flag.get('dangerouslySkipPermissions');
+
+// Clear all flags
+Flag.clear();
+```
+
+### Available Flags
+
+#### dangerouslySkipPermissions
+
+Bypasses all permission checks. Use with extreme caution as this disables the security layer.
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// Enable permission bypass (dangerous!)
+Flag.set('dangerouslySkipPermissions', true);
+
+// Check if permissions are being skipped
+if (Flag.dangerouslySkipPermissions()) {
+  console.warn('Running with permission checks disabled');
+}
+
+// Disable permission bypass
+Flag.set('dangerouslySkipPermissions', false);
+```
+
+### Use Cases
+
+**Testing Environment**: Skip permission prompts during automated testing:
+
+```typescript
+import { Flag } from './flag/index.js';
+import { describe, it, beforeEach, afterEach } from 'vitest';
+
+describe('Tool execution tests', () => {
+  beforeEach(() => {
+    Flag.set('dangerouslySkipPermissions', true);
+  });
+
+  afterEach(() => {
+    Flag.clear();
+  });
+
+  it('should execute tool without permission prompts', async () => {
+    // Test code here runs with permissions disabled
+  });
+});
+```
+
+**Trusted CI/CD Environments**: Disable permission checks in automated workflows:
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// In CI environment, skip permission checks
+if (process.env.CI === 'true') {
+  Flag.set('dangerouslySkipPermissions', true);
+}
+```
+
+**Development Mode**: Temporarily disable permission checks during development:
+
+```bash
+# Set environment variable to skip permissions
+export ALEXI_SKIP_PERMISSIONS=true
+```
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// Check environment variable on startup
+if (process.env.ALEXI_SKIP_PERMISSIONS === 'true') {
+  Flag.set('dangerouslySkipPermissions', true);
+  console.warn('Permission checks disabled via ALEXI_SKIP_PERMISSIONS');
+}
+```
+
+### Security Considerations
+
+Feature flags that bypass security mechanisms should be used with extreme caution:
+
+1. **Never use in production**: Permission bypass flags should only be used in trusted environments
+2. **Clear after use**: Always clear flags after testing to prevent accidental bypass
+3. **Audit flag usage**: Monitor and log when security-related flags are enabled
+4. **Document usage**: Clearly document why and when flags are being used
+
+### Flag Management Best Practices
+
+```typescript
+// Good: Clear scope and cleanup
+function runTestWithoutPermissions() {
+  Flag.set('dangerouslySkipPermissions', true);
+  try {
+    // Test code here
+  } finally {
+    Flag.clear(); // Always clean up
+  }
+}
+
+// Bad: No cleanup
+function runTestWithoutPermissions() {
+  Flag.set('dangerouslySkipPermissions', true);
+  // Test code here
+  // Flag remains set!
 }
 ```
 
@@ -622,9 +746,11 @@ interface Session {
 1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control
 2. **Use User Config for Preferences**: Store personal preferences in ~/.alexi/config.json
 3. **Use Routing Config for Model Selection**: Define routing rules in routing-config.json
-4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
-5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
-6. **Keep User Files Private**: Never commit ~/.alexi/ directory
+4. **Use Feature Flags for Runtime Control**: Enable/disable features dynamically with Flag API
+5. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
+6. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
+7. **Keep User Files Private**: Never commit ~/.alexi/ directory
+8. **Clear Security Flags**: Always clear feature flags that bypass security after use
 
 ## Configuration Validation
 

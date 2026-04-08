@@ -221,6 +221,22 @@ graph LR
    const tree = parser.parse(source);
    ```
 
+7. **Feature Flags**: Use the Flag API for runtime behavior control
+   ```typescript
+   import { Flag } from './flag/index.js';
+   
+   // Set a flag for testing
+   Flag.set('dangerouslySkipPermissions', true);
+   
+   // Check flag status
+   if (Flag.dangerouslySkipPermissions()) {
+     // Skip permission checks
+   }
+   
+   // Always clear flags after use
+   Flag.clear();
+   ```
+
 ### File Organization
 
 ```
@@ -241,6 +257,9 @@ src/
 │   └── tools/        # Individual tool implementations
 ├── permission/       # Permission system
 │   └── index.ts
+├── flag/             # Feature flag system
+│   ├── flag.ts       # Flag implementation
+│   └── index.ts      # Flag exports
 ├── session/          # Session management
 └── bus/              # Event bus system
 ```
@@ -387,6 +406,56 @@ Key principles for TUI testing:
 3. Capture hook return values through a component
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
+
+### Testing with Feature Flags
+
+When testing code that interacts with the permission system or other flag-controlled features:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { Flag } from '../src/flag/index.js';
+
+describe('Permission-gated operations', () => {
+  beforeEach(() => {
+    // Disable permission checks for testing
+    Flag.set('dangerouslySkipPermissions', true);
+  });
+
+  afterEach(() => {
+    // Always clear flags after tests
+    Flag.clear();
+  });
+
+  it('should execute operation without permission prompts', async () => {
+    // Test code runs with permissions disabled
+    const result = await somePermissionGatedOperation();
+    expect(result.success).toBe(true);
+  });
+});
+```
+
+**Important**: Always clear feature flags in `afterEach()` to prevent test pollution:
+
+```typescript
+// Good: Proper cleanup
+describe('Test suite', () => {
+  beforeEach(() => Flag.set('someFlag', true));
+  afterEach(() => Flag.clear());
+  
+  it('test case', () => {
+    // Test code
+  });
+});
+
+// Bad: No cleanup - affects other tests
+describe('Test suite', () => {
+  beforeEach(() => Flag.set('someFlag', true));
+  
+  it('test case', () => {
+    // Test code
+  });
+});
+```
 
 ## Pull Request Process
 

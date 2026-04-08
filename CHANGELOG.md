@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-04-08
+
+### Added
+
+- Global feature flag system for runtime behavior control
+  - New `src/flag/` module with Flag API for setting/getting runtime flags
+  - `dangerouslySkipPermissions()` flag for bypassing permission checks in trusted environments
+  - Support for dynamic flag management with `set()`, `get()`, and `clear()` functions
+- Permission system enhancements
+  - Added `PermissionNext.merge()` utility for combining multiple rulesets
+  - Later rulesets take precedence when merging permission rules
+- Abort signal support for websearch tool
+  - Checks for abort signal before starting search operations
+  - Handles abort signal in error handling paths
+  - Returns appropriate error messages when search is aborted
+
+### Changed
+
+- Updated read-only bash command documentation for ask agent and plan mode
+  - Clarified that unknown commands are denied by default (not "ask")
+  - Reinforced filesystem protection for ask agent mode
+
+### Fixed
+
+- Websearch tool now properly handles abort signals during search operations
+- Improved error handling for aborted search requests
+
+## [0.4.3] - 2026-04-07
+
+### Changed
+
+- Applied upstream synchronization changes from kilocode, opencode, and claude-code repositories
+
+## [0.4.2] - 2026-04-05
+
+### Changed
+
+- Applied upstream synchronization changes
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +263,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/ausardcompany/alexi/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/ausardcompany/alexi/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.2
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
