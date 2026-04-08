@@ -39,8 +39,16 @@ Usage:
     getResource: (params) => `duckduckgo.com (search: ${params.query.slice(0, 50)})`,
   },
 
-  async execute(params): Promise<ToolResult<WebSearchResult>> {
+  async execute(params, context): Promise<ToolResult<WebSearchResult>> {
     try {
+      // Check for abort before starting
+      if (context.signal?.aborted) {
+        return {
+          success: false,
+          error: 'Search aborted',
+        };
+      }
+
       // Clamp limit to 1-10
       const limit = Math.max(1, Math.min(10, params.limit ?? 5));
 
@@ -68,6 +76,14 @@ Usage:
         },
       };
     } catch (err) {
+      // Check if aborted
+      if (context.signal?.aborted) {
+        return {
+          success: false,
+          error: 'Search aborted',
+        };
+      }
+
       // Handle specific error types
       const errorMessage = err instanceof Error ? err.message : String(err);
 
