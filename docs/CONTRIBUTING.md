@@ -221,6 +221,38 @@ graph LR
    const tree = parser.parse(source);
    ```
 
+7. **Feature Flags**: Use feature flags for experimental or dangerous features
+   ```typescript
+   import { Flag } from './flag/index.js';
+   
+   // Check flag before executing dangerous operation
+   if (Flag.dangerouslySkipPermissions()) {
+     // Skip permission checks (use with caution)
+   }
+   
+   // Set flags for testing
+   Flag.set('experimentalFeature', true);
+   ```
+
+8. **Abort Signal Support**: Support cancellation in long-running operations
+   ```typescript
+   async execute(params, context): Promise<ToolResult> {
+     // Check for abort before starting
+     if (context.signal?.aborted) {
+       return { success: false, error: 'Operation aborted' };
+     }
+     
+     const result = await longRunningOperation();
+     
+     // Check for abort after operation
+     if (context.signal?.aborted) {
+       return { success: false, error: 'Operation aborted' };
+     }
+     
+     return { success: true, data: result };
+   }
+   ```
+
 ### File Organization
 
 ```
@@ -240,7 +272,11 @@ src/
 │   ├── index.ts      # Tool framework
 │   └── tools/        # Individual tool implementations
 ├── permission/       # Permission system
-│   └── index.ts
+│   ├── index.ts      # Permission manager
+│   └── next.ts       # Permission utilities
+├── flag/             # Feature flag system
+│   ├── index.ts      # Flag exports
+│   └── flag.ts       # Flag implementation
 ├── session/          # Session management
 └── bus/              # Event bus system
 ```
@@ -333,6 +369,9 @@ npm test -- tests/commands-image.test.tsx
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"
+
+# Run tests for a specific tool
+npm test -- tests/tool/tools/recall.test.ts
 ```
 
 ### Testing TUI Commands
@@ -387,6 +426,69 @@ Key principles for TUI testing:
 3. Capture hook return values through a component
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
+
+### Testing Tools with Abort Signals
+
+Tools that support cancellation should be tested with abort signals:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+
+describe('websearch tool', () => {
+  it('should handle abort signal', async () => {
+    const abortController = new AbortController();
+    const context = { signal: abortController.signal };
+    
+    // Abort before execution
+    abortController.abort();
+    
+    const result = await websearchTool.execute(
+      { query: 'test', limit: 5 },
+      context
+    );
+    
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+});
+```
+
+### Testing Permission Systems
+
+When testing permission-related functionality:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { getPermissionManager } from '../src/permission/index.js';
+
+describe('Permission manager', () => {
+  let manager;
+  
+  beforeEach(() => {
+    manager = getPermissionManager();
+    manager.clearSession();
+  });
+  
+  it('should enable allow everything mode', () => {
+    manager.setAllowEverything(true);
+    expect(manager.getAllowEverything()).toBe(true);
+    
+    // Verify high-priority rule added
+    const rules = manager.getRules();
+    const allowAll = rules.find(r => r.id === 'allow-everything');
+    expect(allowAll).toBeDefined();
+    expect(allowAll.priority).toBe(10000);
+  });
+  
+  it('should merge rulesets', () => {
+    const base = [{ id: 'read', decision: 'allow' }];
+    const override = [{ id: 'write', decision: 'deny' }];
+    
+    const merged = PermissionNext.merge(base, override);
+    expect(merged).toHaveLength(2);
+  });
+});
+```
 
 ## Pull Request Process
 
@@ -549,6 +651,56 @@ The system:
 - Uses AI to analyze and apply relevant changes
 - Creates PRs with detailed change descriptions
 - Auto-merges after CI passes
+
+### New Tools and Features
+
+#### Recall Tool
+
+The recall tool enables AI agents to access previous session transcripts:
+
+```typescript
+// Search for sessions
+const searchResult = await recallTool.execute({
+  mode: 'search',
+  query: 'bug fix',
+  limit: 10
+}, context);
+
+// Read a session transcript
+const readResult = await recallTool.execute({
+  mode: 'read',
+  sessionID: 'abc-123'
+}, context);
+```
+
+When implementing similar tools:
+1. Use Zod schemas for parameter validation
+2. Support multiple operation modes where appropriate
+3. Implement proper error handling with descriptive messages
+4. Use SessionManager for accessing session data
+5. Format output for AI consumption (structured data + readable text)
+
+#### Feature Flags
+
+Use feature flags for experimental or dangerous functionality:
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// In tool implementation
+if (Flag.dangerouslySkipPermissions()) {
+  // Skip permission checks (testing only)
+}
+
+// In tests
+beforeEach(() => {
+  Flag.set('testMode', true);
+});
+
+afterEach(() => {
+  Flag.clear();
+});
+```
 
 ### Agentic File Operations
 

@@ -617,6 +617,105 @@ interface Session {
 }
 ```
 
+### Session Access with Recall Tool
+
+The recall tool enables AI agents to search and read transcripts from previous sessions:
+
+```typescript
+// Search for sessions by title
+{
+  mode: 'search',
+  query: 'bug fix',
+  limit: 10
+}
+
+// Read a specific session transcript
+{
+  mode: 'read',
+  sessionID: 'abc-123'
+}
+```
+
+This allows agents to access context from past conversations and maintain continuity across sessions.
+
+## Feature Flags
+
+Alexi supports runtime feature flags for controlling application behavior.
+
+### Flag System
+
+```typescript
+import { Flag } from './flag/index.js';
+
+// Set a flag
+Flag.set('dangerouslySkipPermissions', true);
+
+// Get a flag value
+const skipPermissions = Flag.get('dangerouslySkipPermissions');
+
+// Check dangerous permissions flag
+const shouldSkip = Flag.dangerouslySkipPermissions();
+
+// Clear all flags
+Flag.clear();
+```
+
+### Available Flags
+
+#### dangerouslySkipPermissions
+
+Bypasses all permission checks. Use with extreme caution as this allows unrestricted file system access.
+
+```typescript
+// Enable (use only in trusted environments)
+Flag.set('dangerouslySkipPermissions', true);
+
+// Disable (recommended for normal operation)
+Flag.set('dangerouslySkipPermissions', false);
+```
+
+## Permission System Configuration
+
+### Allow Everything Mode
+
+The permission system supports a temporary "allow everything" mode for trusted operations:
+
+```typescript
+import { getPermissionManager } from './permission/index.js';
+
+const manager = getPermissionManager();
+
+// Enable allow-all mode (adds highest priority rule)
+manager.setAllowEverything(true);
+
+// Check if enabled
+const isEnabled = manager.getAllowEverything();
+
+// Disable allow-all mode (removes the rule)
+manager.setAllowEverything(false);
+```
+
+When enabled, this adds a catch-all permission rule with priority 10000 that allows all operations.
+
+### Ruleset Merging
+
+Combine multiple permission rulesets with precedence control:
+
+```typescript
+import { PermissionNext } from './permission/next.js';
+
+const baseRules = [
+  { id: 'read-allow', decision: 'allow', actions: ['read'] }
+];
+
+const restrictiveRules = [
+  { id: 'write-deny', decision: 'deny', actions: ['write'] }
+];
+
+// Later rulesets take precedence
+const merged = PermissionNext.merge(baseRules, restrictiveRules);
+```
+
 ## Configuration Best Practices
 
 1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control
@@ -625,6 +724,8 @@ interface Session {
 4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
 5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
 6. **Keep User Files Private**: Never commit ~/.alexi/ directory
+7. **Use Feature Flags Carefully**: Only enable dangerous flags in trusted environments
+8. **Manage Permissions Explicitly**: Prefer specific permission rules over allow-everything mode
 
 ## Configuration Validation
 

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-04-09
+
+### Added
+
+- New recall tool for searching and reading previous session transcripts
+  - Search sessions by title with query matching
+  - Read full session transcripts by session ID
+  - Configurable result limits (default 20, max 50)
+  - Enables AI agents to access context from past conversations
+- Feature flag system for runtime behavior control
+  - Global flag registry with get/set/clear operations
+  - dangerouslySkipPermissions flag for bypassing permission checks
+  - Centralized flag management through Flag module
+- Permission system enhancements
+  - Allow everything mode with highest priority catch-all rule
+  - Ruleset merging functionality for combining permission rules
+  - setAllowEverything() and getAllowEverything() methods
+- Edit tool improvements
+  - FileDiff interface for tracking file changes
+  - buildFileDiff() function with addition/deletion counting
+  - Size limits for diff generation (500KB max)
+  - Cached file diffs for permission display
+- Web search tool abort signal support
+  - Graceful cancellation with context.signal
+  - Abort checks before and after search operations
+
+### Changed
+
+- Edit tool now generates detailed file diffs for permission review
+  - Tracks line additions and deletions using diff library
+  - Skips diff generation for files exceeding size limits
+- Web search tool enhanced with cancellation support
+  - Checks abort signal before starting search
+  - Handles aborted searches with proper error messages
+- Task tool documentation updated with permission inheritance note
+  - Added TODO for sub-agent permission restrictions
+  - References upstream implementation for privilege escalation prevention
+- Agent system bash rules documentation clarified
+  - Read-only bash commands now documented for both ask agent and plan mode
+
+## [0.4.4] - 2026-04-08
+
+### Changed
+
+- Applied upstream changes from kilocode, opencode, and claude-code repositories
+- Updated sync tracking metadata
+
+## [0.4.3] - 2026-04-07
+
+### Changed
+
+- Applied upstream changes from kilocode, opencode, and claude-code repositories
+- Updated sync tracking metadata
+
 ## [0.3.1] - 2026-03-21
 
 ### Added
@@ -224,7 +278,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/ausardcompany/alexi/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/ausardcompany/alexi/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.3
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
