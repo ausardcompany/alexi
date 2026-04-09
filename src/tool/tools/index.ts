@@ -28,6 +28,7 @@ import { codesearchTool } from './codesearch.js';
 import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
 import { warpgrepTool } from './warpgrep.js';
+import { recallTool } from './recall.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -56,6 +57,7 @@ export const builtInTools = [
   storeMemoryTool,
   recallMemoryTool,
   warpgrepTool,
+  recallTool,
 ] as const;
 
 /**
@@ -95,6 +97,7 @@ export {
   storeMemoryTool,
   recallMemoryTool,
   warpgrepTool,
+  recallTool,
 };
 
 // Re-export UI utilities from specific tools

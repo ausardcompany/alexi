@@ -565,6 +565,33 @@ export class PermissionManager {
   }
 
   /**
+   * Enable or disable "allow everything" mode
+   * When enabled, all permission checks will pass automatically
+   */
+  private allowEverythingEnabled: boolean = false;
+
+  setAllowEverything(enable: boolean): void {
+    this.allowEverythingEnabled = enable;
+    if (enable) {
+      // Add a catch-all rule with highest priority
+      this.addRule({
+        id: 'allow-everything',
+        name: 'Allow Everything',
+        description: 'Temporary rule to allow all operations',
+        decision: 'allow',
+        priority: 10000,
+      });
+    } else {
+      // Remove the catch-all rule
+      this.removeRule('allow-everything');
+    }
+  }
+
+  getAllowEverything(): boolean {
+    return this.allowEverythingEnabled;
+  }
+
+  /**
    * Load rules from config
    */
   static fromConfig(config: unknown): PermissionManager {
