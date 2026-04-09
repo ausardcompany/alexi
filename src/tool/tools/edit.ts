@@ -5,7 +5,48 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { diffLines } from 'diff';
 import { defineTool, type ToolResult } from '../index.js';
+
+const MAX_DIFF_CONTENT = 500_000; // Maximum content size for diff generation
+
+/**
+ * File diff structure for permission display and review
+ */
+export interface FileDiff {
+  file: string;
+  before: string;
+  after: string;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * Build a file diff with size limits and change tracking
+ */
+export function buildFileDiff(file: string, before: string, after: string): FileDiff {
+  const tooLarge = before.length > MAX_DIFF_CONTENT || after.length > MAX_DIFF_CONTENT;
+  const fd: FileDiff = {
+    file,
+    before: tooLarge ? '' : before,
+    after: tooLarge ? '' : after,
+    additions: 0,
+    deletions: 0,
+  };
+
+  if (!tooLarge) {
+    for (const change of diffLines(before, after)) {
+      if (change.added) {
+        fd.additions += change.count || 0;
+      }
+      if (change.removed) {
+        fd.deletions += change.count || 0;
+      }
+    }
+  }
+
+  return fd;
+}
 
 const EditParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file to modify'),
@@ -52,6 +93,9 @@ Usage:
       // Read existing file
       const content = await fs.readFile(filePath, 'utf-8');
 
+      // Cache file diff for permission display
+      let cachedFilediff: FileDiff | undefined;
+
       // Detect and preserve line endings
       const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
       const normalizeLineEndings = (text: string): string => text.replaceAll('\r\n', '\n');
@@ -92,6 +136,9 @@ Usage:
         newContent = content.replace(oldString, newString);
         replacements = 1;
       }
+
+      // Build diff for tracking
+      cachedFilediff = buildFileDiff(filePath, content, newContent);
 
       // Write the file
       await fs.writeFile(filePath, newContent, 'utf-8');
