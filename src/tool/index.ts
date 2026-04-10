@@ -378,6 +378,23 @@ class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /**
+   * Get specific named tools for typed access
+   */
+  getNamed(): {
+    task: Tool<any, any> | undefined;
+    read: Tool<any, any> | undefined;
+    write: Tool<any, any> | undefined;
+    recall: Tool<any, any> | undefined;
+  } {
+    return {
+      task: this.tools.get('task'),
+      read: this.tools.get('read'),
+      write: this.tools.get('write'),
+      recall: this.tools.get('recall'),
+    };
+  }
+
   list(): Tool<any, any>[] {
     return Array.from(this.tools.values());
   }
@@ -388,6 +405,13 @@ class ToolRegistry {
     parameters: Record<string, unknown>;
   }> {
     return this.list().map((t) => t.toFunctionSchema());
+  }
+
+  /**
+   * Get tool IDs
+   */
+  ids(): string[] {
+    return Array.from(this.tools.keys());
   }
 }
 
