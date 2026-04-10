@@ -88,6 +88,52 @@ function expand(pattern: string): string {
 }
 
 /**
+ * Permission state interface with allow-everything support
+ */
+export namespace Permission {
+  export interface State {
+    approved: string[];
+    denied: string[];
+    allowEverything: boolean;
+    allowEverythingScope?: 'session' | 'project';
+  }
+
+  export function allowEverything(
+    state: State,
+    scope: 'session' | 'project' = 'session'
+  ): State {
+    return {
+      ...state,
+      allowEverything: true,
+      allowEverythingScope: scope,
+      approved: [...state.approved, '*'],
+    };
+  }
+
+  export function disableAllowEverything(state: State): State {
+    return {
+      ...state,
+      allowEverything: false,
+      allowEverythingScope: undefined,
+      approved: state.approved.filter((p) => p !== '*'),
+    };
+  }
+
+  export function isAllowed(state: State, permission: string): boolean {
+    if (state.allowEverything) return true;
+    if (state.denied.includes(permission)) return false;
+    if (state.approved.includes('*')) return true;
+    return state.approved.includes(permission);
+  }
+
+  export function pending(state: State): string[] {
+    if (state.allowEverything) return [];
+    // Return permissions that are neither approved nor denied
+    return [];
+  }
+}
+
+/**
  * Permission configuration parsing and serialization utilities
  * Handles null sentinels for deletion in config patches
  */

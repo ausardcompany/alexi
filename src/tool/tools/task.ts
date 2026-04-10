@@ -1,9 +1,10 @@
 /**
  * Task Tool - Launch subagent for complex tasks
+ * Delegates work to specialized sub-agents for parallel or specialized processing
  */
 
 import { z } from 'zod';
-import { defineTool, type ToolResult } from '../index.js';
+import { defineTool, type ToolResult, type ToolContext } from '../index.js';
 import { getAgentRegistry } from '../../agent/index.js';
 
 const TaskParamsSchema = z.object({
@@ -11,6 +12,7 @@ const TaskParamsSchema = z.object({
   description: z.string().describe('Short 3-5 word description'),
   subagent_type: z.string().optional().describe('Type of specialized agent: general, explore'),
   task_id: z.string().optional().describe('Resume a previous task by ID'),
+  context: z.string().optional().describe('Additional context for the subtask'),
 });
 
 interface TaskResult {
@@ -27,8 +29,17 @@ const taskStore = new Map<
     agentId: string;
     messages: Array<{ role: string; content: string }>;
     created: number;
+    parentSessionId?: string;
   }
 >();
+
+/**
+ * Check if current context is a subagent session
+ */
+function isSubagentContext(context: ToolContext): boolean {
+  // Check if this is being called from within a task/subagent session
+  return !!(context as any).isSubagent;
+}
 
 export const taskTool = defineTool<typeof TaskParamsSchema, TaskResult>({
   name: 'task',
@@ -41,13 +52,30 @@ Available agent types:
 Usage:
 - Provide a detailed prompt with exactly what information to return
 - Use task_id to resume a previous task session
-- Results are returned in the agent's final message`,
+- Results are returned in the agent's final message
+- Primary agents cannot use task tool in subagent sessions (prevents nesting)
+
+Best practices:
+- Delegate independent subtasks that can run in parallel
+- Provide clear, specific instructions for what to return
+- Use context parameter to pass relevant information`,
 
   parameters: TaskParamsSchema,
 
-  async execute(params, _context): Promise<ToolResult<TaskResult>> {
+  async execute(params, context): Promise<ToolResult<TaskResult>> {
     const { nanoid } = await import('nanoid');
     const registry = getAgentRegistry();
+
+    // Get current agent to check if we're in a subagent context
+    const currentAgent = registry.getCurrent();
+
+    // Prevent primary agents from using task tool in subagent sessions
+    if (isSubagentContext(context) && currentAgent.mode === 'primary') {
+      return {
+        success: false,
+        error: 'Primary agents cannot use task tool in subagent sessions to prevent infinite nesting',
+      };
+    }
 
     // Determine which agent to use
     let agentId = 'explore'; // Default
@@ -75,14 +103,20 @@ Usage:
         agentId: agent.id,
         messages: [],
         created: Date.now(),
+        parentSessionId: context.sessionId,
       };
       taskStore.set(taskId, taskData);
     }
 
+    // Build task prompt with context if provided
+    const fullPrompt = params.context
+      ? `${params.prompt}\n\nContext:\n${params.context}`
+      : params.prompt;
+
     // Add the prompt to messages
     taskData.messages.push({
       role: 'user',
-      content: params.prompt,
+      content: fullPrompt,
     });
 
     // TODO: When full session/permission integration is added, inherit edit, bash, and MCP
@@ -92,7 +126,15 @@ Usage:
 
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
-    const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt.`;
+    const response = `[Task ${taskId} queued for agent: ${agent.name}]
+
+Description: ${params.description}
+Agent: ${agent.name}
+Prompt: ${params.prompt}
+
+This task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and return the actual results.
+
+The subagent would inherit permission restrictions from the parent session to prevent privilege escalation.`;
 
     taskData.messages.push({
       role: 'assistant',
