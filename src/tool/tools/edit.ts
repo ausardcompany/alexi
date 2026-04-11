@@ -77,13 +77,11 @@ Usage:
 
       // Use line number hints if provided for faster matching
       let searchContent = content;
-      let lineOffset = 0;
       if (params.startLine !== undefined && params.endLine !== undefined) {
         const lines = content.split(lineEnding);
         const startIdx = Math.max(0, params.startLine - 1);
         const endIdx = Math.min(lines.length, params.endLine);
         searchContent = lines.slice(startIdx, endIdx).join(lineEnding);
-        lineOffset = startIdx;
       }
 
       // Check for matches

@@ -6,36 +6,36 @@
 import { z } from 'zod';
 
 // Branded ID types for type safety
-export const ToolID = z.string().describe('Unique identifier for a tool');
-export type ToolID = z.infer<typeof ToolID>;
+const _ToolIDSchema = z.string().describe('Unique identifier for a tool');
+export type ToolID = z.infer<typeof _ToolIDSchema>;
 
-export const ToolCallID = z.string().describe('Unique identifier for a tool call instance');
-export type ToolCallID = z.infer<typeof ToolCallID>;
+const _ToolCallIDSchema = z.string().describe('Unique identifier for a tool call instance');
+export type ToolCallID = z.infer<typeof _ToolCallIDSchema>;
 
-export const ToolResultID = z.string().describe('Unique identifier for a tool result');
-export type ToolResultID = z.infer<typeof ToolResultID>;
+const _ToolResultIDSchema = z.string().describe('Unique identifier for a tool result');
+export type ToolResultID = z.infer<typeof _ToolResultIDSchema>;
 
 // Tool execution state
-export const ToolExecutionState = z.enum([
+const _ToolExecutionStateSchema = z.enum([
   'pending',
   'running',
   'completed',
   'failed',
   'cancelled',
 ]);
-export type ToolExecutionState = z.infer<typeof ToolExecutionState>;
+export type ToolExecutionState = z.infer<typeof _ToolExecutionStateSchema>;
 
 // Tool permission level
-export const ToolPermissionLevel = z.enum(['allow', 'ask', 'deny']);
-export type ToolPermissionLevel = z.infer<typeof ToolPermissionLevel>;
+const _ToolPermissionLevelSchema = z.enum(['allow', 'ask', 'deny']);
+export type ToolPermissionLevel = z.infer<typeof _ToolPermissionLevelSchema>;
 
 // Tool metadata for registration
-export const ToolMetadata = z.object({
-  id: ToolID,
+const _ToolMetadataSchema = z.object({
+  id: _ToolIDSchema,
   name: z.string(),
   description: z.string(),
   category: z.string().optional(),
   requiresPermission: z.boolean(),
-  defaultPermission: ToolPermissionLevel,
+  defaultPermission: _ToolPermissionLevelSchema,
 });
-export type ToolMetadata = z.infer<typeof ToolMetadata>;
+export type ToolMetadata = z.infer<typeof _ToolMetadataSchema>;
