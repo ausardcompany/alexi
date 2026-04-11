@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes
+
 ## [0.3.1] - 2026-03-21
 
 ### Added

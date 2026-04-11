@@ -199,7 +199,25 @@ graph LR
    const value = context && context.workdir ? context.workdir : process.cwd();
    ```
 
-6. **Graceful Degradation**: Handle optional dependencies gracefully
+6. **Unused Variables**: Remove or prefix with underscore
+   ```typescript
+   // Good - Remove if truly unused
+   const lines = content.split(lineEnding);
+   const startIdx = Math.max(0, params.startLine - 1);
+   const endIdx = Math.min(lines.length, params.endLine);
+   searchContent = lines.slice(startIdx, endIdx).join(lineEnding);
+   
+   // Good - Prefix with underscore if needed for future use
+   function processData(_context: Context, data: Data): Result {
+     return transform(data);
+   }
+   
+   // Bad - Declared but never used
+   let lineOffset = 0;
+   const startIdx = Math.max(0, params.startLine - 1);
+   ```
+
+7. **Graceful Degradation**: Handle optional dependencies gracefully
    ```typescript
    // Good - Return null if initialization fails
    function getTsParser(): Parser | null {
@@ -219,6 +237,24 @@ graph LR
      return null; // Skip parsing, don't fail
    }
    const tree = parser.parse(source);
+   ```
+
+8. **Zod Schema Naming**: Use private schema constants to avoid ESLint naming conflicts
+   ```typescript
+   // Good - Private schema constant with underscore prefix
+   const _ToolIDSchema = z.string().describe('Unique identifier for a tool');
+   export type ToolID = z.infer<typeof _ToolIDSchema>;
+   
+   const _ToolMetadataSchema = z.object({
+     id: _ToolIDSchema,
+     name: z.string(),
+     description: z.string(),
+   });
+   export type ToolMetadata = z.infer<typeof _ToolMetadataSchema>;
+   
+   // Bad - Schema and type with same name causes ESLint errors
+   export const ToolID = z.string().describe('Unique identifier for a tool');
+   export type ToolID = z.infer<typeof ToolID>;
    ```
 
 ### File Organization
