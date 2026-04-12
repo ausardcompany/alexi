@@ -617,6 +617,77 @@ interface Session {
 }
 ```
 
+### Cross-Session Context Recall
+
+The recall tool enables searching through past conversation sessions to find relevant context:
+
+```typescript
+// Search past sessions for TypeScript-related discussions
+const result = await recallTool.execute({
+  query: 'TypeScript async/await',
+  sessionLimit: 10,  // Search last 10 sessions
+  includeCurrentSession: false
+}, context);
+
+// Returns relevance-scored results
+interface RecallResult {
+  results: Array<{
+    sessionId: string;
+    messageId: string;
+    content: string;      // Truncated to 500 chars
+    relevance: number;    // 0-100 score
+    timestamp: string;
+  }>;
+  totalMatches: number;   // Total matches found
+}
+```
+
+Configuration options:
+- **sessionLimit**: Maximum number of sessions to search (default: 10)
+- **includeCurrentSession**: Whether to include current session (default: false)
+- **query**: Search string (case-insensitive substring match)
+
+The tool automatically:
+- Searches most recent sessions first
+- Calculates relevance scores based on query occurrence density
+- Returns top 20 most relevant results
+- Truncates content to 500 characters per result
+- Requires no permissions (read-only operation)
+
+### Tool System Type Definitions
+
+Alexi uses centralized type definitions for the tool system (src/tool/schema.ts):
+
+```typescript
+// Branded ID types for type safety
+export type ToolID = string;              // Unique identifier for a tool
+export type ToolCallID = string;          // Unique identifier for a tool call instance
+export type ToolResultID = string;        // Unique identifier for a tool result
+
+// Tool execution state
+export type ToolExecutionState = 
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+// Tool permission level
+export type ToolPermissionLevel = 'allow' | 'ask' | 'deny';
+
+// Tool metadata for registration
+export interface ToolMetadata {
+  id: ToolID;
+  name: string;
+  description: string;
+  category?: string;
+  requiresPermission: boolean;
+  defaultPermission: ToolPermissionLevel;
+}
+```
+
+These types are re-exported from `src/tool/index.ts` for convenient access throughout the codebase.
+
 ## Configuration Best Practices
 
 1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control

@@ -257,6 +257,28 @@ graph LR
    export type ToolID = z.infer<typeof ToolID>;
    ```
 
+9. **Dynamic Tool Registration**: Support runtime tool management for plugins
+   ```typescript
+   // Register a dynamic tool at runtime
+   const customTool = defineTool({
+     name: 'custom-search',
+     description: 'Custom search implementation',
+     parameters: z.object({ query: z.string() }),
+     execute: async (params, context) => {
+       // Tool implementation
+       return { success: true, data: results };
+     }
+   });
+   
+   // Register and unregister dynamically
+   registerDynamicTool(customTool);
+   
+   // Later, remove when no longer needed
+   unregisterDynamicTool('custom-search');
+   
+   // Note: Dynamic tools cannot conflict with built-in tool names
+   ```
+
 ### File Organization
 
 ```
@@ -369,6 +391,9 @@ npm test -- tests/commands-image.test.tsx
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"
+
+# Run recall tool tests
+npm test -- tests/tool/tools/recall.test.ts
 ```
 
 ### Testing TUI Commands
@@ -423,6 +448,64 @@ Key principles for TUI testing:
 3. Capture hook return values through a component
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
+
+### Testing Tool Enhancements
+
+When testing tools with enhanced features:
+
+```typescript
+describe('edit tool with line hints', () => {
+  it('should use line number hints for faster matching', async () => {
+    // Create file with known content
+    const lines = Array.from({ length: 1000 }, (_, i) => `line ${i}`);
+    const content = lines.join('\n');
+    await fs.writeFile(filePath, content, 'utf-8');
+
+    // Edit with line hints to narrow search scope
+    const result = await editTool.execute({
+      filePath,
+      oldString: 'line 500',
+      newString: 'modified line',
+      startLine: 490,
+      endLine: 510
+    }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.startLine).toBe(501);
+    expect(result.data?.endLine).toBe(501);
+  });
+});
+
+describe('task tool security', () => {
+  it('should prevent recursive subagent spawning', async () => {
+    // Set context to simulate subagent session
+    const subagentContext = {
+      ...context,
+      sessionId: 'subagent-123'
+    };
+
+    const result = await taskTool.execute({
+      prompt: 'Do something',
+      description: 'Test task',
+      subagent_type: 'general'
+    }, subagentContext);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('not available for subagent sessions');
+  });
+
+  it('should prevent spawning primary agents', async () => {
+    const result = await taskTool.execute({
+      prompt: 'Do something',
+      description: 'Test task',
+      subagent_type: 'primary'
+    }, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Cannot spawn primary agents');
+  });
+});
+```
 
 ## Pull Request Process
 

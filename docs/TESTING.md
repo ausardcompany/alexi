@@ -229,6 +229,7 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `recall` | `tests/tool/tools/recall.test.ts` | 12+ cases |
 
 ### TUI Command Test Coverage
 
@@ -268,6 +269,12 @@ Each tool is tested across multiple categories:
    - Detect and preserve CRLF vs LF line endings
    - Normalize parameters to match file's line ending style
    - Ensure replacements maintain original file format
+
+6. **Session History Search** (Recall Tool)
+   - Search through past conversation sessions
+   - Relevance scoring and ranking
+   - Session limit and filtering
+   - Content truncation and formatting
 
 #### Testing Line Ending Preservation
 
@@ -310,6 +317,62 @@ describe('edit tool line endings', () => {
     const updated = await fs.readFile(filePath, 'utf-8');
     expect(updated).not.toContain('\r\n');
     expect(updated).toBe('line1\nmodified\nline3\n');
+  });
+});
+```
+
+#### Testing Recall Tool
+
+The recall tool searches past conversation sessions:
+
+```typescript
+describe('recall tool', () => {
+  let tempDir: string;
+  let sessionsDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'recall-test-'));
+    sessionsDir = path.join(tempDir, '.alexi', 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    
+    // Override HOME for testing
+    process.env.HOME = tempDir;
+  });
+
+  it('should find matches in session messages', async () => {
+    // Create test session
+    const sessionData = {
+      metadata: { id: 'session-1', created: Date.now() },
+      messages: [
+        { role: 'user', content: 'Help with TypeScript', timestamp: Date.now() },
+        { role: 'assistant', content: 'I can help with TypeScript', timestamp: Date.now() }
+      ]
+    };
+
+    await fs.writeFile(
+      path.join(sessionsDir, 'session-1.json'),
+      JSON.stringify(sessionData),
+      'utf-8'
+    );
+
+    const result = await recallTool.execute(
+      { query: 'TypeScript' },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data?.totalMatches).toBeGreaterThan(0);
+    expect(result.data?.results[0].content).toContain('TypeScript');
+  });
+
+  it('should exclude current session when requested', async () => {
+    // Create current and past sessions
+    // ...test implementation
+  });
+
+  it('should calculate relevance scores', async () => {
+    // Test relevance scoring algorithm
+    // ...test implementation
   });
 });
 ```
