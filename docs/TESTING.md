@@ -229,6 +229,7 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `recall` | `tests/tool/tools/recall.test.ts` | 5+ cases |
 
 ### TUI Command Test Coverage
 
@@ -268,6 +269,71 @@ Each tool is tested across multiple categories:
    - Detect and preserve CRLF vs LF line endings
    - Normalize parameters to match file's line ending style
    - Ensure replacements maintain original file format
+
+6. **Abort Signal Handling** (Glob and Grep Tools)
+   - Check abort signal before starting operations
+   - Check abort signal during loops and traversals
+   - Return proper error messages for aborted operations
+   - Prevent resource leaks when operations are cancelled
+
+7. **Cross-Session Memory** (Recall Tool)
+   - Search through past session files
+   - Calculate relevance scores for matches
+   - Exclude current session from results
+   - Respect session limit configuration
+
+#### Testing Recall Tool
+
+The recall tool searches past sessions for relevant context:
+
+```typescript
+describe('recall tool', () => {
+  it('should find matches in session messages', async () => {
+    // Create test session with messages
+    const sessionData = {
+      metadata: { id: 'session-1', created: Date.now() },
+      messages: [
+        { role: 'user', content: 'How do I use TypeScript?', timestamp: Date.now() },
+        { role: 'assistant', content: 'TypeScript is a typed superset...', timestamp: Date.now() }
+      ]
+    };
+    
+    await fs.writeFile(
+      path.join(sessionsDir, 'session-1.json'),
+      JSON.stringify(sessionData),
+      'utf-8'
+    );
+
+    const result = await recallTool.execute({ query: 'TypeScript' }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.totalMatches).toBeGreaterThan(0);
+    expect(result.data?.results[0].content).toContain('TypeScript');
+  });
+
+  it('should exclude current session when requested', async () => {
+    const result = await recallTool.execute({
+      query: 'keyword',
+      includeCurrentSession: false
+    }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.results.every(r => r.sessionId !== context.sessionId)).toBe(true);
+  });
+
+  it('should calculate relevance scores', async () => {
+    // Create session with multiple keyword occurrences
+    const result = await recallTool.execute({ query: 'keyword' }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.results.length).toBeGreaterThan(1);
+    // First result should have higher relevance
+    expect(result.data?.results[0].relevance).toBeGreaterThan(
+      result.data?.results[1].relevance
+    );
+  });
+});
+```
 
 #### Testing Line Ending Preservation
 
@@ -532,7 +598,52 @@ describe('tool metadata', () => {
 });
 ```
 
-### 8. Test TUI Commands with Context Mocking
+### 8. Test Abort Signal Handling
+
+Verify that long-running operations can be cancelled:
+
+```typescript
+describe('abort signal', () => {
+  it('should abort glob operation', async () => {
+    const controller = new AbortController();
+    const context = { workdir: tempDir, signal: controller.signal };
+    
+    // Start operation and abort immediately
+    controller.abort();
+    
+    const result = await globTool.execute({ pattern: '**/*' }, context);
+    
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+
+  it('should abort grep operation between files', async () => {
+    // Create many files
+    for (let i = 0; i < 100; i++) {
+      await fs.writeFile(
+        path.join(tempDir, `file-${i}.txt`),
+        'searchterm content',
+        'utf-8'
+      );
+    }
+
+    const controller = new AbortController();
+    const context = { workdir: tempDir, signal: controller.signal };
+    
+    // Abort after a short delay
+    setTimeout(() => controller.abort(), 10);
+    
+    const result = await grepTool.execute({ pattern: 'searchterm' }, context);
+    
+    // Should either complete or be aborted
+    if (!result.success) {
+      expect(result.error).toContain('aborted');
+    }
+  });
+});
+```
+
+### 9. Test TUI Commands with Context Mocking
 
 TUI commands require mocking React contexts and using ink-testing-library:
 

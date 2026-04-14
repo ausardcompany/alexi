@@ -617,6 +617,40 @@ interface Session {
 }
 ```
 
+### Cross-Session Memory Search
+
+The recall tool enables searching through past conversation sessions:
+
+```typescript
+import { recallTool } from './tool/tools/recall.js';
+
+// Search past sessions for relevant context
+const result = await recallTool.execute({
+  query: 'TypeScript async patterns',
+  sessionLimit: 10,
+  includeCurrentSession: false
+}, context);
+
+// Result structure
+interface RecallResult {
+  results: Array<{
+    sessionId: string;
+    messageId: string;
+    content: string;        // Truncated to 500 characters
+    relevance: number;      // 0-100 relevance score
+    timestamp: string;
+  }>;
+  totalMatches: number;     // Total matches found
+}
+```
+
+The recall tool:
+- Searches message content across multiple sessions
+- Calculates relevance scores based on keyword density
+- Returns top 20 most relevant matches sorted by relevance
+- Excludes current session by default to avoid circular references
+- Searches most recent sessions first (configurable limit)
+
 ## Configuration Best Practices
 
 1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control

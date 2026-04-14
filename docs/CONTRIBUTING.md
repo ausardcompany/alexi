@@ -257,6 +257,53 @@ graph LR
    export type ToolID = z.infer<typeof ToolID>;
    ```
 
+9. **Abort Signal Support**: Long-running operations should check for cancellation
+   ```typescript
+   // Good - Check abort signal before and during operations
+   async function longOperation(context: ToolContext): Promise<Result> {
+     if (context.signal?.aborted) {
+       throw new Error('Operation aborted');
+     }
+     
+     for (const item of items) {
+       if (context.signal?.aborted) {
+         throw new Error('Operation aborted');
+       }
+       await processItem(item);
+     }
+   }
+   
+   // Bad - No cancellation support
+   async function longOperation(): Promise<Result> {
+     for (const item of items) {
+       await processItem(item);
+     }
+   }
+   ```
+
+10. **Dynamic Tool Registration**: Use dynamic registration for runtime-added tools
+    ```typescript
+    // Good - Register dynamic tools separately
+    import { registerDynamicTool, unregisterDynamicTool } from './tool/index.js';
+    
+    const customTool = defineTool({
+      name: 'custom-tool',
+      description: 'Custom tool for specific task',
+      parameters: CustomParamsSchema,
+      execute: async (params, context) => {
+        // Implementation
+      }
+    });
+    
+    registerDynamicTool(customTool);
+    
+    // Later, remove when no longer needed
+    unregisterDynamicTool('custom-tool');
+    
+    // Bad - Modifying built-in tool registry directly
+    getToolRegistry().tools.set('custom-tool', customTool);
+    ```
+
 ### File Organization
 
 ```
@@ -369,6 +416,9 @@ npm test -- tests/commands-image.test.tsx
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"
+
+# Run recall tool tests
+npm test -- tests/tool/tools/recall.test.ts
 ```
 
 ### Testing TUI Commands
