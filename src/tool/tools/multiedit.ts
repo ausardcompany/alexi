@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { ConfigValidation } from '../../alexi/config-validation.js';
 
 const EditItemSchema = z.object({
   oldString: z.string().describe('The text to replace'),
@@ -133,6 +134,9 @@ Usage:
       // Write the file
       await fs.writeFile(filePath, content, 'utf-8');
 
+      // Validate config files after changes
+      const validationWarning = await ConfigValidation.check(filePath);
+
       // Check for empty file warning
       const result: ToolResult<MultiEditResult> = {
         success: true,
@@ -145,9 +149,15 @@ Usage:
 
       if (content.trim() === '') {
         result.hint = 'Warning: File became empty after edits';
+      } else if (validationWarning) {
+        result.hint = validationWarning;
       }
 
-      context.gitManager?.onFileChanged(filePath, 'multiedit', `${changes.length} edit(s) applied`);
+      context.gitManager?.onFileChanged(
+        filePath,
+        'multiedit',
+        `${changes.length} edit(s) applied`
+      );
 
       return result;
     } catch (err) {

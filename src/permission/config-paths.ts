@@ -91,8 +91,36 @@ export function isAbsolute(absolutePath: string, projectRoot: string): boolean {
   return isRelative(relative);
 }
 
-/** Check if a permission request involves config files. */
-export function isRequest(info: { patterns: string[]; permission: string }): boolean {
+/**
+ * Check if a permission request involves config files.
+ * Gates `edit` permissions and bash-originated `external_directory` requests.
+ * File-tool reads are not restricted.
+ */
+export function isRequest(info: {
+  patterns: string[];
+  permission: string;
+  metadata?: Record<string, any>;
+}): boolean {
+  if (info.permission === 'external_directory') {
+    // File tools include metadata.filepath. They may read global config
+    // without prompting, but edits are still protected separately via `edit`.
+    if (info.metadata?.filepath) {
+      return false;
+    }
+    for (const pattern of info.patterns) {
+      const dir = pattern.replace(/\/\*$/, '');
+      if (path.isAbsolute(dir)) {
+        // Check if this is a global config directory
+        const globalPaths = getGlobalPaths();
+        const globalConfig = normalize(globalPaths.config);
+        const normalizedDir = normalize(dir);
+        if (normalizedDir.startsWith(globalConfig)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
   if (!['write', 'edit', 'patch', 'apply_patch'].includes(info.permission)) {
     return false;
   }

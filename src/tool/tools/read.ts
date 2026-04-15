@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, truncateOutput, MAX_LINES, type ToolResult } from '../index.js';
+import { AlexiPaths } from '../../alexi/paths.js';
 
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
@@ -46,6 +47,14 @@ Usage:
   permission: {
     action: 'read',
     getResource: (params) => params.filePath,
+    metadata: (params) => {
+      // Add metadata to indicate this is a file tool read
+      // This helps config protection logic allow reads without prompting
+      return {
+        filepath: params.filePath,
+        tool: 'read',
+      };
+    },
   },
 
   async execute(params, context): Promise<ToolResult<ReadResult>> {

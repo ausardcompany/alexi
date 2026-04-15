@@ -189,6 +189,21 @@ Usage:
               : 'Output truncated.';
         }
 
+        // Handle timeout with helpful hints
+        if (timedOut) {
+          resolve({
+            success: false,
+            data: result,
+            truncated: stdoutTruncated || stderrTruncated,
+            hint,
+            error: `Command timed out after ${timeout}ms. Consider:
+- Breaking the command into smaller steps
+- Using background execution with &
+- Increasing timeout in config if this is expected behavior`,
+          });
+          return;
+        }
+
         resolve({
           success: code === 0,
           data: result,

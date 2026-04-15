@@ -96,6 +96,7 @@ export interface PermissionContext {
   action: PermissionAction;
   resource: string; // Path, command, URL, etc.
   description?: string;
+  metadata?: Record<string, unknown>; // Additional context for permission checks
 }
 
 // Permission check result

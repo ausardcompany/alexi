@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { ConfigValidation } from '../../alexi/config-validation.js';
 
 const EditParamsSchema = z.object({
   filePath: z
@@ -119,6 +120,9 @@ Usage:
         Buffer.byteLength(newContent, 'utf-8') - Buffer.byteLength(content, 'utf-8')
       );
 
+      // Validate config files after changes
+      const validationWarning = await ConfigValidation.check(filePath);
+
       // Calculate line numbers for the change
       let startLine: number | undefined;
       let endLine: number | undefined;
@@ -145,6 +149,7 @@ Usage:
           startLine,
           endLine,
         },
+        hint: validationWarning || undefined,
       };
 
       context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);

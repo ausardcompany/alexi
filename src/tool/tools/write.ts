@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { ConfigValidation } from '../../alexi/config-validation.js';
 
 const WriteParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file to write'),
@@ -63,6 +64,9 @@ Usage:
       await fs.writeFile(filePath, params.content, 'utf-8');
       const bytesWritten = Buffer.byteLength(params.content, 'utf-8');
 
+      // Validate config files after changes
+      const validationWarning = await ConfigValidation.check(filePath);
+
       const toolResult = {
         success: true,
         data: {
@@ -70,6 +74,7 @@ Usage:
           bytesWritten,
           created: !exists,
         },
+        hint: validationWarning || undefined,
       };
 
       context.gitManager?.onFileChanged(
