@@ -92,6 +92,9 @@ npm test -- tests/tool/tools/write.test.ts
 
 # Run tests matching pattern
 npm test -- --grep "write tool"
+
+# Run recall tool tests
+npm test -- tests/tool/tools/recall.test.ts
 ```
 
 ### Test Framework
@@ -229,6 +232,7 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `recall` | `tests/tool/tools/recall.test.ts` | 10+ cases |
 
 ### TUI Command Test Coverage
 
@@ -268,6 +272,11 @@ Each tool is tested across multiple categories:
    - Detect and preserve CRLF vs LF line endings
    - Normalize parameters to match file's line ending style
    - Ensure replacements maintain original file format
+
+6. **Abort Signal Handling** (Glob/Grep Tools)
+   - Operations can be cancelled via AbortSignal
+   - Periodic checks during long-running operations
+   - Graceful error handling for aborted operations
 
 #### Testing Line Ending Preservation
 
@@ -310,6 +319,67 @@ describe('edit tool line endings', () => {
     const updated = await fs.readFile(filePath, 'utf-8');
     expect(updated).not.toContain('\r\n');
     expect(updated).toBe('line1\nmodified\nline3\n');
+  });
+});
+```
+
+#### Testing Abort Signal Support
+
+The glob and grep tools support cancellation via AbortSignal:
+
+```typescript
+describe('glob tool abort signal', () => {
+  it('should abort operation when signal is triggered', async () => {
+    const controller = new AbortController();
+    const context: ToolContext = { 
+      workdir: tempDir,
+      signal: controller.signal
+    };
+
+    // Trigger abort after short delay
+    setTimeout(() => controller.abort(), 10);
+
+    const result = await globTool.execute(
+      { pattern: '**/*.ts' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+});
+```
+
+#### Testing Recall Tool
+
+The recall tool searches through past conversation sessions:
+
+```typescript
+describe('recall tool', () => {
+  it('should find relevant messages from past sessions', async () => {
+    // Create mock session files
+    const session1 = {
+      metadata: { id: 'session-1', created: '2024-01-01' },
+      messages: [
+        { role: 'user', content: 'How do I implement a binary search?' },
+        { role: 'assistant', content: 'Here is a binary search implementation...' }
+      ]
+    };
+
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sessionsDir, 'session-1.json'),
+      JSON.stringify(session1)
+    );
+
+    const result = await recallTool.execute(
+      { query: 'binary search' },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data?.results.length).toBeGreaterThan(0);
+    expect(result.data?.results[0].content).toContain('binary search');
   });
 });
 ```
@@ -603,6 +673,45 @@ Key patterns for TUI command testing:
 4. **Test Command Dispatch**: Call handleCommand() and verify behavior
 5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
 
+### 9. Test Dynamic Tool Registration
+
+Test the dynamic tool registration system:
+
+```typescript
+describe('dynamic tool registration', () => {
+  it('should register and retrieve dynamic tools', () => {
+    const customTool = defineTool({
+      name: 'custom-tool',
+      description: 'A custom tool',
+      parameters: z.object({ input: z.string() }),
+      execute: async () => ({ success: true })
+    });
+
+    registerDynamicTool(customTool);
+    
+    const retrieved = getTool('custom-tool');
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.name).toBe('custom-tool');
+  });
+
+  it('should unregister dynamic tools', () => {
+    const customTool = defineTool({
+      name: 'temp-tool',
+      description: 'A temporary tool',
+      parameters: z.object({}),
+      execute: async () => ({ success: true })
+    });
+
+    registerDynamicTool(customTool);
+    expect(getTool('temp-tool')).toBeDefined();
+    
+    const removed = unregisterDynamicTool('temp-tool');
+    expect(removed).toBe(true);
+    expect(getTool('temp-tool')).toBeUndefined();
+  });
+});
+```
+
 ## Testing with SAP AI Core
 
 ### Local Development Testing
@@ -682,6 +791,11 @@ graph LR
    - Use proper cleanup in `afterEach`
    - Avoid shared state between tests
    - Use unique temporary directories per test
+
+5. **Abort signal tests fail**
+   - Ensure AbortController is properly instantiated
+   - Check timing of abort signal trigger
+   - Verify error messages match expected patterns
 
 ## Contributing Tests
 

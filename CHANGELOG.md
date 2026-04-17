@@ -7,9 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New recall tool for searching through past conversation sessions
+  - Enables cross-session context recall for improved agent memory
+  - Searches message content with relevance scoring
+  - Supports session limits and current session filtering
+  - No permission required (read-only operation on session history)
+- Dynamic tool registration system
+  - registerDynamicTool() for runtime tool registration
+  - unregisterDynamic() for removing dynamic tools
+  - Separate registry for dynamic tools to avoid conflicts with built-in tools
+- Centralized tool schema definitions in src/tool/schema.ts
+  - Branded ID types for type safety (ToolID, ToolCallID, ToolResultID)
+  - Tool execution state enumeration
+  - Tool permission level types
+  - Tool metadata schema for registration
+- New Alexi Configuration skill with command lookup guidance
+  - Documents configuration directory precedence
+  - Explains named command resolution order
+  - Describes explicit search paths and environment variables
+  - Accessible via skill activation system
+- Abort signal support in glob and grep tools
+  - Operations can be cancelled via AbortSignal in ToolContext
+  - Periodic checks during directory traversal
+  - Graceful error handling for aborted operations
+- Line number hints for edit tool
+  - Optional startLine and endLine parameters for faster matching
+  - Returns actual line numbers where edits were made
+  - Improves performance for large files
+
+### Changed
+
+- Updated dependencies to latest versions
+  - ink from 6.8.0 to 7.0.0 (major version update)
+  - hono from 4.12.11 to 4.12.12
+  - react from 19.2.4 to 19.2.5
+  - simple-git from 3.33.0 to 3.36.0
+  - terminal-image from 4.2.0 to 4.3.0
+  - prettier from 3.8.1 to 3.8.2 (dev)
+  - @vitest/coverage-v8 from 4.1.2 to 4.1.4 (dev)
+  - @typescript-eslint/eslint-plugin from 8.58.0 to 8.58.1 (dev)
+- Enhanced permission system for config file protection
+  - isRequest() now gates edit permissions and bash-originated external_directory requests
+  - File tool reads are not restricted for global config access
+  - Improved metadata handling for permission requests
+- Tool registry now supports both static and dynamic tool registration
+  - list() method returns combined array of static and dynamic tools
+  - get() method searches both registries
+- Edit tool parameters now include better descriptions
+  - Clarified that oldString must match exactly including whitespace
+  - Documented optional line number hints for performance
+- Glob tool validates that search path is a directory, not a file
+  - Returns clear error message if path is not a directory
+  - Prevents confusing behavior when passing file paths
+
 ### Fixed
 
-- Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes
+- Resolved ESLint naming conflicts in tool schema definitions
+  - Schema constants now use underscore prefix (_ToolIDSchema)
+  - Type exports use clean names (ToolID)
+  - Eliminates no-redeclare ESLint errors
 
 ## [0.3.1] - 2026-03-21
 
@@ -23,14 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- Full TUI (Terminal User Interface) — component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
   - 5 modal dialog overlays: ModelPicker, AgentSelector, PermissionDialog, SessionList, McpManager
   - Keybinding system: Tab/Shift-Tab agent cycling, Ctrl+X leader mode, Ctrl+K command palette
-  - Dark/light theme support via ThemeContext with `/theme` command
-  - Image attachment support: Ctrl+V clipboard paste and `/image` file attachment
+  - Dark/light theme support via ThemeContext with /theme command
+  - Image attachment support: Ctrl+V clipboard paste and /image file attachment
   - 12 slash commands: help, exit, clear, model, agent, status, sessions, mcp, theme, image, clear-images, memory
   - Event bus integration for real-time tool execution and permission prompt display
 - 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
@@ -39,21 +97,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Interactive mode (`alexi interactive`) now launches the TUI instead of the legacy readline REPL
-- `src/cli/interactive.ts` marked as `@deprecated` in favor of `src/cli/tui/`
+- Interactive mode (alexi interactive) now launches the TUI instead of the legacy readline REPL
+- src/cli/interactive.ts marked as deprecated in favor of src/cli/tui/
 
 ### Dependencies
 
-- Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
-- Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
-- Added dev: `ink-testing-library`, `@types/diff`
-- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
+- Added runtime: marked, marked-terminal, cli-highlight, diff, terminal-link
+- Added runtime: ink-text-input, ink-select-input, ink-spinner
+- Added dev: ink-testing-library, @types/diff
+- Existing: ink (v6.8.0) and react (v19.2.4) now actively used
 
 ## [0.2.6] - 2026-03-19
 
 ### Added
 
-- Unit tests for TUI slash commands (`/image` and `/clear-images`)
+- Unit tests for TUI slash commands (/image and /clear-images)
   - Tests command registration with correct names and aliases
   - Tests clipboard paste functionality when no arguments provided
   - Tests file path handling for image attachments
@@ -66,8 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Enhanced user configuration API with batch update support
-  - Added `updateGlobal()` function for atomic multi-key updates
-  - Added `UpdateGlobalOptions` interface with disposal control
+  - Added updateGlobal() function for atomic multi-key updates
+  - Added UpdateGlobalOptions interface with disposal control
   - Maintains backward compatibility with default dispose behavior
 - Edit tool now preserves line endings during replacements
   - Automatically detects CRLF vs LF line endings in target files

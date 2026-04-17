@@ -257,6 +257,46 @@ graph LR
    export type ToolID = z.infer<typeof ToolID>;
    ```
 
+9. **Abort Signal Support**: Support cancellation for long-running operations
+   ```typescript
+   // Good - Check abort signal in loops
+   async function processFiles(files: string[], signal?: AbortSignal): Promise<void> {
+     for (const file of files) {
+       if (signal?.aborted) {
+         throw new Error('Operation aborted');
+       }
+       await processFile(file);
+     }
+   }
+   
+   // Usage with context
+   async execute(params: Params, context: ToolContext): Promise<ToolResult> {
+     if (context.signal?.aborted) {
+       return { success: false, error: 'Operation aborted' };
+     }
+     // ... perform operation
+   }
+   ```
+
+10. **Dynamic Tool Registration**: Use proper registration for runtime tools
+    ```typescript
+    // Good - Use registerDynamicTool for runtime tools
+    const customTool = defineTool({
+      name: 'custom-tool',
+      description: 'A custom tool',
+      parameters: CustomParamsSchema,
+      execute: async (params, context) => {
+        // Implementation
+        return { success: true, data: result };
+      }
+    });
+    
+    registerDynamicTool(customTool);
+    
+    // Later, clean up when done
+    unregisterDynamicTool('custom-tool');
+    ```
+
 ### File Organization
 
 ```
@@ -274,6 +314,7 @@ src/
 │   └── anthropic/
 ├── tool/             # Tool system
 │   ├── index.ts      # Tool framework
+│   ├── schema.ts     # Tool type definitions
 │   └── tools/        # Individual tool implementations
 ├── permission/       # Permission system
 │   └── index.ts
@@ -369,6 +410,9 @@ npm test -- tests/commands-image.test.tsx
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"
+
+# Run recall tool tests
+npm test -- tests/tool/tools/recall.test.ts
 ```
 
 ### Testing TUI Commands
@@ -424,6 +468,29 @@ Key principles for TUI testing:
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
 
+### Testing New Tools
+
+When adding a new tool, ensure comprehensive test coverage:
+
+```typescript
+describe('new tool', () => {
+  // Test basic functionality
+  it('should perform expected operation', async () => { /* ... */ });
+  
+  // Test error handling
+  it('should handle invalid input', async () => { /* ... */ });
+  
+  // Test edge cases
+  it('should handle empty input', async () => { /* ... */ });
+  
+  // Test abort signal support
+  it('should abort when signal is triggered', async () => { /* ... */ });
+  
+  // Test metadata
+  it('should have correct tool metadata', () => { /* ... */ });
+});
+```
+
 ## Pull Request Process
 
 ### Before Submitting
@@ -459,22 +526,21 @@ Example:
 
 ```markdown
 ## Summary
-Enhanced write and edit tools with relative path resolution for permission checks.
+Added recall tool for searching through past conversation sessions.
 
 ## Motivation
-In CI environments, the agentic system needs to resolve relative paths correctly
-for permission checks to work with the workdir context.
+Users need to access information from previous sessions without manually searching through session files.
 
 ## Changes
-- Modified `getResource` in write.ts to accept ToolContext parameter
-- Modified `getResource` in edit.ts to accept ToolContext parameter
-- Updated tool index to pass context to getResource functions
-- Added path resolution logic using workdir
+- Added src/tool/tools/recall.ts with search functionality
+- Implemented relevance scoring algorithm
+- Added comprehensive test coverage in tests/tool/tools/recall.test.ts
+- Updated tool registry to include recall tool
 
 ## Testing
-- Added unit tests for relative path resolution
-- Verified in CI environment with documentation-update workflow
-- Tested locally with various path configurations
+- Added 10+ test cases covering search, relevance scoring, and edge cases
+- Tested with real session files
+- Verified abort signal support
 ```
 
 ### Automated Checks

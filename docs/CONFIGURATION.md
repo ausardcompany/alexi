@@ -10,6 +10,7 @@ This document describes all configuration options available in Alexi, including 
 - [Instruction Files](#instruction-files)
 - [Project Context](#project-context)
 - [Configuration Examples](#configuration-examples)
+- [Configuration Directory Precedence](#configuration-directory-precedence)
 
 ## Environment Variables
 
@@ -78,6 +79,30 @@ API key for WarpGrep semantic code search (optional).
 
 ```bash
 export MORPH_API_KEY=your_morph_api_key
+```
+
+#### ALEXI_CONFIG_PATH
+
+Additional configuration search paths (colon-separated). Allows specifying custom directories for configuration files.
+
+```bash
+export ALEXI_CONFIG_PATH=/path/to/custom/config:/another/path
+```
+
+#### ALEXI_HOME
+
+Override default configuration directory. Useful for testing or custom installations.
+
+```bash
+export ALEXI_HOME=/custom/alexi/home
+```
+
+#### ALEXI_TEST_HOME
+
+Used in tests to isolate configuration from user's actual config directory.
+
+```bash
+export ALEXI_TEST_HOME=/tmp/alexi-test-home
 ```
 
 ## User Configuration
@@ -462,6 +487,110 @@ Architectural invariants that should never be violated.
 3. Session state must be persisted to disk
 4. Error handling must use Result<T> pattern
 ```
+
+## Configuration Directory Precedence
+
+Alexi searches for configuration in multiple locations with a defined precedence order. Understanding this hierarchy is important for organizing configuration files.
+
+### Configuration Search Order
+
+```mermaid
+graph TD
+    A[Configuration Request] --> B{Project-local .alexi/?}
+    B -->|Found| C[Use Project Config]
+    B -->|Not Found| D{User ~/.config/alexi/?}
+    D -->|Found| E[Use XDG Config]
+    D -->|Not Found| F{Legacy ~/.alexi/?}
+    F -->|Found| G[Use Legacy Config]
+    F -->|Not Found| H[Use Built-in Defaults]
+    
+    style C fill:#4CAF50
+    style E fill:#2196F3
+    style G fill:#FF9800
+    style H fill:#9E9E9E
+```
+
+### 1. Project-Local Configuration
+
+**Location**: `.alexi/` in your project directory
+
+**Priority**: Highest
+
+**Purpose**: Project-specific configuration that can be committed to version control
+
+**Files**:
+- `.alexi/config.json` - Project-specific settings
+- `.alexi/routing-config.json` - Project routing rules
+- `.alexi/rules/*.md` - Project-specific instruction rules
+- `.alexi/skills/` - Project-specific skills
+
+### 2. User Configuration (XDG Base Directory)
+
+**Location**: `~/.config/alexi/`
+
+**Priority**: Medium
+
+**Purpose**: User-wide configuration following XDG Base Directory standard
+
+**Files**:
+- `~/.config/alexi/config.json` - User settings
+- `~/.config/alexi/routing-config.json` - User routing rules
+- `~/.config/alexi/ALEXI.md` - User instruction file
+- `~/.config/alexi/skills/` - User skills
+- `~/.config/alexi/command/` - User commands
+
+### 3. Legacy User Configuration
+
+**Location**: `~/.alexi/`
+
+**Priority**: Low (backward compatibility)
+
+**Purpose**: Maintains compatibility with older Alexi versions
+
+**Files**:
+- `~/.alexi/config.json` - User settings
+- `~/.alexi/routing-config.json` - User routing rules
+- `~/.alexi/ALEXI.md` - User instruction file
+- `~/.alexi/sessions/` - Session history
+- `~/.alexi/mcp-servers.json` - MCP server configuration
+
+### Named Command Resolution
+
+When you invoke a command by name, Alexi searches in these locations:
+
+1. Project-local: `<project>/.alexi/command/<name>`
+2. User config: `~/.config/alexi/command/<name>`
+3. Legacy user: `~/.alexi/command/<name>`
+4. Built-in commands
+
+The first match wins. This allows you to:
+- Override built-in commands with custom implementations
+- Share commands across projects via global config
+- Keep project-specific commands in version control
+
+### Explicit Search Paths
+
+You can specify explicit search paths in your configuration:
+
+- Use `**/command/` pattern to search subdirectories
+- Configure custom search paths in `alexi.config.json`
+- Set `ALEXI_CONFIG_PATH` environment variable for additional paths
+
+```bash
+# Add custom config paths
+export ALEXI_CONFIG_PATH=/path/to/custom/config:/another/path
+```
+
+### Skills Loading
+
+Skills are loaded from multiple locations:
+
+1. `~/.config/alexi/skills/`
+2. `~/.alexi/skills/`
+3. `.alexi/skills/` (project-local)
+4. Built-in skills
+
+Skills are reusable AI prompts that can be activated during conversations. Use the `/skill` command to activate them.
 
 ## Configuration Examples
 
