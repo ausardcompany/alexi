@@ -269,4 +269,64 @@ describe('Skill Tool', () => {
       expect(result3.data?.skillName).toBe('Case Test');
     });
   });
+
+  describe('built-in alexi-config skill', () => {
+    it('should include named command lookup guidance', async () => {
+      // Register the built-in alexi-config skill
+      const alexiConfigSkill: Skill = {
+        id: 'alexi-config',
+        name: 'Alexi Configuration',
+        description: 'Information about Alexi configuration and where it loads things from',
+        prompt: `# Alexi Configuration Guide
+
+This document explains where Alexi loads configuration and commands from.
+
+## Configuration Directories
+
+Alexi searches for configuration in the following locations (in order of precedence):
+
+1. **Project-local configuration**: \`.alexi/\` in your project directory
+2. **User configuration**: \`~/.config/alexi/\` (XDG Base Directory standard)
+3. **Legacy user configuration**: \`~/.alexi/\` (backward compatibility)
+
+## Finding a named command
+
+When you invoke a command by name, Alexi searches in these locations:
+
+1. Project-local: \`<project>/.alexi/command/<name>\`
+2. User config: \`~/.config/alexi/command/<name>\`
+3. Legacy user: \`~/.alexi/command/<name>\`
+4. Built-in commands
+
+The first match wins. This allows you to:
+- Override built-in commands with custom implementations
+- Share commands across projects via global config
+- Keep project-specific commands in version control
+
+## Explicit search paths
+
+You can also specify explicit search paths in your configuration:
+
+- Use \`**/command/\` pattern to search subdirectories
+- Configure custom search paths in \`alexi.config.json\`
+- Set \`ALEXI_CONFIG_PATH\` environment variable for additional paths`,
+        category: 'system',
+        tags: ['config', 'system', 'help'],
+        aliases: ['config'],
+        source: 'builtin',
+      };
+      getSkillRegistry().register(alexiConfigSkill);
+
+      const result = await skillTool.executeUnsafe({ name: 'alexi-config' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.skillName).toBe('Alexi Configuration');
+      expect(result.data?.description).toContain('where it loads things from');
+      expect(result.data?.prompt).toContain('Finding a named command');
+      expect(result.data?.prompt).toContain('~/.config/alexi/');
+      expect(result.data?.prompt).toContain('~/.alexi/');
+      expect(result.data?.prompt).toContain('**/command/');
+      expect(result.data?.prompt).toContain('explicit search');
+    });
+  });
 });

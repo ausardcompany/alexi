@@ -459,6 +459,66 @@ export const migrationSkill = defineSkill({
 - Communication plan`,
 });
 
+// ============ Configuration Skills ============
+
+export const alexiConfigSkill = defineSkill({
+  id: 'alexi-config',
+  name: 'Alexi Configuration',
+  description: 'Information about Alexi configuration and where it loads things from',
+  category: 'system',
+  tags: ['config', 'system', 'help'],
+  aliases: ['config'],
+  temperature: 0.3,
+  prompt: `# Alexi Configuration Guide
+
+This document explains where Alexi loads configuration and commands from.
+
+## Configuration Directories
+
+Alexi searches for configuration in the following locations (in order of precedence):
+
+1. **Project-local configuration**: \`.alexi/\` in your project directory
+2. **User configuration**: \`~/.config/alexi/\` (XDG Base Directory standard)
+3. **Legacy user configuration**: \`~/.alexi/\` (backward compatibility)
+
+## Finding a named command
+
+When you invoke a command by name, Alexi searches in these locations:
+
+1. Project-local: \`<project>/.alexi/command/<name>\`
+2. User config: \`~/.config/alexi/command/<name>\`
+3. Legacy user: \`~/.alexi/command/<name>\`
+4. Built-in commands
+
+The first match wins. This allows you to:
+- Override built-in commands with custom implementations
+- Share commands across projects via global config
+- Keep project-specific commands in version control
+
+## Explicit search paths
+
+You can also specify explicit search paths in your configuration:
+
+- Use \`**/command/\` pattern to search subdirectories
+- Configure custom search paths in \`alexi.config.json\`
+- Set \`ALEXI_CONFIG_PATH\` environment variable for additional paths
+
+## Skills
+
+Skills are loaded from:
+- \`~/.config/alexi/skills/\`
+- \`~/.alexi/skills/\`
+- \`.alexi/skills/\` (project-local)
+
+Skills are reusable AI prompts that can be activated during conversations.
+
+## Environment Variables
+
+- \`ALEXI_CONFIG_PATH\`: Additional config search paths (colon-separated)
+- \`ALEXI_HOME\`: Override default config directory
+- \`ALEXI_TEST_HOME\`: Used in tests to isolate config`,
+});
+
 // All built-in skills
 export const builtInSkills: Skill[] = [
   codeReviewSkill,
@@ -474,6 +534,7 @@ export const builtInSkills: Skill[] = [
   performanceSkill,
   explainerSkill,
   migrationSkill,
+  alexiConfigSkill,
 ];
 
 /**
