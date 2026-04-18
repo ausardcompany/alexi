@@ -29,6 +29,8 @@ import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
 import { warpgrepTool } from './warpgrep.js';
 import { recallTool } from './recall.js';
+import { suggestTool } from './suggest.js';
+import { readDirectoryTool } from './read-directory.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -42,6 +44,8 @@ export const builtInTools = [
   websearchTool,
   taskTool,
   questionTool,
+  suggestTool,
+  readDirectoryTool,
   todowriteTool,
   deleteTool,
   multieditTool,
@@ -98,6 +102,8 @@ export {
   recallMemoryTool,
   warpgrepTool,
   recallTool,
+  suggestTool,
+  readDirectoryTool,
 };
 
 // Re-export UI utilities from specific tools

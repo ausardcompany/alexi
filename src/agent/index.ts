@@ -91,6 +91,7 @@ export const builtInAgents: AgentConfig[] = [
     systemPrompt: planAgentPrompt,
     aliases: ['p', 'architect'],
     tools: ['read', 'glob', 'grep', 'webfetch'], // Read-only tools
+    disabledTools: ['suggest'], // Plan agent cannot suggest changes
   },
   {
     id: 'explore',
@@ -101,6 +102,7 @@ export const builtInAgents: AgentConfig[] = [
     aliases: ['e', 'search'],
     tools: ['read', 'glob', 'grep'],
     temperature: 0.2, // Lower temperature for factual responses
+    disabledTools: ['suggest'], // Explore agent cannot suggest changes
   },
   {
     id: 'orchestrator',
@@ -110,6 +112,7 @@ export const builtInAgents: AgentConfig[] = [
     systemPrompt: orchestratorPrompt,
     aliases: ['o', 'main'],
     tools: ['task'], // Can only delegate
+    disabledTools: ['suggest'], // Orchestrator cannot suggest changes directly
   },
 ];
 
