@@ -14,6 +14,7 @@ import { grepTool } from './grep.js';
 import { webfetchTool } from './webfetch.js';
 import { taskTool } from './task.js';
 import { questionTool } from './question.js';
+import { suggestTool } from './suggest.js';
 import { todowriteTool } from './todowrite.js';
 import { deleteTool } from './delete.js';
 import { multieditTool } from './multiedit.js';
@@ -42,6 +43,7 @@ export const builtInTools = [
   websearchTool,
   taskTool,
   questionTool,
+  suggestTool,
   todowriteTool,
   deleteTool,
   multieditTool,
@@ -82,6 +84,7 @@ export {
   websearchTool,
   taskTool,
   questionTool,
+  suggestTool,
   todowriteTool,
   deleteTool,
   multieditTool,

@@ -23,7 +23,7 @@ import {
 import { ConfigProtection } from './config-paths.js';
 
 // Permission action types
-export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
+export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin' | 'suggest';
 
 // Permission decision
 export type PermissionDecision = 'allow' | 'deny' | 'ask';
@@ -581,6 +581,15 @@ export const defaultRules: PermissionRule[] = [
     name: 'Default Read Allow',
     description: 'Allow reading files in workspace',
     actions: ['read'],
+    decision: 'allow',
+    priority: 0,
+  },
+  // Allow suggestions
+  {
+    id: 'default-suggest-allow',
+    name: 'Default Suggest Allow',
+    description: 'Allow code review suggestions',
+    actions: ['suggest'],
     decision: 'allow',
     priority: 0,
   },

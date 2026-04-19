@@ -170,7 +170,7 @@ export const PermissionRequested = defineEvent(
   z.object({
     id: z.string(),
     toolName: z.string(),
-    action: z.enum(['read', 'write', 'execute', 'network', 'admin']),
+    action: z.enum(['read', 'write', 'execute', 'network', 'admin', 'suggest']),
     resource: z.string(),
     description: z.string(),
     timestamp: z.number(),
