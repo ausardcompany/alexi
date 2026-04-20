@@ -229,6 +229,9 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `recall` | `tests/tool/tools/recall.test.ts` | 12+ cases |
+| `read_directory` | Tests in tool system | Integrated |
+| `suggest` | Tests in tool system | Integrated |
 
 ### TUI Command Test Coverage
 
@@ -268,6 +271,60 @@ Each tool is tested across multiple categories:
    - Detect and preserve CRLF vs LF line endings
    - Normalize parameters to match file's line ending style
    - Ensure replacements maintain original file format
+
+6. **Abort Signal Handling** (Glob/Grep Tools)
+   - Check for abort signal before starting operations
+   - Check for abort signal during iteration loops
+   - Gracefully terminate when signal is aborted
+
+#### Testing Abort Signal Handling
+
+Tools that support abort signals can be cancelled during execution:
+
+```typescript
+describe('glob tool abort signal', () => {
+  it('should abort when signal is triggered', async () => {
+    const controller = new AbortController();
+    const context = { 
+      workdir: tempDir,
+      signal: controller.signal 
+    };
+
+    // Abort immediately
+    controller.abort();
+
+    const result = await globTool.execute({
+      pattern: '**/*.ts'
+    }, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+
+  it('should check abort signal during iteration', async () => {
+    const controller = new AbortController();
+    const context = { 
+      workdir: tempDir,
+      signal: controller.signal 
+    };
+
+    // Create many files to ensure iteration happens
+    for (let i = 0; i < 100; i++) {
+      await fs.writeFile(path.join(tempDir, `file${i}.ts`), 'content');
+    }
+
+    // Abort during execution
+    setTimeout(() => controller.abort(), 10);
+
+    const result = await globTool.execute({
+      pattern: '**/*.ts'
+    }, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+});
+```
 
 #### Testing Line Ending Preservation
 
@@ -310,6 +367,63 @@ describe('edit tool line endings', () => {
     const updated = await fs.readFile(filePath, 'utf-8');
     expect(updated).not.toContain('\r\n');
     expect(updated).toBe('line1\nmodified\nline3\n');
+  });
+});
+```
+
+#### Testing Dynamic Tool Registration
+
+The tool system supports runtime tool registration:
+
+```typescript
+describe('dynamic tool registration', () => {
+  it('should register and execute dynamic tool', () => {
+    const dynamicTool = defineTool({
+      name: 'dynamic_test',
+      description: 'Test dynamic tool',
+      parameters: z.object({ value: z.string() }),
+      execute: async (params) => ({ 
+        success: true, 
+        data: { result: params.value } 
+      }),
+    });
+
+    registerDynamicTool(dynamicTool);
+
+    const retrieved = getTool('dynamic_test');
+    expect(retrieved).toBeDefined();
+    expect(retrieved?.name).toBe('dynamic_test');
+  });
+
+  it('should unregister dynamic tool', () => {
+    const dynamicTool = defineTool({
+      name: 'temp_tool',
+      description: 'Temporary tool',
+      parameters: z.object({}),
+      execute: async () => ({ success: true }),
+    });
+
+    registerDynamicTool(dynamicTool);
+    expect(getTool('temp_tool')).toBeDefined();
+
+    const removed = unregisterDynamicTool('temp_tool');
+    expect(removed).toBe(true);
+    expect(getTool('temp_tool')).toBeUndefined();
+  });
+
+  it('should prevent duplicate registration', () => {
+    const tool = defineTool({
+      name: 'duplicate_test',
+      description: 'Test',
+      parameters: z.object({}),
+      execute: async () => ({ success: true }),
+    });
+
+    registerDynamicTool(tool);
+    
+    expect(() => {
+      registerDynamicTool(tool);
+    }).toThrow('already registered');
   });
 });
 ```
