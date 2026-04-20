@@ -29,6 +29,9 @@ import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
 import { warpgrepTool } from './warpgrep.js';
 import { recallTool } from './recall.js';
+import { suggestTool } from './suggest.js';
+import { readDirectoryTool } from './read-directory.js';
+import { mcpExaTool } from './mcp-exa.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -58,6 +61,9 @@ export const builtInTools = [
   recallMemoryTool,
   warpgrepTool,
   recallTool,
+  suggestTool,
+  readDirectoryTool,
+  mcpExaTool,
 ] as const;
 
 /**
@@ -98,6 +104,9 @@ export {
   recallMemoryTool,
   warpgrepTool,
   recallTool,
+  suggestTool,
+  readDirectoryTool,
+  mcpExaTool,
 };
 
 // Re-export UI utilities from specific tools

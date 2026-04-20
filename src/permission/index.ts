@@ -23,7 +23,7 @@ import {
 import { ConfigProtection } from './config-paths.js';
 
 // Permission action types
-export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
+export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin' | 'suggest';
 
 // Permission decision
 export type PermissionDecision = 'allow' | 'deny' | 'ask';
@@ -54,7 +54,7 @@ export const PermissionRuleSchema = z.object({
   description: z.string().optional(),
   // Matching criteria
   tools: z.array(z.string()).optional(), // Tool name patterns
-  actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin'])).optional(),
+  actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin', 'suggest'])).optional(),
   paths: z.array(z.string()).optional(), // File path patterns
   commands: z.array(z.string()).optional(), // Command patterns
   hosts: z.array(z.string()).optional(), // Network host patterns
@@ -630,6 +630,15 @@ export const defaultRules: PermissionRule[] = [
     commands: ['rm -rf /', 'rm -rf /*', 'dd', 'mkfs*', '> /dev/*'],
     decision: 'deny',
     priority: 100,
+  },
+  // Allow suggestions
+  {
+    id: 'allow-suggest',
+    name: 'Allow Suggestions',
+    description: 'Allow code review suggestions',
+    actions: ['suggest'],
+    decision: 'allow',
+    priority: 0,
   },
 ];
 

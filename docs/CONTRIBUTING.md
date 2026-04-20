@@ -257,6 +257,42 @@ graph LR
    export type ToolID = z.infer<typeof ToolID>;
    ```
 
+9. **Abort Signal Support**: Support cancellation in long-running operations
+   ```typescript
+   // Good - Check abort signal before and during operations
+   async execute(params, context): Promise<ToolResult> {
+     if (context.signal?.aborted) {
+       return { success: false, error: 'Operation aborted' };
+     }
+     
+     for (const item of items) {
+       if (context.signal?.aborted) {
+         throw new Error('Operation aborted');
+       }
+       // Process item
+     }
+   }
+   ```
+
+10. **Dynamic Tool Registration**: Use dynamic registration for runtime tools
+    ```typescript
+    // Register a tool at runtime
+    const customTool = defineTool({
+      name: 'custom_search',
+      description: 'Custom search tool',
+      parameters: z.object({ query: z.string() }),
+      execute: async (params) => {
+        // Implementation
+        return { success: true, data: results };
+      },
+    });
+    
+    registerDynamicTool(customTool);
+    
+    // Later, unregister when no longer needed
+    unregisterDynamicTool('custom_search');
+    ```
+
 ### File Organization
 
 ```
@@ -274,7 +310,17 @@ src/
 │   └── anthropic/
 ├── tool/             # Tool system
 │   ├── index.ts      # Tool framework
+│   ├── schema.ts     # Tool type definitions
 │   └── tools/        # Individual tool implementations
+│       ├── read.ts
+│       ├── write.ts
+│       ├── edit.ts
+│       ├── glob.ts
+│       ├── grep.ts
+│       ├── recall.ts           # Session history search
+│       ├── read-directory.ts   # Directory listing
+│       ├── suggest.ts          # Code review suggestions
+│       └── mcp-exa.ts          # Exa AI search placeholder
 ├── permission/       # Permission system
 │   └── index.ts
 ├── session/          # Session management
@@ -369,6 +415,12 @@ npm test -- tests/commands-image.test.tsx
 
 # Run tests matching a pattern
 npm test -- --grep "line endings"
+
+# Run recall tool tests
+npm test -- tests/tool/tools/recall.test.ts
+
+# Run dynamic tool registration tests
+npm test -- --grep "dynamic tool"
 ```
 
 ### Testing TUI Commands
@@ -423,6 +475,68 @@ Key principles for TUI testing:
 3. Capture hook return values through a component
 4. Clear mocks between tests with vi.clearAllMocks()
 5. Test both command dispatch and context interactions
+
+### Testing New Tools
+
+When adding new tools, ensure comprehensive test coverage:
+
+```typescript
+describe('recall tool', () => {
+  it('should search through session history', async () => {
+    // Create mock session files
+    const sessionsDir = path.join(tempDir, '.alexi', 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    
+    const session = {
+      messages: [
+        { role: 'user', content: 'How do I test TypeScript?' },
+        { role: 'assistant', content: 'Use Vitest for testing TypeScript.' }
+      ],
+      metadata: { id: 'test-session', created: Date.now() }
+    };
+    
+    await fs.writeFile(
+      path.join(sessionsDir, 'test-session.json'),
+      JSON.stringify(session)
+    );
+    
+    const result = await recallTool.execute(
+      { query: 'TypeScript', sessionLimit: 10 },
+      { workdir: tempDir }
+    );
+    
+    expect(result.success).toBe(true);
+    expect(result.data?.results.length).toBeGreaterThan(0);
+    expect(result.data?.results[0].content).toContain('TypeScript');
+  });
+});
+```
+
+### Testing Abort Signals
+
+Tools that support cancellation should be tested with abort signals:
+
+```typescript
+describe('glob tool with abort signal', () => {
+  it('should abort when signal is triggered', async () => {
+    const controller = new AbortController();
+    const context = { 
+      workdir: tempDir,
+      signal: controller.signal 
+    };
+
+    controller.abort();
+
+    const result = await globTool.execute(
+      { pattern: '**/*.ts' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('aborted');
+  });
+});
+```
 
 ## Pull Request Process
 

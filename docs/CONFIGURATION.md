@@ -80,9 +80,33 @@ API key for WarpGrep semantic code search (optional).
 export MORPH_API_KEY=your_morph_api_key
 ```
 
+#### ALEXI_CONFIG_PATH
+
+Additional configuration search paths (colon-separated).
+
+```bash
+export ALEXI_CONFIG_PATH=/path/to/custom/config:/another/path
+```
+
+#### ALEXI_HOME
+
+Override default configuration directory.
+
+```bash
+export ALEXI_HOME=/custom/alexi/home
+```
+
 ## User Configuration
 
 User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.
+
+### Configuration Directory Hierarchy
+
+Alexi searches for configuration in the following locations (in order of precedence):
+
+1. **Project-local configuration**: `.alexi/` in your project directory
+2. **User configuration**: `~/.config/alexi/` (XDG Base Directory standard)
+3. **Legacy user configuration**: `~/.alexi/` (backward compatibility)
 
 ### Configuration File Location
 
@@ -660,6 +684,37 @@ alexi config show
 1. Verify file paths: `ls AGENTS.md ~/.alexi/ALEXI.md`
 2. Check file encoding (must be UTF-8)
 3. Use `/memory` command to list loaded files
+
+## Command Lookup System
+
+When you invoke a command by name, Alexi searches in these locations:
+
+1. Project-local: `<project>/.alexi/command/<name>`
+2. User config: `~/.config/alexi/command/<name>`
+3. Legacy user: `~/.alexi/command/<name>`
+4. Built-in commands
+
+The first match wins. This allows you to:
+- Override built-in commands with custom implementations
+- Share commands across projects via global config
+- Keep project-specific commands in version control
+
+### Explicit Search Paths
+
+You can also specify explicit search paths in your configuration:
+
+- Use `**/command/` pattern to search subdirectories
+- Configure custom search paths in `alexi.config.json`
+- Set `ALEXI_CONFIG_PATH` environment variable for additional paths
+
+### Skills Configuration
+
+Skills are loaded from:
+- `~/.config/alexi/skills/`
+- `~/.alexi/skills/`
+- `.alexi/skills/` (project-local)
+
+Skills are reusable AI prompts that can be activated during conversations.
 
 ## Related Documentation
 
