@@ -27,6 +27,50 @@ interface BashResult {
 
 const DEFAULT_TIMEOUT = 120000; // 2 minutes
 
+const BLOCKED_OPERATORS = [
+  '&&',
+  '||',
+  ';',
+  '|',
+  '$(',
+  '`',
+  '>',
+  '>>',
+  '<',
+  '<<',
+  '&',
+];
+
+const BLOCKED_SORT_FLAGS = ['-o', '--output'];
+
+/**
+ * Validates command for dangerous operators and patterns.
+ * @throws Error if command contains blocked operators or patterns
+ */
+function validateCommand(command: string): void {
+  // Block shell separators and operators
+  for (const op of BLOCKED_OPERATORS) {
+    if (command.includes(op)) {
+      throw new Error(`Shell operator '${op}' is not allowed for security reasons`);
+    }
+  }
+
+  // Block dangerous sort output flags
+  const tokens = command.split(/\s+/);
+  if (tokens[0] === 'sort') {
+    for (const flag of BLOCKED_SORT_FLAGS) {
+      if (tokens.includes(flag)) {
+        throw new Error(`Sort flag '${flag}' is not allowed`);
+      }
+    }
+  }
+
+  // Block dangerous rm commands
+  if (command.includes('rm -rf /')) {
+    throw new Error('Dangerous command detected');
+  }
+}
+
 /**
  * Processes carriage returns in command output.
  * Handles Windows-style line endings and progress indicators that use \r.
@@ -66,6 +110,9 @@ Usage:
   },
 
   async execute(params, context): Promise<ToolResult<BashResult>> {
+    // Validate command for security
+    validateCommand(params.command);
+
     const workdir = params.workdir
       ? path.isAbsolute(params.workdir)
         ? params.workdir

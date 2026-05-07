@@ -12,6 +12,15 @@ import { loadAllCustomAgents } from './customAgentLoader.js';
 // Agent mode - determines when agent is available
 export type AgentMode = 'primary' | 'subagent' | 'all';
 
+// Agent step schema
+export const AgentStepSchema = z.object({
+  name: z.string(),
+  tool: z.string(),
+  parameters: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type AgentStep = z.infer<typeof AgentStepSchema>;
+
 // Agent schema for validation
 export const AgentSchema = z.object({
   id: z.string(),
@@ -24,6 +33,10 @@ export const AgentSchema = z.object({
   // Tool configuration
   tools: z.array(z.string()).optional(), // Tool IDs this agent can use
   disabledTools: z.array(z.string()).optional(), // Explicitly disabled tools
+  // Agent steps - null means "use defaults", undefined means "not specified", [] means "no steps"
+  steps: z.array(AgentStepSchema).nullable().optional(),
+  // Enabled flag - null for default behavior
+  enabled: z.boolean().nullable().optional(),
   // Model preferences
   preferredModel: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
@@ -429,4 +442,18 @@ const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
  */
 export function getAskAgentBashRules(): Record<string, 'allow' | 'ask' | 'deny'> {
   return readOnlyBash;
+}
+
+/**
+ * Normalize agent configuration
+ * Preserves null sentinels for steps and enabled fields
+ */
+export function normalizeAgentConfig(config: AgentConfig): AgentConfig {
+  return {
+    ...config,
+    // Preserve null sentinel - don't convert to empty array
+    steps: config.steps === undefined ? undefined : config.steps,
+    // Preserve null for enabled toggle
+    enabled: config.enabled === undefined ? undefined : config.enabled,
+  };
 }

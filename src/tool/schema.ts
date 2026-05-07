@@ -39,3 +39,42 @@ const _ToolMetadataSchema = z.object({
   defaultPermission: _ToolPermissionLevelSchema,
 });
 export type ToolMetadata = z.infer<typeof _ToolMetadataSchema>;
+
+// ============ Effect Schema Compatibility Layer ============
+// Provides a bridge for gradual migration from Zod to Effect Schema
+
+/**
+ * Schema namespace for Effect Schema compatibility
+ * Currently wraps Zod schemas for backward compatibility
+ */
+export const Schema = {
+  Struct: z.object.bind(z),
+  String: z.string(),
+  Number: z.number(),
+  Boolean: z.boolean(),
+  Array: z.array.bind(z),
+  Record: z.record.bind(z),
+  Literal: z.literal.bind(z),
+  Union: z.union.bind(z),
+  Unknown: z.unknown(),
+  optional: z.optional.bind(z),
+  NullOr: <T extends z.ZodTypeAny>(schema: T) => z.union([schema, z.null()]),
+
+  // Numeric modifiers
+  positive: () => z.number().positive(),
+
+  // JSON Schema generation helper
+  JSONSchema: {
+    make: <T extends z.ZodTypeAny>(schema: T) => {
+      // Basic JSON Schema generation from Zod
+      // This is a simplified implementation
+      return {
+        type: 'object',
+        properties: {},
+        description: schema.description,
+      };
+    },
+  },
+} as const;
+
+export type { z as ZodType };
