@@ -44,21 +44,12 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Kilo CLI and dependencies
+      - name: Install dependencies and build
         run: |
-          # Download native Linux binary from GitHub releases
-          KILO_VERSION="7.2.40"
-          curl -fsSL "https://github.com/Kilo-Org/kilocode/releases/download/v${KILO_VERSION}/kilo-linux-x64.tar.gz" -o /tmp/kilo.tar.gz
-          tar -xzf /tmp/kilo.tar.gz -C /tmp
-          sudo mv /tmp/kilo /usr/local/bin/kilo
-          chmod +x /usr/local/bin/kilo
           npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
+          npm run build
+          echo "[OK] Alexi CLI built"
 
-      - name: Configure Kilo provider
-        run: |
-          printf '{"permission":"allow","experimental":{"titleModel":"sap-ai-core/anthropic--claude-3.5-sonnet"}}\n' > kilo.json
-          echo "[OK] kilo.json created"
 
       - name: Prepare research context
         id: context
@@ -154,7 +145,7 @@ jobs:
           echo "[DEBUG] Token prefix: ${TOKEN}..."
 
           # Now run kilo
-          kilo run "$TASK_PROMPT" \
+          node dist/cli/program.js run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --title "Agent 1 Research" \

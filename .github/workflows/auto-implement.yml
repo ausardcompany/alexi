@@ -133,14 +133,10 @@ jobs:
       - name: Install Kilo CLI and project dependencies
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          npm install -g @kilocode/cli
-          echo "[OK] Kilo CLI: $(kilo --version)"
+          npm run build
+          echo "[OK] Alexi CLI built"
           npm ci
 
-      - name: Configure Kilo provider
-        run: |
-          printf '{"$schema":"https://app.kilo.ai/config.json","model":"sap-ai-core/anthropic--claude-4.6-opus","permission":"allow"}\n' > kilo.json
-          echo "[OK] kilo.json created"
           echo "[OK] Project dependencies installed"
 
       # ─── Step 4: Label issue as in-progress ────────────────────────────────────
@@ -209,7 +205,7 @@ jobs:
             echo "   - \`npm run lint\` — no lint errors"
             echo "   - \`npm run format:check\` — proper formatting"
             echo "   - \`npm test\` — all tests pass"
-            echo "   - \`npm install -g @kilocode/cli\` — builds successfully"
+            echo "   - \`npm run build\` — builds successfully"
             echo ""
             echo "### Hard constraints"
             echo ""
@@ -240,7 +236,7 @@ jobs:
           TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
           echo "Running Kilo CLI (speckit.implement) ..."
-          kilo run "$TASK_PROMPT" \
+          node dist/cli/program.js run "$TASK_PROMPT" --title "Agent 3 Implement" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
@@ -286,7 +282,7 @@ jobs:
           run_check "typecheck" "npm run typecheck"
           run_check "lint" "npm run lint"
           run_check "format" "npm run format:check"
-          run_check "build" "npm install -g @kilocode/cli"
+          run_check "build" "npm run build"
           run_check "tests" "npm test"
 
           echo -e "$RESULTS" > verify-results.txt
