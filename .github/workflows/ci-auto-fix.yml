@@ -20,7 +20,7 @@ on:
         type: string
 
 concurrency:
-  group: ci-auto-fix-${​{ github.event.workflow_run.head_branch || inputs.pr_branch }}
+  group: ci-auto-fix-${{ github.event.workflow_run.head_branch || inputs.pr_branch }}
   cancel-in-progress: false
 
 permissions:
@@ -46,12 +46,12 @@ jobs:
       - name: Determine branch and run ID
         id: determine
         run: |
-          if [ "${​{ github.event_name }}" = "workflow_run" ]; then
-            BRANCH="${​{ github.event.workflow_run.head_branch }}"
-            RUN_ID="${​{ github.event.workflow_run.id }}"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            RUN_ID="${{ github.event.workflow_run.id }}"
           else
-            BRANCH="${​{ inputs.pr_branch }}"
-            RUN_ID="${​{ inputs.run_id }}"
+            BRANCH="${{ inputs.pr_branch }}"
+            RUN_ID="${{ inputs.run_id }}"
           fi
 
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
@@ -59,13 +59,13 @@ jobs:
           echo "Branch: $BRANCH"
           echo "Run ID: $RUN_ID"
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 2: Check retry count (prevent infinite loops) ─────────────────
       - name: Check retry count
         id: retry_check
         run: |
-          BRANCH="${​{ steps.determine.outputs.branch }}"
+          BRANCH="${{ steps.determine.outputs.branch }}"
           TODAY=$(date -u +%Y-%m-%d)
 
           WORKFLOW_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
@@ -91,14 +91,14 @@ jobs:
             echo "should_skip=false" >> $GITHUB_OUTPUT
           fi
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 3: Collect failed job logs ─────────────────────────────────────
       - name: Collect failed job logs
         id: collect_logs
         if: steps.retry_check.outputs.should_skip != 'true'
         run: |
-          RUN_ID="${​{ steps.determine.outputs.run_id }}"
+          RUN_ID="${{ steps.determine.outputs.run_id }}"
           echo "Collecting failed job logs for run $RUN_ID..."
 
           JOBS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" \
@@ -120,7 +120,7 @@ jobs:
             echo "# CI Failure Report"
             echo ""
             echo "**Run ID**: $RUN_ID"
-            echo "**Branch**: ${​{ steps.determine.outputs.branch }}"
+            echo "**Branch**: ${{ steps.determine.outputs.branch }}"
             echo "**Date**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo ""
             echo "---"
@@ -164,7 +164,7 @@ jobs:
           echo "[OK] ci-failures.md generated ($(wc -l < ci-failures.md) lines)"
           cat ci-failures.md
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 3b: Preserve ci-failures.md before checkout ─────────────────────
       - name: Preserve ci-failures.md
@@ -180,9 +180,9 @@ jobs:
         if: steps.retry_check.outputs.should_skip != 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${​{ steps.determine.outputs.branch }}
+          ref: ${{ steps.determine.outputs.branch }}
           fetch-depth: 0
-          token: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ─── Step 4b: Restore ci-failures.md after checkout ─────────────────────
       - name: Restore ci-failures.md
@@ -264,7 +264,7 @@ jobs:
         id: quick_commit
         if: steps.retry_check.outputs.should_skip != 'true' && steps.quick_fixes.outputs.quick_fix_changes == 'true'
         run: |
-          BRANCH="${​{ steps.determine.outputs.branch }}"
+          BRANCH="${{ steps.determine.outputs.branch }}"
 
           # Stage only src/ and tests/ — never commit workflow files
           git add src/ tests/ 2>/dev/null || true
@@ -285,14 +285,14 @@ jobs:
             echo "[OK] Quick fixes committed and pushed ($CHANGES_COUNT file(s))"
           fi
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ─── Step 8c: Re-verify after quick fixes ─────────────────────────────
       - name: Re-verify after quick fixes
         id: quick_verify
         if: steps.retry_check.outputs.should_skip != 'true' && steps.quick_commit.outputs.committed == 'true'
         run: |
-          FAILED_JOBS="${​{ steps.collect_logs.outputs.failed_jobs }}"
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
           ALL_PASSED=true
 
           run_check() {
@@ -337,8 +337,8 @@ jobs:
           steps.retry_check.outputs.should_skip != 'true' &&
           steps.quick_verify.outputs.all_fixed != 'true'
         run: |
-          BRANCH="${​{ steps.determine.outputs.branch }}"
-          FAILED_JOBS="${​{ steps.collect_logs.outputs.failed_jobs }}"
+          BRANCH="${{ steps.determine.outputs.branch }}"
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
 
           # Verify system prompt template exists (should already be available via Step 5b)
           if [ ! -f ".github/prompts/ci-fix-system.md" ]; then
@@ -400,8 +400,8 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         run: |
           echo "Running Kilo CLI with SAP AI Core (autonomous mode)..."
 
@@ -460,7 +460,7 @@ jobs:
           steps.retry_check.outputs.should_skip != 'true' &&
           steps.quick_verify.outputs.all_fixed != 'true'
         run: |
-          FAILED_JOBS="${​{ steps.collect_logs.outputs.failed_jobs }}"
+          FAILED_JOBS="${{ steps.collect_logs.outputs.failed_jobs }}"
           ALL_PASSED=true
           RESULTS=""
 
@@ -516,7 +516,7 @@ jobs:
           steps.retry_check.outputs.should_skip != 'true' &&
           steps.quick_verify.outputs.all_fixed != 'true'
         run: |
-          BRANCH="${​{ steps.determine.outputs.branch }}"
+          BRANCH="${{ steps.determine.outputs.branch }}"
 
           # Stage only src/ and tests/ — never commit workflow files or prompt files
           git add src/ tests/ 2>/dev/null || true
@@ -550,25 +550,25 @@ jobs:
             echo "[INFO] No new commits to push"
           fi
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ─── Step 13: Post PR comment ─────────────────────────────────────────────
       - name: Post PR comment
         if: steps.retry_check.outputs.should_skip != 'true' && always()
         uses: actions/github-script@v7
         with:
-          github-token: ${​{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const branch = '${​{ steps.determine.outputs.branch }}';
-            const quickFixOnly = '${​{ steps.quick_verify.outputs.all_fixed }}' === 'true';
-            const quickFixCommitted = '${​{ steps.quick_commit.outputs.committed }}' === 'true';
-            const fixesVerified = quickFixOnly || '${​{ steps.verify.outputs.fixes_verified }}' === 'true';
+            const branch = '${{ steps.determine.outputs.branch }}';
+            const quickFixOnly = '${{ steps.quick_verify.outputs.all_fixed }}' === 'true';
+            const quickFixCommitted = '${{ steps.quick_commit.outputs.committed }}' === 'true';
+            const fixesVerified = quickFixOnly || '${{ steps.verify.outputs.fixes_verified }}' === 'true';
             const changesCount = quickFixOnly
               ? (quickFixCommitted ? 1 : 0)
-              : parseInt('${​{ steps.commit.outputs.changes_count }}' || '0', 10);
-            const committed = quickFixOnly ? quickFixCommitted : '${​{ steps.commit.outputs.committed }}' === 'true';
-            const botSuccess = quickFixOnly || '${​{ steps.bot.outputs.success }}' === 'true';
+              : parseInt('${{ steps.commit.outputs.changes_count }}' || '0', 10);
+            const committed = quickFixOnly ? quickFixCommitted : '${{ steps.commit.outputs.committed }}' === 'true';
+            const botSuccess = quickFixOnly || '${{ steps.bot.outputs.success }}' === 'true';
 
             // Find the PR for this branch
             const { data: pulls } = await github.rest.pulls.list({
@@ -662,7 +662,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-auto-fix-artifacts-${​{ github.run_id }}
+          name: ci-auto-fix-artifacts-${{ github.run_id }}
           path: |
             ci-failures.md
             ci-fix-prompt.md

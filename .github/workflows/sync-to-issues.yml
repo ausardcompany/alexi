@@ -63,8 +63,8 @@ jobs:
       - name: Download sync reports
         id: download
         run: |
-          if [ "${​{ github.event_name }}" = "workflow_run" ]; then
-            RUN_ID="${​{ github.event.workflow_run.id }}"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
           else
             # For manual dispatch, find the latest successful repo-sync run
             RUN_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
@@ -99,17 +99,17 @@ jobs:
             echo "[WARN] analysis-report.md not found in artifacts"
           fi
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 3: Analyze gaps and create issues ─────────────────────────────
       - name: Create issues from feature gaps
         if: steps.download.outputs.has_reports == 'true'
         id: issues
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
-          MAX_ISSUES: ${​{ inputs.max_issues || '10' }}
-          MIN_PRIORITY: ${​{ inputs.min_priority || 'high' }}
-          DRY_RUN: ${​{ inputs.dry_run || 'false' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX_ISSUES: ${{ inputs.max_issues || '10' }}
+          MIN_PRIORITY: ${{ inputs.min_priority || 'high' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           node --input-type=module <<'NODE_EOF'
           import { FeatureAnalyzer } from './dist/sync/analyzer.js';
@@ -301,7 +301,7 @@ jobs:
       - name: Report results
         if: always()
         run: |
-          CREATED="${​{ steps.issues.outputs.created_count || '0' }}"
+          CREATED="${{ steps.issues.outputs.created_count || '0' }}"
           echo "Issues created: $CREATED"
 
           if [ "$CREATED" = "0" ]; then

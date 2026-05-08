@@ -36,9 +36,9 @@ jobs:
       - name: Pick next issue
         id: pick
         run: |
-          if [ -n "${​{ inputs.issue_number }}" ]; then
+          if [ -n "${{ inputs.issue_number }}" ]; then
             # Manual dispatch — use the specified issue
-            ISSUE_NUMBER="${​{ inputs.issue_number }}"
+            ISSUE_NUMBER="${{ inputs.issue_number }}"
             echo "[INFO] Manual dispatch: implementing issue #$ISSUE_NUMBER"
           else
             # Scheduled run — pick the oldest open issue with 'auto-implement' label
@@ -94,7 +94,7 @@ jobs:
           echo "     Branch: $BRANCH_NAME"
           echo "     Labels: $ISSUE_LABELS"
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 2: Checkout and create branch ────────────────────────────────────
       - name: Checkout repository
@@ -102,12 +102,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Create feature branch
         if: steps.pick.outputs.has_issue == 'true' && inputs.dry_run != true
         run: |
-          BRANCH="${​{ steps.pick.outputs.branch_name }}"
+          BRANCH="${{ steps.pick.outputs.branch_name }}"
           git config user.name "kilo-bot[bot]"
           git config user.email "kilo-bot[bot]@users.noreply.github.com"
 
@@ -121,7 +121,7 @@ jobs:
             echo "[OK] Created branch: $BRANCH"
           fi
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ─── Step 3: Setup environment ─────────────────────────────────────────────
       - name: Setup Node.js
@@ -142,24 +142,24 @@ jobs:
       - name: Mark issue as in-progress
         if: steps.pick.outputs.has_issue == 'true' && inputs.dry_run != true
         run: |
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           gh issue edit "$ISSUE_NUMBER" --add-label "in-progress" --remove-label "auto-implement" || true
           gh issue comment "$ISSUE_NUMBER" --body "🤖 **Kilo** is starting to implement this feature automatically.
 
-          - **Branch**: \`${​{ steps.pick.outputs.branch_name }}\`
+          - **Branch**: \`${{ steps.pick.outputs.branch_name }}\`
           - **Model**: \`sap-ai-core/anthropic--claude-4.6-opus\`
           - **Run**: [View workflow](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
 
           Implementation in progress..."
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 5: Build implementation prompt ───────────────────────────────────
       - name: Build implementation prompt
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
-          ISSUE_TITLE="${​{ steps.pick.outputs.issue_title }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
           # Restore issue body
           ISSUE_BODY=""
@@ -229,8 +229,8 @@ jobs:
         continue-on-error: true
         timeout-minutes: 20
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         run: |
           PROMPT=$(cat /tmp/implement-prompt.txt)
 
@@ -300,7 +300,7 @@ jobs:
           steps.pick.outputs.has_issue == 'true' &&
           inputs.dry_run != true
         run: |
-          BRANCH="${​{ steps.pick.outputs.branch_name }}"
+          BRANCH="${{ steps.pick.outputs.branch_name }}"
 
           # Stage all changes (src/, tests/, docs/)
           git add -A
@@ -316,7 +316,7 @@ jobs:
           echo "Committing $CHANGES_COUNT file(s):"
           echo "$STAGED"
 
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
           git commit -m "feat: implement #${ISSUE_NUMBER} [kilo-bot]"
           git push origin "$BRANCH"
 
@@ -324,7 +324,7 @@ jobs:
           echo "changes_count=$CHANGES_COUNT" >> $GITHUB_OUTPUT
           echo "[OK] Pushed $CHANGES_COUNT file(s) to $BRANCH"
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Create Pull Request
         id: pr
@@ -333,11 +333,11 @@ jobs:
           steps.commit.outputs.has_changes == 'true' &&
           inputs.dry_run != true
         run: |
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
-          ISSUE_TITLE="${​{ steps.pick.outputs.issue_title }}"
-          BRANCH="${​{ steps.pick.outputs.branch_name }}"
-          VERIFIED="${​{ steps.verify.outputs.verified }}"
-          CHANGES_COUNT="${​{ steps.commit.outputs.changes_count }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
+          BRANCH="${{ steps.pick.outputs.branch_name }}"
+          VERIFIED="${{ steps.verify.outputs.verified }}"
+          CHANGES_COUNT="${{ steps.commit.outputs.changes_count }}"
 
           # Read verify results
           VERIFY_RESULTS=""
@@ -393,17 +393,17 @@ jobs:
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "[OK] PR created: $PR_URL"
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
       # ─── Step 9: Update issue with results ─────────────────────────────────────
       - name: Update issue with results
         if: steps.pick.outputs.has_issue == 'true' && inputs.dry_run != true && always()
         run: |
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
-          KILO_SUCCESS="${​{ steps.kilo.outputs.success }}"
-          VERIFIED="${​{ steps.verify.outputs.verified }}"
-          PR_URL="${​{ steps.pr.outputs.pr_url }}"
-          HAS_CHANGES="${​{ steps.commit.outputs.has_changes }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          KILO_SUCCESS="${{ steps.kilo.outputs.success }}"
+          VERIFIED="${{ steps.verify.outputs.verified }}"
+          PR_URL="${{ steps.pr.outputs.pr_url }}"
+          HAS_CHANGES="${{ steps.commit.outputs.has_changes }}"
 
           if [ "$HAS_CHANGES" = "true" ] && [ -n "$PR_URL" ]; then
             if [ "$VERIFIED" = "true" ]; then
@@ -442,7 +442,7 @@ jobs:
 
           gh issue comment "$ISSUE_NUMBER" --body "$COMMENT"
         env:
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ─── Step 10: Upload artifacts ─────────────────────────────────────────────
       - name: Upload artifacts
