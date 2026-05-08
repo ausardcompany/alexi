@@ -1,0 +1,376 @@
+name: "Agent: Autohealing"
+
+on:
+  workflow_run:
+    workflows:
+      - "Agent 1: Research & Trends"
+      - "Agent 2: Planning & Issues"
+      - "Agent 3: Auto-Implement"
+      - "Agent 4: Code Review & QA"
+      - "Agent 5: Release Management"
+      - "CI"
+      - "CI Auto-Fix"
+      - "Documentation Update"
+      - "Security Scanning"
+      - "Sync Upstream Changes"
+      - "Repository Sync"
+      - "Sync → Issues"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Failed workflow run ID to heal'
+        required: true
+        type: number
+
+concurrency:
+  group: autohealing-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  issues: write
+
+jobs:
+  heal:
+    name: Self-Heal Failed Workflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only run on failures, never on itself (prevent infinite loops)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.name != 'Agent: Autohealing')
+
+    steps:
+      # ─── Step 1: Determine failed run info ─────────────────────────────────────
+      - name: Determine failed run
+        id: failed_run
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+          else
+            RUN_ID="${{ inputs.run_id }}"
+            # Fetch workflow name from API
+            RUN_DATA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")
+            WORKFLOW_NAME=$(echo "$RUN_DATA" | jq -r '.name')
+            BRANCH=$(echo "$RUN_DATA" | jq -r '.head_branch')
+          fi
+
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "workflow_name=$WORKFLOW_NAME" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+          echo "[INFO] Failed run: $RUN_ID"
+          echo "[INFO] Workflow: $WORKFLOW_NAME"
+          echo "[INFO] Branch: $BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 2: Check retry limits (prevent infinite loops) ───────────────────
+      - name: Check retry limits
+        id: limits
+        run: |
+          WORKFLOW_NAME="${{ steps.failed_run.outputs.workflow_name }}"
+          BRANCH="${{ steps.failed_run.outputs.branch }}"
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Count how many times autohealing ran today for this workflow+branch
+          HEAL_WORKFLOW_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
+            --jq '.workflows[] | select(.name == "Agent: Autohealing") | .id')
+
+          if [ -n "$HEAL_WORKFLOW_ID" ]; then
+            HEAL_COUNT=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/$HEAL_WORKFLOW_ID/runs?created=>=${TODAY}T00:00:00Z&status=completed&per_page=50" \
+              --jq "[.workflow_runs[] | select(.head_branch == \"$BRANCH\")] | length")
+          else
+            HEAL_COUNT=0
+          fi
+
+          echo "[INFO] Autohealing attempts today for '$WORKFLOW_NAME' on '$BRANCH': $HEAL_COUNT"
+
+          if [ "${HEAL_COUNT:-0}" -ge 3 ]; then
+            echo "[STOP] Too many healing attempts ($HEAL_COUNT >= 3). Escalating."
+            echo "should_skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_skip=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 3: Collect failure logs ──────────────────────────────────────────
+      - name: Collect failure logs
+        id: logs
+        if: steps.limits.outputs.should_skip != 'true'
+        run: |
+          RUN_ID="${{ steps.failed_run.outputs.run_id }}"
+
+          echo "Collecting failure logs for run $RUN_ID..."
+
+          JOBS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[] | select(.conclusion == "failure")]')
+
+          JOB_COUNT=$(echo "$JOBS" | jq 'length')
+          echo "Failed jobs: $JOB_COUNT"
+
+          if [ "$JOB_COUNT" -eq 0 ]; then
+            echo "[INFO] No failed jobs found."
+            echo "has_failures=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "has_failures=true" >> $GITHUB_OUTPUT
+
+          # Build failure report
+          {
+            echo "# Workflow Failure Report"
+            echo ""
+            echo "**Workflow**: ${{ steps.failed_run.outputs.workflow_name }}"
+            echo "**Run ID**: $RUN_ID"
+            echo "**Branch**: ${{ steps.failed_run.outputs.branch }}"
+            echo "**Date**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo ""
+            echo "---"
+            echo ""
+          } > /tmp/failure-report.md
+
+          FAILED_STEPS=""
+
+          echo "$JOBS" | jq -c '.[]' | while read -r JOB; do
+            JOB_ID=$(echo "$JOB" | jq -r '.id')
+            JOB_NAME=$(echo "$JOB" | jq -r '.name')
+
+            {
+              echo "## Job: $JOB_NAME"
+              echo ""
+              echo "### Failed Steps"
+              echo ""
+            } >> /tmp/failure-report.md
+
+            echo "$JOB" | jq -r '.steps[] | select(.conclusion == "failure") | "- **\(.name)** (step \(.number))"' >> /tmp/failure-report.md
+            echo "" >> /tmp/failure-report.md
+
+            # Get log for this job
+            echo "### Log Output (last 150 lines)" >> /tmp/failure-report.md
+            echo '```' >> /tmp/failure-report.md
+
+            LOG_CONTENT=$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$JOB_ID/logs" 2>/dev/null || echo "[Log unavailable]")
+            echo "$LOG_CONTENT" | tail -150 >> /tmp/failure-report.md
+
+            echo '```' >> /tmp/failure-report.md
+            echo "" >> /tmp/failure-report.md
+          done
+
+          FAILED_JOB_NAMES=$(echo "$JOBS" | jq -r '[.[].name] | join(", ")')
+          echo "failed_jobs=$FAILED_JOB_NAMES" >> $GITHUB_OUTPUT
+
+          echo "[OK] Failure report generated ($(wc -l < /tmp/failure-report.md) lines)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 4: Checkout the branch where failure occurred ────────────────────
+      - name: Checkout target branch
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.failed_run.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        run: |
+          git config user.name "alexi-bot[bot]"
+          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+
+      # ─── Step 5: Setup environment ─────────────────────────────────────────────
+      - name: Setup Node.js
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Kilo CLI and dependencies
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        run: |
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
+
+      # ─── Step 6: Build healing prompt ──────────────────────────────────────────
+      - name: Build healing prompt
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        run: |
+          WORKFLOW_NAME="${{ steps.failed_run.outputs.workflow_name }}"
+          BRANCH="${{ steps.failed_run.outputs.branch }}"
+          FAILED_JOBS="${{ steps.logs.outputs.failed_jobs }}"
+
+          {
+            echo "# Autohealing Task"
+            echo ""
+            echo "A GitHub Actions workflow has failed and needs to be fixed."
+            echo ""
+            echo "## Failure Context"
+            echo ""
+            echo "- **Workflow**: $WORKFLOW_NAME"
+            echo "- **Branch**: $BRANCH"
+            echo "- **Failed jobs**: $FAILED_JOBS"
+            echo ""
+            echo "## Failure Report"
+            echo ""
+            cat /tmp/failure-report.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "## Your Task"
+            echo ""
+            echo "1. **Analyze the error** — read the logs above carefully"
+            echo "2. **Identify root cause** — is it YAML syntax, shell error, missing dep, or code issue?"
+            echo "3. **Read the failing file(s)** — use the \`read\` tool"
+            echo "4. **Apply minimal fix** — change only what is broken"
+            echo "5. **Verify** — if it's a code file, run relevant checks:"
+            echo "   - \`npm run typecheck\` for TypeScript errors"
+            echo "   - \`npm run lint\` for lint errors"
+            echo "   - \`npm run format:check\` for formatting"
+            echo "   - \`npm test\` for test failures"
+            echo "6. **Commit and push** the fix:"
+            echo '   ```bash'
+            echo "   git add <fixed-files>"
+            echo "   git commit -m \"fix(ci): <description> [autohealing]\""
+            echo "   git push origin $BRANCH"
+            echo '   ```'
+            echo ""
+            echo "## Important Rules"
+            echo ""
+            echo "- Fix ONLY the immediate failure — do not refactor"
+            echo "- Maximum 3 files changed"
+            echo "- If the fix requires adding new secrets or major changes — do NOT fix it."
+            echo "  Instead, create an issue: \`gh issue create --title \"[Autohealing] Manual fix needed: $WORKFLOW_NAME\" --body \"...\"\`"
+            echo "- For YAML workflow files: validate after edit (check matching braces, proper indentation)"
+            echo "- For shell scripts: watch for quoting, variable expansion, and exit codes"
+            echo "- NEVER disable or remove CI checks to \"fix\" a failure"
+          } > /tmp/healing-prompt.txt
+
+          echo "[OK] Healing prompt built ($(wc -l < /tmp/healing-prompt.txt) lines)"
+
+      # ─── Step 7: Run Kilo CLI (Autohealing Agent) ──────────────────────────────
+      - name: Run Autohealing Agent
+        id: heal
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          PROMPT=$(cat /tmp/healing-prompt.txt)
+
+          kilo run "$PROMPT" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --system-prompt "$(cat .github/prompts/agent-autohealing-system.md)" \
+            > healing-output.log 2>&1
+
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Autohealing completed"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Autohealing exited with code $EXIT_CODE"
+          fi
+
+          echo "=== Output (last 50 lines) ==="
+          tail -50 healing-output.log
+
+      # ─── Step 8: Verify fix ────────────────────────────────────────────────────
+      - name: Verify fix applied
+        id: verify
+        if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
+        run: |
+          # Check if any commits were made
+          BRANCH="${{ steps.failed_run.outputs.branch }}"
+          LOCAL_HEAD=$(git rev-parse HEAD)
+          REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+
+          if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+            echo "fix_pushed=true" >> $GITHUB_OUTPUT
+            echo "[OK] Fix was committed and pushed"
+            git log --oneline -3
+          else
+            echo "fix_pushed=false" >> $GITHUB_OUTPUT
+            echo "[INFO] No fix was pushed (agent may not have found a fixable issue)"
+          fi
+
+      # ─── Step 9: Escalate if unfixable ─────────────────────────────────────────
+      - name: Escalate if needed
+        if: >
+          steps.limits.outputs.should_skip == 'true' ||
+          (steps.heal.outputs.success == 'false' && steps.logs.outputs.has_failures == 'true')
+        run: |
+          WORKFLOW_NAME="${{ steps.failed_run.outputs.workflow_name }}"
+          RUN_ID="${{ steps.failed_run.outputs.run_id }}"
+          BRANCH="${{ steps.failed_run.outputs.branch }}"
+
+          # Check if escalation issue already exists
+          EXISTING=$(gh issue list --label "autohealing-escalation" --state open \
+            --json title --jq "[.[] | select(.title | contains(\"$WORKFLOW_NAME\"))] | length")
+
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "[INFO] Escalation issue already exists for '$WORKFLOW_NAME'"
+            exit 0
+          fi
+
+          SKIP_FLAG="${{ steps.limits.outputs.should_skip }}"
+          if [ "$SKIP_FLAG" = "true" ]; then
+            REASON="Too many healing attempts (3+ today). Possible infinite loop."
+          else
+            REASON="Agent could not determine or apply a fix."
+          fi
+
+          cat > /tmp/escalation-body.md <<EOF
+          ## Autohealing Escalation
+
+          Workflow: $WORKFLOW_NAME
+          Branch: $BRANCH
+          Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID
+
+          The autohealing agent was unable to fix this failure automatically.
+
+          ### Reason
+          $REASON
+
+          ### Action Required
+          Please investigate manually and fix the issue.
+
+          ---
+          Auto-escalated by Autohealing Agent
+          EOF
+
+          gh issue create \
+            --title "[Autohealing] Manual fix needed: $WORKFLOW_NAME on $BRANCH" \
+            --body-file /tmp/escalation-body.md \
+            --label "autohealing-escalation,bug"
+
+          echo "[OK] Escalation issue created"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─── Step 10: Upload artifacts ─────────────────────────────────────────────
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohealing-${{ github.run_id }}
+          path: |
+            healing-output.log
+            /tmp/failure-report.md
+          retention-days: 14
+          if-no-files-found: ignore
