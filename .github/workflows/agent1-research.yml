@@ -157,6 +157,7 @@ jobs:
           kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-3.5-sonnet" \
+            --title "Agent 1 Research" \
             --print-logs \
             > research-output.log 2>&1
 
