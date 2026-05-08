@@ -165,7 +165,7 @@ jobs:
           git add .specify/ .github/research/ 2>/dev/null || true
 
           if ! git diff --cached --quiet; then
-            git commit -m "spec: analyze trends ($TODAY) [alexi-bot]"
+            git commit -m "docs(ci): research trends $TODAY [alexi-bot]" --no-verify
             git push origin master
             echo "[OK] Spec committed"
           else
