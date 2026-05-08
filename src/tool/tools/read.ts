@@ -13,9 +13,49 @@ import {
   type EncodingInfo,
 } from '../encoded-io.js';
 
+// Supported image formats for reading
+const SUPPORTED_IMAGE_FORMATS = ['png', 'jpg', 'jpeg', 'gif', 'webp'] as const;
+const SUPPORTED_IMAGE_MIME_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+] as const;
+
+// Common image extensions (for detection)
+const IMAGE_EXTENSIONS = [
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'tiff',
+  'tif',
+  'svg',
+  'ico',
+  'heic',
+  'heif',
+] as const;
+
+function isSupportedImageFormat(filePath: string): boolean {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  return SUPPORTED_IMAGE_FORMATS.includes(ext as any);
+}
+
+function isImageFile(filePath: string): boolean {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  return IMAGE_EXTENSIONS.includes(ext as any);
+}
+
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
-  offset: z.number().optional().describe('Line number to start from (1-indexed)'),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('Line number to start from (0-indexed, default: 0)'),
   limit: z.number().optional().describe('Maximum number of lines to read (default: 2000)'),
 });
 
@@ -87,6 +127,22 @@ Usage:
         };
       }
 
+      // Check if it's an image file
+      if (isImageFile(filePath)) {
+        if (!isSupportedImageFormat(filePath)) {
+          return {
+            success: false,
+            error: `Unsupported image format. Supported formats: ${SUPPORTED_IMAGE_FORMATS.join(', ')}`,
+          };
+        }
+        // For now, return error as we don't have image handling in place
+        // In the future, this would return base64 encoded image data
+        return {
+          success: false,
+          error: 'Image reading not yet implemented. Use supported formats: png, jpg, gif, webp',
+        };
+      }
+
       // Read file
       const buffer = await fs.readFile(filePath);
 
@@ -108,15 +164,16 @@ Usage:
       const lines = content.split('\n');
       const totalLines = lines.length;
 
-      const offset = Math.max(1, params.offset ?? 1);
+      // offset of 0 is now explicitly allowed
+      const offset = Math.max(0, params.offset ?? 0);
       const limit = params.limit ?? MAX_LINES;
 
       // Extract requested lines
-      const startIdx = offset - 1;
+      const startIdx = offset;
       const endIdx = Math.min(startIdx + limit, lines.length);
       const selectedLines = lines.slice(startIdx, endIdx);
 
-      // Add line numbers
+      // Add line numbers (1-indexed for display)
       const numberedLines = selectedLines.map((line, i) => `${startIdx + i + 1}: ${line}`);
 
       const output = numberedLines.join('\n');
@@ -130,11 +187,11 @@ Usage:
           content: truncated,
           totalLines,
           shownLines: selectedLines.length,
-          offset,
+          offset: offset + 1, // Return 1-indexed offset for consistency
         },
         truncated: wasTruncated,
         hint: wasTruncated
-          ? `Output truncated. Use offset=${endIdx + 1} to continue reading.`
+          ? `Output truncated. Use offset=${endIdx} to continue reading.`
           : undefined,
       };
     } catch (err) {

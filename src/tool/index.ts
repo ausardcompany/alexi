@@ -63,39 +63,103 @@ export interface Tool<TParams extends z.ZodType, TResult> {
   executeUnsafe(params: z.infer<TParams>, context: ToolContext): Promise<ToolResult<TResult>>;
 }
 
+// Output truncation configuration
+export interface TruncationConfig {
+  maxLength?: number;
+  maxLines?: number;
+  preserveEnding?: boolean;
+}
+
 // Output truncation constants
 const MAX_LINES = 2000;
 const MAX_BYTES = 51200; // 50KB
 
+const DEFAULT_TRUNCATION_CONFIG: Required<TruncationConfig> = {
+  maxLength: MAX_BYTES,
+  maxLines: MAX_LINES,
+  preserveEnding: true,
+};
+
 /**
  * Truncate output if it exceeds limits
  */
-function truncateOutput(output: string): { content: string; truncated: boolean } {
+function truncateOutput(
+  output: string,
+  config: Partial<TruncationConfig> = {}
+): { content: string; truncated: boolean } {
+  const { maxLength, maxLines, preserveEnding } = { ...DEFAULT_TRUNCATION_CONFIG, ...config };
+
   const lines = output.split('\n');
   const bytes = Buffer.byteLength(output, 'utf-8');
 
-  if (lines.length <= MAX_LINES && bytes <= MAX_BYTES) {
+  if (lines.length <= maxLines && bytes <= maxLength) {
     return { content: output, truncated: false };
   }
 
-  // Truncate by lines first
-  const truncatedLines = lines.slice(0, MAX_LINES);
-  let result = truncatedLines.join('\n');
+  let result = output;
 
-  // Then check bytes
-  if (Buffer.byteLength(result, 'utf-8') > MAX_BYTES) {
-    // Binary search for the right length
-    let left = 0;
-    let right = result.length;
-    while (left < right) {
-      const mid = Math.floor((left + right + 1) / 2);
-      if (Buffer.byteLength(result.slice(0, mid), 'utf-8') <= MAX_BYTES) {
-        left = mid;
-      } else {
-        right = mid - 1;
-      }
+  // Truncate by lines first
+  if (lines.length > maxLines) {
+    if (preserveEnding) {
+      const keepStart = Math.floor(maxLines * 0.7);
+      const keepEnd = maxLines - keepStart;
+      result = [
+        ...lines.slice(0, keepStart),
+        `\n... (${lines.length - maxLines} lines truncated) ...\n`,
+        ...lines.slice(-keepEnd),
+      ].join('\n');
+    } else {
+      result = lines.slice(0, maxLines).join('\n') + '\n... (truncated)';
     }
-    result = result.slice(0, left);
+  }
+
+  // Then truncate by bytes
+  const resultBytes = Buffer.byteLength(result, 'utf-8');
+  if (resultBytes > maxLength) {
+    if (preserveEnding) {
+      const keepStart = Math.floor(maxLength * 0.7);
+      const keepEnd = maxLength - keepStart - 50; // space for message
+      // Binary search for the right start length
+      let left = 0;
+      let right = result.length;
+      while (left < right) {
+        const mid = Math.floor((left + right + 1) / 2);
+        if (Buffer.byteLength(result.slice(0, mid), 'utf-8') <= keepStart) {
+          left = mid;
+        } else {
+          right = mid - 1;
+        }
+      }
+      const startPart = result.slice(0, left);
+
+      // Binary search for the right end length
+      left = 0;
+      right = result.length;
+      while (left < right) {
+        const mid = Math.floor((left + right + 1) / 2);
+        if (Buffer.byteLength(result.slice(-mid), 'utf-8') <= keepEnd) {
+          left = mid;
+        } else {
+          right = mid - 1;
+        }
+      }
+      const endPart = result.slice(-left);
+
+      result = startPart + '\n... (truncated) ...\n' + endPart;
+    } else {
+      // Binary search for the right length
+      let left = 0;
+      let right = result.length;
+      while (left < right) {
+        const mid = Math.floor((left + right + 1) / 2);
+        if (Buffer.byteLength(result.slice(0, mid), 'utf-8') <= maxLength) {
+          left = mid;
+        } else {
+          right = mid - 1;
+        }
+      }
+      result = result.slice(0, left) + '\n... (truncated)';
+    }
   }
 
   return { content: result, truncated: true };
@@ -449,6 +513,7 @@ export {
   persistLargeOutput,
   cleanupToolOutputs,
   TOOL_OUTPUT_DIR,
+  type TruncationConfig,
 };
 
 // Re-export schema types

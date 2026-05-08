@@ -8,8 +8,20 @@ import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 
+// Shell operators that must be denied for security
+const DENIED_OPERATORS = [';', '&&', '||', '|', '>', '>>', '<', '<<', '`', '$('];
+
+function containsDeniedOperator(command: string): boolean {
+  return DENIED_OPERATORS.some((op) => command.includes(op));
+}
+
 const BashParamsSchema = z.object({
-  command: z.string().describe('The command to execute'),
+  command: z
+    .string()
+    .describe('The command to execute')
+    .refine((cmd) => !containsDeniedOperator(cmd), {
+      message: 'Shell operators are not allowed for security reasons',
+    }),
   workdir: z.string().optional().describe('Working directory for command execution'),
   timeout: z.number().optional().describe('Timeout in milliseconds (default: 120000)'),
   description: z
@@ -55,6 +67,7 @@ export const bashTool = defineTool<typeof BashParamsSchema, BashResult>({
 Usage:
 - Use for terminal operations like git, npm, docker, etc.
 - All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. AVOID using 'cd <directory> && <command>' patterns - use workdir instead.
+- Shell operators (;, &&, ||, |, >, <, etc.) are blocked for security reasons.
 - Output is truncated if it exceeds 2000 lines or 50KB.
 - Default timeout is 2 minutes.`,
 
@@ -66,6 +79,13 @@ Usage:
   },
 
   async execute(params, context): Promise<ToolResult<BashResult>> {
+    // Validate no shell operators (belt and suspenders)
+    if (containsDeniedOperator(params.command)) {
+      return {
+        success: false,
+        error: 'Shell operators are not allowed for security reasons',
+      };
+    }
     const workdir = params.workdir
       ? path.isAbsolute(params.workdir)
         ? params.workdir
