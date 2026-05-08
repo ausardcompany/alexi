@@ -228,8 +228,8 @@ jobs:
         if: steps.retry_check.outputs.should_skip != 'true'
         run: |
           echo "Installing Kilo CLI..."
-          npm install -g @kilocode/cli
-          echo "[OK] Kilo CLI version: $(kilo --version)"
+          npm run build
+          echo "[OK] Alexi CLI built"
 
       - name: Install project dependencies
         if: steps.retry_check.outputs.should_skip != 'true'
@@ -415,7 +415,7 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             echo "=== Attempt $ATTEMPT of $MAX_RETRIES ==="
 
-            kilo run "$PROMPT" \
+            node dist/cli/program.js run "$PROMPT" --title "CI Auto-Fix" \
               --auto \
               -m "sap-ai-core/anthropic--claude-4.6-opus" \
               --variant max \
