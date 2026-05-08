@@ -15,12 +15,7 @@ import {
 
 // Supported image formats for reading
 const SUPPORTED_IMAGE_FORMATS = ['png', 'jpg', 'jpeg', 'gif', 'webp'] as const;
-const SUPPORTED_IMAGE_MIME_TYPES = [
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-] as const;
+const _SUPPORTED_IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 
 // Common image extensions (for detection)
 const IMAGE_EXTENSIONS = [

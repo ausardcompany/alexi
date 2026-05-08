@@ -1,9 +1,9 @@
 /**
  * CodeSearch Tool - DEPRECATED
- * 
+ *
  * This tool has been removed upstream as it was broken.
  * Search functionality is now handled by grep, glob, and other search tools.
- * 
+ *
  * This stub exists only for backward compatibility.
  * The tool will return an error if called.
  */

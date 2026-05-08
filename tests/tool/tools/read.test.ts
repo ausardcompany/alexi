@@ -139,16 +139,17 @@ describe('Read Tool', () => {
       const testFile = path.join(tempDir, 'lines.txt');
       await fs.writeFile(testFile, 'line 1\nline 2\nline 3\nline 4\nline 5');
 
+      // offset is 0-indexed: offset 3 means start from array index 3 (line 4)
       const result = await readTool.execute({ filePath: testFile, offset: 3 }, context);
 
       expect(result.success).toBe(true);
       if (result.data?.type === 'file') {
-        expect(result.data.content).toContain('3: line 3');
         expect(result.data.content).toContain('4: line 4');
         expect(result.data.content).toContain('5: line 5');
         expect(result.data.content).not.toContain('1: line 1');
         expect(result.data.content).not.toContain('2: line 2');
-        expect(result.data.offset).toBe(3);
+        expect(result.data.content).not.toContain('3: line 3');
+        expect(result.data.offset).toBe(4); // returned offset is 1-indexed
       }
     });
 
@@ -171,16 +172,18 @@ describe('Read Tool', () => {
       const testFile = path.join(tempDir, 'lines.txt');
       await fs.writeFile(testFile, 'line 1\nline 2\nline 3\nline 4\nline 5');
 
+      // offset is 0-indexed: offset 2 means start from array index 2 (line 3)
       const result = await readTool.execute({ filePath: testFile, offset: 2, limit: 2 }, context);
 
       expect(result.success).toBe(true);
       if (result.data?.type === 'file') {
-        expect(result.data.content).toContain('2: line 2');
         expect(result.data.content).toContain('3: line 3');
+        expect(result.data.content).toContain('4: line 4');
         expect(result.data.content).not.toContain('1: line 1');
-        expect(result.data.content).not.toContain('4: line 4');
+        expect(result.data.content).not.toContain('2: line 2');
+        expect(result.data.content).not.toContain('5: line 5');
         expect(result.data.shownLines).toBe(2);
-        expect(result.data.offset).toBe(2);
+        expect(result.data.offset).toBe(3); // returned offset is 1-indexed
       }
     });
 

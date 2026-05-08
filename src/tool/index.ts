@@ -513,7 +513,6 @@ export {
   persistLargeOutput,
   cleanupToolOutputs,
   TOOL_OUTPUT_DIR,
-  type TruncationConfig,
 };
 
 // Re-export schema types
