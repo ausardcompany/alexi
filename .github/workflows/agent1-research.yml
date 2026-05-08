@@ -46,9 +46,12 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          curl -fsSL https://kilo.ai/install.sh | bash
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          # Download native Linux binary from GitHub releases
+          KILO_VERSION="7.2.40"
+          curl -fsSL "https://github.com/Kilo-Org/kilocode/releases/download/v${KILO_VERSION}/kilo-linux-x64.tar.gz" -o /tmp/kilo.tar.gz
+          tar -xzf /tmp/kilo.tar.gz -C /tmp
+          sudo mv /tmp/kilo /usr/local/bin/kilo
+          chmod +x /usr/local/bin/kilo
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
