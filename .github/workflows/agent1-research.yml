@@ -52,8 +52,8 @@ jobs:
 
       - name: Configure Kilo provider
         run: |
-          printf '{"$schema":"https://app.kilo.ai/config.json","model":"sap-ai-core/anthropic--claude-4.6-opus","permission":"allow"}\n' > kilo.json
-          echo "[OK] kilo.json created"
+          printf '{"permission":"allow"}\n' > kilo.json
+          echo "[OK] kilo.json created (minimal)"
 
       - name: Prepare research context
         id: context
