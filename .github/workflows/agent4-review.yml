@@ -173,7 +173,7 @@ jobs:
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
           # Use built-in local-review command for code review
-          kilo run --command "local-review" "" \
+          kilo run "Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR." \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

@@ -133,16 +133,9 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Debug: verify provider detection
-          echo "[DEBUG] AICORE_SERVICE_KEY length: ${#AICORE_SERVICE_KEY}"
-          echo "[DEBUG] AICORE_SERVICE_KEY first char: ${AICORE_SERVICE_KEY:0:1}"
-          kilo auth list 2>&1 || true
-          kilo models sap-ai-core 2>&1 | head -3 || true
-          echo "[DEBUG] --- end debug ---"
-
           TASK_PROMPT=$(cat /tmp/research-prompt.txt)
 
-          kilo run --command "speckit.specify" "$TASK_PROMPT" \
+          kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

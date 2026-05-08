@@ -240,7 +240,7 @@ jobs:
           TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
           echo "Running Kilo CLI (speckit.implement) ..."
-          kilo run --command "speckit.implement" "$TASK_PROMPT" \
+          kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

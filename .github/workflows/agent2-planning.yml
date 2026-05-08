@@ -152,19 +152,19 @@ jobs:
           TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
 
           # Run plan + tasks + issues in sequence via speckit
-          kilo run --command "speckit.plan" "$TASK_PROMPT" \
+          kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             > planning-output.log 2>&1
 
-          kilo run --command "speckit.tasks" "" \
+          kilo run "Break the plan into implementable tasks and save to tasks.md" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             >> planning-output.log 2>&1
 
-          kilo run --command "speckit.taskstoissues" "" \
+          kilo run "Create GitHub issues from tasks.md using gh issue create" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
