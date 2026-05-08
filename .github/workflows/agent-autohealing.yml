@@ -268,13 +268,7 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          cat .github/prompts/agent-autohealing-system.md > /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          echo "---" >> /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          cat /tmp/healing-prompt.txt >> /tmp/full-prompt.txt
-
-          PROMPT=$(cat /tmp/full-prompt.txt)
+          PROMPT=$(cat /tmp/healing-prompt.txt)
 
           kilo run "$PROMPT" \
             --auto \

@@ -119,25 +119,18 @@ jobs:
 
           echo "[OK] Research prompt built"
 
-      - name: Run Agent 1 (Research)
+      - name: Run Agent 1 (Specify)
         id: research
         continue-on-error: true
         timeout-minutes: 15
         env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
         run: |
-          # Combine system prompt + task prompt into one message file
-          cat .github/prompts/agent1-research-system.md > /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          echo "---" >> /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          cat /tmp/research-prompt.txt >> /tmp/full-prompt.txt
+          TASK_PROMPT=$(cat /tmp/research-prompt.txt)
 
-          PROMPT=$(cat /tmp/full-prompt.txt)
-
-          kilo run "$PROMPT" \
+          kilo run --command "speckit.specify" "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

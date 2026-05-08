@@ -232,16 +232,10 @@ jobs:
           AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         run: |
-          cat .github/prompts/agent3-implement-system.md > /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          echo "---" >> /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          cat /tmp/implement-prompt.txt >> /tmp/full-prompt.txt
+          TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
-          PROMPT=$(cat /tmp/full-prompt.txt)
-
-          echo "Running Kilo CLI to implement feature..."
-          kilo run "$PROMPT" \
+          echo "Running Kilo CLI (speckit.implement) ..."
+          kilo run --command "speckit.implement" "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

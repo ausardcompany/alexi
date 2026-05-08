@@ -144,19 +144,26 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cat .github/prompts/agent2-planning-system.md > /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          echo "---" >> /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          cat /tmp/planning-prompt.txt >> /tmp/full-prompt.txt
+          TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
 
-          PROMPT=$(cat /tmp/full-prompt.txt)
-
-          kilo run "$PROMPT" \
+          # Run plan + tasks + issues in sequence via speckit
+          kilo run --command "speckit.plan" "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             > planning-output.log 2>&1
+
+          kilo run --command "speckit.tasks" "" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --variant max \
+            >> planning-output.log 2>&1
+
+          kilo run --command "speckit.taskstoissues" "" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --variant max \
+            >> planning-output.log 2>&1
 
           EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT

@@ -167,15 +167,8 @@ jobs:
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
-          cat .github/prompts/agent4-review-system.md > /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          echo "---" >> /tmp/full-prompt.txt
-          echo "" >> /tmp/full-prompt.txt
-          cat /tmp/review-prompt.txt >> /tmp/full-prompt.txt
-
-          PROMPT=$(cat /tmp/full-prompt.txt)
-
-          kilo run "$PROMPT" \
+          # Use built-in local-review command for code review
+          kilo run --command "local-review" "" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
