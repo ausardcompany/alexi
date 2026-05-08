@@ -324,7 +324,7 @@ export class McpClientManager {
   async callTool(
     serverName: string,
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown> | undefined | null
   ): Promise<{ success: boolean; result?: unknown; error?: string }> {
     const connection = this.connections.get(serverName);
 
@@ -339,7 +339,7 @@ export class McpClientManager {
     try {
       const result = await connection.client.callTool({
         name: toolName,
-        arguments: args,
+        arguments: args ?? {},
       });
 
       // Extract text content from result
