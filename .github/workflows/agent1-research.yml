@@ -154,20 +154,19 @@ jobs:
         if: steps.research.outputs.success == 'true'
         run: |
           TODAY="${{ steps.context.outputs.date }}"
-          RESEARCH_FILE=".github/research/${TODAY}-research.md"
 
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
-          if [ -f "$RESEARCH_FILE" ]; then
-            git add .github/research/
-            git commit -m "research: analyze trends and feature gaps ($TODAY) [alexi-bot]" || echo "[INFO] No changes"
+          # spec-kit writes to .specify/ — commit any generated specs
+          git add .specify/ .github/research/ 2>/dev/null || true
+
+          if ! git diff --cached --quiet; then
+            git commit -m "spec: analyze trends ($TODAY) [alexi-bot]"
             git push origin master
-            echo "[OK] Research committed: $RESEARCH_FILE"
+            echo "[OK] Spec committed"
           else
-            echo "[WARN] Research file not found: $RESEARCH_FILE"
-            # Check if any research file was created
-            ls -la .github/research/ 2>/dev/null || true
+            echo "[INFO] No spec changes to commit"
           fi
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
