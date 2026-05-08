@@ -49,9 +49,10 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm run build
+          npm install -g @kilocode/cli
           npm ci
-          echo "[OK] Alexi CLI built"
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
 
       - name: Check if release needed
@@ -103,7 +104,8 @@ jobs:
           npm run typecheck && \
           npm run lint && \
           npm run format:check && \
-          npm run build && \
+          npm install -g @kilocode/cli
+          npm ci && \
           npm test
 
           if [ $? -eq 0 ]; then
@@ -211,7 +213,7 @@ jobs:
 
           TASK_PROMPT=$(cat /tmp/release-prompt.txt)
 
-          node dist/cli/program.js run "$TASK_PROMPT" --title "Agent 5 Release" \
+          kilo run "$TASK_PROMPT" --title "Agent 5 Release" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

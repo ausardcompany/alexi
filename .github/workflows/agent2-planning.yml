@@ -53,9 +53,10 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm run build
+          npm install -g @kilocode/cli
           npm ci
-          echo "[OK] Alexi CLI built"
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
 
       - name: Find latest research
@@ -148,19 +149,19 @@ jobs:
           TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
 
           # Run plan + tasks + issues in sequence via speckit
-          node dist/cli/program.js run "$TASK_PROMPT" --title "Agent 2 Planning" \
+          kilo run "$TASK_PROMPT" --title "Agent 2 Planning" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             > planning-output.log 2>&1
 
-          node dist/cli/program.js run "Break the plan into implementable tasks and save to tasks.md" --title "Agent 2 Tasks" \
+          kilo run "Break the plan into implementable tasks and save to tasks.md" --title "Agent 2 Tasks" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             >> planning-output.log 2>&1
 
-          node dist/cli/program.js run "Create GitHub issues from tasks.md using gh issue create" --title "Agent 2 Issues" \
+          kilo run "Create GitHub issues from tasks.md using gh issue create" --title "Agent 2 Issues" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

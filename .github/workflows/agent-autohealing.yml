@@ -197,9 +197,10 @@ jobs:
       - name: Install Kilo CLI and dependencies
         if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
         run: |
-          npm run build
+          npm install -g @kilocode/cli
           npm ci
-          echo "[OK] Alexi CLI built"
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
 
       # ─── Step 6: Build healing prompt ──────────────────────────────────────────
@@ -271,7 +272,7 @@ jobs:
         run: |
           PROMPT=$(cat /tmp/healing-prompt.txt)
 
-          node dist/cli/program.js run "$PROMPT" --title "Autohealing" \
+          kilo run "$PROMPT" --title "Autohealing" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

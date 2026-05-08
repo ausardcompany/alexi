@@ -133,8 +133,9 @@ jobs:
       - name: Install Kilo CLI and project dependencies
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          npm run build
-          echo "[OK] Alexi CLI built"
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
           npm ci
 
           echo "[OK] Project dependencies installed"
@@ -205,7 +206,8 @@ jobs:
             echo "   - \`npm run lint\` — no lint errors"
             echo "   - \`npm run format:check\` — proper formatting"
             echo "   - \`npm test\` — all tests pass"
-            echo "   - \`npm run build\` — builds successfully"
+            echo "   - \`npm install -g @kilocode/cli
+          npm ci\` — builds successfully"
             echo ""
             echo "### Hard constraints"
             echo ""
@@ -236,7 +238,7 @@ jobs:
           TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
           echo "Running Kilo CLI (speckit.implement) ..."
-          node dist/cli/program.js run "$TASK_PROMPT" --title "Agent 3 Implement" \
+          kilo run "$TASK_PROMPT" --title "Agent 3 Implement" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
@@ -282,7 +284,8 @@ jobs:
           run_check "typecheck" "npm run typecheck"
           run_check "lint" "npm run lint"
           run_check "format" "npm run format:check"
-          run_check "build" "npm run build"
+          run_check "build" "npm install -g @kilocode/cli
+          npm ci"
           run_check "tests" "npm test"
 
           echo -e "$RESULTS" > verify-results.txt

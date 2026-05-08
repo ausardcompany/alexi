@@ -71,8 +71,9 @@ jobs:
       - name: Install Kilo CLI
         run: |
           echo "Installing Kilo CLI..."
-          npm run build
-          echo "[OK] Alexi CLI built"
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
       - name: Install project dependencies
         run: |
@@ -86,12 +87,12 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
         run: |
           echo "Verifying Kilo CLI and SAP AI Core configuration..."
-          echo "[OK] Alexi CLI built"
+          echo "[OK] Kilo CLI: $(kilo --version)"
           echo "[OK] SAP AI Core credentials configured via environment variables"
           echo "     Resource Group: $AICORE_RESOURCE_GROUP"
           echo "     Service Key: [configured]"
           echo "[OK] Available SAP AI Core models:"
-          node dist/cli/program.js models sap-ai-core 2>/dev/null | head -10 || echo "     (model listing requires auth)"
+          kilo models sap-ai-core 2>/dev/null | head -10 || echo "     (model listing requires auth)"
       
       - name: Analyze changed files
         id: analyze
@@ -511,7 +512,7 @@ jobs:
             # Use 'kilo run --auto' for autonomous non-interactive mode
             # -m selects model via SAP AI Core provider
             # --auto approves all tool permissions automatically
-            node dist/cli/program.js run "$PROMPT" --title "Documentation Update" \
+            kilo run "$PROMPT" --title "Documentation Update" \
               --auto \
               -m "sap-ai-core/anthropic--claude-4.6-opus" \
               --variant max \

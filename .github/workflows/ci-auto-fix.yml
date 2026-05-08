@@ -228,8 +228,9 @@ jobs:
         if: steps.retry_check.outputs.should_skip != 'true'
         run: |
           echo "Installing Kilo CLI..."
-          npm run build
-          echo "[OK] Alexi CLI built"
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
       - name: Install project dependencies
         if: steps.retry_check.outputs.should_skip != 'true'
@@ -317,9 +318,11 @@ jobs:
               *Format*|*format*)
                 run_check "format" "npm run format:check" ;;
               *Test*|*test*)
-                run_check "test" "npm run build && npm run test:coverage" ;;
+                run_check "test" "npm install -g @kilocode/cli
+          npm ci && npm run test:coverage" ;;
               *Build*|*build*)
-                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
+                run_check "build" "npm install -g @kilocode/cli
+          npm ci && node dist/cli/program.js --help" ;;
             esac
           done
 
@@ -384,7 +387,8 @@ jobs:
             echo "   - For type errors: \`npm run typecheck\`"
             echo "   - For format failures: \`npm run format:check\`"
             echo "   - For test failures: \`npm test\`"
-            echo "   - For build failures: \`npm run build\`"
+            echo "   - For build failures: \`npm install -g @kilocode/cli
+          npm ci\`"
             echo ""
             echo "Focus **only** on the checks listed above. Do not touch unrelated code."
           } > ci-fix-prompt.md
@@ -415,7 +419,7 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             echo "=== Attempt $ATTEMPT of $MAX_RETRIES ==="
 
-            node dist/cli/program.js run "$PROMPT" --title "CI Auto-Fix" \
+            kilo run "$PROMPT" --title "CI Auto-Fix" \
               --auto \
               -m "sap-ai-core/anthropic--claude-4.6-opus" \
               --variant max \
@@ -491,9 +495,11 @@ jobs:
               *Format*|*format*)
                 run_check "format" "npm run format:check" ;;
               *Test*|*test*)
-                run_check "test" "npm run build && npm run test:coverage" ;;
+                run_check "test" "npm install -g @kilocode/cli
+          npm ci && npm run test:coverage" ;;
               *Build*|*build*)
-                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
+                run_check "build" "npm install -g @kilocode/cli
+          npm ci && node dist/cli/program.js --help" ;;
             esac
           done
 

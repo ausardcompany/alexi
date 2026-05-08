@@ -65,9 +65,10 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm run build
+          npm install -g @kilocode/cli
           npm ci
-          echo "[OK] Alexi CLI built"
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
 
       - name: Run CI checks
@@ -93,7 +94,8 @@ jobs:
           run_check "typecheck" "npm run typecheck"
           run_check "lint" "npm run lint 2>&1 | grep -c 'error' | xargs -I{} test {} -eq 0"
           run_check "format" "npm run format:check"
-          run_check "build" "npm run build"
+          run_check "build" "npm install -g @kilocode/cli
+          npm ci"
           run_check "tests" "npm test"
 
           echo -e "$RESULTS" > check-results.txt
@@ -169,7 +171,7 @@ jobs:
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
           # Use built-in local-review command for code review
-          node dist/cli/program.js run "Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR." --title "Agent 4 Review" \
+          kilo run "Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR." --title "Agent 4 Review" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
