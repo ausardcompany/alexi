@@ -57,8 +57,8 @@ jobs:
 
       - name: Configure Kilo provider
         run: |
-          printf '{"permission":"allow"}\n' > kilo.json
-          echo "[OK] kilo.json created (minimal)"
+          printf '{"permission":"allow","experimental":{"titleModel":"sap-ai-core/anthropic--claude-3.5-sonnet"}}\n' > kilo.json
+          echo "[OK] kilo.json created"
 
       - name: Prepare research context
         id: context
