@@ -268,13 +268,18 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          PROMPT=$(cat /tmp/healing-prompt.txt)
+          cat .github/prompts/agent-autohealing-system.md > /tmp/full-prompt.txt
+          echo "" >> /tmp/full-prompt.txt
+          echo "---" >> /tmp/full-prompt.txt
+          echo "" >> /tmp/full-prompt.txt
+          cat /tmp/healing-prompt.txt >> /tmp/full-prompt.txt
+
+          PROMPT=$(cat /tmp/full-prompt.txt)
 
           kilo run "$PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
-            --system-prompt "$(cat .github/prompts/agent-autohealing-system.md)" \
             > healing-output.log 2>&1
 
           EXIT_CODE=$?

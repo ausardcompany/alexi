@@ -514,7 +514,7 @@ jobs:
             kilo run "$PROMPT" \
               --auto \
               -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
+              --variant max \
               > bot-output.log 2>&1
             
             BOT_EXIT_CODE=$?
