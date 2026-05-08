@@ -132,20 +132,7 @@ jobs:
         run: |
           TASK_PROMPT=$(cat /tmp/research-prompt.txt)
 
-          # Debug: test SAP AI Core connectivity directly
-          AUTH_URL=$(echo "$AICORE_SERVICE_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])")
-          CLIENT_ID=$(echo "$AICORE_SERVICE_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['clientid'])")
-          echo "[DEBUG] Auth URL: $AUTH_URL"
-          echo "[DEBUG] Client ID length: ${#CLIENT_ID}"
-
-          # Try to get token
-          TOKEN=$(curl -s -X POST "$AUTH_URL/oauth/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$(echo "$AICORE_SERVICE_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['clientsecret'])")" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token','FAILED')[:20])")
-          echo "[DEBUG] Token prefix: ${TOKEN}..."
-
-          # Now run kilo
+          
           kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
@@ -167,7 +154,7 @@ jobs:
           tail -50 research-output.log
 
       - name: Commit research results
-        if: steps.research.outputs.success == 'true'
+        if: always()
         run: |
           TODAY="${{ steps.context.outputs.date }}"
 
