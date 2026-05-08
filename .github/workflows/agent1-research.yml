@@ -50,6 +50,28 @@ jobs:
           npm ci
           echo "[OK] Kilo CLI version: $(kilo --version)"
 
+      - name: Configure Kilo provider
+        env:
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+        run: |
+          cat > kilo.json << 'EOF'
+          {
+            "$schema": "https://app.kilo.ai/config.json",
+            "provider": {
+              "sap-ai-core": {
+                "options": {
+                  "serviceKey": "{env:AICORE_SERVICE_KEY}",
+                  "resourceGroup": "{env:AICORE_RESOURCE_GROUP}"
+                }
+              }
+            },
+            "model": "sap-ai-core/anthropic--claude-4.6-opus",
+            "permission": "allow"
+          }
+          EOF
+          echo "[OK] Kilo provider configured (SAP AI Core)"
+
       - name: Prepare research context
         id: context
         run: |
@@ -124,9 +146,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 15
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TASK_PROMPT=$(cat /tmp/research-prompt.txt)
 
