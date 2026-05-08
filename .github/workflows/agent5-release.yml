@@ -49,14 +49,14 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm run build
+          npm install -g @kilocode/cli
           npm ci
-          echo "[OK] Alexi CLI built"
+          echo "[OK] Kilo CLI: $(kilo --version)"
 
       - name: Configure Kilo provider
         run: |
-          printf '{"$schema":"https://app.kilo.ai/config.json","provider":{"sap-ai-core":{"options":{"serviceKey":"{env:AICORE_SERVICE_KEY}","resourceGroup":"{env:AICORE_RESOURCE_GROUP}"}}},"model":"sap-ai-core/anthropic--claude-4.6-opus","permission":"allow"}\n' > kilo.json
-          echo "[OK] Kilo provider configured (SAP AI Core)"
+          printf '{"$schema":"https://app.kilo.ai/config.json","model":"sap-ai-core/anthropic--claude-4.6-opus","permission":"allow"}\n' > kilo.json
+          echo "[OK] kilo.json created"
 
       - name: Check if release needed
         id: check
@@ -107,7 +107,7 @@ jobs:
           npm run typecheck && \
           npm run lint && \
           npm run format:check && \
-          npm run build && \
+          npm install -g @kilocode/cli && \
           npm test
 
           if [ $? -eq 0 ]; then
@@ -215,7 +215,7 @@ jobs:
 
           TASK_PROMPT=$(cat /tmp/release-prompt.txt)
 
-          node dist/cli/program.js run "$TASK_PROMPT" \
+          kilo run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
