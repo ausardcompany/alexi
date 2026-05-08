@@ -137,8 +137,7 @@ jobs:
 
           kilo run "$TASK_PROMPT" \
             --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
+            -m "sap-ai-core/anthropic--claude-3.5-sonnet" \
             > research-output.log 2>&1
 
           EXIT_CODE=$?
