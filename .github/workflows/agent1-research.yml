@@ -46,7 +46,9 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm install -g @kilocode/cli
+          curl -fsSL https://kilo.ai/install.sh | bash
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
