@@ -49,9 +49,9 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm install -g @kilocode/cli
+          npm run build
           npm ci
-          echo "[OK] Kilo CLI version: $(kilo --version)"
+          echo "[OK] Alexi CLI built"
 
       - name: Configure Kilo provider
         run: |
@@ -215,7 +215,7 @@ jobs:
 
           TASK_PROMPT=$(cat /tmp/release-prompt.txt)
 
-          kilo run "$TASK_PROMPT" \
+          node dist/cli/program.js run "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

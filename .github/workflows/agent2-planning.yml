@@ -53,9 +53,9 @@ jobs:
 
       - name: Install Kilo CLI and dependencies
         run: |
-          npm install -g @kilocode/cli
+          npm run build
           npm ci
-          echo "[OK] Kilo CLI version: $(kilo --version)"
+          echo "[OK] Alexi CLI built"
 
       - name: Configure Kilo provider
         run: |
@@ -152,19 +152,19 @@ jobs:
           TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
 
           # Run plan + tasks + issues in sequence via speckit
-          kilo run --command "speckit.plan" "$TASK_PROMPT" \
+          node dist/cli/program.js run --command "speckit.plan" "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             > planning-output.log 2>&1
 
-          kilo run --command "speckit.tasks" "" \
+          node dist/cli/program.js run --command "speckit.tasks" "" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
             >> planning-output.log 2>&1
 
-          kilo run --command "speckit.taskstoissues" "" \
+          node dist/cli/program.js run --command "speckit.taskstoissues" "" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

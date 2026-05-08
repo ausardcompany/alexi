@@ -133,8 +133,8 @@ jobs:
       - name: Install Kilo CLI and project dependencies
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          npm install -g @kilocode/cli
-          echo "[OK] Kilo CLI version: $(kilo --version)"
+          npm run build
+          echo "[OK] Alexi CLI built"
           npm ci
 
       - name: Configure Kilo provider
@@ -240,7 +240,7 @@ jobs:
           TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
           echo "Running Kilo CLI (speckit.implement) ..."
-          kilo run --command "speckit.implement" "$TASK_PROMPT" \
+          node dist/cli/program.js run --command "speckit.implement" "$TASK_PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \

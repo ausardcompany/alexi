@@ -197,7 +197,7 @@ jobs:
       - name: Install Kilo CLI and dependencies
         if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
         run: |
-          npm install -g @kilocode/cli
+          npm run build
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
@@ -275,7 +275,7 @@ jobs:
         run: |
           PROMPT=$(cat /tmp/healing-prompt.txt)
 
-          kilo run "$PROMPT" \
+          node dist/cli/program.js run "$PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
