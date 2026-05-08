@@ -1,0 +1,184 @@
+name: "Agent 1: Research & Trends"
+
+on:
+  schedule:
+    # Run daily at 04:00 UTC (before planning at 06:00)
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      focus_area:
+        description: 'Focus area (tools, agents, mcp, dx, all)'
+        required: false
+        type: choice
+        options:
+          - all
+          - tools
+          - agents
+          - mcp
+          - dx
+          - performance
+        default: all
+
+concurrency:
+  group: agent1-research
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  research:
+    name: Analyze Trends
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Kilo CLI and dependencies
+        run: |
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI version: $(kilo --version)"
+
+      - name: Prepare research context
+        id: context
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          echo "date=$TODAY" >> $GITHUB_OUTPUT
+
+          FOCUS="${{ inputs.focus_area || 'all' }}"
+          echo "focus=$FOCUS" >> $GITHUB_OUTPUT
+
+          # Ensure research directory exists
+          mkdir -p .github/research
+
+          # Get last research date
+          LAST_RESEARCH=$(ls -1 .github/research/*-research.md 2>/dev/null | sort | tail -1 || echo "")
+          if [ -n "$LAST_RESEARCH" ]; then
+            echo "last_research=$LAST_RESEARCH" >> $GITHUB_OUTPUT
+            echo "[INFO] Last research: $LAST_RESEARCH"
+          else
+            echo "last_research=" >> $GITHUB_OUTPUT
+            echo "[INFO] No previous research found"
+          fi
+
+      - name: Build research prompt
+        run: |
+          TODAY="${{ steps.context.outputs.date }}"
+          FOCUS="${{ steps.context.outputs.focus }}"
+          LAST_RESEARCH="${{ steps.context.outputs.last_research }}"
+
+          {
+            echo "# Research Task — $TODAY"
+            echo ""
+            echo "Focus area: **$FOCUS**"
+            echo ""
+
+            if [ -n "$LAST_RESEARCH" ]; then
+              echo "## Previous Research"
+              echo ""
+              echo "Last research was saved to: $LAST_RESEARCH"
+              echo "Read it to understand what was already analyzed and focus on NEW developments."
+              echo ""
+            fi
+
+            echo "## Instructions"
+            echo ""
+            echo "1. Use \`gh api\` to check recent commits (last 7 days) in these repos:"
+            echo "   - Kilo-Org/kilocode"
+            echo "   - anthropics/claude-code"
+            echo "   - cline/cline"
+            echo "   - aider-ai/aider"
+            echo "   - continuedev/continue"
+            echo ""
+            echo "2. Identify significant new features, patterns, or improvements"
+            echo ""
+            echo "3. Compare against our current codebase (explore src/ to see what we have)"
+            echo ""
+            echo "4. Save your findings to: \`.github/research/${TODAY}-research.md\`"
+            echo ""
+            echo "5. The file MUST include:"
+            echo "   - Executive Summary (5-10 bullet points)"
+            echo "   - Detailed Findings with priority/effort/category"
+            echo "   - Actionable Recommendations"
+            echo ""
+            echo "Use the format described in .github/prompts/agent1-research-system.md"
+            echo ""
+            echo "IMPORTANT: Save the file using the write tool. Do not skip this step."
+          } > /tmp/research-prompt.txt
+
+          echo "[OK] Research prompt built"
+
+      - name: Run Agent 1 (Research)
+        id: research
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PROMPT=$(cat /tmp/research-prompt.txt)
+
+          kilo run "$PROMPT" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --system-prompt "$(cat .github/prompts/agent1-research-system.md)" \
+            > research-output.log 2>&1
+
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Research completed"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Research failed with exit code $EXIT_CODE"
+          fi
+
+          echo "=== Output (last 50 lines) ==="
+          tail -50 research-output.log
+
+      - name: Commit research results
+        if: steps.research.outputs.success == 'true'
+        run: |
+          TODAY="${{ steps.context.outputs.date }}"
+          RESEARCH_FILE=".github/research/${TODAY}-research.md"
+
+          git config user.name "alexi-bot[bot]"
+          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+
+          if [ -f "$RESEARCH_FILE" ]; then
+            git add .github/research/
+            git commit -m "research: analyze trends and feature gaps ($TODAY) [alexi-bot]" || echo "[INFO] No changes"
+            git push origin master
+            echo "[OK] Research committed: $RESEARCH_FILE"
+          else
+            echo "[WARN] Research file not found: $RESEARCH_FILE"
+            # Check if any research file was created
+            ls -la .github/research/ 2>/dev/null || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent1-research-${{ github.run_id }}
+          path: |
+            research-output.log
+            .github/research/
+          retention-days: 30
+          if-no-files-found: ignore

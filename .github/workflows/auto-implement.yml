@@ -1,4 +1,4 @@
-name: Auto-Implement Features
+name: "Agent 3: Auto-Implement"
 
 on:
   schedule:
@@ -238,6 +238,7 @@ jobs:
           kilo run "$PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --system-prompt "$(cat .github/prompts/agent3-implement-system.md)" \
             > kilo-output.log 2>&1
 
           KILO_EXIT=$?

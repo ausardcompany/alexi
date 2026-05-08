@@ -1,0 +1,218 @@
+name: "Agent 4: Code Review & QA"
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+
+concurrency:
+  group: agent4-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  review:
+    name: Code Review & QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only review PRs from bot branches (auto-implement or auto-fix)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.user.login == 'github-actions[bot]' ||
+       contains(github.event.pull_request.head.ref, 'auto/'))
+
+    steps:
+      - name: Determine PR info
+        id: pr_info
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+          else
+            PR_NUMBER="${{ inputs.pr_number }}"
+            BRANCH=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "PR #$PR_NUMBER on branch: $BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr_info.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Kilo CLI and dependencies
+        run: |
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI version: $(kilo --version)"
+
+      - name: Run CI checks
+        id: checks
+        continue-on-error: true
+        run: |
+          RESULTS=""
+          ALL_PASSED=true
+
+          run_check() {
+            local name="$1"
+            local cmd="$2"
+            if eval "$cmd" > /tmp/check-$name.log 2>&1; then
+              echo "[PASS] $name"
+              RESULTS="$RESULTS\n- ✅ $name: passed"
+            else
+              echo "[FAIL] $name"
+              RESULTS="$RESULTS\n- ❌ $name: failed"
+              ALL_PASSED=false
+            fi
+          }
+
+          run_check "typecheck" "npm run typecheck"
+          run_check "lint" "npm run lint 2>&1 | grep -c 'error' | xargs -I{} test {} -eq 0"
+          run_check "format" "npm run format:check"
+          run_check "build" "npm run build"
+          run_check "tests" "npm test"
+
+          echo -e "$RESULTS" > check-results.txt
+
+          if [ "$ALL_PASSED" = true ]; then
+            echo "all_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "all_passed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build review prompt
+        run: |
+          PR_NUMBER="${{ steps.pr_info.outputs.pr_number }}"
+          BRANCH="${{ steps.pr_info.outputs.branch }}"
+          ALL_PASSED="${{ steps.checks.outputs.all_passed }}"
+
+          {
+            echo "# Code Review Task — PR #$PR_NUMBER"
+            echo ""
+            echo "Branch: \`$BRANCH\`"
+            echo ""
+            echo "## CI Check Results"
+            echo ""
+            cat check-results.txt
+            echo ""
+
+            if [ "$ALL_PASSED" != "true" ]; then
+              echo "## Failed Check Logs"
+              echo ""
+              for logfile in /tmp/check-*.log; do
+                CHECK_NAME=$(basename "$logfile" .log | sed 's/check-//')
+                if [ -f "$logfile" ] && [ "$(wc -l < "$logfile")" -gt 0 ]; then
+                  echo "### $CHECK_NAME"
+                  echo '```'
+                  tail -30 "$logfile"
+                  echo '```'
+                  echo ""
+                fi
+              done
+            fi
+
+            echo "## Your Task"
+            echo ""
+            echo "1. Review the code changes on this branch vs master:"
+            echo "   - Run: \`git diff master...HEAD\` to see all changes"
+            echo "   - Run: \`git log master..HEAD --oneline\` for commits"
+            echo ""
+
+            if [ "$ALL_PASSED" != "true" ]; then
+              echo "2. **Fix all CI failures** first"
+              echo "3. Then review code quality using the checklist"
+            else
+              echo "2. Review code quality using the checklist in the system prompt"
+              echo "3. Check test coverage — add tests if needed"
+            fi
+
+            echo ""
+            echo "4. Commit any fixes with: \`git commit -m \"fix(review): [description] [alexi-bot]\"\`"
+            echo "5. Push fixes: \`git push origin $BRANCH\`"
+            echo "6. Post review summary using: \`gh pr comment $PR_NUMBER --body-file /tmp/review.md\`"
+          } > /tmp/review-prompt.txt
+
+      - name: Run Agent 4 (Review)
+        id: review
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "alexi-bot[bot]"
+          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+
+          PROMPT=$(cat /tmp/review-prompt.txt)
+
+          kilo run "$PROMPT" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --system-prompt "$(cat .github/prompts/agent4-review-system.md)" \
+            > review-output.log 2>&1
+
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
+
+          tail -50 review-output.log
+
+      - name: Final verification
+        id: final_check
+        if: always()
+        run: |
+          echo "Running final CI verification..."
+          ALL_PASSED=true
+
+          npm run typecheck 2>/dev/null || ALL_PASSED=false
+          npm run lint 2>&1 | grep -q "0 errors" || ALL_PASSED=false
+          npm run format:check 2>/dev/null || ALL_PASSED=false
+          npm test 2>/dev/null || ALL_PASSED=false
+
+          if [ "$ALL_PASSED" = true ]; then
+            echo "verified=true" >> $GITHUB_OUTPUT
+            echo "[OK] All checks pass after review"
+          else
+            echo "verified=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Some checks still failing"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent4-review-${{ github.run_id }}
+          path: |
+            review-output.log
+            check-results.txt
+          retention-days: 14
+          if-no-files-found: ignore

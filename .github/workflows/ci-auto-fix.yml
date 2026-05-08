@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows:
       - 'CI'
-      - 'Auto-Implement Features'
+      - 'Agent 3: Auto-Implement'
       - 'Documentation Update'
       - 'Security Scanning'
     types: [completed]
