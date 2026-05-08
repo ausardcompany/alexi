@@ -273,6 +273,7 @@ jobs:
           kilo run "$PROMPT" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --variant max \
             --system-prompt "$(cat .github/prompts/agent-autohealing-system.md)" \
             > healing-output.log 2>&1
 
