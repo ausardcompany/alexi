@@ -64,7 +64,6 @@ function validateCommand(command: string): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
-
 /**
  * Processes carriage returns in command output.
  * Handles Windows-style line endings and progress indicators that use \r.

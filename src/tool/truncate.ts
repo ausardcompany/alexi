@@ -34,11 +34,7 @@ export const TruncationConfigSchema = z.object({
     .record(z.string(), z.number().positive())
     .optional()
     .describe('Per-tool character limits'),
-  contextLimit: z
-    .number()
-    .positive()
-    .optional()
-    .describe('Maximum context size before truncation'),
+  contextLimit: z.number().positive().optional().describe('Maximum context size before truncation'),
 });
 
 export class Truncator {
@@ -60,7 +56,7 @@ export class Truncator {
    */
   truncateOutput(output: string, toolName?: string): { content: string; truncated: boolean } {
     const limit = toolName
-      ? this.config.toolLimits[toolName] ?? this.config.defaultLimit
+      ? (this.config.toolLimits[toolName] ?? this.config.defaultLimit)
       : this.config.defaultLimit;
 
     if (output.length <= limit) {

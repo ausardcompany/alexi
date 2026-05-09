@@ -10,7 +10,11 @@ import { z } from 'zod';
  * Uses explicit null to distinguish between "use default" and "unset"
  */
 export const AgentConfigSchema = z.object({
-  steps: z.number().nullable().optional().describe('Maximum steps for agent execution. Null means use default.'),
+  steps: z
+    .number()
+    .nullable()
+    .optional()
+    .describe('Maximum steps for agent execution. Null means use default.'),
   enabled: z.boolean().optional().describe('Whether the agent is enabled'),
   maxTokens: z.number().optional().describe('Maximum tokens for agent responses'),
   temperature: z.number().min(0).max(2).optional().describe('Temperature for agent responses'),

@@ -71,7 +71,6 @@ async function readFileStreaming(
   });
 }
 
-
 export const readTool = defineTool<typeof ReadParamsSchema, ReadResult>({
   name: 'read',
   description: `Read a file or directory from the local filesystem. Returns contents with line numbers.

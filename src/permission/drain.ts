@@ -3,7 +3,7 @@
  * Auto-resolve pending permissions now fully covered by approved or denied rules.
  * When the user approves/denies a rule on subagent A, sibling subagent B's
  * pending permission for the same pattern resolves or rejects automatically.
- * 
+ *
  * Also handles stale permission request cleanup to prevent stuck approvals.
  */
 
