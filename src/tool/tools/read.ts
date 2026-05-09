@@ -54,7 +54,7 @@ async function readFileStreaming(
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     const stream = createReadStream(filePath, {
-      encoding: null, // Read as Buffer for proper UTF-8 handling
+      encoding: undefined, // Read as Buffer for proper UTF-8 handling
       start: options?.offset ? options.offset - 1 : undefined,
       end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
     });

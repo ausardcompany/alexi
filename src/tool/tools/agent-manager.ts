@@ -46,12 +46,12 @@ Actions:
   parameters: AgentManagerParamsSchema,
 
   permission: {
-    action: 'manage-agents',
+    action: 'admin',
     getResource: (params) => params.action,
   },
 
   async execute(params, _context): Promise<ToolResult<AgentManagerResult>> {
-    const { action, sessionId, config } = params;
+    const { action, sessionId, config: _config } = params;
 
     try {
       switch (action) {
