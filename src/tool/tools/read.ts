@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import * as fs from 'fs/promises';
+import { createReadStream } from 'fs';
 import * as path from 'path';
 import { defineTool, truncateOutput, MAX_LINES, type ToolResult } from '../index.js';
 import {
@@ -42,6 +43,34 @@ const fileEncodings = new Map<string, EncodingInfo>();
 export function getFileEncoding(filePath: string): EncodingInfo | undefined {
   return fileEncodings.get(filePath);
 }
+
+/**
+ * Read file with streaming for better UTF-8 handling and memory efficiency
+ */
+async function readFileStreaming(
+  filePath: string,
+  options?: { offset?: number; limit?: number }
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const stream = createReadStream(filePath, {
+      encoding: null, // Read as Buffer for proper UTF-8 handling
+      start: options?.offset ? options.offset - 1 : undefined,
+      end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
+    });
+
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      resolve(buffer);
+    });
+    stream.on('error', reject);
+
+    // Ensure stream is destroyed on consumer teardown
+    stream.once('close', () => stream.destroy());
+  });
+}
+
 
 export const readTool = defineTool<typeof ReadParamsSchema, ReadResult>({
   name: 'read',
@@ -88,7 +117,8 @@ Usage:
       }
 
       // Read file
-      const buffer = await fs.readFile(filePath);
+      // Use streaming for better UTF-8 handling
+      const buffer = await readFileStreaming(filePath);
 
       // Check for binary first
       if (isBinaryFile(buffer)) {

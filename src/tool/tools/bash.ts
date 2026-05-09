@@ -28,6 +28,44 @@ interface BashResult {
 const DEFAULT_TIMEOUT = 120000; // 2 minutes
 
 /**
+ * Shell operators that are denied for security reasons
+ */
+const DENIED_OPERATORS = [';', '&&', '||', '|', '>', '>>', '<', '<<', '`', '$('];
+
+/**
+ * Patterns that are denied for security reasons
+ */
+const DENIED_PATTERNS = [/;\s*rm\s/i, /\|\s*bash/i, />\s*\/dev\//i];
+
+/**
+ * Validates command for dangerous shell operators and patterns
+ */
+function validateCommand(command: string): { valid: boolean; error?: string } {
+  // Check for denied operators
+  for (const op of DENIED_OPERATORS) {
+    if (command.includes(op)) {
+      return {
+        valid: false,
+        error: `Shell operator "${op}" is not allowed for security reasons. Please run commands separately.`,
+      };
+    }
+  }
+
+  // Check for denied patterns
+  for (const pattern of DENIED_PATTERNS) {
+    if (pattern.test(command)) {
+      return {
+        valid: false,
+        error: 'Command pattern not allowed for security reasons.',
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+
+/**
  * Processes carriage returns in command output.
  * Handles Windows-style line endings and progress indicators that use \r.
  */
@@ -66,6 +104,15 @@ Usage:
   },
 
   async execute(params, context): Promise<ToolResult<BashResult>> {
+    // Validate command for dangerous operators
+    const validation = validateCommand(params.command);
+    if (!validation.valid) {
+      return {
+        success: false,
+        error: validation.error,
+      };
+    }
+
     const workdir = params.workdir
       ? path.isAbsolute(params.workdir)
         ? params.workdir
