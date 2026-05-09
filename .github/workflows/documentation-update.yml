@@ -599,6 +599,16 @@ jobs:
           
           # --- 2. Push any local commits (including auto-commits from the agent) ---
           BRANCH="${{ steps.pr_data.outputs.branch }}"
+
+          # Pull remote changes (rebase) to avoid push rejection when the remote
+          # has been updated by another job or the Kilo agent itself.
+          git fetch origin "$BRANCH"
+          git rebase "origin/$BRANCH" || {
+            echo "[WARN] Rebase failed, attempting merge strategy instead"
+            git rebase --abort 2>/dev/null || true
+            git pull --no-edit origin "$BRANCH"
+          }
+
           LOCAL_HEAD=$(git rev-parse HEAD)
           REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
           
