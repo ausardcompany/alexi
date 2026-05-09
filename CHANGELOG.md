@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updated write tool logic to improve code formatting and readability in BOM handling for UTF-8 files. The conditional that strips a leading BOM from content is now formatted for clarity and robustness.
-
+- Agent manager tool permission action changed from `manage-agents` to `admin` for consistency with the unified permission action taxonomy.
+- Read tool streaming now uses `encoding: undefined` instead of `encoding: null` for correct TypeScript typing with `createReadStream` options.
+- Truncator nullish coalescing expression in `truncateOutput` now uses explicit parentheses for operator precedence clarity.
 
 ### Fixed
 - Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes.
+- Fixed TypeScript type error in read tool where `encoding: null` was incompatible with the `createReadStream` options type signature.
+- Fixed unused variable lint error in agent manager tool by prefixing destructured `config` with underscore (`_config`).
+- Resolved formatting inconsistencies flagged by Prettier across agent config schema, bash tool, read tool, truncation config, and permission drain module.
 
 
 ## [0.3.1] - 2026-03-21
