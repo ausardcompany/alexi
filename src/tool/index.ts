@@ -370,6 +370,8 @@ export function defineTool<TParams extends z.ZodType, TResult>(
 class ToolRegistry {
   private tools: Map<string, Tool<any, any>> = new Map();
   private dynamicTools: Map<string, Tool<any, any>> = new Map();
+  private indexingTools: Map<string, Tool<any, any>> = new Map();
+  private indexingInitialized = false;
 
   register<TParams extends z.ZodType, TResult>(tool: Tool<TParams, TResult>): void {
     this.tools.set(tool.name, tool);
@@ -386,6 +388,34 @@ class ToolRegistry {
     return this.dynamicTools.delete(name);
   }
 
+  /**
+   * Register an indexing tool (semantic search, etc.)
+   * These tools are initialized asynchronously to prevent startup failures
+   */
+  registerIndexing<TParams extends z.ZodType, TResult>(tool: Tool<TParams, TResult>): void {
+    this.indexingTools.set(tool.name, tool);
+  }
+
+  /**
+   * Initialize indexing tools asynchronously
+   * Failures won't block the registry
+   */
+  async initializeIndexingAsync(): Promise<void> {
+    try {
+      // Load semantic search and other indexing tools here
+      // For now, this is a placeholder for future implementation
+      this.indexingInitialized = true;
+
+      // Merge indexing tools into main registry if successful
+      for (const [name, tool] of this.indexingTools) {
+        this.tools.set(name, tool);
+      }
+    } catch (error) {
+      console.warn('Indexing tools failed to initialize:', error);
+      // Continue without indexing tools - non-fatal
+    }
+  }
+
   get(name: string): Tool<any, any> | undefined {
     return this.tools.get(name) || this.dynamicTools.get(name);
   }
@@ -400,6 +430,13 @@ class ToolRegistry {
     parameters: Record<string, unknown>;
   }> {
     return this.list().map((t) => t.toFunctionSchema());
+  }
+
+  /**
+   * Check if indexing tools are ready
+   */
+  isIndexingReady(): boolean {
+    return this.indexingInitialized;
   }
 }
 

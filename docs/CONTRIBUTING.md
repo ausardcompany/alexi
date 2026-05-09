@@ -176,11 +176,13 @@ graph LR
    ```
 
 6. **Unused Variables**: Remove or prefix with underscore
-   ```typescript
-   function processData(_context: Context, data: Data): Result {
-     return transform(data);
-   }
-   ```
+    ```typescript
+    function processData(_context: Context, data: Data): Result {
+      return transform(data);
+    }
+    // Also applies to destructured variables
+    const { action, sessionId, config: _config } = params;
+    ```
 
 7. **Graceful Degradation**: Handle optional dependencies gracefully
    ```typescript
@@ -203,12 +205,45 @@ graph LR
    ```
 
 8. **Zod Schema Naming**: Use private schema constants to avoid ESLint naming conflicts
-   ```typescript
-   // Good
-   const _ToolIDSchema = z.string().describe('Unique identifier for a tool');
-   export type ToolID = z.infer<typeof _ToolIDSchema>;
-   ```
-   
+    ```typescript
+    // Good
+    const _ToolIDSchema = z.string().describe('Unique identifier for a tool');
+    export type ToolID = z.infer<typeof _ToolIDSchema>;
+    ```
+
+9. **Node.js Stream Options**: Use `undefined` instead of `null` for optional stream parameters
+    ```typescript
+    // Good - compatible with TypeScript strict mode
+    const stream = createReadStream(filePath, {
+      encoding: undefined, // Read as Buffer
+    });
+    // Bad - causes type errors with strict null checks
+    const stream = createReadStream(filePath, {
+      encoding: null,
+    });
+    ```
+
+10. **Operator Precedence**: Use explicit parentheses for nullish coalescing with property access
+    ```typescript
+    // Good - explicit grouping for clarity
+    const limit = toolName
+      ? (this.config.toolLimits[toolName] ?? this.config.defaultLimit)
+      : this.config.defaultLimit;
+    // Avoid - ambiguous precedence
+    const limit = toolName
+      ? this.config.toolLimits[toolName] ?? this.config.defaultLimit
+      : this.config.defaultLimit;
+    ```
+
+11. **Permission Actions**: Use standard permission action names from the unified taxonomy
+    ```typescript
+    // Standard permission actions: 'read', 'write', 'execute', 'admin'
+    permission: {
+      action: 'admin',
+      getResource: (params) => params.action,
+    },
+    ```
+    
 ### File Organization
 
 ```
@@ -231,10 +266,24 @@ src/
 
 ### Code Style
 - Use 2 spaces for indentation
-- Maximum line length: 100 characters
+- Maximum line length: 100 characters (Prettier `printWidth`)
 - Use single quotes for strings
-- Include trailing commas
+- Include trailing commas (ES5 style)
 - Use semicolons
+- LF line endings (enforced by Prettier)
+- Zod schema method chains that exceed the line width must break to one method per line:
+  ```typescript
+  // When chain fits within 100 chars
+  contextLimit: z.number().positive().optional().describe('Maximum context size before truncation'),
+
+  // When chain exceeds line width, break per method
+  steps: z
+    .number()
+    .nullable()
+    .optional()
+    .describe('Maximum steps for agent execution. Null means use default.'),
+  ```
+- No double blank lines between declarations (single blank line maximum)
 
 ### Documentation Comments
 Use JSDoc for functions and classes:
@@ -477,6 +526,14 @@ getResource: (params, context) => {
   return path.join(context?.workdir || process.cwd(), params.filePath);
 }
 ```
+
+### CI Autohealing
+The CI pipeline includes an autohealing system that automatically resolves type errors, lint errors, and formatting issues. When autohealing triggers:
+- Commits are tagged with `[autohealing]` in the message
+- Formatting fixes are tagged with `[alexi-bot]`
+- Changes follow standard coding conventions (unused variable prefixing, Prettier formatting, TypeScript strict compatibility)
+
+Developers should review autohealing commits to understand patterns that trigger fixes (e.g., `encoding: null` vs `encoding: undefined`, missing underscore prefixes on unused destructured variables).
 
 ### Contributing to Automation
 When modifying workflows:
