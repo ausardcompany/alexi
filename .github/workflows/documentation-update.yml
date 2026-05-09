@@ -613,6 +613,13 @@ jobs:
           REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
           
           if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+            # Fetch latest remote changes and rebase local commits on top
+            git fetch origin "$BRANCH"
+            git rebase "origin/$BRANCH" || {
+              echo "[WARN] Rebase conflict detected, attempting merge strategy"
+              git rebase --abort
+              git pull --no-edit origin "$BRANCH"
+            }
             git push origin "$BRANCH"
             echo "[OK] Documentation changes pushed to $BRANCH"
           else
