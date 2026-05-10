@@ -600,30 +600,36 @@ jobs:
           # --- 2. Push any local commits (including auto-commits from the agent) ---
           BRANCH="${{ steps.pr_data.outputs.branch }}"
 
+          # Stash any remaining unstaged/untracked changes so rebase can proceed
+          STASHED=false
+          if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            git stash push --include-untracked -m "ci: temp stash for rebase"
+            STASHED=true
+            echo "[INFO] Stashed unstaged/untracked changes before rebase"
+          fi
+
           # Pull remote changes (rebase) to avoid push rejection when the remote
           # has been updated by another job or the Kilo agent itself.
           git fetch origin "$BRANCH"
           git rebase "origin/$BRANCH" || {
             echo "[WARN] Rebase failed, attempting merge strategy instead"
             git rebase --abort 2>/dev/null || true
-            git pull --no-edit origin "$BRANCH"
+            git pull --rebase=false --no-edit origin "$BRANCH"
           }
 
           LOCAL_HEAD=$(git rev-parse HEAD)
           REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
           
           if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
-            # Fetch latest remote changes and rebase local commits on top
-            git fetch origin "$BRANCH"
-            git rebase "origin/$BRANCH" || {
-              echo "[WARN] Rebase conflict detected, attempting merge strategy"
-              git rebase --abort
-              git pull --no-edit origin "$BRANCH"
-            }
             git push origin "$BRANCH"
             echo "[OK] Documentation changes pushed to $BRANCH"
           else
             echo "[INFO] No new commits to push — branch is up to date"
+          fi
+
+          # Restore stashed changes (non-critical, best-effort)
+          if [ "$STASHED" = "true" ]; then
+            git stash pop 2>/dev/null || echo "[WARN] Could not restore stash (may conflict)"
           fi
       
       - name: Post skip comment

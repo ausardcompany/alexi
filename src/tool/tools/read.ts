@@ -86,7 +86,15 @@ Usage:
 
   permission: {
     action: 'read',
-    getResource: (params) => params.filePath,
+    getResource: (params, context) => {
+      // Return worktree-relative path for permission pattern matching
+      // This prevents permission bypass with absolute paths
+      const absolutePath = path.isAbsolute(params.filePath)
+        ? params.filePath
+        : path.join(context?.workdir || process.cwd(), params.filePath);
+      const workdir = context?.workdir || process.cwd();
+      return path.relative(workdir, absolutePath);
+    },
   },
 
   async execute(params, context): Promise<ToolResult<ReadResult>> {
