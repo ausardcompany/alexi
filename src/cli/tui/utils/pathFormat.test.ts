@@ -8,7 +8,7 @@ import {
   formatPathRelativeToSession,
   formatPathForDisplay,
   abbreviateHomePath,
-} from './pathFormat';
+} from './pathFormat.js';
 
 describe('formatPathRelativeToSession', () => {
   it('formats paths within session directory as relative', () => {

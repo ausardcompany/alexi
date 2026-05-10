@@ -4,7 +4,7 @@
  * From PR #26617
  */
 
-import { defineSkill, type SkillDefinition } from './index.js';
+import { type SkillDefinition } from './index.js';
 import { Flag } from '../flag/index.js';
 
 export const customizeAlexiSkill: SkillDefinition = {
