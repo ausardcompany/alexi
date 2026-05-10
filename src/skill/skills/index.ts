@@ -4,6 +4,7 @@
  */
 
 import { registerSkill, type Skill, defineSkill } from '../index.js';
+import { customizeAlexiSkill, isCustomizeSkillEnabled } from '../customize-alexi.js';
 
 // ============ Code Quality Skills ============
 
@@ -535,6 +536,8 @@ export const builtInSkills: Skill[] = [
   explainerSkill,
   migrationSkill,
   alexiConfigSkill,
+  // Add customize skill if enabled
+  ...(isCustomizeSkillEnabled() ? [defineSkill(customizeAlexiSkill)] : []),
 ];
 
 /**

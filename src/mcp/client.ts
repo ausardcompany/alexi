@@ -82,12 +82,33 @@ export class McpClientManager {
 
       // Fetch available tools
       const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as McpToolInfo['inputSchema'],
-        serverName: config.name,
-      }));
+      connection.tools = (toolsResult.tools || []).map((tool) => {
+        // Tolerate malformed schemas - use permissive fallback if parsing fails
+        let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
+        try {
+          // Validate schema structure
+          if (!inputSchema || typeof inputSchema !== 'object') {
+            throw new Error('Invalid schema structure');
+          }
+        } catch (error) {
+          console.warn(
+            `MCP tool schema parsing failed for ${tool.name} from ${config.name}, using permissive fallback:`,
+            error
+          );
+          inputSchema = {
+            type: 'object',
+            properties: {},
+            additionalProperties: true,
+          };
+        }
+
+        return {
+          name: tool.name,
+          description: tool.description,
+          inputSchema,
+          serverName: config.name,
+        };
+      });
 
       connection.status = 'connected';
       console.log(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
@@ -300,12 +321,33 @@ export class McpClientManager {
 
     try {
       const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as McpToolInfo['inputSchema'],
-        serverName: connection.config.name,
-      }));
+      connection.tools = (toolsResult.tools || []).map((tool) => {
+        // Tolerate malformed schemas - use permissive fallback if parsing fails
+        let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
+        try {
+          // Validate schema structure
+          if (!inputSchema || typeof inputSchema !== 'object') {
+            throw new Error('Invalid schema structure');
+          }
+        } catch (error) {
+          console.warn(
+            `MCP tool schema parsing failed for ${tool.name} from ${connection.config.name}, using permissive fallback:`,
+            error
+          );
+          inputSchema = {
+            type: 'object',
+            properties: {},
+            additionalProperties: true,
+          };
+        }
+
+        return {
+          name: tool.name,
+          description: tool.description,
+          inputSchema,
+          serverName: connection.config.name,
+        };
+      });
       connection.toolsCachedAt = Date.now();
 
       // Update cache

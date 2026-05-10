@@ -103,10 +103,19 @@ Usage:
       content: params.prompt,
     });
 
-    // TODO: When full session/permission integration is added, inherit edit, bash, and MCP
-    // restrictions from the calling agent to prevent privilege escalation. Sub-agents must
-    // inherit restrictions so they cannot bypass parent agent permissions.
-    // See upstream commit for implementation reference.
+    // TODO: When full session/permission integration is added, use deriveSubagentSessionPermission
+    // to inherit edit, bash, and MCP restrictions from the calling agent to prevent privilege
+    // escalation. Sub-agents must inherit restrictions so they cannot bypass parent agent permissions.
+    //
+    // Example integration (requires session context in ToolContext):
+    // import { deriveSubagentSessionPermission } from '../../agent/subagent-permissions.js';
+    // const subagentPermission = deriveSubagentSessionPermission({
+    //   parentSessionPermission: context.session.permission,
+    //   parentAgent: context.agent,
+    //   subagent: agent,
+    // });
+    //
+    // See src/agent/subagent-permissions.ts for implementation.
 
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
