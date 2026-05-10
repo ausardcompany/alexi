@@ -38,8 +38,7 @@ describe('deriveSubagentSessionPermission', () => {
     // Should deny write and shell since parent doesn't have them
     const writeDeny = result.find((r) => r.tools?.includes('write') && r.decision === 'deny');
     const shellDeny = result.find(
-      (r) =>
-        (r.tools?.includes('shell') || r.tools?.includes('bash')) && r.decision === 'deny'
+      (r) => (r.tools?.includes('shell') || r.tools?.includes('bash')) && r.decision === 'deny'
     );
 
     expect(writeDeny).toBeDefined();
@@ -156,9 +155,7 @@ describe('deriveSubagentSessionPermission', () => {
 
     // Should not have todowrite/task denies
     expect(
-      resultWithPermission.find(
-        (r) => r.tools?.includes('todowrite') && r.decision === 'deny'
-      )
+      resultWithPermission.find((r) => r.tools?.includes('todowrite') && r.decision === 'deny')
     ).toBeUndefined();
     expect(
       resultWithPermission.find((r) => r.tools?.includes('task') && r.decision === 'deny')
@@ -213,8 +210,6 @@ describe('deriveSubagentSessionPermission', () => {
     expect(
       result.find((r) => r.tools?.includes('todowrite') && r.decision === 'deny')
     ).toBeDefined();
-    expect(
-      result.find((r) => r.tools?.includes('task') && r.decision === 'deny')
-    ).toBeDefined();
+    expect(result.find((r) => r.tools?.includes('task') && r.decision === 'deny')).toBeDefined();
   });
 });

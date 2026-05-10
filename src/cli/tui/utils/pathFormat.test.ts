@@ -4,7 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import * as path from 'path';
-import { formatPathRelativeToSession, formatPathForDisplay, abbreviateHomePath } from './pathFormat';
+import {
+  formatPathRelativeToSession,
+  formatPathForDisplay,
+  abbreviateHomePath,
+} from './pathFormat';
 
 describe('formatPathRelativeToSession', () => {
   it('formats paths within session directory as relative', () => {

@@ -49,11 +49,7 @@ export function deriveSubagentSessionPermission(input: {
         });
       }
       // If shell/bash is not in allowed tools, deny it
-      if (
-        !allowedTools.has('shell') &&
-        !allowedTools.has('bash') &&
-        !allowedTools.has('*')
-      ) {
+      if (!allowedTools.has('shell') && !allowedTools.has('bash') && !allowedTools.has('*')) {
         parentAgentDenies.push({
           id: 'parent-deny-shell',
           tools: ['shell', 'bash'],
@@ -78,9 +74,7 @@ export function deriveSubagentSessionPermission(input: {
 
   // Filter session permissions for deny rules and external_directory
   const sessionDeniesAndExternal = input.parentSessionPermission.filter(
-    (rule) =>
-      rule.decision === 'deny' ||
-      (rule.tools && rule.tools.includes('external_directory'))
+    (rule) => rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'))
   );
 
   // Build default denies for task and todowrite if not permitted

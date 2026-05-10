@@ -32,10 +32,7 @@ export function formatPathRelativeToSession(
 /**
  * Format multiple paths relative to the session directory
  */
-export function formatPathsRelativeToSession(
-  paths: string[],
-  sessionDirectory: string
-): string[] {
+export function formatPathsRelativeToSession(paths: string[], sessionDirectory: string): string[] {
   return paths.map((p) => formatPathRelativeToSession(p, sessionDirectory));
 }
 
@@ -55,10 +52,7 @@ export function abbreviateHomePath(filePath: string): string {
  * - Uses relative path if within session directory
  * - Abbreviates home directory otherwise
  */
-export function formatPathForDisplay(
-  absolutePath: string,
-  sessionDirectory: string
-): string {
+export function formatPathForDisplay(absolutePath: string, sessionDirectory: string): string {
   const relativePath = formatPathRelativeToSession(absolutePath, sessionDirectory);
 
   // If we got a relative path, use it
