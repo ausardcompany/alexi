@@ -30,7 +30,11 @@ export async function processImage(
   mimeType: string,
   options: ImageProcessingOptions = {}
 ): Promise<ProcessedImage> {
-  const { maxWidth = 2048, maxHeight = 2048, maxSizeBytes = 5 * 1024 * 1024 } = options;
+  const {
+    maxWidth: _maxWidth = 2048,
+    maxHeight: _maxHeight = 2048,
+    maxSizeBytes = 5 * 1024 * 1024,
+  } = options;
 
   // Check if processing is needed
   if (input.length <= maxSizeBytes) {
