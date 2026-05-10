@@ -584,7 +584,7 @@ jobs:
         run: |
           # --- 1. Handle any unstaged/untracked documentation changes ---
           # Stage only the files the workflow intended to update (never unmanaged files)
-          DOCS_TO_UPDATE="${{ steps.scope.outputs.docs_to_update }}"
+          DOCS_TO_UPDATE="${​{ steps.scope.outputs.docs_to_update }}"
           for f in $DOCS_TO_UPDATE; do
             [ -f "$f" ] && git add "$f"
           done
@@ -596,6 +596,62 @@ jobs:
           else
             echo "[INFO] No unstaged documentation changes to commit"
           fi
+          
+          # --- 2. Push any local commits (including auto-commits from the agent) ---
+          BRANCH="${​{ steps.pr_data.outputs.branch }}"
+
+          # Stash any unstaged/untracked changes so rebase/pull can proceed cleanly
+          if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            git stash push --include-untracked -m "ci: temp stash for push"
+            STASHED=true
+          else
+            STASHED=false
+          fi
+
+          # Save the doc commit SHA before any rebase/reset
+          DOC_COMMIT=$(git rev-parse HEAD)
+
+          # Pull remote changes (rebase) to avoid push rejection when the remote
+          # has been updated by another job or the Kilo agent itself.
+          git fetch origin "$BRANCH"
+
+          REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+
+          if [ "$DOC_COMMIT" = "$REMOTE_HEAD" ]; then
+            echo "[INFO] No new commits to push — branch is up to date"
+            [ "$STASHED" = "true" ] && git stash pop 2>/dev/null || true
+            exit 0
+          fi
+
+          # Try rebase first
+          if git rebase "origin/$BRANCH"; then
+            echo "[OK] Rebase succeeded"
+          else
+            echo "[WARN] Rebase failed, resetting and re-applying docs on remote HEAD"
+            git rebase --abort 2>/dev/null || true
+
+            # Strategy: reset to remote, then cherry-pick our doc commits
+            # accepting our version on any conflicts (docs are authoritative)
+            git reset --hard "origin/$BRANCH"
+
+            # Cherry-pick each local commit with -X theirs to resolve conflicts
+            # in favour of our (doc-generating) version
+            for sha in $(git log --reverse --format="%H" "origin/$BRANCH".."$DOC_COMMIT" 2>/dev/null); do
+              git cherry-pick -X theirs "$sha" || {
+                # If cherry-pick still fails, accept all changes and continue
+                git add -A
+                git cherry-pick --continue --no-edit 2>/dev/null || true
+              }
+            done
+            echo "[OK] Re-applied documentation commits on top of remote"
+          fi
+
+          # Restore stashed changes (if any)
+          [ "$STASHED" = "true" ] && git stash pop 2>/dev/null || true
+
+          # Push
+          git push origin "$BRANCH"
+          echo "[OK] Documentation changes pushed to $BRANCH"
           
           # --- 2. Push any local commits (including auto-commits from the agent) ---
           BRANCH="${{ steps.pr_data.outputs.branch }}"
