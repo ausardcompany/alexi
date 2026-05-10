@@ -99,7 +99,6 @@ export class McpClientManager {
           inputSchema = {
             type: 'object',
             properties: {},
-            additionalProperties: true,
           };
         }
 
@@ -338,7 +337,6 @@ export class McpClientManager {
           inputSchema = {
             type: 'object',
             properties: {},
-            additionalProperties: true,
           };
         }
 
