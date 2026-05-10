@@ -26,9 +26,7 @@ export function deriveSubagentSessionPermission(input: {
   subagent: Agent;
 }): PermissionRule[] {
   const canTask = input.subagent.tools?.includes('task') ?? false;
-  const canTodo =
-    input.subagent.tools?.includes('todowrite') ||
-    !input.subagent.disabledTools?.includes('todowrite');
+  const canTodo = input.subagent.tools?.includes('todowrite') ?? false;
 
   // Extract parent agent deny rules
   // Note: In Alexi, agent permissions are expressed through tools/disabledTools
