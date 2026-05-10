@@ -600,26 +600,34 @@ jobs:
           # --- 2. Push any local commits (including auto-commits from the agent) ---
           BRANCH="${{ steps.pr_data.outputs.branch }}"
 
+          # Stash any unstaged/untracked changes so rebase/pull can proceed cleanly
+          git stash --include-untracked || true
+
           # Pull remote changes (rebase) to avoid push rejection when the remote
           # has been updated by another job or the Kilo agent itself.
           git fetch origin "$BRANCH"
           git rebase "origin/$BRANCH" || {
             echo "[WARN] Rebase failed, attempting merge strategy instead"
             git rebase --abort 2>/dev/null || true
-            git pull --no-edit origin "$BRANCH"
+            git pull --no-rebase --no-edit origin "$BRANCH"
           }
+
+          # Restore stashed changes (if any)
+          git stash pop 2>/dev/null || true
 
           LOCAL_HEAD=$(git rev-parse HEAD)
           REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
           
           if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
             # Fetch latest remote changes and rebase local commits on top
+            git stash --include-untracked || true
             git fetch origin "$BRANCH"
             git rebase "origin/$BRANCH" || {
               echo "[WARN] Rebase conflict detected, attempting merge strategy"
               git rebase --abort
-              git pull --no-edit origin "$BRANCH"
+              git pull --no-rebase --no-edit origin "$BRANCH"
             }
+            git stash pop 2>/dev/null || true
             git push origin "$BRANCH"
             echo "[OK] Documentation changes pushed to $BRANCH"
           else
