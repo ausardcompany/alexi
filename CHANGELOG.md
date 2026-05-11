@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.17] - 2026-05-11
+
+### Dependencies
+- Bump `@typescript-eslint/parser` from 8.59.1 to 8.59.2 (#305)
+- Bump `react` from 19.2.5 to 19.2.6 (#303)
+- Bump `@commitlint/cli` from 20.5.3 to 21.0.0 (#308)
+- Bump `lint-staged` from 16.4.0 to 17.0.4 (#306)
+- Bump `ink` from 7.0.1 to 7.0.2 (#309)
+- Bump `puppeteer` from 24.42.0 to 24.43.1 (#307)
+- Bump `hono` from 4.12.16 to 4.12.18 (#304)
+- Bump `@inquirer/prompts` from 8.4.2 to 8.4.3 (#302)
+- Bump `@types/node` in the dev-dependencies group (#301)
+
 ## [Unreleased]
 
 ### Changed
