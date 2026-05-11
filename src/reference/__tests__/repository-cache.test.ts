@@ -4,7 +4,6 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { RepositoryCacheService } from '../repository-cache.js';
-import * as path from 'path';
 
 describe('RepositoryCacheService', () => {
   let service: RepositoryCacheService;
