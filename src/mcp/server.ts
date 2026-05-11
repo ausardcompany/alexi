@@ -13,6 +13,10 @@ import {
 
 import { getToolRegistry, type ToolContext } from '../tool/index.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
+import { initReferenceService, getReferenceService } from '../reference/reference.js';
+import { initRepositoryCache } from '../reference/repository-cache.js';
+import * as os from 'os';
+import * as path from 'path';
 
 export class McpServerAdapter {
   private server: Server;
@@ -25,6 +29,16 @@ export class McpServerAdapter {
 
     // Register built-in tools
     registerBuiltInTools();
+
+    // Initialize reference services if not already initialized
+    if (!getReferenceService()) {
+      const cacheDir = path.join(os.homedir(), '.alexi', 'cache');
+      initRepositoryCache(cacheDir);
+      initReferenceService({
+        worktree: this.context.workdir,
+        directory: this.context.workdir,
+      });
+    }
 
     // Create MCP server
     this.server = new Server(
