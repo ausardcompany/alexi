@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { getReferenceService } from '../../reference/reference.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -135,6 +136,12 @@ Usage:
           success: false,
           error: 'Operation aborted',
         };
+      }
+
+      // Ensure reference is materialized if this is a reference path
+      const referenceService = getReferenceService();
+      if (referenceService) {
+        await referenceService.ensure(searchPath);
       }
 
       // Validate that searchPath is a directory, not a file

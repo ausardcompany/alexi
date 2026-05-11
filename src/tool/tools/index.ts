@@ -32,6 +32,7 @@ import { warpgrepTool } from './warpgrep.js';
 import { recallTool } from './recall.js';
 import { agentManagerTool } from './agent-manager.js';
 import { applyPatchTool } from './apply-patch.js';
+import { repoCloneTool } from './repo-clone.js';
 
 // All built-in tools
 export const builtInTools = [
@@ -64,6 +65,7 @@ export const builtInTools = [
   recallTool,
   agentManagerTool,
   applyPatchTool,
+  repoCloneTool,
 ] as const;
 
 /**
@@ -107,6 +109,7 @@ export {
   recallTool,
   agentManagerTool,
   applyPatchTool,
+  repoCloneTool,
 };
 
 // Re-export UI utilities from specific tools

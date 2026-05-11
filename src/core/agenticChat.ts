@@ -21,6 +21,10 @@ import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
 import { buildAssembledSystemPrompt } from '../agent/system.js';
+import { initReferenceService, getReferenceService } from '../reference/reference.js';
+import { initRepositoryCache } from '../reference/repository-cache.js';
+import * as os from 'os';
+import * as path from 'path';
 
 // Tool call from LLM response
 interface ToolCall {
@@ -202,6 +206,16 @@ export async function agenticChat(
   const effortConfig = getEffortConfig(options?.effort ?? DEFAULT_EFFORT);
   const maxIterations = options?.maxIterations ?? effortConfig.maxIterations;
   const workdir = options?.workdir ?? process.cwd();
+
+  // Initialize reference services if not already initialized
+  if (!getReferenceService()) {
+    const cacheDir = path.join(os.homedir(), '.alexi', 'cache');
+    initRepositoryCache(cacheDir);
+    initReferenceService({
+      worktree: workdir,
+      directory: workdir,
+    });
+  }
 
   // Configure permission manager to allow writes in the workdir
   const permissionManager = getPermissionManager();

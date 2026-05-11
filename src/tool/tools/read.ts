@@ -13,6 +13,7 @@ import {
   isBinaryFile,
   type EncodingInfo,
 } from '../encoded-io.js';
+import { getReferenceService } from '../../reference/reference.js';
 
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
@@ -103,6 +104,12 @@ Usage:
       : path.join(context.workdir, params.filePath);
 
     try {
+      // Ensure reference is materialized for reference paths
+      const referenceService = getReferenceService();
+      if (referenceService) {
+        await referenceService.ensure(path.dirname(filePath));
+      }
+
       const stat = await fs.stat(filePath);
 
       if (stat.isDirectory()) {

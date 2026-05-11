@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { getReferenceService } from '../../reference/reference.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -137,6 +138,12 @@ Usage:
           success: false,
           error: 'Operation aborted',
         };
+      }
+
+      // Ensure reference is materialized if this is a reference path
+      const referenceService = getReferenceService();
+      if (referenceService) {
+        await referenceService.ensure(searchPath);
       }
 
       const regex = new RegExp(params.pattern);

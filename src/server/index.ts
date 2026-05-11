@@ -22,6 +22,10 @@ import {
   SessionEnded,
   ErrorOccurred,
 } from '../bus/index.js';
+import { initReferenceService, getReferenceService } from '../reference/reference.js';
+import { initRepositoryCache } from '../reference/repository-cache.js';
+import * as os from 'os';
+import * as path from 'path';
 
 // Request schemas
 const ChatRequestSchema = z.object({
@@ -393,6 +397,16 @@ export async function startServer(
 
   // Register built-in tools
   registerBuiltInTools();
+
+  // Initialize reference services if not already initialized
+  if (!getReferenceService()) {
+    const cacheDir = path.join(os.homedir(), '.alexi', 'cache');
+    initRepositoryCache(cacheDir);
+    initReferenceService({
+      worktree: workdir,
+      directory: workdir,
+    });
+  }
 
   const app = createApp();
 
