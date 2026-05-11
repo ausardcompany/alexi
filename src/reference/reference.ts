@@ -1,6 +1,6 @@
 /**
  * Reference Service - Manages external repository references
- * 
+ *
  * This service enables tools to access external codebases safely through
  * configured references (local directories or git repositories).
  */

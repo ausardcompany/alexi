@@ -1,6 +1,6 @@
 /**
  * Repository Cache Service - Manages cloned reference repositories
- * 
+ *
  * This service prevents redundant cloning operations and provides
  * a consistent interface for accessing external code repositories.
  */
