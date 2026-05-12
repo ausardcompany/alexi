@@ -14,6 +14,7 @@ const TaskParamsSchema = z.object({
 });
 
 // Namespace for task tool utilities
+// eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace TaskTool {
   /** Alexi keeps delegation one level deep to avoid recursive subagent chains. */
   export function nestedTask(): false {

@@ -152,7 +152,7 @@ function pruneToolOutput(content: string | object, maxLength: number): string {
  */
 function pruneMessageToolOutput(message: Message): Message {
   // Check if this is a tool message with large content
-  if (message.role === 'tool' && message.content) {
+  if ((message.role as string) === 'tool' && message.content) {
     const contentLength =
       typeof message.content === 'string'
         ? message.content.length
