@@ -13,46 +13,44 @@ const TaskParamsSchema = z.object({
   task_id: z.string().optional().describe('Resume a previous task by ID'),
 });
 
-// Namespace for task tool utilities
-export namespace TaskTool {
-  /** Alexi keeps delegation one level deep to avoid recursive subagent chains. */
-  export function nestedTask(): false {
-    return false;
-  }
+// Task tool utility interfaces
+export interface SubagentOptions {
+  autoMode?: boolean;
+  inheritPermissions?: boolean;
+  maxDepth?: number;
+}
 
-  export function validate(agent: Agent, name: string): void {
+export interface SubagentConfig {
+  autoMode: boolean;
+  maxDepth: number;
+}
+
+// Task tool utilities
+export const TaskTool = {
+  /** Alexi keeps delegation one level deep to avoid recursive subagent chains. */
+  nestedTask(): false {
+    return false;
+  },
+
+  validate(agent: Agent, name: string): void {
     if (agent.mode === 'primary') {
       throw new Error(`Agent "${name}" is a primary agent and cannot be used as a subagent`);
     }
-  }
-
-  export interface SubagentOptions {
-    autoMode?: boolean;
-    inheritPermissions?: boolean;
-    maxDepth?: number;
-  }
-
-  export interface SubagentConfig {
-    autoMode: boolean;
-    maxDepth: number;
-  }
+  },
 
   /**
    * Build configuration for spawning a subagent.
    * Propagates relevant flags from parent context.
    */
-  export function buildSubagentConfig(
-    parentCtx: ToolContext,
-    options: SubagentOptions = {}
-  ): SubagentConfig {
+  buildSubagentConfig(_parentCtx: ToolContext, options: SubagentOptions = {}): SubagentConfig {
     // Note: context.flags would need to be added to ToolContext type
     // For now, we prepare the structure for future integration
     return {
       autoMode: options.autoMode ?? false, // Would be: parentCtx.flags?.auto ?? false
       maxDepth: 1, // Enforce single-level nesting
     };
-  }
-}
+  },
+};
 
 interface ToolContext {
   workdir: string;
