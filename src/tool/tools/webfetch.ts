@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
+import { normalizeUrls } from '../../utils/url.js';
 
 const WebFetchParamsSchema = z.object({
   url: z.string().describe('The URL to fetch content from'),
@@ -41,8 +42,10 @@ Usage:
 
   async execute(params, context): Promise<ToolResult<WebFetchResult>> {
     try {
+      // Normalize URL to prevent homograph attacks
+      let url = normalizeUrls(params.url).trim();
+
       // Parse and validate URL
-      let url = params.url;
       if (url.startsWith('http://')) {
         url = 'https://' + url.slice(7);
       }
@@ -50,7 +53,16 @@ Usage:
         url = 'https://' + url;
       }
 
-      const parsedUrl = new URL(url);
+      // Validate URL format
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(url);
+      } catch {
+        return {
+          success: false,
+          error: `Invalid URL format: ${params.url}`,
+        };
+      }
 
       const timeoutMs = Math.min(params.timeout ?? 30, 120) * 1000;
       const controller = new AbortController();
@@ -62,7 +74,7 @@ Usage:
 
       try {
         const response = await fetch(parsedUrl.toString(), {
-          signal: controller.signal,
+          signal: controller.signal ?? AbortSignal.timeout(30000),
           headers: {
             'User-Agent': 'SAP-Bot-Orchestrator/1.0',
             Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

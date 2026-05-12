@@ -25,7 +25,7 @@ import { definitionsTool } from './definitions.js';
 import { notebookReadTool, notebookEditTool } from './notebook.js';
 import { browserTool } from './browser.js';
 import { diagnosticsTool } from './diagnostics.js';
-import { codesearchTool } from './codesearch.js';
+// codesearch removed - use semantic search or grep instead
 import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
 import { warpgrepTool } from './warpgrep.js';
@@ -57,7 +57,7 @@ export const builtInTools = [
   notebookEditTool,
   browserTool,
   diagnosticsTool,
-  codesearchTool,
+  // codesearchTool removed - superseded by improved semantic search
   batchTool,
   storeMemoryTool,
   recallMemoryTool,
@@ -101,7 +101,7 @@ export {
   notebookEditTool,
   browserTool,
   diagnosticsTool,
-  codesearchTool,
+  // codesearchTool removed
   batchTool,
   storeMemoryTool,
   recallMemoryTool,

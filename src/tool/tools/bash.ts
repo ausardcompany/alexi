@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
+import { normalizeUrls } from '../../utils/url.js';
 
 const BashParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -62,7 +63,7 @@ Usage:
 
   permission: {
     action: 'execute',
-    getResource: (params) => params.command,
+    getResource: (params) => normalizeUrls(params.command),
   },
 
   async execute(params, context): Promise<ToolResult<BashResult>> {

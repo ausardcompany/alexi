@@ -26,7 +26,9 @@ interface WarpGrepResult {
 }
 
 const DESCRIPTION = `Search the codebase for relevant code using AI-powered semantic search.
-This tool performs intelligent multi-step code search and returns the most relevant code spans.
+This tool finds code snippets most relevant to the search query using semantic search.
+Returns matching content with file paths, line ranges, and relevance scores.
+Searches based on meaning rather than exact text matches.
 Use this for finding implementations, understanding code patterns, or locating specific functionality.
 Be specific and descriptive in your query for best results.`;
 

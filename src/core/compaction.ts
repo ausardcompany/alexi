@@ -16,6 +16,7 @@ export interface CompactionOptions {
   preserveLastN?: number; // Keep last N messages intact, default 4
   summaryMaxTokens?: number; // Max tokens for summary, default 2000
   triggerThreshold?: number; // Auto-trigger at this % of context, default 90
+  keepPruned?: boolean; // Keep pruned messages in history, default false
 }
 
 export interface CompactionResult {
@@ -33,6 +34,8 @@ export type LLMSummarizeFn = (prompt: string) => Promise<string>;
 const DEFAULT_PRESERVE_LAST_N = 4;
 const DEFAULT_SUMMARY_MAX_TOKENS = 2000;
 const DEFAULT_TRIGGER_THRESHOLD = 90; // percent
+const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
+const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
 const SUMMARY_PROMPT = `Summarize this conversation for context continuity. Extract and preserve:
 1. KEY DECISIONS: What was decided and why
@@ -127,6 +130,49 @@ function formatMessagesForPrompt(messages: Message[]): string {
 function createSummaryPrompt(messages: Message[]): string {
   const formattedMessages = formatMessagesForPrompt(messages);
   return SUMMARY_PROMPT.replace('{messages}', formattedMessages);
+}
+
+/**
+ * Prune tool output if it exceeds size threshold
+ */
+function pruneToolOutput(content: string | object, maxLength: number): string {
+  const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+
+  if (text.length <= maxLength) return text;
+
+  // Keep beginning and end for context
+  const headLength = Math.floor(maxLength * 0.7);
+  const tailLength = Math.floor(maxLength * 0.2);
+
+  return `${text.slice(0, headLength)}\n\n${PRUNED_TOOL_MARKER}\n\n${text.slice(-tailLength)}`;
+}
+
+/**
+ * Check if message contains tool output and prune if necessary
+ */
+function pruneMessageToolOutput(message: Message): Message {
+  // Check if this is a tool message with large content
+  if ((message.role as string) === 'tool' && message.content) {
+    const contentLength =
+      typeof message.content === 'string'
+        ? message.content.length
+        : JSON.stringify(message.content).length;
+
+    if (contentLength > MAX_TOOL_OUTPUT_LENGTH) {
+      return {
+        ...message,
+        content: pruneToolOutput(message.content, MAX_TOOL_OUTPUT_LENGTH),
+      };
+    }
+  }
+  return message;
+}
+
+/**
+ * Prune large tool outputs from messages to prevent context overflow
+ */
+export function pruneToolOutputs(messages: Message[]): Message[] {
+  return messages.map((message) => pruneMessageToolOutput(message));
 }
 
 /**
