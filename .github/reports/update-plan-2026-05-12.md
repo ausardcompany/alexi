@@ -1,9 +1,3 @@
-# Execution Task: Apply Update Plan to Alexi
-
-You are an expert software developer. Your task is to execute the update plan below precisely.
-
-## Update Plan to Execute
-
 # Update Plan for Alexi
 
 Generated: 2026-05-12
@@ -535,24 +529,3 @@ export const decodeSession = Schema.decodeUnknownSync(SessionSchema)
 
 [Session: d235de49-897b-4343-9507-2b140e793c48]
 [Messages: 2, Tokens: 30797]
-
-## Execution Instructions
-
-1. **Execute each change** in the plan above in order of priority (critical → high → medium → low)
-2. **Make exact code changes** as specified in the plan
-3. **Maintain SAP AI Core compatibility** - do not break existing integrations
-4. **Follow existing code style** in this repository
-5. **Create changes summary** at `.github/reports/changes-summary.md` with:
-   - List of files modified
-   - Summary of each change made
-   - Any issues encountered
-
-## Important
-
-- Do NOT skip any items in the plan
-- Do NOT add extra changes not in the plan
-- Do NOT ask questions - just execute
-- If a file doesn't exist, create it
-- If code context is unclear, use your best judgment based on the plan
-
-Execute the entire plan now.

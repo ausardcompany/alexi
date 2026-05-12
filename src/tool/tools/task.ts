@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
-import { getAgentRegistry } from '../../agent/index.js';
+import { getAgentRegistry, type Agent } from '../../agent/index.js';
 
 const TaskParamsSchema = z.object({
   prompt: z.string().describe('The task for the agent to perform'),
@@ -12,6 +12,55 @@ const TaskParamsSchema = z.object({
   subagent_type: z.string().optional().describe('Type of specialized agent: general, explore'),
   task_id: z.string().optional().describe('Resume a previous task by ID'),
 });
+
+// Namespace for task tool utilities
+export namespace TaskTool {
+  /** Alexi keeps delegation one level deep to avoid recursive subagent chains. */
+  export function nestedTask(): false {
+    return false;
+  }
+
+  export function validate(agent: Agent, name: string): void {
+    if (agent.mode === 'primary') {
+      throw new Error(`Agent "${name}" is a primary agent and cannot be used as a subagent`);
+    }
+  }
+
+  export interface SubagentOptions {
+    autoMode?: boolean;
+    inheritPermissions?: boolean;
+    maxDepth?: number;
+  }
+
+  export interface SubagentConfig {
+    autoMode: boolean;
+    maxDepth: number;
+  }
+
+  /**
+   * Build configuration for spawning a subagent.
+   * Propagates relevant flags from parent context.
+   */
+  export function buildSubagentConfig(
+    parentCtx: ToolContext,
+    options: SubagentOptions = {}
+  ): SubagentConfig {
+    // Note: context.flags would need to be added to ToolContext type
+    // For now, we prepare the structure for future integration
+    return {
+      autoMode: options.autoMode ?? false, // Would be: parentCtx.flags?.auto ?? false
+      maxDepth: 1, // Enforce single-level nesting
+    };
+  }
+}
+
+interface ToolContext {
+  workdir: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+  gitManager?: unknown;
+  // Future: flags?: { auto?: boolean }
+}
 
 interface TaskResult {
   taskId: string;
@@ -49,12 +98,12 @@ Usage:
     const { nanoid } = await import('nanoid');
     const registry = getAgentRegistry();
 
-    // Security: Deny task tool for subagent sessions to prevent recursive spawning
-    // Check if we're in a subagent context by looking at session metadata
-    if (context.sessionId && context.sessionId.includes('subagent')) {
+    // Security: Alexi disallows subagents spawning subagents
+    const canTask = TaskTool.nestedTask();
+    if (!canTask && context.sessionId && context.sessionId.includes('subagent')) {
       return {
         success: false,
-        error: 'Task tool is not available for subagent sessions',
+        error: 'Task tool is not available for subagent sessions to prevent recursive delegation',
       };
     }
 
@@ -80,6 +129,16 @@ Usage:
       return {
         success: false,
         error: `Unknown agent type: ${params.subagent_type}`,
+      };
+    }
+
+    // Validate agent can be used as subagent
+    try {
+      TaskTool.validate(agent, agent.name);
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
       };
     }
 
@@ -117,9 +176,16 @@ Usage:
     //
     // See src/agent/subagent-permissions.ts for implementation.
 
+    // Build subagent configuration with auto flag propagation
+    const subagentConfig = TaskTool.buildSubagentConfig(context, {
+      autoMode: false, // TODO: Extract from context.flags when available
+      inheritPermissions: true,
+    });
+
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
-    const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt.`;
+    // and pass subagentConfig.autoMode to maintain automation behavior
+    const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
 
     taskData.messages.push({
       role: 'assistant',
