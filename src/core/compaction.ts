@@ -175,7 +175,6 @@ export function pruneToolOutputs(messages: Message[]): Message[] {
   return messages.map((message) => pruneMessageToolOutput(message));
 }
 
-
 /**
  * Compact a conversation by summarizing older messages
  *
