@@ -26,59 +26,93 @@ permissions:
   issues: write
 
 jobs:
-  implement:
-    name: Auto-Implement Feature
+  # ─── Job 1: Pick up to 3 issues to implement in parallel ─────────────────────
+  pick-issues:
+    name: Pick Issues
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_issues: ${{ steps.matrix.outputs.has_issues }}
     steps:
-      # ─── Step 1: Pick the next issue to implement ─────────────────────────────
-      - name: Pick next issue
-        id: pick
+      - name: Build issue matrix
+        id: matrix
         run: |
           if [ -n "${{ inputs.issue_number }}" ]; then
-            # Manual dispatch — use the specified issue
-            ISSUE_NUMBER="${{ inputs.issue_number }}"
-            echo "[INFO] Manual dispatch: implementing issue #$ISSUE_NUMBER"
+            # Manual dispatch — single issue
+            ISSUES="[{\"number\":${{ inputs.issue_number }}}]"
           else
-            # Scheduled run — pick the oldest open issue with 'auto-implement' label
-            ISSUE=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=auto-implement&state=open&sort=created&direction=asc&per_page=1" \
-              --jq '.[0]')
-
-            if [ "$ISSUE" = "null" ] || [ -z "$ISSUE" ]; then
-              echo "[INFO] No issues with 'auto-implement' label found. Nothing to do."
-              echo "has_issue=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-
-            ISSUE_NUMBER=$(echo "$ISSUE" | jq -r '.number')
+            # Scheduled — pick up to 3 oldest open issues
+            ISSUES=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=auto-implement&state=open&sort=created&direction=asc&per_page=3" \
+              --jq '[.[] | {number: .number, title: .title}]')
           fi
 
-          # Fetch full issue details
+          COUNT=$(echo "$ISSUES" | jq 'length')
+          echo "[INFO] Found $COUNT issue(s) to implement"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "has_issues=false" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Filter out issues that already have PRs
+          OPEN_PRS=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '[.[].title]')
+          FILTERED="[]"
+
+          for row in $(echo "$ISSUES" | jq -c '.[]'); do
+            NUM=$(echo "$row" | jq -r '.number')
+            # Check if PR exists for this issue
+            HAS_PR=$(echo "$OPEN_PRS" | jq "[.[] | select(contains(\"#${NUM}\"))] | length")
+            if [ "${HAS_PR:-0}" -eq 0 ]; then
+              FILTERED=$(echo "$FILTERED" | jq --argjson item "$row" '. + [$item]')
+            else
+              echo "[SKIP] PR already exists for #$NUM"
+            fi
+          done
+
+          FINAL_COUNT=$(echo "$FILTERED" | jq 'length')
+          if [ "$FINAL_COUNT" -eq 0 ]; then
+            echo "has_issues=false" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[]}' >> $GITHUB_OUTPUT
+            echo "[INFO] All issues already have PRs"
+            exit 0
+          fi
+
+          MATRIX=$(echo "$FILTERED" | jq -c '{include: .}')
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "has_issues=true" >> $GITHUB_OUTPUT
+          echo "[OK] Matrix: $MATRIX"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─── Job 2: Implement each issue in parallel ─────────────────────────────────
+  implement:
+    name: "Implement #${{ matrix.number }}"
+    needs: pick-issues
+    if: needs.pick-issues.outputs.has_issues == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      matrix: ${{ fromJSON(needs.pick-issues.outputs.matrix) }}
+      fail-fast: false
+
+    steps:
+      - name: Prepare issue data
+        id: pick
+        run: |
+          ISSUE_NUMBER="${{ matrix.number }}"
           ISSUE_DATA=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER")
 
           ISSUE_TITLE=$(echo "$ISSUE_DATA" | jq -r '.title')
           ISSUE_BODY=$(echo "$ISSUE_DATA" | jq -r '.body // ""')
-          ISSUE_LABELS=$(echo "$ISSUE_DATA" | jq -r '[.labels[].name] | join(",")')
           ISSUE_STATE=$(echo "$ISSUE_DATA" | jq -r '.state')
 
           if [ "$ISSUE_STATE" != "open" ]; then
-            echo "[WARN] Issue #$ISSUE_NUMBER is not open (state: $ISSUE_STATE). Skipping."
+            echo "[WARN] Issue #$ISSUE_NUMBER is not open. Skipping."
             echo "has_issue=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Check if a PR already exists for this issue
-          EXISTING_PR=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
-            --jq "[.[] | select(.title | test(\"#${ISSUE_NUMBER}\"))] | length")
-
-          if [ "${EXISTING_PR:-0}" -gt 0 ]; then
-            echo "[INFO] PR already exists for issue #$ISSUE_NUMBER. Skipping."
-            echo "has_issue=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Generate branch name from issue
           SAFE_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | head -c 50)
           BRANCH_NAME="auto/${ISSUE_NUMBER}-${SAFE_TITLE}"
 
@@ -87,12 +121,8 @@ jobs:
           echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
-          # Save issue body to file (may be large)
           echo "$ISSUE_BODY" > /tmp/issue-body.md
-
-          echo "[OK] Selected issue #$ISSUE_NUMBER: $ISSUE_TITLE"
-          echo "     Branch: $BRANCH_NAME"
-          echo "     Labels: $ISSUE_LABELS"
+          echo "[OK] Issue #$ISSUE_NUMBER: $ISSUE_TITLE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
