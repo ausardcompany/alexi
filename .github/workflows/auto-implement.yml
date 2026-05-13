@@ -2,8 +2,8 @@ name: "Agent 3: Auto-Implement"
 
 on:
   schedule:
-    # Run every hour
-    - cron: '0 * * * *'
+    # Run every 30 minutes
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       issue_number:
@@ -129,6 +129,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
       - name: Install Kilo CLI and project dependencies
         if: steps.pick.outputs.has_issue == 'true'
@@ -136,8 +137,6 @@ jobs:
           npm install -g @kilocode/cli
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
-          npm ci
-
           echo "[OK] Project dependencies installed"
 
       # ─── Step 4: Label issue as in-progress ────────────────────────────────────

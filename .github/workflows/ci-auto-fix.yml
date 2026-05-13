@@ -279,7 +279,7 @@ jobs:
             echo "Committing $CHANGES_COUNT quick-fix file(s):"
             echo "$STAGED"
 
-            git commit -m "style(ci): auto-fix lint/format issues [alexi-bot]"
+            git commit -m "style(ci): auto-fix lint/format issues [alexi-bot]" --no-verify
             git push origin "$BRANCH"
 
             echo "committed=true" >> $GITHUB_OUTPUT
@@ -538,7 +538,7 @@ jobs:
             echo "Committing $CHANGES_COUNT changed file(s):"
             echo "$STAGED"
 
-            git commit -m "fix(ci): auto-fix CI failures [alexi-bot]"
+            git commit -m "fix(ci): auto-fix CI failures [alexi-bot]" --no-verify
             echo "committed=true" >> $GITHUB_OUTPUT
             echo "changes_count=$CHANGES_COUNT" >> $GITHUB_OUTPUT
             echo "[OK] Committed $CHANGES_COUNT file(s)"

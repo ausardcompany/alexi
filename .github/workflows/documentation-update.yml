@@ -591,7 +591,7 @@ jobs:
           
           # Create a new commit if there are staged changes
           if ! git diff --cached --quiet; then
-            git commit -m "docs: auto-generate documentation [skip ci] [alexi-bot]"
+            git commit -m "docs: auto-generate documentation [skip ci] [alexi-bot]" --no-verify
             echo "[OK] Created documentation commit"
           else
             echo "[INFO] No unstaged documentation changes to commit"

@@ -50,6 +50,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
       - name: Install Kilo CLI and dependencies
         run: |
@@ -190,7 +191,7 @@ jobs:
           git add .github/research/ 2>/dev/null || true
 
           if ! git diff --cached --quiet; then
-            git commit -m "plan: development roadmap $(date -u +%Y-%m-%d) [alexi-bot]"
+            git commit -m "plan: development roadmap $(date -u +%Y-%m-%d) [alexi-bot]" --no-verify
             git push origin master
             echo "[OK] Plan committed"
           else

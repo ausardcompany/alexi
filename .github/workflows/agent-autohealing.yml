@@ -193,6 +193,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
       - name: Install Kilo CLI and dependencies
         if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
