@@ -13,6 +13,10 @@ const AgentManagerParamsSchema = z.object({
     .object({
       mode: z.string().optional().describe('Agent mode'),
       model: z.string().optional().describe('Model to use'),
+      excludeLocalState: z
+        .boolean()
+        .optional()
+        .describe('Exclude local state on startup for fresh session initialization'),
     })
     .optional()
     .describe('Configuration for session creation'),
@@ -51,7 +55,7 @@ Actions:
   },
 
   async execute(params, _context): Promise<ToolResult<AgentManagerResult>> {
-    const { action, sessionId, config: _config } = params;
+    const { action, sessionId, config } = params;
 
     try {
       switch (action) {
@@ -59,15 +63,19 @@ Actions:
           // Create new agent session
           // In a real implementation, this would interact with the agent system
           const newSessionId = `session-${Date.now()}`;
+          const excludeLocalState = config?.excludeLocalState ?? false;
+
           return {
             success: true,
             data: {
               action: 'create',
               session: {
                 id: newSessionId,
-                status: 'created',
+                status: excludeLocalState ? 'created-fresh' : 'created',
               },
-              message: `Created new agent session: ${newSessionId}`,
+              message: excludeLocalState
+                ? `Created new agent session with fresh state: ${newSessionId}`
+                : `Created new agent session: ${newSessionId}`,
             },
           };
         }
