@@ -13,8 +13,13 @@ import {
 
 const QuestionOptionSchema = z.object({
   label: z.string().describe('Display text (1-5 words)'),
-  description: z.string().describe('Explanation of choice'),
-  mode: z.string().optional().describe('Agent mode to switch to'),
+  value: z.string().describe('Value to return when selected'),
+  description: z.string().optional().describe('Explanation of choice'),
+  i18nKey: z.string().optional().describe('Internationalization key'),
+  mode: z
+    .string()
+    .optional()
+    .describe('Optional agent/mode name to pre-select in the UI when this option is picked'),
 });
 
 const QuestionSchema = z.object({
