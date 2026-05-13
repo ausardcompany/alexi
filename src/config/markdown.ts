@@ -4,6 +4,7 @@
  */
 
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger.js';
 
@@ -50,7 +51,6 @@ export function processMarkdownPromptSync(
   content: string,
   basePath: string = process.cwd()
 ): string {
-  const fsSync = require('fs');
   const matches = content.matchAll(FILE_INCLUDE_REGEX);
   let result = content;
 
