@@ -39,6 +39,18 @@ export {
   type ChatMessage,
 } from './sapOrchestration.js';
 
+// Re-export model discovery module
+export {
+  discoverModels,
+  fetchModelsFromAICore,
+  getAvailableModelIds,
+  getStaticModels,
+  mergeWithStaticModels,
+  clearModelDiscoveryCache,
+  type DiscoveredModel,
+  type ModelDiscoveryOptions,
+} from './modelDiscovery.js';
+
 /**
  * Get the SAP Orchestration provider for the specified model
  *
@@ -64,4 +76,20 @@ export function getProviderForModel(modelId: string): SapOrchestrationProvider {
  */
 export function getDefaultModel(): string {
   return env('AICORE_MODEL') ?? getConfigDefaultModel() ?? 'gpt-4o';
+}
+
+/**
+ * Check if a model is available (async version using dynamic discovery).
+ *
+ * Unlike the synchronous `isOrchestrationModel` which checks only the static list,
+ * this function queries the discovery cache (and potentially SAP AI Core) to
+ * determine if a model is available.
+ *
+ * @param modelId - The model identifier to check
+ * @returns true if the model is available (discovered or static)
+ */
+export async function isModelAvailable(modelId: string): Promise<boolean> {
+  const { getAvailableModelIds } = await import('./modelDiscovery.js');
+  const ids = await getAvailableModelIds();
+  return ids.includes(modelId);
 }

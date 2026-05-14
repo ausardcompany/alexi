@@ -3,7 +3,7 @@
  */
 
 import { select, Separator } from '@inquirer/prompts';
-import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
+import { discoverModels } from '../../providers/modelDiscovery.js';
 import { env } from '../../config/env.js';
 import { c } from './colors.js';
 
@@ -67,14 +67,20 @@ async function fetchRemoteModels(): Promise<string[]> {
 
 /**
  * Build the combined, deduplicated, grouped model list.
+ * Uses dynamic model discovery from SAP AI Core with fallback to static list,
+ * and additionally merges models from the SAP proxy if configured.
  */
 export async function getAvailableModels(): Promise<ModelChoice[]> {
-  const localModels = [...ORCHESTRATION_MODELS];
-  const remoteModels = await fetchRemoteModels();
+  // Use model discovery (handles caching and fallback internally)
+  const discoveredModels = await discoverModels();
+  const allModels: ModelChoice[] = discoveredModels.map((m) => ({
+    id: m.id,
+    source: (m.source === 'discovered' ? 'remote' : 'local') as 'local' | 'remote',
+  }));
 
-  // Merge: local first, then remote-only models
-  const seen = new Set<string>(localModels);
-  const allModels: ModelChoice[] = localModels.map((id) => ({ id, source: 'local' as const }));
+  // Also merge proxy models if configured
+  const remoteModels = await fetchRemoteModels();
+  const seen = new Set<string>(allModels.map((m) => m.id));
 
   for (const id of remoteModels) {
     if (!seen.has(id)) {
