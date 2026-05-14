@@ -11,6 +11,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ToolExecutionStarted, ToolExecutionCompleted, ToolExecutionFailed } from '../bus/index.js';
 import { getPermissionManager, type PermissionAction } from '../permission/index.js';
+import { executeHooks, createHookContext } from '../hooks/index.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { EffortLevel } from '../core/effortLevel.js';
 
@@ -327,6 +328,17 @@ export function defineTool<TParams extends z.ZodType, TResult>(
         timestamp: startTime,
       });
 
+      // Fire PreToolUse hooks with effort level from context
+      await executeHooks(
+        'PreToolUse',
+        createHookContext('PreToolUse', {
+          toolName: definition.name,
+          toolParams: validatedParams as Record<string, unknown>,
+          sessionId: context.sessionId,
+          effortLevel: context.effortLevel,
+        })
+      );
+
       try {
         // Check for abort
         if (context.signal?.aborted) {
@@ -336,6 +348,19 @@ export function defineTool<TParams extends z.ZodType, TResult>(
         // Execute the tool
         const result = await definition.execute(validatedParams, context);
         const duration = Date.now() - startTime;
+
+        // Fire PostToolUse or PostToolUseFailure hooks with effort level
+        await executeHooks(
+          result.success ? 'PostToolUse' : 'PostToolUseFailure',
+          createHookContext(result.success ? 'PostToolUse' : 'PostToolUseFailure', {
+            toolName: definition.name,
+            toolParams: validatedParams as Record<string, unknown>,
+            toolResult: result.data,
+            sessionId: context.sessionId,
+            effortLevel: context.effortLevel,
+            error: result.error,
+          })
+        );
 
         // Publish completion event
         ToolExecutionCompleted.publish({
@@ -350,6 +375,18 @@ export function defineTool<TParams extends z.ZodType, TResult>(
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
+
+        // Fire PostToolUseFailure hooks with effort level
+        await executeHooks(
+          'PostToolUseFailure',
+          createHookContext('PostToolUseFailure', {
+            toolName: definition.name,
+            toolParams: validatedParams as Record<string, unknown>,
+            sessionId: context.sessionId,
+            effortLevel: context.effortLevel,
+            error: errorMessage,
+          })
+        );
 
         // Publish failure event
         ToolExecutionFailed.publish({

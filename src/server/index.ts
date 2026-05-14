@@ -41,6 +41,7 @@ const ChatRequestSchema = z.object({
 const ToolExecuteRequestSchema = z.object({
   parameters: z.record(z.string(), z.unknown()),
   sessionId: z.string().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high']).optional(),
 });
 
 // Session store
@@ -314,6 +315,7 @@ export function createApp() {
       const context: ToolContext = {
         workdir,
         sessionId: request.sessionId,
+        effortLevel: request.effortLevel,
       };
 
       const result = await tool.execute(request.parameters, context);
