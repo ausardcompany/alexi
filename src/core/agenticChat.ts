@@ -358,7 +358,7 @@ export async function agenticChat(
   if (options?.sessionManager) {
     const session = options.sessionManager.getCurrentSession();
     if (!session) {
-      options.sessionManager.createSession(modelId);
+      options.sessionManager.createSession(modelId, workdir);
     }
 
     const history = options.sessionManager.getHistory(20);

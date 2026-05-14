@@ -9,14 +9,16 @@ export function registerSessionCommands(program: Command): void {
   // List all sessions
   program
     .command('sessions')
-    .description('List all saved sessions')
-    .action(async () => {
+    .description('List saved sessions (filtered by current workspace by default)')
+    .option('-a, --all', 'Show sessions from all workspaces')
+    .action(async (opts: { all?: boolean }) => {
       try {
         const sessionManager = new SessionManager();
-        const sessions = sessionManager.listSessions();
+        const filter = opts.all ? undefined : { workdir: process.cwd() };
+        const sessions = sessionManager.listSessions(filter);
 
         if (sessions.length === 0) {
-          console.log('No sessions found');
+          console.log(opts.all ? 'No sessions found' : 'No sessions found for current workspace');
           return;
         }
 

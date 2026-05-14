@@ -27,6 +27,11 @@ export interface SessionMetadata {
   totalTokens: number;
   messageCount: number;
   title?: string;
+  workdir?: string;
+}
+
+export interface SessionListFilter {
+  workdir?: string;
 }
 
 export interface Session {
@@ -63,7 +68,7 @@ export class SessionManager {
   /**
    * Create a new session
    */
-  createSession(modelId?: string): Session {
+  createSession(modelId?: string, workdir?: string): Session {
     const session: Session = {
       metadata: {
         id: randomUUID(),
@@ -72,6 +77,7 @@ export class SessionManager {
         modelId,
         totalTokens: 0,
         messageCount: 0,
+        workdir,
       },
       messages: [],
     };
@@ -183,12 +189,12 @@ export class SessionManager {
   }
 
   /**
-   * List all sessions
+   * List all sessions, optionally filtered by workspace
    */
-  listSessions(): SessionMetadata[] {
+  listSessions(filter?: SessionListFilter): SessionMetadata[] {
     try {
       const files = fs.readdirSync(this.sessionsDir);
-      const sessions: SessionMetadata[] = [];
+      let sessions: SessionMetadata[] = [];
 
       for (const file of files) {
         if (!file.endsWith('.json')) continue;
@@ -198,6 +204,11 @@ export class SessionManager {
         const session = JSON.parse(content) as Session;
 
         sessions.push(session.metadata);
+      }
+
+      // Apply workdir filter if provided
+      if (filter?.workdir) {
+        sessions = sessions.filter((s) => s.workdir === filter.workdir);
       }
 
       // Sort by updated time (newest first)

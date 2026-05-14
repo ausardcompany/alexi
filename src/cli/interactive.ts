@@ -369,7 +369,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         }
       } else if (args[0] === 'new') {
         state.sessionManager.clearSession();
-        state.sessionManager.createSession(state.currentModel);
+        state.sessionManager.createSession(state.currentModel, process.cwd());
         const session = state.sessionManager.getCurrentSession();
         console.log(c('green', `\n  Created new session: ${session?.metadata.id.slice(0, 8)}\n`));
       } else if (args[0] === 'load' && args[1]) {
@@ -395,7 +395,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       return true;
 
     case 'sessions': {
-      const sessions = state.sessionManager.listSessions();
+      const showAll = args[0] === '--all' || args[0] === '-a';
+      const sessionsFilter = showAll ? undefined : { workdir: process.cwd() };
+      const sessions = state.sessionManager.listSessions(sessionsFilter);
       if (sessions.length === 0) {
         console.log(c('yellow', '\n  No saved sessions\n'));
       } else {
@@ -587,7 +589,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       }
       const forkName = args[0] || `fork-${Date.now()}`;
       // Create a new session with the same history
-      state.sessionManager.createSession(state.currentModel);
+      state.sessionManager.createSession(state.currentModel, process.cwd());
       const newSession = state.sessionManager.getCurrentSession();
       if (newSession) {
         newSession.metadata.title = forkName;
@@ -964,7 +966,7 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       } else {
         const count = history.length;
         state.sessionManager.clearSession();
-        state.sessionManager.createSession(state.currentModel);
+        state.sessionManager.createSession(state.currentModel, process.cwd());
         console.log(c('green', `\n  Cleared ${count} messages from history\n`));
       }
       return true;
@@ -1846,7 +1848,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     }
   } else {
     // Create new session
-    state.sessionManager.createSession(state.currentModel);
+    state.sessionManager.createSession(state.currentModel, process.cwd());
   }
 
   printHeader(state);

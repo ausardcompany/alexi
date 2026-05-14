@@ -109,6 +109,29 @@ describe('SessionManager', () => {
 
       expect(session.metadata.modelId).toBe('gpt-4');
     });
+
+    it('should store workdir when provided', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession('gpt-4', '/home/user/project');
+
+      expect(session.metadata.workdir).toBe('/home/user/project');
+    });
+
+    it('should leave workdir undefined when not provided', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession('gpt-4');
+
+      expect(session.metadata.workdir).toBeUndefined();
+    });
+
+    it('should persist workdir to disk', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession('gpt-4', '/workspace/my-project');
+
+      const sessionPath = path.join(tempDir, `${session.metadata.id}.json`);
+      const content = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as Session;
+      expect(content.metadata.workdir).toBe('/workspace/my-project');
+    });
   });
 
   // ========== 3. loadSession ==========
@@ -355,6 +378,48 @@ describe('SessionManager', () => {
       const manager = new SessionManager(emptyDir);
 
       expect(manager.listSessions()).toEqual([]);
+    });
+
+    it('should filter sessions by workdir when filter is provided', () => {
+      const manager = new SessionManager(tempDir);
+
+      manager.createSession('model-a', '/workspace/project-a');
+      manager.addMessage('user', 'Project A session');
+
+      manager.createSession('model-b', '/workspace/project-b');
+      manager.addMessage('user', 'Project B session');
+
+      manager.createSession('model-a', '/workspace/project-a');
+      manager.addMessage('user', 'Another Project A session');
+
+      const filtered = manager.listSessions({ workdir: '/workspace/project-a' });
+      expect(filtered).toHaveLength(2);
+      filtered.forEach((s) => {
+        expect(s.workdir).toBe('/workspace/project-a');
+      });
+    });
+
+    it('should return all sessions when no filter is provided', () => {
+      const manager = new SessionManager(tempDir);
+
+      manager.createSession('model-a', '/workspace/project-a');
+      manager.addMessage('user', 'Project A session');
+
+      manager.createSession('model-b', '/workspace/project-b');
+      manager.addMessage('user', 'Project B session');
+
+      const all = manager.listSessions();
+      expect(all).toHaveLength(2);
+    });
+
+    it('should return empty array when no sessions match the workdir filter', () => {
+      const manager = new SessionManager(tempDir);
+
+      manager.createSession('model-a', '/workspace/project-a');
+      manager.addMessage('user', 'Project A session');
+
+      const filtered = manager.listSessions({ workdir: '/workspace/nonexistent' });
+      expect(filtered).toEqual([]);
     });
   });
 

@@ -88,7 +88,7 @@ export async function* streamChat(
 
     // Initialize session if needed
     if (!session) {
-      options.sessionManager.createSession(modelId);
+      options.sessionManager.createSession(modelId, options?.workdir);
     }
 
     // Get conversation history
