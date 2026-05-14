@@ -4,7 +4,7 @@
  */
 
 import { getProviderForModel, getDefaultModel, type StreamChunk } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePromptWithDiscovery } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
@@ -61,7 +61,7 @@ export async function* streamChat(
 
   // Auto-routing enabled?
   if (options?.autoRoute && !options?.modelOverride) {
-    const decision = routePrompt(messageText, { preferCheap });
+    const decision = await routePromptWithDiscovery(messageText, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
   } else {

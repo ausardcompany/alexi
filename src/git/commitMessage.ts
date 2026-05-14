@@ -3,7 +3,7 @@
  * Generates Conventional Commits messages via cheap LLM or heuristics
  */
 
-import { routePrompt } from '../core/router.js';
+import { routePromptWithDiscovery } from '../core/router.js';
 import { getProviderForModel } from '../providers/index.js';
 import type { GitConfig } from './config.js';
 
@@ -64,7 +64,7 @@ async function generateWithLLM(files: ChangedFile[], config: GitConfig): Promise
   try {
     const modelId = config.commitMessage.model
       ? config.commitMessage.model
-      : routePrompt('summarize in 10 words', { preferCheap: true }).modelId;
+      : (await routePromptWithDiscovery('summarize in 10 words', { preferCheap: true })).modelId;
 
     const provider = getProviderForModel(modelId);
 

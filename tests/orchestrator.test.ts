@@ -7,13 +7,13 @@ vi.mock('../src/providers/index.js', () => ({
 }));
 
 vi.mock('../src/core/router.js', () => ({
-  routePrompt: vi.fn(),
+  routePromptWithDiscovery: vi.fn(),
 }));
 
 // Import after mocking
 import { sendChat } from '../src/core/orchestrator.js';
 import { getProviderForModel, getDefaultModel } from '../src/providers/index.js';
-import { routePrompt } from '../src/core/router.js';
+import { routePromptWithDiscovery } from '../src/core/router.js';
 import { SessionManager } from '../src/core/sessionManager.js';
 
 // Helper to create mock provider
@@ -75,7 +75,7 @@ describe('Orchestrator', () => {
 
         vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
-        vi.mocked(routePrompt).mockReturnValue({
+        vi.mocked(routePromptWithDiscovery).mockResolvedValue({
           modelId: 'anthropic--claude-4-opus',
           reason: 'Complex task detected',
           confidence: 0.9,
@@ -87,9 +87,12 @@ describe('Orchestrator', () => {
           autoRoute: true,
         });
 
-        expect(routePrompt).toHaveBeenCalledWith('Explain quantum computing step by step', {
-          preferCheap: undefined,
-        });
+        expect(routePromptWithDiscovery).toHaveBeenCalledWith(
+          'Explain quantum computing step by step',
+          {
+            preferCheap: undefined,
+          }
+        );
         expect(result.modelUsed).toBe('anthropic--claude-4-opus');
         expect(result.routingReason).toBe('Complex task detected');
         expect(consoleSpy).toHaveBeenCalled();
@@ -110,7 +113,7 @@ describe('Orchestrator', () => {
           modelOverride: 'gpt-4o',
         });
 
-        expect(routePrompt).not.toHaveBeenCalled();
+        expect(routePromptWithDiscovery).not.toHaveBeenCalled();
         expect(getProviderForModel).toHaveBeenCalledWith('gpt-4o');
       });
     });
@@ -255,7 +258,7 @@ describe('Orchestrator', () => {
 
         vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
 
-        vi.mocked(routePrompt).mockReturnValue({
+        vi.mocked(routePromptWithDiscovery).mockResolvedValue({
           modelId: 'routed-model',
           reason: 'Routing reason',
           confidence: 0.8,

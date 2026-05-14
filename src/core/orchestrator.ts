@@ -1,5 +1,5 @@
 import { getProviderForModel, getDefaultModel } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePromptWithDiscovery } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 
@@ -18,7 +18,9 @@ export async function sendChat(
 
   // Auto-routing enabled?
   if (options?.autoRoute && !options?.modelOverride) {
-    const decision = routePrompt(message, { preferCheap: options.preferCheap });
+    const decision = await routePromptWithDiscovery(message, {
+      preferCheap: options.preferCheap,
+    });
     modelId = decision.modelId;
     routingReason = decision.reason;
     console.log(

@@ -8,6 +8,7 @@ import {
   findMatchingRule,
   type RoutingConfig,
 } from '../config/routingConfig.js';
+import { getAvailableModelIds } from '../providers/modelDiscovery.js';
 
 export interface ModelCapability {
   id: string;
@@ -240,6 +241,41 @@ export function routePrompt(
     confidence,
     ruleApplied: matchedRule?.name,
   };
+}
+
+/**
+ * Route prompt to best model using dynamically discovered models.
+ *
+ * This is the async counterpart to `routePrompt` that integrates with the
+ * model discovery service. It fetches the list of actually available models
+ * from SAP AI Core (with caching) and constrains routing decisions to only
+ * those models that are deployed and running.
+ *
+ * Falls back to static model list if discovery fails.
+ *
+ * @param prompt - The user prompt to route
+ * @param options - Routing options (same as routePrompt)
+ * @returns Routing decision constrained to available models
+ */
+export async function routePromptWithDiscovery(
+  prompt: string,
+  options?: {
+    preferCheap?: boolean;
+    forceModel?: string;
+  }
+): Promise<RoutingDecision> {
+  // If model is forced, use it directly (skip discovery)
+  if (options?.forceModel) {
+    return routePrompt(prompt, options);
+  }
+
+  // Fetch available models from discovery (uses cache, falls back to static)
+  const availableModelIds = await getAvailableModelIds();
+
+  return routePrompt(prompt, {
+    ...options,
+    availableModels: availableModelIds,
+  });
 }
 
 /**

@@ -10,7 +10,7 @@
  */
 
 import { getProviderForModel, getDefaultModel } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePromptWithDiscovery } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/index.js';
@@ -274,7 +274,7 @@ export async function agenticChat(
     modelId = activeAgent.preferredModel.trim();
     routingReason = `Agent '${activeAgent.id}' preferred model`;
   } else if (options?.autoRoute) {
-    const decision = routePrompt(message, { preferCheap });
+    const decision = await routePromptWithDiscovery(message, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
   } else {

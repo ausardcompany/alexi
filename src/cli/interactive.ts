@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import { execSync } from 'child_process';
 import { streamChat, resolveModelId, isAbortError } from '../core/streamingOrchestrator.js';
 import { isOrchestrationModel } from '../providers/sapOrchestration.js';
+import { isModelAvailable } from '../providers/index.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { colors, c } from './utils/colors.js';
 import {
@@ -315,7 +316,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         console.log(c('gray', `\n  Current model: ${c('green', state.currentModel)}\n`));
       } else {
         const modelId = args.join(' ');
-        if (!isOrchestrationModel(modelId)) {
+        // Check dynamic discovery first, fall back to static list
+        const available = await isModelAvailable(modelId);
+        if (!available && !isOrchestrationModel(modelId)) {
           console.log(c('yellow', `\n  Warning: '${modelId}' is not in the known models list`));
           console.log(c('yellow', '  Use /models to see available models'));
         }
