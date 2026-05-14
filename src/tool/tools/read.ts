@@ -1,5 +1,5 @@
 /**
- * Read Tool - Read files or directories
+ * Read Tool - Read files or directories with encoding-aware streaming
  */
 
 import { z } from 'zod';
@@ -46,29 +46,127 @@ export function getFileEncoding(filePath: string): EncodingInfo | undefined {
 }
 
 /**
- * Read file with streaming for better UTF-8 handling and memory efficiency
+ * Size threshold for streaming reads (1MB).
+ * Files larger than this are streamed in chunks.
  */
-async function readFileStreaming(
-  filePath: string,
-  options?: { offset?: number; limit?: number }
-): Promise<Buffer> {
+const STREAM_THRESHOLD = 1024 * 1024;
+
+/**
+ * Read file as a buffer using streaming for large files.
+ * For files under STREAM_THRESHOLD, reads entirely into memory.
+ * For larger files, streams chunks to avoid high memory usage.
+ */
+async function readFileBuffer(filePath: string, fileSize: number): Promise<Buffer> {
+  if (fileSize <= STREAM_THRESHOLD) {
+    // Small files: read all at once
+    return fs.readFile(filePath);
+  }
+
+  // Large files: stream in chunks
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    const stream = createReadStream(filePath, {
-      encoding: undefined, // Read as Buffer for proper UTF-8 handling
-      start: options?.offset ? options.offset - 1 : undefined,
-      end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
-    });
+    const stream = createReadStream(filePath);
 
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
     stream.on('end', () => {
-      const buffer = Buffer.concat(chunks);
-      resolve(buffer);
+      resolve(Buffer.concat(chunks));
     });
-    stream.on('error', reject);
+    stream.on('error', (err) => {
+      stream.destroy();
+      reject(err);
+    });
+  });
+}
 
-    // Ensure stream is destroyed on consumer teardown
-    stream.once('close', () => stream.destroy());
+/**
+ * Stream a file and return only the requested lines (offset/limit).
+ * Converts from detected encoding to UTF-8 during streaming.
+ * This avoids loading and splitting the entire file when only a portion is needed.
+ */
+async function streamFileLines(
+  filePath: string,
+  encoding: EncodingInfo,
+  offset: number,
+  limit: number
+): Promise<{ lines: string[]; totalLines: number }> {
+  return new Promise((resolve, reject) => {
+    const lines: string[] = [];
+    let currentLine = '';
+    let lineCount = 0;
+    let collected = 0;
+    const startLine = offset; // 1-indexed
+    const stream = createReadStream(filePath);
+    let bomSkipped = false;
+
+    stream.on('data', (chunk: Buffer) => {
+      // For non-UTF-8 files, we need to decode the entire chunk properly
+      // This handles the case where multi-byte chars span chunk boundaries
+      let text: string;
+
+      if (!bomSkipped && encoding.hasBOM && encoding.bomBytes) {
+        chunk = chunk.slice(encoding.bomBytes.length);
+        bomSkipped = true;
+      } else if (!bomSkipped) {
+        bomSkipped = true;
+      }
+
+      switch (encoding.encoding) {
+        case 'utf-16le':
+          text = chunk.toString('utf16le');
+          break;
+        case 'utf-16be': {
+          // Swap bytes for BE -> LE conversion
+          const swapped = Buffer.alloc(chunk.length);
+          for (let i = 0; i < chunk.length - 1; i += 2) {
+            swapped[i] = chunk[i + 1];
+            swapped[i + 1] = chunk[i];
+          }
+          if (chunk.length % 2 !== 0) {
+            swapped[chunk.length - 1] = chunk[chunk.length - 1];
+          }
+          text = swapped.toString('utf16le');
+          break;
+        }
+        case 'latin1':
+          text = chunk.toString('latin1');
+          break;
+        default:
+          text = chunk.toString('utf-8');
+          break;
+      }
+
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '\n') {
+          lineCount++;
+          if (lineCount >= startLine && collected < limit) {
+            lines.push(currentLine);
+            collected++;
+          }
+          currentLine = '';
+
+          // If we've collected enough and only want a subset, we still need totalLines
+          // So we keep reading to count, but stop collecting
+        } else {
+          currentLine += text[i];
+        }
+      }
+    });
+
+    stream.on('end', () => {
+      // Handle last line (no trailing newline)
+      lineCount++;
+      if (lineCount >= startLine && collected < limit) {
+        lines.push(currentLine);
+      }
+      resolve({ lines, totalLines: lineCount });
+    });
+
+    stream.on('error', (err) => {
+      stream.destroy();
+      reject(err);
+    });
   });
 }
 
@@ -130,9 +228,9 @@ Usage:
         };
       }
 
-      // Read file
-      // Use streaming for better UTF-8 handling
-      const buffer = await readFileStreaming(filePath);
+      // Read file with streaming for large files
+      const fileSize = stat.size;
+      const buffer = await readFileBuffer(filePath, fileSize);
 
       // Check for binary first
       if (isBinaryFile(buffer)) {
@@ -142,13 +240,49 @@ Usage:
         };
       }
 
-      // Detect and decode with proper encoding
+      // Detect encoding from the buffer
       const encoding = detectEncoding(buffer);
-      const content = decodeWithEncoding(buffer, encoding);
 
       // Cache encoding for write operations
       fileEncodings.set(filePath, encoding);
 
+      // For large files with offset/limit, use streaming to avoid full decode
+      if (fileSize > STREAM_THRESHOLD && (params.offset || params.limit)) {
+        const offset = Math.max(1, params.offset ?? 1);
+        const limit = params.limit ?? MAX_LINES;
+
+        const { lines: selectedLines, totalLines } = await streamFileLines(
+          filePath,
+          encoding,
+          offset,
+          limit
+        );
+
+        // Add line numbers
+        const numberedLines = selectedLines.map((line, i) => `${offset + i}: ${line}`);
+        const output = numberedLines.join('\n');
+        const { content: truncated, truncated: wasTruncated } = truncateOutput(output);
+
+        const endIdx = offset + selectedLines.length - 1;
+        return {
+          success: true,
+          data: {
+            type: 'file',
+            path: filePath,
+            content: truncated,
+            totalLines,
+            shownLines: selectedLines.length,
+            offset,
+          },
+          truncated: wasTruncated,
+          hint: wasTruncated
+            ? `Output truncated. Use offset=${endIdx + 1} to continue reading.`
+            : undefined,
+        };
+      }
+
+      // Decode with proper encoding to UTF-8
+      const content = decodeWithEncoding(buffer, encoding);
       const lines = content.split('\n');
       const totalLines = lines.length;
 

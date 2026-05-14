@@ -1,5 +1,5 @@
 /**
- * Write Tool - Write or create files
+ * Write Tool - Write or create files with encoding preservation
  */
 
 import { z } from 'zod';
@@ -27,6 +27,8 @@ export const writeTool = defineTool<typeof WriteParamsSchema, WriteResult>({
 Usage:
 - Use absolute paths
 - Parent directories will be created if needed
+- Preserves original file encoding when overwriting
+- Defaults to UTF-8 for new files
 - Prefer editing existing files over creating new ones`,
 
   parameters: WriteParamsSchema,
@@ -61,25 +63,22 @@ Usage:
       const dir = path.dirname(filePath);
       await fs.mkdir(dir, { recursive: true });
 
-      // Get cached encoding from previous read, default to UTF-8
+      // Get cached encoding from previous read, default to UTF-8 for new files
       const encoding: EncodingInfo = getFileEncoding(filePath) || {
         encoding: 'utf-8',
         confidence: 1,
         hasBOM: false,
       };
 
-      // Handle UTF-8 BOM preservation
-      // If content starts with U+FEFF and we already have BOM, don't double it
+      // Handle BOM preservation:
+      // If content starts with U+FEFF (BOM character) and we already track BOM,
+      // strip it to prevent double-BOM in the output
       let finalContent = params.content;
-      if (
-        encoding.hasBOM &&
-        encoding.encoding === 'utf-8' &&
-        params.content.charCodeAt(0) === 0xfeff
-      ) {
+      if (encoding.hasBOM && params.content.charCodeAt(0) === 0xfeff) {
         finalContent = params.content.slice(1);
       }
 
-      // Encode with proper encoding
+      // Encode with proper encoding (preserves original encoding and BOM)
       const buffer = encodeWithEncoding(finalContent, encoding);
 
       // Write the file
