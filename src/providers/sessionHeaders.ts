@@ -6,24 +6,41 @@
 export interface SessionHeaders {
   'x-session-affinity'?: string;
   'x-parent-session-id'?: string;
+  'x-alexi-agent-id'?: string;
+  'x-alexi-parent-agent-id'?: string;
 }
 
 export interface SessionContext {
   sessionID: string;
   parentSessionID?: string;
+  agentID?: string;
+  parentAgentID?: string;
 }
 
 /**
  * Build session headers for HTTP requests
  * These headers enable better session tracking and routing for load-balanced deployments
  */
-export function buildSessionHeaders(sessionID: string, parentSessionID?: string): SessionHeaders {
+export function buildSessionHeaders(
+  sessionID: string,
+  parentSessionID?: string,
+  agentID?: string,
+  parentAgentID?: string
+): SessionHeaders {
   const headers: SessionHeaders = {
     'x-session-affinity': sessionID,
   };
 
   if (parentSessionID) {
     headers['x-parent-session-id'] = parentSessionID;
+  }
+
+  if (agentID) {
+    headers['x-alexi-agent-id'] = agentID;
+  }
+
+  if (parentAgentID) {
+    headers['x-alexi-parent-agent-id'] = parentAgentID;
   }
 
   return headers;
@@ -33,7 +50,12 @@ export function buildSessionHeaders(sessionID: string, parentSessionID?: string)
  * Build session headers from context object
  */
 export function buildSessionHeadersFromContext(context: SessionContext): SessionHeaders {
-  return buildSessionHeaders(context.sessionID, context.parentSessionID);
+  return buildSessionHeaders(
+    context.sessionID,
+    context.parentSessionID,
+    context.agentID,
+    context.parentAgentID
+  );
 }
 
 /**
