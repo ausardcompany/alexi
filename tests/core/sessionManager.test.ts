@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
+import fsSync from 'fs';
 import * as path from 'path';
 import os from 'os';
 import { SessionManager } from '../../src/core/sessionManager.js';
@@ -89,9 +90,22 @@ describe('SessionManager', () => {
         const session1 = manager.createSession('gpt-4o', '/workspace/a');
         const session2 = manager.createSession('gpt-4o', '/workspace/a');
 
+        // Manually set distinct timestamps on disk to ensure deterministic ordering
+        const s1Path = path.join(tempDir, `${session1.metadata.id}.json`);
+        const s2Path = path.join(tempDir, `${session2.metadata.id}.json`);
+
+        const s1Data = JSON.parse(fsSync.readFileSync(s1Path, 'utf-8'));
+        const s2Data = JSON.parse(fsSync.readFileSync(s2Path, 'utf-8'));
+
+        s1Data.metadata.updated = 1000;
+        s2Data.metadata.updated = 2000;
+
+        fsSync.writeFileSync(s1Path, JSON.stringify(s1Data));
+        fsSync.writeFileSync(s2Path, JSON.stringify(s2Data));
+
         const sessions = manager.listSessions({ workdir: '/workspace/a' });
 
-        // session2 was created later so should be first
+        // session2 has a newer updated timestamp so should be first
         expect(sessions[0].id).toBe(session2.metadata.id);
         expect(sessions[1].id).toBe(session1.metadata.id);
       });
