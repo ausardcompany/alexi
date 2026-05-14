@@ -182,7 +182,7 @@ async function executeToolCall(
     // Preserve error details for better debugging
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorStack = err instanceof Error ? err.stack : undefined;
-    
+
     const result: ToolResult = {
       success: false,
       error: `Tool execution error: ${errorMessage}`,

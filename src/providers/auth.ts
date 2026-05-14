@@ -29,11 +29,11 @@ export class TokenExpiredError extends AuthError {
 }
 
 export class MissingCredentialsError extends AuthError {
-  constructor(provider: string, readonly missingFields: string[]) {
-    super(
-      `Missing credentials for provider ${provider}: ${missingFields.join(', ')}`,
-      provider
-    );
+  constructor(
+    provider: string,
+    readonly missingFields: string[]
+  ) {
+    super(`Missing credentials for provider ${provider}: ${missingFields.join(', ')}`, provider);
     this.name = 'MissingCredentialsError';
   }
 }
