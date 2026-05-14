@@ -17,6 +17,7 @@ import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
 import { defineEvent } from '../bus/index.js';
+import type { EffortLevel } from '../core/effortLevel.js';
 
 // ============ Type Definitions ============
 
@@ -63,6 +64,9 @@ export interface HookContext {
   toolParams?: Record<string, unknown>;
   toolResult?: unknown;
   error?: string;
+
+  /** Current effort level propagated from the orchestrator */
+  effortLevel?: EffortLevel;
 }
 
 export interface HookResult {
@@ -112,6 +116,7 @@ export const HookContextSchema = z.object({
   toolParams: z.record(z.string(), z.unknown()).optional(),
   toolResult: z.unknown().optional(),
   error: z.string().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high']).optional(),
 });
 
 export const HooksConfigSchema = z.object({
@@ -150,7 +155,7 @@ const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
 
 /**
  * Substitute template variables in a string
- * Supports: {{event}}, {{toolName}}, {{sessionId}}, {{timestamp}}, {{error}}
+ * Supports: event, toolName, sessionId, timestamp, error, effortLevel (wrapped in double braces)
  */
 export function substituteTemplates(template: string, context: HookContext): string {
   return template
@@ -158,7 +163,8 @@ export function substituteTemplates(template: string, context: HookContext): str
     .replace(/\{\{toolName\}\}/g, context.toolName || '')
     .replace(/\{\{sessionId\}\}/g, context.sessionId || '')
     .replace(/\{\{timestamp\}\}/g, String(context.timestamp))
-    .replace(/\{\{error\}\}/g, context.error || '');
+    .replace(/\{\{error\}\}/g, context.error || '')
+    .replace(/\{\{effortLevel\}\}/g, context.effortLevel || '');
 }
 
 // ============ Hook Interface ============
@@ -212,6 +218,7 @@ async function executeCommandHook(hook: HookDefinition, context: HookContext): P
         ALEXI_HOOK_TOOL: context.toolName || '',
         ALEXI_HOOK_SESSION: context.sessionId || '',
         ALEXI_HOOK_TIMESTAMP: String(context.timestamp),
+        ALEXI_EFFORT_LEVEL: context.effortLevel || '',
       },
     });
 

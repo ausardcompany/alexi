@@ -671,4 +671,120 @@ describe('Hooks System', () => {
       expect(results[0].error).toContain('Script error');
     });
   });
+
+  describe('Effort Level Propagation', () => {
+    it('should pass effort level as ALEXI_EFFORT_LEVEL env var to command hooks', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo $ALEXI_EFFORT_LEVEL',
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        effortLevel: 'high',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].success).toBe(true);
+      expect(results[0].output?.trim()).toBe('high');
+    });
+
+    it('should pass empty effort level env var when not set', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "level:$ALEXI_EFFORT_LEVEL"',
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].success).toBe(true);
+      expect(results[0].output?.trim()).toBe('level:');
+    });
+
+    it('should substitute effortLevel template variable', () => {
+      const context: HookContext = {
+        event: 'PreToolUse',
+        timestamp: 1234567890,
+        effortLevel: 'low',
+      };
+
+      const template = 'Effort: {{effortLevel}}';
+      const result = substituteTemplates(template, context);
+
+      expect(result).toBe('Effort: low');
+    });
+
+    it('should pass effort level to script hooks via context', async () => {
+      const scriptPath = path.join(tempDir, 'effort-hook.mjs');
+      fs.writeFileSync(
+        scriptPath,
+        `
+        export default function(context) {
+          return { effortLevel: context.effortLevel };
+        }
+        `
+      );
+
+      manager.register({
+        event: 'PreToolUse',
+        type: 'script',
+        script: scriptPath,
+      });
+
+      const context: HookContext = {
+        event: 'PreToolUse',
+        timestamp: Date.now(),
+        effortLevel: 'medium',
+      };
+
+      const results = await manager.execute('PreToolUse', context);
+
+      expect(results[0].success).toBe(true);
+      expect(results[0].output).toContain('"effortLevel":"medium"');
+    });
+
+    it('should include effort level in HTTP hook body', async () => {
+      const mockFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: () => Promise.resolve('ok'),
+      });
+
+      vi.stubGlobal('fetch', mockFetch);
+
+      manager.register({
+        event: 'PostToolUse',
+        type: 'http',
+        url: 'https://example.com/webhook',
+        method: 'POST',
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        effortLevel: 'high',
+      };
+
+      await manager.execute('PostToolUse', context);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://example.com/webhook',
+        expect.objectContaining({
+          body: expect.stringContaining('"effortLevel":"high"'),
+        })
+      );
+
+      vi.unstubAllGlobals();
+    });
+  });
 });

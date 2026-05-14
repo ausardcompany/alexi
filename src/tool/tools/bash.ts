@@ -28,6 +28,13 @@ interface BashResult {
 
 const DEFAULT_TIMEOUT = 120000; // 2 minutes
 
+/** Timeout multipliers by effort level */
+const EFFORT_TIMEOUT_MULTIPLIERS: Record<string, number> = {
+  low: 0.5,
+  medium: 1,
+  high: 2,
+};
+
 /**
  * Processes carriage returns in command output.
  * Handles Windows-style line endings and progress indicators that use \r.
@@ -73,7 +80,9 @@ Usage:
         : path.join(context.workdir, params.workdir)
       : context.workdir;
 
-    const timeout = params.timeout ?? DEFAULT_TIMEOUT;
+    // Adjust default timeout based on effort level (explicit timeout takes precedence)
+    const effortMultiplier = EFFORT_TIMEOUT_MULTIPLIERS[context.effortLevel ?? 'medium'] ?? 1;
+    const timeout = params.timeout ?? Math.round(DEFAULT_TIMEOUT * effortMultiplier);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -87,7 +96,11 @@ Usage:
       const proc = spawn(params.command, {
         shell: true,
         cwd: workdir,
-        env: { ...process.env, FORCE_COLOR: '0' },
+        env: {
+          ...process.env,
+          FORCE_COLOR: '0',
+          ALEXI_EFFORT_LEVEL: context.effortLevel ?? 'medium',
+        },
         windowsHide: true,
         detached: true,
       });

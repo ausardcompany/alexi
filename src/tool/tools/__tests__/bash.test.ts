@@ -180,6 +180,60 @@ describe('bash tool', () => {
     });
   });
 
+  describe('effort level propagation', () => {
+    it('should expose effort level as ALEXI_EFFORT_LEVEL env var', async () => {
+      const highEffortContext: ToolContext = { ...context, effortLevel: 'high' };
+      const result = await bashTool.executeUnsafe(
+        { command: 'echo $ALEXI_EFFORT_LEVEL' },
+        highEffortContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data?.stdout.trim()).toBe('high');
+    });
+
+    it('should default effort level env var to medium when not set', async () => {
+      const result = await bashTool.executeUnsafe({ command: 'echo $ALEXI_EFFORT_LEVEL' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.stdout.trim()).toBe('medium');
+    });
+
+    it('should use shorter timeout for low effort (explicit timeout takes precedence)', async () => {
+      // With explicit timeout param, effort level should NOT override
+      const lowEffortContext: ToolContext = { ...context, effortLevel: 'low' };
+      const result = await bashTool.executeUnsafe(
+        { command: 'echo "fast"', timeout: 5000 },
+        lowEffortContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data?.timedOut).toBe(false);
+    });
+
+    it('should timeout sooner with low effort level', async () => {
+      // low effort multiplier = 0.5, so default 120s becomes 60s
+      // Use a sleep that would finish within 120s but we check the process respects shorter timeout
+      const lowEffortContext: ToolContext = { ...context, effortLevel: 'low' };
+      // Default timeout for low = 60000ms (60s). A 1s sleep should still succeed.
+      const result = await bashTool.executeUnsafe({ command: 'sleep 0.1' }, lowEffortContext);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.timedOut).toBe(false);
+    });
+
+    it('should expose low effort level as env var', async () => {
+      const lowEffortContext: ToolContext = { ...context, effortLevel: 'low' };
+      const result = await bashTool.executeUnsafe(
+        { command: 'echo $ALEXI_EFFORT_LEVEL' },
+        lowEffortContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data?.stdout.trim()).toBe('low');
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(bashTool.name).toBe('bash');

@@ -12,6 +12,7 @@ import * as os from 'os';
 import { ToolExecutionStarted, ToolExecutionCompleted, ToolExecutionFailed } from '../bus/index.js';
 import { getPermissionManager, type PermissionAction } from '../permission/index.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
+import type { EffortLevel } from '../core/effortLevel.js';
 
 // Tool execution context
 export interface ToolContext {
@@ -20,6 +21,8 @@ export interface ToolContext {
   sessionId?: string;
   /** Optional git auto-commit manager — injected by agenticChat when enabled */
   gitManager?: AutoCommitManager;
+  /** Current effort level — propagated from orchestrator for tools to adjust behavior */
+  effortLevel?: EffortLevel;
 }
 
 // Tool result

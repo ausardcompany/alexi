@@ -391,6 +391,7 @@ export async function agenticChat(
     signal: options?.signal,
     sessionId: options?.sessionManager?.getCurrentSession()?.metadata.id,
     gitManager: options?.gitManager,
+    effortLevel: options?.effort ?? DEFAULT_EFFORT,
   };
 
   // Agent loop
