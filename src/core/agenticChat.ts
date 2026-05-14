@@ -179,9 +179,15 @@ async function executeToolCall(
 
     return { id: toolCall.id, result };
   } catch (err) {
+    // Preserve error details for better debugging
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    const errorStack = err instanceof Error ? err.stack : undefined;
+
     const result: ToolResult = {
       success: false,
-      error: `Tool execution error: ${err instanceof Error ? err.message : String(err)}`,
+      error: `Tool execution error: ${errorMessage}`,
+      // Preserve stack trace in metadata for debugging
+      metadata: errorStack ? { errorStack } : undefined,
     };
     onProgress?.({
       type: 'tool_end',

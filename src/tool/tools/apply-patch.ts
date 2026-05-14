@@ -133,6 +133,24 @@ Usage:
       : path.join(context.workdir, params.path);
 
     try {
+      // Validate patch format before applying
+      if (!params.patch || typeof params.patch !== 'string') {
+        return {
+          success: false,
+          error: 'Invalid patch: must be a non-empty string',
+        };
+      }
+
+      // Check if target file exists
+      try {
+        await fs.access(filePath);
+      } catch {
+        return {
+          success: false,
+          error: `File not found: ${filePath}`,
+        };
+      }
+
       // Read the original file as buffer
       const buffer = await fs.readFile(filePath);
 

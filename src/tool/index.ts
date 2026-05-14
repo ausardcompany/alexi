@@ -29,6 +29,7 @@ export interface ToolResult<T = unknown> {
   error?: string;
   truncated?: boolean;
   hint?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // Tool definition options
