@@ -87,7 +87,7 @@ Usage:
       const proc = spawn(params.command, {
         shell: true,
         cwd: workdir,
-        env: { ...process.env, FORCE_COLOR: '0' },
+        env: { ...process.env, FORCE_COLOR: '0', ALEXI_SESSION_ID: context.sessionId ?? '' },
         windowsHide: true,
         detached: true,
       });
