@@ -22,6 +22,12 @@ import {
 } from '../bus/index.js';
 import { ConfigProtection } from './config-paths.js';
 import { containsPath, safePathCheck } from '../utils/filesystem.js';
+import {
+  evaluateDenyRules,
+  parseDenyRulesConfig,
+  type HardDenyRule,
+  type DenyRuleMatchResult,
+} from './deny-rules.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -112,6 +118,9 @@ export class PermissionManager {
   private sessionGrants: Map<string, boolean> = new Map();
   private askTimeoutMs: number = 60000; // 1 minute timeout for ask prompts
 
+  // Hard deny rules - take absolute priority over allow rules
+  private hardDenyRules: HardDenyRule[] = [];
+
   // Doom loop detection
   private recentOperations: Map<string, OperationAttempt> = new Map();
   private doomLoopConfig: DoomLoopConfig = {
@@ -133,6 +142,58 @@ export class PermissionManager {
    */
   private sortRules(rules: PermissionRule[]): PermissionRule[] {
     return [...rules].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  }
+
+  // ============ Hard Deny Rules ============
+
+  /**
+   * Set hard deny rules from configuration.
+   * These rules take absolute priority over allow rules and session grants.
+   */
+  setHardDenyRules(rules: HardDenyRule[]): void {
+    this.hardDenyRules = [...rules];
+  }
+
+  /**
+   * Load hard deny rules from a raw configuration object.
+   * Parses and validates the config before storing.
+   */
+  loadHardDenyRulesFromConfig(config: unknown): void {
+    this.hardDenyRules = parseDenyRulesConfig(config);
+  }
+
+  /**
+   * Add a single hard deny rule.
+   */
+  addHardDenyRule(rule: HardDenyRule): void {
+    this.hardDenyRules.push(rule);
+  }
+
+  /**
+   * Remove a hard deny rule by id.
+   */
+  removeHardDenyRule(ruleId: string): boolean {
+    const idx = this.hardDenyRules.findIndex((r) => r.id === ruleId);
+    if (idx >= 0) {
+      this.hardDenyRules.splice(idx, 1);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get all hard deny rules.
+   */
+  getHardDenyRules(): HardDenyRule[] {
+    return [...this.hardDenyRules];
+  }
+
+  /**
+   * Check if a context is blocked by hard deny rules.
+   * Returns the match result with denial details.
+   */
+  checkHardDeny(ctx: PermissionContext): DenyRuleMatchResult {
+    return evaluateDenyRules(this.hardDenyRules, ctx);
   }
 
   // ============ Doom Loop Detection ============
@@ -425,10 +486,17 @@ export class PermissionManager {
   }
 
   /**
-   * Evaluate permission using last-match-wins
+   * Evaluate permission using last-match-wins.
+   * Hard deny rules are checked first and take absolute priority.
    */
   evaluate(ctx: PermissionContext): { decision: PermissionDecision; rule?: PermissionRule } {
-    // Check session grants first
+    // Check hard deny rules first - these take absolute priority
+    const denyResult = this.checkHardDeny(ctx);
+    if (denyResult.denied) {
+      return { decision: 'deny' };
+    }
+
+    // Check session grants
     const sessionKey = `${ctx.toolName}:${ctx.action}:${ctx.resource}`;
     const sessionGrant = this.sessionGrants.get(sessionKey);
     if (sessionGrant !== undefined) {
@@ -450,10 +518,18 @@ export class PermissionManager {
 
   /**
    * Check permission with interactive ask flow
-   * Enhanced with doom loop detection and external path checking
+   * Enhanced with doom loop detection, external path checking,
+   * and hard deny rules evaluation
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
-    // Check for doom loop first
+    // Check hard deny rules first - absolute priority, no bypass
+    const denyResult = this.checkHardDeny(ctx);
+    if (denyResult.denied) {
+      this.recordOperationAttempt(ctx);
+      return { decision: 'deny', granted: false };
+    }
+
+    // Check for doom loop
     const loopCheck = this.checkDoomLoop(ctx);
     if (loopCheck.isLoop) {
       const loopResult = this.handleDoomLoop(ctx, loopCheck.attempts);
@@ -582,6 +658,21 @@ export class PermissionManager {
     const rules = z.array(PermissionRuleSchema).parse(config);
     return new PermissionManager(rules);
   }
+
+  /**
+   * Create a PermissionManager with both regular rules and hard deny rules.
+   */
+  static fromConfigWithDenyRules(config: {
+    rules?: unknown;
+    denyRules?: unknown;
+  }): PermissionManager {
+    const rules = config.rules ? z.array(PermissionRuleSchema).parse(config.rules) : [];
+    const manager = new PermissionManager(rules);
+    if (config.denyRules) {
+      manager.loadHardDenyRulesFromConfig(config.denyRules);
+    }
+    return manager;
+  }
 }
 
 // Default permission rules for common scenarios
@@ -660,3 +751,15 @@ export function setPermissionManager(manager: PermissionManager): void {
 
 // Export prompt functionality
 export { startPermissionPromptHandler, isPermissionPromptSupported } from './prompt.js';
+
+// Export deny rules
+export {
+  evaluateDenyRules,
+  parseDenyRulesConfig,
+  validateDenyRule,
+  HardDenyRuleSchema,
+  DenyRulesConfigSchema,
+  type HardDenyRule,
+  type DenyRulesConfig,
+  type DenyRuleMatchResult,
+} from './deny-rules.js';
