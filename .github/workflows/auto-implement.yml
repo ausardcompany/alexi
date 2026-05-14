@@ -59,7 +59,7 @@ jobs:
           OPEN_PRS=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '[.[].title]')
           FILTERED="[]"
 
-          for row in $(echo "$ISSUES" | jq -c '.[]'); do
+          while IFS= read -r row; do
             NUM=$(echo "$row" | jq -r '.number')
             # Check if PR exists for this issue
             HAS_PR=$(echo "$OPEN_PRS" | jq "[.[] | select(contains(\"#${NUM}\"))] | length")
@@ -68,7 +68,7 @@ jobs:
             else
               echo "[SKIP] PR already exists for #$NUM"
             fi
-          done
+          done < <(echo "$ISSUES" | jq -c '.[]')
 
           FINAL_COUNT=$(echo "$FILTERED" | jq 'length')
           if [ "$FINAL_COUNT" -eq 0 ]; then
