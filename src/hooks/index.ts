@@ -51,6 +51,7 @@ export interface HookDefinition {
   timeout?: number; // Max execution time in ms, default 30000
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
+  continueOnBlock?: boolean; // Feed rejection back to model instead of halting
 }
 
 export interface HookContext {
@@ -70,6 +71,8 @@ export interface HookResult {
   output?: string;
   error?: string;
   duration: number;
+  blocked?: boolean; // Tool was blocked by hook
+  blockReason?: string; // Reason for blocking (fed back to model)
 }
 
 // Zod schemas for validation
@@ -93,6 +96,7 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  continueOnBlock: z.boolean().optional(),
 });
 
 export const HookContextSchema = z.object({
@@ -507,6 +511,13 @@ export class HookManagerImpl implements HookManager {
           error: `Hook execution error: ${err instanceof Error ? err.message : String(err)}`,
           duration: 0,
         };
+      }
+
+      // Handle continueOnBlock: when a PreToolUse hook rejects and continueOnBlock is true,
+      // mark the result as blocked so the orchestrator can feed rejection back to the model
+      if (!result.success && hook.continueOnBlock && event === 'PreToolUse') {
+        result.blocked = true;
+        result.blockReason = result.error || 'Hook rejected tool execution';
       }
 
       results.push(result);

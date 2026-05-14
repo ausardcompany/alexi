@@ -23,6 +23,11 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import {
+  executeHooks,
+  createHookContext,
+  type HookResult as HookExecResult,
+} from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -481,15 +486,97 @@ export async function agenticChat(
 
       // Execute each tool call
       for (const toolCall of result.toolCalls) {
+        const tc = toolCall as ToolCall;
+
+        // Run PreToolUse hooks before tool execution
+        let hookBlocked = false;
+        let hookBlockReason = '';
+        let hookHalted = false;
+
+        try {
+          const hookContext = createHookContext('PreToolUse', {
+            toolName: tc.function.name,
+            toolParams: JSON.parse(tc.function.arguments || '{}'),
+            sessionId: toolContext.sessionId,
+          });
+          const hookResults: HookExecResult[] = await executeHooks('PreToolUse', hookContext);
+
+          for (const hookResult of hookResults) {
+            if (!hookResult.success) {
+              if (hookResult.blocked) {
+                // Hook rejected with continueOnBlock — feed back to model
+                hookBlocked = true;
+                hookBlockReason = hookResult.blockReason || 'Hook rejected tool execution';
+              } else {
+                // Hook rejected without continueOnBlock — halt execution
+                hookHalted = true;
+                hookBlockReason = hookResult.error || 'Hook rejected tool execution';
+                break;
+              }
+            }
+          }
+        } catch {
+          // Hook execution failure is non-fatal; proceed with tool
+        }
+
+        if (hookHalted) {
+          // Halt: return tool error and stop the loop
+          const haltResult: ToolResult = {
+            success: false,
+            error: `Tool execution halted by hook: ${hookBlockReason}`,
+          };
+
+          toolCallsExecuted++;
+          toolCallSummary.push({
+            name: tc.function.name,
+            success: false,
+            error: haltResult.error,
+          });
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify(haltResult),
+          });
+
+          // Stop processing further tool calls in this batch
+          finalText = `Tool execution halted by hook: ${hookBlockReason}`;
+          break;
+        }
+
+        if (hookBlocked) {
+          // continueOnBlock: inject feedback message instead of executing tool
+          const blockedResult: ToolResult = {
+            success: false,
+            error: `Tool ${tc.function.name} was blocked: ${hookBlockReason}. Please adjust your approach.`,
+          };
+
+          toolCallsExecuted++;
+          toolCallSummary.push({
+            name: tc.function.name,
+            success: false,
+            error: blockedResult.error,
+          });
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify(blockedResult),
+          });
+
+          // Continue processing remaining tool calls in this batch
+          continue;
+        }
+
         const { id, result: toolResult } = await executeToolCall(
-          toolCall as ToolCall,
+          tc,
           toolContext,
           options?.onProgress
         );
 
         toolCallsExecuted++;
         toolCallSummary.push({
-          name: toolCall.function.name,
+          name: tc.function.name,
           success: toolResult.success,
           error: toolResult.error,
         });
@@ -500,6 +587,11 @@ export async function agenticChat(
           tool_call_id: id,
           content: JSON.stringify(toolResult),
         });
+      }
+
+      // If halted by a hook, break out of the agent loop
+      if (finalText.startsWith('Tool execution halted by hook:')) {
+        break;
       }
 
       // Continue loop to let LLM process tool results
