@@ -28,6 +28,7 @@ import {
   type HardDenyRule,
   type DenyRuleMatchResult,
 } from './deny-rules.js';
+import { loadProjectDenyRules as loadProjectDenyRulesFromDir } from '../config/projectDenyRules.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -747,6 +748,33 @@ export function getPermissionManager(): PermissionManager {
 
 export function setPermissionManager(manager: PermissionManager): void {
   globalPermissionManager = manager;
+}
+
+/**
+ * Initialize the global permission manager with project deny rules.
+ * This should be called during startup or when the project root changes.
+ * Deny rules are loaded from project config files and take absolute priority.
+ *
+ * @param projectRoot - The root directory of the project
+ * @returns Information about loaded deny rules (source file, count, errors)
+ */
+export function initPermissionManagerWithDenyRules(projectRoot: string): {
+  rulesLoaded: number;
+  source?: string;
+  error?: string;
+} {
+  const manager = getPermissionManager();
+  const result = loadProjectDenyRulesFromDir(projectRoot);
+
+  if (result.rules.length > 0) {
+    manager.setHardDenyRules(result.rules);
+  }
+
+  return {
+    rulesLoaded: result.rules.length,
+    source: result.source,
+    error: result.error,
+  };
 }
 
 // Export prompt functionality

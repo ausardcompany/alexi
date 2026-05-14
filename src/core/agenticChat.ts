@@ -15,7 +15,7 @@ import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/index.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
-import { getPermissionManager } from '../permission/index.js';
+import { getPermissionManager, initPermissionManagerWithDenyRules } from '../permission/index.js';
 import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
@@ -222,6 +222,10 @@ export async function agenticChat(
   permissionManager.setProjectRoot(workdir);
   // Enable external directories to allow full agentic capability
   permissionManager.setAllowExternalDirectories(true);
+
+  // Load hard deny rules from project config (kilo.json, .kilo/kilo.json, etc.)
+  // These rules take absolute priority over allow rules and cannot be auto-approved
+  initPermissionManagerWithDenyRules(workdir);
 
   // Add explicit allow rule for writes in workdir (higher priority than default ask-write)
   // This enables autonomous file operations without interactive prompts
