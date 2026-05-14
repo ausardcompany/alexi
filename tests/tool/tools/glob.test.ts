@@ -225,6 +225,60 @@ describe('Glob Tool', () => {
     });
   });
 
+  describe('structured error reporting', () => {
+    it('should report walk_error when directory cannot be read', async () => {
+      // Create a subdirectory that can't be read
+      const unreadableDir = path.join(tempDir, 'noperm');
+      await fs.mkdir(unreadableDir);
+      await fs.writeFile(path.join(unreadableDir, 'file.txt'), 'content');
+      await fs.chmod(unreadableDir, 0o000);
+
+      const result = await globTool.execute({ pattern: '**/*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeDefined();
+      expect(result.data?.warnings).toContain('[walk_error]');
+      expect(result.data?.warnings).toContain(unreadableDir);
+
+      // Restore permissions for cleanup
+      await fs.chmod(unreadableDir, 0o755);
+    });
+
+    it('should not include warnings when there are no errors', async () => {
+      await fs.writeFile(path.join(tempDir, 'file.txt'), 'content');
+
+      const result = await globTool.execute({ pattern: '*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeUndefined();
+    });
+
+    it('should include warnings in hint field', async () => {
+      const unreadableDir = path.join(tempDir, 'blocked');
+      await fs.mkdir(unreadableDir);
+      await fs.writeFile(path.join(unreadableDir, 'deep.txt'), 'content');
+      await fs.chmod(unreadableDir, 0o000);
+
+      const result = await globTool.execute({ pattern: '**/*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.hint).toBeDefined();
+      expect(result.hint).toContain('[walk_error]');
+
+      await fs.chmod(unreadableDir, 0o755);
+    });
+
+    it('should still return path error for non-existent search path', async () => {
+      const result = await globTool.execute(
+        { pattern: '*.txt', path: path.join(tempDir, 'nonexistent') },
+        context
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Cannot access path');
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(globTool.name).toBe('glob');

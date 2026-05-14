@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { SearchDiagnostics } from './search-errors.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -16,6 +17,7 @@ const GlobParamsSchema = z.object({
 interface GlobResult {
   matches: string[];
   count: number;
+  warnings?: string;
 }
 
 /**
@@ -24,7 +26,8 @@ interface GlobResult {
 async function globMatch(
   baseDir: string,
   pattern: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  diagnostics?: SearchDiagnostics
 ): Promise<string[]> {
   const matches: string[] = [];
   const parts = pattern.split('/');
@@ -82,8 +85,12 @@ async function globMatch(
           }
         }
       }
-    } catch {
-      // Ignore permission errors
+    } catch (err) {
+      diagnostics?.addError({
+        type: 'walk_error',
+        message: err instanceof Error ? err.message : String(err),
+        path: dir,
+      });
     }
   }
 
@@ -160,7 +167,8 @@ Usage:
         };
       }
 
-      let matches = await globMatch(searchPath, params.pattern, context.signal);
+      const diagnostics = new SearchDiagnostics();
+      let matches = await globMatch(searchPath, params.pattern, context.signal, diagnostics);
 
       // Sort by modification time (most recent first)
       const withStats = await Promise.all(
@@ -179,13 +187,16 @@ Usage:
 
       // Convert to relative paths
       const relativePaths = matches.map((f) => path.relative(searchPath, f));
+      const warnings = diagnostics.hasErrors() ? diagnostics.getSummary() : undefined;
 
       return {
         success: true,
         data: {
           matches: relativePaths,
           count: matches.length,
+          warnings,
         },
+        hint: diagnostics.hasErrors() ? warnings : undefined,
       };
     } catch (err) {
       return {

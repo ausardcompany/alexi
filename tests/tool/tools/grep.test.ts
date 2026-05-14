@@ -284,6 +284,98 @@ describe('Grep Tool', () => {
     });
   });
 
+  describe('structured error reporting', () => {
+    it('should report walk_error when directory cannot be read', async () => {
+      // Create a directory that can't be read
+      const unreadableDir = path.join(tempDir, 'unreadable');
+      await fs.mkdir(unreadableDir);
+      await fs.writeFile(path.join(unreadableDir, 'file.txt'), 'match');
+      await fs.chmod(unreadableDir, 0o000);
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeDefined();
+      expect(result.data?.warnings).toContain('[walk_error]');
+      expect(result.data?.warnings).toContain(unreadableDir);
+
+      // Restore permissions for cleanup
+      await fs.chmod(unreadableDir, 0o755);
+    });
+
+    it('should report permission_denied when file cannot be read', async () => {
+      // Create a file that can't be read
+      const unreadableFile = path.join(tempDir, 'unreadable.txt');
+      await fs.writeFile(unreadableFile, 'match');
+      await fs.chmod(unreadableFile, 0o000);
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeDefined();
+      expect(result.data?.warnings).toContain('[permission_denied]');
+      expect(result.data?.warnings).toContain('unreadable.txt');
+
+      // Restore permissions for cleanup
+      await fs.chmod(unreadableFile, 0o644);
+    });
+
+    it('should still return invalid regex error on bad pattern', async () => {
+      await fs.writeFile(path.join(tempDir, 'file.txt'), 'content');
+
+      const result = await grepTool.execute({ pattern: '[invalid' }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid regex pattern');
+    });
+
+    it('should not include warnings when there are no errors', async () => {
+      await fs.writeFile(path.join(tempDir, 'file.txt'), 'match');
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeUndefined();
+    });
+
+    it('should cap diagnostics at 5 errors', async () => {
+      // Create multiple unreadable files
+      for (let i = 0; i < 7; i++) {
+        const file = path.join(tempDir, `unreadable-${i}.txt`);
+        await fs.writeFile(file, 'match');
+        await fs.chmod(file, 0o000);
+      }
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.warnings).toBeDefined();
+      // Should have at most 5 error lines
+      const errorLines = result.data!.warnings!.split('\n');
+      expect(errorLines.length).toBeLessThanOrEqual(5);
+
+      // Restore permissions for cleanup
+      for (let i = 0; i < 7; i++) {
+        await fs.chmod(path.join(tempDir, `unreadable-${i}.txt`), 0o644);
+      }
+    });
+
+    it('should include warnings in hint field', async () => {
+      const unreadableDir = path.join(tempDir, 'noperm');
+      await fs.mkdir(unreadableDir);
+      await fs.writeFile(path.join(unreadableDir, 'file.txt'), 'match');
+      await fs.chmod(unreadableDir, 0o000);
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.hint).toBeDefined();
+      expect(result.hint).toContain('[walk_error]');
+
+      await fs.chmod(unreadableDir, 0o755);
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(grepTool.name).toBe('grep');

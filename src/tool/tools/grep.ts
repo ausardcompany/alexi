@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { SearchDiagnostics } from './search-errors.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -24,6 +25,7 @@ interface GrepResult {
   matches: GrepMatch[];
   filesSearched: number;
   totalMatches: number;
+  warnings?: string;
 }
 
 /**
@@ -58,7 +60,8 @@ async function findFiles(
   dir: string,
   include?: string,
   maxFiles = 10000,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  diagnostics?: SearchDiagnostics
 ): Promise<string[]> {
   const files: string[] = [];
 
@@ -98,8 +101,12 @@ async function findFiles(
           files.push(fullPath);
         }
       }
-    } catch {
-      // Ignore permission errors
+    } catch (err) {
+      diagnostics?.addError({
+        type: 'walk_error',
+        message: err instanceof Error ? err.message : String(err),
+        path: currentDir,
+      });
     }
   }
 
@@ -146,8 +153,9 @@ Usage:
         await referenceService.ensure(searchPath);
       }
 
+      const diagnostics = new SearchDiagnostics();
       const regex = new RegExp(params.pattern);
-      const files = await findFiles(searchPath, params.include, 10000, context.signal);
+      const files = await findFiles(searchPath, params.include, 10000, context.signal, diagnostics);
       const matches: GrepMatch[] = [];
 
       for (const file of files) {
@@ -172,8 +180,12 @@ Usage:
               });
             }
           }
-        } catch {
-          // Skip files that can't be read
+        } catch (err) {
+          diagnostics.addError({
+            type: 'permission_denied',
+            message: err instanceof Error ? err.message : 'Cannot read file',
+            path: path.relative(searchPath, file),
+          });
         }
       }
 
@@ -203,6 +215,7 @@ Usage:
 
       // Limit total matches
       const limitedMatches = matches.slice(0, 1000);
+      const warnings = diagnostics.hasErrors() ? diagnostics.getSummary() : undefined;
 
       return {
         success: true,
@@ -210,12 +223,15 @@ Usage:
           matches: limitedMatches,
           filesSearched: files.length,
           totalMatches: matches.length,
+          warnings,
         },
         truncated: matches.length > 1000,
         hint:
           matches.length > 1000
             ? `Showing first 1000 of ${matches.length} matches. Narrow your search.`
-            : undefined,
+            : diagnostics.hasErrors()
+              ? warnings
+              : undefined,
       };
     } catch (err) {
       if (err instanceof SyntaxError) {
