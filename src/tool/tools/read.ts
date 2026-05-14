@@ -14,6 +14,7 @@ import {
   type EncodingInfo,
 } from '../encoded-io.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { resolveInside } from '../../utils/filesystem.js';
 
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
@@ -102,6 +103,15 @@ Usage:
     const filePath = path.isAbsolute(params.filePath)
       ? params.filePath
       : path.join(context.workdir, params.filePath);
+
+    // Symlink-safe path validation
+    const pathCheck = await resolveInside(context.workdir, filePath);
+    if (!pathCheck.safe) {
+      return {
+        success: false,
+        error: `Path rejected: ${pathCheck.reason}`,
+      };
+    }
 
     try {
       // Ensure reference is materialized for reference paths

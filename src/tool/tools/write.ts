@@ -8,6 +8,7 @@ import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { encodeWithEncoding, type EncodingInfo } from '../encoded-io.js';
 import { getFileEncoding } from './read.js';
+import { resolveInside } from '../../utils/filesystem.js';
 
 const WriteParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file to write'),
@@ -46,6 +47,15 @@ Usage:
     const filePath = path.isAbsolute(params.filePath)
       ? params.filePath
       : path.join(context.workdir, params.filePath);
+
+    // Symlink-safe path validation
+    const pathCheck = await resolveInside(context.workdir, filePath);
+    if (!pathCheck.safe) {
+      return {
+        success: false,
+        error: `Path rejected: ${pathCheck.reason}`,
+      };
+    }
 
     try {
       // Check if file exists

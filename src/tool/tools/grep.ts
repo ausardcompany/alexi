@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { resolveInside } from '../../utils/filesystem.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -131,6 +132,15 @@ Usage:
         : path.join(context.workdir, params.path)
       : context.workdir;
 
+    // Symlink-safe path validation for search directory
+    const pathCheck = await resolveInside(context.workdir, searchPath);
+    if (!pathCheck.safe) {
+      return {
+        success: false,
+        error: `Path rejected: ${pathCheck.reason}`,
+      };
+    }
+
     try {
       // Check for abort before starting
       if (context.signal?.aborted) {
@@ -147,7 +157,17 @@ Usage:
       }
 
       const regex = new RegExp(params.pattern);
-      const files = await findFiles(searchPath, params.include, 10000, context.signal);
+      const allFiles = await findFiles(searchPath, params.include, 10000, context.signal);
+
+      // Filter out files that escape workspace via symlinks
+      const files: string[] = [];
+      for (const file of allFiles) {
+        const fileCheck = await resolveInside(context.workdir, file);
+        if (fileCheck.safe) {
+          files.push(file);
+        }
+      }
+
       const matches: GrepMatch[] = [];
 
       for (const file of files) {

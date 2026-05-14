@@ -220,6 +220,54 @@ describe('Write Tool', () => {
     });
   });
 
+  describe('symlink traversal protection', () => {
+    it('should reject symlinks pointing outside workspace', async () => {
+      // Create a file outside the workspace
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-write-'));
+      const outsideFile = path.join(outsideDir, 'target.txt');
+      await fs.writeFile(outsideFile, 'original');
+
+      // Create a symlink inside workspace pointing outside
+      const linkPath = path.join(tempDir, 'evil-link.txt');
+      await fs.symlink(outsideFile, linkPath);
+
+      const result = await writeTool.execute({ filePath: linkPath, content: 'malicious' }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+      expect(result.error).toContain('Symlink target escapes workspace boundary');
+
+      // Verify original file was not modified
+      const content = await fs.readFile(outsideFile, 'utf-8');
+      expect(content).toBe('original');
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should allow writing via symlinks pointing inside workspace', async () => {
+      const realFile = path.join(tempDir, 'real-file.txt');
+      await fs.writeFile(realFile, 'original');
+
+      const linkPath = path.join(tempDir, 'safe-link.txt');
+      await fs.symlink(realFile, linkPath);
+
+      const result = await writeTool.execute({ filePath: linkPath, content: 'updated' }, context);
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject path traversal escaping workspace', async () => {
+      const result = await writeTool.execute(
+        { filePath: path.join(tempDir, '..', '..', 'etc', 'evil.txt'), content: 'malicious' },
+        context
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(writeTool.name).toBe('write');

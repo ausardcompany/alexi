@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { resolveInside } from '../../utils/filesystem.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -129,6 +130,15 @@ Usage:
         : path.join(context.workdir, params.path)
       : context.workdir;
 
+    // Symlink-safe path validation for search directory
+    const pathCheck = await resolveInside(context.workdir, searchPath);
+    if (!pathCheck.safe) {
+      return {
+        success: false,
+        error: `Path rejected: ${pathCheck.reason}`,
+      };
+    }
+
     try {
       // Check for abort before starting
       if (context.signal?.aborted) {
@@ -161,6 +171,16 @@ Usage:
       }
 
       let matches = await globMatch(searchPath, params.pattern, context.signal);
+
+      // Filter out results that escape workspace via symlinks
+      const safeMatches: string[] = [];
+      for (const match of matches) {
+        const matchCheck = await resolveInside(context.workdir, match);
+        if (matchCheck.safe) {
+          safeMatches.push(match);
+        }
+      }
+      matches = safeMatches;
 
       // Sort by modification time (most recent first)
       const withStats = await Promise.all(

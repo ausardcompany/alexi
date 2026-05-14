@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { resolveInside } from '../../utils/filesystem.js';
 
 const EditParamsSchema = z.object({
   filePath: z
@@ -58,6 +59,15 @@ Usage:
     const filePath = path.isAbsolute(params.filePath)
       ? params.filePath
       : path.join(context.workdir, params.filePath);
+
+    // Symlink-safe path validation
+    const pathCheck = await resolveInside(context.workdir, filePath);
+    if (!pathCheck.safe) {
+      return {
+        success: false,
+        error: `Path rejected: ${pathCheck.reason}`,
+      };
+    }
 
     try {
       // Read existing file

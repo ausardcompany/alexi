@@ -244,6 +244,53 @@ describe('Read Tool', () => {
     });
   });
 
+  describe('symlink traversal protection', () => {
+    it('should reject symlinks pointing outside workspace', async () => {
+      // Create a file outside the workspace
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-read-'));
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fs.writeFile(outsideFile, 'secret data');
+
+      // Create a symlink inside workspace pointing outside
+      const linkPath = path.join(tempDir, 'evil-link.txt');
+      await fs.symlink(outsideFile, linkPath);
+
+      const result = await readTool.execute({ filePath: linkPath }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+      expect(result.error).toContain('Symlink target escapes workspace boundary');
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should allow symlinks pointing inside workspace', async () => {
+      const realFile = path.join(tempDir, 'real-file.txt');
+      await fs.writeFile(realFile, 'allowed content');
+
+      const linkPath = path.join(tempDir, 'safe-link.txt');
+      await fs.symlink(realFile, linkPath);
+
+      const result = await readTool.execute({ filePath: linkPath }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        expect(result.data.content).toContain('allowed content');
+      }
+    });
+
+    it('should reject path traversal escaping workspace', async () => {
+      const result = await readTool.execute(
+        { filePath: path.join(tempDir, '..', '..', '..', 'etc', 'passwd') },
+        context
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(readTool.name).toBe('read');
