@@ -46,29 +46,49 @@ export function getFileEncoding(filePath: string): EncodingInfo | undefined {
 }
 
 /**
- * Read file with streaming for better UTF-8 handling and memory efficiency
+ * Read file with streaming for better UTF-8 handling and memory efficiency.
+ * Destroys the stream early when the byte cap is reached to avoid reading
+ * entire large files into memory.
  */
-async function readFileStreaming(
-  filePath: string,
-  options?: { offset?: number; limit?: number }
-): Promise<Buffer> {
+async function readFileStreaming(filePath: string): Promise<Buffer> {
+  const MAX_READ_BYTES = 102400; // 100KB cap — generous for 50KB output limit
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    const stream = createReadStream(filePath, {
-      encoding: undefined, // Read as Buffer for proper UTF-8 handling
-      start: options?.offset ? options.offset - 1 : undefined,
-      end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
+    let totalBytes = 0;
+    let resolved = false;
+    const stream = createReadStream(filePath, { encoding: undefined });
+
+    stream.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      totalBytes += chunk.length;
+      if (totalBytes >= MAX_READ_BYTES) {
+        stream.destroy();
+      }
     });
 
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
     stream.on('end', () => {
-      const buffer = Buffer.concat(chunks);
-      resolve(buffer);
+      if (!resolved) {
+        resolved = true;
+        resolve(Buffer.concat(chunks));
+      }
     });
-    stream.on('error', reject);
 
-    // Ensure stream is destroyed on consumer teardown
-    stream.once('close', () => stream.destroy());
+    stream.on('close', () => {
+      if (!resolved) {
+        resolved = true;
+        resolve(Buffer.concat(chunks));
+      }
+    });
+
+    stream.on('error', (err) => {
+      if (!stream.destroyed) {
+        reject(err);
+      } else if (!resolved) {
+        // Stream was destroyed by us (byte cap reached), resolve with collected data
+        resolved = true;
+        resolve(Buffer.concat(chunks));
+      }
+    });
   });
 }
 

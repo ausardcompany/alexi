@@ -244,6 +244,50 @@ describe('Read Tool', () => {
     });
   });
 
+  describe('stream early termination', () => {
+    it('should terminate early for large files without reading entire content', async () => {
+      // Create a file larger than the 100KB read cap (200KB+)
+      const testFile = path.join(tempDir, 'large-file.txt');
+      const lineContent = 'A'.repeat(100) + '\n'; // ~101 bytes per line
+      const lineCount = 3000; // ~300KB total
+      const largeContent = lineContent.repeat(lineCount);
+      await fs.writeFile(testFile, largeContent);
+
+      const result = await readTool.execute({ filePath: testFile }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.type).toBe('file');
+      if (result.data?.type === 'file') {
+        // Should still have properly line-numbered content from the beginning
+        expect(result.data.content).toContain('1: ');
+        expect(result.data.offset).toBe(1);
+        // Should have some lines but not all (stream was terminated early)
+        expect(result.data.totalLines).toBeGreaterThan(0);
+        expect(result.data.totalLines).toBeLessThan(lineCount);
+      }
+    });
+
+    it('should correctly line-number content from a large file', async () => {
+      // Create a file with numbered lines exceeding the byte cap
+      const testFile = path.join(tempDir, 'numbered-large.txt');
+      const lines: string[] = [];
+      for (let i = 1; i <= 2000; i++) {
+        lines.push(`Content line ${i} ${'x'.repeat(80)}`);
+      }
+      await fs.writeFile(testFile, lines.join('\n'));
+
+      const result = await readTool.execute({ filePath: testFile }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        // First line should be correctly numbered
+        expect(result.data.content).toContain('1: Content line 1');
+        expect(result.data.content).toContain('2: Content line 2');
+        expect(result.data.offset).toBe(1);
+      }
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(readTool.name).toBe('read');
