@@ -284,6 +284,84 @@ describe('Grep Tool', () => {
     });
   });
 
+  describe('symlink traversal protection', () => {
+    it('should filter out symlinks pointing outside workspace from results', async () => {
+      // Create a file outside the workspace
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-grep-'));
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fs.writeFile(outsideFile, 'secret match pattern');
+
+      // Create a normal file inside workspace
+      await fs.writeFile(path.join(tempDir, 'safe.txt'), 'safe match pattern');
+
+      // Create a symlink inside workspace pointing outside
+      const linkPath = path.join(tempDir, 'evil-link.txt');
+      await fs.symlink(outsideFile, linkPath);
+
+      const result = await grepTool.execute({ pattern: 'match' }, context);
+
+      expect(result.success).toBe(true);
+      // Only the safe file should have matches
+      expect(result.data?.matches.some((m) => m.file === 'safe.txt')).toBe(true);
+      expect(result.data?.matches.some((m) => m.file === 'evil-link.txt')).toBe(false);
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should allow symlinks pointing inside workspace in results', async () => {
+      const realFile = path.join(tempDir, 'real-file.txt');
+      await fs.writeFile(realFile, 'findable content');
+
+      const linkPath = path.join(tempDir, 'safe-link.txt');
+      await fs.symlink(realFile, linkPath);
+
+      const result = await grepTool.execute({ pattern: 'findable' }, context);
+
+      expect(result.success).toBe(true);
+      // Both real file and safe symlink should have matches
+      expect(result.data?.matches.some((m) => m.file === 'real-file.txt')).toBe(true);
+      expect(result.data?.matches.some((m) => m.file === 'safe-link.txt')).toBe(true);
+    });
+
+    it('should reject search path outside workspace', async () => {
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-grep-path-'));
+      await fs.writeFile(path.join(outsideDir, 'file.txt'), 'content');
+
+      const result = await grepTool.execute({ pattern: 'content', path: outsideDir }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should filter out files in symlinked directories pointing outside workspace', async () => {
+      // Create directory outside workspace with matching content
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-grep-dir-'));
+      await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'searchable content');
+
+      // Create a symlink to outside directory inside workspace
+      const linkDir = path.join(tempDir, 'linked-dir');
+      await fs.symlink(outsideDir, linkDir);
+
+      // Also create a safe file with matching content
+      await fs.writeFile(path.join(tempDir, 'safe.txt'), 'searchable content');
+
+      const result = await grepTool.execute({ pattern: 'searchable' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.matches.some((m) => m.file === 'safe.txt')).toBe(true);
+      // Files from the symlinked directory should not appear
+      const hasLinkedDirFile = result.data?.matches.some((m) => m.file.includes('linked-dir'));
+      expect(hasLinkedDirFile).toBe(false);
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(grepTool.name).toBe('grep');

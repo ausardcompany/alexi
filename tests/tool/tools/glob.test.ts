@@ -225,6 +225,83 @@ describe('Glob Tool', () => {
     });
   });
 
+  describe('symlink traversal protection', () => {
+    it('should filter out symlinks pointing outside workspace from results', async () => {
+      // Create a file outside the workspace
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-glob-'));
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fs.writeFile(outsideFile, 'secret data');
+
+      // Create a normal file inside workspace
+      await fs.writeFile(path.join(tempDir, 'safe.txt'), 'safe content');
+
+      // Create a symlink inside workspace pointing outside
+      const linkPath = path.join(tempDir, 'evil-link.txt');
+      await fs.symlink(outsideFile, linkPath);
+
+      const result = await globTool.execute({ pattern: '*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      // Only the safe file should appear in results
+      expect(result.data?.matches).toContain('safe.txt');
+      expect(result.data?.matches).not.toContain('evil-link.txt');
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should allow symlinks pointing inside workspace in results', async () => {
+      const realFile = path.join(tempDir, 'real-file.txt');
+      await fs.writeFile(realFile, 'real content');
+
+      const linkPath = path.join(tempDir, 'safe-link.txt');
+      await fs.symlink(realFile, linkPath);
+
+      const result = await globTool.execute({ pattern: '*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.matches).toContain('real-file.txt');
+      expect(result.data?.matches).toContain('safe-link.txt');
+    });
+
+    it('should reject search path outside workspace', async () => {
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-glob-path-'));
+      await fs.writeFile(path.join(outsideDir, 'file.txt'), 'content');
+
+      const result = await globTool.execute({ pattern: '*.txt', path: outsideDir }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Path rejected');
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+
+    it('should filter out symlinked directories pointing outside workspace', async () => {
+      // Create directory outside workspace
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'outside-glob-dir-'));
+      await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'secret');
+
+      // Create a symlink to outside directory inside workspace
+      const linkDir = path.join(tempDir, 'linked-dir');
+      await fs.symlink(outsideDir, linkDir);
+
+      // Also create a safe file
+      await fs.writeFile(path.join(tempDir, 'safe.txt'), 'safe');
+
+      const result = await globTool.execute({ pattern: '**/*.txt' }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.matches).toContain('safe.txt');
+      // Files from the symlinked directory should not appear
+      const hasLinkedDirFile = result.data?.matches.some((m) => m.includes('linked-dir'));
+      expect(hasLinkedDirFile).toBe(false);
+
+      // Cleanup
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(globTool.name).toBe('glob');
