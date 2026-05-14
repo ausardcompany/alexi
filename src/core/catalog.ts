@@ -13,6 +13,7 @@ export const ModelCapability = z.enum([
   'streaming',
 ]);
 
+// eslint-disable-next-line no-redeclare
 export type ModelCapability = z.infer<typeof ModelCapability>;
 
 export interface ModelInfo {
