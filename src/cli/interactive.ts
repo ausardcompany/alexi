@@ -28,7 +28,7 @@ import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { getCheckpointManager } from '../core/checkpoints.js';
 import { completeLine } from './utils/completer.js';
-import { compactConversation, estimateTokens } from '../core/compaction.js';
+import { compactConversation, compactBefore, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
 import { getStageManager, type ConversationStage } from '../core/stageManager.js';
 import {
@@ -478,6 +478,56 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       console.log(c('cyan', '\n  Compacting conversation...'));
       try {
         const { result } = await compactConversation(history);
+        if (result.estimatedTokensSaved > 0) {
+          console.log(c('green', `  Compacted: saved ~${result.estimatedTokensSaved} tokens`));
+          console.log(
+            c(
+              'gray',
+              `  Messages reduced from ${result.originalMessages} to ${result.compactedMessages}`
+            )
+          );
+        } else {
+          console.log(c('yellow', '  No compaction needed'));
+        }
+      } catch (err) {
+        console.log(c('red', `  Compaction failed: ${err}`));
+      }
+      console.log();
+      return true;
+    }
+
+    case 'compact-before': {
+      const history = state.sessionManager.getHistory();
+      if (history.length === 0) {
+        console.log(c('yellow', '\n  No conversation to compact\n'));
+        return true;
+      }
+      if (args.length === 0) {
+        console.log(c('red', '\n  Usage: /compact-before <N>'));
+        console.log(c('gray', '  Compacts messages before index N, preserving the rest\n'));
+        return true;
+      }
+      const index = parseInt(args[0], 10);
+      if (isNaN(index)) {
+        console.log(c('red', `\n  Invalid index: ${args[0]} (must be a number)\n`));
+        return true;
+      }
+      if (index < 1) {
+        console.log(c('red', '\n  Index must be at least 1\n'));
+        return true;
+      }
+      if (index > history.length) {
+        console.log(
+          c(
+            'red',
+            `\n  Index ${index} is out of range (conversation has ${history.length} messages)\n`
+          )
+        );
+        return true;
+      }
+      console.log(c('cyan', `\n  Compacting messages before index ${index}...`));
+      try {
+        const { result } = await compactBefore(history, index);
         if (result.estimatedTokensSaved > 0) {
           console.log(c('green', `  Compacted: saved ~${result.estimatedTokensSaved} tokens`));
           console.log(

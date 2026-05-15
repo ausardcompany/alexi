@@ -17,6 +17,7 @@ export interface CompactionOptions {
   summaryMaxTokens?: number; // Max tokens for summary, default 2000
   triggerThreshold?: number; // Auto-trigger at this % of context, default 90
   keepPruned?: boolean; // Keep pruned messages in history, default false
+  upToIndex?: number; // Only compact messages before this index
 }
 
 export interface CompactionResult {
@@ -282,6 +283,89 @@ export async function compactConversation(
       compactedMessages: compactedMessages.length,
       estimatedTokensSaved: tokensSaved,
       summary,
+    },
+  };
+}
+
+/**
+ * Compact only messages before the specified index, preserving messages at and after
+ * that index verbatim.
+ *
+ * @param messages  Full conversation message array
+ * @param index     Index up to which messages will be compacted (exclusive)
+ * @param options   Additional compaction options
+ * @returns Compacted messages and result metadata
+ */
+export async function compactBefore(
+  messages: Message[],
+  index: number,
+  options?: Omit<CompactionOptions, 'upToIndex'>
+): Promise<{ messages: Message[]; result: CompactionResult }> {
+  // Validate index
+  if (index < 0) {
+    return {
+      messages: [...messages],
+      result: {
+        originalMessages: messages.length,
+        compactedMessages: messages.length,
+        estimatedTokensSaved: 0,
+        summary: '',
+      },
+    };
+  }
+
+  if (index > messages.length) {
+    return {
+      messages: [...messages],
+      result: {
+        originalMessages: messages.length,
+        compactedMessages: messages.length,
+        estimatedTokensSaved: 0,
+        summary: '',
+      },
+    };
+  }
+
+  // Nothing to compact if index is 0 or 1
+  if (index <= 1) {
+    return {
+      messages: [...messages],
+      result: {
+        originalMessages: messages.length,
+        compactedMessages: messages.length,
+        estimatedTokensSaved: 0,
+        summary: '',
+      },
+    };
+  }
+
+  // Split messages at the index boundary
+  const messagesToCompact = messages.slice(0, index);
+  const messagesToPreserve = messages.slice(index);
+
+  // Compact the first portion. We set preserveLastN to 1 so that
+  // compactConversation summarizes most of the prefix but the slice logic works
+  // (slice(0, -0) has undefined behavior, so we avoid preserveLastN: 0).
+  const compactOpts: CompactionOptions = {
+    ...options,
+    preserveLastN: 1,
+  };
+
+  const { messages: compactedPortion, result } = await compactConversation(
+    messagesToCompact,
+    compactOpts
+  );
+
+  // Concatenate compacted portion with preserved messages
+  const finalMessages = [...compactedPortion, ...messagesToPreserve];
+
+  return {
+    messages: finalMessages,
+    result: {
+      originalMessages: messages.length,
+      compactedMessages: finalMessages.length,
+      estimatedTokensSaved: result.estimatedTokensSaved,
+      summary: result.summary,
     },
   };
 }
