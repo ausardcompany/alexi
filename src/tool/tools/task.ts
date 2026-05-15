@@ -11,6 +11,10 @@ const TaskParamsSchema = z.object({
   description: z.string().describe('Short 3-5 word description'),
   subagent_type: z.string().optional().describe('Type of specialized agent: general, explore'),
   task_id: z.string().optional().describe('Resume a previous task by ID'),
+  background: z
+    .boolean()
+    .optional()
+    .describe('Run task in background (experimental, requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)'),
 });
 
 // Task tool utility interfaces
@@ -60,11 +64,15 @@ interface ToolContext {
   // Future: flags?: { auto?: boolean }
 }
 
+export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
 interface TaskResult {
   taskId: string;
   agentId: string;
   response: string;
   completed: boolean;
+  status?: TaskStatus;
+  background?: boolean;
 }
 
 // Store for ongoing tasks
@@ -74,8 +82,58 @@ const taskStore = new Map<
     agentId: string;
     messages: Array<{ role: string; content: string }>;
     created: number;
+    status: TaskStatus;
+    background?: boolean;
+    result?: string;
+    error?: string;
+    startedAt?: Date;
+    completedAt?: Date;
   }
 >();
+
+/**
+ * Background task queue processor (stub for future implementation)
+ */
+async function queueBackgroundTask(
+  taskId: string,
+  taskData: {
+    agentId: string;
+    messages: Array<{ role: string; content: string }>;
+    created: number;
+    status: TaskStatus;
+    background?: boolean;
+    result?: string;
+    error?: string;
+    startedAt?: Date;
+    completedAt?: Date;
+  },
+  _agent: Agent,
+  _config: SubagentConfig
+): Promise<void> {
+  // This is a stub - in a full implementation, this would:
+  // 1. Add task to a persistent queue
+  // 2. Spawn a background worker process
+  // 3. Execute the LLM call with the agent's system prompt
+  // 4. Update taskData with results
+  
+  // For now, simulate async completion
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  taskData.status = 'running';
+  
+  // Simulate task completion after a delay
+  setTimeout(() => {
+    taskData.status = 'completed';
+    taskData.result = 'Background task completed (stub implementation)';
+    taskData.completedAt = new Date();
+  }, 1000);
+}
+
+/**
+ * Get task store for status queries
+ */
+export function getTaskStore() {
+  return taskStore;
+}
 
 export const taskTool = defineTool<typeof TaskParamsSchema, TaskResult>({
   name: 'task',
@@ -88,6 +146,7 @@ Available agent types:
 Usage:
 - Provide a detailed prompt with exactly what information to return
 - Use task_id to resume a previous task session
+- Use background=true for long-running tasks (requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)
 - Results are returned in the agent's final message`,
 
   parameters: TaskParamsSchema,
@@ -95,6 +154,9 @@ Usage:
   async execute(params, context): Promise<ToolResult<TaskResult>> {
     const { nanoid } = await import('nanoid');
     const registry = getAgentRegistry();
+
+    // Check if background tasks are enabled
+    const enableBackground = process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS === 'true';
 
     // Security: Alexi disallows subagents spawning subagents
     const canTask = TaskTool.nestedTask();
@@ -150,6 +212,8 @@ Usage:
         agentId: agent.id,
         messages: [],
         created: Date.now(),
+        status: 'queued',
+        background: params.background && enableBackground,
       };
       taskStore.set(taskId, taskData);
     }
@@ -180,9 +244,43 @@ Usage:
       inheritPermissions: true,
     });
 
+    // Handle background task execution
+    if (params.background && enableBackground) {
+      taskData.status = 'queued';
+      taskData.startedAt = new Date();
+
+      const response = `[Task ${taskId} queued for background execution by agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task is running in the background. Use the task_status tool to check progress.`;
+
+      taskData.messages.push({
+        role: 'assistant',
+        content: response,
+      });
+
+      // Queue task for background processing
+      // In a full implementation, this would dispatch to a background worker
+      queueBackgroundTask(taskId, taskData, agent, subagentConfig).catch((err) => {
+        taskData!.status = 'failed';
+        taskData!.error = err instanceof Error ? err.message : String(err);
+        taskData!.completedAt = new Date();
+      });
+
+      return {
+        success: true,
+        data: {
+          taskId: taskId!,
+          agentId: agent.id,
+          response,
+          completed: false,
+          status: 'queued',
+          background: true,
+        },
+      };
+    }
+
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
     // and pass subagentConfig.autoMode to maintain automation behavior
+    taskData.status = 'completed';
     const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
 
     taskData.messages.push({
@@ -197,6 +295,7 @@ Usage:
         agentId: agent.id,
         response,
         completed: true,
+        status: 'completed',
       },
     };
   },

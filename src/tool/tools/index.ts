@@ -13,6 +13,7 @@ import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webfetchTool } from './webfetch.js';
 import { taskTool } from './task.js';
+import { taskStatusTool } from './task_status.js';
 import { questionTool } from './question.js';
 import { suggestTool } from './suggest.js';
 import { todowriteTool } from './todowrite.js';
@@ -45,6 +46,7 @@ export const builtInTools = [
   webfetchTool,
   websearchTool,
   taskTool,
+  taskStatusTool,
   questionTool,
   suggestTool,
   todowriteTool,
@@ -89,6 +91,7 @@ export {
   webfetchTool,
   websearchTool,
   taskTool,
+  taskStatusTool,
   questionTool,
   suggestTool,
   todowriteTool,
