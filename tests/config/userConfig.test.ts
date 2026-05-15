@@ -14,6 +14,7 @@ import {
   deleteConfigValue,
   getConfigDefaultModel,
   setConfigDefaultModel,
+  getCompactionThreshold,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -169,6 +170,48 @@ describe('userConfig', () => {
       expect(config.defaultModel).toBe('gpt-4.1');
       expect(config.theme).toBe('dark');
       expect(config.sounds).toEqual({ enabled: true });
+    });
+  });
+
+  describe('getCompactionThreshold', () => {
+    it('should return undefined when not set', () => {
+      saveFullConfig({});
+      expect(getCompactionThreshold()).toBeUndefined();
+    });
+
+    it('should return the configured threshold value', () => {
+      saveFullConfig({ compactionThreshold: 0.7 });
+      expect(getCompactionThreshold()).toBe(0.7);
+    });
+
+    it('should return undefined for non-number values', () => {
+      saveFullConfig({ compactionThreshold: 'high' });
+      expect(getCompactionThreshold()).toBeUndefined();
+    });
+
+    it('should return undefined for zero', () => {
+      saveFullConfig({ compactionThreshold: 0 });
+      expect(getCompactionThreshold()).toBeUndefined();
+    });
+
+    it('should return undefined for values greater than 1', () => {
+      saveFullConfig({ compactionThreshold: 1.5 });
+      expect(getCompactionThreshold()).toBeUndefined();
+    });
+
+    it('should return undefined for negative values', () => {
+      saveFullConfig({ compactionThreshold: -0.5 });
+      expect(getCompactionThreshold()).toBeUndefined();
+    });
+
+    it('should return 1.0 as a valid boundary value', () => {
+      saveFullConfig({ compactionThreshold: 1.0 });
+      expect(getCompactionThreshold()).toBe(1.0);
+    });
+
+    it('should return 0.6 for aggressive compaction threshold', () => {
+      saveFullConfig({ compactionThreshold: 0.6 });
+      expect(getCompactionThreshold()).toBe(0.6);
     });
   });
 });

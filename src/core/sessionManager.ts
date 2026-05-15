@@ -38,6 +38,7 @@ export interface SessionManagerOptions {
   sessionsDir?: string;
   maxContextTokens?: number;
   autoCompact?: boolean;
+  compactionThreshold?: number; // 0.0-1.0, default 0.8
 }
 
 export class SessionManager {
@@ -45,6 +46,7 @@ export class SessionManager {
   private activeSession: Session | null = null;
   private maxContextTokens: number;
   private autoCompact: boolean;
+  private compactionThreshold: number;
 
   constructor(options?: string | SessionManagerOptions) {
     const opts: SessionManagerOptions =
@@ -53,6 +55,7 @@ export class SessionManager {
     this.sessionsDir = opts.sessionsDir || path.join(process.env.HOME || '~', '.alexi', 'sessions');
     this.maxContextTokens = opts.maxContextTokens ?? 128_000;
     this.autoCompact = opts.autoCompact ?? true;
+    this.compactionThreshold = opts.compactionThreshold ?? 0.8;
 
     // Ensure sessions directory exists
     if (!fs.existsSync(this.sessionsDir)) {
@@ -149,7 +152,14 @@ export class SessionManager {
     this.saveSession(this.activeSession!);
 
     // Auto-compact if enabled and context usage exceeds threshold
-    if (this.autoCompact && shouldCompact(this.activeSession!.messages, this.maxContextTokens)) {
+    if (
+      this.autoCompact &&
+      shouldCompact(
+        this.activeSession!.messages,
+        this.maxContextTokens,
+        this.compactionThreshold * 100
+      )
+    ) {
       this.compact().catch(() => {});
     }
   }

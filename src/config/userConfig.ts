@@ -183,6 +183,18 @@ export function setConfigDefaultModel(modelId: string): void {
   setConfigValue('defaultModel', modelId);
 }
 
+/**
+ * Get the user's configured compaction threshold (0.0-1.0), or undefined if not set.
+ * Returns undefined for values outside the valid range.
+ */
+export function getCompactionThreshold(): number | undefined {
+  const value = getConfigValue('compactionThreshold');
+  if (typeof value === 'number' && value > 0 && value <= 1) {
+    return value;
+  }
+  return undefined;
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {
