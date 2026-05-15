@@ -41,6 +41,11 @@ export interface McpConnection {
   toolsCachedAt?: number;
 }
 
+export interface McpConnectOptions {
+  /** Project working directory to pass as ALEXI_PROJECT_DIR */
+  workdir?: string;
+}
+
 interface ToolCache {
   tools: McpToolInfo[];
   timestamp: number;
@@ -55,7 +60,7 @@ export class McpClientManager {
   /**
    * Connect to an MCP server
    */
-  async connect(config: McpServerConfig): Promise<McpConnection> {
+  async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
     if (this.connections.has(config.name)) {
       const existing = this.connections.get(config.name)!;
       if (existing.status === 'connected') {
@@ -76,7 +81,7 @@ export class McpClientManager {
 
     try {
       if (config.transport === 'stdio') {
-        await this.connectStdio(connection);
+        await this.connectStdio(connection, options);
       } else {
         throw new Error(`Transport ${config.transport} not yet implemented`);
       }
@@ -122,7 +127,10 @@ export class McpClientManager {
     }
   }
 
-  private async connectStdio(connection: McpConnection): Promise<void> {
+  private async connectStdio(
+    connection: McpConnection,
+    options?: McpConnectOptions
+  ): Promise<void> {
     const { config } = connection;
 
     if (!config.command) {
@@ -130,8 +138,10 @@ export class McpClientManager {
     }
 
     // Resolve environment variables
+    // ALEXI_PROJECT_DIR is injected before user config.env so users can override it
     const env = {
       ...process.env,
+      ALEXI_PROJECT_DIR: options?.workdir ?? process.cwd(),
       ...resolveEnvVars(config.env),
     };
 
@@ -212,7 +222,7 @@ export class McpClientManager {
    * Connect to all enabled servers from config
    * Enhanced with graceful failure handling and summary logging
    */
-  async connectFromConfig(): Promise<void> {
+  async connectFromConfig(options?: McpConnectOptions): Promise<void> {
     const config = loadMcpConfig();
 
     // Add graceful handling for server initialization failures
@@ -220,7 +230,7 @@ export class McpClientManager {
     const results = await Promise.allSettled(
       servers.map(async (server) => {
         try {
-          const connection = await this.connect(server);
+          const connection = await this.connect(server, options);
           if (connection.status === 'connected') {
             return { server: server.name, status: 'connected', tools: connection.tools.length };
           } else {
