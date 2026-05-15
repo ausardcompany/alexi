@@ -133,6 +133,7 @@ export class McpClientManager {
     const env = {
       ...process.env,
       ...resolveEnvVars(config.env),
+      ALEXI_PROJECT_DIR: process.cwd(),
     };
 
     // Spawn the MCP server process
