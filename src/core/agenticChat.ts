@@ -23,6 +23,11 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import {
+  executeHooks,
+  createHookContext,
+  type HookResult as HookExecResult,
+} from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -500,6 +505,34 @@ export async function agenticChat(
           tool_call_id: id,
           content: JSON.stringify(toolResult),
         });
+
+        // Execute PostToolUse hooks and handle rejection feedback
+        const hookContext = createHookContext('PostToolUse', {
+          sessionId: toolContext.sessionId,
+          toolName: toolCall.function.name,
+          toolResult,
+        });
+
+        const hookResults: HookExecResult[] = await executeHooks('PostToolUse', hookContext);
+
+        for (const hookResult of hookResults) {
+          if (!hookResult.success) {
+            if (hookResult.continueOnBlock) {
+              // Feed rejection reason back to the model as a user message
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              messages.push({
+                role: 'user',
+                content: `Tool execution was blocked: ${reason}. Please try a different approach.`,
+              });
+            } else {
+              // Halt: throw to stop the agentic loop
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              throw new Error(`PostToolUse hook blocked execution: ${reason}`);
+            }
+          }
+        }
       }
 
       // Continue loop to let LLM process tool results
