@@ -303,6 +303,8 @@ export interface CompletionOptions {
   tools?: ChatCompletionTool[];
   /** Override tool choice for this call */
   toolChoice?: OrchestrationConfig['toolChoice'];
+  /** Extra HTTP headers to include in the request (e.g. agent observability headers) */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -663,9 +665,12 @@ export class SapOrchestrationProvider {
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
 
-    const response = await client.chatCompletion({
-      messages: orchestrationMessages,
-    });
+    const requestConfig = options?.headers ? { headers: options.headers } : undefined;
+
+    const response = await client.chatCompletion(
+      { messages: orchestrationMessages },
+      requestConfig
+    );
 
     const tokenUsage = response.getTokenUsage();
     const toolCalls = response.getToolCalls();
@@ -733,7 +738,13 @@ export class SapOrchestrationProvider {
     const orchestrationMessages = toOrchestrationMessages(messages);
 
     // Use SAP SDK streaming with AbortSignal support
-    const response = await client.stream({ messages: orchestrationMessages }, options?.signal);
+    const requestConfig = options?.headers ? { headers: options.headers } : undefined;
+    const response = await client.stream(
+      { messages: orchestrationMessages },
+      options?.signal,
+      undefined,
+      requestConfig
+    );
 
     // Stream chunks using the iterator
     for await (const chunk of response.stream) {
