@@ -260,7 +260,7 @@ Usage:
 
       // Queue task for background processing
       // In a full implementation, this would dispatch to a background worker
-      queueBackgroundTask(taskId, taskData, agent, subagentConfig).catch((err) => {
+      queueBackgroundTask(taskId as string, taskData, agent, subagentConfig).catch((err) => {
         taskData!.status = 'failed';
         taskData!.error = err instanceof Error ? err.message : String(err);
         taskData!.completedAt = new Date();

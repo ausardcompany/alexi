@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { taskTool, getTaskStore, type TaskStatus } from '../../../src/tool/tools/task.js';
+import { taskTool, getTaskStore } from '../../../src/tool/tools/task.js';
 import { taskStatusTool } from '../../../src/tool/tools/task_status.js';
 import type { ToolContext } from '../../../src/tool/index.js';
 
@@ -196,7 +196,7 @@ describe('Background Tasks', () => {
         context
       );
 
-      const taskId = taskResult.data?.taskId!;
+      const taskId = taskResult.data!.taskId;
 
       // Wait for background task to complete (stub completes after 1s)
       await new Promise((resolve) => setTimeout(resolve, 1100));
