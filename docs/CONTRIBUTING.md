@@ -386,6 +386,7 @@ When testing code gated behind environment variables (e.g., `ALEXI_EXPERIMENTAL_
 - Save and restore original environment values in `beforeEach`/`afterEach`
 - Test both enabled and disabled states of the flag
 - Clean up any shared state (e.g., task stores, registries) between tests
+- When waiting for async operations (e.g., background task completion), use generous timeout margins (approximately 2x the expected duration) to prevent flakiness in CI environments where scheduling latency varies
 
 ```typescript
 let originalEnv: string | undefined;
@@ -402,6 +403,13 @@ afterEach(() => {
   }
   getTaskStore().clear();
 });
+```
+
+When testing background task completion, account for the total async execution time plus CI overhead:
+```typescript
+// Stub has 100ms await + 1000ms setTimeout = ~1100ms theoretical minimum
+// Use 2000ms to provide buffer for CI scheduling variability
+await new Promise((resolve) => setTimeout(resolve, 2000));
 ```
 
 ### TUI Command Testing

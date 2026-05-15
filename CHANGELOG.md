@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolved formatting inconsistencies flagged by Prettier across agent config schema, bash tool, read tool, truncation config, and permission drain module.
 - Fixed TypeScript type error in task tool where `taskId` variable (typed as `string | undefined`) was passed to `queueBackgroundTask` without narrowing.
 - Removed unused `TaskStatus` type import from background tasks test file to resolve lint warning.
+- Increased background task test timeout from 1100ms to 2000ms to prevent CI flakiness caused by variable scheduling latency in CI runners.
 
 
 ## [0.3.1] - 2026-03-21

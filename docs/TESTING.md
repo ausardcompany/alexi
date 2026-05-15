@@ -302,8 +302,8 @@ describe('Background Tasks', () => {
 
     const taskId = taskResult.data!.taskId;
 
-    // Wait for background task to complete (stub completes after 1s)
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    // Wait for background task to complete (stub has 100ms await + 1000ms setTimeout)
+    await new Promise((resolve) => setTimeout(resolve, 2000));
 
     const statusResult = await taskStatusTool.execute({ taskId }, context);
 
@@ -317,7 +317,7 @@ Key patterns for testing background tasks:
 
 1. **Environment Variable Control**: Enable/disable experimental features via `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`
 2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach` to prevent state leakage
-3. **Async Completion Testing**: Use `setTimeout` with sufficient delay to wait for stub task completion
+3. **Async Completion Testing**: Use `setTimeout` with a generous margin above the expected completion time to prevent CI flakiness. For example, if the stub has a 100ms await plus a 1000ms setTimeout (total ~1100ms), use a 2000ms wait to account for CI environment variability.
 4. **Non-null Assertions**: Use `taskResult.data!.taskId` pattern (not `taskResult.data?.taskId!`) for correct operator precedence
 5. **Feature Flag Gating**: Test that background functionality is ignored when the feature flag is disabled
 
@@ -760,11 +760,13 @@ graph LR
 3. **Timeout errors**
    - Increase timeout for slow operations: `it('test', { timeout: 10000 }, async () => {})`
    - Check for hanging async operations
+   - For tests that await background task completion, use generous margins (e.g., 2x the expected duration) to account for CI environment scheduling delays
 
 4. **Flaky tests**
    - Use proper cleanup in `afterEach`
    - Avoid shared state between tests
    - Use unique temporary directories per test
+   - When waiting for async tasks to complete, provide sufficient buffer time above the theoretical minimum (CI runners may have variable scheduling latency)
 
 ## Contributing Tests
 
