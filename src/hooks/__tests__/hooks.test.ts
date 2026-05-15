@@ -594,6 +594,135 @@ describe('Hooks System', () => {
     });
   });
 
+  describe('continueOnBlock', () => {
+    it('should accept continueOnBlock field in hook definition schema', () => {
+      const hook: HookDefinition = {
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "check"',
+        continueOnBlock: true,
+      };
+
+      expect(() => manager.register(hook)).not.toThrow();
+      const hooks = manager.getHooks('PostToolUse');
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0].continueOnBlock).toBe(true);
+    });
+
+    it('should default continueOnBlock to false when not specified', () => {
+      const hook: HookDefinition = {
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "check"',
+      };
+
+      manager.register(hook);
+      const hooks = manager.getHooks('PostToolUse');
+      expect(hooks[0].continueOnBlock).toBe(false);
+    });
+
+    it('should mark failed hook results with blocked: true', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'exit 1',
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].success).toBe(false);
+      expect(results[0].blocked).toBe(true);
+    });
+
+    it('should set continueOnBlock: true on blocked result when hook has continueOnBlock', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'exit 1',
+        continueOnBlock: true,
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].blocked).toBe(true);
+      expect(results[0].continueOnBlock).toBe(true);
+    });
+
+    it('should set continueOnBlock: false on blocked result when hook does not have continueOnBlock', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'exit 1',
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].blocked).toBe(true);
+      expect(results[0].continueOnBlock).toBe(false);
+    });
+
+    it('should not mark successful hook results as blocked', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "ok"',
+        continueOnBlock: true,
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'read',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].success).toBe(true);
+      expect(results[0].blocked).toBeUndefined();
+      expect(results[0].continueOnBlock).toBeUndefined();
+    });
+
+    it('should capture rejection output in blocked result', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "rejected: unsafe operation" && exit 1',
+        continueOnBlock: true,
+      });
+
+      const context: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'bash',
+      };
+
+      const results = await manager.execute('PostToolUse', context);
+
+      expect(results[0].blocked).toBe(true);
+      expect(results[0].continueOnBlock).toBe(true);
+      expect(results[0].output?.trim()).toBe('rejected: unsafe operation');
+    });
+  });
+
   describe('Script Hook', () => {
     it('should handle non-existent script file', async () => {
       manager.register({

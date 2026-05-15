@@ -23,6 +23,7 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import { executeHooks, createHookContext } from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -500,6 +501,51 @@ export async function agenticChat(
           tool_call_id: id,
           content: JSON.stringify(toolResult),
         });
+
+        // Execute PostToolUse hooks and handle continueOnBlock feedback
+        let parsedParams: Record<string, unknown> = {};
+        try {
+          parsedParams = JSON.parse(toolCall.function.arguments || '{}');
+        } catch {
+          // If arguments are not valid JSON, use empty object
+        }
+
+        const hookContext = createHookContext('PostToolUse', {
+          toolName: toolCall.function.name,
+          toolParams: parsedParams,
+          toolResult,
+          sessionId: toolContext.sessionId,
+        });
+
+        const hookResults = await executeHooks('PostToolUse', hookContext);
+
+        for (const hookResult of hookResults) {
+          if (hookResult.blocked) {
+            if (hookResult.continueOnBlock) {
+              // Feed rejection back to the model as an error message
+              messages.push({
+                role: 'user',
+                content: `[Hook Rejection] A PostToolUse hook blocked this action: ${hookResult.output || hookResult.error}. Please adjust your approach.`,
+              });
+            } else {
+              // Default behavior: halt execution by breaking out of the tool loop
+              // and returning the current state
+              return {
+                text: `Hook blocked tool execution: ${hookResult.output || hookResult.error}`,
+                usage: {
+                  prompt_tokens: totalUsage.prompt_tokens ?? 0,
+                  completion_tokens: totalUsage.completion_tokens ?? 0,
+                  total_tokens: totalUsage.total_tokens ?? 0,
+                },
+                modelUsed: modelId,
+                routingReason,
+                iterations,
+                toolCallsExecuted,
+                toolCallSummary,
+              };
+            }
+          }
+        }
       }
 
       // Continue loop to let LLM process tool results

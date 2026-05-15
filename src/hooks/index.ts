@@ -51,6 +51,11 @@ export interface HookDefinition {
   timeout?: number; // Max execution time in ms, default 30000
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
+
+  // When true: if this hook rejects (blocks) a tool action, feed rejection
+  // reason back to the model as an error message so it can self-correct,
+  // instead of halting execution. Default: false (halt on rejection).
+  continueOnBlock?: boolean;
 }
 
 export interface HookContext {
@@ -70,6 +75,10 @@ export interface HookResult {
   output?: string;
   error?: string;
   duration: number;
+  /** Indicates the hook blocked (rejected) the action */
+  blocked?: boolean;
+  /** When true, the model should receive the rejection as feedback instead of halting */
+  continueOnBlock?: boolean;
 }
 
 // Zod schemas for validation
@@ -93,6 +102,7 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  continueOnBlock: z.boolean().default(false).optional(),
 });
 
 export const HookContextSchema = z.object({
@@ -507,6 +517,12 @@ export class HookManagerImpl implements HookManager {
           error: `Hook execution error: ${err instanceof Error ? err.message : String(err)}`,
           duration: 0,
         };
+      }
+
+      // Mark failed hooks as blocked and propagate continueOnBlock
+      if (!result.success) {
+        result.blocked = true;
+        result.continueOnBlock = hook.continueOnBlock ?? false;
       }
 
       results.push(result);

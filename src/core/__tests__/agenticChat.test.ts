@@ -5,6 +5,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { CompletionResult } from '../../providers/sapOrchestration.js';
 
+// Mock hooks module
+vi.mock('../../hooks/index.js', () => ({
+  executeHooks: vi.fn().mockResolvedValue([]),
+  createHookContext: vi.fn((_event: string, data: Record<string, unknown>) => ({
+    event: _event,
+    timestamp: Date.now(),
+    ...data,
+  })),
+}));
+
 // Mock memory module (dynamic import)
 vi.mock('../memory.js', () => ({
   getMemoryManager: vi.fn(() => ({
@@ -59,6 +69,7 @@ import { agenticChat } from '../agenticChat.js';
 import { getProviderForModel } from '../../providers/index.js';
 import { getMemoryManager } from '../memory.js';
 import { getSessionContextString } from '../sessionContext.js';
+import { executeHooks } from '../../hooks/index.js';
 
 describe('agenticChat', () => {
   let mockProvider: {
@@ -657,6 +668,191 @@ describe('agenticChat', () => {
         expect(result.text).toBe('Response');
         expect(result.iterations).toBe(1);
       });
+    });
+  });
+
+  describe('PostToolUse hook integration', () => {
+    const mockTool = {
+      name: 'write',
+      description: 'Write file',
+      toFunctionSchema: () => ({
+        name: 'write',
+        description: 'Write file',
+        parameters: { type: 'object', properties: {} },
+      }),
+      execute: vi.fn().mockResolvedValue({ success: true, data: { written: true } }),
+    };
+
+    beforeEach(() => {
+      mockToolRegistry.list.mockReturnValue([mockTool]);
+      mockToolRegistry.get.mockImplementation((name: string) =>
+        name === 'write' ? mockTool : undefined
+      );
+      // Reset hooks mock to return no results by default
+      vi.mocked(executeHooks).mockResolvedValue([]);
+    });
+
+    it('should halt execution when hook blocks without continueOnBlock', async () => {
+      // First LLM call: wants to use write tool
+      mockProvider.complete.mockResolvedValueOnce({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'write', arguments: '{"filePath": "/etc/passwd", "content": "bad"}' },
+          },
+        ],
+        usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
+      });
+
+      // Hook blocks with continueOnBlock: false (halt)
+      vi.mocked(executeHooks).mockResolvedValueOnce([
+        {
+          success: false,
+          error: 'Writing to /etc/passwd is not allowed',
+          duration: 5,
+          blocked: true,
+          continueOnBlock: false,
+        },
+      ]);
+
+      const result = await agenticChat('Write to /etc/passwd');
+
+      // Should halt — no second LLM call
+      expect(mockProvider.complete).toHaveBeenCalledTimes(1);
+      expect(result.text).toContain('Hook blocked tool execution');
+      expect(result.text).toContain('Writing to /etc/passwd is not allowed');
+      expect(result.toolCallsExecuted).toBe(1);
+    });
+
+    it('should inject feedback message when hook blocks with continueOnBlock: true', async () => {
+      // First LLM call: wants to use write tool
+      mockProvider.complete.mockResolvedValueOnce({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'write',
+              arguments: '{"filePath": "/etc/passwd", "content": "bad"}',
+            },
+          },
+        ],
+        usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
+      });
+
+      // Hook blocks with continueOnBlock: true (feedback)
+      vi.mocked(executeHooks).mockResolvedValueOnce([
+        {
+          success: false,
+          error: 'Writing to system files is prohibited',
+          duration: 5,
+          blocked: true,
+          continueOnBlock: true,
+        },
+      ]);
+
+      // Second LLM call: processes the feedback and responds
+      mockProvider.complete.mockResolvedValueOnce({
+        text: 'I apologize, I will write to a different location.',
+        usage: { prompt_tokens: 100, completion_tokens: 15, total_tokens: 115 },
+      });
+
+      const result = await agenticChat('Write to /etc/passwd');
+
+      // Should continue — second LLM call happens
+      expect(mockProvider.complete).toHaveBeenCalledTimes(2);
+      expect(result.text).toBe('I apologize, I will write to a different location.');
+      expect(result.iterations).toBe(2);
+
+      // Verify the feedback message was injected into messages
+      const secondCallMessages = mockProvider.complete.mock.calls[1][0];
+      const feedbackMessage = secondCallMessages.find(
+        (m: { role: string; content?: string }) =>
+          m.role === 'user' && m.content?.includes('[Hook Rejection]')
+      );
+      expect(feedbackMessage).toBeDefined();
+      expect(feedbackMessage.content).toContain('Writing to system files is prohibited');
+    });
+
+    it('should not affect execution when hooks pass (no blocking)', async () => {
+      // First LLM call: wants to use write tool
+      mockProvider.complete.mockResolvedValueOnce({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'write', arguments: '{"filePath": "/home/user/test.txt"}' },
+          },
+        ],
+        usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
+      });
+
+      // Hooks pass (no blocking)
+      vi.mocked(executeHooks).mockResolvedValueOnce([
+        {
+          success: true,
+          output: 'check passed',
+          duration: 3,
+        },
+      ]);
+
+      // Second LLM call: LLM responds (done)
+      mockProvider.complete.mockResolvedValueOnce({
+        text: 'File written successfully.',
+        usage: { prompt_tokens: 80, completion_tokens: 10, total_tokens: 90 },
+      });
+
+      const result = await agenticChat('Write test file');
+
+      expect(mockProvider.complete).toHaveBeenCalledTimes(2);
+      expect(result.text).toBe('File written successfully.');
+      expect(result.iterations).toBe(2);
+    });
+
+    it('should use hook output in feedback when available', async () => {
+      mockProvider.complete.mockResolvedValueOnce({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'write', arguments: '{"filePath": "/tmp/test"}' },
+          },
+        ],
+        usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
+      });
+
+      // Hook blocks with output (not just error)
+      vi.mocked(executeHooks).mockResolvedValueOnce([
+        {
+          success: false,
+          output: 'Policy violation: must use /workspace/ prefix',
+          error: 'hook failed',
+          duration: 5,
+          blocked: true,
+          continueOnBlock: true,
+        },
+      ]);
+
+      mockProvider.complete.mockResolvedValueOnce({
+        text: 'Adjusted path.',
+        usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+      });
+
+      const result = await agenticChat('Write file');
+
+      expect(result.text).toBe('Adjusted path.');
+      const secondCallMessages = mockProvider.complete.mock.calls[1][0];
+      const feedbackMessage = secondCallMessages.find(
+        (m: { role: string; content?: string }) =>
+          m.role === 'user' && m.content?.includes('[Hook Rejection]')
+      );
+      // Should prefer output over error
+      expect(feedbackMessage.content).toContain('Policy violation: must use /workspace/ prefix');
     });
   });
 });
