@@ -1,6 +1,0 @@
-
-- ✅ typecheck
-- ✅ lint
-- ✅ format
-- ✅ build
-- ✅ tests
