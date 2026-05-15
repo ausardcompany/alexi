@@ -14,7 +14,9 @@ const TaskParamsSchema = z.object({
   background: z
     .boolean()
     .optional()
-    .describe('Run task in background (experimental, requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)'),
+    .describe(
+      'Run task in background (experimental, requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)'
+    ),
 });
 
 // Task tool utility interfaces
@@ -115,11 +117,11 @@ async function queueBackgroundTask(
   // 2. Spawn a background worker process
   // 3. Execute the LLM call with the agent's system prompt
   // 4. Update taskData with results
-  
+
   // For now, simulate async completion
   await new Promise((resolve) => setTimeout(resolve, 100));
   taskData.status = 'running';
-  
+
   // Simulate task completion after a delay
   setTimeout(() => {
     taskData.status = 'completed';

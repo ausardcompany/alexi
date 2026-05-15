@@ -53,9 +53,7 @@ Available status values:
     }
 
     // Extract the last user message as description if available
-    const lastUserMessage = task.messages
-      .filter((m) => m.role === 'user')
-      .pop();
+    const lastUserMessage = task.messages.filter((m) => m.role === 'user').pop();
 
     return {
       success: true,
