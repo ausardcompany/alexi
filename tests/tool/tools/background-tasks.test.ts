@@ -198,8 +198,8 @@ describe('Background Tasks', () => {
 
       const taskId = taskResult.data!.taskId;
 
-      // Wait for background task to complete (stub completes after 1s)
-      await new Promise((resolve) => setTimeout(resolve, 1100));
+      // Wait for background task to complete (stub has 100ms await + 1000ms setTimeout)
+      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       // Query task status
       const statusResult = await taskStatusTool.execute(
