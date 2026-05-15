@@ -17,6 +17,7 @@ export interface CompactionOptions {
   summaryMaxTokens?: number; // Max tokens for summary, default 2000
   triggerThreshold?: number; // Auto-trigger at this % of context, default 90
   keepPruned?: boolean; // Keep pruned messages in history, default false
+  maxChunkTokens?: number; // Max tokens per chunk for oversized payloads, default 80000
 }
 
 export interface CompactionResult {
@@ -34,6 +35,7 @@ export type LLMSummarizeFn = (prompt: string) => Promise<string>;
 const DEFAULT_PRESERVE_LAST_N = 4;
 const DEFAULT_SUMMARY_MAX_TOKENS = 2000;
 const DEFAULT_TRIGGER_THRESHOLD = 90; // percent
+const DEFAULT_MAX_CHUNK_TOKENS = 80000;
 const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
 const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
@@ -176,6 +178,82 @@ export function pruneToolOutputs(messages: Message[]): Message[] {
 }
 
 /**
+ * Split messages into chunks that each fit within maxChunkTokens.
+ * Splits at message boundaries — never splits mid-message.
+ */
+export function splitIntoChunks(messages: Message[], maxChunkTokens: number): Message[][] {
+  if (!messages || messages.length === 0) {
+    return [];
+  }
+
+  const chunks: Message[][] = [];
+  let currentChunk: Message[] = [];
+  let currentTokens = 0;
+
+  for (const message of messages) {
+    const messageTokens = estimateTokens(message.content) + 4; // +4 for role overhead
+
+    // If adding this message would exceed the limit and chunk is non-empty, start a new chunk
+    if (currentTokens + messageTokens > maxChunkTokens && currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentTokens = 0;
+    }
+
+    currentChunk.push(message);
+    currentTokens += messageTokens;
+  }
+
+  // Don't forget the last chunk
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+/**
+ * Summarize messages in chunks when the payload exceeds maxChunkTokens.
+ * Each chunk is summarized independently, then partial summaries are merged.
+ * If merged summaries still exceed the limit, recursively summarizes the summaries.
+ */
+export async function summarizeChunked(
+  messages: Message[],
+  maxChunkTokens: number,
+  summarizeFn: LLMSummarizeFn
+): Promise<string> {
+  const chunks = splitIntoChunks(messages, maxChunkTokens);
+
+  if (chunks.length === 0) {
+    return '';
+  }
+
+  if (chunks.length === 1) {
+    const prompt = createSummaryPrompt(chunks[0]);
+    return summarizeFn(prompt);
+  }
+
+  // Summarize each chunk independently
+  const chunkSummaries = await Promise.all(
+    chunks.map((chunk) => {
+      const prompt = createSummaryPrompt(chunk);
+      return summarizeFn(prompt);
+    })
+  );
+
+  const merged = chunkSummaries.join('\n\n---\n\n');
+
+  // If merged summaries still exceed the limit, recursively summarize
+  if (estimateTokens(merged) > maxChunkTokens) {
+    const summaryMessages: Message[] = [{ role: 'user', content: merged, timestamp: Date.now() }];
+    const prompt = createSummaryPrompt(summaryMessages);
+    return summarizeFn(prompt);
+  }
+
+  return merged;
+}
+
+/**
  * Compact a conversation by summarizing older messages
  *
  * Algorithm:
@@ -183,7 +261,7 @@ export function pruneToolOutputs(messages: Message[]): Message[] {
  * 2. If below threshold, return messages unchanged
  * 3. Separate messages: keep last N, compact the rest
  * 4. Create a summary prompt that extracts key information
- * 5. Call LLM to generate summary
+ * 5. Call LLM to generate summary (with chunking for oversized payloads)
  * 6. Return: [system message, summary message, ...last N messages]
  */
 export async function compactConversation(
@@ -243,12 +321,21 @@ export async function compactConversation(
   const messagesToKeep = nonSystemMessages.slice(-preserveLastN);
 
   // Generate summary
+  const maxChunkTokens = options?.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
   let summary: string;
 
   if (globalLLMSummarizeFn) {
-    // Use LLM for summarization
-    const prompt = createSummaryPrompt(messagesToSummarize);
-    summary = await globalLLMSummarizeFn(prompt);
+    // Check if chunking is needed
+    const messagesToSummarizeTokens = estimateMessagesTokens(messagesToSummarize);
+
+    if (messagesToSummarizeTokens > maxChunkTokens) {
+      // Use chunked summarization for oversized payloads
+      summary = await summarizeChunked(messagesToSummarize, maxChunkTokens, globalLLMSummarizeFn);
+    } else {
+      // Use single-pass summarization
+      const prompt = createSummaryPrompt(messagesToSummarize);
+      summary = await globalLLMSummarizeFn(prompt);
+    }
 
     // Truncate if summary exceeds max tokens
     const summaryTokens = estimateTokens(summary);

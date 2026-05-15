@@ -25,6 +25,7 @@ export interface CompactionOptions {
   preserveRecent?: number; // Number of recent messages to always keep
   preserveSystemPrompt?: boolean; // Always keep system prompt
   customSummaryPrompt?: string; // Custom prompt for summarization
+  maxChunkTokens?: number; // Max tokens per chunk for oversized payloads, default 80000
 }
 
 export type CompactionStrategy =
@@ -52,6 +53,7 @@ export type SummarizeFn = (prompt: string) => Promise<string>;
 const DEFAULT_MAX_TOKENS = 100000;
 const DEFAULT_WARNING_THRESHOLD = 0.8;
 const DEFAULT_PRESERVE_RECENT = 4;
+const DEFAULT_MAX_CHUNK_TOKENS = 80000;
 
 const SUMMARY_PROMPT = `You are an anchored context summarization assistant for coding sessions.
 
@@ -139,6 +141,43 @@ export function estimateConversationTokens(messages: Message[]): number {
   }
 
   return total;
+}
+
+// ============ Chunking Helpers ============
+
+/**
+ * Split messages into chunks that each fit within maxChunkTokens.
+ * Splits at message boundaries — never splits mid-message.
+ */
+export function splitIntoChunks(messages: Message[], maxChunkTokens: number): Message[][] {
+  if (!messages || messages.length === 0) {
+    return [];
+  }
+
+  const chunks: Message[][] = [];
+  let currentChunk: Message[] = [];
+  let currentTokens = 0;
+
+  for (const message of messages) {
+    const messageTokens = estimateTokens(message.content) + 4; // +4 for role overhead
+
+    // If adding this message would exceed the limit and chunk is non-empty, start a new chunk
+    if (currentTokens + messageTokens > maxChunkTokens && currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentTokens = 0;
+    }
+
+    currentChunk.push(message);
+    currentTokens += messageTokens;
+  }
+
+  // Don't forget the last chunk
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
 }
 
 // ============ CompactionManager Class ============
@@ -276,8 +315,9 @@ export class CompactionManager {
 
   /**
    * Generate a summary of messages (requires summarizeFn to be set)
+   * If messages exceed maxChunkTokens, uses chunked summarization.
    */
-  async summarize(messages: Message[]): Promise<string> {
+  async summarize(messages: Message[], maxChunkTokens?: number): Promise<string> {
     if (!this.summarizeFn) {
       throw new Error(
         'Summarization function not configured. Set summarizeFn in constructor or via setSummarizeFn().'
@@ -288,12 +328,67 @@ export class CompactionManager {
       return '';
     }
 
+    const chunkLimit = maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
+    const totalTokens = estimateConversationTokens(messages);
+
+    if (totalTokens > chunkLimit) {
+      return this.summarizeChunked(messages, chunkLimit);
+    }
+
     const formattedMessages = messages
       .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
       .join('\n\n');
 
     const prompt = SUMMARY_PROMPT.replace('{messages}', formattedMessages);
     return await this.summarizeFn(prompt);
+  }
+
+  /**
+   * Summarize messages in chunks when the payload exceeds maxChunkTokens.
+   * Each chunk is summarized independently, then partial summaries are merged.
+   * If merged summaries still exceed the limit, recursively summarizes the summaries.
+   */
+  private async summarizeChunked(messages: Message[], maxChunkTokens: number): Promise<string> {
+    if (!this.summarizeFn) {
+      throw new Error(
+        'Summarization function not configured. Set summarizeFn in constructor or via setSummarizeFn().'
+      );
+    }
+
+    const chunks = splitIntoChunks(messages, maxChunkTokens);
+
+    if (chunks.length === 0) {
+      return '';
+    }
+
+    if (chunks.length === 1) {
+      const formattedMessages = chunks[0]
+        .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+        .join('\n\n');
+      const prompt = SUMMARY_PROMPT.replace('{messages}', formattedMessages);
+      return this.summarizeFn(prompt);
+    }
+
+    // Summarize each chunk independently
+    const chunkSummaries = await Promise.all(
+      chunks.map((chunk) => {
+        const formattedMessages = chunk
+          .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+          .join('\n\n');
+        const prompt = SUMMARY_PROMPT.replace('{messages}', formattedMessages);
+        return this.summarizeFn!(prompt);
+      })
+    );
+
+    const merged = chunkSummaries.join('\n\n---\n\n');
+
+    // If merged summaries still exceed the limit, recursively summarize
+    if (estimateTokens(merged) > maxChunkTokens) {
+      const mergedPrompt = SUMMARY_PROMPT.replace('{messages}', merged);
+      return this.summarizeFn(mergedPrompt);
+    }
+
+    return merged;
   }
 
   // ============ Strategy Implementations ============
@@ -360,6 +455,7 @@ export class CompactionManager {
     const toKeep = nonSystemMessages.slice(-preserveRecent);
 
     let summaryText: string;
+    const maxChunkTokens = options.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
 
     if (this.summarizeFn) {
       // Use AI summarization
@@ -370,7 +466,7 @@ export class CompactionManager {
           .join('\n\n');
         summaryText = await this.summarizeFn(customPrompt.replace('{messages}', formattedMessages));
       } else {
-        summaryText = await this.summarize(toSummarize);
+        summaryText = await this.summarize(toSummarize, maxChunkTokens);
       }
     } else {
       // Fallback to basic extraction
@@ -483,12 +579,13 @@ export class CompactionManager {
     const unimportantOldMessages = oldMessages.filter((m) => !this.isImportantMessage(m));
 
     // Create summary of unimportant messages
+    const maxChunkTokens = options.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
     let summaryMessage: Message | undefined;
     if (unimportantOldMessages.length > 0) {
       let summaryText: string;
 
       if (this.summarizeFn) {
-        summaryText = await this.summarize(unimportantOldMessages);
+        summaryText = await this.summarize(unimportantOldMessages, maxChunkTokens);
       } else {
         summaryText = this.extractKeySummary(unimportantOldMessages);
       }
