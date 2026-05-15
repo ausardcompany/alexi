@@ -428,6 +428,17 @@ export class HookManagerImpl implements HookManager {
     // Validate hook
     const validated = HookDefinitionSchema.parse(hook);
 
+    // Validate event-type compatibility
+    const COMMAND_ONLY_EVENTS: HookEvent[] = ['SessionStart', 'SessionEnd', 'Error'];
+
+    if (COMMAND_ONLY_EVENTS.includes(validated.event) && validated.type !== 'command') {
+      throw new Error(
+        `Event '${validated.event}' requires a command-type hook. ` +
+          `${validated.type}-type hooks are not supported for this event because they ` +
+          `may have long timeouts or rely on session state not yet available.`
+      );
+    }
+
     // Validate type-specific fields
     if (validated.type === 'command' && !validated.command) {
       throw new Error('Command hook requires "command" field');
