@@ -421,16 +421,38 @@ jobs:
           Implemented by [Kilo CLI](https://kilo.ai) with SAP AI Core · Closes #${ISSUE_NUMBER}
           PRBODY
 
+          # Ensure label exists before creating PR
+          gh label create "auto-implemented" --description "PR created by auto-implement workflow" --color "1d76db" 2>/dev/null || true
+
           PR_URL=$(gh pr create \
             --title "feat: ${ISSUE_TITLE} (#${ISSUE_NUMBER})" \
             --body-file /tmp/pr-body.md \
             --base master \
             --head "$BRANCH" \
             --label "auto-implemented" \
-            2>&1)
+            2>&1) || true
 
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-          echo "[OK] PR created: $PR_URL"
+          if [ -n "$PR_URL" ] && echo "$PR_URL" | grep -q "^https://"; then
+            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            echo "[OK] PR created: $PR_URL"
+          else
+            echo "[WARN] PR creation failed: $PR_URL"
+            # Try without label as fallback
+            PR_URL=$(gh pr create \
+              --title "feat: ${ISSUE_TITLE} (#${ISSUE_NUMBER})" \
+              --body-file /tmp/pr-body.md \
+              --base master \
+              --head "$BRANCH" \
+              2>&1) || true
+
+            if [ -n "$PR_URL" ] && echo "$PR_URL" | grep -q "^https://"; then
+              echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+              echo "[OK] PR created (without label): $PR_URL"
+            else
+              echo "[ERROR] PR creation failed entirely: $PR_URL"
+              echo "pr_url=" >> $GITHUB_OUTPUT
+            fi
+          fi
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
 
