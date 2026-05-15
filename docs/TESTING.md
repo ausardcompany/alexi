@@ -229,6 +229,8 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
+| `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
 
 ### TUI Command Test Coverage
 
@@ -237,6 +239,87 @@ TUI slash commands are tested through the `useCommands` hook with React context 
 | Command | Test File | Test Cases |
 |---------|-----------|------------|
 | `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+
+### Testing Background Tasks
+
+The `task` and `task_status` tools support experimental background task execution. Tests for these tools are in `tests/tool/tools/background-tasks.test.ts` and demonstrate patterns for testing asynchronous, feature-flagged functionality.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { taskTool, getTaskStore } from '../../../src/tool/tools/task.js';
+import { taskStatusTool } from '../../../src/tool/tools/task_status.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+describe('Background Tasks', () => {
+  let context: ToolContext;
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    context = {
+      workdir: '/tmp/test',
+      sessionId: 'test-session',
+    };
+    originalEnv = process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
+  });
+
+  afterEach(() => {
+    // Restore environment
+    if (originalEnv === undefined) {
+      delete process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
+    } else {
+      process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = originalEnv;
+    }
+    // Clear task store
+    getTaskStore().clear();
+  });
+
+  it('should create background task when feature enabled', async () => {
+    process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = 'true';
+
+    const result = await taskTool.execute(
+      {
+        prompt: 'Test background task',
+        description: 'Background test',
+        subagent_type: 'explore',
+        background: true,
+      },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data?.completed).toBe(false);
+    expect(result.data?.status).toBe('queued');
+    expect(result.data?.background).toBe(true);
+  });
+
+  it('should track task completion', async () => {
+    process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = 'true';
+
+    const taskResult = await taskTool.execute(
+      { prompt: 'Test task', description: 'Test', background: true },
+      context
+    );
+
+    const taskId = taskResult.data!.taskId;
+
+    // Wait for background task to complete (stub completes after 1s)
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const statusResult = await taskStatusTool.execute({ taskId }, context);
+
+    expect(statusResult.data?.status).toBe('completed');
+    expect(statusResult.data?.result).toBeDefined();
+  });
+});
+```
+
+Key patterns for testing background tasks:
+
+1. **Environment Variable Control**: Enable/disable experimental features via `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`
+2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach` to prevent state leakage
+3. **Async Completion Testing**: Use `setTimeout` with sufficient delay to wait for stub task completion
+4. **Non-null Assertions**: Use `taskResult.data!.taskId` pattern (not `taskResult.data?.taskId!`) for correct operator precedence
+5. **Feature Flag Gating**: Test that background functionality is ignored when the feature flag is disabled
 
 ### Test Categories
 

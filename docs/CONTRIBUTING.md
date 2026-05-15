@@ -235,13 +235,44 @@ graph LR
       : this.config.defaultLimit;
     ```
 
-11. **Permission Actions**: Use standard permission action names from the unified taxonomy
+11. **Non-null Assertion Placement**: Place the non-null assertion (`!`) on the correct operand to avoid misleading operator precedence
+    ```typescript
+    // Good - asserts data is non-null, then accesses taskId
+    const taskId = taskResult.data!.taskId;
+
+    // Bad - optional chains then asserts the result (confusing precedence)
+    const taskId = taskResult.data?.taskId!;
+    ```
+
+12. **Explicit Type Assertions for Narrowing**: Use `as` assertions when control flow analysis cannot narrow a type sufficiently
+    ```typescript
+    // Good - explicit assertion when value is guaranteed non-undefined by logic
+    queueBackgroundTask(taskId as string, taskData, agent, config).catch((err) => {
+      // handle error
+    });
+
+    // Bad - passes potentially undefined value to a string parameter
+    queueBackgroundTask(taskId, taskData, agent, config).catch((err) => {
+      // handle error
+    });
+    ```
+
+13. **Permission Actions**: Use standard permission action names from the unified taxonomy
     ```typescript
     // Standard permission actions: 'read', 'write', 'execute', 'admin'
     permission: {
       action: 'admin',
       getResource: (params) => params.action,
     },
+    ```
+
+14. **Remove Unused Imports**: Do not import types or values that are not used in the file. The `no-unused-vars` ESLint rule enforces this.
+    ```typescript
+    // Good - only import what is used
+    import { taskTool, getTaskStore } from '../../../src/tool/tools/task.js';
+
+    // Bad - importing TaskStatus but never using it
+    import { taskTool, getTaskStore, type TaskStatus } from '../../../src/tool/tools/task.js';
     ```
     
 ### File Organization
@@ -349,6 +380,29 @@ npm test -- --watch
 - Always use temporary directories for file operation tests
 - Clean up temp directories after tests
 - Mock permission system to bypass checks during testing
+
+### Testing Feature-Flagged Functionality
+When testing code gated behind environment variables (e.g., `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`):
+- Save and restore original environment values in `beforeEach`/`afterEach`
+- Test both enabled and disabled states of the flag
+- Clean up any shared state (e.g., task stores, registries) between tests
+
+```typescript
+let originalEnv: string | undefined;
+
+beforeEach(() => {
+  originalEnv = process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
+});
+
+afterEach(() => {
+  if (originalEnv === undefined) {
+    delete process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
+  } else {
+    process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = originalEnv;
+  }
+  getTaskStore().clear();
+});
+```
 
 ### TUI Command Testing
 - Mock React contexts before importing hooks

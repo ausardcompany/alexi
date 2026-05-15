@@ -25,12 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent manager tool permission action changed from `manage-agents` to `admin` for consistency with the unified permission action taxonomy.
 - Read tool streaming now uses `encoding: undefined` instead of `encoding: null` for correct TypeScript typing with `createReadStream` options.
 - Truncator nullish coalescing expression in `truncateOutput` now uses explicit parentheses for operator precedence clarity.
+- Task tool `queueBackgroundTask` call now uses explicit type assertion (`taskId as string`) to satisfy TypeScript strict mode.
+- Task status tool message filtering reformatted to single-line chained expression for consistency with Prettier rules.
+- Background tasks test uses correct non-null assertion operator precedence (`taskResult.data!.taskId` instead of `taskResult.data?.taskId!`).
 
 ### Fixed
 - Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes.
 - Fixed TypeScript type error in read tool where `encoding: null` was incompatible with the `createReadStream` options type signature.
 - Fixed unused variable lint error in agent manager tool by prefixing destructured `config` with underscore (`_config`).
 - Resolved formatting inconsistencies flagged by Prettier across agent config schema, bash tool, read tool, truncation config, and permission drain module.
+- Fixed TypeScript type error in task tool where `taskId` variable (typed as `string | undefined`) was passed to `queueBackgroundTask` without narrowing.
+- Removed unused `TaskStatus` type import from background tasks test file to resolve lint warning.
 
 
 ## [0.3.1] - 2026-03-21
