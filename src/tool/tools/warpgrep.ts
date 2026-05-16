@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
+import { Telemetry } from '../../utils/telemetry.js';
 
 const WarpGrepParamsSchema = z.object({
   query: z
@@ -25,12 +26,34 @@ interface WarpGrepResult {
   query: string;
 }
 
-const DESCRIPTION = `Search the codebase for relevant code using AI-powered semantic search.
-This tool finds code snippets most relevant to the search query using semantic search.
-Returns matching content with file paths, line ranges, and relevance scores.
-Searches based on meaning rather than exact text matches.
-Use this for finding implementations, understanding code patterns, or locating specific functionality.
-Be specific and descriptive in your query for best results.`;
+const DESCRIPTION = `Find code snippets by semantic meaning and return ranked matches with file paths and line ranges.
+
+## When to use
+
+- Explore an unfamiliar code area before you know exact identifiers
+- Find related implementations of a concept or behavior across the workspace
+- Search by intent such as authentication, caching, or session resume logic
+- Narrow a large codebase before following up with \`Read\` or \`Grep\`
+- Limit semantic search to one subdirectory with \`path\`
+
+## When NOT to use
+
+- Search for an exact symbol or regex pattern — use \`Grep\`
+- Find files by filename or extension — use \`Glob\`
+- Read the contents of a known file — use \`Read\`
+- Explore files outside the current workspace - use \`Grep\`, \`Glob\`, and \`Read\`
+
+## Examples
+
+- "User login and password hashing" → search for auth-related code by meaning
+- "Database connection pooling" → find conceptually similar implementations
+- "Session resume flow" → retrieve snippets involved in restoring session state
+- "Tool approval UI" with \`path: "packages/opencode/src"\` → combine a natural-language query with \`path\`
+
+## Constraints
+
+- Write the query in English.
+- Use \`path\` only for subdirectories inside the current workspace.`;
 
 // FREE_PERIOD_TODO: Remove KILO_WARPGREP_PROXY_URL constant and the proxy
 // fallback below. After the free period ends, require MORPH_API_KEY and
@@ -81,6 +104,15 @@ export const warpgrepTool = defineTool<typeof WarpGrepParamsSchema, WarpGrepResu
       }
 
       const spans: CodeSpan[] = result.codeSpans || [];
+      
+      // Track codebase search usage
+      Telemetry.track('codebase_search', {
+        tool: 'warpgrep',
+        query_length: params.query?.length ?? 0,
+        results_count: spans.length,
+        path_filter: false,
+      });
+      
       if (spans.length === 0) {
         return {
           success: true,

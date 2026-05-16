@@ -498,3 +498,32 @@ export type {
   ToolPermissionLevel,
   ToolMetadata,
 } from './schema.js';
+
+// ============ Tool Description Enhancement ============
+
+const SEMANTIC_SEARCH_HINT =
+  '- When you are doing an open-ended search where you do not know the exact symbol name, use the `semantic_search` tool first to narrow down the search scope, then follow up with `Grep` and/or `Read`';
+
+/**
+ * Augment tool descriptions with semantic search hints when semantic search is available.
+ * @param tools - Array of tool definitions to potentially augment
+ * @param extra - Object containing optional semantic search tool definition
+ * @returns Tool definitions with augmented descriptions where applicable
+ */
+export function describeTools(
+  tools: Tool<any, any>[],
+  extra: { semantic?: Tool<any, any> }
+): Tool<any, any>[] {
+  if (!extra.semantic) {
+    return tools;
+  }
+  return tools.map((tool) => {
+    if (tool.name !== 'glob' && tool.name !== 'grep') {
+      return tool;
+    }
+    return {
+      ...tool,
+      description: `${tool.description}\n${SEMANTIC_SEARCH_HINT}`,
+    };
+  });
+}

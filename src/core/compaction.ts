@@ -9,6 +9,7 @@
  */
 
 import type { Message } from './sessionManager.js';
+import { CompactionChunks } from './compaction-chunks.js';
 
 // ============ Types ============
 
@@ -246,9 +247,20 @@ export async function compactConversation(
   let summary: string;
 
   if (globalLLMSummarizeFn) {
-    // Use LLM for summarization
+    // Use LLM for summarization with chunked compaction for large contexts
     const prompt = createSummaryPrompt(messagesToSummarize);
-    summary = await globalLLMSummarizeFn(prompt);
+    
+    // Use chunked compaction if prompt is very large
+    if (prompt.length > 100000) {
+      summary = await CompactionChunks.compactInChunks(
+        prompt,
+        async (chunk) => {
+          return await globalLLMSummarizeFn(chunk);
+        }
+      );
+    } else {
+      summary = await globalLLMSummarizeFn(prompt);
+    }
 
     // Truncate if summary exceeds max tokens
     const summaryTokens = estimateTokens(summary);
