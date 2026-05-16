@@ -23,6 +23,11 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import {
+  getHookManager,
+  createHookContext,
+  type HookResult as HookExecResult,
+} from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -479,27 +484,138 @@ export async function agenticChat(
         tool_calls: result.toolCalls as ToolCall[],
       });
 
-      // Execute each tool call
+      // Execute each tool call with pre/post hooks
+      let hookRejectedTurn = false;
       for (const toolCall of result.toolCalls) {
+        const tc = toolCall as ToolCall;
+
+        // --- PreToolUse hook ---
+        const preHookContext = createHookContext('PreToolUse', {
+          sessionId: toolContext.sessionId,
+          toolName: tc.function.name,
+          toolParams: (() => {
+            try {
+              return JSON.parse(tc.function.arguments) as Record<string, unknown>;
+            } catch {
+              return {};
+            }
+          })(),
+        });
+
+        const preResults = await getHookManager().execute('PreToolUse', preHookContext);
+        const preRejection = preResults.find((r: HookExecResult) => !r.success);
+
+        if (preRejection) {
+          // Hook rejected tool execution
+          toolCallsExecuted++;
+          const rejectionError =
+            preRejection.error || preRejection.output || 'Hook rejected tool execution';
+
+          toolCallSummary.push({
+            name: tc.function.name,
+            success: false,
+            error: rejectionError,
+          });
+
+          if (preRejection.continueOnBlock) {
+            // Feed rejection back to model as tool error response
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify({
+                success: false,
+                error: `Hook blocked execution: ${rejectionError}`,
+              }),
+            });
+          } else {
+            // End the turn — add tool response so message structure is valid
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify({
+                success: false,
+                error: `Hook blocked execution: ${rejectionError}`,
+              }),
+            });
+            hookRejectedTurn = true;
+            finalText = `Turn ended: hook rejected tool "${tc.function.name}" — ${rejectionError}`;
+            break;
+          }
+          continue;
+        }
+
+        // --- Execute tool ---
         const { id, result: toolResult } = await executeToolCall(
-          toolCall as ToolCall,
+          tc,
           toolContext,
           options?.onProgress
         );
 
         toolCallsExecuted++;
         toolCallSummary.push({
-          name: toolCall.function.name,
+          name: tc.function.name,
           success: toolResult.success,
           error: toolResult.error,
         });
 
-        // Add tool response to messages
-        messages.push({
-          role: 'tool',
-          tool_call_id: id,
-          content: JSON.stringify(toolResult),
+        // --- PostToolUse hook ---
+        const postHookContext = createHookContext('PostToolUse', {
+          sessionId: toolContext.sessionId,
+          toolName: tc.function.name,
+          toolParams: (() => {
+            try {
+              return JSON.parse(tc.function.arguments) as Record<string, unknown>;
+            } catch {
+              return {};
+            }
+          })(),
+          toolResult: toolResult,
         });
+
+        const postResults = await getHookManager().execute('PostToolUse', postHookContext);
+        const postRejection = postResults.find((r: HookExecResult) => !r.success);
+
+        if (postRejection) {
+          const rejectionError =
+            postRejection.error || postRejection.output || 'Hook rejected after tool execution';
+
+          if (postRejection.continueOnBlock) {
+            // Feed rejection back to model as tool error response
+            messages.push({
+              role: 'tool',
+              tool_call_id: id,
+              content: JSON.stringify({
+                success: false,
+                error: `PostToolUse hook rejected: ${rejectionError}`,
+              }),
+            });
+          } else {
+            // End the turn
+            messages.push({
+              role: 'tool',
+              tool_call_id: id,
+              content: JSON.stringify({
+                success: false,
+                error: `PostToolUse hook rejected: ${rejectionError}`,
+              }),
+            });
+            hookRejectedTurn = true;
+            finalText = `Turn ended: PostToolUse hook rejected tool "${tc.function.name}" — ${rejectionError}`;
+            break;
+          }
+        } else {
+          // Add tool response to messages
+          messages.push({
+            role: 'tool',
+            tool_call_id: id,
+            content: JSON.stringify(toolResult),
+          });
+        }
+      }
+
+      // If a hook ended the turn, break the outer loop
+      if (hookRejectedTurn) {
+        break;
       }
 
       // Continue loop to let LLM process tool results

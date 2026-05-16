@@ -51,6 +51,10 @@ export interface HookDefinition {
   timeout?: number; // Max execution time in ms, default 30000
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
+
+  // Rejection behavior
+  /** When true, hook rejection feeds error back to model instead of ending the turn */
+  continueOnBlock?: boolean;
 }
 
 export interface HookContext {
@@ -70,6 +74,8 @@ export interface HookResult {
   output?: string;
   error?: string;
   duration: number;
+  /** Whether the hook was configured with continueOnBlock */
+  continueOnBlock?: boolean;
 }
 
 // Zod schemas for validation
@@ -93,6 +99,7 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  continueOnBlock: z.boolean().optional(),
 });
 
 export const HookContextSchema = z.object({
@@ -508,6 +515,9 @@ export class HookManagerImpl implements HookManager {
           duration: 0,
         };
       }
+
+      // Attach continueOnBlock from hook definition to result
+      result.continueOnBlock = hook.continueOnBlock ?? false;
 
       results.push(result);
 
