@@ -74,6 +74,8 @@ export interface HookResult {
   output?: string;
   error?: string;
   duration: number;
+  /** True when a Stop hook exceeded the consecutive block cap */
+  capped?: boolean;
   /** When true, callers should feed the rejection reason back to the model instead of halting */
   continueOnBlock?: boolean;
 }
@@ -152,6 +154,23 @@ export const HookFailed = defineEvent(
 
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
+
+/** Default maximum consecutive blocks before a Stop hook is capped */
+export const STOP_HOOK_BLOCK_CAP = 8;
+
+/**
+ * Get the effective block cap from env var or default
+ */
+export function getBlockCap(): number {
+  const envVal = process.env.ALEXI_STOP_HOOK_BLOCK_CAP;
+  if (envVal !== undefined) {
+    const parsed = parseInt(envVal, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return STOP_HOOK_BLOCK_CAP;
+}
 
 // ============ Template Substitution ============
 
@@ -427,6 +446,7 @@ async function executeScriptHook(hook: HookDefinition, context: HookContext): Pr
 
 export class HookManagerImpl implements HookManager {
   private hooks: Map<HookEvent, HookDefinition[]> = new Map();
+  private consecutiveBlocks: Map<string, number> = new Map();
 
   /**
    * Register a hook for an event
@@ -492,11 +512,27 @@ export class HookManagerImpl implements HookManager {
   async execute(event: HookEvent, context: HookContext): Promise<HookResult[]> {
     const eventHooks = this.hooks.get(event) || [];
     const results: HookResult[] = [];
+    const cap = getBlockCap();
 
     for (const hook of eventHooks) {
       // Skip disabled hooks
       if (hook.enabled === false) {
         continue;
+      }
+
+      // For Stop hooks, check if we've hit the block cap
+      const hookKey = `${event}:${hook.type}:${hook.command ?? hook.url ?? hook.script ?? ''}`;
+      if (event === 'Stop') {
+        const currentCount = this.consecutiveBlocks.get(hookKey) ?? 0;
+        if (currentCount >= cap) {
+          results.push({
+            success: false,
+            error: `Stop hook blocked ${cap} consecutive times. Ending turn to prevent infinite loop.`,
+            duration: 0,
+            capped: true,
+          });
+          continue;
+        }
       }
 
       let result: HookResult;
@@ -525,6 +561,16 @@ export class HookManagerImpl implements HookManager {
           error: `Hook execution error: ${err instanceof Error ? err.message : String(err)}`,
           duration: 0,
         };
+      }
+
+      // Track consecutive blocks for Stop hooks
+      if (event === 'Stop') {
+        if (result.success) {
+          this.consecutiveBlocks.set(hookKey, 0);
+        } else {
+          const current = this.consecutiveBlocks.get(hookKey) ?? 0;
+          this.consecutiveBlocks.set(hookKey, current + 1);
+        }
       }
 
       // Propagate continueOnBlock from hook definition to result
@@ -619,10 +665,28 @@ export class HookManagerImpl implements HookManager {
   }
 
   /**
+   * Reset the consecutive block counter.
+   * If event is specified, only reset counters for that event.
+   * Otherwise, reset all counters.
+   */
+  resetBlockCount(event?: string): void {
+    if (event) {
+      for (const key of this.consecutiveBlocks.keys()) {
+        if (key.startsWith(`${event}:`)) {
+          this.consecutiveBlocks.delete(key);
+        }
+      }
+    } else {
+      this.consecutiveBlocks.clear();
+    }
+  }
+
+  /**
    * Clear all hooks
    */
   clear(): void {
     this.hooks.clear();
+    this.consecutiveBlocks.clear();
   }
 }
 

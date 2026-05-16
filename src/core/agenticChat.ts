@@ -26,6 +26,7 @@ import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
   executeHooks,
   createHookContext,
+  getBlockCap,
   type HookResult as HookExecResult,
 } from '../hooks/index.js';
 import * as os from 'os';
@@ -533,6 +534,20 @@ export async function agenticChat(
             }
           }
         }
+      }
+
+      // Check Stop hooks for loop guard
+      const stopHookContext = createHookContext('Stop', {
+        sessionId: toolContext.sessionId,
+        toolName: toolCallSummary[toolCallSummary.length - 1]?.name,
+      });
+      const stopResults: HookExecResult[] = await executeHooks('Stop', stopHookContext);
+      const cappedResult = stopResults.find((r) => r.capped === true);
+      if (cappedResult) {
+        const cap = getBlockCap();
+        finalText = `[Hook Loop Guard] Stop hook blocked ${cap} consecutive times. Ending turn to prevent infinite loop.`;
+        messages.push({ role: 'assistant', content: finalText });
+        break;
       }
 
       // Continue loop to let LLM process tool results
