@@ -24,6 +24,11 @@ import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
+  checkAndCompact,
+  estimateConversationTokens,
+  type Message as CompactionMessage,
+} from '../compaction/index.js';
+import {
   executeHooks,
   createHookContext,
   getBlockCap,
@@ -103,6 +108,57 @@ export interface AgenticChatResult {
     success: boolean;
     error?: string;
   }>;
+}
+
+// ============ Context Overflow Detection ============
+
+/**
+ * Common patterns in context overflow error messages from LLM providers.
+ */
+const CONTEXT_OVERFLOW_PATTERNS = [
+  /context.length/i,
+  /context.*exceeded/i,
+  /maximum.*context/i,
+  /token.*limit.*exceeded/i,
+  /too.many.tokens/i,
+  /input.*too.long/i,
+  /context_length_exceeded/i,
+  /max_tokens_exceeded/i,
+  /request.*too.*large/i,
+];
+
+/**
+ * Detect if an error is a context overflow error and extract the overflow amount.
+ * Returns the estimated overflow tokens, or undefined if not a context overflow error.
+ */
+function detectContextOverflow(
+  error: unknown,
+  currentTokenEstimate: number,
+  maxTokens: number
+): number | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const isOverflow = CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+
+  if (!isOverflow) {
+    return undefined;
+  }
+
+  // Try to extract token count from error message (common format: "...N tokens...")
+  const tokenMatch = message.match(/(\d{4,})\s*tokens/);
+  if (tokenMatch) {
+    const reportedTokens = parseInt(tokenMatch[1], 10);
+    if (reportedTokens > maxTokens) {
+      return reportedTokens - maxTokens;
+    }
+  }
+
+  // Fallback: estimate overflow as amount over the max
+  if (currentTokenEstimate > maxTokens) {
+    return currentTokenEstimate - maxTokens;
+  }
+
+  // If we can't determine exact overflow, use 20% of current as a conservative estimate
+  return Math.ceil(currentTokenEstimate * 0.2);
 }
 
 /**
@@ -445,13 +501,54 @@ export async function agenticChat(
       );
     }
 
-    const result: CompletionResult = await provider.complete(
-      messages as Array<{ role: string; content: string }>,
-      {
+    let result: CompletionResult;
+    try {
+      result = await provider.complete(messages as Array<{ role: string; content: string }>, {
         maxTokens: effortConfig.maxTokens,
         tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+      });
+    } catch (err) {
+      // Detect context overflow and attempt compaction with reactive seeding
+      const compactionMessages = messages
+        .filter(
+          (m): m is { role: 'user' | 'assistant' | 'system'; content: string } =>
+            m.role === 'user' || m.role === 'assistant' || m.role === 'system'
+        )
+        .map((m) => ({ role: m.role, content: m.content ?? '' })) as CompactionMessage[];
+
+      const currentTokenEstimate = estimateConversationTokens(compactionMessages);
+      const contextMax = effortConfig.maxTokens * 4; // Approximate context window
+      const overflowTokens = detectContextOverflow(err, currentTokenEstimate, contextMax);
+
+      if (overflowTokens !== undefined) {
+        options?.onProgress?.({
+          type: 'iteration',
+          iteration: iterations,
+          message: `Context overflow detected (~${overflowTokens} tokens over). Compacting...`,
+        });
+
+        const { messages: compactedMessages, wasCompacted } = await checkAndCompact(
+          compactionMessages,
+          { strategy: 'summarize', overflowTokens }
+        );
+
+        if (wasCompacted) {
+          // Replace messages with compacted version
+          messages.length = 0;
+          messages.push(...compactedMessages);
+
+          // Retry the completion
+          result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+            maxTokens: effortConfig.maxTokens,
+            tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+          });
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
       }
-    );
+    }
 
     // Accumulate usage
     if (result.usage) {
