@@ -246,8 +246,8 @@ class AgentRegistry {
    * Custom agents are registered after built-in agents; duplicates overwrite.
    * Returns the number of custom agents loaded.
    */
-  loadCustomAgents(workdir?: string): number {
-    const customAgents = loadAllCustomAgents(workdir);
+  async loadCustomAgents(workdir?: string): Promise<number> {
+    const customAgents = await loadAllCustomAgents(workdir);
     let count = 0;
 
     for (const config of customAgents) {

@@ -25,6 +25,7 @@ export interface CompactionOptions {
   preserveRecent?: number; // Number of recent messages to always keep
   preserveSystemPrompt?: boolean; // Always keep system prompt
   customSummaryPrompt?: string; // Custom prompt for summarization
+  overflowTokens?: number; // Tokens that triggered overflow — seeds target summary size
 }
 
 export type CompactionStrategy =
@@ -46,6 +47,54 @@ export interface CompactionResult {
 
 // Summarization function type - can be injected for AI-based summarization
 export type SummarizeFn = (prompt: string) => Promise<string>;
+
+// ============ Compaction Config ============
+
+export interface CompactionConfig {
+  maxTokens?: number; // Default: 100000
+  warningThreshold?: number; // Default: 0.8 (trigger at 80%)
+  strategy?: CompactionStrategy; // Default: 'sliding'
+  preserveRecent?: number; // Default: 4
+}
+
+let globalCompactionConfig: CompactionConfig = {};
+
+/**
+ * Set the global compaction configuration.
+ * Values are validated: warningThreshold must be 0-1, maxTokens must be > 0.
+ */
+export function setCompactionConfig(config: CompactionConfig): void {
+  if (config.warningThreshold !== undefined) {
+    if (config.warningThreshold < 0 || config.warningThreshold > 1) {
+      throw new Error('warningThreshold must be between 0 and 1');
+    }
+  }
+  if (config.maxTokens !== undefined) {
+    if (config.maxTokens <= 0) {
+      throw new Error('maxTokens must be greater than 0');
+    }
+  }
+  if (config.preserveRecent !== undefined) {
+    if (config.preserveRecent < 0) {
+      throw new Error('preserveRecent must be >= 0');
+    }
+  }
+  globalCompactionConfig = { ...config };
+}
+
+/**
+ * Get the current global compaction configuration.
+ */
+export function getCompactionConfig(): CompactionConfig {
+  return { ...globalCompactionConfig };
+}
+
+/**
+ * Reset the global compaction configuration to defaults.
+ */
+export function resetCompactionConfig(): void {
+  globalCompactionConfig = {};
+}
 
 // ============ Constants ============
 
@@ -152,9 +201,10 @@ export class CompactionManager {
     defaultOptions?: Partial<CompactionOptions>;
   }) {
     this.summarizeFn = options?.summarizeFn;
+    const config = getCompactionConfig();
     this.defaultOptions = options?.defaultOptions ?? {
-      strategy: 'sliding',
-      preserveRecent: DEFAULT_PRESERVE_RECENT,
+      strategy: config.strategy ?? 'sliding',
+      preserveRecent: config.preserveRecent ?? DEFAULT_PRESERVE_RECENT,
       preserveSystemPrompt: true,
     };
   }
@@ -181,8 +231,10 @@ export class CompactionManager {
       return false;
     }
 
-    const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
-    const threshold = options?.warningThreshold ?? DEFAULT_WARNING_THRESHOLD;
+    const config = getCompactionConfig();
+    const maxTokens = options?.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const threshold =
+      options?.warningThreshold ?? config.warningThreshold ?? DEFAULT_WARNING_THRESHOLD;
 
     const currentTokens = estimateConversationTokens(messages);
     const thresholdTokens = maxTokens * threshold;
@@ -205,7 +257,14 @@ export class CompactionManager {
    * Compact messages using the specified strategy
    */
   async compact(messages: Message[], options?: CompactionOptions): Promise<CompactionResult> {
-    const opts = { ...this.defaultOptions, ...options } as CompactionOptions;
+    const config = getCompactionConfig();
+    const opts = {
+      strategy: config.strategy ?? 'sliding',
+      preserveRecent: config.preserveRecent ?? DEFAULT_PRESERVE_RECENT,
+      preserveSystemPrompt: true,
+      ...this.defaultOptions,
+      ...options,
+    } as CompactionOptions;
     const originalTokens = estimateConversationTokens(messages);
     const originalCount = messages.length;
 
@@ -364,13 +423,19 @@ export class CompactionManager {
     if (this.summarizeFn) {
       // Use AI summarization
       const customPrompt = options.customSummaryPrompt;
+      // Build target length instruction if overflowTokens is provided
+      const targetInstruction = this.buildTargetInstruction(toSummarize, options);
       if (customPrompt) {
         const formattedMessages = toSummarize
           .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
           .join('\n\n');
-        summaryText = await this.summarizeFn(customPrompt.replace('{messages}', formattedMessages));
+        let prompt = customPrompt.replace('{messages}', formattedMessages);
+        if (targetInstruction) {
+          prompt += `\n\n${targetInstruction}`;
+        }
+        summaryText = await this.summarizeFn(prompt);
       } else {
-        summaryText = await this.summarize(toSummarize);
+        summaryText = await this.summarizeWithTarget(toSummarize, targetInstruction);
       }
     } else {
       // Fallback to basic extraction
@@ -488,7 +553,8 @@ export class CompactionManager {
       let summaryText: string;
 
       if (this.summarizeFn) {
-        summaryText = await this.summarize(unimportantOldMessages);
+        const targetInstruction = this.buildTargetInstruction(unimportantOldMessages, options);
+        summaryText = await this.summarizeWithTarget(unimportantOldMessages, targetInstruction);
       } else {
         summaryText = this.extractKeySummary(unimportantOldMessages);
       }
@@ -528,6 +594,56 @@ export class CompactionManager {
   }
 
   // ============ Helper Methods ============
+
+  /**
+   * Build a target length instruction for the summary prompt based on overflow tokens.
+   * Returns undefined if no overflow seeding is needed.
+   */
+  private buildTargetInstruction(
+    messagesToSummarize: Message[],
+    options: CompactionOptions
+  ): string | undefined {
+    if (!options.overflowTokens || options.overflowTokens <= 0) {
+      return undefined;
+    }
+
+    const totalOldTokens = estimateConversationTokens(messagesToSummarize);
+    const targetSummaryTokens = Math.max(
+      1,
+      Math.floor(totalOldTokens - options.overflowTokens * 1.5)
+    );
+
+    return `Keep your summary under approximately ${targetSummaryTokens} tokens.`;
+  }
+
+  /**
+   * Summarize messages with an optional target length instruction appended to the prompt.
+   */
+  private async summarizeWithTarget(
+    messages: Message[],
+    targetInstruction?: string
+  ): Promise<string> {
+    if (!this.summarizeFn) {
+      throw new Error(
+        'Summarization function not configured. Set summarizeFn in constructor or via setSummarizeFn().'
+      );
+    }
+
+    if (!messages || messages.length === 0) {
+      return '';
+    }
+
+    const formattedMessages = messages
+      .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+      .join('\n\n');
+
+    let prompt = SUMMARY_PROMPT.replace('{messages}', formattedMessages);
+    if (targetInstruction) {
+      prompt += `\n\n${targetInstruction}`;
+    }
+
+    return await this.summarizeFn(prompt);
+  }
 
   /**
    * Check if a message is considered important

@@ -9,6 +9,7 @@ import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
 import { buildAssembledSystemPrompt } from '../agent/system.js';
+import { buildSessionHeaders } from '../providers/sessionHeaders.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -114,6 +115,15 @@ export async function* streamChat(
   // Get SAP Orchestration provider for this model
   const provider = getProviderForModel(modelId);
 
+  // Build agent observability headers
+  const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+  const extraHeaders = buildSessionHeaders(
+    sessionId ?? 'anonymous',
+    undefined,
+    options?.agentId,
+    undefined // parentAgentId - future enhancement
+  );
+
   let fullText = '';
   let finalUsage: StreamingResult['usage'];
 
@@ -122,6 +132,7 @@ export async function* streamChat(
     maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
     temperature: options?.temperature,
     signal: options?.signal,
+    headers: extraHeaders as Record<string, string>,
   })) {
     fullText += chunk.text;
     if (chunk.usage) finalUsage = chunk.usage;
