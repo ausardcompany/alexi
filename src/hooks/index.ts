@@ -95,6 +95,19 @@ export const HookDefinitionSchema = z.object({
   description: z.string().optional(),
 });
 
+/**
+ * Refined schema that validates event-type compatibility.
+ * SessionStart, SessionEnd, and Error events only accept 'command' type hooks.
+ */
+export const RefinedHookDefinitionSchema = HookDefinitionSchema.superRefine((hook, ctx) => {
+  if (COMMAND_ONLY_EVENTS.includes(hook.event as HookEvent) && hook.type !== 'command') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Hook event '${hook.event}' requires type 'command'. Got '${hook.type}'. Use a command-type hook instead.`,
+    });
+  }
+});
+
 export const HookContextSchema = z.object({
   event: z.enum([
     'SessionStart',
@@ -145,6 +158,15 @@ export const HookFailed = defineEvent(
 
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
+
+/**
+ * Events that only accept 'command' type hooks.
+ * These events have lifecycle constraints that make non-command hooks dangerous:
+ * - SessionStart: http/script hooks could deadlock session startup on network timeout
+ * - SessionEnd: http/script hooks could delay/block session teardown
+ * - Error: http/script hooks could throw and mask the original error
+ */
+export const COMMAND_ONLY_EVENTS: HookEvent[] = ['SessionStart', 'SessionEnd', 'Error'];
 
 // ============ Template Substitution ============
 
@@ -425,8 +447,18 @@ export class HookManagerImpl implements HookManager {
    * Register a hook for an event
    */
   register(hook: HookDefinition): void {
-    // Validate hook
+    // Validate hook structure
     const validated = HookDefinitionSchema.parse(hook);
+
+    // Validate event-type compatibility
+    if (
+      COMMAND_ONLY_EVENTS.includes(validated.event as HookEvent) &&
+      validated.type !== 'command'
+    ) {
+      throw new Error(
+        `Hook event '${validated.event}' requires type 'command'. Got '${validated.type}'. Use a command-type hook instead.`
+      );
+    }
 
     // Validate type-specific fields
     if (validated.type === 'command' && !validated.command) {
@@ -578,12 +610,19 @@ export class HookManagerImpl implements HookManager {
             continue;
           }
 
-          // Validate the config
+          // Validate the config structure
           const validated = z.array(HookDefinitionSchema).parse(hooksArray);
 
-          // Register all hooks
-          for (const hook of validated) {
-            this.register(hook as HookDefinition);
+          // Register hooks individually, skipping those with incompatible event/type
+          for (let i = 0; i < validated.length; i++) {
+            const hook = validated[i] as HookDefinition;
+            try {
+              this.register(hook);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              const desc = hook.description || `hook at index ${i}`;
+              console.warn(`Skipping invalid hook "${desc}" from ${filePath}: ${message}`);
+            }
           }
 
           return;

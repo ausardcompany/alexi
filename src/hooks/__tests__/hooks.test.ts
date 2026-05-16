@@ -325,19 +325,19 @@ describe('Hooks System', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       manager.register({
-        event: 'SessionEnd',
+        event: 'PostToolUse',
         type: 'http',
         url: 'https://example.com/webhook',
         method: 'POST',
       });
 
       const context: HookContext = {
-        event: 'SessionEnd',
+        event: 'PostToolUse',
         timestamp: Date.now(),
         sessionId: 'test-session',
       };
 
-      const results = await manager.execute('SessionEnd', context);
+      const results = await manager.execute('PostToolUse', context);
 
       expect(results).toHaveLength(1);
       expect(results[0].success).toBe(true);
@@ -366,17 +366,17 @@ describe('Hooks System', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       manager.register({
-        event: 'Error',
+        event: 'PostToolUseFailure',
         type: 'http',
         url: 'https://example.com/webhook',
       });
 
       const context: HookContext = {
-        event: 'Error',
+        event: 'PostToolUseFailure',
         timestamp: Date.now(),
       };
 
-      const results = await manager.execute('Error', context);
+      const results = await manager.execute('PostToolUseFailure', context);
 
       expect(results[0].success).toBe(false);
       expect(results[0].error).toContain('500');
@@ -655,17 +655,17 @@ describe('Hooks System', () => {
       );
 
       manager.register({
-        event: 'Error',
+        event: 'PostToolUseFailure',
         type: 'script',
         script: scriptPath,
       });
 
       const context: HookContext = {
-        event: 'Error',
+        event: 'PostToolUseFailure',
         timestamp: Date.now(),
       };
 
-      const results = await manager.execute('Error', context);
+      const results = await manager.execute('PostToolUseFailure', context);
 
       expect(results[0].success).toBe(false);
       expect(results[0].error).toContain('Script error');
