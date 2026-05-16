@@ -24,6 +24,7 @@
  */
 
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import matter from 'gray-matter';
@@ -39,16 +40,68 @@ export interface CustomAgentConfig extends AgentConfig {
 }
 
 /**
+ * Maximum recursion depth for nested file inclusions.
+ */
+const MAX_INCLUSION_DEPTH = 3;
+
+/**
+ * Resolve `{file:path/to/file}` inclusions in content.
+ * Replaces each `{file:...}` tag with the referenced file's contents.
+ * Paths are resolved relative to `basePath`.
+ * Supports recursive inclusions up to `MAX_INCLUSION_DEPTH` levels.
+ */
+export async function resolveFileInclusions(
+  content: string,
+  basePath: string,
+  depth: number = 0
+): Promise<string> {
+  const pattern = /\{file:([^}]+)\}/g;
+  const matches = [...content.matchAll(pattern)];
+
+  if (matches.length === 0) {
+    return content;
+  }
+
+  let result = content;
+
+  for (const match of matches) {
+    const fullMatch = match[0];
+    const filePath = match[1];
+    const resolvedPath = path.resolve(basePath, filePath);
+
+    if (depth >= MAX_INCLUSION_DEPTH) {
+      result = result.replace(fullMatch, `<!-- ${fullMatch} max inclusion depth reached -->`);
+      continue;
+    }
+
+    try {
+      let fileContent = await fsPromises.readFile(resolvedPath, 'utf-8');
+      // Recursively resolve inclusions in the included content
+      fileContent = await resolveFileInclusions(fileContent, path.dirname(resolvedPath), depth + 1);
+      result = result.replace(fullMatch, fileContent);
+    } catch {
+      result = result.replace(fullMatch, `<!-- {file:${filePath}} not found -->`);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Load a single agent from a markdown file with YAML frontmatter.
  * The markdown body becomes the agent's systemPrompt.
  */
-export function loadAgentFromFile(filePath: string, source: AgentSource): CustomAgentConfig | null {
+export async function loadAgentFromFile(
+  filePath: string,
+  source: AgentSource
+): Promise<CustomAgentConfig | null> {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const { data, content: promptContent } = matter(content);
 
     const id = data.slug || data.id || path.basename(filePath, path.extname(filePath));
-    const systemPrompt = promptContent.trim();
+    const resolvedContent = await resolveFileInclusions(promptContent, path.dirname(filePath));
+    const systemPrompt = resolvedContent.trim();
 
     if (!systemPrompt) {
       // eslint-disable-next-line no-console
@@ -95,7 +148,10 @@ export function loadAgentFromFile(filePath: string, source: AgentSource): Custom
 /**
  * Load all agents from a directory of markdown files.
  */
-export function loadAgentsFromDirectory(dirPath: string, source: AgentSource): CustomAgentConfig[] {
+export async function loadAgentsFromDirectory(
+  dirPath: string,
+  source: AgentSource
+): Promise<CustomAgentConfig[]> {
   const agents: CustomAgentConfig[] = [];
 
   if (!fs.existsSync(dirPath)) {
@@ -109,7 +165,7 @@ export function loadAgentsFromDirectory(dirPath: string, source: AgentSource): C
       .sort();
 
     for (const file of files) {
-      const agent = loadAgentFromFile(path.join(dirPath, file), source);
+      const agent = await loadAgentFromFile(path.join(dirPath, file), source);
       if (agent) {
         agents.push(agent);
       }
@@ -197,15 +253,15 @@ export function loadAgentsFromConfig(config: Record<string, unknown>): CustomAge
  * Returns all loaded agents. Duplicates are handled by the caller
  * (AgentRegistry.register overwrites on same ID).
  */
-export function loadAllCustomAgents(workdir?: string): CustomAgentConfig[] {
+export async function loadAllCustomAgents(workdir?: string): Promise<CustomAgentConfig[]> {
   const cwd = workdir || process.cwd();
 
   const userDir = path.join(os.homedir(), '.alexi', 'agents');
   const projectDir = path.join(cwd, '.alexi', 'agents');
 
   // Load in precedence order (lowest first — registry overwrites on duplicate)
-  const userAgents = loadAgentsFromDirectory(userDir, 'user-global');
-  const projectAgents = loadAgentsFromDirectory(projectDir, 'project-local');
+  const userAgents = await loadAgentsFromDirectory(userDir, 'user-global');
+  const projectAgents = await loadAgentsFromDirectory(projectDir, 'project-local');
 
   return [...userAgents, ...projectAgents];
 }

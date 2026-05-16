@@ -51,6 +51,10 @@ export interface HookDefinition {
   timeout?: number; // Max execution time in ms, default 30000
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
+
+  // Rejection behavior
+  /** When true, hook rejection feeds the error back to the model instead of halting */
+  continueOnBlock?: boolean;
 }
 
 export interface HookContext {
@@ -72,6 +76,8 @@ export interface HookResult {
   duration: number;
   /** True when a Stop hook exceeded the consecutive block cap */
   capped?: boolean;
+  /** When true, callers should feed the rejection reason back to the model instead of halting */
+  continueOnBlock?: boolean;
 }
 
 // Zod schemas for validation
@@ -95,6 +101,7 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  continueOnBlock: z.boolean().optional(),
 });
 
 export const HookContextSchema = z.object({
@@ -448,6 +455,17 @@ export class HookManagerImpl implements HookManager {
     // Validate hook
     const validated = HookDefinitionSchema.parse(hook);
 
+    // Validate event-type compatibility
+    const COMMAND_ONLY_EVENTS: HookEvent[] = ['SessionStart', 'SessionEnd', 'Error'];
+
+    if (COMMAND_ONLY_EVENTS.includes(validated.event) && validated.type !== 'command') {
+      throw new Error(
+        `Event '${validated.event}' requires a command-type hook. ` +
+          `${validated.type}-type hooks are not supported for this event because they ` +
+          `may have long timeouts or rely on session state not yet available.`
+      );
+    }
+
     // Validate type-specific fields
     if (validated.type === 'command' && !validated.command) {
       throw new Error('Command hook requires "command" field');
@@ -553,6 +571,11 @@ export class HookManagerImpl implements HookManager {
           const current = this.consecutiveBlocks.get(hookKey) ?? 0;
           this.consecutiveBlocks.set(hookKey, current + 1);
         }
+      }
+
+      // Propagate continueOnBlock from hook definition to result
+      if (hook.continueOnBlock) {
+        result.continueOnBlock = true;
       }
 
       results.push(result);
