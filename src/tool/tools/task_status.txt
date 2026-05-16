@@ -1,0 +1,29 @@
+Query the status of a background task.
+
+Use this tool to check on the progress of tasks that were started in the background.
+Returns the current status, any results if completed, or error information if failed.
+
+Parameters:
+- taskId: The unique identifier of the task to query
+
+Returns:
+- found: Whether the task was found
+- taskId: The task identifier
+- status: Current status (queued, running, completed, failed, cancelled)
+- description: The task description
+- result: Task result if completed
+- error: Error message if failed
+- startedAt: When the task started
+- completedAt: When the task completed
+
+Example usage:
+```
+task_status({ taskId: "abc123" })
+```
+
+Status meanings:
+- queued: Task is waiting in the queue to start execution
+- running: Task is currently being executed by a subagent
+- completed: Task finished successfully, check result field
+- failed: Task encountered an error, check error field
+- cancelled: Task was cancelled before completion
