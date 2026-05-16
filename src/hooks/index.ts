@@ -146,6 +146,12 @@ export const HookFailed = defineEvent(
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
 
+/**
+ * Events that only support command-type hooks.
+ * http/script hooks on these events could deadlock startup or mask errors.
+ */
+export const COMMAND_ONLY_EVENTS: HookEvent[] = ['SessionStart', 'SessionEnd', 'Error'];
+
 // ============ Template Substitution ============
 
 /**
@@ -427,6 +433,14 @@ export class HookManagerImpl implements HookManager {
   register(hook: HookDefinition): void {
     // Validate hook
     const validated = HookDefinitionSchema.parse(hook);
+
+    // Validate event/type compatibility
+    if (COMMAND_ONLY_EVENTS.includes(validated.event) && validated.type !== 'command') {
+      throw new Error(
+        `Event '${validated.event}' only supports command-type hooks. ` +
+          `Got type '${validated.type}'. Use a command-type hook instead.`
+      );
+    }
 
     // Validate type-specific fields
     if (validated.type === 'command' && !validated.command) {
