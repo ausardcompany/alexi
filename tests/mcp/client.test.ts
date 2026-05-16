@@ -1,27 +1,56 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { McpClientManager } from '../../src/mcp/client.js';
-import type { McpServerConfig } from '../../src/mcp/config.js';
+import { EventEmitter } from 'events';
 
-// Mock child_process spawn
+// Mock child_process.spawn
 const mockSpawn = vi.fn();
 vi.mock('child_process', () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-// Mock the MCP SDK client
+// Mock @modelcontextprotocol/sdk
+const mockClientConnect = vi.fn().mockResolvedValue(undefined);
+const mockClientListTools = vi.fn().mockResolvedValue({ tools: [] });
+const mockClientClose = vi.fn().mockResolvedValue(undefined);
+
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
-  class MockClient {
-    connect = vi.fn().mockResolvedValue(undefined);
-    listTools = vi.fn().mockResolvedValue({ tools: [] });
-    close = vi.fn().mockResolvedValue(undefined);
-  }
-  return { Client: MockClient };
+  return {
+    Client: class MockClient {
+      connect = mockClientConnect;
+      listTools = mockClientListTools;
+      close = mockClientClose;
+    },
+  };
 });
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
-  class MockStdioClientTransport {}
-  return { StdioClientTransport: MockStdioClientTransport };
-});
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  StdioClientTransport: vi.fn().mockImplementation(() => ({})),
+}));
+
+// Mock config loading
+vi.mock('../../src/mcp/config.js', () => ({
+  loadMcpConfig: vi.fn().mockReturnValue({ version: '1.0', servers: [] }),
+  resolveEnvVars: vi.fn((env?: Record<string, string>) => env ?? {}),
+}));
+
+import { McpClientManager } from '../../src/mcp/client.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { McpServerConfig } from '../../src/mcp/config.js';
+
+function createMockProcess() {
+  const proc = new EventEmitter() as EventEmitter & {
+    stdin: EventEmitter;
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: ReturnType<typeof vi.fn>;
+    pid: number;
+  };
+  proc.stdin = new EventEmitter();
+  proc.stdout = new EventEmitter();
+  proc.stderr = new EventEmitter();
+  proc.kill = vi.fn();
+  proc.pid = 12345;
+  return proc;
+}
 
 describe('McpClientManager', () => {
   let manager: McpClientManager;
@@ -29,96 +58,86 @@ describe('McpClientManager', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     manager = new McpClientManager();
-
-    // Setup mock spawn to return a fake child process
-    mockSpawn.mockReturnValue({
-      on: vi.fn(),
-      stderr: { on: vi.fn() },
-      stdout: { on: vi.fn() },
-      stdin: { on: vi.fn() },
-      kill: vi.fn(),
-      pid: 12345,
-    });
+    mockSpawn.mockReturnValue(createMockProcess());
   });
 
   afterEach(async () => {
     await manager.disconnectAll();
+    vi.restoreAllMocks();
   });
 
-  describe('connectStdio', () => {
-    it('should pass ALEXI_PROJECT_DIR environment variable to spawned process', async () => {
-      const config: McpServerConfig = {
-        name: 'test-server',
-        transport: 'stdio',
-        command: 'node',
-        args: ['test-server.js'],
-        enabled: true,
-        autoConnect: false,
-      };
+  const stdioConfig: McpServerConfig = {
+    name: 'test-server',
+    transport: 'stdio',
+    command: 'node',
+    args: ['server.js'],
+    enabled: true,
+  };
 
-      await manager.connect(config);
+  describe('ALEXI_PROJECT_DIR injection', () => {
+    it('should set ALEXI_PROJECT_DIR in child process env from options.workdir', async () => {
+      await manager.connect(stdioConfig, { workdir: '/my/project/dir' });
 
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
-      const [, , spawnOptions] = mockSpawn.mock.calls[0] as [
-        string,
-        string[],
-        { env: Record<string, string> },
-      ];
-      expect(spawnOptions.env).toHaveProperty('ALEXI_PROJECT_DIR');
-      expect(spawnOptions.env.ALEXI_PROJECT_DIR).toBe(process.cwd());
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_PROJECT_DIR: '/my/project/dir',
+          }),
+        })
+      );
     });
 
-    it('should include ALEXI_PROJECT_DIR alongside resolved config env vars', async () => {
-      process.env.TEST_TOKEN = 'my-secret-token';
-
-      const config: McpServerConfig = {
-        name: 'test-server-with-env',
-        transport: 'stdio',
-        command: 'node',
-        args: ['test-server.js'],
-        env: {
-          API_TOKEN: '${TEST_TOKEN}',
-          STATIC_VAR: 'static-value',
-        },
-        enabled: true,
-        autoConnect: false,
-      };
-
-      await manager.connect(config);
-
-      expect(mockSpawn).toHaveBeenCalledTimes(1);
-      const [, , spawnOptions] = mockSpawn.mock.calls[0] as [
-        string,
-        string[],
-        { env: Record<string, string> },
-      ];
-      expect(spawnOptions.env.ALEXI_PROJECT_DIR).toBe(process.cwd());
-      expect(spawnOptions.env.API_TOKEN).toBe('my-secret-token');
-      expect(spawnOptions.env.STATIC_VAR).toBe('static-value');
-
-      delete process.env.TEST_TOKEN;
-    });
-
-    it('should set ALEXI_PROJECT_DIR to process.cwd()', async () => {
+    it('should default ALEXI_PROJECT_DIR to process.cwd() when no workdir is provided', async () => {
       const cwd = process.cwd();
 
-      const config: McpServerConfig = {
-        name: 'test-cwd-server',
-        transport: 'stdio',
-        command: 'echo',
-        args: [],
-        enabled: true,
-        autoConnect: false,
+      await manager.connect(stdioConfig);
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_PROJECT_DIR: cwd,
+          }),
+        })
+      );
+    });
+
+    it('should allow user-configured env in config.env to override ALEXI_PROJECT_DIR', async () => {
+      const { resolveEnvVars } = await import('../../src/mcp/config.js');
+      vi.mocked(resolveEnvVars).mockReturnValue({
+        ALEXI_PROJECT_DIR: '/user/override/path',
+      });
+
+      const configWithEnv: McpServerConfig = {
+        ...stdioConfig,
+        env: { ALEXI_PROJECT_DIR: '/user/override/path' },
       };
 
-      await manager.connect(config);
+      await manager.connect(configWithEnv, { workdir: '/my/project/dir' });
 
-      const [, , spawnOptions] = mockSpawn.mock.calls[0] as [
-        string,
-        string[],
-        { env: Record<string, string> },
-      ];
-      expect(spawnOptions.env.ALEXI_PROJECT_DIR).toBe(cwd);
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_PROJECT_DIR: '/user/override/path',
+          }),
+        })
+      );
+    });
+
+    it('should pass ALEXI_PROJECT_DIR to spawn env as well', async () => {
+      const { resolveEnvVars } = await import('../../src/mcp/config.js');
+      vi.mocked(resolveEnvVars).mockReturnValue({});
+
+      await manager.connect(stdioConfig, { workdir: '/spawn/test/dir' });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'node',
+        ['server.js'],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_PROJECT_DIR: '/spawn/test/dir',
+          }),
+        })
+      );
     });
   });
 });

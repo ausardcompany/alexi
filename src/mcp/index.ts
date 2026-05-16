@@ -4,5 +4,5 @@
  */
 
 export { McpServerAdapter, createMcpServer } from './server.js';
-export { McpClientManager, getMcpClientManager } from './client.js';
+export { McpClientManager, getMcpClientManager, type McpConnectOptions } from './client.js';
 export { loadMcpConfig, saveMcpConfig, type McpServerConfig, type McpConfig } from './config.js';
