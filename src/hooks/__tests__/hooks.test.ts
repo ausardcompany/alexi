@@ -325,19 +325,19 @@ describe('Hooks System', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       manager.register({
-        event: 'SessionEnd',
+        event: 'PostToolUse',
         type: 'http',
         url: 'https://example.com/webhook',
         method: 'POST',
       });
 
       const context: HookContext = {
-        event: 'SessionEnd',
+        event: 'PostToolUse',
         timestamp: Date.now(),
         sessionId: 'test-session',
       };
 
-      const results = await manager.execute('SessionEnd', context);
+      const results = await manager.execute('PostToolUse', context);
 
       expect(results).toHaveLength(1);
       expect(results[0].success).toBe(true);
@@ -366,17 +366,17 @@ describe('Hooks System', () => {
       vi.stubGlobal('fetch', mockFetch);
 
       manager.register({
-        event: 'Error',
+        event: 'PreToolUse',
         type: 'http',
         url: 'https://example.com/webhook',
       });
 
       const context: HookContext = {
-        event: 'Error',
+        event: 'PreToolUse',
         timestamp: Date.now(),
       };
 
-      const results = await manager.execute('Error', context);
+      const results = await manager.execute('PreToolUse', context);
 
       expect(results[0].success).toBe(false);
       expect(results[0].error).toContain('500');
@@ -594,6 +594,91 @@ describe('Hooks System', () => {
     });
   });
 
+  describe('Event-Type Compatibility Validation', () => {
+    it('should reject script hook on SessionStart', () => {
+      expect(() =>
+        manager.register({
+          event: 'SessionStart',
+          type: 'script',
+          script: '/tmp/hook.mjs',
+        })
+      ).toThrow(
+        "Event 'SessionStart' requires a command-type hook. " +
+          'script-type hooks are not supported for this event because they ' +
+          'may have long timeouts or rely on session state not yet available.'
+      );
+    });
+
+    it('should reject http hook on SessionEnd', () => {
+      expect(() =>
+        manager.register({
+          event: 'SessionEnd',
+          type: 'http',
+          url: 'https://example.com/webhook',
+        })
+      ).toThrow(
+        "Event 'SessionEnd' requires a command-type hook. " +
+          'http-type hooks are not supported for this event because they ' +
+          'may have long timeouts or rely on session state not yet available.'
+      );
+    });
+
+    it('should reject http hook on Error', () => {
+      expect(() =>
+        manager.register({
+          event: 'Error',
+          type: 'http',
+          url: 'https://example.com/webhook',
+        })
+      ).toThrow(
+        "Event 'Error' requires a command-type hook. " +
+          'http-type hooks are not supported for this event because they ' +
+          'may have long timeouts or rely on session state not yet available.'
+      );
+    });
+
+    it('should allow command hook on SessionStart', () => {
+      expect(() =>
+        manager.register({
+          event: 'SessionStart',
+          type: 'command',
+          command: 'echo "start"',
+        })
+      ).not.toThrow();
+    });
+
+    it('should allow all hook types on PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, and Stop', () => {
+      const compatibleEvents: HookEvent[] = [
+        'PreToolUse',
+        'PostToolUse',
+        'PostToolUseFailure',
+        'PermissionRequest',
+        'Stop',
+      ];
+
+      const types: Array<{ type: 'command' | 'http' | 'script'; field: Record<string, string> }> = [
+        { type: 'command', field: { command: 'echo "test"' } },
+        { type: 'http', field: { url: 'https://example.com/hook' } },
+        { type: 'script', field: { script: '/tmp/hook.mjs' } },
+      ];
+
+      for (const event of compatibleEvents) {
+        for (const { type, field } of types) {
+          expect(() =>
+            manager.register({
+              event,
+              type,
+              ...field,
+            } as HookDefinition)
+          ).not.toThrow();
+        }
+      }
+
+      // 5 events x 3 types = 15 hooks
+      expect(manager.getHooks()).toHaveLength(15);
+    });
+  });
+
   describe('Script Hook', () => {
     it('should handle non-existent script file', async () => {
       manager.register({
@@ -655,17 +740,17 @@ describe('Hooks System', () => {
       );
 
       manager.register({
-        event: 'Error',
+        event: 'PostToolUseFailure',
         type: 'script',
         script: scriptPath,
       });
 
       const context: HookContext = {
-        event: 'Error',
+        event: 'PostToolUseFailure',
         timestamp: Date.now(),
       };
 
-      const results = await manager.execute('Error', context);
+      const results = await manager.execute('PostToolUseFailure', context);
 
       expect(results[0].success).toBe(false);
       expect(results[0].error).toContain('Script error');
