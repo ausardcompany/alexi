@@ -23,6 +23,7 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import { executeHooks, createHookContext } from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -480,6 +481,9 @@ export async function agenticChat(
       });
 
       // Execute each tool call
+      let hookBlocked = false;
+      let hookBlockHalt = false;
+
       for (const toolCall of result.toolCalls) {
         const { id, result: toolResult } = await executeToolCall(
           toolCall as ToolCall,
@@ -494,12 +498,64 @@ export async function agenticChat(
           error: toolResult.error,
         });
 
-        // Add tool response to messages
-        messages.push({
-          role: 'tool',
-          tool_call_id: id,
-          content: JSON.stringify(toolResult),
-        });
+        // Invoke PostToolUse hooks after tool execution
+        const hookResults = await executeHooks(
+          'PostToolUse',
+          createHookContext('PostToolUse', {
+            toolName: toolCall.function.name,
+            toolResult: toolResult,
+          })
+        );
+
+        // Check if any hook blocked the execution
+        const blockingResult = hookResults.find((hr) => hr.blocked);
+        if (blockingResult) {
+          const rejectionMessage = `[Hook Rejection] ${blockingResult.error || blockingResult.output || 'Tool execution rejected by hook'}`;
+
+          if (blockingResult.continueOnBlock) {
+            // Feed rejection back to model as tool error and continue
+            messages.push({
+              role: 'tool',
+              tool_call_id: id,
+              content: JSON.stringify({
+                success: false,
+                error: rejectionMessage,
+              }),
+            });
+            hookBlocked = true;
+          } else {
+            // Halt: add tool response then break out
+            messages.push({
+              role: 'tool',
+              tool_call_id: id,
+              content: JSON.stringify({
+                success: false,
+                error: rejectionMessage,
+              }),
+            });
+            hookBlockHalt = true;
+            finalText = rejectionMessage;
+            break;
+          }
+        } else {
+          // No blocking — add normal tool response to messages
+          messages.push({
+            role: 'tool',
+            tool_call_id: id,
+            content: JSON.stringify(toolResult),
+          });
+        }
+      }
+
+      // If a hook halted execution, break the outer loop
+      if (hookBlockHalt) {
+        break;
+      }
+
+      // If a hook blocked with continueOnBlock, the rejection is already
+      // in the messages — continue the loop so the LLM can self-correct
+      if (hookBlocked) {
+        // Continue loop to let LLM process the rejection feedback
       }
 
       // Continue loop to let LLM process tool results

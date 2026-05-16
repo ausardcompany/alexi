@@ -51,6 +51,8 @@ export interface HookDefinition {
   timeout?: number; // Max execution time in ms, default 30000
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
+  /** When true, feed rejection back to model instead of halting */
+  continueOnBlock?: boolean;
 }
 
 export interface HookContext {
@@ -70,6 +72,10 @@ export interface HookResult {
   output?: string;
   error?: string;
   duration: number;
+  /** True when hook explicitly rejected the tool execution */
+  blocked?: boolean;
+  /** Mirrors the hook's continueOnBlock setting for consumer convenience */
+  continueOnBlock?: boolean;
 }
 
 // Zod schemas for validation
@@ -93,6 +99,10 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  continueOnBlock: z
+    .boolean()
+    .optional()
+    .describe('When true, feed rejection back to model instead of halting'),
 });
 
 export const HookContextSchema = z.object({
@@ -507,6 +517,12 @@ export class HookManagerImpl implements HookManager {
           error: `Hook execution error: ${err instanceof Error ? err.message : String(err)}`,
           duration: 0,
         };
+      }
+
+      // Mark blocked results with the hook's continueOnBlock preference
+      if (!result.success) {
+        result.blocked = true;
+        result.continueOnBlock = hook.continueOnBlock ?? false;
       }
 
       results.push(result);
