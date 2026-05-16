@@ -48,6 +48,54 @@ export interface CompactionResult {
 // Summarization function type - can be injected for AI-based summarization
 export type SummarizeFn = (prompt: string) => Promise<string>;
 
+// ============ Compaction Config ============
+
+export interface CompactionConfig {
+  maxTokens?: number; // Default: 100000
+  warningThreshold?: number; // Default: 0.8 (trigger at 80%)
+  strategy?: CompactionStrategy; // Default: 'sliding'
+  preserveRecent?: number; // Default: 4
+}
+
+let globalCompactionConfig: CompactionConfig = {};
+
+/**
+ * Set the global compaction configuration.
+ * Values are validated: warningThreshold must be 0-1, maxTokens must be > 0.
+ */
+export function setCompactionConfig(config: CompactionConfig): void {
+  if (config.warningThreshold !== undefined) {
+    if (config.warningThreshold < 0 || config.warningThreshold > 1) {
+      throw new Error('warningThreshold must be between 0 and 1');
+    }
+  }
+  if (config.maxTokens !== undefined) {
+    if (config.maxTokens <= 0) {
+      throw new Error('maxTokens must be greater than 0');
+    }
+  }
+  if (config.preserveRecent !== undefined) {
+    if (config.preserveRecent < 0) {
+      throw new Error('preserveRecent must be >= 0');
+    }
+  }
+  globalCompactionConfig = { ...config };
+}
+
+/**
+ * Get the current global compaction configuration.
+ */
+export function getCompactionConfig(): CompactionConfig {
+  return { ...globalCompactionConfig };
+}
+
+/**
+ * Reset the global compaction configuration to defaults.
+ */
+export function resetCompactionConfig(): void {
+  globalCompactionConfig = {};
+}
+
 // ============ Constants ============
 
 const DEFAULT_MAX_TOKENS = 100000;
@@ -153,9 +201,10 @@ export class CompactionManager {
     defaultOptions?: Partial<CompactionOptions>;
   }) {
     this.summarizeFn = options?.summarizeFn;
+    const config = getCompactionConfig();
     this.defaultOptions = options?.defaultOptions ?? {
-      strategy: 'sliding',
-      preserveRecent: DEFAULT_PRESERVE_RECENT,
+      strategy: config.strategy ?? 'sliding',
+      preserveRecent: config.preserveRecent ?? DEFAULT_PRESERVE_RECENT,
       preserveSystemPrompt: true,
     };
   }
@@ -182,8 +231,10 @@ export class CompactionManager {
       return false;
     }
 
-    const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
-    const threshold = options?.warningThreshold ?? DEFAULT_WARNING_THRESHOLD;
+    const config = getCompactionConfig();
+    const maxTokens = options?.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const threshold =
+      options?.warningThreshold ?? config.warningThreshold ?? DEFAULT_WARNING_THRESHOLD;
 
     const currentTokens = estimateConversationTokens(messages);
     const thresholdTokens = maxTokens * threshold;
@@ -206,7 +257,14 @@ export class CompactionManager {
    * Compact messages using the specified strategy
    */
   async compact(messages: Message[], options?: CompactionOptions): Promise<CompactionResult> {
-    const opts = { ...this.defaultOptions, ...options } as CompactionOptions;
+    const config = getCompactionConfig();
+    const opts = {
+      strategy: config.strategy ?? 'sliding',
+      preserveRecent: config.preserveRecent ?? DEFAULT_PRESERVE_RECENT,
+      preserveSystemPrompt: true,
+      ...this.defaultOptions,
+      ...options,
+    } as CompactionOptions;
     const originalTokens = estimateConversationTokens(messages);
     const originalCount = messages.length;
 
