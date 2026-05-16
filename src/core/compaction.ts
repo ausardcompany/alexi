@@ -249,15 +249,12 @@ export async function compactConversation(
   if (globalLLMSummarizeFn) {
     // Use LLM for summarization with chunked compaction for large contexts
     const prompt = createSummaryPrompt(messagesToSummarize);
-    
+
     // Use chunked compaction if prompt is very large
     if (prompt.length > 100000) {
-      summary = await CompactionChunks.compactInChunks(
-        prompt,
-        async (chunk) => {
-          return await globalLLMSummarizeFn(chunk);
-        }
-      );
+      summary = await CompactionChunks.compactInChunks(prompt, async (chunk) => {
+        return await globalLLMSummarizeFn(chunk);
+      });
     } else {
       summary = await globalLLMSummarizeFn(prompt);
     }

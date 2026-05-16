@@ -104,7 +104,7 @@ export const warpgrepTool = defineTool<typeof WarpGrepParamsSchema, WarpGrepResu
       }
 
       const spans: CodeSpan[] = result.codeSpans || [];
-      
+
       // Track codebase search usage
       Telemetry.track('codebase_search', {
         tool: 'warpgrep',
@@ -112,7 +112,7 @@ export const warpgrepTool = defineTool<typeof WarpGrepParamsSchema, WarpGrepResu
         results_count: spans.length,
         path_filter: false,
       });
-      
+
       if (spans.length === 0) {
         return {
           success: true,
