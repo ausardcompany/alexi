@@ -145,6 +145,24 @@ export const HookFailed = defineEvent(
 
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
+const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
+
+// ============ Stop Hook Block Cap ============
+
+/**
+ * Get the maximum number of consecutive Stop hook blocks before ending the turn.
+ * Reads from ALEXI_STOP_HOOK_BLOCK_CAP env var, falling back to default of 8.
+ */
+export function getStopHookBlockCap(): number {
+  const envValue = process.env.ALEXI_STOP_HOOK_BLOCK_CAP;
+  if (envValue !== undefined) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_STOP_HOOK_BLOCK_CAP;
+}
 
 // ============ Template Substitution ============
 

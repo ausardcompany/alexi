@@ -23,6 +23,7 @@ import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel
 import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
+import { executeHooks, createHookContext, getStopHookBlockCap } from '../hooks/index.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -401,6 +402,8 @@ export async function agenticChat(
 
   // Agent loop
   let finalText = '';
+  let consecutiveStopBlocks = 0;
+  const stopHookBlockCap = getStopHookBlockCap();
 
   while (iterations < maxIterations) {
     iterations++;
@@ -504,9 +507,39 @@ export async function agenticChat(
 
       // Continue loop to let LLM process tool results
     } else {
-      // No tool calls - LLM is done
-      finalText = result.text;
-      break;
+      // No tool calls - LLM is done, check Stop hooks
+      const stopContext = createHookContext('Stop', {
+        sessionId: toolContext.sessionId,
+      });
+      const stopResults = await executeHooks('Stop', stopContext);
+
+      // Check if any Stop hook blocked (returned success: false)
+      const blocked = stopResults.some((r) => !r.success);
+
+      if (blocked) {
+        consecutiveStopBlocks++;
+
+        if (consecutiveStopBlocks >= stopHookBlockCap) {
+          finalText =
+            `Turn ended: Stop hook blocked ${stopHookBlockCap} consecutive times. ` +
+            'Check hook configuration.';
+          break;
+        }
+
+        // Add the LLM's response and continue to give it another chance
+        if (result.text) {
+          messages.push({ role: 'assistant', content: result.text });
+          messages.push({
+            role: 'user',
+            content: 'The stop hook rejected your response. Please try again.',
+          });
+        }
+        // Continue the loop
+      } else {
+        // Stop hook passed or no Stop hooks — finish normally
+        finalText = result.text;
+        break;
+      }
     }
   }
 
