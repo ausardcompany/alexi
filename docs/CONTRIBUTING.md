@@ -1,10 +1,9 @@
 # Contributing to Alexi
 
-Thank you for your interest in contributing to Alexi! This document provides guidelines and instructions for contributing to the project.
+This document provides guidelines and instructions for contributing to the project.
 
 ## Table of Contents
 
-- [Code of Conduct](#code-of-conduct)
 - [Getting Started](#getting-started)
 - [Development Workflow](#development-workflow)
 - [Coding Standards](#coding-standards)
@@ -13,19 +12,12 @@ Thank you for your interest in contributing to Alexi! This document provides gui
 - [Documentation](#documentation)
 - [Automation System](#automation-system)
 
-## Code of Conduct
-
-This project follows a professional code of conduct. We expect all contributors to:
-- Be respectful and inclusive
-- Provide constructive feedback
-- Focus on technical merit
-- Maintain professional communication
-
 ## Getting Started
 
 ### Prerequisites
-- Node.js 22 or higher
-- npm or yarn package manager
+
+- Node.js >= 22.12.0
+- npm package manager
 - Git
 - SAP AI Core account with valid credentials
 - TypeScript knowledge
@@ -57,25 +49,27 @@ This project follows a professional code of conduct. We expect all contributors 
    ```
 
 ### Environment Configuration
+
 Create a `.env` file (never commit this file) with:
 
 ```bash
-# Proxy configuration (for OpenAI-compatible models)
-SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
-SAP_PROXY_API_KEY=your_secret_key
-SAP_PROXY_MODEL=gpt-4o
-
-# Native SAP AI Core (for Claude models)
+# SAP AI Core credentials
 AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
 AICORE_RESOURCE_GROUP=your-resource-group-id
+
+# Optional: Proxy configuration
+SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
+SAP_PROXY_API_KEY=your_secret_key
 ```
 
 ## Development Workflow
 
 ### Branch Strategy
-- `main`: Production-ready code
+
+- `main` / `master`: Production-ready code
 - `feature/*`: New features
 - `fix/*`: Bug fixes
+- `auto/*`: Automated branches (CI, sync, implementation)
 - `docs/*`: Documentation updates
 - `refactor/*`: Code refactoring
 
@@ -85,56 +79,102 @@ AICORE_RESOURCE_GROUP=your-resource-group-id
 graph LR
     A[Create Branch] --> B[Make Changes]
     B --> C[Write Tests]
-    C --> D[Run Tests]
+    C --> D[Run Tests + Lint]
     D --> E[Commit]
     E --> F[Push]
     F --> G[Create PR]
-    G --> H[Code Review]
-    H --> I[Address Feedback]
-    I --> J[Auto-Generate Docs]
-    J --> K[Merge]
+    G --> H[CI + Auto-Docs]
+    H --> I[Review]
+    I --> J[Merge]
 ```
 
 1. Create a feature branch:
    ```bash
    git checkout -b feature/your-feature-name
    ```
-2. Make your changes following coding standards
-3. Write or update tests for your changes
-4. Run tests locally:
+2. Make changes following coding standards
+3. Write or update tests
+4. Run quality checks locally:
    ```bash
    npm test
-   ```
-5. Build and verify:
-   ```bash
-   npm run build
    npm run lint
+   npm run typecheck
+   npm run format:check
    ```
-6. Commit your changes with descriptive messages:
+5. Commit with conventional commit format:
    ```bash
-   git add .
-   git commit -m "feat: add new feature description"
+   git commit -m "feat(core): add reactive context compaction"
    ```
-7. Push to your fork:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-8. Create a pull request on GitHub
+6. Push and create a pull request
+
+### Build Commands
+
+```bash
+npm run build          # Compile TypeScript to dist/
+npm run typecheck      # Type-check without emitting files
+npm run dev            # Run in development mode with tsx
+npm run lint           # Run ESLint on src/ and tests/
+npm run lint:fix       # Auto-fix ESLint issues
+npm run format         # Format code with Prettier
+npm run format:check   # Check formatting without changes
+npm test               # Run all tests once
+npm run test:watch     # Run tests in watch mode
+npm run test:coverage  # Run tests with coverage report
+```
 
 ## Coding Standards
 
+### TypeScript Configuration
+
+- **Target**: ES2022
+- **Module**: NodeNext
+- **Strict mode**: Enabled
+- **JSX**: react-jsx (for Ink components)
+
+### Formatting (Prettier)
+
+- 2 spaces indentation
+- 100 character line width
+- Single quotes
+- Semicolons required
+- Trailing commas (ES5 style)
+- LF line endings
+
+### Import Conventions
+
+```typescript
+// Always use .js extension for local imports (required for ES Modules)
+import { routePrompt } from './router.js';
+import { SessionManager } from '../core/sessionManager.js';
+
+// External imports first, then internal imports
+import { z } from 'zod';
+import * as fs from 'fs/promises';
+
+import { defineTool } from '../index.js';
+import type { ToolContext } from '../tool/index.js';
+```
+
+### Naming Conventions
+
+| Element | Convention | Example |
+|---------|------------|---------|
+| Files | camelCase | `orchestrator.ts`, `sessionManager.ts` |
+| Functions | camelCase | `sendChat()`, `routePrompt()` |
+| Classes | PascalCase | `SessionManager`, `ToolRegistry` |
+| Interfaces/Types | PascalCase | `ToolContext`, `PermissionAction` |
+| Constants | UPPER_SNAKE_CASE | `MAX_LINES`, `MAX_BYTES` |
+| Unused params | Prefix with `_` | `_context`, `_config` |
+
 ### TypeScript Guidelines
 
-1. **Type Safety**: Always use explicit types, avoid `any`
+1. **Type Safety**: Avoid `any` -- use `unknown` and narrow types
    ```typescript
    // Good
-   function processMessage(message: string): Promise<Response> {
-     // ...
-   }
+   function processMessage(message: string): Promise<ToolResult> { }
+   
    // Bad
-   function processMessage(message: any): any {
-     // ...
-   }
+   function processMessage(message: any): any { }
    ```
 
 2. **Interfaces over Types**: Prefer interfaces for object shapes
@@ -143,23 +183,18 @@ graph LR
      workdir: string;
      signal?: AbortSignal;
    }
-   // Acceptable for unions/intersections
-   type PermissionAction = 'read' | 'write' | 'execute';
+   type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
    ```
 
-3. **Async/Await**: Use async/await over raw promises
+3. **Async/Await**: Always use async/await over raw promises
    ```typescript
    async function fetchData(): Promise<Data> {
      const response = await fetch(url);
      return await response.json();
    }
-   // Avoid
-   function fetchData(): Promise<Data> {
-     return fetch(url).then(r => r.json());
-   }
    ```
 
-4. **Error Handling**: Always handle errors appropriately
+4. **Error Handling**: Use the Result pattern
    ```typescript
    try {
      const result = await riskyOperation();
@@ -175,219 +210,97 @@ graph LR
    const value = context?.workdir ?? process.cwd();
    ```
 
-6. **Unused Variables**: Remove or prefix with underscore
-    ```typescript
-    function processData(_context: Context, data: Data): Result {
-      return transform(data);
-    }
-    // Also applies to destructured variables
-    const { action, sessionId, config: _config } = params;
-    ```
-
-7. **Graceful Degradation**: Handle optional dependencies gracefully
+6. **Unused Variables**: Prefix with underscore
    ```typescript
-   function getTsParser(): Parser | null {
-     if (!Parser) {
-       return null;
-     }
-     if (!tsParser) {
-       tsParser = new Parser();
-       tsParser.setLanguage(TypeScript.typescript);
-     }
-     return tsParser;
-   }
-   // Usage
-   const parser = getTsParser();
-   if (!parser) {
-     return null; // Skip parsing, don't fail
-   }
-   const tree = parser.parse(source);
+   const { action, config: _config } = params;
    ```
 
-8. **Zod Schema Naming**: Use private schema constants to avoid ESLint naming conflicts
+7. **Non-null Assertion Placement**: Assert on the correct operand
+   ```typescript
+   // Good
+   const taskId = taskResult.data!.taskId;
+   
+   // Bad (confusing precedence)
+   const taskId = taskResult.data?.taskId!;
+   ```
+
+8. **Explicit Type Assertions**: Use `as` when control flow cannot narrow
+   ```typescript
+   queueBackgroundTask(taskId as string, taskData, agent, config);
+   ```
+
+9. **Stream Options**: Use `undefined` instead of `null`
+   ```typescript
+   const stream = createReadStream(filePath, { encoding: undefined });
+   ```
+
+10. **Permission Actions**: Use standard taxonomy
     ```typescript
-    // Good
-    const _ToolIDSchema = z.string().describe('Unique identifier for a tool');
-    export type ToolID = z.infer<typeof _ToolIDSchema>;
+    // Standard: 'read' | 'write' | 'execute' | 'network' | 'admin'
+    permission: { action: 'admin', getResource: (params) => params.action }
     ```
 
-9. **Node.js Stream Options**: Use `undefined` instead of `null` for optional stream parameters
-    ```typescript
-    // Good - compatible with TypeScript strict mode
-    const stream = createReadStream(filePath, {
-      encoding: undefined, // Read as Buffer
-    });
-    // Bad - causes type errors with strict null checks
-    const stream = createReadStream(filePath, {
-      encoding: null,
-    });
-    ```
+### ESLint Rules
 
-10. **Operator Precedence**: Use explicit parentheses for nullish coalescing with property access
-    ```typescript
-    // Good - explicit grouping for clarity
-    const limit = toolName
-      ? (this.config.toolLimits[toolName] ?? this.config.defaultLimit)
-      : this.config.defaultLimit;
-    // Avoid - ambiguous precedence
-    const limit = toolName
-      ? this.config.toolLimits[toolName] ?? this.config.defaultLimit
-      : this.config.defaultLimit;
-    ```
-
-11. **Non-null Assertion Placement**: Place the non-null assertion (`!`) on the correct operand to avoid misleading operator precedence
-    ```typescript
-    // Good - asserts data is non-null, then accesses taskId
-    const taskId = taskResult.data!.taskId;
-
-    // Bad - optional chains then asserts the result (confusing precedence)
-    const taskId = taskResult.data?.taskId!;
-    ```
-
-12. **Explicit Type Assertions for Narrowing**: Use `as` assertions when control flow analysis cannot narrow a type sufficiently
-    ```typescript
-    // Good - explicit assertion when value is guaranteed non-undefined by logic
-    queueBackgroundTask(taskId as string, taskData, agent, config).catch((err) => {
-      // handle error
-    });
-
-    // Bad - passes potentially undefined value to a string parameter
-    queueBackgroundTask(taskId, taskData, agent, config).catch((err) => {
-      // handle error
-    });
-    ```
-
-13. **Permission Actions**: Use standard permission action names from the unified taxonomy
-    ```typescript
-    // Standard permission actions: 'read', 'write', 'execute', 'admin'
-    permission: {
-      action: 'admin',
-      getResource: (params) => params.action,
-    },
-    ```
-
-14. **Remove Unused Imports**: Do not import types or values that are not used in the file. The `no-unused-vars` ESLint rule enforces this.
-    ```typescript
-    // Good - only import what is used
-    import { taskTool, getTaskStore } from '../../../src/tool/tools/task.js';
-
-    // Bad - importing TaskStatus but never using it
-    import { taskTool, getTaskStore, type TaskStatus } from '../../../src/tool/tools/task.js';
-    ```
-    
-### File Organization
-
-```
-src/
-├── cli/          # CLI entry point
-├── core/         # Orchestrator, router, session management
-├── providers/    # SAP AI Core provider
-├── agent/        # Agent system
-├── tool/         # Tool implementations (read, write, edit, glob, grep, etc.)
-├── permission/   # Permission system
-└── bus/          # Event bus
-```
-
-### Naming Conventions
-- **Files**: camelCase for TypeScript files (`orchestrator.ts`)
-- **Classes**: PascalCase (`class ToolRegistry`)
-- **Functions**: camelCase (`function defineTool()`)
-- **Constants**: UPPER_SNAKE_CASE (`const MAX_LINES = 2000`)
-- **Interfaces/Types**: PascalCase (`interface ToolContext`, `type PermissionAction`)
-
-### Code Style
-- Use 2 spaces for indentation
-- Maximum line length: 100 characters (Prettier `printWidth`)
-- Use single quotes for strings
-- Include trailing commas (ES5 style)
-- Use semicolons
-- LF line endings (enforced by Prettier)
-- Zod schema method chains that exceed the line width must break to one method per line:
-  ```typescript
-  // When chain fits within 100 chars
-  contextLimit: z.number().positive().optional().describe('Maximum context size before truncation'),
-
-  // When chain exceeds line width, break per method
-  steps: z
-    .number()
-    .nullable()
-    .optional()
-    .describe('Maximum steps for agent execution. Null means use default.'),
-  ```
-- No double blank lines between declarations (single blank line maximum)
-
-### Documentation Comments
-Use JSDoc for functions and classes:
-```typescript
-/**
- * Define a new tool with lazy initialization
- * @param definition - Tool definition with parameters and execution logic
- * @returns Tool instance with execution methods
- */
-export function defineTool<TParams extends z.ZodType, TResult>(
-  definition: ToolDefinition<TParams, TResult>
-): Tool<TParams, TResult> {
-  // ...
-}
-```
+Key rules enforced:
+- `no-console: warn` -- Use logger utilities
+- `eqeqeq: error` -- Always use `===` and `!==`
+- `curly: error` -- Always use braces for control statements
+- `prefer-const: error` -- Use `const` when not reassigned
+- `@typescript-eslint/no-explicit-any: warn`
+- `@typescript-eslint/no-unused-vars: error`
 
 ## Testing Guidelines
 
+### Test Framework
+
+Alexi uses **Vitest** with:
+- Native TypeScript/ESM support
+- React plugin for Ink TUI testing
+- V8 coverage provider
+
 ### Test Structure
-- Place tests next to the code they test: `tool.test.ts` next to `tool.ts`
-- Use descriptive test names
-- Follow Arrange-Act-Assert pattern
 
 ```typescript
-describe('defineTool', () => {
-  it('should create tool with permission checks', async () => {
-    // Arrange
-    const definition = {
-      name: 'test-tool',
-      description: 'Test tool',
-      parameters: z.object({ path: z.string() }),
-      permission: {
-        action: 'write' as const,
-        getResource: (params) => params.path,
-      },
-      execute: async () => ({ success: true }),
-    };
-    // Act
-    const tool = defineTool(definition);
-    // Assert
-    expect(tool.name).toBe('test-tool');
-    expect(tool.toFunctionSchema()).toBeDefined();
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+describe('Component Name', () => {
+  let tempDir: string;
+  let context: ToolContext;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-'));
+    context = { workdir: tempDir };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  describe('feature', () => {
+    it('should do something specific', async () => {
+      // Arrange, Act, Assert
+    });
   });
 });
 ```
 
-### Running Tests
-```bash
-# Run all tests
-npm test
+### Mocking
 
-# Run specific test file
-npm test -- tool.test.ts
+```typescript
+// Mock modules before importing
+vi.mock('../src/providers/index.js', () => ({
+  getProviderForModel: vi.fn(),
+  getDefaultModel: vi.fn(),
+}));
 
-# Run with coverage
-npm test -- --coverage
-
-# Watch mode
-npm test -- --watch
+// Import after mocking
+import { sendChat } from '../src/core/orchestrator.js';
 ```
 
-### Mocking and Temporary Directories
-- Always use temporary directories for file operation tests
-- Clean up temp directories after tests
-- Mock permission system to bypass checks during testing
+### Testing Async/Background Operations
 
-### Testing Feature-Flagged Functionality
-When testing code gated behind environment variables (e.g., `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`):
-- Save and restore original environment values in `beforeEach`/`afterEach`
-- Test both enabled and disabled states of the flag
-- Clean up any shared state (e.g., task stores, registries) between tests
-- When waiting for async operations (e.g., background task completion), use generous timeout margins (approximately 2x the expected duration) to prevent flakiness in CI environments where scheduling latency varies
-
+For feature-flagged functionality:
 ```typescript
 let originalEnv: string | undefined;
 
@@ -405,219 +318,153 @@ afterEach(() => {
 });
 ```
 
-When testing background task completion, account for the total async execution time plus CI overhead:
+Use generous timeouts for CI:
 ```typescript
-// Stub has 100ms await + 1000ms setTimeout = ~1100ms theoretical minimum
-// Use 2000ms to provide buffer for CI scheduling variability
+// 2x expected duration for CI scheduling variability
 await new Promise((resolve) => setTimeout(resolve, 2000));
 ```
 
-### TUI Command Testing
-- Mock React contexts before importing hooks
-- Use ink-testing-library for rendering
-- Clear mocks between tests
+### Running Tests
+
+```bash
+npm test                              # All tests
+npm test -- tests/tool/tools/         # Directory
+npm test -- tests/hooks/blockCap.test.ts  # Single file
+npm test -- --grep "compaction"       # Pattern match
+npm run test:coverage                 # With coverage
+```
 
 ## Pull Request Process
 
 ### Before Submitting
-1. Ensure all tests pass
-2. Update relevant documentation
-3. Add entries to CHANGELOG.md if needed
-4. Verify build succeeds
-5. Run linter and fix issues
 
-### PR Title Format
-Use conventional commit format:
-- `feat: add new feature`
-- `fix: resolve bug in tool system`
-- `docs: update API documentation`
-- `refactor: simplify orchestrator logic`
-- `test: add tests for permission system`
-- `chore: update dependencies`
+1. All tests pass: `npm test`
+2. No lint errors: `npm run lint`
+3. Types check: `npm run typecheck`
+4. Format is correct: `npm run format:check`
+5. Build succeeds: `npm run build`
 
-### PR Description
-Include:
-1. **Summary**: Brief description of changes
-2. **Motivation**: Why this change is needed
-3. **Changes**: List of specific changes made
-4. **Testing**: How changes were tested
+### Commit Message Format
 
-Example:
+Uses conventional commits: `type(scope): description`
+
+**Types**: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `revert`
+
+**Scopes**: `cli`, `core`, `providers`, `config`, `server`, `agent`, `tools`, `ci`, `deps`, `tests`
+
+**Examples**:
+```
+feat(core): add reactive context compaction with overflow seeding
+fix(tools): resolve type error in read tool stream options
+test(hooks): add blockCap and continueOnBlock test suites
+chore(deps): bump marked to ^15.0.12 for marked-terminal compatibility
+ci(agent): add daily PR merge workflow with Kilo CLI automation
+```
+
+### PR Description Template
+
 ```markdown
 ## Summary
-Enhanced write and edit tools with relative path resolution for permission checks.
+Brief description of changes.
 
 ## Motivation
-In CI environments, the agentic system needs to resolve relative paths correctly
-for permission checks to work with the workdir context.
+Why this change is needed.
 
 ## Changes
-- Modified `getResource` in write.ts to accept ToolContext parameter
-- Modified `getResource` in edit.ts to accept ToolContext parameter
-- Updated tool index to pass context to getResource functions
-- Added path resolution logic using workdir
+- List of specific changes made
 
 ## Testing
-- Added unit tests for relative path resolution
-- Verified in CI environment with documentation-update workflow
-- Tested locally with various path configurations
+How changes were tested.
 ```
 
 ### Automated Checks
-Pull requests trigger automated workflows:
-1. **CI**: Runs tests, linting, and build verification
-2. **Documentation Update**: AI-powered documentation generation
-   - Analyzes code changes
-   - Updates relevant documentation files
-   - Generates Mermaid diagrams
-   - Updates CHANGELOG.md
-3. **CI Auto-Fix** (for auto/* branches): Automatically fixes CI failures
-   - Collects failure logs
-   - Applies quick fixes (lint:fix, format)
-   - Uses Alexi agent to fix remaining issues
-   - Verifies fixes and commits changes
 
-The documentation update workflow will automatically:
-- Detect which documentation files need updating based on changed code
-- Generate accurate technical documentation using Claude AI
-- Commit documentation changes to your PR branch
-- Ensure documentation stays in sync with code
+Pull requests trigger:
+1. **CI**: Tests, linting, build verification
+2. **Documentation Update**: AI-powered docs generation from code changes
+3. **CI Auto-Fix** (auto/* branches): Automatic fix for CI failures
 
-For auto/* branches, if CI fails, the CI Auto-Fix workflow will:
-- Analyze failure logs with exact error messages
-- Apply deterministic fixes (linting, formatting)
-- Use Alexi agent mode to fix complex issues
-- Verify all fixes pass the original checks
-- Commit fixes back to the PR branch
-- Rate-limited to 2 runs per branch per day
+### Code Review Expectations
 
-### Code Review
-All PRs require:
-- At least one approval from a maintainer
-- Passing CI checks
-- Passing documentation generation
-- No merge conflicts
-
-Reviewers will check:
-- Code quality and style
-- Test coverage
+Reviewers check:
+- Code quality and adherence to TypeScript strict mode
+- Test coverage for new code (target 80%+)
 - Documentation accuracy
 - Performance implications
-- Security considerations
+- Security considerations (no secrets in code)
 
 ## Documentation
 
 ### Documentation Files
-| File | Purpose |
-|------|---------|
-| `README.md` | Project overview and quick start |
-| `docs/ARCHITECTURE.md` | System architecture and design |
-| `docs/API.md` | API reference and usage examples |
-| `docs/ROUTING.md` | Routing system documentation |
-| `docs/PROVIDERS.md` | Provider integration guide |
-| `docs/CONFIGURATION.md` | Configuration options |
-| `docs/TESTING.md` | Testing guide |
-| `docs/AUTOMATION.md` | CI/CD and automation |
-| `docs/CONTRIBUTING.md` | This file |
-| `CHANGELOG.md` | Version history |
+
+| File | Location | Purpose |
+|------|----------|---------|
+| ARCHITECTURE.md | `docs/` | System architecture with Mermaid diagrams |
+| API.md | `docs/` | CLI commands and TypeScript interfaces |
+| CONFIGURATION.md | `docs/` | All configuration options |
+| TESTING.md | `docs/` | Testing guide and patterns |
+| AUTOMATION.md | `docs/` | CI/CD workflows |
+| CONTRIBUTING.md | `docs/` | This file |
+| CHANGELOG.md | Root | Version history (Keep a Changelog format) |
+| AGENTS.md | Root | AI agent coding guidelines |
 
 ### Documentation Standards
-1. Use clear, technical language
+
+1. Use clear, professional technical language (no emojis)
 2. Include code examples from actual codebase
-3. Add Mermaid diagrams for complex concepts
+3. Add Mermaid diagrams for complex flows
 4. Keep examples up-to-date with code changes
 5. Use proper markdown formatting
-
-### Mermaid Diagrams
-Include at least 3 Mermaid diagrams in major documentation:
-```mermaid
-graph TD
-    A[Start] --> B[Process]
-    B --> C[End]
-```
-
-Supported diagram types:
-- Flowcharts (`graph`)
-- Sequence diagrams (`sequenceDiagram`)
-- Class diagrams (`classDiagram`)
-- State diagrams (`stateDiagram`)
 
 ## Automation System
 
 ### Autonomous Sync
-Alexi includes an autonomous upstream synchronization system:
+
+Alexi automatically syncs from upstream repositories daily:
+
 ```mermaid
 graph LR
-    A[Daily Schedule] --> B[Sync Forks]
+    A[Daily 06:00 UTC] --> B[Sync Forks]
     B --> C[Analyze Changes]
-    C --> D[Generate Plan]
-    D --> E[Execute Updates]
+    C --> D[AI Planning]
+    D --> E[AI Execution]
     E --> F[Create PR]
-    F --> G[Auto-Merge]
-```
-
-The system:
-- Runs daily at 06:00 UTC
-- Syncs from kilocode, opencode, and claude-code repositories
-- Uses AI to analyze and apply relevant changes
-- Creates PRs with detailed change descriptions
-- Auto-merges after CI passes
-
-### Agentic File Operations
-The tool system supports autonomous file operations with:
-
-**Automatic Permission Configuration**:
-```typescript
-// High-priority allow rules for agentic mode
-{
-  id: 'agentic-allow-write',
-  priority: 200,
-  actions: ['write'],
-  paths: ['<workdir>/**'],
-  decision: 'allow'
-}
-```
-
-**Relative Path Resolution**:
-```typescript
-// Tools resolve relative paths using workdir context
-getResource: (params, context) => {
-  if (path.isAbsolute(params.filePath)) {
-    return params.filePath;
-  }
-  return path.join(context?.workdir || process.cwd(), params.filePath);
-}
+    F --> G[CI + Auto-Merge]
 ```
 
 ### CI Autohealing
-The CI pipeline includes an autohealing system that automatically resolves type errors, lint errors, and formatting issues. When autohealing triggers:
-- Commits are tagged with `[autohealing]` in the message
-- Formatting fixes are tagged with `[alexi-bot]`
-- Changes follow standard coding conventions (unused variable prefixing, Prettier formatting, TypeScript strict compatibility)
 
-Developers should review autohealing commits to understand patterns that trigger fixes (e.g., `encoding: null` vs `encoding: undefined`, missing underscore prefixes on unused destructured variables).
+When CI fails on auto/* branches:
+1. Failure logs collected and analyzed
+2. Quick fixes applied (lint:fix, format)
+3. Alexi agent applies targeted fixes
+4. Fixes verified and committed
+5. Rate-limited: max 2 runs/branch/day
+
+### Daily PR Merge
+
+At 18:00 UTC daily, Kilo CLI processes open PRs:
+- Checks merge eligibility
+- Resolves simple conflicts
+- Reports merge results
+- Supports dry-run mode
 
 ### Contributing to Automation
+
 When modifying workflows:
-1. Test with manual dispatch first
-2. Use dry-run mode for sync workflows
-3. Update `docs/AUTOMATION.md`
-4. Document new secrets or configuration
-5. Ensure backward compatibility
+1. Test with manual dispatch and dry-run first
+2. Update `docs/AUTOMATION.md`
+3. Document new secrets or configuration
+4. Use concurrency groups to prevent parallel runs
+5. Set appropriate timeouts
 
 ## Getting Help
+
 - Open an issue for bugs or feature requests
-- Join discussions for questions
 - Check existing issues before creating new ones
 - Provide minimal reproducible examples for bugs
+- Reference specific file paths and line numbers
 
 ## License
-By contributing, you agree that your contributions will be licensed under the same license as the project.
 
-## Recognition
-Contributors are recognized in:
-- GitHub contributors page
-- Release notes for significant contributions
-- Project documentation when appropriate
-
-Thank you for contributing to Alexi!
+By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

@@ -4,7 +4,7 @@ This document describes the GitHub Actions workflows and automation systems in t
 
 ## Overview
 
-Alexi uses GitHub Actions for continuous integration, automated documentation updates, and autonomous upstream synchronization. The automation system consists of multiple workflows that handle different aspects of the development lifecycle.
+Alexi uses 19 GitHub Actions workflows for continuous integration, automated documentation, autonomous upstream synchronization, AI-powered autohealing, and daily PR management. The automation system leverages Kilo CLI and Alexi's agentic capabilities.
 
 ## Workflow Architecture
 
@@ -13,47 +13,133 @@ graph TB
     subgraph Triggers["Workflow Triggers"]
         PR[Pull Request]
         Push[Push to main]
-        Schedule[Daily Schedule]
+        Schedule[Daily/Weekly Schedule]
         Manual[Manual Dispatch]
+        Failure[Workflow Failure]
     end
     
     subgraph Workflows["GitHub Actions Workflows"]
+        CI[CI]
         DocUpdate[Documentation Update]
         Sync[Upstream Sync]
-        CI[Continuous Integration]
-        Release[Release Automation]
+        DailyMerge[Daily PR Merge]
+        CIFix[CI Auto-Fix]
+        Autohealing[Autohealing]
+        Release[Release]
     end
     
     subgraph Tools["Automation Tools"]
+        Kilo[Kilo CLI]
         Alexi[Alexi CLI]
-        Claude[Claude AI Models]
-        Scripts[Shell Scripts]
+        GH[GitHub CLI]
     end
     
-    PR --> DocUpdate
     PR --> CI
+    PR --> DocUpdate
     Schedule --> Sync
+    Schedule --> DailyMerge
     Manual --> Sync
-    Manual --> DocUpdate
+    Manual --> DailyMerge
     Push --> Release
+    Failure --> CIFix
+    Failure --> Autohealing
     
     DocUpdate --> Alexi
     Sync --> Alexi
-    Alexi --> Claude
-    Sync --> Scripts
+    DailyMerge --> Kilo
+    CIFix --> Alexi
+    Autohealing --> Alexi
 ```
 
 ## Workflows
 
-### 1. Documentation Update Workflow
+### 1. Continuous Integration (CI)
+
+**File**: `.github/workflows/ci.yml`
+
+**Triggers**: Push/PR to main/master
+
+**Steps**:
+1. Checkout code
+2. Set up Node.js 22
+3. Install dependencies (`npm ci`)
+4. Run TypeScript compiler (`npm run build`)
+5. Run linting (`npm run lint`)
+6. Run tests (`npm test`)
+
+### 2. Daily PR Merge
+
+**File**: `.github/workflows/daily-merge-prs.yml`
+
+**Triggers**:
+- Daily schedule at 18:00 UTC (21:00 Minsk time)
+- Manual workflow dispatch with optional `dry_run` flag
+
+**Purpose**: Automatically processes and merges open pull requests using Kilo CLI with AI-powered conflict resolution.
+
+#### Workflow Steps
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub Actions
+    participant API as GitHub API
+    participant Kilo as Kilo CLI
+    participant Repo as Repository
+    
+    GH->>API: Check for open PRs
+    alt No PRs found
+        GH->>GH: Exit early
+    end
+    GH->>Repo: Checkout with full history
+    GH->>GH: Install Kilo CLI + npm ci
+    GH->>GH: Configure git (kilo-bot)
+    GH->>Kilo: Run /merge-prs command
+    Kilo->>Repo: Merge eligible PRs
+    GH->>API: Report results (merged/remaining)
+    GH->>GH: Upload logs artifact
+```
+
+#### Configuration
+
+```yaml
+concurrency:
+  group: daily-merge-prs
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+```
+
+#### Kilo CLI Invocation
+
+```bash
+kilo run "/merge-prs" --title "Daily PR Merge" \
+  --auto \
+  -m "sap-ai-core/anthropic--claude-4.6-opus" \
+  --variant max
+```
+
+#### Dry Run Mode
+
+Manual trigger with `dry_run: true` reports PR status without merging:
+
+```
+=== Open PRs Status ===
+#123 | CLEAN | feat: add new feature
+#456 | BLOCKED | fix: resolve conflict
+```
+
+### 3. Documentation Update
 
 **File**: `.github/workflows/documentation-update.yml`
 
 **Triggers**:
 - Pull request events (opened, synchronize, reopened)
-- Manual workflow dispatch with PR number
+- Manual workflow dispatch with PR number and optional force regeneration
 
-**Purpose**: Automatically generates and updates documentation based on code changes in pull requests.
+**Purpose**: AI-powered documentation generation based on code changes.
 
 #### Workflow Steps
 
@@ -62,85 +148,49 @@ sequenceDiagram
     participant GH as GitHub Actions
     participant Repo as Repository
     participant Alexi as Alexi CLI
-    participant Claude as Claude AI
-    participant Docs as Documentation Files
+    participant AI as SAP AI Core
+    participant Docs as Documentation
     
     GH->>Repo: Checkout PR branch
     GH->>Repo: Analyze changed files
     GH->>GH: Determine documentation scope
-    GH->>Repo: Generate diff summary
-    GH->>Alexi: Build CLI
-    Alexi->>Claude: Send documentation prompt
-    Claude->>Docs: Generate/update docs
-    GH->>Repo: Commit documentation changes
-    GH->>Repo: Push to PR branch
+    GH->>Repo: Generate diff + commit history
+    GH->>Alexi: Build CLI from source
+    Alexi->>AI: Send documentation prompt
+    AI->>Docs: Generate/update docs
+    GH->>Repo: Commit + push docs to PR
 ```
 
-#### Key Features
+#### Scope Detection
 
-1. **Intelligent Scope Detection**: Analyzes changed files to determine which documentation needs updating
-   - Core/CLI changes trigger `ARCHITECTURE.md` and `API.md` updates
-   - Routing changes trigger `ROUTING.md` updates
-   - Provider changes trigger `PROVIDERS.md` updates
-   - Workflow/script changes trigger `AUTOMATION.md` updates
-   - Always updates `CHANGELOG.md` and `CONTRIBUTING.md`
-
-2. **Code Analysis**: Generates detailed analysis including:
-   - Changed file list with categorization
-   - Commit history since last documentation update
-   - Code diff statistics
-   - TypeScript and configuration change previews
-
-3. **AI-Powered Generation**: Uses Claude AI models through Alexi CLI to:
-   - Analyze code changes
-   - Update documentation with accurate technical details
-   - Generate Mermaid diagrams
-   - Maintain consistent documentation style
-
-4. **Force Regeneration**: Manual trigger option to regenerate all documentation
-
-#### Environment Variables
-
-```bash
-AICORE_SERVICE_KEY      # SAP AI Core service credentials
-AICORE_RESOURCE_GROUP   # SAP AI Core resource group ID
-```
-
-#### Configuration
-
-The workflow determines documentation scope based on file patterns:
-
-| Pattern | Documentation Triggered |
-|---------|------------------------|
+| File Pattern | Documentation Updated |
+|-------------|----------------------|
 | `src/cli/**`, `src/core/**` | ARCHITECTURE.md, API.md |
-| `src/router/**`, `routing-config.json` | ROUTING.md |
 | `src/providers/**` | PROVIDERS.md |
 | `*.json`, `.env*` | CONFIGURATION.md |
 | `*.test.ts`, `*.spec.ts` | TESTING.md |
-| `.github/workflows/**`, `scripts/**` | AUTOMATION.md |
+| `.github/workflows/**` | AUTOMATION.md |
 | All changes | CHANGELOG.md, CONTRIBUTING.md |
 
-### 2. Upstream Sync Workflow
+### 4. Upstream Sync
 
 **File**: `.github/workflows/sync-upstream.yml`
 
 **Triggers**:
-- Daily schedule at 06:00 UTC
-- Manual workflow dispatch with options:
-  - `dry_run`: Analyze changes without creating PR
-  - `force_sync`: Sync even if no changes detected
+- Daily at 06:00 UTC
+- Manual dispatch with `dry_run` and `force_sync` options
 
-**Purpose**: Automatically synchronizes changes from upstream AI coding assistant repositories (kilocode, opencode, claude-code) and applies relevant updates to Alexi.
+**Purpose**: Synchronize changes from upstream repositories (kilocode, opencode, claude-code) and apply relevant updates.
 
 #### Upstream Repositories
 
-| Repository | Purpose | Sync Source |
-|------------|---------|-------------|
-| kilocode | AI coding assistant patterns | Kilo-Org/kilocode |
-| opencode | Open source coding patterns | anomalyco/opencode |
-| claude-code | Anthropic Claude patterns | anthropics/claude-code |
+| Repository | Upstream | Purpose |
+|------------|----------|---------|
+| kilocode | Kilo-Org/kilocode | AI coding assistant patterns |
+| opencode | anomalyco/opencode | Open source coding patterns |
+| claude-code | anthropics/claude-code | Anthropic Claude patterns |
 
-#### Workflow Architecture
+#### Sync Architecture
 
 ```mermaid
 graph LR
@@ -150,378 +200,166 @@ graph LR
         Claude[claude-code]
     end
     
-    subgraph Sync["Sync Process"]
-        Fork[Sync Forks]
-        Analyze[Analyze Changes]
-        Plan[Generate Plan]
-        Execute[Execute Updates]
+    subgraph Sync["Two-Stage AI Process"]
+        Plan[Stage 1: Planning<br/>Claude 4.5 Opus]
+        Execute[Stage 2: Execution<br/>Claude 4.5 Sonnet + Tools]
     end
     
-    subgraph Alexi["Alexi Repository"]
-        Code[Source Code]
-        Commit[Commit Changes]
-        PR[Create PR]
+    subgraph Output["Repository Updates"]
+        Code[Source Code Changes]
+        State[Update Sync State]
+        PR[Create Pull Request]
     end
     
-    Kilo --> Fork
-    Open --> Fork
-    Claude --> Fork
-    Fork --> Analyze
-    Analyze --> Plan
+    Kilo --> Plan
+    Open --> Plan
+    Claude --> Plan
     Plan --> Execute
     Execute --> Code
-    Code --> Commit
-    Commit --> PR
+    Code --> State
+    State --> PR
 ```
 
-#### Sync Process
+#### Sync State
 
-The upstream sync workflow follows a sophisticated two-stage AI-powered process:
-
-**Stage 1: Planning (Claude 4.5 Opus)**
-1. Clone upstream repositories
-2. Read previous sync state from `.github/last-sync-commits.json`
-3. Generate diff report comparing current vs last synced commits
-4. Use Claude 4.5 Opus to analyze changes and create detailed update plan
-5. Plan includes:
-   - Critical, high, medium, and low priority changes
-   - Exact code snippets and modifications
-   - SAP AI Core compatibility considerations
-   - File-by-file change instructions
-
-**Stage 2: Execution (Claude 4.5 Sonnet with Tools)**
-1. Read the generated update plan
-2. Use agentic mode with enabled tools:
-   - `read`: Examine existing files
-   - `write`: Create new files
-   - `edit`: Modify existing files with exact string replacement
-   - `glob`: Find files by pattern
-   - `grep`: Search file contents
-3. Execute changes in priority order
-4. Maximum 50 iterations for complex updates
-5. Generate execution summary
-
-**Stage 3: PR Creation**
-1. Commit all changes made by the AI agent
-2. Update `.github/last-sync-commits.json` with new commit hashes
-3. Create pull request with:
-   - Detailed description of upstream changes
-   - Links to upstream commits
-   - Diff report attachment
-   - Auto-merge enabled for trusted updates
-
-#### Sync State Management
-
-The workflow maintains sync state in `.github/last-sync-commits.json`:
+Maintained in `.github/last-sync-commits.json`:
 
 ```json
 {
   "kilocode": {
-    "last_synced_commit": "abc123...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_commit": "a23fe160d66d7e95d8d7f38a45afe228736652bb",
+    "last_synced_at": "2026-05-17T08:27:24Z",
+    "upstream": "Kilo-Org/kilocode",
+    "fork": "ausard/kilocode"
   },
   "opencode": {
-    "last_synced_commit": "def456...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_commit": "53e89f9d5242e95c2b03a732e8bec69e6b8ba470",
+    "last_synced_at": "2026-05-17T08:27:24Z",
+    "upstream": "anomalyco/opencode",
+    "fork": "ausard/opencode"
   },
   "claude-code": {
-    "last_synced_commit": "ghi789...",
-    "last_sync_date": "2024-01-15T06:00:00Z"
+    "last_synced_commit": "8bdbb7296d3fa2217283d3ef94452dd64097393b",
+    "last_synced_at": "2026-05-17T08:27:24Z",
+    "upstream": "anthropics/claude-code",
+    "fork": "direct-clone"
   }
 }
 ```
 
-#### Auto-Merge Behavior
-
-The workflow automatically merges PRs when:
-- All CI checks pass
-- Changes are from trusted upstream sources
-- No merge conflicts exist
-- PR is properly labeled with `upstream-sync`
-
-#### Dry Run Mode
-
-Manual trigger with `dry_run: true` will:
-- Analyze all upstream changes
-- Generate update plan
-- Show proposed changes in workflow logs
-- NOT create a pull request
-- NOT commit any changes
-
-### 3. Continuous Integration Workflow
-
-**File**: `.github/workflows/ci.yml`
-
-**Triggers**:
-- Push to any branch
-- Pull requests
-
-**Purpose**: Runs tests, linting, and build verification.
-
-**Steps**:
-1. Checkout code
-2. Set up Node.js 22
-3. Install dependencies
-4. Run TypeScript compiler
-5. Run tests
-6. Run linters
-
-### 4. CI Auto-Fix Workflow
+### 5. CI Auto-Fix
 
 **File**: `.github/workflows/ci-auto-fix.yml`
 
 **Triggers**:
-- Workflow run completion (when CI workflow fails on auto/* branches)
-- Manual workflow dispatch with run ID and branch name
+- Workflow run completion (when CI/docs/security fails on auto/* branches)
+- Manual dispatch with run ID and branch name
 
-**Purpose**: Automatically diagnoses and fixes CI failures on auto/* branches using Alexi's agentic capabilities.
+**Purpose**: Automatically diagnose and fix CI failures on auto/* branches.
 
-#### Workflow Architecture
+#### Fix Process
 
 ```mermaid
 graph TB
-    subgraph Trigger[\"Workflow Triggers\"]
+    subgraph Trigger["Trigger"]
         CIFail[CI Failure on auto/*]
-        Manual[Manual Dispatch]
     end
     
-    subgraph Analysis[\"Failure Analysis\"]
+    subgraph Analysis["Failure Analysis"]
         Collect[Collect Failed Job Logs]
         Parse[Parse Error Messages]
         Build[Build Fix Prompt]
     end
     
-    subgraph Fixing[\"Auto-Fix Process\"]
-        QuickFix[Quick Fixes<br/>lint:fix, format]
-        AgentFix[Alexi Agent Fix<br/>read, write, edit, bash]
+    subgraph Fixing["Two-Stage Fix"]
+        Quick[Quick Fixes<br/>lint:fix + format]
+        Agent[Alexi Agent<br/>read, write, edit, bash]
         Verify[Verify Fixes]
     end
     
-    subgraph Output[\"PR Update\"]
+    subgraph Output["Commit"]
         Commit[Commit Changes]
         Push[Push to Branch]
-        Comment[Post PR Comment]
     end
     
     CIFail --> Collect
-    Manual --> Collect
     Collect --> Parse
     Parse --> Build
-    Build --> QuickFix
-    QuickFix --> AgentFix
-    AgentFix --> Verify
+    Build --> Quick
+    Quick --> Agent
+    Agent --> Verify
     Verify --> Commit
     Commit --> Push
-    Push --> Comment
-    
-    style AgentFix fill:#4CAF50
-    style Verify fill:#2196F3
 ```
 
 #### Key Features
 
-1. **Intelligent Failure Detection**: Collects logs from all failed CI jobs with exact error messages, file paths, and line numbers
+1. **Intelligent Failure Detection**: Collects logs from all failed jobs with file paths and line numbers
+2. **Two-Stage Fix**: Quick deterministic fixes (lint, format) then AI agent for remaining issues
+3. **Rate Limiting**: Maximum 2 auto-fix runs per branch per day
+4. **Branch Filtering**: Only processes `auto/*` branches
+5. **Targeted Verification**: Re-runs only the checks that originally failed
 
-2. **Two-Stage Fix Process**:
-   - **Quick Fixes**: Runs `npm run lint:fix` and `npm run format` for deterministic auto-fixes
-   - **AI Agent Fixes**: Uses Alexi agent mode with tools (read, write, edit, glob, grep, bash) to apply targeted fixes
+#### Alexi Agent Invocation
 
-3. **Targeted Verification**: Re-runs only the checks that originally failed to verify fixes
-
-4. **Rate Limiting**: Maximum 2 auto-fix runs per branch per day to prevent infinite loops
-
-5. **Branch Filtering**: Only processes branches matching `auto/*` pattern
-
-#### Workflow Steps
-
-**Step 1: Determine Branch and Run ID**
-- Extracts branch name and CI run ID from workflow trigger
-- Guards against non-auto/* branches
-
-**Step 2: Check Retry Count**
-- Queries GitHub API for previous auto-fix runs on the branch
-- Skips if already ran 2+ times today on the same branch
-
-**Step 3: Collect Failed Job Logs**
-- Fetches all jobs from the failed CI run
-- Filters for jobs with `conclusion == "failure"`
-- Downloads full logs for each failed job
-- Generates `ci-failures.md` with structured failure report
-
-**Step 3b: Preserve ci-failures.md**
-- Saves `ci-failures.md` to `/tmp/ci-failures.md` before checkout
-- Prevents file loss during branch checkout
-
-**Step 4: Checkout PR Branch**
-- Checks out the auto/* branch that triggered the failure
-- Configures git with alexi-bot identity
-
-**Step 4b: Restore ci-failures.md**
-- Restores `ci-failures.md` from `/tmp` after checkout
-- Ensures failure logs are available for analysis
-
-**Step 5: Build Alexi CLI**
-- Installs dependencies
-- Builds Alexi CLI from source
-
-**Step 6: Run Quick Auto-Fixes**
-- Runs `npm run lint:fix` to fix linting issues
-- Runs `npm run format` to fix formatting issues
-- Tracks if any changes were made
-
-**Step 7: Build Fix Prompt**
-- Assembles comprehensive fix prompt with:
-  - Failed check names
-  - Full error logs with file paths and line numbers
-  - Specific verification commands for each check type
-  - Instructions to make minimal, targeted fixes
-
-**Step 8: Run Alexi Agent**
-- Invokes Alexi agent mode with:
-  - System prompt: `.github/prompts/ci-fix-system.md`
-  - Message: `ci-fix-prompt.md` (failure details)
-  - Tools: read, write, edit, glob, grep, bash
-  - Max iterations: 20
-  - High effort level
-  - Auto-routing enabled
-
-**Step 9: Verify Fixes**
-- Re-runs only the checks that originally failed:
-  - Lint failures → `npm run lint`
-  - Type errors → `npm run typecheck`
-  - Format failures → `npm run format:check`
-  - Test failures → `npm run test:coverage`
-  - Build failures → `npm run build`
-- Generates verification results summary
-
-**Step 10: Commit and Push**
-- Stages changes in `src/` and `tests/` directories only
-- Commits with message: `fix(ci): auto-fix CI failures [skip ci] [alexi-bot]`
-- Pushes to the auto/* branch
-- CI re-triggers automatically on push
-
-**Step 11: Post PR Comment**
-- Posts detailed comment to PR with:
-  - Success/failure status
-  - Number of files changed
-  - Verification results
-  - Bot output snippet
-  - Link to workflow run
-
-#### Example Fix Prompt
-
-```markdown
-# CI Fix Task
-
-You are fixing CI failures on branch: **`auto/feature-name`**
-
-## Failed CI Checks
-
-The following checks failed and need to be fixed:
-
-- Lint
-- Type Check
-
-## CI Failure Details
-
-### Job: Lint
-
-**URL**: https://github.com/.../actions/runs/123/jobs/456
-
-### Failed Steps
-
-- **Run linting** (step 5)
-
-### Log Output (last 200 lines)
-```
-/home/runner/work/alexi/alexi/src/tool/tools/edit.ts
-  45:7  error  'oldString' is defined but never used  @typescript-eslint/no-unused-vars
-
-✖ 1 problem (1 error, 0 warnings)
+```bash
+alexi agent \
+  --system .github/prompts/ci-fix-system.md \
+  -m "$(cat ci-fix-prompt.md)" \
+  --tools read,write,edit,glob,grep,bash \
+  --max-iterations 20 \
+  --effort high \
+  --auto-route
 ```
 
-## Your Task
+### 6. Autohealing
 
-1. Read the failure logs above carefully
-2. Identify the exact files and lines that need to be changed
-3. Read those files using the `read` tool
-4. Make **minimal, targeted fixes** — only change what is broken
-5. After each fix, verify it using the `bash` tool:
-   - For lint failures: `npm run lint`
-   - For type errors: `npm run typecheck`
+**File**: `.github/workflows/agent-autohealing.yml`
 
-Focus **only** on the checks listed above. Do not touch unrelated code.
-```
+**Triggers**: After any workflow failure
 
-#### Rate Limiting Logic
+**Purpose**: AI-powered automatic recovery from workflow failures.
 
-```typescript
-// Count completed auto-fix runs today on this branch
-const today = new Date().toISOString().split('T')[0];
-const runCount = await gh.api(
-  `repos/${repo}/actions/workflows/${workflowId}/runs?branch=${branch}&created=>=${today}T00:00:00Z&status=completed`
-);
+### 7. Agent Workflows
 
-if (runCount >= 2) {
-  console.log('Already ran 2 times today. Skipping to avoid infinite loop.');
-  exit(0);
-}
-```
+| Workflow | File | Schedule | Purpose |
+|----------|------|----------|---------|
+| Agent 1: Research | `agent1-research.yml` | Daily 04:00 UTC | Research tasks and issue analysis |
+| Agent 2: Planning | `agent2-planning.yml` | Daily 06:00 UTC + after Agent 1 | Development planning |
+| Agent 4: Review | `agent4-review.yml` | PR events (src/tests) | Automated code review |
+| Agent 5: Release | `agent5-release.yml` | Weekly Monday 10:00 UTC | Release management |
+| Auto-Implement | `auto-implement.yml` | Every 30 minutes | Implement issues from backlog |
 
-#### System Prompt
+### 8. Release Workflows
 
-Located at `.github/prompts/ci-fix-system.md`:
+| Workflow | File | Trigger | Purpose |
+|----------|------|---------|---------|
+| Release | `release.yml` | Tag push (v*) + manual | Publish release |
+| Tag Release | `tag-release.yml` | Manual dispatch | Create version tag |
+| On Release Merge | `on-release-merge.yml` | PR closed (release/*) | Post-release tasks |
 
-```markdown
-You are an expert software engineer fixing CI failures in the Alexi codebase.
+### 9. Support Workflows
 
-Your role:
-- Read CI failure logs carefully
-- Identify exact files and lines causing failures
-- Make minimal, targeted fixes
-- Verify each fix using bash tool
-- Do NOT make unrelated changes
-
-Available tools:
-- read: Read file contents
-- write: Create or overwrite files
-- edit: Make exact string replacements
-- glob: Find files by pattern
-- grep: Search file contents
-- bash: Run verification commands
-
-Always verify fixes before completing the task.
-```
-
-### 5. Release Workflows
-
-**Files**: 
-- `.github/workflows/release.yml`
-- `.github/workflows/tag-release.yml`
-- `.github/workflows/on-release-merge.yml`
-
-**Purpose**: Automate version bumping, changelog generation, and release publishing.
+| Workflow | File | Purpose |
+|----------|------|---------|
+| Repository Sync | `repo-sync.yml` | Fork synchronization |
+| Sync to Issues | `sync-to-issues.yml` | Convert sync results to issues |
+| Auto Merge | `auto-merge.yml` | Auto-merge approved PRs |
+| Security | `security.yml` | Security scanning |
+| Update Homebrew | `update-homebrew.yml` | Update Homebrew formula |
 
 ## GitHub Secrets Required
 
-The automation workflows require the following secrets to be configured in the repository settings:
-
 | Secret | Purpose | Required For |
 |--------|---------|--------------|
-| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Documentation Update, Upstream Sync, CI Auto-Fix |
-| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Documentation Update, Upstream Sync, CI Auto-Fix |
-| `GH_PAT` | GitHub Personal Access Token | Upstream Sync (cross-repo operations) |
-| `GITHUB_TOKEN` | Default GitHub token | All workflows (automatically provided) |
+| `AICORE_SERVICE_KEY` | SAP AI Core authentication | Docs, Sync, CI Fix, Autohealing, Daily Merge |
+| `AICORE_RESOURCE_GROUP` | SAP AI Core resource group | Docs, Sync, CI Fix, Autohealing, Daily Merge |
+| `GH_PAT` | GitHub Personal Access Token | Sync (cross-repo), Daily Merge |
+| `GITHUB_TOKEN` | Default GitHub token | All workflows (automatic) |
 
-### Setting Up Secrets
+### Secret Configuration
 
-1. Navigate to repository Settings > Secrets and variables > Actions
-2. Click "New repository secret"
-3. Add each required secret with appropriate values
-
-#### AICORE_SERVICE_KEY Format
-
-The service key should be a JSON string containing SAP AI Core credentials:
+#### AICORE_SERVICE_KEY
 
 ```json
 {
@@ -536,69 +374,28 @@ The service key should be a JSON string containing SAP AI Core credentials:
 
 #### GH_PAT Permissions
 
-The Personal Access Token needs the following permissions:
 - `repo` (full control of private repositories)
 - `workflow` (update GitHub Actions workflows)
 
-## Local Development Scripts
-
-### Sync Upstream Script
-
-**File**: `scripts/sync-upstream.sh`
-
-Local version of the upstream sync workflow for development and testing.
-
-**Usage**:
-```bash
-./scripts/sync-upstream.sh [OPTIONS]
-
-Options:
-  --dry-run           Analyze changes without applying
-  --kilocode-dir DIR  Path to kilocode repository
-  --opencode-dir DIR  Path to opencode repository
-  --verbose           Enable verbose output
-```
-
-### Generate Diff Report Script
-
-**File**: `scripts/generate-diff-report.sh`
-
-Generates detailed diff reports comparing upstream repositories.
-
-**Usage**:
-```bash
-./scripts/generate-diff-report.sh \
-  --kilocode-dir ../kilocode \
-  --opencode-dir ../opencode \
-  --last-sync .github/last-sync-commits.json \
-  --format markdown \
-  --output diff-report.md
-```
-
 ## Agentic File Operations
 
-The automation system leverages Alexi's agentic capabilities with automatic permission management:
+Automation workflows leverage Alexi's agentic capabilities with automatic permission management.
 
-### Permission Configuration
-
-In agentic mode, the tool system automatically configures high-priority permission rules:
+### Permission Configuration in CI
 
 ```typescript
-// Automatic write permissions for workdir
+// Automatic high-priority rules in agentic mode
 {
   id: 'agentic-allow-write',
   priority: 200,
-  description: 'Allow writing files in workdir for agentic mode',
   actions: ['write'],
   paths: ['<workdir>/**'],
   decision: 'allow'
 }
 
-// Automatic execute permissions
 {
   id: 'agentic-allow-execute',
   priority: 200,
-  description: 'Allow executing commands for agentic mode',
   actions: ['execute'],
   decision: 'allow'
 }
@@ -606,14 +403,12 @@ In agentic mode, the tool system automatically configures high-priority permissi
 
 ### Tool Context Resolution
 
-The `write` and `edit` tools now support relative path resolution:
+Tools resolve relative paths using the workdir context:
 
 ```typescript
-// tools/write.ts and tools/edit.ts
 permission: {
   action: 'write',
   getResource: (params, context) => {
-    // Resolve relative paths to absolute using workdir
     if (path.isAbsolute(params.filePath)) {
       return params.filePath;
     }
@@ -622,54 +417,38 @@ permission: {
 }
 ```
 
-This enhancement allows the AI agent to:
-- Work with relative file paths naturally
-- Respect workdir boundaries for permission checks
-- Operate autonomously within the project directory
-- Support external directory operations when explicitly allowed
-
 ## Workflow Maintenance
 
 ### Updating Workflows
 
 1. Edit workflow YAML files in `.github/workflows/`
-2. Test changes using manual workflow dispatch
+2. Test changes using manual workflow dispatch with dry-run
 3. Commit and push changes
-4. Workflow changes automatically trigger `AUTOMATION.md` update
+4. Changes to workflows automatically trigger `AUTOMATION.md` update
 
 ### Debugging Workflows
 
 1. Check workflow run logs in GitHub Actions tab
-2. Use workflow dispatch with verbose flags
-3. Review generated reports in `.github/reports/`
+2. Use dry-run mode for sync and merge workflows
+3. Review generated artifacts (kilo-output.log, ci-failures.md)
 4. Check sync state in `.github/last-sync-commits.json`
 
 ### Common Issues
 
-**Issue**: Documentation update fails with permission error
-**Solution**: Verify `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` secrets are set correctly
-
-**Issue**: Upstream sync creates no PR
-**Solution**: Check if upstream repositories have new commits since last sync
-
-**Issue**: AI agent makes incorrect changes
-**Solution**: Review generated plan in `.github/reports/update-plan-*.md` and adjust prompts
+| Issue | Solution |
+|-------|----------|
+| Documentation update fails | Verify `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` secrets |
+| Upstream sync creates no PR | Check if upstreams have new commits since last sync |
+| Daily merge skips PRs | Check PR merge state (CLEAN vs BLOCKED) |
+| CI auto-fix loops | Rate limit (2/day) should prevent; check branch patterns |
+| Autohealing not triggering | Verify workflow failure event propagation |
 
 ## Best Practices
 
-1. **Always test workflow changes**: Use manual dispatch with dry-run mode first
-2. **Review AI-generated changes**: Check PR diffs before merging
-3. **Keep secrets updated**: Rotate credentials regularly
-4. **Monitor workflow costs**: Claude API usage is tracked in SAP AI Core
-5. **Document workflow modifications**: Update this file when changing workflows
-
-## Future Enhancements
-
-Planned improvements to the automation system:
-
-- [ ] Support for additional upstream repositories
-- [ ] Configurable sync schedules per repository
-- [ ] Automated testing of synced changes before PR creation
-- [ ] Slack/Teams notifications for sync results
-- [ ] Rollback mechanism for failed syncs
-- [ ] Metrics dashboard for sync success rates
+1. **Test workflow changes with dry-run** before allowing actual execution
+2. **Review AI-generated changes** in PR diffs before merging
+3. **Keep secrets updated** and rotate credentials regularly
+4. **Monitor API usage** via SAP AI Core cost tracking
+5. **Document workflow modifications** by updating this file
+6. **Use concurrency groups** to prevent parallel runs of the same workflow
+7. **Set appropriate timeouts** (daily merge: 30min, sync: 45min, CI fix: 20min)

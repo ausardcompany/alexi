@@ -1,14 +1,17 @@
 # Configuration
 
-This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, and instruction files.
+This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, compaction settings, hooks, and instruction files.
 
 ## Table of Contents
 
 - [Environment Variables](#environment-variables)
 - [User Configuration](#user-configuration)
 - [Routing Configuration](#routing-configuration)
+- [Compaction Configuration](#compaction-configuration)
+- [Hooks Configuration](#hooks-configuration)
 - [Instruction Files](#instruction-files)
 - [Project Context](#project-context)
+- [Session Storage](#session-storage)
 - [Configuration Examples](#configuration-examples)
 
 ## Environment Variables
@@ -34,7 +37,7 @@ export AICORE_SERVICE_KEY='{
 
 #### AICORE_RESOURCE_GROUP
 
-SAP AI Core resource group identifier. Defaults to "default" if not specified.
+SAP AI Core resource group identifier. Defaults to `"default"` if not specified.
 
 ```bash
 export AICORE_RESOURCE_GROUP=production
@@ -74,10 +77,26 @@ export SAP_PROXY_API_KEY=your_secret_key
 
 #### MORPH_API_KEY
 
-API key for WarpGrep semantic code search (optional).
+API key for WarpGrep semantic code search (optional during free period).
 
 ```bash
 export MORPH_API_KEY=your_morph_api_key
+```
+
+#### ALEXI_EXPERIMENTAL_BACKGROUND_TASKS
+
+Enable experimental background task execution in the task tool.
+
+```bash
+export ALEXI_EXPERIMENTAL_BACKGROUND_TASKS=true
+```
+
+#### ALEXI_PROJECT_DIR
+
+Override the project directory for configuration resolution.
+
+```bash
+export ALEXI_PROJECT_DIR=/path/to/project
 ```
 
 ## User Configuration
@@ -126,7 +145,7 @@ alexi config path
 /config show
 
 # Set configuration value
-/config set key value
+/config set soundEnabled true
 ```
 
 #### Programmatic Access
@@ -138,74 +157,24 @@ import {
   getConfigValue,
   setConfigValue,
   getConfigDefaultModel,
-  setConfigDefaultModel
+  setConfigDefaultModel,
+  updateGlobal,
 } from './config/userConfig.js';
 
 // Load entire config
 const config = loadFullConfig();
 
-// Get specific value
-const defaultModel = getConfigDefaultModel();
+// Get/set specific values
+const model = getConfigDefaultModel();
+setConfigDefaultModel('anthropic--claude-4-sonnet');
 
-// Set and persist value
-setConfigDefaultModel('claude-4-sonnet');
-```
-
-### Configuration API
-
-```typescript
-// Load full config object
-function loadFullConfig(): Record<string, unknown>
-
-// Save full config object
-function saveFullConfig(config: Record<string, unknown>): void
-
-// Get single value
-function getConfigValue(key: string): unknown
-
-// Set single value
-function setConfigValue(key: string, value: unknown): void
-
-// Delete single value
-function deleteConfigValue(key: string): void
-
-// Typed accessors
-function getConfigDefaultModel(): string | undefined
-function setConfigDefaultModel(model: string): void
-
-// Batch update with options
-interface UpdateGlobalOptions {
-  dispose?: boolean;
-}
-
-function updateGlobal(
-  updates: Partial<Record<string, unknown>>,
-  options?: UpdateGlobalOptions
-): void
-```
-
-#### Batch Configuration Updates
-
-The `updateGlobal` function allows updating multiple configuration keys atomically:
-
-```typescript
-import { updateGlobal } from './config/userConfig.js';
-
-// Update multiple settings at once
+// Batch update (atomic)
 updateGlobal({
   defaultModel: 'gpt-4o',
   soundEnabled: false,
-  autoRoute: true
+  autoRoute: true,
 });
-
-// Update with disposal control
-updateGlobal(
-  { defaultModel: 'anthropic--claude-4.5-sonnet' },
-  { dispose: false }
-);
 ```
-
-The `dispose` option controls whether cached configuration instances should be disposed after update. Default behavior preserves backward compatibility with `dispose: true`.
 
 ## Routing Configuration
 
@@ -213,7 +182,7 @@ Routing configuration controls automatic model selection based on prompt analysi
 
 ### Configuration Files
 
-Alexi searches for routing configuration in the following order:
+Alexi searches for routing configuration in order:
 
 1. `routing-config.json` (project-level)
 2. `~/.alexi/routing-config.json` (user-level)
@@ -231,15 +200,44 @@ interface RoutingConfig {
 
 interface RoutingRule {
   name: string;
-  priority: number;
+  priority: number;      // Higher priority = evaluated first
   condition: {
-    contains?: string[];
-    regex?: string;
+    contains?: string[];          // Keywords in prompt
+    regex?: string;               // Regex pattern match
     complexity?: 'simple' | 'medium' | 'complex';
-    taskType?: string;
+    taskType?: string;            // Task classification
   };
-  model: string;
-  reason?: string;
+  model: string;                  // Model ID to route to
+  reason?: string;                // Human-readable explanation
+}
+```
+
+### Prompt Classification
+
+The router classifies prompts into:
+
+**Task Types:**
+- `simple-qa` -- Basic questions and lookups
+- `coding` -- Code generation, modification, debugging
+- `deep-reasoning` -- Complex analysis, math, logic
+- `creative-writing` -- Creative content generation
+- `general-qa` -- General knowledge questions
+
+**Complexity Levels:**
+- `simple` -- Short, straightforward prompts
+- `medium` -- Moderate complexity
+- `complex` -- Long, multi-step, or reasoning-heavy
+
+### Model Capability Matching
+
+```typescript
+interface ModelCapability {
+  id: string;
+  type: 'openai' | 'claude' | 'gemini';
+  costTier: 'cheap' | 'medium' | 'expensive';
+  strengths: string[];   // Task types the model excels at
+  maxTokens: number;
+  reasoning: boolean;    // Has extended reasoning capability
 }
 ```
 
@@ -283,107 +281,169 @@ interface RoutingRule {
 }
 ```
 
+## Compaction Configuration
+
+Context compaction manages conversation length when approaching token limits.
+
+### Configuration Schema
+
+```typescript
+interface CompactionConfig {
+  maxTokens?: number;            // Default: 100000
+  warningThreshold?: number;     // Default: 0.8 (80% of maxTokens)
+  strategy?: CompactionStrategy; // Default: 'sliding'
+  preserveRecent?: number;       // Default: 4 (messages to always keep)
+}
+
+type CompactionStrategy = 'truncate' | 'summarize' | 'sliding' | 'smart';
+```
+
+### Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `truncate` | Remove oldest messages beyond limit | Fast, minimal processing |
+| `summarize` | AI-powered summarization of old messages | Best context retention |
+| `sliding` | Sliding window, keeping N recent messages | Predictable behavior |
+| `smart` | Hybrid: importance scoring + selective summarization | Long complex sessions |
+
+### Reactive Overflow Seeding
+
+When context overflow is detected during LLM calls, compaction is triggered with an `overflowTokens` parameter that seeds the target summary size:
+
+```typescript
+// Target calculation:
+const targetSummaryTokens = Math.max(
+  1,
+  Math.floor(totalOldTokens - overflowTokens * 1.5)
+);
+// Instruction: "Keep your summary under approximately N tokens."
+```
+
+### Chunked Compaction
+
+Large contexts are split into chunks at natural boundaries before compaction:
+
+```typescript
+import { compactInChunks } from '../core/compaction-chunks.js';
+
+// Split at ~100K token boundaries (newline-aware)
+const result = await compactInChunks(largeContent, summarizeFn, 100000);
+```
+
+## Hooks Configuration
+
+Lifecycle hooks execute at specific events during tool execution and session management.
+
+### Hook Definition
+
+```typescript
+interface HookDefinition {
+  event: HookEvent;
+  type: 'command' | 'http' | 'script';
+  command?: string;            // Shell command (for type: 'command')
+  url?: string;                // Endpoint URL (for type: 'http')
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  script?: string;             // JS/TS file path (for type: 'script')
+  timeout?: number;            // Default: 30000ms
+  enabled?: boolean;           // Default: true
+  description?: string;
+  continueOnBlock?: boolean;   // Feed rejection to model instead of halting
+}
+```
+
+### Hook Events
+
+| Event | When Triggered |
+|-------|---------------|
+| `SessionStart` | Session begins or resumes |
+| `SessionEnd` | Session terminates |
+| `PreToolUse` | Before tool execution |
+| `PostToolUse` | After successful tool execution |
+| `PostToolUseFailure` | After failed tool execution |
+| `PermissionRequest` | Permission dialog appears |
+| `Stop` | Agent finishes responding |
+| `Error` | Error occurred |
+
+### Block Cap
+
+Consecutive `Stop` hook rejections are capped to prevent infinite loops. When the cap is reached, the hook result includes `capped: true` and execution halts.
+
+### continueOnBlock
+
+When `continueOnBlock: true`, hook rejections feed the error message back to the model as context instead of halting execution. This allows the model to adapt its behavior.
+
 ## Instruction Files
 
-Instruction files provide context and guidelines to AI agents. Alexi supports a multi-layer instruction system.
+Instruction files provide context and guidelines to AI agents via a multi-layer system.
 
 ### Instruction File Hierarchy
 
 ```mermaid
 graph TB
-    Soul[Soul Prompt] --> Model[Model-Specific Prompt]
-    Model --> Env[Environment Info]
-    Env --> Agent[Agent Role Prompt]
+    Soul[Soul Prompt<br/>core identity] --> Model[Model-Specific Prompt]
+    Model --> Env[Environment Info<br/>workdir, git, platform]
+    Env --> Agent[Agent Role Prompt<br/>code/debug/plan/explore]
     Agent --> Project[Project AGENTS.md]
     Project --> User[User ALEXI.md]
-    User --> Rules[Project Rules]
+    User --> Rules[Project Rules<br/>.alexi/rules/*.md]
     Rules --> Custom[Custom Rules]
-    
-    style Soul fill:#E3F2FD
-    style Model fill:#E8F5E9
-    style Agent fill:#FFF3E0
-    style Project fill:#F3E5F5
-    style User fill:#FCE4EC
-    style Rules fill:#E0F2F1
 ```
 
 ### 1. Project-Level Instructions (AGENTS.md)
 
-Located in the project root directory.
-
 **Path**: `./AGENTS.md`
 
-**Purpose**: Provides project-specific context, coding standards, and build instructions.
-
-**Example**:
+Provides project-specific context, coding standards, and build instructions.
 
 ```markdown
 # AGENTS.md
 
 ## Project Overview
-
-Alexi is a TypeScript/Node.js CLI application — an intelligent LLM orchestrator for SAP AI Core.
+Alexi is a TypeScript/Node.js CLI application.
 
 ## Build & Test Commands
-
-```bash
 npm run build
 npm test
-```
 
 ## Code Style
-
 - Use 2 spaces for indentation
-- Always use async/await over raw promises
-- Prefer interfaces over types for object shapes
+- Always use .js extension for local imports
 ```
 
 ### 2. User-Level Instructions (ALEXI.md)
 
-Located in the user's home directory.
-
 **Path**: `~/.alexi/ALEXI.md`
 
-**Purpose**: Global user preferences and coding style that apply to all projects.
+Global user preferences applied to all projects.
 
-**Example**:
-
-```markdown
-# ALEXI.md
-
-## Personal Preferences
-
-- I prefer verbose variable names for clarity
-- Always add JSDoc comments to exported functions
-- Use functional programming patterns when possible
-
-## Formatting
-
-- Maximum line length: 100 characters
-- Use single quotes for strings
-```
-
-### 3. Project-Level Rules (.alexi/rules/*.md)
-
-Located in the project's `.alexi/rules/` directory.
+### 3. Project-Level Rules
 
 **Path**: `./.alexi/rules/*.md`
 
-**Purpose**: Scoped rules for specific aspects of the project (e.g., API design, database patterns).
+Scoped rules for specific aspects (API design, security, database patterns).
 
-**Example**:
+### 4. Custom Agents with File Inclusion
 
+Agent prompt files support `{file:path/to/file}` inclusion syntax:
+
+```markdown
+---
+slug: my-agent
+name: My Custom Agent
+---
+
+{file:../shared/preamble.md}
+
+You are a specialized agent for...
+
+{file:./tools-reference.md}
 ```
-.alexi/
-└── rules/
-    ├── api-design.md
-    ├── database-patterns.md
-    └── security-guidelines.md
-```
+
+Inclusions are recursive up to a depth of 3. Paths are resolved relative to the agent file's directory.
 
 ### Managing Instruction Files
-
-#### Via /memory Command
 
 ```bash
 # List all instruction files
@@ -399,41 +459,11 @@ Located in the project's `.alexi/rules/` directory.
 /memory init
 ```
 
-#### System Prompt Assembly
-
-The system prompt is assembled in the following order:
-
-1. Soul prompt (core identity)
-2. Model-specific instructions (Anthropic, OpenAI, Gemini)
-3. Environment info (workdir, git repo, platform, date)
-4. Agent role prompt (code, debug, plan, explore)
-5. Project AGENTS.md (if exists)
-6. User ~/.alexi/ALEXI.md (if exists)
-7. Project .alexi/rules/*.md (if exist)
-8. Custom rules (user-provided via API)
-
-```typescript
-import { buildAssembledSystemPrompt } from './agent/system.js';
-
-const systemPrompt = buildAssembledSystemPrompt({
-  agentId: 'code',
-  modelId: 'anthropic--claude-4-sonnet',
-  workdir: process.cwd(),
-  customRules: 'Additional instructions here',
-  skipEnv: false,
-  skipAgentsMd: false
-});
-```
-
 ## Project Context
 
-Project context provides additional information about the codebase structure and architecture.
+### .alexi/context.json
 
-### Context Files
-
-#### .alexi/context.json
-
-Project-level context configuration.
+Project-level context configuration:
 
 ```json
 {
@@ -450,9 +480,9 @@ Project-level context configuration.
 }
 ```
 
-#### .alexi/invariants.md
+### .alexi/invariants.md
 
-Architectural invariants that should never be violated.
+Architectural invariants that should never be violated:
 
 ```markdown
 # Architectural Invariants
@@ -463,11 +493,52 @@ Architectural invariants that should never be violated.
 4. Error handling must use Result<T> pattern
 ```
 
+## Session Storage
+
+Sessions are stored as JSON files in `~/.alexi/sessions/`.
+
+### Directory Structure
+
+```
+~/.alexi/
+├── sessions/
+│   ├── abc-123.json
+│   ├── def-456.json
+│   └── ghi-789.json
+├── config.json
+├── ALEXI.md
+├── routing-config.json
+├── mcp-servers.json
+└── agents/
+    └── custom-agent.md
+```
+
+### Session Schema
+
+```typescript
+interface Session {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: Message[];
+  model: string;
+  usage: TokenUsage;
+  metadata: {
+    agent?: string;
+    stage?: string;
+    workdir?: string;
+  };
+}
+```
+
+Session titles are auto-generated from the first user message. Sessions support auto-compaction when configurable `maxContextTokens` (default: 128K) is reached.
+
 ## Configuration Examples
 
 ### Cost Optimization
 
-Prioritize cheaper models while maintaining quality.
+Prioritize cheaper models while maintaining quality for simple tasks.
 
 ```json
 {
@@ -481,9 +552,11 @@ Prioritize cheaper models while maintaining quality.
       "model": "gpt-4o-mini"
     },
     {
-      "name": "fallback-sonnet",
-      "priority": 50,
-      "condition": {},
+      "name": "medium-sonnet",
+      "priority": 80,
+      "condition": {
+        "complexity": "medium"
+      },
       "model": "anthropic--claude-4-sonnet"
     }
   ],
@@ -495,7 +568,7 @@ Prioritize cheaper models while maintaining quality.
 
 ### Quality Optimization
 
-Always use the most capable models.
+Always use the most capable models regardless of cost.
 
 ```json
 {
@@ -551,93 +624,40 @@ Route different task types to specialized models.
 }
 ```
 
-### Development Stage Routing
+### Specific Model Preferences
 
-Route based on development stage.
+Force a specific model for all interactions.
 
 ```json
 {
-  "rules": [
-    {
-      "name": "prototyping",
-      "priority": 100,
-      "condition": {
-        "contains": ["prototype", "spike", "experiment"]
-      },
-      "model": "gpt-4o-mini"
-    },
-    {
-      "name": "production",
-      "priority": 90,
-      "condition": {
-        "contains": ["production", "release", "deploy"]
-      },
-      "model": "anthropic--claude-4.5-opus"
-    }
-  ],
+  "rules": [],
   "default": {
     "model": "anthropic--claude-4-sonnet"
   }
 }
 ```
 
-## Session Storage Configuration
+Combined with user config:
 
-Session files are stored in `~/.alexi/sessions/`.
-
-### Session File Structure
-
-```
-~/.alexi/
-├── sessions/
-│   ├── abc-123.json
-│   ├── def-456.json
-│   └── ghi-789.json
-├── config.json
-├── ALEXI.md
-└── mcp-servers.json
-```
-
-### Session Schema
-
-```typescript
-interface Session {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: Message[];
-  model: string;
-  usage: TokenUsage;
-  metadata: {
-    agent?: string;
-    stage?: string;
-    workdir?: string;
-  };
+```json
+{
+  "defaultModel": "anthropic--claude-4-sonnet",
+  "autoRoute": false
 }
 ```
 
-## Configuration Best Practices
-
-1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control
-2. **Use User Config for Preferences**: Store personal preferences in ~/.alexi/config.json
-3. **Use Routing Config for Model Selection**: Define routing rules in routing-config.json
-4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
-5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
-6. **Keep User Files Private**: Never commit ~/.alexi/ directory
-
 ## Configuration Validation
 
-Alexi validates configuration files on startup and provides helpful error messages:
+Alexi validates configuration on startup:
 
 ```bash
-# Validate routing configuration
+# Check routing config via explain
 alexi explain -m "test prompt"
 
-# Check environment variables
+# Run health checks
 alexi doctor
 
-# Show current configuration
+# Show resolved configuration
 alexi config show
 ```
 
@@ -651,18 +671,27 @@ alexi config show
 
 ### Routing Not Working
 
-1. Verify routing-config.json syntax
-2. Check rule priorities (higher = evaluated later)
-3. Use `alexi explain` to see routing decisions
+1. Verify `routing-config.json` syntax
+2. Check rule priorities (highest priority rule that matches wins)
+3. Use `alexi explain -m "<prompt>"` to debug routing decisions
+4. Verify model IDs match available SAP AI Core deployments
 
 ### Instruction Files Not Applied
 
 1. Verify file paths: `ls AGENTS.md ~/.alexi/ALEXI.md`
 2. Check file encoding (must be UTF-8)
-3. Use `/memory` command to list loaded files
+3. Use `/memory` command to list loaded instruction files
+
+### Hooks Not Executing
+
+1. Verify `enabled: true` (or omitted, defaults to true)
+2. Check timeout is sufficient for the operation
+3. Verify script paths are correct and executable
+4. Check hook event matches the desired trigger point
 
 ## Related Documentation
 
-- [API Documentation](API.md) - CLI commands and TypeScript APIs
-- [Architecture](ARCHITECTURE.md) - System architecture and design
-- [Testing Guide](TESTING.md) - Testing configuration and environment setup
+- [API Documentation](API.md) -- CLI commands and TypeScript APIs
+- [Architecture](ARCHITECTURE.md) -- System architecture and design
+- [Testing Guide](TESTING.md) -- Testing configuration and environment setup
+- [Automation](AUTOMATION.md) -- CI/CD workflows and automation

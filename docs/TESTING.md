@@ -6,15 +6,20 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 
 - [Testing Strategy](#testing-strategy)
 - [Test Commands](#test-commands)
+- [Test Configuration](#test-configuration)
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
-- [Testing Providers](#testing-providers)
+- [Testing Hooks](#testing-hooks)
+- [Testing Compaction](#testing-compaction)
+- [Testing TUI Commands](#testing-tui-commands)
+- [Testing Background Tasks](#testing-background-tasks)
 - [Testing Routing](#testing-routing)
+- [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
 
-Alexi employs a multi-layered testing strategy to ensure reliability and maintainability:
+Alexi employs a multi-layered testing strategy:
 
 ```mermaid
 graph TB
@@ -25,40 +30,44 @@ graph TB
     end
     
     subgraph "Test Coverage Areas"
-        Tools[Tool System Tests]
-        Providers[Provider Tests]
+        Tools[Tool System<br/>30 tools]
+        Hooks[Hooks System<br/>blockCap + continueOnBlock]
+        Compaction[Compaction<br/>reactive seeding + chunks]
+        Agents[Agent System<br/>custom loader + file inclusion]
+        TUI[TUI Commands<br/>slash commands + export]
         Router[Router Tests]
-        Core[Core Logic Tests]
+        Core[Core Logic]
     end
     
     Unit --> Tools
+    Unit --> Hooks
+    Unit --> Compaction
+    Unit --> Agents
+    Unit --> TUI
     Unit --> Router
-    Unit --> Core
-    Integration --> Providers
-    Integration --> Tools
+    Integration --> Core
     E2E --> Core
-    
-    style Unit fill:#4CAF50
-    style Integration fill:#2196F3
-    style E2E fill:#FF9800
 ```
 
 ### Testing Layers
 
 1. **Unit Tests**: Test individual functions and modules in isolation
-   - Tool implementations
-   - Routing logic
-   - Utility functions
-   - Permission management
+   - Tool implementations (30 tools)
+   - Routing logic and prompt classification
+   - Compaction strategies (truncate, summarize, sliding, smart)
+   - Hook execution (command, HTTP, script types)
+   - Agent loader with file inclusions
+   - Permission management and doom loop detection
 
 2. **Integration Tests**: Test interactions between components
-   - Provider integrations with SAP AI Core
-   - Tool execution with permission system
-   - Session management with persistence
+   - Agentic chat with tool execution loop
+   - Context overflow detection and reactive compaction
+   - Hook integration in agentic execution
+   - MCP client/server connections
 
 3. **End-to-End Tests**: Test complete user workflows
    - CLI command execution
-   - Multi-turn conversations
+   - Multi-turn conversations with session persistence
    - Auto-routing decisions
 
 ## Test Commands
@@ -84,42 +93,73 @@ npm run test:coverage
 ### Run Specific Test Files
 
 ```bash
-# Run tool tests
-npm test -- tests/tool/tools/
-
-# Run specific test file
+# Run a single test file
 npm test -- tests/tool/tools/write.test.ts
 
-# Run tests matching pattern
+# Run tests in a directory
+npm test -- tests/tool/tools/
+
+# Run tests matching a pattern
 npm test -- --grep "write tool"
+
+# Run hook tests
+npm test -- tests/hooks/
+
+# Run compaction tests
+npm test -- tests/compaction/
+
+# Run agent tests
+npm test -- tests/agent/
 ```
 
-### Test Framework
+## Test Configuration
 
-Alexi uses **Vitest** as its testing framework, chosen for:
-- Native TypeScript support
-- Fast execution with ESM support
-- Compatible with Node.js 22
-- Built-in mocking capabilities
+Alexi uses **Vitest** with the following configuration (`vitest.config.ts`):
+
+```typescript
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'node',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      thresholds: {
+        lines: 15,
+        functions: 15,
+        branches: 15,
+        statements: 15,
+      },
+    },
+  },
+});
+```
+
+Key configuration:
+- **Environment**: Node.js (not jsdom)
+- **React Plugin**: Enabled for Ink TUI component testing
+- **Coverage Provider**: V8
+- **Coverage Threshold**: 15% minimum (increasing as coverage improves)
 
 ## Test Coverage
 
 ### Coverage Expectations
 
-| Component | Target Coverage | Current Status |
-|-----------|----------------|----------------|
-| Tool System | 90%+ | ✅ Achieved |
-| Core Logic | 85%+ | 🔄 In Progress |
-| Providers | 80%+ | 🔄 In Progress |
-| Router | 90%+ | 🔄 In Progress |
-| CLI | 70%+ | 🔄 In Progress |
+| Component | Target | Description |
+|-----------|--------|-------------|
+| Tool System | 90%+ | File operations, permissions, error handling |
+| Hooks | 85%+ | blockCap, continueOnBlock, execution types |
+| Compaction | 85%+ | All strategies, reactive seeding, chunked |
+| Agent Loader | 80%+ | Custom agents, file inclusions |
+| Core Logic | 85%+ | Orchestrator, router, session |
+| TUI | 70%+ | Slash commands, context hooks |
 
-### Coverage Reports
-
-Coverage reports are generated in the `coverage/` directory:
+### Generating Coverage Reports
 
 ```bash
-# Generate coverage report
 npm run test:coverage
 
 # View HTML report
@@ -128,15 +168,13 @@ open coverage/index.html
 
 ## Testing Tool System
 
-The tool system has comprehensive unit tests covering file operations, permissions, and error handling.
-
 ### Tool Test Architecture
 
 ```mermaid
 graph LR
-    subgraph "Tool Test Setup"
+    subgraph "Test Setup"
         TempDir[Temporary Directory]
-        Context[Tool Context]
+        Context[ToolContext]
         Mock[Permission Mock]
     end
     
@@ -151,12 +189,9 @@ graph LR
     Context --> Execute
     Execute --> Verify
     Verify --> Cleanup
-    
-    style Execute fill:#4CAF50
-    style Verify fill:#2196F3
 ```
 
-### Example: Testing Write Tool
+### Standard Tool Test Pattern
 
 ```typescript
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -164,7 +199,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import os from 'os';
 
-// Mock the tool index module to bypass permission checks
+// Mock tool index to bypass permission checks
 vi.mock('../../../src/tool/index.js', async () => {
   const actual = await vi.importActual('../../../src/tool/index.js');
   return {
@@ -190,13 +225,11 @@ describe('Write Tool', () => {
   let context: ToolContext;
 
   beforeEach(async () => {
-    // Create a temporary directory for tests
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'write-tool-test-'));
     context = { workdir: tempDir };
   });
 
   afterEach(async () => {
-    // Clean up temp directory
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -208,10 +241,8 @@ describe('Write Tool', () => {
 
     expect(result.success).toBe(true);
     expect(result.data?.created).toBe(true);
-    expect(result.data?.path).toBe(filePath);
-    expect(result.data?.bytesWritten).toBe(Buffer.byteLength(content, 'utf-8'));
 
-    // Verify file was actually created
+    // Verify actual file system change
     const actualContent = await fs.readFile(filePath, 'utf-8');
     expect(actualContent).toBe(content);
   });
@@ -220,8 +251,6 @@ describe('Write Tool', () => {
 
 ### Tool Test Coverage
 
-All file operation tools have comprehensive test coverage:
-
 | Tool | Test File | Test Cases |
 |------|-----------|------------|
 | `read` | `tests/tool/tools/read.test.ts` | 20+ cases |
@@ -229,20 +258,221 @@ All file operation tools have comprehensive test coverage:
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
+| `bash` | `tests/tool/tools/bash.test.ts` | 10+ cases |
 | `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
 | `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
 
-### TUI Command Test Coverage
+## Testing Hooks
 
-TUI slash commands are tested through the `useCommands` hook with React context mocking:
+### Hook Test Files
 
-| Command | Test File | Test Cases |
-|---------|-----------|------------|
-| `/image`, `/clear-images` | `tests/commands-image.test.tsx` | 10+ cases |
+- `tests/hooks/blockCap.test.ts` -- Tests consecutive Stop hook rejection cap
+- `tests/hooks/continueOnBlock.test.ts` -- Tests rejection feedback to model
 
-### Testing Background Tasks
+### Testing Block Cap
 
-The `task` and `task_status` tools support experimental background task execution. Tests for these tools are in `tests/tool/tools/background-tasks.test.ts` and demonstrate patterns for testing asynchronous, feature-flagged functionality.
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { executeHooks, createHookContext, getBlockCap } from '../../src/hooks/index.js';
+
+describe('Hook Block Cap', () => {
+  it('should cap consecutive Stop rejections', async () => {
+    const hooks = [
+      {
+        event: 'Stop' as const,
+        type: 'command' as const,
+        command: 'exit 1', // Always rejects
+        timeout: 5000,
+      },
+    ];
+
+    const blockCap = getBlockCap();  // Default cap value
+    let blocked = 0;
+
+    for (let i = 0; i < blockCap + 5; i++) {
+      const ctx = createHookContext({ event: 'Stop' });
+      const results = await executeHooks(hooks, ctx);
+      if (results[0]?.capped) {
+        break;
+      }
+      if (!results[0]?.success) {
+        blocked++;
+      }
+    }
+
+    expect(blocked).toBeLessThanOrEqual(blockCap);
+  });
+});
+```
+
+### Testing continueOnBlock
+
+```typescript
+describe('continueOnBlock', () => {
+  it('should feed rejection back to model', async () => {
+    const hooks = [
+      {
+        event: 'PostToolUse' as const,
+        type: 'command' as const,
+        command: 'echo "BLOCKED: unsafe operation" && exit 1',
+        continueOnBlock: true,
+      },
+    ];
+
+    const ctx = createHookContext({
+      event: 'PostToolUse',
+      toolName: 'write',
+    });
+
+    const results = await executeHooks(hooks, ctx);
+
+    expect(results[0]?.success).toBe(false);
+    expect(results[0]?.continueOnBlock).toBe(true);
+    expect(results[0]?.output).toContain('BLOCKED');
+  });
+});
+```
+
+## Testing Compaction
+
+### Compaction Test Files
+
+- `tests/compaction/reactive-seeding.test.ts` -- Tests overflow-triggered compaction with target sizing
+- `tests/core/compaction-chunked.test.ts` -- Tests chunked compaction for large contexts
+
+### Testing Reactive Seeding
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { CompactionManager, type Message } from '../../src/compaction/index.js';
+
+describe('Reactive Seeding', () => {
+  it('should include target instruction when overflowTokens provided', async () => {
+    let capturedPrompt = '';
+    const manager = new CompactionManager({
+      summarizeFn: async (prompt: string) => {
+        capturedPrompt = prompt;
+        return 'Summary of conversation';
+      },
+    });
+
+    const messages: Message[] = [
+      { role: 'user', content: 'Long message '.repeat(500) },
+      { role: 'assistant', content: 'Long response '.repeat(500) },
+      { role: 'user', content: 'Recent message' },
+    ];
+
+    await manager.compact(messages, {
+      strategy: 'summarize',
+      preserveRecent: 1,
+      overflowTokens: 5000,
+    });
+
+    expect(capturedPrompt).toContain('Keep your summary under approximately');
+    expect(capturedPrompt).toContain('tokens');
+  });
+});
+```
+
+### Testing Chunked Compaction
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { splitForCompaction, compactInChunks } from '../../src/core/compaction-chunks.js';
+
+describe('Chunked Compaction', () => {
+  it('should split large content at natural boundaries', () => {
+    const content = 'Line 1\nLine 2\nLine 3\n'.repeat(10000);
+    const { chunks, totalSize } = splitForCompaction(content, 1000);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(totalSize).toBe(content.length);
+    // Each chunk should end at a newline
+    for (const chunk of chunks.slice(0, -1)) {
+      expect(chunk.endsWith('\n')).toBe(true);
+    }
+  });
+
+  it('should compact and merge chunks', async () => {
+    const content = 'Content block.\n'.repeat(5000);
+    const result = await compactInChunks(
+      content,
+      async (chunk) => `Summary of ${chunk.length} chars`,
+      500
+    );
+
+    expect(result).toContain('Summary of');
+    expect(result).toContain('---'); // Chunk separator
+  });
+});
+```
+
+## Testing TUI Commands
+
+TUI slash commands are tested via the `useCommands` hook with React context mocking.
+
+### Test File
+
+- `tests/cli/tui/useCommands.test.tsx`
+
+### Testing Pattern
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+
+// Mock contexts before importing hooks
+const mockAddSystemMessage = vi.fn();
+
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    pasteFromClipboard: vi.fn().mockResolvedValue(undefined),
+    addFromFile: vi.fn().mockResolvedValue(undefined),
+    clearAll: vi.fn(),
+  }),
+}));
+
+import { useCommands } from '../../../src/cli/tui/hooks/useCommands.js';
+
+describe('/export command', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should export session and show system message', async () => {
+    let captured: any;
+    function CommandCapture() {
+      captured = useCommands({ addSystemMessage: mockAddSystemMessage });
+      return <Text>ready</Text>;
+    }
+
+    render(<CommandCapture />);
+
+    const handled = await captured.handleCommand('/export /tmp/test.json');
+    expect(handled).toBe(true);
+    expect(mockAddSystemMessage).toHaveBeenCalled();
+  });
+});
+```
+
+Key patterns:
+1. **Mock Before Import**: All `vi.mock()` calls before hook imports
+2. **addSystemMessage Callback**: The `useCommands` hook now accepts an `addSystemMessage` option
+3. **Capture Hook Return**: Render a component that captures the hook value
+4. **Test Command Dispatch**: Call `handleCommand()` and verify side effects
+
+## Testing Background Tasks
+
+Background tasks are gated behind the `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` feature flag.
+
+### Test File
+
+- `tests/tool/tools/background-tasks.test.ts`
+
+### Pattern
 
 ```typescript
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -255,39 +485,30 @@ describe('Background Tasks', () => {
   let originalEnv: string | undefined;
 
   beforeEach(() => {
-    context = {
-      workdir: '/tmp/test',
-      sessionId: 'test-session',
-    };
+    context = { workdir: '/tmp/test', sessionId: 'test-session' };
     originalEnv = process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
   });
 
   afterEach(() => {
-    // Restore environment
     if (originalEnv === undefined) {
       delete process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS;
     } else {
       process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = originalEnv;
     }
-    // Clear task store
     getTaskStore().clear();
   });
 
   it('should create background task when feature enabled', async () => {
     process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = 'true';
 
-    const result = await taskTool.execute(
-      {
-        prompt: 'Test background task',
-        description: 'Background test',
-        subagent_type: 'explore',
-        background: true,
-      },
-      context
-    );
+    const result = await taskTool.execute({
+      prompt: 'Test background task',
+      description: 'Background test',
+      subagent_type: 'explore',
+      background: true,
+    }, context);
 
     expect(result.success).toBe(true);
-    expect(result.data?.completed).toBe(false);
     expect(result.data?.status).toBe('queued');
     expect(result.data?.background).toBe(true);
   });
@@ -296,221 +517,174 @@ describe('Background Tasks', () => {
     process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS = 'true';
 
     const taskResult = await taskTool.execute(
-      { prompt: 'Test task', description: 'Test', background: true },
+      { prompt: 'Test', description: 'Test', background: true },
       context
     );
 
     const taskId = taskResult.data!.taskId;
 
-    // Wait for background task to complete (stub has 100ms await + 1000ms setTimeout)
+    // Wait with generous margin for CI (stub: 100ms + 1000ms = ~1100ms)
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
     const statusResult = await taskStatusTool.execute({ taskId }, context);
-
     expect(statusResult.data?.status).toBe('completed');
-    expect(statusResult.data?.result).toBeDefined();
   });
 });
 ```
 
-Key patterns for testing background tasks:
-
-1. **Environment Variable Control**: Enable/disable experimental features via `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`
-2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach` to prevent state leakage
-3. **Async Completion Testing**: Use `setTimeout` with a generous margin above the expected completion time to prevent CI flakiness. For example, if the stub has a 100ms await plus a 1000ms setTimeout (total ~1100ms), use a 2000ms wait to account for CI environment variability.
-4. **Non-null Assertions**: Use `taskResult.data!.taskId` pattern (not `taskResult.data?.taskId!`) for correct operator precedence
-5. **Feature Flag Gating**: Test that background functionality is ignored when the feature flag is disabled
-
-### Test Categories
-
-Each tool is tested across multiple categories:
-
-1. **Basic Operations**
-   - Normal usage scenarios
-   - Edge cases (empty files, large files)
-   - Special characters and unicode
-
-2. **Path Handling**
-   - Absolute paths
-   - Relative paths with workdir
-   - Nested directory creation
-   - Path normalization
-
-3. **Error Handling**
-   - Non-existent files/directories
-   - Permission errors
-   - Invalid parameters
-   - Malformed patterns (glob/grep)
-
-4. **Tool Metadata**
-   - Correct tool names
-   - Description presence
-   - Schema generation
-
-5. **Line Ending Preservation** (Edit Tool)
-   - Detect and preserve CRLF vs LF line endings
-   - Normalize parameters to match file's line ending style
-   - Ensure replacements maintain original file format
-
-#### Testing Line Ending Preservation
-
-The edit tool preserves line endings when performing replacements:
-
-```typescript
-describe('edit tool line endings', () => {
-  it('should preserve CRLF line endings', async () => {
-    // Create file with CRLF endings
-    const content = 'line1\r\nline2\r\nline3\r\n';
-    await fs.writeFile(filePath, content, 'utf-8');
-
-    // Perform edit with LF in parameters
-    const result = await editTool.execute({
-      filePath,
-      oldString: 'line2\n',
-      newString: 'modified\n'
-    }, context);
-
-    expect(result.success).toBe(true);
-
-    // Verify CRLF preserved in output
-    const updated = await fs.readFile(filePath, 'utf-8');
-    expect(updated).toContain('\r\n');
-    expect(updated).toBe('line1\r\nmodified\r\nline3\r\n');
-  });
-
-  it('should preserve LF line endings', async () => {
-    const content = 'line1\nline2\nline3\n';
-    await fs.writeFile(filePath, content, 'utf-8');
-
-    const result = await editTool.execute({
-      filePath,
-      oldString: 'line2',
-      newString: 'modified'
-    }, context);
-
-    expect(result.success).toBe(true);
-
-    const updated = await fs.readFile(filePath, 'utf-8');
-    expect(updated).not.toContain('\r\n');
-    expect(updated).toBe('line1\nmodified\nline3\n');
-  });
-});
-```
-
-## Testing Providers
-
-Provider tests verify integration with SAP AI Core and proper message formatting.
-
-### Provider Test Strategy
-
-```mermaid
-sequenceDiagram
-    participant Test as Test Suite
-    participant Provider as Provider Implementation
-    participant Mock as Mock SAP AI Core
-    participant Validator as Response Validator
-    
-    Test->>Provider: Initialize with config
-    Provider->>Mock: Send request
-    Mock->>Provider: Return mock response
-    Provider->>Validator: Validate format
-    Validator->>Test: Assert expectations
-    
-    Note over Test,Validator: Verify message format, streaming, error handling
-```
-
-### Example: Testing Provider Integration
-
-```typescript
-describe('OpenAI Compatible Provider', () => {
-  it('should format messages correctly', async () => {
-    const provider = new OpenAICompatibleProvider(config);
-    
-    const messages = [
-      { role: 'user', content: 'Hello' }
-    ];
-    
-    const result = await provider.sendMessage(messages, {
-      model: 'gpt-4o',
-      temperature: 0.7
-    });
-    
-    expect(result.content).toBeDefined();
-    expect(result.role).toBe('assistant');
-  });
-  
-  it('should handle streaming responses', async () => {
-    // Test streaming implementation
-  });
-  
-  it('should handle API errors gracefully', async () => {
-    // Test error handling
-  });
-});
-```
+Key testing patterns:
+1. **Environment Variable Control**: Enable/disable via `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS`
+2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach`
+3. **Generous Timeouts**: Use ~2x the expected duration for CI scheduling variability
+4. **Non-null Assertions**: Use `taskResult.data!.taskId` (correct precedence)
 
 ## Testing Routing
-
-Router tests verify automatic model selection based on prompt analysis.
 
 ### Router Test Flow
 
 ```mermaid
 graph TD
-    Input[Test Input Prompt] --> Classifier[Prompt Classifier]
-    Classifier --> Complexity[Complexity Score]
-    Classifier --> Category[Task Category]
+    Input[Test Prompt] --> Classifier[Prompt Classifier]
+    Classifier --> TaskType[Task Type]
+    Classifier --> Complexity[Complexity Level]
     
-    Complexity --> Router[Router Logic]
-    Category --> Router
+    TaskType --> Router[Router Logic]
+    Complexity --> Router
     Config[Routing Config] --> Router
     
     Router --> Model[Selected Model]
-    Model --> Verify[Verify Selection]
-    
-    style Input fill:#E3F2FD
-    style Router fill:#4CAF50
-    style Verify fill:#2196F3
+    Model --> Verify[Assert Selection]
 ```
 
-### Example: Testing Routing Decisions
+### Example
 
 ```typescript
 describe('Auto Router', () => {
   it('should select cheap model for simple prompts', async () => {
-    const router = new AutoRouter(config);
-    
     const result = await router.selectModel({
       prompt: 'What is 2+2?',
       preferCheap: true
     });
     
     expect(result.model).toBe('gpt-4o-mini');
-    expect(result.confidence).toBeGreaterThan(0.8);
+    expect(result.confidence).toBeGreaterThan(80);
   });
   
-  it('should select powerful model for complex tasks', async () => {
-    const router = new AutoRouter(config);
-    
+  it('should select reasoning model for complex tasks', async () => {
     const result = await router.selectModel({
-      prompt: 'Analyze this codebase and suggest architectural improvements...',
+      prompt: 'Analyze this distributed systems architecture...',
       preferCheap: false
     });
     
-    expect(result.model).toBe('claude-4-sonnet');
-  });
-  
-  it('should respect routing rules', async () => {
-    // Test rule-based routing
+    expect(result.model).toMatch(/gpt-4|claude/);
   });
 });
 ```
+
+## Testing with SAP AI Core
+
+### Local Development Testing
+
+For local testing without SAP AI Core connectivity:
+
+```bash
+# Mock provider mode
+export ALEXI_MOCK_PROVIDER=true
+npm test
+```
+
+### Integration Testing
+
+For real SAP AI Core integration tests:
+
+```bash
+export AICORE_SERVICE_KEY='{...}'
+export AICORE_RESOURCE_GROUP='default'
+npm run test:integration
+```
+
+### CI/CD Testing
+
+GitHub Actions uses repository secrets:
+
+```yaml
+- name: Run Tests
+  env:
+    AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+    AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+  run: npm test
+```
+
+## Testing Agent Custom Loader
+
+### Test Files
+
+- `tests/agent/customAgentLoader.test.ts` -- Tests loading agents from markdown files
+- `tests/agent/fileInclusion.test.ts` -- Tests `{file:path}` recursive inclusions
+
+### Testing File Inclusions
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { resolveFileInclusions } from '../../src/agent/customAgentLoader.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+
+describe('resolveFileInclusions', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'inclusion-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('should resolve file inclusions', async () => {
+    await fs.writeFile(path.join(tempDir, 'preamble.md'), 'Preamble content');
+    const content = 'Before {file:preamble.md} After';
+
+    const result = await resolveFileInclusions(content, tempDir);
+
+    expect(result).toBe('Before Preamble content After');
+  });
+
+  it('should cap recursion at MAX_INCLUSION_DEPTH (3)', async () => {
+    // Create recursive chain
+    await fs.writeFile(path.join(tempDir, 'a.md'), '{file:b.md}');
+    await fs.writeFile(path.join(tempDir, 'b.md'), '{file:c.md}');
+    await fs.writeFile(path.join(tempDir, 'c.md'), '{file:d.md}');
+    await fs.writeFile(path.join(tempDir, 'd.md'), 'deep content');
+
+    const result = await resolveFileInclusions('{file:a.md}', tempDir);
+
+    expect(result).toContain('max inclusion depth reached');
+  });
+
+  it('should handle missing files gracefully', async () => {
+    const content = 'Before {file:nonexistent.md} After';
+    const result = await resolveFileInclusions(content, tempDir);
+
+    expect(result).toContain('not found');
+  });
+});
+```
+
+## Testing MCP Client
+
+### Test File
+
+- `tests/mcp/client.test.ts`
+
+The MCP client tests verify connection management, tool discovery, and reconnection behavior.
 
 ## Best Practices
 
 ### 1. Test Isolation
 
-Always use temporary directories and clean up after tests:
+Always use temporary directories and clean up:
 
 ```typescript
 beforeEach(async () => {
@@ -524,8 +698,6 @@ afterEach(async () => {
 ```
 
 ### 2. Mock External Dependencies
-
-Mock SAP AI Core API calls and file system operations when appropriate:
 
 ```typescript
 vi.mock('../../../src/tool/index.js', async () => {
@@ -544,32 +716,26 @@ vi.mock('../../../src/tool/index.js', async () => {
 ### 3. Test Both Success and Failure Cases
 
 ```typescript
-describe('error handling', () => {
-  it('should handle non-existent file', async () => {
-    const result = await readTool.execute(
-      { filePath: '/nonexistent.txt' },
-      context
-    );
-    
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('File not found');
-  });
+it('should handle non-existent file', async () => {
+  const result = await readTool.execute(
+    { filePath: '/nonexistent.txt' },
+    context
+  );
+  expect(result.success).toBe(false);
+  expect(result.error).toContain('not found');
 });
 ```
 
 ### 4. Verify Actual File System Changes
 
-Don't just check return values - verify actual changes:
-
 ```typescript
 it('should create file on disk', async () => {
   const result = await writeTool.execute({ filePath, content }, context);
-  
   expect(result.success).toBe(true);
-  
-  // Verify file actually exists
-  const actualContent = await fs.readFile(filePath, 'utf-8');
-  expect(actualContent).toBe(content);
+
+  // Verify file exists
+  const actual = await fs.readFile(filePath, 'utf-8');
+  expect(actual).toBe(content);
 });
 ```
 
@@ -581,6 +747,7 @@ describe('edge cases', () => {
   it('should handle unicode content', async () => { /* ... */ });
   it('should handle files with spaces in name', async () => { /* ... */ });
   it('should handle deeply nested directories', async () => { /* ... */ });
+  it('should handle line ending preservation (CRLF/LF)', async () => { /* ... */ });
 });
 ```
 
@@ -588,139 +755,39 @@ describe('edge cases', () => {
 
 ```typescript
 // Good
-it('should create parent directories if they do not exist', async () => {
-  // ...
-});
+it('should create parent directories if they do not exist', async () => { });
+it('should cap consecutive Stop rejections at blockCap limit', async () => { });
 
 // Bad
-it('test write', async () => {
-  // ...
-});
+it('test write', async () => { });
 ```
 
-### 7. Test Tool Metadata
-
-Verify tool definitions are correct:
+### 7. Feature-Flagged Tests
 
 ```typescript
-describe('tool metadata', () => {
-  it('should have correct name', () => {
-    expect(writeTool.name).toBe('write');
-  });
+let originalEnv: string | undefined;
 
-  it('should have a description', () => {
-    expect(writeTool.description).toBeDefined();
-    expect(writeTool.description.length).toBeGreaterThan(0);
-  });
+beforeEach(() => {
+  originalEnv = process.env.FEATURE_FLAG;
+});
+
+afterEach(() => {
+  if (originalEnv === undefined) {
+    delete process.env.FEATURE_FLAG;
+  } else {
+    process.env.FEATURE_FLAG = originalEnv;
+  }
 });
 ```
 
-### 8. Test TUI Commands with Context Mocking
+### 8. Async Timing in CI
 
-TUI commands require mocking React contexts and using ink-testing-library:
+When testing background operations, use generous margins:
 
 ```typescript
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import React from 'react';
-import { render } from 'ink-testing-library';
-import { Text } from 'ink';
-
-// Mock contexts before importing hooks
-const mockPasteFromClipboard = vi.fn().mockResolvedValue(undefined);
-const mockAddFromFile = vi.fn().mockResolvedValue(undefined);
-const mockClearAll = vi.fn();
-
-vi.mock('../src/cli/tui/context/AttachmentContext.js', () => ({
-  useAttachments: () => ({
-    pending: [],
-    reading: false,
-    error: null,
-    pasteFromClipboard: mockPasteFromClipboard,
-    addFromFile: mockAddFromFile,
-    clearAll: mockClearAll,
-  }),
-}));
-
-// Import after mocks
-import { useCommands } from '../src/cli/tui/hooks/useCommands.js';
-
-describe('/image command', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should call pasteFromClipboard when no args given', async () => {
-    let captured;
-    function CommandCapture() {
-      captured = useCommands();
-      return <Text>ready</Text>;
-    }
-    
-    render(<CommandCapture />);
-    
-    const handled = await captured.handleCommand('/image');
-    expect(handled).toBe(true);
-    expect(mockPasteFromClipboard).toHaveBeenCalledOnce();
-  });
-
-  it('should call addFromFile when path provided', async () => {
-    let captured;
-    function CommandCapture() {
-      captured = useCommands();
-      return <Text>ready</Text>;
-    }
-    
-    render(<CommandCapture />);
-    
-    await captured.handleCommand('/image ./screenshot.png');
-    expect(mockAddFromFile).toHaveBeenCalledWith('./screenshot.png');
-  });
-});
-```
-
-Key patterns for TUI command testing:
-
-1. **Mock Before Import**: Declare all vi.mock() calls before importing the hook
-2. **Capture Hook Return**: Use a component to capture the hook's return value
-3. **Render with Ink**: Use ink-testing-library's render() function
-4. **Test Command Dispatch**: Call handleCommand() and verify behavior
-5. **Clear Mocks**: Use vi.clearAllMocks() in beforeEach()
-
-## Testing with SAP AI Core
-
-### Local Development Testing
-
-For local testing without SAP AI Core:
-
-```bash
-# Use mock provider
-export ALEXI_MOCK_PROVIDER=true
-npm test
-```
-
-### Integration Testing
-
-For integration tests with real SAP AI Core:
-
-```bash
-# Set required environment variables
-export AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...",...}'
-export AICORE_RESOURCE_GROUP='default'
-
-# Run integration tests
-npm run test:integration
-```
-
-### CI/CD Testing
-
-GitHub Actions workflows use secrets for SAP AI Core credentials:
-
-```yaml
-- name: Run Tests
-  env:
-    AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-    AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-  run: npm test
+// Theoretical minimum: 1100ms (100ms + 1000ms)
+// CI buffer: 2000ms (accounts for scheduling variability)
+await new Promise((resolve) => setTimeout(resolve, 2000));
 ```
 
 ## Continuous Integration
@@ -730,8 +797,6 @@ Tests run automatically on:
 - Push to main/master
 - Manual workflow dispatch
 
-### Test Workflow
-
 ```mermaid
 graph LR
     PR[Pull Request] --> Install[Install Dependencies]
@@ -740,42 +805,26 @@ graph LR
     Lint --> Test[Run Tests]
     Test --> Coverage[Generate Coverage]
     Coverage --> Report[Upload Report]
-    
-    style Test fill:#4CAF50
-    style Coverage fill:#2196F3
 ```
 
 ## Troubleshooting
 
 ### Common Test Issues
 
-1. **Tests fail with "File not found"**
-   - Ensure temporary directories are created in `beforeEach`
-   - Check that file paths use `path.join(tempDir, ...)`
-
-2. **Permission errors in CI**
-   - Verify tool mocking is configured correctly
-   - Check that `defineTool` mock bypasses permission checks
-
-3. **Timeout errors**
-   - Increase timeout for slow operations: `it('test', { timeout: 10000 }, async () => {})`
-   - Check for hanging async operations
-   - For tests that await background task completion, use generous margins (e.g., 2x the expected duration) to account for CI environment scheduling delays
-
-4. **Flaky tests**
-   - Use proper cleanup in `afterEach`
-   - Avoid shared state between tests
-   - Use unique temporary directories per test
-   - When waiting for async tasks to complete, provide sufficient buffer time above the theoretical minimum (CI runners may have variable scheduling latency)
+1. **"File not found" errors**: Ensure temp dirs created in `beforeEach`
+2. **Permission errors**: Verify `defineTool` mock bypasses permission checks
+3. **Timeout errors**: Increase timeout or use generous margins for async ops
+4. **Flaky tests**: Use proper cleanup, unique temp dirs, and sufficient wait times
+5. **React rendering errors**: Ensure `@vitejs/plugin-react` is configured in vitest.config.ts
+6. **Module mock ordering**: `vi.mock()` must appear before module imports
 
 ## Contributing Tests
 
 When contributing new features:
 
 1. Write tests first (TDD approach)
-2. Ensure coverage for new code is above 80%
+2. Target 80%+ coverage for new code
 3. Test both success and failure paths
 4. Include edge cases
-5. Update this documentation with new testing patterns
-
-For more information on contributing, see [CONTRIBUTING.md](CONTRIBUTING.md).
+5. Follow the patterns documented above
+6. Run full test suite before submitting: `npm test && npm run lint`
