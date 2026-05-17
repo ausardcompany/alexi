@@ -185,8 +185,8 @@ describe('bash tool', () => {
       expect(bashTool.name).toBe('bash');
     });
 
-    it('should have a description mentioning truncation', () => {
-      expect(bashTool.description).toContain('truncated');
+    it('should have a description mentioning security', () => {
+      expect(bashTool.description).toContain('Security');
     });
 
     it('should generate a valid function schema', () => {
