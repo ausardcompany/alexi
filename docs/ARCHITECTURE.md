@@ -1,10 +1,10 @@
 # Alexi Architecture
 
-This document describes the high-level architecture of Alexi, an AI-powered CLI assistant.
+This document describes the high-level architecture of Alexi, an intelligent LLM orchestrator for SAP AI Core.
 
 ## Overview
 
-Alexi is a TypeScript/Node.js application that orchestrates multiple LLM providers with intelligent routing, session management, and extensible tool systems.
+Alexi is a TypeScript/Node.js CLI application that orchestrates LLM calls exclusively through SAP AI Core, featuring intelligent routing, multi-turn session management, agentic tool execution, lifecycle hooks, context compaction, and an extensible tool system with 30+ built-in tools.
 
 ## System Architecture
 
@@ -13,21 +13,23 @@ graph TB
     subgraph CLI["CLI Layer"]
         Program[program.ts]
         Interactive[interactive.ts]
+        TUI[Ink TUI]
     end
 
     subgraph Core["Core Layer"]
         Orchestrator[orchestrator.ts]
+        AgenticChat[agenticChat.ts]
         Router[router.ts]
         SessionManager[sessionManager.ts]
         StreamingOrch[streamingOrchestrator.ts]
+        Compaction[compaction/index.ts]
+        CompactionChunks[compaction-chunks.ts]
     end
 
-    subgraph Providers["Provider Layer"]
-        OpenAI[openaiCompatible.ts]
-        Anthropic[anthropicCompatible.ts]
-        Claude[claudeNative.ts]
-        SAP[sapOrchestration.ts]
-        SAPNative[sapNative.ts]
+    subgraph Provider["Provider Layer (SAP AI Core)"]
+        SAPOrch[sapOrchestration.ts]
+        Auth[auth.ts]
+        Transform[transform.ts]
     end
 
     subgraph Tools["Tool System"]
@@ -40,6 +42,7 @@ graph TB
         Grep[grep.ts]
         Task[task.ts]
         WebFetch[webfetch.ts]
+        TaskStatus[task_status.ts]
     end
 
     subgraph Support["Support Systems"]
@@ -47,20 +50,25 @@ graph TB
         Permission[permission/index.ts]
         Agent[agent/index.ts]
         MCP[mcp/index.ts]
+        Hooks[hooks/index.ts]
         Skill[skill/index.ts]
     end
 
     Program --> Interactive
+    Program --> TUI
     Interactive --> Orchestrator
+    TUI --> Orchestrator
     Orchestrator --> Router
     Orchestrator --> SessionManager
     Orchestrator --> StreamingOrch
-    Router --> OpenAI
-    Router --> Anthropic
-    Router --> Claude
-    Router --> SAP
-    Router --> SAPNative
-    Orchestrator --> ToolIndex
+    AgenticChat --> Router
+    AgenticChat --> Compaction
+    AgenticChat --> Hooks
+    Compaction --> CompactionChunks
+    Router --> SAPOrch
+    SAPOrch --> Auth
+    SAPOrch --> Transform
+    AgenticChat --> ToolIndex
     ToolIndex --> Bash
     ToolIndex --> Read
     ToolIndex --> Write
@@ -69,6 +77,7 @@ graph TB
     ToolIndex --> Grep
     ToolIndex --> Task
     ToolIndex --> WebFetch
+    ToolIndex --> TaskStatus
     Orchestrator --> Bus
     Orchestrator --> Permission
     Orchestrator --> Agent
@@ -82,64 +91,95 @@ graph TB
 
 | Module | File | Description |
 |--------|------|-------------|
-| Program | `src/cli/program.ts` | CLI entry point using Commander.js |
-| Interactive | `src/cli/interactive.ts` | Interactive mode with streaming UI |
-| Completer | `src/cli/utils/completer.ts` | Unified autocomplete engine for commands, models, paths |
-| Keybindings | `src/cli/utils/keybindings.ts` | Keyboard shortcut handling |
+| Program | `src/cli/program.ts` | CLI entry point using Commander.js, registers 10 command groups |
+| Interactive | `src/cli/interactive.ts` | Legacy interactive mode (deprecated in favor of TUI) |
+| TUI | `src/cli/tui/` | Full-screen Ink/React TUI with streaming, dialogs, and slash commands |
 
 ### Core Layer
 
 | Module | File | Description |
 |--------|------|-------------|
-| Orchestrator | `src/core/orchestrator.ts` | Main orchestration logic |
-| Router | `src/core/router.ts` | Model selection and routing |
-| Session Manager | `src/core/sessionManager.ts` | Conversation session persistence |
+| Orchestrator | `src/core/orchestrator.ts` | Single-turn `sendChat()` with routing and session |
+| Agentic Chat | `src/core/agenticChat.ts` | Multi-turn autonomous agent with tool loop, compaction, and hooks |
+| Router | `src/core/router.ts` | Model selection based on prompt classification and routing rules |
+| Session Manager | `src/core/sessionManager.ts` | File-based session persistence to `~/.alexi/sessions/` |
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
-| Agentic Chat | `src/core/agenticChat.ts` | Autonomous agent with tool execution loop |
-| Stage Manager | `src/core/stageManager.ts` | Workflow stage management |
-| Workflow Manager | `src/core/workflowManager.ts` | Multi-stage workflow orchestration |
+| Compaction | `src/compaction/index.ts` | Context compression with multiple strategies |
+| Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
 
 ### Provider Layer
 
+Alexi uses a **single provider architecture** -- all LLM calls route exclusively through SAP AI Core Orchestration API.
+
 | Module | File | Description |
 |--------|------|-------------|
-| OpenAI Compatible | `src/providers/openaiCompatible.ts` | OpenAI API compatible provider |
-| Anthropic Compatible | `src/providers/anthropicCompatible.ts` | Anthropic Messages API |
-| Claude Native | `src/providers/claudeNative.ts` | Direct Claude integration |
-| SAP Orchestration | `src/providers/sapOrchestration.ts` | SAP AI Core via SDK |
-| SAP Native | `src/providers/sapNative.ts` | Native SAP AI Core API |
+| SAP Orchestration | `src/providers/sapOrchestration.ts` | Sole provider via `@sap-ai-sdk/orchestration` |
+| Auth | `src/providers/auth.ts` | OAuth token management for SAP AI Core |
+| Transform | `src/providers/transform.ts` | Message format transformation for SAP API |
+| Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
+| Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
+
+Provider resolution:
+
+```typescript
+// src/providers/index.ts
+function getDefaultModel(): string {
+  // 1. AICORE_MODEL env variable
+  // 2. ~/.alexi/config.json defaultModel
+  // 3. Fallback: 'gpt-4o'
+}
+
+function getProviderForModel(modelId: string): SapOrchestrationProvider {
+  // Single provider handles all models via SAP AI Core
+}
+```
 
 ### Tool System
 
-| Tool | File | Description |
-|------|------|-------------|
-| Bash | `src/tool/tools/bash.ts` | Execute shell commands |
-| Bash Hierarchy | `src/tool/tools/bash-hierarchy.ts` | Hierarchical permission rules for bash commands |
-| Read | `src/tool/tools/read.ts` | Read files and directories |
-| Write | `src/tool/tools/write.ts` | Write files |
-| Edit | `src/tool/tools/edit.ts` | Edit files with string replacement |
-| Glob | `src/tool/tools/glob.ts` | Find files by pattern |
-| Grep | `src/tool/tools/grep.ts` | Search file contents |
-| WarpGrep | `src/tool/tools/warpgrep.ts` | AI-powered semantic code search |
-| Task | `src/tool/tools/task.ts` | Launch sub-agents |
-| WebFetch | `src/tool/tools/webfetch.ts` | Fetch web content |
-| Question | `src/tool/tools/question.ts` | Ask user questions |
-| TodoWrite | `src/tool/tools/todowrite.ts` | Manage task lists |
+Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
+
+| Tool | File | Permission | Description |
+|------|------|-----------|-------------|
+| `bash` | `bash.ts` | execute | Execute shell commands with timeout |
+| `read` | `read.ts` | read | Read files and directories |
+| `write` | `write.ts` | write | Write/create files |
+| `edit` | `edit.ts` | write | Exact string replacement in files |
+| `glob` | `glob.ts` | read | Find files by pattern |
+| `grep` | `grep.ts` | read | Search file contents by regex |
+| `warpgrep` | `warpgrep.ts` | read | AI-powered semantic code search |
+| `task` | `task.ts` | -- | Launch sub-agent tasks (foreground/background) |
+| `task_status` | `task_status.ts` | -- | Query background task status |
+| `webfetch` | `webfetch.ts` | network | Fetch web content |
+| `websearch` | `websearch.ts` | network | Web search |
+| `question` | `question.ts` | -- | Ask user questions |
+| `todowrite` | `todowrite.ts` | -- | Manage task lists |
+| `suggest` | `suggest.ts` | -- | Suggest next actions |
+| `delete` | `delete.ts` | write | Delete files |
+| `multiedit` | `multiedit.ts` | write | Multiple edits in one call |
+| `ls` | `ls.ts` | read | List directory contents |
+| `skill` | `skill.ts` | -- | Load specialized skills |
+| `definitions` | `definitions.ts` | read | Get code definitions |
+| `browser` | `browser.ts` | network | Browser automation |
+| `diagnostics` | `diagnostics.ts` | read | Code diagnostics |
+| `batch` | `batch.ts` | -- | Batch tool execution |
+| `memory` | `memory.ts` | -- | Store/retrieve memories |
+| `recall` | `recall.ts` | -- | Recall past sessions |
+| `agent-manager` | `agent-manager.ts` | admin | Manage agent instances |
+| `apply-patch` | `apply-patch.ts` | write | Apply code patches |
+| `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
 
 ### Support Systems
 
 | Module | File | Description |
 |--------|------|-------------|
-| Event Bus | `src/bus/index.ts` | Pub/sub event system |
-| Permission | `src/permission/index.ts` | File access control |
-| Agent | `src/agent/index.ts` | Autonomous agent system |
-| Agent System | `src/agent/system.ts` | Multi-layer system prompt assembly |
-| MCP | `src/mcp/index.ts` | Model Context Protocol |
-| Skill | `src/skill/index.ts` | Specialized prompt skills |
-| Compaction | `src/compaction/index.ts` | Context compression |
-| Profile | `src/profile/index.ts` | User profile management |
-| User Config | `src/config/userConfig.ts` | Persistent user configuration |
-| Logger | `src/utils/logger.ts` | Centralized logging utility |
+| Event Bus | `src/bus/index.ts` | Typed pub/sub event system with Zod validation |
+| Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
+| Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents |
+| Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
+| MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration |
+| Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
+| Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
+| Telemetry | `src/utils/telemetry.ts` | Usage metrics tracking |
 
 ## Data Flow
 
@@ -149,61 +189,333 @@ sequenceDiagram
     participant CLI
     participant Orchestrator
     participant Router
-    participant Provider
+    participant Provider as SAP AI Core
     participant Tools
+    participant Session
 
     User->>CLI: Input message
     CLI->>Orchestrator: Process request
-    Orchestrator->>Router: Select model
-    Router-->>Orchestrator: Model selection
-    Orchestrator->>Provider: Send to LLM
-    Provider-->>Orchestrator: LLM response
+    Orchestrator->>Session: Load session history
+    Orchestrator->>Router: Classify prompt + select model
+    Router-->>Orchestrator: RoutingDecision (modelId, reason, confidence)
+    Orchestrator->>Provider: Send messages to LLM
+    Provider-->>Orchestrator: CompletionResult (text or tool calls)
     
-    alt Tool calls needed
-        Orchestrator->>Tools: Execute tool
-        Tools-->>Orchestrator: Tool result
-        Orchestrator->>Provider: Continue with result
+    alt Tool calls in response
+        Orchestrator->>Tools: Execute tool (with permission check)
+        Tools-->>Orchestrator: ToolResult
+        Orchestrator->>Provider: Continue with tool results
         Provider-->>Orchestrator: Final response
     end
     
-    Orchestrator-->>CLI: Response
+    Orchestrator->>Session: Save messages + usage
+    Orchestrator-->>CLI: Response text
     CLI-->>User: Display output
 ```
 
 ## Agentic Chat Flow
 
+The agentic chat system (`src/core/agenticChat.ts`) implements an autonomous multi-turn execution loop with context overflow recovery, lifecycle hooks, and compaction:
+
 ```mermaid
 flowchart TB
-    Start([Start Agentic Chat]) --> Init[Initialize Permission Manager]
-    Init --> SetRoot[Set Project Root to workdir]
-    SetRoot --> EnableExt[Enable External Directories]
-    EnableExt --> AddRules[Add High-Priority Allow Rules]
-    AddRules --> DetermineModel[Determine Model via Router]
+    Start([Start Agentic Chat]) --> Init[Initialize Permissions + Tools]
+    Init --> SetRoot[Set Project Root + Enable External Dirs]
+    SetRoot --> AddRules[Add High-Priority Allow Rules<br/>priority: 200]
+    AddRules --> DetermineModel[Route: Classify Prompt + Select Model]
     
     DetermineModel --> BuildMessages[Build Message History]
     BuildMessages --> LoopStart{Iteration < Max?}
     
-    LoopStart -->|Yes| CallLLM[Call LLM with Tools]
-    CallLLM --> CheckTools{Tool Calls?}
+    LoopStart -->|Yes| CallLLM[Call LLM with Tool Schemas]
+    CallLLM --> CheckOverflow{Context Overflow?}
     
-    CheckTools -->|Yes| ExecTools[Execute Tool Calls]
-    ExecTools --> CheckPerm[Check Permissions]
+    CheckOverflow -->|Yes| Compact[Reactive Compaction<br/>with overflowTokens seed]
+    Compact --> CallLLM
+    
+    CheckOverflow -->|No| CheckTools{Tool Calls?}
+    
+    CheckTools -->|Yes| ExecTools[Execute Tool Calls in Parallel]
+    ExecTools --> CheckPerm[Check Permissions<br/>last-match-wins rules]
     CheckPerm -->|Allowed| RunTool[Run Tool]
     CheckPerm -->|Denied| ReturnError[Return Permission Error]
     
-    RunTool --> AddToolResult[Add Tool Result to Messages]
-    ReturnError --> AddToolResult
+    RunTool --> Hooks[Execute PostToolUse Hooks]
+    ReturnError --> Hooks
+    Hooks --> CheckBlock{Hook Blocked?}
+    CheckBlock -->|Yes + continueOnBlock| FeedBack[Feed Rejection to Model]
+    CheckBlock -->|Yes + capped| End
+    CheckBlock -->|No| AddToolResult[Add Tool Result to Messages]
+    FeedBack --> AddToolResult
     AddToolResult --> LoopStart
     
     CheckTools -->|No| RecordCost[Record Token Usage]
     RecordCost --> SaveSession[Save to Session]
-    SaveSession --> End([Return Result])
+    SaveSession --> End([Return AgenticChatResult])
     
     LoopStart -->|No| MaxReached[Max Iterations Reached]
     MaxReached --> End
 ```
 
-## Permission System Flow
+### Context Overflow Recovery
+
+When the LLM returns a context-length error, the agentic chat detects it via pattern matching and triggers reactive compaction:
+
+```typescript
+// Error patterns detected:
+const CONTEXT_OVERFLOW_PATTERNS = [
+  /context.length/i,
+  /context.*exceeded/i,
+  /token.*limit.*exceeded/i,
+  /max_tokens_exceeded/i,
+  // ...
+];
+
+// Compaction with overflow seeding:
+const { messages: compactedMessages } = await checkAndCompact(
+  messages, { strategy: 'summarize', overflowTokens }
+);
+```
+
+The `overflowTokens` parameter seeds the target summary length so the compacted context fits within limits.
+
+## Routing Decision Flow
+
+```mermaid
+flowchart TB
+    Input[User Prompt] --> Classify[Classify Prompt]
+    
+    Classify --> TaskType[Determine Task Type<br/>simple-qa, coding,<br/>deep-reasoning, creative-writing]
+    Classify --> Complexity[Assess Complexity<br/>simple, medium, complex]
+    
+    TaskType --> CheckRules{Custom Routing Rules?}
+    Complexity --> CheckRules
+    
+    CheckRules -->|Matched| ApplyRule[Apply Matched Rule<br/>highest priority wins]
+    CheckRules -->|No Match| ScoreModels[Score All Models]
+    
+    ScoreModels --> Factors[Scoring Factors:<br/>- Cost tier match<br/>- Task type strength<br/>- Reasoning capability<br/>- Cost preference]
+    Factors --> SelectBest[Select Highest Score]
+    
+    ApplyRule --> Decision[RoutingDecision]
+    SelectBest --> Decision
+    
+    Decision --> Return[Return modelId + reason + confidence]
+```
+
+### Model Capability Registry
+
+```typescript
+interface ModelCapability {
+  id: string;
+  type: 'openai' | 'claude' | 'gemini';
+  costTier: 'cheap' | 'medium' | 'expensive';
+  strengths: string[];   // e.g., ['coding', 'deep-reasoning']
+  maxTokens: number;
+  reasoning: boolean;
+}
+```
+
+## Event Bus Architecture
+
+The event bus (`src/bus/index.ts`) provides typed pub/sub with Zod schema validation:
+
+```mermaid
+graph LR
+    subgraph Publishers
+        AgenticChat[Agentic Chat]
+        ToolSystem[Tool System]
+        PermSystem[Permission System]
+        SessionMgr[Session Manager]
+    end
+
+    subgraph EventBus["Event Bus (defineEvent + BusEvent)"]
+        ToolStart[ToolExecutionStarted]
+        ToolEnd[ToolExecutionCompleted]
+        ToolFail[ToolExecutionFailed]
+        PermReq[PermissionRequested]
+        PermResp[PermissionResponse]
+        AgentSwitch[AgentSwitched]
+        MsgRecv[MessageReceived]
+        SessCreate[SessionCreated]
+        ErrOccur[ErrorOccurred]
+    end
+
+    subgraph Subscribers
+        TUI[TUI Components]
+        Telemetry[Telemetry Service]
+        Logger[Logger]
+        Plugins[Plugins]
+    end
+
+    AgenticChat --> ToolStart
+    AgenticChat --> ToolEnd
+    ToolSystem --> ToolFail
+    PermSystem --> PermReq
+    PermSystem --> PermResp
+    SessionMgr --> SessCreate
+
+    ToolStart --> TUI
+    ToolEnd --> TUI
+    PermReq --> TUI
+    ToolFail --> Logger
+    ToolStart --> Telemetry
+    ToolEnd --> Telemetry
+    AgentSwitch --> Plugins
+```
+
+### Event API
+
+```typescript
+import { defineEvent, BusEvent } from '../bus/index.js';
+import { z } from 'zod';
+
+// Define a typed event
+const MyEvent = defineEvent('MyEvent', z.object({
+  toolName: z.string(),
+  duration: z.number(),
+}));
+
+// Subscribe
+const unsub = MyEvent.subscribe((payload) => {
+  console.log(payload.toolName, payload.duration);
+});
+
+// Publish
+MyEvent.publish({ toolName: 'read', duration: 42 });
+
+// Async publish (waits for all handlers)
+await MyEvent.publishAsync({ toolName: 'write', duration: 100 });
+
+// One-time listener
+MyEvent.once((payload) => { /* ... */ });
+
+// Wait for event with predicate
+const result = await waitForEvent(MyEvent, (p) => p.toolName === 'bash', 5000);
+```
+
+## Agent System
+
+```mermaid
+classDiagram
+    class AgentRegistry {
+        -agents: Map~string, Agent~
+        +register(config: AgentConfig): void
+        +get(id: string): Agent
+        +list(mode?: AgentMode): Agent[]
+        +loadCustomAgents(workdir?: string): Promise~number~
+    }
+
+    class Agent {
+        +id: string
+        +name: string
+        +mode: AgentMode
+        +systemPrompt: string
+        +tools?: string[]
+        +disabledTools?: string[]
+        +canUseTool(toolId: string): boolean
+    }
+
+    class CustomAgentConfig {
+        +sourcePath?: string
+        +source: AgentSource
+    }
+
+    AgentRegistry --> Agent
+    Agent <|-- CustomAgentConfig
+
+    note for AgentRegistry "Singleton via getAgentRegistry()"
+    note for Agent "Built-in: code, debug, plan, explore"
+```
+
+### Built-in Agents
+
+| ID | Name | Mode | Purpose |
+|----|------|------|---------|
+| `code` | Code Agent | all | General-purpose coding (default) |
+| `debug` | Debug Agent | all | Debugging and fixing issues |
+| `plan` | Plan Agent | all | Architecture and planning (read-only tools) |
+| `explore` | Explore Agent | subagent | Fast codebase exploration |
+
+### Custom Agent Loading
+
+Custom agents are loaded from markdown files with YAML frontmatter:
+
+```markdown
+---
+slug: my-agent
+name: My Custom Agent
+mode: primary
+tools: [read, write, edit, bash]
+---
+
+You are a specialized agent for...
+```
+
+Agents support `{file:path/to/file}` inclusions (recursive, max depth 3) resolved relative to the agent file's directory.
+
+Loading order (lowest precedence first, duplicates overwrite):
+1. `~/.alexi/agents/*.md` (user-global)
+2. `.alexi/agents/*.md` (project-local)
+
+## Hooks System
+
+The hooks system (`src/hooks/index.ts`) provides lifecycle callbacks for tool execution and session events:
+
+```typescript
+interface HookDefinition {
+  event: HookEvent;    // SessionStart, PreToolUse, PostToolUse, Stop, etc.
+  type: HookType;      // 'command' | 'http' | 'script'
+  command?: string;    // Shell command with template variables
+  url?: string;        // HTTP endpoint
+  script?: string;     // JS/TS file path
+  timeout?: number;    // Default: 30000ms
+  continueOnBlock?: boolean; // Feed rejection back to model
+}
+```
+
+Key features:
+- **Block Cap**: Consecutive Stop hook rejections are capped to prevent infinite loops
+- **continueOnBlock**: When a hook rejects, the error is fed back to the model instead of halting
+- **Template Variables**: Hook commands support `{{toolName}}`, `{{sessionId}}`, etc.
+
+## Compaction System
+
+Context compaction manages conversation length when approaching token limits:
+
+| Strategy | Description |
+|----------|-------------|
+| `truncate` | Remove oldest messages beyond limit |
+| `summarize` | AI-powered summarization of old messages |
+| `sliding` | Sliding window keeping recent messages |
+| `smart` | Hybrid: importance scoring + summarization |
+
+### Reactive Seeding
+
+When context overflow is detected during LLM calls, the system calculates optimal summary size:
+
+```typescript
+const targetSummaryTokens = Math.max(
+  1,
+  Math.floor(totalOldTokens - overflowTokens * 1.5)
+);
+// Appended to summary prompt:
+// "Keep your summary under approximately N tokens."
+```
+
+### Chunked Compaction
+
+Large contexts are split into chunks at natural boundaries (newlines, paragraphs) before compaction:
+
+```typescript
+import { compactInChunks } from './compaction-chunks.js';
+
+const result = await compactInChunks(content, async (chunk) => {
+  return await summarize(chunk);
+}, 100000); // max tokens per chunk
+```
+
+## Permission System
 
 ```mermaid
 flowchart LR
@@ -211,16 +523,15 @@ flowchart LR
     HasPerm -->|Yes| GetResource[Get Resource Path]
     HasPerm -->|No| DirectExec[Execute Directly]
     
-    GetResource --> ResolveCtx[Resolve with Context]
-    ResolveCtx --> CheckRules[Check Permission Rules]
+    GetResource --> ResolveCtx[Resolve with workdir Context]
+    ResolveCtx --> CheckRules[Evaluate Rules by Priority]
     
-    CheckRules --> EvalRules[Evaluate Rules by Priority]
-    EvalRules --> LastMatch[Last Match Wins]
+    CheckRules --> LastMatch[Last Match Wins]
     
     LastMatch --> Decision{Decision?}
     Decision -->|Allow| Grant[Grant Permission]
     Decision -->|Deny| Reject[Deny Permission]
-    Decision -->|Ask| Interactive[Interactive Prompt]
+    Decision -->|Ask| Interactive[Interactive Prompt via Bus]
     
     Interactive --> UserResp{User Response}
     UserResp -->|Allow| Grant
@@ -228,324 +539,133 @@ flowchart LR
     
     Grant --> DirectExec
     Reject --> RetErr[Return Error]
-    DirectExec --> Result[Return Result]
+    DirectExec --> Result[Return ToolResult]
     RetErr --> Result
 ```
 
-## Tool System with Context Resolution
+### Permission Actions
 
-The tool system resolves relative paths using the workdir context:
-
-```mermaid
-flowchart TB
-    ToolCall[Tool Call with Params] --> ParseParams[Parse Parameters]
-    ParseParams --> CheckPath{Path Type?}
-    
-    CheckPath -->|Absolute| UseAbsolute[Use Path As-Is]
-    CheckPath -->|Relative| ResolveRelative[Resolve with Workdir]
-    
-    ResolveRelative --> JoinPath[path.join workdir, filePath]
-    JoinPath --> AbsolutePath[Absolute Path]
-    UseAbsolute --> AbsolutePath
-    
-    AbsolutePath --> PermCheck[Permission Check]
-    PermCheck --> GetResource[getResource params, context]
-    GetResource --> CheckPerms[Check Against Rules]
-    
-    CheckPerms --> Allowed{Allowed?}
-    Allowed -->|Yes| Execute[Execute Tool]
-    Allowed -->|No| Deny[Return Permission Denied]
-    
-    Execute --> Result[Return Result]
-    Deny --> Result
+```typescript
+type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
+type PermissionDecision = 'allow' | 'deny' | 'ask';
 ```
 
-## Instruction File System
+### Doom Loop Detection
 
-Alexi uses a multi-layer instruction file system to provide context to AI agents:
+The permission system detects repeated denials and configures mitigation:
 
-```mermaid
-graph TB
-    subgraph Sources[\"Instruction Sources\"]
-        Soul[Soul Prompt<br/>core identity]
-        Model[Model Prompt<br/>Anthropic/OpenAI/Gemini]
-        Env[Environment Info<br/>workdir, git, platform]
-        Agent[Agent Prompt<br/>code/debug/plan/explore]
-        Project[Project AGENTS.md<br/>./AGENTS.md]
-        User[User ALEXI.md<br/>~/.alexi/ALEXI.md]
-        Rules[Project Rules<br/>.alexi/rules/*.md]
-        Custom[Custom Rules<br/>user-provided]
-    end
-    
-    subgraph Assembly[\"System Prompt Assembly\"]
-        Assemble[buildAssembledSystemPrompt]
-    end
-    
-    subgraph Output[\"Final Prompt\"]
-        System[Complete System Prompt]
-    end
-    
-    Soul --> Assemble
-    Model --> Assemble
-    Env --> Assemble
-    Agent --> Assemble
-    Project --> Assemble
-    User --> Assemble
-    Rules --> Assemble
-    Custom --> Assemble
-    
-    Assemble --> System
-    
-    style Soul fill:#E3F2FD
-    style Model fill:#E8F5E9
-    style Agent fill:#FFF3E0
-    style Project fill:#F3E5F5
-    style User fill:#FCE4EC
-    style Rules fill:#E0F2F1
-    style System fill:#4CAF50
-```
-
-### Instruction File Locations
-
-| File | Path | Purpose |
-|------|------|---------|
-| Project Instructions | `./AGENTS.md` | Project-specific context, coding standards, build commands |
-| User Instructions | `~/.alexi/ALEXI.md` | Global user preferences applied to all projects |
-| Project Rules | `./.alexi/rules/*.md` | Scoped rules for specific aspects (API design, security, etc.) |
-
-### Managing Instruction Files
-
-```bash
-# List all instruction files
-/memory
-
-# Edit project instructions
-/memory edit project
-
-# Edit user instructions
-/memory edit user
-
-# Create AGENTS.md from template
-/memory init
-```
-
-## Configuration
-
-### Environment Variables
-
-```
-AICORE_SERVICE_KEY    # SAP AI Core credentials
-AICORE_RESOURCE_GROUP # SAP AI Core resource group
-OPENAI_API_KEY        # OpenAI API key (optional)
-ANTHROPIC_API_KEY     # Anthropic API key (optional)
-```
-
-### Routing Configuration
-
-Routing rules are defined in `routing-config.json` or `~/.alexi/routing-config.json`:
-
-```json
-{
-  "rules": [
-    {
-      "name": "code-tasks",
-      "priority": 100,
-      "condition": { "contains": ["code", "implement", "fix"] },
-      "model": "anthropic--claude-4-sonnet"
-    }
-  ],
-  "default": {
-    "model": "anthropic--claude-4-sonnet"
-  }
+```typescript
+interface DoomLoopConfig {
+  maxRetries: number;
+  windowMs: number;
+  onDetected: 'warn' | 'block' | 'ask';
 }
 ```
+
+## MCP Integration
+
+Model Context Protocol support allows external tool servers to be connected:
+
+```typescript
+import { getMcpClientManager } from './mcp/index.js';
+
+const manager = getMcpClientManager();
+await manager.connect({
+  name: 'my-server',
+  transport: 'stdio',
+  command: 'npx',
+  args: ['@my/mcp-server'],
+});
+
+// MCP tools are automatically registered in the tool registry
+```
+
+Connections are managed with automatic reconnection and a 30-second tool cache TTL.
 
 ## Directory Structure
 
 ```
 alexi/
 ├── src/
-│   ├── cli/           # CLI entry points
-│   ├── core/          # Core orchestration
-│   ├── providers/     # LLM providers
-│   ├── tool/          # Tool system
-│   │   └── tools/     # Individual tools
-│   ├── agent/         # Agent system
-│   ├── bus/           # Event bus
-│   ├── permission/    # Permission system
-│   ├── mcp/           # MCP integration
-│   ├── skill/         # Skill system
-│   ├── config/        # Configuration
-│   ├── log/           # Logging
-│   ├── profile/       # Profile management
-│   └── ...
-├── tests/             # Test files
-├── dist/              # Compiled output
-└── docs/              # Documentation
+│   ├── agent/          # Agent registry, custom loader, system prompt assembly
+│   ├── bus/            # Typed event bus (defineEvent, BusEvent)
+│   ├── cli/            # CLI program + TUI (Ink/React components)
+│   ├── command/        # Slash command system
+│   ├── compaction/     # Context compaction strategies
+│   ├── config/         # Environment, routing, user config, project context
+│   ├── context/        # Repo map, symbol ranking, tree-sitter
+│   ├── core/           # Orchestrator, router, session, agentic chat
+│   ├── git/            # Auto-commit, attribution, dirty file tracking
+│   ├── hooks/          # Lifecycle hooks (command, HTTP, script)
+│   ├── mcp/            # Model Context Protocol client/server
+│   ├── permission/     # Permission rules, doom loop detection
+│   ├── providers/      # SAP AI Core Orchestration (sole provider)
+│   ├── skill/          # Specialized prompt skills
+│   ├── tool/           # Tool system + 30 built-in tool implementations
+│   ├── tui/            # Ink-based TUI components
+│   └── utils/          # Logger, telemetry, shared utilities
+├── tests/              # Vitest test suites
+├── docs/               # Generated documentation
+├── .github/
+│   ├── workflows/      # 19 GitHub Actions workflows
+│   └── prompts/        # AI prompt templates for CI automation
+├── CHANGELOG.md
+├── AGENTS.md
+├── package.json
+└── tsconfig.json
 ```
 
 ## Key Design Decisions
 
-### 1. Multi-Provider Architecture
+### 1. Single Provider Architecture (SAP AI Core)
 
-Alexi supports multiple LLM providers through a unified interface, allowing:
-- Easy switching between providers
-- Fallback mechanisms
-- Cost optimization through routing
+All LLM calls route exclusively through SAP AI Core Orchestration API via `@sap-ai-sdk/orchestration`. This provides:
+- Centralized governance and compliance
+- Unified token tracking and cost management
+- Single authentication surface (AICORE_SERVICE_KEY)
+- Access to multiple underlying models (GPT-4o, Claude, Gemini) through one API
 
 ### 2. Tool System with Permission Control
 
-Tools are implemented as independent modules that:
-- Follow a consistent interface based on Zod schema validation
-- Can be enabled/disabled per session
-- Support permission-based access control with last-match-wins rule evaluation
-- Resolve relative paths using workdir context for agentic operations
-- Support interactive permission prompts and high-priority allow rules
-- Convert Zod schemas to JSON Schema for LLM function calling with proper type handling
+Tools are implemented as independent modules with:
+- Zod schema validation for parameters
+- Permission-based access control (last-match-wins rule evaluation)
+- Context-aware relative path resolution via workdir
+- Event bus integration for observability
+- Support for background execution (experimental)
 
-### 3. Agentic Execution Mode
+### 3. Agentic Execution with Compaction
 
-The agentic chat system enables autonomous file operations:
-- Automatic permission configuration for write and execute actions
-- High-priority allow rules (priority 200) override default ask prompts
-- External directory access for full workspace capability
-- Tool execution loop with LLM-driven decision making
-- Iteration limits to prevent infinite loops (default: 50)
+The agentic chat system enables autonomous multi-turn operations:
+- Automatic permission configuration (priority 200 allow rules)
+- Context overflow detection and reactive compaction
+- Lifecycle hooks with block cap and continueOnBlock
+- Configurable iteration limits (default: 50)
+- Effort levels controlling max tokens and behavior
 
 ### 4. Event-Driven Architecture
 
-The event bus enables:
+The typed event bus enables:
 - Loose coupling between modules
 - Plugin extensibility
-- Real-time streaming updates
-- Permission events (DoomLoopDetected, ExternalAccessAttempted)
+- Real-time TUI updates
+- Telemetry collection
+- Permission dialog coordination
 
-### 5. Session Management
+### 5. Custom Agent System with File Inclusion
 
-Sessions provide:
-- Multi-turn conversation context
-- Persistence across CLI invocations
-- Export and sharing capabilities
+Custom agents support:
+- Markdown + YAML frontmatter format
+- `{file:path}` recursive inclusion (max depth 3)
+- User-global and project-local scopes
+- Tool allowlists and denylists
+- Model and temperature preferences
 
 ## Security Considerations
 
-1. **Secrets Management**: Secrets are redacted in exports and logs
-2. **Permission System**: File access is controlled by configurable rules
-3. **Environment Isolation**: Sensitive config stored in `~/.alexi/`
-4. **Type Safety**: Strict TypeScript configuration with proper type assertions
-5. **Logging**: Centralized logger replaces direct console calls for better control
-
-## Logging System
-
-Alexi uses a centralized logging utility to provide consistent logging across the application.
-
-### Logger API
-
-```typescript
-import { logger } from './utils/logger.js';
-
-// Set log level (debug, info, warn, error)
-logger.setLevel('debug');
-
-// Log messages at different levels
-logger.debug('Debug message', additionalData);
-logger.info('Info message');
-logger.warn('Warning message');
-logger.error('Error message', error);
-
-// Print without formatting (for CLI output)
-logger.print('Raw output');
-```
-
-### Log Levels
-
-| Level | Priority | Description | Output Format |
-|-------|----------|-------------|---------------|
-| `debug` | 0 | Detailed debugging information | `[DEBUG] message` |
-| `info` | 1 | General informational messages | `message` (no prefix) |
-| `warn` | 2 | Warning messages | `[WARN] message` |
-| `error` | 3 | Error messages | `[ERROR] message` |
-
-The logger respects the configured log level and only outputs messages at or above that level. The default level is `info`.
-
-### ESLint Integration
-
-The logger utility is the only module permitted to use direct console calls. All other modules should import and use the centralized logger to maintain ESLint compliance.
-
-```typescript
-// ❌ Avoid direct console usage
-console.log('message');
-
-// ✅ Use centralized logger
-import { logger } from './utils/logger.js';
-logger.info('message');
-```
-
-## Type Safety and Code Quality
-
-### TypeScript Configuration
-
-Alexi uses strict TypeScript configuration with proper type assertions:
-
-```typescript
-// Model capability filtering with explicit type assertion
-const models = config.models.filter(
-  (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
-);
-
-// Zod schema type handling with interface definitions
-interface ZodDefBase {
-  description?: string;
-}
-
-const def = (schema as unknown as { _def: ZodDefBase })._def;
-```
-
-### ESLint Rules
-
-Key ESLint rules enforced:
-
-- `no-console: warn` - Prevents direct console usage (except in logger)
-- `@typescript-eslint/no-explicit-any: warn` - Flags any type usage
-- `@typescript-eslint/no-unused-vars: error` - Prevents unused variables
-- `prefer-const: error` - Enforces const for immutable variables
-- `eqeqeq: error` - Requires strict equality checks
-
-### Code Quality Diagram
-
-```mermaid
-flowchart LR
-    subgraph Development
-        Code[Write Code] --> TypeCheck[TypeScript Check]
-        TypeCheck --> Lint[ESLint]
-        Lint --> Test[Run Tests]
-    end
-    
-    subgraph Quality Gates
-        Test --> Build[Build Project]
-        Build --> CI[CI Pipeline]
-    end
-    
-    subgraph Standards
-        Logger[Centralized Logger]
-        Types[Type Safety]
-        Validation[Zod Validation]
-    end
-    
-    Code --> Logger
-    Code --> Types
-    Code --> Validation
-    
-    CI --> Deploy{Pass?}
-    Deploy -->|Yes| Merge[Merge to Main]
-    Deploy -->|No| Fix[Fix Issues]
-    Fix --> Code
-```
-
-## Future Improvements
-
-- [ ] Add more provider implementations
-- [ ] Improve test coverage
-- [ ] Add metrics and telemetry
-- [ ] Implement caching layer
-- [ ] Add web UI option
+1. **Secrets Management**: AICORE_SERVICE_KEY stored in environment, never in config files
+2. **Permission System**: Last-match-wins rules with doom loop detection
+3. **Config Protection**: Sensitive config paths have special protection rules
+4. **Environment Isolation**: User config in `~/.alexi/`, never committed
+5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
+6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout

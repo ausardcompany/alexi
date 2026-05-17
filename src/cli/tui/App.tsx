@@ -215,7 +215,24 @@ function AppLayout(): React.JSX.Element {
   const chat = useChat();
   const { sendMessage } = useStreamChat();
   const { pending: pendingAttachments } = useAttachments();
-  const { handleCommand, commands } = useCommands();
+
+  const [messages, setMessages] = useState<MessageDisplay[]>([]);
+
+  const addSystemMessage = useCallback(
+    (text: string) => {
+      const msg: MessageDisplay = {
+        id: `sys-${Date.now()}`,
+        role: 'system',
+        content: text,
+        toolCalls: [],
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, msg]);
+    },
+    []
+  );
+
+  const { handleCommand, commands } = useCommands({ addSystemMessage });
   const sidebar = useSidebar();
   const { page } = usePage();
   const logCollector = useLogCollector();
@@ -223,7 +240,6 @@ function AppLayout(): React.JSX.Element {
   useToolEvents();
   usePermission();
 
-  const [messages, setMessages] = useState<MessageDisplay[]>([]);
   const wasStreamingRef = useRef(false);
 
   // Watch for streaming completion: isStreaming transitions false → create assistant message

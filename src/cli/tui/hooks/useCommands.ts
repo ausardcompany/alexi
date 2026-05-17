@@ -6,6 +6,9 @@
  * up essential commands only; remaining commands will be migrated later.
  */
 
+import * as os from 'os';
+import * as path from 'path';
+
 import { useCallback, useMemo } from 'react';
 import { useApp } from 'ink';
 
@@ -17,6 +20,7 @@ import { useTheme } from '../context/ThemeContext.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { AgentOption } from '../dialogs/AgentSelector.js';
+import { getDataExporter } from '../../../core/dataExporter.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -65,6 +69,7 @@ interface BuildCommandsDeps {
   pasteFromClipboard: () => Promise<void>;
   addFromFile: (filePath: string) => Promise<void>;
   clearAttachments: () => void;
+  addSystemMessage: (text: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,12 +353,38 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         return true;
       },
     },
+
+    // /export [file] --------------------------------------------------------
+    {
+      name: 'export',
+      description: 'Export session data to file',
+      category: 'session',
+      execute: async (args, ctx) => {
+        const exporter = getDataExporter();
+        const filePath =
+          args.trim() || path.join(os.homedir(), '.alexi', `export-${Date.now()}.json`);
+
+        try {
+          await exporter.exportToFile(filePath, { sessionIds: [ctx.sessionId] });
+          deps.addSystemMessage(`Session exported to: ${filePath}`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          deps.addSystemMessage(`Export failed: ${message}`);
+        }
+        return true;
+      },
+    },
   ];
 }
 
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
+
+export interface UseCommandsOptions {
+  /** Callback to display a system-level message in the message list. */
+  addSystemMessage?: (text: string) => void;
+}
 
 export interface UseCommandsReturn {
   /** Returns true if the input was a slash command (handled), false otherwise. */
@@ -362,12 +393,16 @@ export interface UseCommandsReturn {
   commands: SlashCommand[];
 }
 
-export function useCommands(): UseCommandsReturn {
+export function useCommands(options: UseCommandsOptions = {}): UseCommandsReturn {
   const { exit } = useApp();
   const session = useSession();
   const { open } = useDialog();
   const { setTheme } = useTheme();
   const { pasteFromClipboard, addFromFile, clearAll: clearAttachments } = useAttachments();
+  const noop = (_text: string): void => {
+    /* no-op default */
+  };
+  const { addSystemMessage = noop } = options;
 
   const commands = useMemo(
     () =>
@@ -377,8 +412,9 @@ export function useCommands(): UseCommandsReturn {
         pasteFromClipboard,
         addFromFile,
         clearAttachments,
+        addSystemMessage,
       }),
-    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments]
+    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments, addSystemMessage]
   );
 
   const handleCommand = useCallback(

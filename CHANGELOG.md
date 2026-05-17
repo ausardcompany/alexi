@@ -5,39 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.17] - 2026-05-11
+## [0.4.22] - 2026-05-17
 
-### Dependencies
-- Bump `@typescript-eslint/parser` from 8.59.1 to 8.59.2 (#305)
-- Bump `react` from 19.2.5 to 19.2.6 (#303)
-- Bump `@commitlint/cli` from 20.5.3 to 21.0.0 (#308)
-- Bump `lint-staged` from 16.4.0 to 17.0.4 (#306)
-- Bump `ink` from 7.0.1 to 7.0.2 (#309)
-- Bump `puppeteer` from 24.42.0 to 24.43.1 (#307)
-- Bump `hono` from 4.12.16 to 4.12.18 (#304)
-- Bump `@inquirer/prompts` from 8.4.2 to 8.4.3 (#302)
-- Bump `@types/node` in the dev-dependencies group (#301)
+### Added
 
-## [Unreleased]
+- **Reactive context compaction**: Agentic chat now detects context overflow errors from LLM providers and automatically triggers compaction with overflow-seeded target sizing to fit within limits
+- **Chunked compaction** (`src/core/compaction-chunks.ts`): Large contexts are split at natural boundaries (newlines, paragraphs) before compaction to stay within API chunk limits
+- **Overflow token seeding** in compaction: The `overflowTokens` option in `CompactionOptions` seeds the summarization prompt with a target token count for the summary output
+- **Lifecycle hooks in agentic chat**: Integration of `executeHooks`, `createHookContext`, and `getBlockCap` into the agentic execution loop for PreToolUse/PostToolUse/Stop events
+- **Block cap for hooks**: Consecutive Stop hook rejections are capped to prevent infinite agent loops; when cap is reached, execution halts with `capped: true`
+- **continueOnBlock hook behavior**: When `continueOnBlock: true` on a hook definition, rejections are fed back to the model as context instead of halting execution
+- **File inclusion in custom agents**: Agent prompt files now support `{file:path/to/file}` syntax for recursive content inclusion (max depth 3), resolved relative to the agent file directory
+- **Background task status tool** (`src/tool/tools/task_status.ts`): Query status of background tasks by ID, returning status, result, timestamps
+- **Telemetry module** (`src/utils/telemetry.ts`): Usage metrics tracking service with enable/disable, track, getEvents, and clear APIs
+- **Daily PR Merge workflow** (`.github/workflows/daily-merge-prs.yml`): Automated daily merging of open PRs using Kilo CLI with dry-run support
+- **/export command in TUI**: Export session data to file via slash command with `addSystemMessage` callback for status feedback
+- **addSystemMessage callback** in `useCommands` hook: TUI commands can now display system-level messages in the message list
 
 ### Changed
-- Updated write tool logic to improve code formatting and readability in BOM handling for UTF-8 files. The conditional that strips a leading BOM from content is now formatted for clarity and robustness.
-- Agent manager tool permission action changed from `manage-agents` to `admin` for consistency with the unified permission action taxonomy.
-- Read tool streaming now uses `encoding: undefined` instead of `encoding: null` for correct TypeScript typing with `createReadStream` options.
-- Truncator nullish coalescing expression in `truncateOutput` now uses explicit parentheses for operator precedence clarity.
-- Task tool `queueBackgroundTask` call now uses explicit type assertion (`taskId as string`) to satisfy TypeScript strict mode.
-- Task status tool message filtering reformatted to single-line chained expression for consistency with Prettier rules.
-- Background tasks test uses correct non-null assertion operator precedence (`taskResult.data!.taskId` instead of `taskResult.data?.taskId!`).
+
+- Custom agent loading functions (`loadAgentFromFile`, `loadAgentsFromDirectory`, `loadAllCustomAgents`, `AgentRegistry.loadCustomAgents`) are now async to support file inclusion resolution
+- Compaction `summarize` strategy now accepts `overflowTokens` to seed target summary length via `buildTargetInstruction` and `summarizeWithTarget` internal methods
+- `useCommands` hook now accepts `UseCommandsOptions` with optional `addSystemMessage` callback
+- TUI `AppLayout` component lifts message state and provides `addSystemMessage` to `useCommands`
+- Upstream sync state updated to latest commits (kilocode, opencode, claude-code) dated 2026-05-17
+- Version bumped from 0.4.20 to 0.4.22
 
 ### Fixed
-- Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes.
-- Fixed TypeScript type error in read tool where `encoding: null` was incompatible with the `createReadStream` options type signature.
-- Fixed unused variable lint error in agent manager tool by prefixing destructured `config` with underscore (`_config`).
-- Resolved formatting inconsistencies flagged by Prettier across agent config schema, bash tool, read tool, truncation config, and permission drain module.
-- Fixed TypeScript type error in task tool where `taskId` variable (typed as `string | undefined`) was passed to `queueBackgroundTask` without narrowing.
-- Removed unused `TaskStatus` type import from background tasks test file to resolve lint warning.
-- Increased background task test timeout from 1100ms to 2000ms to prevent CI flakiness caused by variable scheduling latency in CI runners.
 
+- Context overflow during agentic chat no longer causes unrecoverable errors; the system detects overflow via pattern matching and retries with compacted context
+- MCP client connection handling improved with better error recovery
+- Background tasks test timeout increased to prevent CI flakiness
+
+## [0.4.17] - 2026-05-11
+
+### Changed
+
+- Updated write tool logic to improve code formatting and readability in BOM handling for UTF-8 files
+- Agent manager tool permission action changed from `manage-agents` to `admin` for consistency with unified permission taxonomy
+- Read tool streaming now uses `encoding: undefined` instead of `encoding: null` for correct TypeScript typing
+- Truncator nullish coalescing in `truncateOutput` uses explicit parentheses for operator precedence clarity
+- Task tool `queueBackgroundTask` uses explicit type assertion (`taskId as string`) for TypeScript strict mode
+- Task status tool message filtering reformatted to single-line chained expression
+
+### Fixed
+
+- Resolved ESLint naming conflicts in tool schema definitions by using private schema constants with underscore prefixes
+- Fixed TypeScript type error in read tool where `encoding: null` was incompatible with `createReadStream` options
+- Fixed unused variable lint error in agent manager tool by prefixing with underscore
+- Resolved formatting inconsistencies flagged by Prettier across multiple modules
+- Fixed TypeScript type error in task tool where `taskId` was passed without narrowing
+- Removed unused `TaskStatus` type import from background tasks test
+- Increased background task test timeout from 1100ms to 2000ms to prevent CI flakiness
+
+### Dependencies
+
+- Bump `@typescript-eslint/parser` from 8.59.1 to 8.59.2
+- Bump `react` from 19.2.5 to 19.2.6
+- Bump `@commitlint/cli` from 20.5.3 to 21.0.0
+- Bump `lint-staged` from 16.4.0 to 17.0.4
+- Bump `ink` from 7.0.1 to 7.0.2
+- Bump `puppeteer` from 24.42.0 to 24.43.1
+- Bump `hono` from 4.12.16 to 4.12.18
+- Bump `@inquirer/prompts` from 8.4.2 to 8.4.3
 
 ## [0.3.1] - 2026-03-21
 
@@ -51,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Full TUI (Terminal User Interface)** — component-based interactive mode using Ink v6 + React 19
+- **Full TUI (Terminal User Interface)** -- component-based interactive mode using Ink v6 + React 19
   - Persistent full-screen layout: header, scrollable message area, input box, status bar
   - Streaming markdown rendering with syntax-highlighted code blocks (marked + marked-terminal + cli-highlight)
   - Collapsible tool call blocks with red/green diff view for file edits
@@ -63,7 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Event bus integration for real-time tool execution and permission prompt display
 - 29 TUI test files (1664 total tests) covering all components, contexts, hooks, and dialogs
 - TUI design contracts documenting component props, context APIs, and hook APIs
-- UX requirements quality checklist (30 items)
 
 ### Changed
 
@@ -75,32 +104,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added runtime: `marked`, `marked-terminal`, `cli-highlight`, `diff`, `terminal-link`
 - Added runtime: `ink-text-input`, `ink-select-input`, `ink-spinner`
 - Added dev: `ink-testing-library`, `@types/diff`
-- Existing: `ink` (v6.8.0) and `react` (v19.2.4) now actively used
 
 ## [0.2.6] - 2026-03-19
 
 ### Added
 
 - Unit tests for TUI slash commands (`/image` and `/clear-images`)
-  - Tests command registration with correct names and aliases
-  - Tests clipboard paste functionality when no arguments provided
-  - Tests file path handling for image attachments
-  - Uses ink-testing-library with React context mocking
-  - Comprehensive coverage of command dispatch logic
 - Support for graceful tree-sitter parser initialization failures
-  - Parser functions now return null instead of throwing when Parser is unavailable
-  - Enables operation in environments without native bindings
 
 ### Changed
 
-- Enhanced user configuration API with batch update support
-  - Added `updateGlobal()` function for atomic multi-key updates
-  - Added `UpdateGlobalOptions` interface with disposal control
-  - Maintains backward compatibility with default dispose behavior
-- Edit tool now preserves line endings during replacements
-  - Automatically detects CRLF vs LF line endings in target files
-  - Normalizes oldString and newString parameters to match file format
-  - Ensures consistent line ending style throughout edited files
+- Enhanced user configuration API with batch update support (`updateGlobal()`)
+- Edit tool now preserves line endings during replacements (CRLF/LF detection)
 
 ### Fixed
 
@@ -112,47 +127,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Persistent default model configuration saved to user config file
-- Autocomplete engine for slash commands, model names, and file paths in interactive mode
+- Autocomplete engine for slash commands, model names, and file paths
 - Instruction file management system with multi-layer prompt assembly
-  - Project-level AGENTS.md support
-  - User-level ~/.alexi/ALEXI.md for global instructions
-  - Project-level .alexi/rules/*.md for scoped rules
-- /memory command for managing instruction files (list, edit, init)
-- /mem command for memory management (list, search, delete, clear, stats, export)
-- CI Auto-Fix workflow that automatically fixes failing CI checks on auto/* branches
-  - Collects failed job logs and error messages
-  - Uses Alexi agent mode to apply targeted fixes
-  - Verifies fixes and commits changes automatically
-  - Rate-limited to prevent infinite loops (max 2 runs per branch per day)
-- New tools:
-  - bash-hierarchy: Hierarchical permission rules for bash commands
-  - warpgrep: AI-powered semantic code search using WarpGrep/Morph SDK
-- Tab completion in readline REPL for commands, models, and file paths
+- `/memory` command for managing instruction files
+- `/mem` command for memory management
+- CI Auto-Fix workflow for automatic CI failure resolution on auto/* branches
+- New tools: bash-hierarchy, warpgrep (AI-powered semantic code search)
+- Tab completion in readline REPL
 
 ### Changed
 
-- Model switching now persists selection to ~/.alexi/config.json as default
-- System prompt assembly now loads instruction files in layered order
-- Autocomplete system unified between readline REPL and Ink TUI
+- Model switching now persists selection to `~/.alexi/config.json`
+- System prompt assembly loads instruction files in layered order
 - Documentation workflow improved with better file path handling
-- Enhanced clipboard utilities with osascript fallback for macOS
-- Updated dependencies:
-  - @inquirer/prompts from 8.3.0 to 8.3.2
-  - @commitlint/config-conventional from 20.4.3 to 20.5.0
-  - @typescript-eslint/parser from 8.34.1 to 8.57.0
-  - @vitejs/plugin-react from 5.2.0 to 6.0.1
-  - @vitest/coverage-v8 from 4.0.0 to 4.1.0
-  - hono from 4.12.5 to 4.12.8
-  - nanoid from 5.1.6 to 5.1.7
-  - puppeteer from 24.38.0 to 24.39.1
-  - simple-git from 3.32.3 to 3.33.0
-  - vitest from 4.0.0 to 4.1.0
 
 ### Fixed
 
-- Slash commands now properly intercepted in TUI instead of leaking to LLM
+- Slash commands properly intercepted in TUI
 - Command Palette no longer shows empty command list
-- Edit tool now handles multiline strings correctly in exact replacements
+- Edit tool handles multiline strings correctly
 
 ## [0.2.4] - 2026-03-18
 
@@ -170,93 +163,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Ctrl+V screenshot paste on macOS now works without installing pngpaste — added native osascript fallback that uses AppleScript to read clipboard images
+- Ctrl+V screenshot paste on macOS now works without pngpaste (osascript fallback)
 
 ## [0.2.1] - 2026-03-15
 
 ### Fixed
 
-- Slash commands (/help, /model, /exit, etc.) were leaking directly to the LLM in the TUI instead of being intercepted by the command handler
-- Command Palette (Ctrl+K) was opening with an empty command list
+- Slash commands no longer leak to LLM in TUI
+- Command Palette opens with full command list
 
 ### Added
 
-- Inline autocomplete for slash commands in the TUI input box — shows filtered suggestions when typing /
-- Keyboard navigation (Up/Down/Tab) and acceptance (Enter/Tab) for autocomplete suggestions
-- Command Palette now displays all 11 registered slash commands
+- Inline autocomplete for slash commands in TUI input box
+- Keyboard navigation and acceptance for autocomplete suggestions
 
 ## [0.2.0] - 2026-03-14
 
 ### Added
 
-- Comprehensive unit tests for file operation tools
-  - Added tests for read tool (20+ test cases covering file/directory reading, offsets, limits)
-  - Added tests for write tool (18+ test cases covering file creation, overwriting, directory creation)
-  - Added tests for glob tool (16+ test cases covering pattern matching, recursive search)
-  - Added tests for grep tool (20+ test cases covering regex patterns, file filtering, line matching)
-  - All tests use temporary directories with proper cleanup
-  - Tests verify actual file system changes, not just return values
-  - Mock permission system to bypass checks during testing
-- Enhanced models command with SAP AI Core deployment listing functionality
-  - Query deployments directly from SAP AI Core using DeploymentApi
-  - Filter deployments by status (RUNNING, PENDING, STOPPED, etc.)
-  - Filter deployments by scenario ID
-  - Specify custom resource group with -g, --resource-group option
-  - JSON output support with -j, --json flag
-  - Color-coded status display with formatted table output
-  - Fallback to proxy endpoint with --proxy flag
-  - Display deployment URLs for running deployments
-- New dependency: @sap-ai-sdk/ai-api version 2.7.0 for direct AI Core API access
+- Comprehensive unit tests for file operation tools (read, write, glob, grep)
+- Enhanced models command with SAP AI Core deployment listing
 - Agentic file write capabilities with autonomous permission management
-  - Automatic permission rules for write operations in workdir
-  - Automatic permission rules for execute operations
-  - Priority-based permission system (priority 200) to override default ask prompts
-  - External directory support for full agentic capability
 - Documentation for testing strategy and automation workflows
-  - Added docs/TESTING.md with comprehensive testing guide
-  - Added docs/AUTOMATION.md with workflow documentation
-  - Includes testing best practices and CI/CD pipeline details
 
 ### Changed
 
 - Enhanced tool system with context-aware path resolution
-  - Tool permission system now receives ToolContext in getResource function
-  - Write and edit tools resolve relative paths using workdir context
-  - Enables proper permission checks for both absolute and relative paths
-  - Maintains compatibility with CI/CD workflows
-- Updated documentation-update.yml workflow with improved file path handling
-  - File paths in scope.md now include full relative paths (e.g., docs/ARCHITECTURE.md)
-  - Clarified CHANGELOG.md location in repository root (not docs/)
-  - Removed zero-width space characters from workflow expressions
-  - Enhanced documentation scope comments for bot guidance
 - Updated agenticChat module with permission configuration
-  - Project root set to workdir for permission checks
-  - External directories enabled for agentic operations
-  - High-priority allow rules for write and execute actions
-- Updated env.ts to export env function with proper return type handling
+- Updated documentation-update.yml workflow
 
 ### Fixed
 
 - Resolved relative path handling in write/edit tools for CI permission checks
 - Fixed zero-width characters in GitHub workflow expressions
-- Corrected file path specifications in documentation workflow scope
-- Removed .env file from git tracking to prevent accidental credential exposure
 
 ### Removed
 
-- .env file removed from version control (use .env.example as template)
+- .env file removed from version control
 
 ## [0.1.3] - 2024-01-XX
 
 ### Added
 
-- Initial release with multi-provider support
+- Initial release with SAP AI Core integration
 - Intelligent auto-routing based on prompt analysis
 - Session management with persistence
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
-[Unreleased]: https://github.com/ausardcompany/alexi/compare/v0.2.6...HEAD
+[0.4.22]: https://github.com/ausardcompany/alexi/compare/v0.4.17...v0.4.22
+[0.4.17]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.17
+[0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/ausardcompany/alexi/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/ausardcompany/alexi/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/ausardcompany/alexi/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/ausardcompany/alexi/compare/v0.2.3...v0.2.4
