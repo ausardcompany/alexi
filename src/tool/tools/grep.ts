@@ -115,7 +115,8 @@ Usage:
 - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
 - Filter files by pattern with include (e.g., "*.js", "*.{ts,tsx}")
 - Returns file paths and line numbers with at least one match
-- Results are sorted by modification time`,
+- Results are sorted by modification time
+- When you are doing an open-ended search where you do not know the exact symbol name, use the \`codebase_search\` tool first to narrow down the search scope, then follow up with \`grep\` and/or \`read\``,
 
   parameters: GrepParamsSchema,
 

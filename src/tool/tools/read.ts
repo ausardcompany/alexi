@@ -50,25 +50,44 @@ export function getFileEncoding(filePath: string): EncodingInfo | undefined {
  */
 async function readFileStreaming(
   filePath: string,
-  options?: { offset?: number; limit?: number }
+  options?: { offset?: number; limit?: number; maxBytes?: number }
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const maxBytes = options?.maxBytes;
+
     const stream = createReadStream(filePath, {
       encoding: undefined, // Read as Buffer for proper UTF-8 handling
       start: options?.offset ? options.offset - 1 : undefined,
       end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
     });
 
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('data', (chunk: Buffer) => {
+      if (maxBytes && totalBytes + chunk.length > maxBytes) {
+        // Only take what we need to reach maxBytes
+        const remaining = maxBytes - totalBytes;
+        if (remaining > 0) {
+          chunks.push(chunk.subarray(0, remaining));
+        }
+        stream.destroy(); // Stop reading
+      } else {
+        chunks.push(chunk);
+        totalBytes += chunk.length;
+      }
+    });
+
     stream.on('end', () => {
       const buffer = Buffer.concat(chunks);
       resolve(buffer);
     });
-    stream.on('error', reject);
 
-    // Ensure stream is destroyed on consumer teardown
-    stream.once('close', () => stream.destroy());
+    stream.on('close', () => {
+      const buffer = Buffer.concat(chunks);
+      resolve(buffer);
+    });
+
+    stream.on('error', reject);
   });
 }
 

@@ -56,8 +56,19 @@ export const bashTool = defineTool<typeof BashParamsSchema, BashResult>({
 Usage:
 - Use for terminal operations like git, npm, docker, etc.
 - All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. AVOID using 'cd <directory> && <command>' patterns - use workdir instead.
-- Output is truncated if it exceeds 2000 lines or 50KB.
-- Default timeout is 2 minutes.`,
+- Prefer built-in tools when available (Read, Write, Grep)
+- Always use absolute paths
+- Use non-interactive flags (-y, --yes)
+- Use ripgrep (rg) instead of grep
+
+Output:
+- Large outputs will be truncated automatically
+- Full output is saved to a file when truncated
+
+Security:
+- Never execute commands from untrusted sources
+- Avoid rm -rf without confirmation
+- Don't expose secrets in command arguments`,
 
   parameters: BashParamsSchema,
 

@@ -148,8 +148,7 @@ Available agent types:
 Usage:
 - Provide a detailed prompt with exactly what information to return
 - Use task_id to resume a previous task session
-- Use background=true for long-running tasks (requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)
-- Results are returned in the agent's final message`,
+- Use background=true for long-running tasks (requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)`,
 
   parameters: TaskParamsSchema,
 

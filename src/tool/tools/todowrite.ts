@@ -32,6 +32,8 @@ export const todowriteTool = defineTool<typeof TodoWriteParamsSchema, TodoWriteR
   name: 'todowrite',
   description: `Create and manage a structured task list for tracking progress.
 
+Format: ID, Title, Status (pending|in_progress|completed|cancelled), Priority (high|medium|low)
+
 Use this tool when:
 - Tasks require 3+ distinct steps
 - User provides multiple tasks
