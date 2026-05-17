@@ -8,7 +8,8 @@ This document provides comprehensive API documentation for Alexi's CLI commands,
 - [Environment Variables](#environment-variables)
 - [TypeScript Interfaces](#typescript-interfaces)
 - [Tool System](#tool-system)
-- [Permission System](#permission-system)
+- [Agent System](#agent-system)
+- [Hooks System](#hooks-system)
 
 ## CLI Commands
 
@@ -24,8 +25,9 @@ alexi chat -m <message> [options]
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `-m, --message <text>` | string | Message to send (required) |
-| `--model <id>` | string | Override model selection (e.g., gpt-4o, claude-4-sonnet) |
+| `-m, --message <text>` | string | Message to send (required unless -f used) |
+| `-f, --message-file <path>` | string | Read message from file |
+| `--model <id>` | string | Override model selection (e.g., gpt-4o, anthropic--claude-4.5-sonnet) |
 | `--auto-route` | boolean | Enable automatic model routing |
 | `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
 | `--session <id>` | string | Continue existing session |
@@ -34,15 +36,96 @@ alexi chat -m <message> [options]
 #### Examples
 
 ```bash
-# Use specific model
-alexi chat -m "Hello" --model gpt-4o-mini
+# Simple message with specific model
+alexi chat -m "Explain TypeScript generics" --model gpt-4o
 
 # Auto-route with cost optimization
 alexi chat -m "What is AI?" --auto-route --prefer-cheap
 
 # Continue conversation in session
-alexi chat -m "Tell me more" --session abc-123 --auto-route
+alexi chat -m "Tell me more" --session abc-123
+
+# Read message from file
+alexi chat -f prompt.txt --auto-route
 ```
+
+### agent
+
+Run agentic chat with tool execution for automated workflows.
+
+```bash
+alexi agent -m <message> [options]
+```
+
+#### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `-m, --message <text>` | string | - | Message to send (required unless -f used) |
+| `-f, --message-file <path>` | string | - | Read message from file |
+| `--model <id>` | string | auto | Model ID override |
+| `--auto-route` | boolean | false | Enable automatic model routing |
+| `--prefer-cheap` | boolean | false | Prefer cheaper models |
+| `--session <id>` | string | - | Continue existing session |
+| `--system <prompt>` | string | - | System prompt |
+| `--max-iterations <n>` | number | 50 | Maximum tool execution iterations |
+| `--workdir <path>` | string | cwd | Working directory for tools |
+| `--tools <list>` | string | all | Comma-separated tool names |
+| `-v, --verbose` | boolean | false | Show progress updates |
+| `-q, --quiet` | boolean | false | Only output final response |
+| `--no-auto-commits` | boolean | - | Disable git auto-commits |
+| `--no-dirty-commits` | boolean | - | Skip committing dirty files |
+| `--git-commit-verify` | boolean | false | Run pre-commit hooks |
+| `--attribute-co-authored-by` | boolean | true | Add Co-authored-by trailer |
+| `--attribute-author` | boolean | false | Override git author |
+| `--map-tokens <n>` | string | 2000 | Repo map token budget (0 to disable) |
+| `--effort <level>` | string | medium | Effort level: low, medium, high |
+
+#### Effort Levels
+
+| Level | Max Iterations | Max Tokens | Behavior |
+|-------|---------------|------------|----------|
+| `low` | 15 | 2,048 | Fast and cheap, prefer cheap models |
+| `medium` | 50 | 16,384 | Balanced (default) |
+| `high` | 100 | 32,768 | Thorough, extended thinking budget |
+
+#### Examples
+
+```bash
+# Basic agent task
+alexi agent -m "Add error handling to the login function"
+
+# With specific model and verbose output
+alexi agent -m "Refactor the auth module" --model anthropic--claude-4.5-sonnet -v
+
+# High effort for complex tasks
+alexi agent -m "Implement a caching layer" --effort high
+
+# Restrict available tools
+alexi agent -m "Find all TODO comments" --tools read,glob,grep
+
+# Read task from file with git attribution
+alexi agent -f task.md --attribute-co-authored-by
+
+# Disable auto-commits for dry-run
+alexi agent -m "Update tests" --no-auto-commits
+```
+
+### interactive / i
+
+Start interactive REPL with streaming responses and TUI.
+
+```bash
+alexi interactive [options]
+alexi i [options]
+```
+
+Launches the Ink-based TUI with:
+- Streaming markdown rendering
+- Slash commands (`/help`, `/model`, `/agent`, `/theme`, etc.)
+- Tab/Shift-Tab agent cycling
+- Ctrl+K command palette
+- Collapsible tool call blocks
 
 ### models
 
@@ -56,492 +139,199 @@ alexi models [options]
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `-j, --json` | boolean | Output as JSON |
-| `-s, --status <status>` | string | Filter by status (RUNNING, PENDING, STOPPED, etc.) |
-| `--scenario <scenario>` | string | Filter by scenario ID |
-| `-g, --resource-group <group>` | string | AI Core resource group (default: "default") |
-| `--proxy` | boolean | Use proxy endpoint instead of direct AI Core API |
-
-#### Examples
-
-```bash
-# List all deployments
-alexi models
-
-# Filter by status
-alexi models --status RUNNING
-
-# Filter by scenario
-alexi models --scenario foundation-models
-
-# Output as JSON
-alexi models --json
-
-# Use specific resource group
-alexi models --resource-group production
-
-# Use proxy endpoint
-alexi models --proxy
-```
-
-#### Output Format
-
-The models command displays a formatted table with the following columns:
-
-- **ID**: Deployment ID (UUID)
-- **Configuration**: Configuration name
-- **Scenario**: Scenario ID
-- **Status**: Current status (color-coded)
-  - Green: RUNNING
-  - Yellow: PENDING, STARTING
-  - Red: STOPPED, DEAD, UNKNOWN
-- **Created**: Creation timestamp
-
-For RUNNING deployments, the deployment URL is displayed below the row.
-
-#### TypeScript Interface
-
-```typescript
-interface DeploymentInfo {
-  id: string;
-  configurationId: string;
-  configurationName: string;
-  scenarioId: string | undefined;
-  status: string;
-  targetStatus: string;
-  statusMessage?: string;
-  deploymentUrl?: string;
-  createdAt: string;
-  modifiedAt: string;
-}
-```
+| `--status <status>` | string | Filter by status (RUNNING, PENDING, STOPPED) |
+| `--scenario <id>` | string | Filter by scenario ID |
+| `-g, --resource-group <name>` | string | SAP AI Core resource group |
+| `-j, --json` | boolean | JSON output |
+| `--proxy` | boolean | Use proxy endpoint |
 
 ### explain
 
-Analyze and explain routing decisions without executing the request.
+Explain the routing decision for a prompt without sending it.
 
 ```bash
-alexi explain -m <message>
+alexi explain -m <message> [options]
 ```
 
-#### Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `-m, --message <text>` | string | Message to analyze (required) |
-
-#### Example Output
-
-```
-=== Prompt Analysis ===
-Type: deep-reasoning
-Complexity: complex
-Requires Reasoning: true
-Estimated Tokens: 19
-
-=== Matched Rules ===
-• reasoning-for-math (priority: 80): Use reasoning models for math problems
-
-=== Model Candidates (by score) ===
-✓ gpt-4.1              Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
-  claude-4-sonnet      Score: 120 - expensive tier, strong at deep-reasoning, has reasoning
-
-=== Selected Model ===
-Model: gpt-4.1
-Reason: Task type: deep-reasoning, Complexity: complex, requires reasoning
-Confidence: 100%
-Rule Applied: reasoning-for-math
-```
+Shows which model would be selected and why, including:
+- Prompt classification (type, complexity)
+- Matching rules
+- Selected model with confidence score
 
 ### sessions
 
-List all saved sessions.
+List all saved conversation sessions.
 
 ```bash
-alexi sessions
+alexi sessions [options]
 ```
-
-Displays a table of all sessions with:
-- Session ID
-- Title (auto-generated from first message)
-- Message count
-- Model used
-- Creation date
 
 ### session-export
 
 Export a session to markdown format.
 
 ```bash
-alexi session-export -s <session-id> [-o output.md]
-```
-
-#### Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `-s, --session <id>` | string | Session ID to export (required) |
-| `-o, --output <file>` | string | Output file path (default: stdout) |
-
-### session-delete
-
-Delete a session.
-
-```bash
-alexi session-delete -s <session-id>
-```
-
-#### Options
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `-s, --session <id>` | string | Session ID to delete (required) |
-
-## Interactive Mode Commands
-
-The interactive REPL provides slash commands for managing sessions, configuration, and AI interactions.
-
-### General Commands
-
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/help` | `/h` | Show help message with all available commands |
-| `/exit` | `/quit`, `/q` | Exit the interactive REPL |
-| `/clear` | | Clear the terminal screen |
-| `/agent` | | Switch to a different agent (code, debug, plan, explore) |
-| `/stage` | | Switch development stage |
-| `/dod` | | Run Definition of Done checks |
-| `/map` | | Show repository map |
-| `/map-refresh` | | Rebuild repository map from scratch |
-| `/map-tokens` | | Set token budget for repository map |
-
-### Model Management
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/model <model-id>` | Switch to a different model and save as default | `/model gpt-4o` |
-| `/models` | Open interactive model picker | `/models` |
-| `/autoroute` | Toggle automatic model routing | `/autoroute` |
-
-**Note**: When you switch models with `/model`, the selection is persisted to `~/.alexi/config.json` as your default model.
-
-### Session Commands
-
-| Command | Description |
-|---------|-------------|
-| `/session` | Show current session information |
-| `/sessions` | List all saved sessions |
-| `/history` | Show conversation history |
-| `/tokens` | Show token usage statistics |
-| `/compact` | Trigger manual context compaction |
-| `/context` | Show context usage |
-| `/status` | Show current status |
-| `/fork` | Fork current session |
-| `/rename` | Rename current session |
-| `/clear-history` | Clear conversation history |
-| `/cost` | Show cost summary |
-| `/stats` | Show usage statistics |
-
-### Memory Management
-
-#### Instruction Files (/memory)
-
-Manage instruction files that provide context to AI agents.
-
-```bash
-# List all instruction files
-/memory
-
-# Edit project instructions (AGENTS.md)
-/memory edit project
-
-# Edit user instructions (~/.alexi/ALEXI.md)
-/memory edit user
-
-# Create AGENTS.md from template
-/memory init
-```
-
-**Instruction File Hierarchy**:
-1. Project AGENTS.md (./AGENTS.md)
-2. User ALEXI.md (~/.alexi/ALEXI.md)
-3. Project rules (.alexi/rules/*.md)
-
-#### Memories (/mem)
-
-Manage short-term memories with tagging support.
-
-```bash
-# List all memories
-/mem
-
-# Search memories by text or tag
-/mem search <query>
-
-# Delete a memory by ID
-/mem delete <id>
-
-# Clear all memories
-/mem clear
-
-# Show memory statistics
-/mem stats
-
-# Export memories to JSON
-/mem export
-```
-
-### Remember Command
-
-Save information to memory with optional tags.
-
-```bash
-/remember <text> [#tag1 #tag2]
-
-# Example
-/remember The API endpoint is /v1/chat/completions #api #endpoint
-```
-
-### Configuration Commands
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/system <prompt>` | Set system prompt | `/system You are a helpful assistant` |
-| `/config show` | Show current configuration | `/config show` |
-| `/config set <key> <value>` | Set configuration value | `/config set soundEnabled true` |
-| `/config path` | Show configuration file paths | `/config path` |
-| `/permissions` | List/reset permission rules | `/permissions` |
-| `/mcp` | Manage MCP servers | `/mcp` |
-| `/think` | Toggle extended thinking mode | `/think` |
-| `/effort <level>` | Set effort level (low/medium/high/max) | `/effort high` |
-| `/doctor` | Run environment health checks | `/doctor` |
-
-### Git Commands
-
-| Command | Description |
-|---------|-------------|
-| `/diff` | Show files changed in current session |
-| `/undo` | Undo last file change |
-| `/redo` | Redo last undone change |
-| `/commit` | Force commit pending changes |
-| `/git <command>` | Run a git command |
-| `/git-log` | Show recent AI commits |
-
-### Data Export/Import
-
-| Command | Description | Example |
-|---------|-------------|---------|
-| `/export <file>` | Export data to file | `/export session.json` |
-| `/import <file>` | Import data from file | `/import session.json` |
-
-### Autocomplete Support
-
-The interactive REPL provides Tab completion for:
-- **Slash commands**: Type `/` and press Tab to see available commands
-- **Model names**: After `/model `, press Tab to see available models
-- **File paths**: After `/export ` or `/import `, press Tab for file completion
-
-```bash
-# Autocomplete slash commands
-/mod<Tab>  → /model
-
-# Autocomplete model names
-/model gpt<Tab>  → /model gpt-4o
-
-# Autocomplete file paths
-/export session<Tab>  → /export session.json
+alexi session-export <session-id> [options]
 ```
 
 ### session-delete
 
-Delete a session.
+Delete a saved session.
 
 ```bash
-alexi session-delete -s <session-id>
+alexi session-delete <session-id>
 ```
 
-#### Options
+### context
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `-s, --session <id>` | string | Session ID to delete (required) |
+Show current project context information.
+
+```bash
+alexi context
+```
+
+### context-init
+
+Initialize project context for the current directory.
+
+```bash
+alexi context-init
+```
+
+### context-add-invariant
+
+Add an architecture invariant to project context.
+
+```bash
+alexi context-add-invariant <invariant>
+```
+
+### stages
+
+List available conversation stages.
+
+```bash
+alexi stages
+```
+
+### stage-set
+
+Set the current development stage.
+
+```bash
+alexi stage-set <stage>
+```
+
+### notes-generate
+
+Generate AI_NOTES.md for the current development stage.
+
+```bash
+alexi notes-generate
+```
+
+### dod-check
+
+Run Definition of Done checks.
+
+```bash
+alexi dod-check [options]
+```
+
+### dod-list
+
+List available DoD checks.
+
+```bash
+alexi dod-list
+```
 
 ## Environment Variables
 
-### Required Variables
+### Required
 
-#### AICORE_SERVICE_KEY
+| Variable | Description |
+|----------|-------------|
+| `AICORE_SERVICE_KEY` | JSON service key for SAP AI Core authentication |
 
-SAP AI Core service key in JSON format. Contains authentication credentials for SAP AI Core.
+### Optional
 
-```bash
-AICORE_SERVICE_KEY='{"clientid":"...","clientsecret":"...","url":"...","serviceurls":{"AI_API_URL":"..."}}'
-```
-
-### Optional Variables
-
-#### AICORE_RESOURCE_GROUP
-
-SAP AI Core resource group identifier. Defaults to "default" if not specified.
-
-```bash
-AICORE_RESOURCE_GROUP=production
-```
-
-#### AICORE_MODEL
-
-Default model to use when no model is specified.
-
-```bash
-AICORE_MODEL=gpt-4o
-```
-
-#### SAP_PROXY_BASE_URL
-
-Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
-
-```bash
-SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
-```
-
-#### SAP_PROXY_API_KEY
-
-API key for proxy endpoint authentication.
-
-```bash
-SAP_PROXY_API_KEY=your_secret_key
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AICORE_RESOURCE_GROUP` | undefined | SAP AI Core resource group |
+| `AICORE_DEPLOYMENT_ID` | undefined | Specific deployment ID |
+| `AICORE_MODEL` | `gpt-5` | Default model to use |
+| `SAP_PROXY_BASE_URL` | undefined | OpenAI-compatible proxy base URL |
+| `SAP_PROXY_API_KEY` | undefined | Proxy API key |
+| `SAP_PROXY_MODEL` | undefined | Model for proxy endpoint |
+| `ALEXI_MAX_IMAGE_SIZE_MB` | `20` | Maximum image attachment size in MB |
+| `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | undefined | Enable background task execution |
+| `ALEXI_STOP_HOOK_BLOCK_CAP` | `8` | Max consecutive Stop hook blocks |
 
 ## TypeScript Interfaces
 
-### Core Interfaces
-
-#### UserConfig
-
-User configuration stored in ~/.alexi/config.json
+### Core Types
 
 ```typescript
-interface UserConfig {
-  defaultModel?: string;          // Persistent default model
-  soundEnabled?: boolean;         // Enable notification sounds
-  autoRoute?: boolean;            // Auto-routing preference
-  [key: string]: unknown;         // Extensible for custom settings
+// Tool execution context
+interface ToolContext {
+  workdir: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+  gitManager?: AutoCommitManager;
 }
 
-// User configuration API
-import {
-  loadFullConfig,
-  saveFullConfig,
-  getConfigValue,
-  setConfigValue,
-  getConfigDefaultModel,
-  setConfigDefaultModel
-} from './config/userConfig.js';
-
-// Load entire config
-const config = loadFullConfig();
-
-// Get specific value
-const defaultModel = getConfigDefaultModel();
-
-// Set and persist value
-setConfigDefaultModel('claude-4-sonnet');
-
-// Generic key access
-setConfigValue('soundEnabled', true);
-const soundEnabled = getConfigValue('soundEnabled');
-```
-
-#### CompletionResult
-
-Result from LLM completion request.
-
-```typescript
-interface CompletionResult {
-  text: string;
-  usage?: TokenUsage;
-  toolCalls?: ToolCall[];
-  finishReason?: string;
+// Tool result
+interface ToolResult<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  truncated?: boolean;
+  hint?: string;
+  metadata?: Record<string, unknown>;
 }
-```
 
-#### TokenUsage
-
-Token usage statistics for a request.
-
-```typescript
-interface TokenUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
+// Routing decision
+interface RoutingDecision {
+  modelId: string;
+  reason: string;
+  confidence: number;
+  ruleApplied?: string;
 }
-```
 
-#### ToolCall
-
-Tool call request from LLM.
-
-```typescript
-interface ToolCall {
+// Model capability
+interface ModelCapability {
   id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
+  type: 'openai' | 'claude' | 'gemini';
+  costTier: 'cheap' | 'medium' | 'expensive';
+  strengths: string[];
+  maxTokens: number;
+  reasoning: boolean;
 }
 ```
 
-### Agentic Chat Interfaces
-
-#### AgenticChatOptions
-
-Configuration options for agentic chat execution.
+### Agentic Chat Types
 
 ```typescript
+// Options for agentic chat
 interface AgenticChatOptions {
   modelOverride?: string;
   autoRoute?: boolean;
   preferCheap?: boolean;
   sessionManager?: SessionManager;
   systemPrompt?: string;
-  maxIterations?: number; // Default: 50
-  workdir?: string; // Default: process.cwd()
-  enabledTools?: string[]; // Default: all registered tools
+  maxIterations?: number;
+  workdir?: string;
+  enabledTools?: string[];
   onProgress?: (event: AgenticProgressEvent) => void;
   signal?: AbortSignal;
+  gitManager?: AutoCommitManager;
+  repoMapManager?: RepoMapManager;
+  effort?: EffortLevel;
+  agentId?: string;
 }
-```
 
-#### AgenticChatResult
-
-Result from agentic chat execution.
-
-```typescript
-interface AgenticChatResult {
-  text: string;
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-  modelUsed: string;
-  routingReason?: string;
-  iterations: number;
-  toolCallsExecuted: number;
-  toolCallSummary: Array<{
-    name: string;
-    success: boolean;
-    error?: string;
-  }>;
-}
-```
-
-#### AgenticProgressEvent
-
-Progress event emitted during agentic execution.
-
-```typescript
+// Progress events during agentic execution
 interface AgenticProgressEvent {
   type: 'llm_call' | 'tool_start' | 'tool_end' | 'iteration' | 'complete';
   iteration?: number;
@@ -550,422 +340,346 @@ interface AgenticProgressEvent {
   result?: ToolResult;
   message?: string;
 }
+
+// Agentic chat result
+interface AgenticChatResult {
+  text: string;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  modelUsed?: string;
+  iterations: number;
+  toolCallSummary: Array<{
+    name: string;
+    id: string;
+    success: boolean;
+  }>;
+}
+```
+
+### Session Types
+
+```typescript
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+  tokens?: { input?: number; output?: number };
+}
+
+interface SessionMetadata {
+  id: string;
+  created: number;
+  updated: number;
+  modelId?: string;
+  totalTokens: number;
+  messageCount: number;
+  title?: string;
+}
+
+interface Session {
+  metadata: SessionMetadata;
+  messages: Message[];
+}
+```
+
+### Compaction Types
+
+```typescript
+// Compaction options
+interface CompactionOptions {
+  strategy: CompactionStrategy;
+  preserveRecent?: number;
+  preserveSystemPrompt?: boolean;
+  customSummaryPrompt?: string;
+  overflowTokens?: number; // Tokens that triggered overflow
+}
+
+type CompactionStrategy =
+  | 'truncate'   // Remove oldest messages
+  | 'summarize'  // AI summarization with target sizing
+  | 'sliding'    // Sliding window, keep N most recent
+  | 'smart';     // Importance-based selection
+
+interface CompactionResult {
+  success: boolean;
+  originalMessageCount: number;
+  compactedMessageCount: number;
+  originalTokens: number;
+  compactedTokens: number;
+  summary?: string;
+  removedMessages?: number;
+  error?: string;
+}
+```
+
+### Hook Types
+
+```typescript
+type HookEvent =
+  | 'SessionStart'
+  | 'SessionEnd'
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PermissionRequest'
+  | 'Stop'
+  | 'Error';
+
+type HookType = 'command' | 'http' | 'script';
+
+interface HookDefinition {
+  event: HookEvent;
+  type: HookType;
+  command?: string;       // For 'command' type
+  url?: string;           // For 'http' type
+  method?: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  script?: string;        // For 'script' type
+  timeout?: number;       // Max execution time in ms (default: 30000)
+  enabled?: boolean;      // Default true
+  description?: string;
+  continueOnBlock?: boolean; // Feed rejection back to model
+}
+
+interface HookResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+  duration: number;
+  capped?: boolean;         // Stop hook exceeded block cap
+  continueOnBlock?: boolean;
+}
+```
+
+### Agent Types
+
+```typescript
+type AgentMode = 'primary' | 'subagent' | 'all';
+
+interface AgentConfig {
+  id: string;
+  name: string;
+  displayName?: string;
+  description: string;
+  mode: AgentMode;
+  systemPrompt: string;
+  deprecated?: boolean;
+  tools?: string[];
+  disabledTools?: string[];
+  preferredModel?: string;
+  temperature?: number;
+  maxTokens?: number;
+  aliases?: string[];
+  options?: Record<string, unknown>;
+}
+
+interface Agent extends AgentConfig {
+  canUseTool(toolId: string): boolean;
+}
 ```
 
 ## Tool System
 
-### Tool Definition
+### Defining a Tool
 
-Tools are defined using the `defineTool` function with Zod schema validation.
+Tools are defined using the `defineTool` function with Zod schema validation:
 
 ```typescript
-import { defineTool } from '../tool/index.js';
 import { z } from 'zod';
+import { defineTool, type ToolResult } from '../index.js';
 
-const myTool = defineTool({
-  name: 'my-tool',
-  description: 'Description of what the tool does',
-  parameters: z.object({
-    param1: z.string().describe('Parameter description'),
-    param2: z.number().optional(),
-  }),
+const MyParamsSchema = z.object({
+  path: z.string().describe('File path'),
+  content: z.string().describe('File content'),
+});
+
+export const myTool = defineTool<typeof MyParamsSchema, { written: boolean }>({
+  name: 'my_tool',
+  description: 'Description for the LLM',
+  parameters: MyParamsSchema,
+
   permission: {
     action: 'write',
     getResource: (params, context) => {
-      // Resolve resource path with context
-      return path.join(context?.workdir || process.cwd(), params.filePath);
+      if (path.isAbsolute(params.path)) return params.path;
+      return path.join(context?.workdir ?? process.cwd(), params.path);
     },
   },
-  async execute(params, context) {
-    // Tool implementation
-    return {
-      success: true,
-      data: { /* result data */ },
-    };
-  },
-});
-```
 
-### ToolContext
-
-Context provided to tool execution.
-
-```typescript
-interface ToolContext {
-  workdir: string; // Working directory
-  signal?: AbortSignal; // Cancellation signal
-  sessionId?: string; // Current session ID
-}
-```
-
-### ToolDefinition
-
-Tool definition with permission support and context-aware resource resolution.
-
-```typescript
-interface ToolDefinition<TParams extends z.ZodType, TResult> {
-  name: string;
-  description: string;
-  parameters: TParams;
-  // Permission requirements
-  permission?: {
-    action: PermissionAction;
-    // getResource can optionally receive context to resolve relative paths
-    getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
-  };
-  // Execution function
-  execute: (params: z.infer<TParams>, context: ToolContext) => Promise<ToolResult<TResult>>;
-}
-```
-
-### ToolResult
-
-Result returned from tool execution.
-
-```typescript
-interface ToolResult<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  truncated?: boolean;
-  hint?: string;
-}
-```
-
-### Built-in Tools
-
-#### read
-
-Read files and directories.
-
-```typescript
-{
-  name: 'read',
-  parameters: {
-    filePath: string; // Path to read
-    limit?: number;   // Max lines to return (default: 2000)
-    offset?: number;  // Line offset to start from
-  }
-}
-```
-
-#### write
-
-Write or create files.
-
-```typescript
-{
-  name: 'write',
-  parameters: {
-    filePath: string; // Path to write
-    content: string;  // Content to write
-  }
-}
-```
-
-#### edit
-
-Perform exact string replacements in files.
-
-```typescript
-{
-  name: 'edit',
-  parameters: {
-    filePath: string;    // Path to file
-    oldString: string;   // Text to replace
-    newString: string;   // Replacement text
-    replaceAll?: boolean; // Replace all occurrences (default: false)
-  }
-}
-```
-
-#### glob
-
-Find files matching a pattern.
-
-```typescript
-{
-  name: 'glob',
-  parameters: {
-    pattern: string; // Glob pattern (e.g., "**/*.ts")
-    path?: string;   // Base path to search from
-  }
-}
-```
-
-#### grep
-
-Search file contents using regex.
-
-```typescript
-{
-  name: 'grep',
-  parameters: {
-    pattern: string;  // Regular expression pattern
-    path?: string;    // Base path to search from
-    include?: string; // File pattern filter (e.g., "*.js")
-  }
-}
-```
-
-#### bash
-
-Execute shell commands.
-
-```typescript
-{
-  name: 'bash',
-  parameters: {
-    command: string; // Shell command to execute
-  }
-}
-```
-
-#### codebase_search (WarpGrep)
-
-AI-powered semantic code search using WarpGrep.
-
-```typescript
-{
-  name: 'codebase_search',
-  parameters: {
-    query: string; // Descriptive search query
-  }
-}
-```
-
-**Requirements**: Install `@morphllm/morphsdk` as optional dependency
-**Configuration**: Set `MORPH_API_KEY` environment variable (optional during free period)
-
-**Example**:
-```bash
-# Search for authentication logic
-codebase_search("Find the authentication middleware that validates JWT tokens")
-
-# Find error handling patterns
-codebase_search("Show me how errors are handled in API routes")
-```
-
-**Result Format**:
-```typescript
-interface CodeSpan {
-  filePath: string;
-  startLine: number;
-  endLine: number;
-  content: string;
-}
-
-interface WarpGrepResult {
-  spans: CodeSpan[];
-  query: string;
-}
-```
-
-## Permission System
-
-### Permission Actions
-
-```typescript
-type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
-```
-
-### Permission Decisions
-
-```typescript
-type PermissionDecision = 'allow' | 'deny' | 'ask';
-```
-
-### Permission Rule
-
-```typescript
-interface PermissionRule {
-  id?: string;
-  name?: string;
-  description?: string;
-  // Matching criteria
-  tools?: string[];    // Tool name patterns
-  actions?: PermissionAction[];
-  paths?: string[];    // File path patterns
-  commands?: string[]; // Command patterns
-  hosts?: string[];    // Network host patterns
-  // Decision
-  decision: PermissionDecision;
-  // Priority (higher = evaluated later in last-match-wins)
-  priority: number; // Default: 0
-  // Enhanced options
-  externalPaths?: boolean; // Whether rule applies to external paths
-  homeExpansion?: boolean; // Expand ~/ to home directory in paths
-}
-```
-
-### Permission Context
-
-```typescript
-interface PermissionContext {
-  toolName: string;
-  action: PermissionAction;
-  resource: string; // Path, command, URL, etc.
-  description?: string;
-}
-```
-
-### Agentic Permission Configuration
-
-In agentic mode, the permission system is automatically configured with high-priority allow rules:
-
-```typescript
-// Allow writes in workdir (priority 200)
-{
-  id: 'agentic-allow-write',
-  name: 'Agentic Write Allow',
-  description: 'Allow writing files in workdir for agentic mode',
-  actions: ['write'],
-  paths: [`${workdir}/**`, workdir],
-  decision: 'allow',
-  priority: 200,
-}
-
-// Allow execute operations (priority 200)
-{
-  id: 'agentic-allow-execute',
-  name: 'Agentic Execute Allow',
-  description: 'Allow executing commands for agentic mode',
-  actions: ['execute'],
-  decision: 'allow',
-  priority: 200,
-}
-```
-
-These rules override the default `ask-write` rule (priority 10) and `deny-secrets` rule (priority 100).
-
-## Usage Examples
-
-### Basic Chat with Auto-Routing
-
-```typescript
-import { agenticChat } from './core/agenticChat.js';
-
-const result = await agenticChat('Write a function to sort an array', {
-  autoRoute: true,
-  preferCheap: true,
-  maxIterations: 10,
-  workdir: '/path/to/project',
-});
-
-console.log(result.text);
-console.log(`Model: ${result.modelUsed}`);
-console.log(`Iterations: ${result.iterations}`);
-console.log(`Tool calls: ${result.toolCallsExecuted}`);
-```
-
-### List Deployments Programmatically
-
-```typescript
-import { DeploymentApi } from '@sap-ai-sdk/ai-api';
-
-const response = await DeploymentApi.deploymentQuery(
-  {},
-  { 'AI-Resource-Group': 'default' }
-).execute();
-
-const deployments = response.resources || [];
-const running = deployments.filter(d => d.status === 'RUNNING');
-
-console.log(`Found ${running.length} running deployments`);
-```
-
-### Custom Tool Registration
-
-```typescript
-import { registerTool, defineTool } from './tool/index.js';
-import { z } from 'zod';
-
-const customTool = defineTool({
-  name: 'custom-tool',
-  description: 'My custom tool',
-  parameters: z.object({
-    input: z.string(),
-  }),
-  async execute(params, context) {
+  async execute(params, context): Promise<ToolResult<{ written: boolean }>> {
     // Implementation
-    return { success: true, data: 'result' };
+    return { success: true, data: { written: true } };
   },
 });
-
-registerTool(customTool);
 ```
 
-## Error Handling
+### Available Tools
 
-All CLI commands handle errors gracefully and exit with appropriate exit codes:
+| Tool | Name | Permission | Description |
+|------|------|-----------|-------------|
+| Bash | `bash` | execute | Execute shell commands |
+| Read | `read` | read | Read files/directories with offset and limit |
+| Write | `write` | write | Write files with BOM handling |
+| Edit | `edit` | write | Exact string replacement in files |
+| Glob | `glob` | read | Pattern-based file search |
+| Grep | `grep` | read | Content search with regex |
+| WarpGrep | `warpgrep` | read | AI-powered semantic code search |
+| Task | `task` | - | Launch sub-agent tasks |
+| Task Status | `task_status` | - | Query background task status |
+| WebFetch | `webfetch` | network | Fetch web content |
+| TodoWrite | `todowrite` | - | Manage structured task lists |
+| Question | `question` | - | Ask user questions |
+| Suggest | `suggest` | - | Suggest code review actions |
+| Recall | `recall` | read | Search past conversations |
+| Delete | `delete` | write | Delete files |
+| Multi-Edit | `multiedit` | write | Edit multiple files |
+| Batch | `batch` | - | Execute multiple tool calls |
 
-- `0`: Success
-- `1`: Error (with error message displayed)
+### Task Tool (Sub-agents)
 
-TypeScript APIs throw errors that should be caught and handled by the caller:
+The Task tool launches specialized sub-agents for complex work:
 
 ```typescript
-try {
-  const result = await agenticChat(message, options);
-  // Handle success
-} catch (error) {
-  if (error instanceof Error) {
-    console.error(`Error: ${error.message}`);
-  }
-  // Handle error
+// Parameters
+interface TaskParams {
+  prompt: string;         // Task description
+  description: string;    // Short 3-5 word summary
+  subagent_type?: string; // 'general' or 'explore'
+  task_id?: string;       // Resume previous task
+  background?: boolean;   // Run in background (experimental)
 }
 ```
 
-## Streaming Support
+Sub-agents are restricted to single-level nesting (no recursive spawning).
 
-Alexi supports streaming responses for real-time output. See the streaming orchestrator documentation for details on implementing streaming in custom integrations.
+### Background Tasks
 
-## Logging Utility
-
-Alexi provides a centralized logging utility for consistent logging across the application.
-
-### Logger Interface
+When `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS=true`, tasks can run asynchronously:
 
 ```typescript
-interface Logger {
-  setLevel(level: LogLevel): void;
-  debug(message: string, ...args: unknown[]): void;
-  info(message: string, ...args: unknown[]): void;
-  warn(message: string, ...args: unknown[]): void;
-  error(message: string, ...args: unknown[]): void;
-  print(message: string): void;
+// Launch background task
+const result = await taskTool.execute({
+  prompt: 'Analyze all test files',
+  description: 'Analyze tests',
+  subagent_type: 'explore',
+  background: true,
+});
+// result.data.taskId -> use with task_status
+
+// Query status
+const status = await taskStatusTool.execute({ taskId: 'task-123' });
+// status.data.status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+```
+
+## Agent System
+
+### Switching Agents
+
+In the TUI, agents can be switched using:
+- `@agent-name` syntax in messages
+- Tab/Shift-Tab cycling
+- `/agent` slash command
+
+### Custom Agents
+
+Create custom agents as markdown files:
+
+```markdown
+---
+name: "Security Reviewer"
+slug: security
+aliases: [sec, audit]
+mode: all
+tools: [read, glob, grep]
+temperature: 0.2
+---
+
+You are a security-focused code reviewer. Analyze code for:
+- SQL injection vulnerabilities
+- XSS attack vectors
+- Authentication bypass risks
+
+{file:security-checklist.md}
+```
+
+File inclusions (`{file:path}`) are resolved relative to the agent file and support recursive nesting up to depth 3.
+
+## Hooks System
+
+### Configuration
+
+Hooks are configured in `.alexi/hooks.json` or `alexi.config.json`:
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "type": "command",
+      "command": "echo 'Tool: {{toolName}}'",
+      "description": "Log tool usage",
+      "enabled": true
+    },
+    {
+      "event": "PostToolUse",
+      "type": "http",
+      "url": "https://webhook.example.com/tool-audit",
+      "method": "POST",
+      "timeout": 5000
+    },
+    {
+      "event": "PreToolUse",
+      "type": "script",
+      "script": ".alexi/hooks/validate-write.ts",
+      "continueOnBlock": true
+    }
+  ]
 }
-
-type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 ```
 
-### Usage
+### Template Variables
+
+Hook commands and URLs support template substitution:
+
+| Variable | Description |
+|----------|-------------|
+| `{{event}}` | Hook event name |
+| `{{toolName}}` | Current tool name |
+| `{{sessionId}}` | Session identifier |
+| `{{timestamp}}` | Unix timestamp |
+| `{{error}}` | Error message (if applicable) |
+
+### Hook Environment Variables
+
+Command hooks receive additional environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `ALEXI_HOOK_EVENT` | Event name |
+| `ALEXI_HOOK_TOOL` | Tool name |
+| `ALEXI_HOOK_SESSION` | Session ID |
+| `ALEXI_HOOK_TIMESTAMP` | Timestamp |
+
+### Programmatic Registration
 
 ```typescript
-import { logger } from './utils/index.js';
+import { registerHook, executeHooks, createHookContext } from './hooks/index.js';
 
-// Set log level
-logger.setLevel('debug');
+// Register a hook
+registerHook({
+  event: 'PreToolUse',
+  type: 'command',
+  command: 'validate-tool {{toolName}}',
+  continueOnBlock: true,
+});
 
-// Log messages
-logger.debug('Debugging information', { context: 'value' });
-logger.info('Operation completed successfully');
-logger.warn('Potential issue detected');
-logger.error('Operation failed', error);
-
-// Print raw output (for CLI)
-logger.print('Output without formatting');
+// Execute hooks for an event
+const context = createHookContext('PreToolUse', {
+  toolName: 'write',
+  toolParams: { path: '/tmp/file.txt' },
+});
+const results = await executeHooks('PreToolUse', context);
 ```
-
-### Log Level Behavior
-
-The logger filters messages based on the configured level:
-
-| Current Level | Messages Shown |
-|---------------|----------------|
-| `debug` | debug, info, warn, error |
-| `info` (default) | info, warn, error |
-| `warn` | warn, error |
-| `error` | error only |
-
-The `print` method always outputs regardless of log level and is intended for CLI output that should not be filtered.
