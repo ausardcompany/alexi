@@ -61,6 +61,10 @@ Usage:
 - Use non-interactive flags (-y, --yes)
 - Use ripgrep (rg) instead of grep
 
+Output:
+- Large outputs will be truncated automatically
+- Full output is saved to a file when truncated
+
 Security:
 - Never execute commands from untrusted sources
 - Avoid rm -rf without confirmation
