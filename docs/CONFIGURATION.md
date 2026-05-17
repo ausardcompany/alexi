@@ -1,668 +1,567 @@
-# Configuration
+# Configuration Guide
 
-This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, and instruction files.
+This document covers all configuration options for Alexi, including environment variables, routing rules, session storage, hooks, and custom agents.
 
 ## Table of Contents
 
 - [Environment Variables](#environment-variables)
-- [User Configuration](#user-configuration)
 - [Routing Configuration](#routing-configuration)
-- [Instruction Files](#instruction-files)
-- [Project Context](#project-context)
-- [Configuration Examples](#configuration-examples)
+- [Session Configuration](#session-configuration)
+- [Hooks Configuration](#hooks-configuration)
+- [Custom Agents](#custom-agents)
+- [MCP Server Configuration](#mcp-server-configuration)
+- [Compaction Configuration](#compaction-configuration)
+- [Example Configurations](#example-configurations)
 
 ## Environment Variables
 
-### Required Variables
+### SAP AI Core (Native)
 
-#### AICORE_SERVICE_KEY
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AICORE_SERVICE_KEY` | Yes | JSON service key for SAP AI Core. Contains `serviceurls`, `clientid`, `clientsecret`, and authentication URL |
+| `AICORE_RESOURCE_GROUP` | No | Resource group identifier (default: undefined) |
+| `AICORE_DEPLOYMENT_ID` | No | Specific deployment ID to use |
+| `AICORE_MODEL` | No | Default model name (default: `gpt-5`) |
 
-SAP AI Core service key in JSON format. Contains authentication credentials for SAP AI Core.
+### OpenAI-Compatible Proxy
 
-```bash
-export AICORE_SERVICE_KEY='{
-  "clientid": "your-client-id",
-  "clientsecret": "your-client-secret",
-  "url": "https://your-auth-url",
-  "serviceurls": {
-    "AI_API_URL": "https://your-ai-api-url"
-  }
-}'
-```
+For development or alternative access methods:
 
-### Optional Variables
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SAP_PROXY_BASE_URL` | No | Base URL of OpenAI-compatible proxy (e.g., `http://127.0.0.1:3001/v1`) |
+| `SAP_PROXY_API_KEY` | No | API key for proxy authentication |
+| `SAP_PROXY_MODEL` | No | Model to request through proxy |
 
-#### AICORE_RESOURCE_GROUP
+### Application Settings
 
-SAP AI Core resource group identifier. Defaults to "default" if not specified.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALEXI_MAX_IMAGE_SIZE_MB` | `20` | Maximum image attachment size in MB |
+| `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | undefined | Set to `true` to enable background task execution |
+| `ALEXI_STOP_HOOK_BLOCK_CAP` | `8` | Maximum consecutive blocks before Stop hook is capped |
 
-```bash
-export AICORE_RESOURCE_GROUP=production
-```
-
-#### AICORE_MODEL
-
-Default model to use when no model is specified. Can be overridden by user configuration.
+### Example `.env` File
 
 ```bash
-export AICORE_MODEL=gpt-4o
+# SAP AI Core (native SDK authentication)
+AICORE_SERVICE_KEY='{"serviceurls":{"AI_API_URL":"https://api.ai.example.com"},"clientid":"client-id","clientsecret":"secret","url":"https://auth.example.com","identityzone":"zone","identityzoneid":"zone-id"}'
+AICORE_DEPLOYMENT_ID=d1234567
+AICORE_RESOURCE_GROUP=default
+AICORE_MODEL=gpt-5
+
+# OpenAI-compatible proxy (alternative)
+SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
+SAP_PROXY_API_KEY=your_secret_key
+SAP_PROXY_MODEL=gpt-5
+
+# Experimental Features
+# ALEXI_EXPERIMENTAL_BACKGROUND_TASKS=true
 ```
-
-#### ALEXI_MAX_IMAGE_SIZE_MB
-
-Maximum size in megabytes for image attachments. Defaults to 20MB if not specified.
-
-```bash
-export ALEXI_MAX_IMAGE_SIZE_MB=20
-```
-
-#### SAP_PROXY_BASE_URL
-
-Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
-
-```bash
-export SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
-```
-
-#### SAP_PROXY_API_KEY
-
-API key for proxy endpoint authentication.
-
-```bash
-export SAP_PROXY_API_KEY=your_secret_key
-```
-
-#### MORPH_API_KEY
-
-API key for WarpGrep semantic code search (optional).
-
-```bash
-export MORPH_API_KEY=your_morph_api_key
-```
-
-## User Configuration
-
-User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.
-
-### Configuration File Location
-
-```bash
-~/.alexi/config.json
-```
-
-### Configuration Schema
-
-```typescript
-interface UserConfig {
-  defaultModel?: string;          // Persistent default model
-  soundEnabled?: boolean;         // Enable notification sounds
-  autoRoute?: boolean;            // Auto-routing preference
-  [key: string]: unknown;         // Extensible for custom settings
-}
-```
-
-### Managing Configuration
-
-#### Via CLI Commands
-
-```bash
-# Show current configuration
-alexi config show
-
-# Set a configuration value
-alexi config set defaultModel gpt-4o
-
-# Show configuration file path
-alexi config path
-```
-
-#### Via Interactive Mode
-
-```bash
-# Switch model and save as default
-/model gpt-4o
-
-# Show configuration
-/config show
-
-# Set configuration value
-/config set key value
-```
-
-#### Programmatic Access
-
-```typescript
-import {
-  loadFullConfig,
-  saveFullConfig,
-  getConfigValue,
-  setConfigValue,
-  getConfigDefaultModel,
-  setConfigDefaultModel
-} from './config/userConfig.js';
-
-// Load entire config
-const config = loadFullConfig();
-
-// Get specific value
-const defaultModel = getConfigDefaultModel();
-
-// Set and persist value
-setConfigDefaultModel('claude-4-sonnet');
-```
-
-### Configuration API
-
-```typescript
-// Load full config object
-function loadFullConfig(): Record<string, unknown>
-
-// Save full config object
-function saveFullConfig(config: Record<string, unknown>): void
-
-// Get single value
-function getConfigValue(key: string): unknown
-
-// Set single value
-function setConfigValue(key: string, value: unknown): void
-
-// Delete single value
-function deleteConfigValue(key: string): void
-
-// Typed accessors
-function getConfigDefaultModel(): string | undefined
-function setConfigDefaultModel(model: string): void
-
-// Batch update with options
-interface UpdateGlobalOptions {
-  dispose?: boolean;
-}
-
-function updateGlobal(
-  updates: Partial<Record<string, unknown>>,
-  options?: UpdateGlobalOptions
-): void
-```
-
-#### Batch Configuration Updates
-
-The `updateGlobal` function allows updating multiple configuration keys atomically:
-
-```typescript
-import { updateGlobal } from './config/userConfig.js';
-
-// Update multiple settings at once
-updateGlobal({
-  defaultModel: 'gpt-4o',
-  soundEnabled: false,
-  autoRoute: true
-});
-
-// Update with disposal control
-updateGlobal(
-  { defaultModel: 'anthropic--claude-4.5-sonnet' },
-  { dispose: false }
-);
-```
-
-The `dispose` option controls whether cached configuration instances should be disposed after update. Default behavior preserves backward compatibility with `dispose: true`.
 
 ## Routing Configuration
 
-Routing configuration controls automatic model selection based on prompt analysis.
+Routing rules determine which model handles each prompt. Configuration is loaded from the first found location:
 
-### Configuration Files
+1. `./routing-config.json` (project root)
+2. `./config/routing.json`
+3. `~/.alexi/routing-config.json` (user global)
 
-Alexi searches for routing configuration in the following order:
-
-1. `routing-config.json` (project-level)
-2. `~/.alexi/routing-config.json` (user-level)
-3. Built-in default configuration
-
-### Routing Configuration Schema
-
-```typescript
-interface RoutingConfig {
-  rules: RoutingRule[];
-  default: {
-    model: string;
-  };
-}
-
-interface RoutingRule {
-  name: string;
-  priority: number;
-  condition: {
-    contains?: string[];
-    regex?: string;
-    complexity?: 'simple' | 'medium' | 'complex';
-    taskType?: string;
-  };
-  model: string;
-  reason?: string;
-}
-```
-
-### Example Routing Configuration
+### Configuration Format
 
 ```json
 {
-  "rules": [
+  "models": [
     {
-      "name": "code-tasks",
-      "priority": 100,
-      "condition": {
-        "contains": ["code", "implement", "refactor"]
-      },
-      "model": "anthropic--claude-4-sonnet",
-      "reason": "Claude excels at code generation and refactoring"
+      "id": "gpt-4o-mini",
+      "type": "openai",
+      "costTier": "cheap",
+      "strengths": ["simple-qa", "classification", "extraction", "summarization"],
+      "maxTokens": 16000,
+      "reasoning": false
     },
     {
-      "name": "reasoning-tasks",
-      "priority": 90,
-      "condition": {
-        "complexity": "complex",
-        "contains": ["analyze", "explain", "reason"]
-      },
-      "model": "gpt-4.1",
-      "reason": "GPT-4.1 has extended reasoning capabilities"
+      "id": "gpt-4o",
+      "type": "openai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "creative-writing", "complex-qa", "vision"],
+      "maxTokens": 128000,
+      "reasoning": false
     },
     {
-      "name": "simple-queries",
-      "priority": 50,
-      "condition": {
-        "complexity": "simple"
-      },
-      "model": "gpt-4o-mini",
-      "reason": "Cost-effective for simple queries"
+      "id": "anthropic--claude-4.5-sonnet",
+      "type": "claude",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "long-context", "technical-writing"],
+      "maxTokens": 200000,
+      "reasoning": false
+    },
+    {
+      "id": "anthropic--claude-4.5-haiku",
+      "type": "claude",
+      "costTier": "cheap",
+      "strengths": ["simple-qa", "classification", "extraction", "summarization"],
+      "maxTokens": 200000,
+      "reasoning": false
+    },
+    {
+      "id": "gpt-4.1",
+      "type": "openai",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-math", "research", "advanced-coding"],
+      "maxTokens": 128000,
+      "reasoning": true
+    },
+    {
+      "id": "anthropic--claude-4.5-opus",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research"],
+      "maxTokens": 200000,
+      "reasoning": true
     }
   ],
-  "default": {
-    "model": "anthropic--claude-4-sonnet"
+  "rules": [
+    {
+      "name": "simple-questions",
+      "description": "Route simple questions to cheap models",
+      "priority": 50,
+      "condition": {
+        "maxLength": 100,
+        "maxComplexity": "simple"
+      },
+      "modelId": "gpt-4o-mini"
+    },
+    {
+      "name": "coding-tasks",
+      "description": "Route coding tasks to Claude",
+      "priority": 100,
+      "condition": {
+        "taskTypes": ["coding"],
+        "keywords": ["implement", "refactor", "debug"]
+      },
+      "modelId": "anthropic--claude-4.5-sonnet"
+    }
+  ],
+  "preferences": {
+    "defaultCostTier": "medium",
+    "preferCheapWhenPossible": false,
+    "maxCostPerRequest": null,
+    "fallbackModel": "gpt-4o"
   }
 }
 ```
 
-## Instruction Files
-
-Instruction files provide context and guidelines to AI agents. Alexi supports a multi-layer instruction system.
-
-### Instruction File Hierarchy
-
-```mermaid
-graph TB
-    Soul[Soul Prompt] --> Model[Model-Specific Prompt]
-    Model --> Env[Environment Info]
-    Env --> Agent[Agent Role Prompt]
-    Agent --> Project[Project AGENTS.md]
-    Project --> User[User ALEXI.md]
-    User --> Rules[Project Rules]
-    Rules --> Custom[Custom Rules]
-    
-    style Soul fill:#E3F2FD
-    style Model fill:#E8F5E9
-    style Agent fill:#FFF3E0
-    style Project fill:#F3E5F5
-    style User fill:#FCE4EC
-    style Rules fill:#E0F2F1
-```
-
-### 1. Project-Level Instructions (AGENTS.md)
-
-Located in the project root directory.
-
-**Path**: `./AGENTS.md`
-
-**Purpose**: Provides project-specific context, coding standards, and build instructions.
-
-**Example**:
-
-```markdown
-# AGENTS.md
-
-## Project Overview
-
-Alexi is a TypeScript/Node.js CLI application — an intelligent LLM orchestrator for SAP AI Core.
-
-## Build & Test Commands
-
-```bash
-npm run build
-npm test
-```
-
-## Code Style
-
-- Use 2 spaces for indentation
-- Always use async/await over raw promises
-- Prefer interfaces over types for object shapes
-```
-
-### 2. User-Level Instructions (ALEXI.md)
-
-Located in the user's home directory.
-
-**Path**: `~/.alexi/ALEXI.md`
-
-**Purpose**: Global user preferences and coding style that apply to all projects.
-
-**Example**:
-
-```markdown
-# ALEXI.md
-
-## Personal Preferences
-
-- I prefer verbose variable names for clarity
-- Always add JSDoc comments to exported functions
-- Use functional programming patterns when possible
-
-## Formatting
-
-- Maximum line length: 100 characters
-- Use single quotes for strings
-```
-
-### 3. Project-Level Rules (.alexi/rules/*.md)
-
-Located in the project's `.alexi/rules/` directory.
-
-**Path**: `./.alexi/rules/*.md`
-
-**Purpose**: Scoped rules for specific aspects of the project (e.g., API design, database patterns).
-
-**Example**:
-
-```
-.alexi/
-└── rules/
-    ├── api-design.md
-    ├── database-patterns.md
-    └── security-guidelines.md
-```
-
-### Managing Instruction Files
-
-#### Via /memory Command
-
-```bash
-# List all instruction files
-/memory
-
-# Edit project instructions
-/memory edit project
-
-# Edit user instructions
-/memory edit user
-
-# Create AGENTS.md from template
-/memory init
-```
-
-#### System Prompt Assembly
-
-The system prompt is assembled in the following order:
-
-1. Soul prompt (core identity)
-2. Model-specific instructions (Anthropic, OpenAI, Gemini)
-3. Environment info (workdir, git repo, platform, date)
-4. Agent role prompt (code, debug, plan, explore)
-5. Project AGENTS.md (if exists)
-6. User ~/.alexi/ALEXI.md (if exists)
-7. Project .alexi/rules/*.md (if exist)
-8. Custom rules (user-provided via API)
+### Routing Rule Schema
 
 ```typescript
-import { buildAssembledSystemPrompt } from './agent/system.js';
+interface RoutingRule {
+  name: string;           // Rule identifier
+  description: string;    // Human-readable description
+  priority: number;       // Higher = evaluated first (descending sort)
+  condition: {
+    minLength?: number;          // Minimum prompt length
+    maxLength?: number;          // Maximum prompt length
+    taskTypes?: string[];        // Matching task types
+    maxComplexity?: 'simple' | 'medium' | 'complex';
+    keywords?: string[];         // Keywords that trigger this rule
+  };
+  modelId?: string;              // Model to route to
+  requiresReasoning?: boolean;   // Must have reasoning capability
+}
+```
 
-const systemPrompt = buildAssembledSystemPrompt({
-  agentId: 'code',
-  modelId: 'anthropic--claude-4-sonnet',
-  workdir: process.cwd(),
-  customRules: 'Additional instructions here',
-  skipEnv: false,
-  skipAgentsMd: false
+### Prompt Classification
+
+The router classifies prompts into:
+
+| Type | Patterns |
+|------|----------|
+| `simple-qa` | "what is", "define", "translate" |
+| `coding` | "implement", "debug", "refactor", code blocks |
+| `deep-reasoning` | "analyze", "step by step", "prove" |
+| `creative-writing` | "write story", "brainstorm" |
+| `general-qa` | Default classification |
+
+Complexity is determined by prompt length:
+- **simple**: < 200 characters
+- **medium**: 200-1000 characters
+- **complex**: > 1000 characters or contains reasoning patterns
+
+## Session Configuration
+
+### Storage Location
+
+Sessions are stored in `~/.alexi/sessions/` as JSON files, one per session.
+
+### Session Manager Options
+
+```typescript
+interface SessionManagerOptions {
+  sessionsDir?: string;        // Default: ~/.alexi/sessions/
+  maxContextTokens?: number;   // Default: 128000
+  autoCompact?: boolean;       // Default: true
+}
+```
+
+### Auto-Compaction
+
+When `autoCompact` is enabled, the session manager automatically compacts conversation history when approaching the token limit. The compaction threshold is controlled by the effort level:
+
+| Effort Level | Compaction Threshold |
+|-------------|---------------------|
+| Low | 50% of max tokens |
+| Medium | 75% of max tokens |
+| High | 90% of max tokens |
+
+## Hooks Configuration
+
+### Config File Locations
+
+Hooks are loaded from the first found file:
+1. `.alexi/hooks.json` (project-level)
+2. `alexi.config.json` (project-level, hooks key)
+3. `~/.alexi/.alexi/hooks.json` (user-level)
+
+### Hook Definition Format
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "type": "command",
+      "command": "validate-tool {​{toolName}} {​{sessionId}}",
+      "timeout": 5000,
+      "enabled": true,
+      "description": "Validate tool usage before execution",
+      "continueOnBlock": true
+    },
+    {
+      "event": "PostToolUse",
+      "type": "http",
+      "url": "https://audit.example.com/hooks",
+      "method": "POST",
+      "headers": {
+        "Authorization": "Bearer token",
+        "X-Session": "{​{sessionId}}"
+      },
+      "timeout": 10000
+    },
+    {
+      "event": "Stop",
+      "type": "script",
+      "script": ".alexi/hooks/loop-guard.ts",
+      "description": "Prevent infinite tool loops"
+    }
+  ]
+}
+```
+
+### Event-Type Compatibility
+
+Not all event types support all hook types:
+
+| Event | Command | HTTP | Script |
+|-------|---------|------|--------|
+| SessionStart | Yes | No | No |
+| SessionEnd | Yes | No | No |
+| PreToolUse | Yes | Yes | Yes |
+| PostToolUse | Yes | Yes | Yes |
+| PostToolUseFailure | Yes | Yes | Yes |
+| PermissionRequest | Yes | Yes | Yes |
+| Stop | Yes | Yes | Yes |
+| Error | Yes | No | No |
+
+`SessionStart`, `SessionEnd`, and `Error` events only support command-type hooks because HTTP/script hooks may have long timeouts or rely on session state not yet available.
+
+### Script Hooks
+
+Script hooks must export a function as `default` or named `hook`:
+
+```typescript
+// .alexi/hooks/validate-write.ts
+import type { HookContext } from '../../src/hooks/index.js';
+
+export default async function(context: HookContext) {
+  if (context.toolName === 'write') {
+    const params = context.toolParams;
+    if (params?.path?.includes('/protected/')) {
+      throw new Error('Cannot write to protected directory');
+    }
+  }
+  return { allowed: true };
+}
+```
+
+## Custom Agents
+
+### Agent File Format
+
+Custom agents are markdown files with YAML frontmatter stored in:
+- `~/.alexi/agents/*.md` (user-global, lower precedence)
+- `.alexi/agents/*.md` (project-local, higher precedence)
+
+```markdown
+---
+name: "Agent Display Name"
+slug: agent-id
+aliases: [short, alt]
+mode: all                    # primary | subagent | all
+model: gpt-4o               # Preferred model
+tools: [read, write, edit, glob, grep, bash]
+disabledTools: []
+temperature: 0.3
+maxTokens: 16384
+---
+
+System prompt content goes here.
+
+Supports {file:relative/path/to/include.md} for file inclusions.
+```
+
+### Frontmatter Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | filename | Display name |
+| `slug` / `id` | string | filename (no ext) | Unique identifier |
+| `aliases` | string[] | [] | Alternative names for switching |
+| `mode` | enum | `all` | `primary`, `subagent`, or `all` |
+| `model` | string | - | Preferred SAP AI Core model |
+| `tools` | string[] | all | Allowed tool IDs |
+| `disabledTools` | string[] | [] | Explicitly disabled tools |
+| `temperature` | number | - | LLM temperature (0-2) |
+| `maxTokens` | number | - | Max response tokens |
+
+### File Inclusions
+
+Agent prompts support `{file:path}` syntax:
+
+```markdown
+---
+name: "Code Reviewer"
+slug: reviewer
+---
+
+You are a code reviewer.
+
+{file:review-guidelines.md}
+{file:../shared/coding-standards.md}
+```
+
+- Paths are resolved relative to the agent file's directory
+- Recursive inclusions supported up to depth 3
+- Missing files are replaced with `<!-- {file:path} not found -->`
+- Depth-exceeded inclusions show `<!-- {file:path} max inclusion depth reached -->`
+
+## MCP Server Configuration
+
+MCP servers are configured in `.alexi/mcp.json` or `alexi.config.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    },
+    "database": {
+      "command": "python",
+      "args": ["-m", "mcp_server_sqlite", "--db-path", "${SQLITE_DB_PATH}"]
+    }
+  }
+}
+```
+
+Environment variables in configs are resolved using `${VAR_NAME}` syntax.
+
+## Compaction Configuration
+
+### Global Settings
+
+```typescript
+import { setCompactionConfig } from './compaction/index.js';
+
+setCompactionConfig({
+  maxTokens: 100000,        // Default: 100000
+  warningThreshold: 0.8,    // Trigger at 80% (0-1)
+  strategy: 'summarize',    // Default: 'sliding'
+  preserveRecent: 4,        // Always keep 4 most recent messages
 });
 ```
 
-## Project Context
+### Reactive Overflow Seeding
 
-Project context provides additional information about the codebase structure and architecture.
+When a context overflow error is detected during an LLM call, the system uses reactive seeding to calculate an optimal summary target:
 
-### Context Files
-
-#### .alexi/context.json
-
-Project-level context configuration.
-
-```json
-{
-  "projectName": "alexi",
-  "description": "Intelligent LLM orchestrator for SAP AI Core",
-  "architecture": {
-    "patterns": ["event-driven", "plugin-based"],
-    "layers": ["cli", "core", "providers", "tools"]
-  },
-  "conventions": {
-    "naming": "camelCase for files, PascalCase for classes",
-    "imports": "Always use .js extension for local imports"
-  }
-}
+```
+targetSummaryTokens = totalOldTokens - (overflowTokens * 1.5)
 ```
 
-#### .alexi/invariants.md
+This ensures the compacted context fits within the model's limits with safety margin.
 
-Architectural invariants that should never be violated.
+### Chunked Compaction
 
-```markdown
-# Architectural Invariants
+For very large contexts (> 100,000 tokens), content is split at natural boundaries (newlines, paragraphs) and compacted in parallel chunks before being merged.
 
-1. All LLM calls must go through SAP AI Core Orchestration API
-2. Tool execution requires permission checks
-3. Session state must be persisted to disk
-4. Error handling must use Result<T> pattern
-```
-
-## Configuration Examples
+## Example Configurations
 
 ### Cost Optimization
 
-Prioritize cheaper models while maintaining quality.
+Minimize LLM costs while maintaining acceptable quality:
 
 ```json
 {
-  "rules": [
+  "models": [
     {
-      "name": "prefer-mini",
-      "priority": 100,
-      "condition": {
-        "complexity": "simple"
-      },
-      "model": "gpt-4o-mini"
-    },
-    {
-      "name": "fallback-sonnet",
-      "priority": 50,
-      "condition": {},
-      "model": "anthropic--claude-4-sonnet"
+      "id": "gpt-4o-mini",
+      "type": "openai",
+      "costTier": "cheap",
+      "strengths": ["simple-qa", "classification", "extraction", "summarization", "coding"],
+      "maxTokens": 16000,
+      "reasoning": false
     }
   ],
-  "default": {
-    "model": "gpt-4o-mini"
+  "rules": [
+    {
+      "name": "everything-cheap",
+      "description": "Route all tasks to cheapest model",
+      "priority": 1000,
+      "condition": {},
+      "modelId": "gpt-4o-mini"
+    }
+  ],
+  "preferences": {
+    "defaultCostTier": "cheap",
+    "preferCheapWhenPossible": true,
+    "maxCostPerRequest": null,
+    "fallbackModel": "gpt-4o-mini"
   }
 }
+```
+
+CLI usage:
+```bash
+alexi agent -m "Fix the bug" --prefer-cheap --effort low
 ```
 
 ### Quality Optimization
 
-Always use the most capable models.
+Maximize output quality for complex tasks:
 
 ```json
 {
+  "models": [
+    {
+      "id": "anthropic--claude-4.5-opus",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "coding", "research"],
+      "maxTokens": 200000,
+      "reasoning": true
+    }
+  ],
   "rules": [
     {
-      "name": "always-opus",
-      "priority": 100,
+      "name": "always-best",
+      "description": "Always use the most capable model",
+      "priority": 1000,
       "condition": {},
-      "model": "anthropic--claude-4.5-opus"
+      "modelId": "anthropic--claude-4.5-opus"
     }
   ],
-  "default": {
-    "model": "anthropic--claude-4.5-opus"
+  "preferences": {
+    "defaultCostTier": "expensive",
+    "preferCheapWhenPossible": false,
+    "maxCostPerRequest": null,
+    "fallbackModel": "anthropic--claude-4.5-opus"
   }
 }
 ```
 
-### Task-Specific Routing
-
-Route different task types to specialized models.
-
-```json
-{
-  "rules": [
-    {
-      "name": "code-generation",
-      "priority": 100,
-      "condition": {
-        "contains": ["implement", "write code", "create function"]
-      },
-      "model": "anthropic--claude-4-sonnet"
-    },
-    {
-      "name": "data-analysis",
-      "priority": 90,
-      "condition": {
-        "contains": ["analyze data", "statistics", "visualize"]
-      },
-      "model": "gpt-4o"
-    },
-    {
-      "name": "documentation",
-      "priority": 80,
-      "condition": {
-        "contains": ["document", "explain", "describe"]
-      },
-      "model": "gpt-4o-mini"
-    }
-  ],
-  "default": {
-    "model": "anthropic--claude-4-sonnet"
-  }
-}
-```
-
-### Development Stage Routing
-
-Route based on development stage.
-
-```json
-{
-  "rules": [
-    {
-      "name": "prototyping",
-      "priority": 100,
-      "condition": {
-        "contains": ["prototype", "spike", "experiment"]
-      },
-      "model": "gpt-4o-mini"
-    },
-    {
-      "name": "production",
-      "priority": 90,
-      "condition": {
-        "contains": ["production", "release", "deploy"]
-      },
-      "model": "anthropic--claude-4.5-opus"
-    }
-  ],
-  "default": {
-    "model": "anthropic--claude-4-sonnet"
-  }
-}
-```
-
-## Session Storage Configuration
-
-Session files are stored in `~/.alexi/sessions/`.
-
-### Session File Structure
-
-```
-~/.alexi/
-├── sessions/
-│   ├── abc-123.json
-│   ├── def-456.json
-│   └── ghi-789.json
-├── config.json
-├── ALEXI.md
-└── mcp-servers.json
-```
-
-### Session Schema
-
-```typescript
-interface Session {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: Message[];
-  model: string;
-  usage: TokenUsage;
-  metadata: {
-    agent?: string;
-    stage?: string;
-    workdir?: string;
-  };
-}
-```
-
-## Configuration Best Practices
-
-1. **Use Environment Variables for Secrets**: Never commit API keys or credentials to version control
-2. **Use User Config for Preferences**: Store personal preferences in ~/.alexi/config.json
-3. **Use Routing Config for Model Selection**: Define routing rules in routing-config.json
-4. **Use Instruction Files for Context**: Provide project context via AGENTS.md and .alexi/rules/
-5. **Version Control Project Files**: Commit AGENTS.md and .alexi/ to version control
-6. **Keep User Files Private**: Never commit ~/.alexi/ directory
-
-## Configuration Validation
-
-Alexi validates configuration files on startup and provides helpful error messages:
-
+CLI usage:
 ```bash
-# Validate routing configuration
-alexi explain -m "test prompt"
-
-# Check environment variables
-alexi doctor
-
-# Show current configuration
-alexi config show
+alexi agent -m "Architect the new module" --effort high
 ```
 
-## Troubleshooting
+### Specific Model Preferences
 
-### Configuration Not Loading
+Route different task types to specialized models:
 
-1. Check file exists: `ls ~/.alexi/config.json`
-2. Validate JSON syntax: `cat ~/.alexi/config.json | jq`
-3. Check file permissions: `ls -la ~/.alexi/config.json`
+```json
+{
+  "rules": [
+    {
+      "name": "coding-to-claude",
+      "description": "Claude excels at coding tasks",
+      "priority": 100,
+      "condition": {
+        "taskTypes": ["coding"],
+        "keywords": ["implement", "refactor", "debug", "fix", "test"]
+      },
+      "modelId": "anthropic--claude-4.5-sonnet"
+    },
+    {
+      "name": "reasoning-to-opus",
+      "description": "Complex reasoning needs Opus",
+      "priority": 200,
+      "condition": {
+        "taskTypes": ["deep-reasoning"],
+        "keywords": ["analyze", "architecture", "design"]
+      },
+      "modelId": "anthropic--claude-4.5-opus",
+      "requiresReasoning": true
+    },
+    {
+      "name": "simple-to-mini",
+      "description": "Simple questions use cheap model",
+      "priority": 50,
+      "condition": {
+        "maxLength": 200,
+        "maxComplexity": "simple"
+      },
+      "modelId": "gpt-4o-mini"
+    }
+  ],
+  "preferences": {
+    "defaultCostTier": "medium",
+    "preferCheapWhenPossible": false,
+    "maxCostPerRequest": null,
+    "fallbackModel": "gpt-4o"
+  }
+}
+```
 
-### Routing Not Working
+### Hooks for Audit Trail
 
-1. Verify routing-config.json syntax
-2. Check rule priorities (higher = evaluated later)
-3. Use `alexi explain` to see routing decisions
+Track all tool executions for compliance:
 
-### Instruction Files Not Applied
-
-1. Verify file paths: `ls AGENTS.md ~/.alexi/ALEXI.md`
-2. Check file encoding (must be UTF-8)
-3. Use `/memory` command to list loaded files
-
-## Related Documentation
-
-- [API Documentation](API.md) - CLI commands and TypeScript APIs
-- [Architecture](ARCHITECTURE.md) - System architecture and design
-- [Testing Guide](TESTING.md) - Testing configuration and environment setup
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "type": "command",
+      "command": "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) PRE {​{toolName}} session={​{sessionId}}\" >> ~/.alexi/audit.log",
+      "description": "Log tool usage before execution"
+    },
+    {
+      "event": "PostToolUse",
+      "type": "command",
+      "command": "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) POST {​{toolName}} session={​{sessionId}}\" >> ~/.alexi/audit.log",
+      "description": "Log tool completion"
+    },
+    {
+      "event": "Stop",
+      "type": "script",
+      "script": ".alexi/hooks/loop-guard.ts",
+      "description": "Prevent runaway agentic loops"
+    }
+  ]
+}
+```
