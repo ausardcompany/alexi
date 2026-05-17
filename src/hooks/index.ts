@@ -52,6 +52,10 @@ export interface HookDefinition {
   enabled?: boolean; // Default true
   description?: string; // Human-readable description
 
+  // Tool filtering
+  /** When set, restricts this hook to only fire for the specified tool names */
+  tools?: string[];
+
   // Rejection behavior
   /** When true, hook rejection feeds the error back to the model instead of halting */
   continueOnBlock?: boolean;
@@ -101,6 +105,7 @@ export const HookDefinitionSchema = z.object({
   timeout: z.number().positive().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
+  tools: z.array(z.string()).optional(),
   continueOnBlock: z.boolean().optional(),
 });
 
@@ -517,6 +522,11 @@ export class HookManagerImpl implements HookManager {
     for (const hook of eventHooks) {
       // Skip disabled hooks
       if (hook.enabled === false) {
+        continue;
+      }
+
+      // Skip hooks whose tool filter doesn't match the current tool
+      if (hook.tools && hook.tools.length > 0 && !hook.tools.includes(context.toolName ?? '')) {
         continue;
       }
 

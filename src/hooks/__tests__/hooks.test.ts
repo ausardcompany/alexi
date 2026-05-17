@@ -756,4 +756,134 @@ describe('Hooks System', () => {
       expect(results[0].error).toContain('Script error');
     });
   });
+
+  describe('Tool Filtering', () => {
+    it('should only fire hook for matching tool when tools filter is set', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "write-only"',
+        tools: ['write'],
+      });
+
+      const writeContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const readContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'read',
+      };
+
+      const writeResults = await manager.execute('PostToolUse', writeContext);
+      const readResults = await manager.execute('PostToolUse', readContext);
+
+      expect(writeResults).toHaveLength(1);
+      expect(writeResults[0].success).toBe(true);
+      expect(writeResults[0].output?.trim()).toBe('write-only');
+
+      expect(readResults).toHaveLength(0);
+    });
+
+    it('should fire hook for any tool in the tools array', async () => {
+      manager.register({
+        event: 'PreToolUse',
+        type: 'command',
+        command: 'echo "matched"',
+        tools: ['bash', 'write'],
+      });
+
+      const bashContext: HookContext = {
+        event: 'PreToolUse',
+        timestamp: Date.now(),
+        toolName: 'bash',
+      };
+
+      const writeContext: HookContext = {
+        event: 'PreToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const editContext: HookContext = {
+        event: 'PreToolUse',
+        timestamp: Date.now(),
+        toolName: 'edit',
+      };
+
+      const bashResults = await manager.execute('PreToolUse', bashContext);
+      const writeResults = await manager.execute('PreToolUse', writeContext);
+      const editResults = await manager.execute('PreToolUse', editContext);
+
+      expect(bashResults).toHaveLength(1);
+      expect(bashResults[0].success).toBe(true);
+
+      expect(writeResults).toHaveLength(1);
+      expect(writeResults[0].success).toBe(true);
+
+      expect(editResults).toHaveLength(0);
+    });
+
+    it('should fire hook for all tools when tools field is not set (backward compatible)', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "no-filter"',
+      });
+
+      const readContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'read',
+      };
+
+      const bashContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'bash',
+      };
+
+      const readResults = await manager.execute('PostToolUse', readContext);
+      const bashResults = await manager.execute('PostToolUse', bashContext);
+
+      expect(readResults).toHaveLength(1);
+      expect(readResults[0].success).toBe(true);
+
+      expect(bashResults).toHaveLength(1);
+      expect(bashResults[0].success).toBe(true);
+    });
+
+    it('should fire hook for all tools when tools is an empty array (no filter)', async () => {
+      manager.register({
+        event: 'PostToolUse',
+        type: 'command',
+        command: 'echo "empty-filter"',
+        tools: [],
+      });
+
+      const readContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'read',
+      };
+
+      const writeContext: HookContext = {
+        event: 'PostToolUse',
+        timestamp: Date.now(),
+        toolName: 'write',
+      };
+
+      const readResults = await manager.execute('PostToolUse', readContext);
+      const writeResults = await manager.execute('PostToolUse', writeContext);
+
+      expect(readResults).toHaveLength(1);
+      expect(readResults[0].success).toBe(true);
+
+      expect(writeResults).toHaveLength(1);
+      expect(writeResults[0].success).toBe(true);
+    });
+  });
 });
