@@ -229,6 +229,21 @@ export interface LoadResult {
   warnings?: string[];
 }
 
+// Enable result
+export interface EnableResult {
+  success: boolean;
+  pluginName: string;
+  error?: string;
+  enabledDependencies?: string[];
+}
+
+// Disable result
+export interface DisableResult {
+  success: boolean;
+  pluginName: string;
+  error?: string;
+}
+
 // Plugin info for listing
 export interface PluginInfo {
   name: string;
@@ -803,25 +818,107 @@ export class PluginManager {
   }
 
   /**
-   * Enable a plugin
+   * Get names of enabled plugins that depend on the given plugin
    */
-  enable(name: string): void {
+  getDependents(name: string): string[] {
+    const dependents: string[] = [];
+    for (const [pluginName, state] of this.plugins.entries()) {
+      if (!state.enabled) continue;
+      if (pluginName === name) continue;
+      const deps = state.plugin.dependencies;
+      if (deps && deps.includes(name)) {
+        dependents.push(pluginName);
+      }
+    }
+    return dependents;
+  }
+
+  /**
+   * Enable a plugin and recursively enable its dependencies
+   */
+  enable(name: string): EnableResult {
     const state = this.plugins.get(name);
     if (!state) {
-      throw new Error(`Plugin '${name}' is not loaded`);
+      return {
+        success: false,
+        pluginName: name,
+        error: `Plugin '${name}' is not loaded`,
+      };
     }
-    state.enabled = true;
+
+    const enabledDependencies: string[] = [];
+    const visited = new Set<string>();
+
+    const enableRecursive = (pluginName: string): string | undefined => {
+      if (visited.has(pluginName)) return undefined;
+      visited.add(pluginName);
+
+      const pluginState = this.plugins.get(pluginName);
+      if (!pluginState) {
+        return `Dependency '${pluginName}' is not loaded`;
+      }
+
+      // Recursively enable dependencies first
+      const deps = pluginState.plugin.dependencies;
+      if (deps) {
+        for (const dep of deps) {
+          const err = enableRecursive(dep);
+          if (err) return err;
+        }
+      }
+
+      // Enable the plugin if not already enabled
+      if (!pluginState.enabled) {
+        pluginState.enabled = true;
+        if (pluginName !== name) {
+          enabledDependencies.push(pluginName);
+        }
+      }
+
+      return undefined;
+    };
+
+    const error = enableRecursive(name);
+    if (error) {
+      return { success: false, pluginName: name, error };
+    }
+
+    return {
+      success: true,
+      pluginName: name,
+      enabledDependencies: enabledDependencies.length > 0 ? enabledDependencies : undefined,
+    };
   }
 
   /**
    * Disable a plugin
+   * Refuses if other enabled plugins depend on it unless force is true
    */
-  disable(name: string): void {
+  disable(name: string, options?: { force?: boolean }): DisableResult {
     const state = this.plugins.get(name);
     if (!state) {
-      throw new Error(`Plugin '${name}' is not loaded`);
+      return {
+        success: false,
+        pluginName: name,
+        error: `Plugin '${name}' is not loaded`,
+      };
     }
+
+    const force = options?.force ?? false;
+
+    if (!force) {
+      const dependents = this.getDependents(name);
+      if (dependents.length > 0) {
+        return {
+          success: false,
+          pluginName: name,
+          error: `Cannot disable '${name}': required by ${dependents.join(', ')}. Disable those plugins first.`,
+        };
+      }
+    }
+
     state.enabled = false;
+    return { success: true, pluginName: name };
   }
 
   /**
@@ -1030,15 +1127,15 @@ export function listPlugins(): PluginInfo[] {
 /**
  * Enable a plugin in the global manager
  */
-export function enablePlugin(name: string): void {
-  getPluginManager().enable(name);
+export function enablePlugin(name: string): EnableResult {
+  return getPluginManager().enable(name);
 }
 
 /**
  * Disable a plugin in the global manager
  */
-export function disablePlugin(name: string): void {
-  getPluginManager().disable(name);
+export function disablePlugin(name: string, options?: { force?: boolean }): DisableResult {
+  return getPluginManager().disable(name, options);
 }
 
 // Type exports are already included via class declarations above
