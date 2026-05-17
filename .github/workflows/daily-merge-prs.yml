@@ -1,0 +1,141 @@
+name: "Daily PR Merge"
+
+on:
+  schedule:
+    # Run every day at 18:00 UTC (21:00 Minsk time)
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — only report PR status, do not merge'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-merge-prs
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  merge-prs:
+    name: Merge Open PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check for open PRs
+        id: check
+        run: |
+          PR_COUNT=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq 'length')
+          echo "pr_count=$PR_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "[INFO] No open PRs found. Nothing to do."
+            echo "has_prs=false" >> $GITHUB_OUTPUT
+          else
+            echo "[INFO] Found $PR_COUNT open PR(s) to process."
+            echo "has_prs=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Checkout repository
+        if: steps.check.outputs.has_prs == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        if: steps.check.outputs.has_prs == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Kilo CLI and project dependencies
+        if: steps.check.outputs.has_prs == 'true'
+        run: |
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
+          echo "[OK] Project dependencies installed"
+
+      - name: Configure git
+        if: steps.check.outputs.has_prs == 'true'
+        run: |
+          git config user.name "kilo-bot[bot]"
+          git config user.email "kilo-bot[bot]@users.noreply.github.com"
+
+      - name: Run Kilo CLI to merge PRs
+        id: kilo
+        if: steps.check.outputs.has_prs == 'true' && inputs.dry_run != true
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          kilo run "/merge-prs" --title "Daily PR Merge" \
+            --auto \
+            -m "sap-ai-core/anthropic--claude-4.6-opus" \
+            --variant max \
+            > kilo-output.log 2>&1
+
+          KILO_EXIT=$?
+          echo "exit_code=$KILO_EXIT" >> $GITHUB_OUTPUT
+
+          if [ $KILO_EXIT -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Kilo CLI completed successfully"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Kilo CLI exited with code $KILO_EXIT"
+          fi
+
+          echo "=== Kilo Output (last 100 lines) ==="
+          tail -100 kilo-output.log
+
+      - name: Dry run — report PR status
+        if: steps.check.outputs.has_prs == 'true' && inputs.dry_run == true
+        run: |
+          echo "=== Open PRs Status ==="
+          gh pr list --state open --json number,title,mergeable,mergeStateStatus \
+            --template '{{range .}}#{{.number}} | {{.mergeStateStatus}} | {{.title}}{{"\n"}}{{end}}'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Report results
+        if: steps.check.outputs.has_prs == 'true' && inputs.dry_run != true && always()
+        run: |
+          REMAINING=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq 'length')
+          INITIAL="${{ steps.check.outputs.pr_count }}"
+          MERGED=$((INITIAL - REMAINING))
+
+          echo "=== Daily PR Merge Summary ==="
+          echo "Initial open PRs: $INITIAL"
+          echo "Merged/closed:    $MERGED"
+          echo "Remaining:        $REMAINING"
+
+          if [ "$REMAINING" -gt 0 ]; then
+            echo ""
+            echo "Remaining PRs:"
+            gh pr list --state open --json number,title,mergeStateStatus \
+              --template '{{range .}}  #{{.number}} ({{.mergeStateStatus}}) — {{.title}}{{"\n"}}{{end}}'
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-merge-prs-${{ github.run_id }}
+          path: kilo-output.log
+          retention-days: 7
+          if-no-files-found: ignore
