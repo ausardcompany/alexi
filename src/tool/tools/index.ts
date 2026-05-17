@@ -29,11 +29,33 @@ import { diagnosticsTool } from './diagnostics.js';
 // codesearch removed - use semantic search or grep instead
 import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
-import { warpgrepTool } from './warpgrep.js';
+import { warpgrepTool, isWarpgrepAvailable } from './warpgrep.js';
 import { recallTool } from './recall.js';
 import { agentManagerTool } from './agent-manager.js';
 import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
+
+/**
+ * When warpgrep (codebase_search) is unavailable, append a hint to the grep
+ * tool description so users know how to enable semantic search.
+ */
+const SEMANTIC_SEARCH_INSTALL_HINT = '\nNote: For semantic code search, install @morphllm/morphsdk';
+
+const warpgrepAvailable = isWarpgrepAvailable();
+
+const grepToolMaybeHinted = warpgrepAvailable
+  ? grepTool
+  : {
+      ...grepTool,
+      description: grepTool.description + SEMANTIC_SEARCH_INSTALL_HINT,
+      toFunctionSchema() {
+        const schema = grepTool.toFunctionSchema();
+        return {
+          ...schema,
+          description: schema.description + SEMANTIC_SEARCH_INSTALL_HINT,
+        };
+      },
+    };
 
 // All built-in tools
 export const builtInTools = [
@@ -42,7 +64,7 @@ export const builtInTools = [
   editTool,
   bashTool,
   globTool,
-  grepTool,
+  grepToolMaybeHinted,
   webfetchTool,
   websearchTool,
   taskTool,
@@ -63,12 +85,12 @@ export const builtInTools = [
   batchTool,
   storeMemoryTool,
   recallMemoryTool,
-  warpgrepTool,
+  ...(warpgrepAvailable ? [warpgrepTool] : []),
   recallTool,
   agentManagerTool,
   applyPatchTool,
   repoCloneTool,
-] as const;
+];
 
 /**
  * Register all built-in tools
@@ -109,6 +131,7 @@ export {
   storeMemoryTool,
   recallMemoryTool,
   warpgrepTool,
+  isWarpgrepAvailable,
   recallTool,
   agentManagerTool,
   applyPatchTool,

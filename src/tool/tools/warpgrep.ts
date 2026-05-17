@@ -6,6 +6,21 @@ import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { Telemetry } from '../../utils/telemetry.js';
 
+/**
+ * Check whether `@morphllm/morphsdk` can be resolved at runtime.
+ * Returns true when the package is installed and importable, false otherwise.
+ */
+export function isWarpgrepAvailable(): boolean {
+  try {
+    // Use import.meta.resolve to check if the package is resolvable.
+    // This is a synchronous check in Node.js >= 20.
+    import.meta.resolve('@morphllm/morphsdk');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const WarpGrepParamsSchema = z.object({
   query: z
     .string()
