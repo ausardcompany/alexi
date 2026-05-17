@@ -15,6 +15,8 @@ const mockOpen = vi.fn();
 const mockPasteFromClipboard = vi.fn();
 const mockAddFromFile = vi.fn();
 const mockClearAll = vi.fn();
+const mockExportToFile = vi.fn();
+const mockAddSystemMessage = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
@@ -82,6 +84,12 @@ vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
   }),
 }));
 
+vi.mock('../../../src/core/dataExporter.js', () => ({
+  getDataExporter: () => ({
+    exportToFile: mockExportToFile,
+  }),
+}));
+
 // Import after mocks
 import { useCommands } from '../../../src/cli/tui/hooks/useCommands.js';
 
@@ -92,7 +100,9 @@ import { useCommands } from '../../../src/cli/tui/hooks/useCommands.js';
 let capturedHandleCommand: ((input: string) => Promise<boolean>) | null = null;
 
 function InnerComponent(): React.JSX.Element {
-  const { handleCommand, commands } = useCommands();
+  const { handleCommand, commands } = useCommands({
+    addSystemMessage: mockAddSystemMessage,
+  });
   const [result, setResult] = useState<string>('idle');
 
   capturedHandleCommand = handleCommand;
@@ -206,5 +216,57 @@ describe('useCommands', () => {
 
     await capturedHandleCommand!('/image /tmp/photo.png');
     expect(mockAddFromFile).toHaveBeenCalledWith('/tmp/photo.png');
+  });
+
+  describe('/export command', () => {
+    it('is registered in the commands list', () => {
+      const { lastFrame } = render(<InnerComponent />);
+      const frame = lastFrame() ?? '';
+      // The command count should include the new export command
+      // (original 14 commands + 1 export = 15)
+      expect(frame).toContain('commands:');
+      expect(frame).not.toContain('commands:0');
+    });
+
+    it('calls data exporter with session ID and default path', async () => {
+      mockExportToFile.mockResolvedValue(undefined);
+      render(<InnerComponent />);
+
+      const result = await capturedHandleCommand!('/export');
+      expect(result).toBe(true);
+      expect(mockExportToFile).toHaveBeenCalledTimes(1);
+      expect(mockExportToFile).toHaveBeenCalledWith(
+        expect.stringContaining('export-'),
+        { sessionIds: ['test-session-1'] }
+      );
+      expect(mockAddSystemMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Session exported to:')
+      );
+    });
+
+    it('calls data exporter with custom path argument', async () => {
+      mockExportToFile.mockResolvedValue(undefined);
+      render(<InnerComponent />);
+
+      const result = await capturedHandleCommand!('/export /tmp/my-export.json');
+      expect(result).toBe(true);
+      expect(mockExportToFile).toHaveBeenCalledWith('/tmp/my-export.json', {
+        sessionIds: ['test-session-1'],
+      });
+      expect(mockAddSystemMessage).toHaveBeenCalledWith(
+        'Session exported to: /tmp/my-export.json'
+      );
+    });
+
+    it('reports error when export fails', async () => {
+      mockExportToFile.mockRejectedValue(new Error('Permission denied'));
+      render(<InnerComponent />);
+
+      const result = await capturedHandleCommand!('/export /bad/path.json');
+      expect(result).toBe(true);
+      expect(mockAddSystemMessage).toHaveBeenCalledWith(
+        'Export failed: Permission denied'
+      );
+    });
   });
 });
