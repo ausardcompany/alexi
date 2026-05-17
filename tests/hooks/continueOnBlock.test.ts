@@ -130,7 +130,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects with continueOnBlock: true
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects with continueOnBlock: true
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -177,7 +180,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects with output but no error
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects with output but no error
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -217,7 +223,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects
+      // PreToolUse hook passes for first call
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -240,8 +249,14 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 80, completion_tokens: 20, total_tokens: 100 },
       } satisfies CompletionResult);
 
-      // Second hook execution passes
+      // PreToolUse hook passes for second call
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook passes for second call
       mockExecuteHooks.mockResolvedValueOnce([{ success: true, duration: 1 }]);
+
+      // Stop hooks pass
+      mockExecuteHooks.mockResolvedValueOnce([]);
 
       // Third LLM call: done
       mockProvider.complete.mockResolvedValueOnce({
@@ -271,7 +286,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects without continueOnBlock
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects without continueOnBlock
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -298,7 +316,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects with output but no error, no continueOnBlock
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects with output but no error, no continueOnBlock
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -325,7 +346,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook rejects with no error and no output
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects with no error and no output
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -355,6 +379,10 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook rejects with continueOnBlock
       mockExecuteHooks.mockResolvedValueOnce([
         {
           success: false,
@@ -397,10 +425,16 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // Hook succeeds
+      // PreToolUse hook passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse hook succeeds
       mockExecuteHooks.mockResolvedValueOnce([
         { success: true, output: 'Hook passed', duration: 2 },
       ]);
+
+      // Stop hooks pass
+      mockExecuteHooks.mockResolvedValueOnce([]);
 
       mockProvider.complete.mockResolvedValueOnce({
         text: 'Done.',
@@ -434,7 +468,13 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
-      // No hooks registered — returns empty array
+      // PreToolUse: no hooks — returns empty array
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse: no hooks
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // Stop hooks
       mockExecuteHooks.mockResolvedValueOnce([]);
 
       mockProvider.complete.mockResolvedValueOnce({
@@ -462,6 +502,13 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
         usage: { prompt_tokens: 50, completion_tokens: 20, total_tokens: 70 },
       } satisfies CompletionResult);
 
+      // PreToolUse passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // PostToolUse passes
+      mockExecuteHooks.mockResolvedValueOnce([]);
+
+      // Stop hooks pass
       mockExecuteHooks.mockResolvedValueOnce([]);
 
       mockProvider.complete.mockResolvedValueOnce({
@@ -470,6 +517,12 @@ describe('continueOnBlock - hook rejection feedback loop', () => {
       } satisfies CompletionResult);
 
       await agenticChat('Write test');
+
+      expect(mockCreateHookContext).toHaveBeenCalledWith('PreToolUse', {
+        sessionId: undefined,
+        toolName: 'write',
+        toolParams: { filePath: '/test.txt' },
+      });
 
       expect(mockCreateHookContext).toHaveBeenCalledWith('PostToolUse', {
         sessionId: undefined,

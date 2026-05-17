@@ -584,6 +584,47 @@ export async function agenticChat(
 
       // Execute each tool call
       for (const toolCall of result.toolCalls) {
+        // Execute PreToolUse hooks before tool execution
+        let parsedToolParams: Record<string, unknown> = {};
+        try {
+          parsedToolParams = JSON.parse(toolCall.function.arguments || '{}');
+        } catch {
+          // If arguments are not valid JSON, pass empty params to the hook
+        }
+        const preHookContext = createHookContext('PreToolUse', {
+          sessionId: toolContext.sessionId,
+          toolName: toolCall.function.name,
+          toolParams: parsedToolParams,
+        });
+
+        const preHookResults: HookExecResult[] = await executeHooks('PreToolUse', preHookContext);
+
+        let preToolBlocked = false;
+        for (const hookResult of preHookResults) {
+          if (!hookResult.success) {
+            if (hookResult.continueOnBlock) {
+              // Feed rejection reason back to the model as a user message
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              messages.push({
+                role: 'user',
+                content: `Tool execution was blocked: ${reason}. Please try a different approach.`,
+              });
+              preToolBlocked = true;
+            } else {
+              // Halt: throw to stop the agentic loop
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              throw new Error(`PreToolUse hook blocked execution: ${reason}`);
+            }
+          }
+        }
+
+        // Skip tool execution if PreToolUse hook blocked it
+        if (preToolBlocked) {
+          continue;
+        }
+
         const { id, result: toolResult } = await executeToolCall(
           toolCall as ToolCall,
           toolContext,
