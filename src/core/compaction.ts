@@ -40,10 +40,13 @@ const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
 const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
 const SUMMARY_PROMPT = `Summarize this conversation for context continuity. Extract and preserve:
-1. KEY DECISIONS: What was decided and why
-2. FILES CHANGED: List all files created/modified/deleted
-3. CONTEXT: Tech stack, constraints, requirements mentioned
-4. CURRENT STATE: What task is in progress, what's next
+1. USER INSTRUCTIONS: Identify and preserve ALL explicit user instructions, preferences, and constraints verbatim. This includes coding style rules (indentation, naming, formatting), file/directory restrictions ("never modify X", "always edit Y"), API endpoints, keys, or configuration values provided by the user, any "always do X" or "never do Y" directives, and project-specific conventions or requirements stated by the user. These MUST survive compaction unchanged.
+2. KEY DECISIONS: What was decided and why
+3. FILES CHANGED: List all files created/modified/deleted
+4. CONTEXT: Tech stack, constraints, requirements mentioned
+5. CURRENT STATE: What task is in progress, what's next
+
+CRITICAL: Place all explicit user instructions, preferences, and constraints in the "USER INSTRUCTIONS" section at the top. Preserve them verbatim — do not paraphrase or omit any directive the user stated.
 
 Be concise but preserve actionable details. Format as structured notes.
 Respond in the same language the user used in the conversation.
