@@ -17,6 +17,7 @@ import { loadGitConfig } from '../../git/config.js';
 import { commitDirtyFiles } from '../../git/dirtyFiles.js';
 import { RepoMapManager } from '../../context/repoMap.js';
 import { parseEffortLevel, type EffortLevel } from '../../core/effortLevel.js';
+import { createWorktree } from '../../utils/gitWorktree.js';
 
 interface AgentOptions {
   message?: string;
@@ -28,6 +29,7 @@ interface AgentOptions {
   system?: string;
   maxIterations?: number;
   workdir?: string;
+  worktree?: boolean;
   tools?: string;
   verbose?: boolean;
   quiet?: boolean;
@@ -56,6 +58,7 @@ export function registerAgentCommand(program: Command): void {
     .option('--system <prompt>', 'System prompt for the conversation')
     .option('--max-iterations <n>', 'Maximum tool execution iterations', '50')
     .option('--workdir <path>', 'Working directory for tool execution')
+    .option('--worktree', 'Run in an isolated git worktree')
     .option('--tools <list>', 'Comma-separated list of tool names to enable (default: all)')
     .option('-v, --verbose', 'Show progress updates')
     .option('-q, --quiet', 'Only output the final response')
@@ -70,6 +73,7 @@ export function registerAgentCommand(program: Command): void {
     // Effort level
     .option('--effort <level>', 'Effort level: low, medium, high (default: medium)')
     .action(async (opts: AgentOptions) => {
+      let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
         // Get message from either --message or --message-file
         let message: string;
@@ -82,7 +86,37 @@ export function registerAgentCommand(program: Command): void {
           process.exit(1);
         }
 
-        const workdir = opts.workdir ?? process.cwd();
+        // Validate --worktree and --workdir are not both specified
+        if (opts.worktree && opts.workdir) {
+          console.error('Error: --worktree and --workdir cannot be used together');
+          process.exit(1);
+        }
+
+        let workdir = opts.workdir ?? process.cwd();
+
+        // Create an isolated git worktree if requested
+        if (opts.worktree) {
+          const result = await createWorktree(process.cwd());
+          workdir = result.path;
+          worktreeCleanup = result.cleanup;
+
+          // Register cleanup handlers
+          const doCleanup = async () => {
+            if (worktreeCleanup) {
+              await worktreeCleanup();
+              worktreeCleanup = undefined;
+            }
+          };
+          process.on('SIGINT', async () => {
+            await doCleanup();
+            process.exit(130);
+          });
+          process.on('SIGTERM', async () => {
+            await doCleanup();
+            process.exit(143);
+          });
+        }
+
         const sessionManager = new SessionManager();
 
         // Load or create session
@@ -233,7 +267,16 @@ export function registerAgentCommand(program: Command): void {
             console.error(`\n[Session: ${currentSession.metadata.id}]`);
           }
         }
+
+        // Clean up worktree on normal exit
+        if (worktreeCleanup) {
+          await worktreeCleanup();
+        }
       } catch (e) {
+        // Clean up worktree on error
+        if (worktreeCleanup) {
+          await worktreeCleanup();
+        }
         // Log full error details for debugging (especially API errors)
         if (e instanceof Error) {
           console.error(`Error: ${e.message}`);

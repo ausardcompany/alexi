@@ -10,6 +10,7 @@ import { createAutoCommitManager } from '../../git/autoCommit.js';
 import { loadGitConfig } from '../../git/config.js';
 import { commitDirtyFiles } from '../../git/dirtyFiles.js';
 import { RepoMapManager } from '../../context/repoMap.js';
+import { createWorktree } from '../../utils/gitWorktree.js';
 
 interface InteractiveOptions {
   model?: string;
@@ -17,6 +18,7 @@ interface InteractiveOptions {
   preferCheap?: boolean;
   session?: string;
   system?: string;
+  worktree?: boolean;
   // Git flags — commander's --no-<name> sets <name> to false (not no<Name> to true)
   autoCommits?: boolean;
   dirtyCommits?: boolean;
@@ -37,6 +39,7 @@ export function registerInteractiveCommand(program: Command): void {
     .option('--prefer-cheap', 'Prefer cheaper models when auto-routing')
     .option('--session <id>', 'Continue existing session')
     .option('--system <prompt>', 'System prompt for the conversation')
+    .option('--worktree', 'Run in an isolated git worktree')
     // Git auto-commit flags
     .option('--no-auto-commits', 'Disable git auto-commits')
     .option('--no-dirty-commits', 'Skip committing pre-existing dirty files')
@@ -46,8 +49,36 @@ export function registerInteractiveCommand(program: Command): void {
     // Repo map flags
     .option('--map-tokens <n>', 'Repo map token budget (default: 2000; set to 0 to disable)')
     .action(async (opts: InteractiveOptions) => {
+      let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
-        const workdir = process.cwd();
+        let workdir = process.cwd();
+
+        // Create an isolated git worktree if requested
+        if (opts.worktree) {
+          const result = await createWorktree(workdir);
+          workdir = result.path;
+          worktreeCleanup = result.cleanup;
+
+          // Register cleanup handlers
+          const doCleanup = async () => {
+            if (worktreeCleanup) {
+              await worktreeCleanup();
+              worktreeCleanup = undefined;
+            }
+          };
+          process.on('exit', () => {
+            // Synchronous best-effort — async cleanup already registered via signals
+          });
+          process.on('SIGINT', async () => {
+            await doCleanup();
+            process.exit(130);
+          });
+          process.on('SIGTERM', async () => {
+            await doCleanup();
+            process.exit(143);
+          });
+        }
+
         let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
 
         // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
@@ -90,7 +121,16 @@ export function registerInteractiveCommand(program: Command): void {
           gitManager,
           repoMapManager,
         });
+
+        // Clean up worktree on normal exit
+        if (worktreeCleanup) {
+          await worktreeCleanup();
+        }
       } catch (e) {
+        // Clean up worktree on error
+        if (worktreeCleanup) {
+          await worktreeCleanup();
+        }
         console.error(String(e));
         process.exit(1);
       }
