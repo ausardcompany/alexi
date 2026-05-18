@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.23] - 2026-05-18
 
+### Changed
+
+- Removed duplicate `/* eslint-disable no-undef */` directive from the clipboard utility (`src/cli/utils/clipboard.ts`); the module-level JSDoc comment now precedes the single remaining ESLint suppression directive
+
 ### Fixed
 
 - Suppressed ESLint `no-undef` errors for browser globals (`navigator`, `document`) in the clipboard utility (`src/cli/utils/clipboard.ts`) to resolve CI lint failures

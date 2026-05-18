@@ -817,7 +817,7 @@ const success = await copyToClipboard('text to copy');
 // Returns true if copy succeeded, false otherwise
 ```
 
-The utility first attempts the modern `navigator.clipboard.writeText()` API, then falls back to `document.execCommand('copy')` with a hidden textarea element. This module uses browser globals (`navigator`, `document`) and applies ESLint `no-undef` suppression accordingly.
+The utility first attempts the modern `navigator.clipboard.writeText()` API, then falls back to `document.execCommand('copy')` with a hidden textarea element. This module uses browser globals (`navigator`, `document`) and applies ESLint `no-undef` suppression after the module-level JSDoc comment.
 
 ## Error Handling
 
