@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-18
+
+### Added
+
+- Implement #412 ([#421](https://github.com/niclas-simonsson/alexi/pull/421)) (e357c939)
+
+### Maintenance
+
+- Development roadmap 2026-05-18 (1f5f2d38)
+- Research trends documentation for CI (d2b5cadd)
+
 ## [0.4.22] - 2026-05-17
 
 ### Added
