@@ -4,6 +4,8 @@
  * Provides cross-platform clipboard text copying functionality
  */
 
+/* eslint-disable no-undef */
+
 /**
  * Copy text to clipboard with fallback for environments where navigator.clipboard fails
  * @param text - Text to copy to clipboard
