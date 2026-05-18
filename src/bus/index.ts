@@ -26,6 +26,9 @@ export function defineEvent<T extends z.ZodType<any>>(
 ): BusEvent<z.infer<T>> {
   eventSchemas.set(name, schema);
 
+  // Create a unique context for this bus instance
+  const context = { instance: Symbol('bus-instance') };
+
   return {
     name,
     schema,
@@ -38,7 +41,7 @@ export function defineEvent<T extends z.ZodType<any>>(
       if (handlers) {
         for (const handler of handlers) {
           try {
-            handler(parsed);
+            handler.call(context, parsed);
           } catch (err) {
             console.error(`Error in event handler for ${name}:`, err);
           }
@@ -54,7 +57,7 @@ export function defineEvent<T extends z.ZodType<any>>(
         await Promise.all(
           Array.from(handlers).map(async (handler) => {
             try {
-              await handler(parsed);
+              await handler.call(context, parsed);
             } catch (err) {
               console.error(`Error in async event handler for ${name}:`, err);
             }
@@ -82,6 +85,10 @@ export function defineEvent<T extends z.ZodType<any>>(
       const unsub = this.subscribe(wrappedHandler);
       return unsub;
     },
+
+    getContext() {
+      return context;
+    },
   };
 }
 
@@ -92,6 +99,7 @@ export interface BusEvent<T> {
   publishAsync(payload: T): Promise<void>;
   subscribe(handler: EventHandler<T>): UnsubscribeFn;
   once(handler: EventHandler<T>): UnsubscribeFn;
+  getContext(): { instance: symbol };
 }
 
 /**

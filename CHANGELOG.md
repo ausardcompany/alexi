@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.23] - 2026-05-18
+
+### Changed
+
+- Documentation update workflow (`.github/workflows/documentation-update.yml`) now uses a multi-stage merge conflict resolution strategy: rebase, then `-X ours` merge, then manual checkout-ours for doc files, ensuring freshly generated docs always win over stale remote versions
+
+### Fixed
+
+- Resolved merge conflicts in the documentation update workflow by preferring locally generated documentation over remote versions during push
+- Removed redundant top-level `/* eslint-disable no-undef */` comment from `src/cli/utils/clipboard.ts` (the directive is already present after the module JSDoc)
+
 ## [0.4.22] - 2026-05-17
 
 ### Added
@@ -211,6 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
+[0.4.23]: https://github.com/ausardcompany/alexi/compare/v0.4.22...v0.4.23
 [0.4.22]: https://github.com/ausardcompany/alexi/compare/v0.4.17...v0.4.22
 [0.4.17]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.17
 [0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1
