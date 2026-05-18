@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.23] - 2026-05-18
 
+### Changed
+
+- Documentation update workflow (`.github/workflows/documentation-update.yml`) now uses a multi-stage merge conflict resolution strategy: rebase, then `-X ours` merge, then manual checkout-ours for doc files, ensuring freshly generated docs always win over stale remote versions
+
 ### Fixed
 
-- Suppressed ESLint `no-undef` errors for browser globals (`navigator`, `document`) in the clipboard utility (`src/cli/utils/clipboard.ts`) to resolve CI lint failures
-- Added inline documentation noting browser global usage in the clipboard module
+- Resolved merge conflicts in the documentation update workflow by preferring locally generated documentation over remote versions during push
+- Removed redundant top-level `/* eslint-disable no-undef */` comment from `src/cli/utils/clipboard.ts` (the directive is already present after the module JSDoc)
 
 ## [0.4.22] - 2026-05-17
 

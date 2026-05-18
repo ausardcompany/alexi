@@ -158,8 +158,18 @@ sequenceDiagram
     GH->>Alexi: Build CLI from source
     Alexi->>AI: Send documentation prompt
     AI->>Docs: Generate/update docs
-    GH->>Repo: Commit + push docs to PR
+    GH->>Repo: Commit + push docs to PR (with conflict resolution)
 ```
+
+#### Merge Conflict Resolution Strategy
+
+The documentation workflow includes a multi-stage conflict resolution strategy when pushing generated docs back to the PR branch:
+
+1. **Rebase attempt**: First tries `git rebase origin/$BRANCH`
+2. **Merge with `-X ours`**: If rebase fails, attempts `git pull --rebase=false --no-edit -X ours` to auto-resolve conflicts by preferring freshly generated documentation over the remote version
+3. **Manual conflict resolution**: If the merge with `-X ours` also fails, falls back to checking out the local (ours) version of all doc files, staging them, and completing the merge
+
+This ensures that the most recently generated documentation always wins over stale remote versions, preventing merge conflicts from blocking documentation updates.
 
 #### Scope Detection
 

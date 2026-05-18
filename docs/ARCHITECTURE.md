@@ -94,7 +94,7 @@ graph TB
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js, registers 10 command groups |
 | Interactive | `src/cli/interactive.ts` | Legacy interactive mode (deprecated in favor of TUI) |
 | TUI | `src/cli/tui/` | Full-screen Ink/React TUI with streaming, dialogs, and slash commands |
-| CLI Utilities | `src/cli/utils/` | Shared utilities: clipboard (cross-platform copy with fallback), keybindings, model picker, autocomplete, colors |
+| CLI Utilities | `src/cli/utils/` | Shared utilities: clipboard (cross-platform copy with fallback using browser globals with `typeof` guards), keybindings, model picker, autocomplete, colors |
 
 ### Core Layer
 

@@ -255,14 +255,28 @@ Key rules enforced:
 
 Some modules (e.g., `src/cli/utils/clipboard.ts`) reference browser-only globals (`navigator`, `document`) for cross-platform clipboard or DOM operations in TUI/Electron contexts. For these files:
 
-1. Add `/* eslint-disable no-undef */` at the top of the file
-2. Include a comment explaining which browser globals are used and why
+1. Add a module-level JSDoc comment explaining which browser globals are used and why
+2. Place `/* eslint-disable no-undef */` after the module JSDoc (not at the very top of the file)
 3. Always guard access with `typeof` checks:
    ```typescript
    if (typeof navigator !== 'undefined' && navigator.clipboard) {
      await navigator.clipboard.writeText(text);
    }
    ```
+
+Example file structure:
+```typescript
+/**
+ * Module description
+ * Note: This module uses browser globals (navigator, document) for clipboard access.
+ */
+
+/* eslint-disable no-undef */
+
+export async function copyToClipboard(text: string): Promise<boolean> {
+  // ...
+}
+```
 
 ## Testing Guidelines
 
