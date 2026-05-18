@@ -24,6 +24,16 @@ import { buildAssembledSystemPrompt } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
+  type GoalDefinition,
+  type GoalProgress,
+  evaluateGoal,
+  checkGoalLimits,
+  createGoalPrompt,
+  createContinuationPrompt,
+} from './goalEvaluator.js';
+
+export type { GoalDefinition, GoalProgress };
+import {
   checkAndCompact,
   estimateConversationTokens,
   type Message as CompactionMessage,
@@ -80,15 +90,18 @@ export interface AgenticChatOptions {
   effort?: EffortLevel;
   /** Agent ID to use for assembled system prompt (e.g. 'code', 'debug') */
   agentId?: string;
+  /** Goal definition for autonomous goal-driven loop */
+  goal?: GoalDefinition;
 }
 
 export interface AgenticProgressEvent {
-  type: 'llm_call' | 'tool_start' | 'tool_end' | 'iteration' | 'complete';
+  type: 'llm_call' | 'tool_start' | 'tool_end' | 'iteration' | 'complete' | 'goal_progress';
   iteration?: number;
   toolName?: string;
   toolId?: string;
   result?: ToolResult;
   message?: string;
+  goalProgress?: GoalProgress;
 }
 
 export interface AgenticChatResult {
@@ -441,7 +454,11 @@ export async function agenticChat(
     }
   }
 
-  messages.push({ role: 'user', content: message });
+  // If a goal is set, prepend the goal prompt to the user message
+  const effectiveMessage = options?.goal
+    ? `${createGoalPrompt(options.goal)}\n\n${message}`
+    : message;
+  messages.push({ role: 'user', content: effectiveMessage });
 
   // Tracking
   let iterations = 0;
@@ -461,199 +478,282 @@ export async function agenticChat(
     gitManager: options?.gitManager,
   };
 
+  // Goal tracking
+  const goalStartTime = Date.now();
+  let goalTurns = 0;
+
   // Agent loop
   let finalText = '';
+  let goalPending = !!options?.goal;
 
-  while (iterations < maxIterations) {
-    iterations++;
+  // Outer goal loop — wraps the inner tool loop
+  // Each "goal turn" is one complete inner loop pass (tool calls until text response)
+  // When no goal is set, goalPending is false and the outer loop runs exactly once.
+  do {
+    while (iterations < maxIterations) {
+      iterations++;
 
-    options?.onProgress?.({
-      type: 'iteration',
-      iteration: iterations,
-      message: `Starting iteration ${iterations}`,
-    });
-
-    // Check for abort
-    if (options?.signal?.aborted) {
-      throw new Error('Operation aborted');
-    }
-
-    // Call LLM
-    options?.onProgress?.({
-      type: 'llm_call',
-      iteration: iterations,
-    });
-
-    // Diagnostic: log message structure before API call (helps debug 400 errors)
-    if (process.env.ALEXI_DEBUG_MESSAGES === '1') {
-      const msgSummary = messages.map((m, i) => {
-        const msg = m as Record<string, unknown>;
-        const role = msg['role'] as string;
-        const hasToolCalls = 'tool_calls' in m;
-        const hasToolCallId = 'tool_call_id' in m;
-        const contentLen =
-          typeof msg['content'] === 'string' ? (msg['content'] as string).length : 0;
-        return `  [${i}] role=${role} content_len=${contentLen}${hasToolCalls ? ` tool_calls=${JSON.stringify((msg['tool_calls'] as unknown[]).length)}` : ''}${hasToolCallId ? ` tool_call_id=${msg['tool_call_id']}` : ''}`;
-      });
-      // eslint-disable-next-line no-console
-      console.error(
-        `[DEBUG] Iteration ${iterations} - sending ${messages.length} messages:\n${msgSummary.join('\n')}`
-      );
-    }
-
-    let result: CompletionResult;
-    try {
-      result = await provider.complete(messages as Array<{ role: string; content: string }>, {
-        maxTokens: effortConfig.maxTokens,
-        tools: toolSchemas.length > 0 ? toolSchemas : undefined,
-      });
-    } catch (err) {
-      // Detect context overflow and attempt compaction with reactive seeding
-      const compactionMessages = messages
-        .filter(
-          (m): m is { role: 'user' | 'assistant' | 'system'; content: string } =>
-            m.role === 'user' || m.role === 'assistant' || m.role === 'system'
-        )
-        .map((m) => ({ role: m.role, content: m.content ?? '' })) as CompactionMessage[];
-
-      const currentTokenEstimate = estimateConversationTokens(compactionMessages);
-      const contextMax = effortConfig.maxTokens * 4; // Approximate context window
-      const overflowTokens = detectContextOverflow(err, currentTokenEstimate, contextMax);
-
-      if (overflowTokens !== undefined) {
-        options?.onProgress?.({
-          type: 'iteration',
-          iteration: iterations,
-          message: `Context overflow detected (~${overflowTokens} tokens over). Compacting...`,
-        });
-
-        const { messages: compactedMessages, wasCompacted } = await checkAndCompact(
-          compactionMessages,
-          { strategy: 'summarize', overflowTokens }
-        );
-
-        if (wasCompacted) {
-          // Replace messages with compacted version
-          messages.length = 0;
-          messages.push(...compactedMessages);
-
-          // Retry the completion
-          result = await provider.complete(messages as Array<{ role: string; content: string }>, {
-            maxTokens: effortConfig.maxTokens,
-            tools: toolSchemas.length > 0 ? toolSchemas : undefined,
-          });
-        } else {
-          throw err;
-        }
-      } else {
-        throw err;
-      }
-    }
-
-    // Accumulate usage
-    if (result.usage) {
-      totalUsage.prompt_tokens =
-        (totalUsage.prompt_tokens ?? 0) + (result.usage.prompt_tokens ?? 0);
-      totalUsage.completion_tokens =
-        (totalUsage.completion_tokens ?? 0) + (result.usage.completion_tokens ?? 0);
-      totalUsage.total_tokens = (totalUsage.total_tokens ?? 0) + (result.usage.total_tokens ?? 0);
-    }
-
-    // Detect output truncation — when finishReason is 'length', the response was cut
-    // short by the max_tokens limit. Tool call arguments may be incomplete/corrupted.
-    if (result.finishReason === 'length') {
       options?.onProgress?.({
         type: 'iteration',
         iteration: iterations,
-        message:
-          'Warning: LLM output was truncated (max_tokens reached). ' +
-          'Tool calls in this response may have incomplete parameters.',
-      });
-    }
-
-    // Check if LLM wants to use tools
-    if (result.toolCalls && result.toolCalls.length > 0) {
-      // Add assistant message with tool calls
-      // Use undefined for content when empty — some API backends (e.g. Anthropic
-      // via SAP AI Core) may reject empty-string content on tool-call messages
-      messages.push({
-        role: 'assistant',
-        content: result.text || undefined,
-        tool_calls: result.toolCalls as ToolCall[],
+        message: `Starting iteration ${iterations}`,
       });
 
-      // Execute each tool call
-      for (const toolCall of result.toolCalls) {
-        const { id, result: toolResult } = await executeToolCall(
-          toolCall as ToolCall,
-          toolContext,
-          options?.onProgress
+      // Check for abort
+      if (options?.signal?.aborted) {
+        throw new Error('Operation aborted');
+      }
+
+      // Call LLM
+      options?.onProgress?.({
+        type: 'llm_call',
+        iteration: iterations,
+      });
+
+      // Diagnostic: log message structure before API call (helps debug 400 errors)
+      if (process.env.ALEXI_DEBUG_MESSAGES === '1') {
+        const msgSummary = messages.map((m, i) => {
+          const msg = m as Record<string, unknown>;
+          const role = msg['role'] as string;
+          const hasToolCalls = 'tool_calls' in m;
+          const hasToolCallId = 'tool_call_id' in m;
+          const contentLen =
+            typeof msg['content'] === 'string' ? (msg['content'] as string).length : 0;
+          return `  [${i}] role=${role} content_len=${contentLen}${hasToolCalls ? ` tool_calls=${JSON.stringify((msg['tool_calls'] as unknown[]).length)}` : ''}${hasToolCallId ? ` tool_call_id=${msg['tool_call_id']}` : ''}`;
+        });
+        // eslint-disable-next-line no-console
+        console.error(
+          `[DEBUG] Iteration ${iterations} - sending ${messages.length} messages:\n${msgSummary.join('\n')}`
         );
+      }
 
-        toolCallsExecuted++;
-        toolCallSummary.push({
-          name: toolCall.function.name,
-          success: toolResult.success,
-          error: toolResult.error,
+      let result: CompletionResult;
+      try {
+        result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+          maxTokens: effortConfig.maxTokens,
+          tools: toolSchemas.length > 0 ? toolSchemas : undefined,
         });
+      } catch (err) {
+        // Detect context overflow and attempt compaction with reactive seeding
+        const compactionMessages = messages
+          .filter(
+            (m): m is { role: 'user' | 'assistant' | 'system'; content: string } =>
+              m.role === 'user' || m.role === 'assistant' || m.role === 'system'
+          )
+          .map((m) => ({ role: m.role, content: m.content ?? '' })) as CompactionMessage[];
 
-        // Add tool response to messages
-        messages.push({
-          role: 'tool',
-          tool_call_id: id,
-          content: JSON.stringify(toolResult),
-        });
+        const currentTokenEstimate = estimateConversationTokens(compactionMessages);
+        const contextMax = effortConfig.maxTokens * 4; // Approximate context window
+        const overflowTokens = detectContextOverflow(err, currentTokenEstimate, contextMax);
 
-        // Execute PostToolUse hooks and handle rejection feedback
-        const hookContext = createHookContext('PostToolUse', {
-          sessionId: toolContext.sessionId,
-          toolName: toolCall.function.name,
-          toolResult,
-        });
+        if (overflowTokens !== undefined) {
+          options?.onProgress?.({
+            type: 'iteration',
+            iteration: iterations,
+            message: `Context overflow detected (~${overflowTokens} tokens over). Compacting...`,
+          });
 
-        const hookResults: HookExecResult[] = await executeHooks('PostToolUse', hookContext);
+          const { messages: compactedMessages, wasCompacted } = await checkAndCompact(
+            compactionMessages,
+            { strategy: 'summarize', overflowTokens }
+          );
 
-        for (const hookResult of hookResults) {
-          if (!hookResult.success) {
-            if (hookResult.continueOnBlock) {
-              // Feed rejection reason back to the model as a user message
-              const reason =
-                hookResult.error || hookResult.output || 'Hook rejected tool execution';
-              messages.push({
-                role: 'user',
-                content: `Tool execution was blocked: ${reason}. Please try a different approach.`,
-              });
-            } else {
-              // Halt: throw to stop the agentic loop
-              const reason =
-                hookResult.error || hookResult.output || 'Hook rejected tool execution';
-              throw new Error(`PostToolUse hook blocked execution: ${reason}`);
-            }
+          if (wasCompacted) {
+            // Replace messages with compacted version
+            messages.length = 0;
+            messages.push(...compactedMessages);
+
+            // Retry the completion
+            result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+              maxTokens: effortConfig.maxTokens,
+              tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+            });
+          } else {
+            throw err;
           }
+        } else {
+          throw err;
         }
       }
 
-      // Check Stop hooks for loop guard
-      const stopHookContext = createHookContext('Stop', {
-        sessionId: toolContext.sessionId,
-        toolName: toolCallSummary[toolCallSummary.length - 1]?.name,
-      });
-      const stopResults: HookExecResult[] = await executeHooks('Stop', stopHookContext);
-      const cappedResult = stopResults.find((r) => r.capped === true);
-      if (cappedResult) {
-        const cap = getBlockCap();
-        finalText = `[Hook Loop Guard] Stop hook blocked ${cap} consecutive times. Ending turn to prevent infinite loop.`;
-        messages.push({ role: 'assistant', content: finalText });
-        break;
+      // Accumulate usage
+      if (result.usage) {
+        totalUsage.prompt_tokens =
+          (totalUsage.prompt_tokens ?? 0) + (result.usage.prompt_tokens ?? 0);
+        totalUsage.completion_tokens =
+          (totalUsage.completion_tokens ?? 0) + (result.usage.completion_tokens ?? 0);
+        totalUsage.total_tokens = (totalUsage.total_tokens ?? 0) + (result.usage.total_tokens ?? 0);
       }
 
-      // Continue loop to let LLM process tool results
-    } else {
-      // No tool calls - LLM is done
-      finalText = result.text;
-      break;
+      // Detect output truncation — when finishReason is 'length', the response was cut
+      // short by the max_tokens limit. Tool call arguments may be incomplete/corrupted.
+      if (result.finishReason === 'length') {
+        options?.onProgress?.({
+          type: 'iteration',
+          iteration: iterations,
+          message:
+            'Warning: LLM output was truncated (max_tokens reached). ' +
+            'Tool calls in this response may have incomplete parameters.',
+        });
+      }
+
+      // Check if LLM wants to use tools
+      if (result.toolCalls && result.toolCalls.length > 0) {
+        // Add assistant message with tool calls
+        // Use undefined for content when empty — some API backends (e.g. Anthropic
+        // via SAP AI Core) may reject empty-string content on tool-call messages
+        messages.push({
+          role: 'assistant',
+          content: result.text || undefined,
+          tool_calls: result.toolCalls as ToolCall[],
+        });
+
+        // Execute each tool call
+        for (const toolCall of result.toolCalls) {
+          const { id, result: toolResult } = await executeToolCall(
+            toolCall as ToolCall,
+            toolContext,
+            options?.onProgress
+          );
+
+          toolCallsExecuted++;
+          toolCallSummary.push({
+            name: toolCall.function.name,
+            success: toolResult.success,
+            error: toolResult.error,
+          });
+
+          // Add tool response to messages
+          messages.push({
+            role: 'tool',
+            tool_call_id: id,
+            content: JSON.stringify(toolResult),
+          });
+
+          // Execute PostToolUse hooks and handle rejection feedback
+          const hookContext = createHookContext('PostToolUse', {
+            sessionId: toolContext.sessionId,
+            toolName: toolCall.function.name,
+            toolResult,
+          });
+
+          const hookResults: HookExecResult[] = await executeHooks('PostToolUse', hookContext);
+
+          for (const hookResult of hookResults) {
+            if (!hookResult.success) {
+              if (hookResult.continueOnBlock) {
+                // Feed rejection reason back to the model as a user message
+                const reason =
+                  hookResult.error || hookResult.output || 'Hook rejected tool execution';
+                messages.push({
+                  role: 'user',
+                  content: `Tool execution was blocked: ${reason}. Please try a different approach.`,
+                });
+              } else {
+                // Halt: throw to stop the agentic loop
+                const reason =
+                  hookResult.error || hookResult.output || 'Hook rejected tool execution';
+                throw new Error(`PostToolUse hook blocked execution: ${reason}`);
+              }
+            }
+          }
+        }
+
+        // Check Stop hooks for loop guard
+        const stopHookContext = createHookContext('Stop', {
+          sessionId: toolContext.sessionId,
+          toolName: toolCallSummary[toolCallSummary.length - 1]?.name,
+        });
+        const stopResults: HookExecResult[] = await executeHooks('Stop', stopHookContext);
+        const cappedResult = stopResults.find((r) => r.capped === true);
+        if (cappedResult) {
+          const cap = getBlockCap();
+          finalText = `[Hook Loop Guard] Stop hook blocked ${cap} consecutive times. Ending turn to prevent infinite loop.`;
+          messages.push({ role: 'assistant', content: finalText });
+          break;
+        }
+
+        // Continue loop to let LLM process tool results
+      } else {
+        // No tool calls - LLM is done
+        finalText = result.text;
+        break;
+      }
     }
-  }
+
+    // Goal evaluation — if no goal is set, exit immediately
+    if (options?.goal) {
+      // Increment goal turn count
+      goalTurns++;
+
+      // Build current progress
+      const progress: GoalProgress = {
+        turnsElapsed: goalTurns,
+        elapsedMs: Date.now() - goalStartTime,
+        tokensUsed: totalUsage.total_tokens ?? 0,
+        lastAssistantMessage: finalText,
+        isComplete: false,
+      };
+
+      // Check limits first
+      const limitReason = checkGoalLimits(options.goal, progress, options?.signal);
+      if (limitReason) {
+        progress.isComplete = true;
+        progress.reason = limitReason;
+        options?.onProgress?.({
+          type: 'goal_progress',
+          iteration: iterations,
+          message: `Goal loop ended: ${limitReason}`,
+          goalProgress: progress,
+        });
+        goalPending = false;
+      } else {
+        // Evaluate goal completion
+        let evaluationFailed = false;
+        try {
+          const goalMet = await evaluateGoal(options.goal, progress, toolContext);
+          if (goalMet) {
+            progress.isComplete = true;
+            progress.reason = 'goal_met';
+            options?.onProgress?.({
+              type: 'goal_progress',
+              iteration: iterations,
+              message: 'Goal has been met!',
+              goalProgress: progress,
+            });
+            goalPending = false;
+          }
+        } catch {
+          evaluationFailed = true;
+          progress.isComplete = true;
+          progress.reason = 'error';
+          options?.onProgress?.({
+            type: 'goal_progress',
+            iteration: iterations,
+            message: 'Goal evaluation failed',
+            goalProgress: progress,
+          });
+          goalPending = false;
+        }
+
+        // Goal not met and no error — inject continuation prompt
+        if (goalPending && !evaluationFailed) {
+          options?.onProgress?.({
+            type: 'goal_progress',
+            iteration: iterations,
+            message: `Goal turn ${goalTurns} complete, not yet met. Continuing...`,
+            goalProgress: progress,
+          });
+
+          // Inject continuation prompt as a user message
+          const continuationPrompt = createContinuationPrompt(options.goal, progress);
+          messages.push({ role: 'user', content: continuationPrompt });
+        }
+      }
+    } else {
+      goalPending = false;
+    }
+  } while (goalPending);
 
   // Record cost
   if (totalUsage.prompt_tokens || totalUsage.completion_tokens) {
