@@ -112,6 +112,13 @@ Always follow the exact output structure requested by the user prompt. Keep ever
 
 Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
 
+CRITICAL: You MUST preserve the following verbatim in the summary — do not paraphrase or omit them:
+- User-specified coding preferences and constraints (indentation, naming, style rules)
+- Explicit instructions about what NOT to do or what to always do
+- API keys, endpoints, URLs, credentials, and environment configuration the user provided
+- Tool configuration, file paths, and project-specific settings
+- Any instruction the user marked as important, critical, or that they want remembered
+
 Conversation to summarize:
 {messages}
 

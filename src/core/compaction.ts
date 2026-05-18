@@ -44,6 +44,7 @@ const SUMMARY_PROMPT = `Summarize this conversation for context continuity. Extr
 2. FILES CHANGED: List all files created/modified/deleted
 3. CONTEXT: Tech stack, constraints, requirements mentioned
 4. CURRENT STATE: What task is in progress, what's next
+5. USER INSTRUCTIONS: Preserve ALL user-specified preferences, constraints, and explicit instructions verbatim (coding style, API keys, endpoints, "always do X", "never do Y")
 
 Be concise but preserve actionable details. Format as structured notes.
 Respond in the same language the user used in the conversation.
