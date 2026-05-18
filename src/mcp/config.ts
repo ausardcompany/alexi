@@ -28,6 +28,8 @@ export interface McpServerConfig {
   enabled: boolean;
   /** Auto-connect on startup */
   autoConnect?: boolean;
+  /** Tool call timeout in milliseconds. Default: 60000 */
+  timeout?: number;
 }
 
 export interface McpConfig {
