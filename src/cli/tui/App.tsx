@@ -232,9 +232,10 @@ function AppLayout(): React.JSX.Element {
   const { rewindTo } = useRewind({ messages, setMessages: setMessagesCallback });
 
   // Wire up rewindTo to the ChatContext so dialogs can call it
+  const { setRewindHandler } = chat;
   useEffect(() => {
-    chat.setRewindHandler(rewindTo);
-  }, [chat, rewindTo]);
+    setRewindHandler(rewindTo);
+  }, [setRewindHandler, rewindTo]);
 
   const addSystemMessage = useCallback(
     (text: string) => {
@@ -252,8 +253,13 @@ function AppLayout(): React.JSX.Element {
 
   const handleRewindResult = useCallback(
     (result: unknown) => {
-      const r = result as { turnIndex: number; mode: 'discard' | 'summarize' } | null;
-      if (r) {
+      if (
+        result != null &&
+        typeof result === 'object' &&
+        'turnIndex' in result &&
+        'mode' in result
+      ) {
+        const r = result as RewindResult;
         void rewindTo(r.turnIndex, r.mode);
       }
     },

@@ -3,7 +3,7 @@
  * conversation history via the rewind menu.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 
 import { useChat } from '../context/ChatContext.js';
 import type { RewindMode } from '../context/ChatContext.js';
@@ -39,13 +39,17 @@ function toCompactionMessage(msg: MessageDisplay): Message {
 export function useRewind({ messages, setMessages }: UseRewindOptions): UseRewindReturn {
   const chat = useChat();
 
+  // Use a ref to always access the latest messages without recreating callbacks
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
   const discardAfter = useCallback(
     (turnIndex: number) => {
       // Keep messages[0..turnIndex] inclusive
-      const truncated = messages.slice(0, turnIndex + 1);
+      const truncated = messagesRef.current.slice(0, turnIndex + 1);
       setMessages(truncated);
     },
-    [messages, setMessages]
+    [setMessages]
   );
 
   const summarizeBefore = useCallback(
@@ -55,27 +59,35 @@ export function useRewind({ messages, setMessages }: UseRewindOptions): UseRewin
         return;
       }
 
-      const compactionMessages = messages.map(toCompactionMessage);
-      const compactedMessages = await partialCompact(compactionMessages, turnIndex);
+      const currentMessages = messagesRef.current;
+      const compactionMessages = currentMessages.map(toCompactionMessage);
 
-      // Rebuild MessageDisplay array from compacted messages
-      const preserved = messages.slice(turnIndex);
-      const summaryMsg = compactedMessages[0];
+      try {
+        const compactedMessages = await partialCompact(compactionMessages, turnIndex);
 
-      if (summaryMsg) {
-        const summaryDisplay: MessageDisplay = {
-          id: `summary-${Date.now()}`,
-          role: 'system',
-          content: summaryMsg.content,
-          toolCalls: [],
-          timestamp: summaryMsg.timestamp ?? Date.now(),
-        };
-        setMessages([summaryDisplay, ...preserved]);
-      } else {
+        // Rebuild MessageDisplay array from compacted messages
+        const preserved = currentMessages.slice(turnIndex);
+        const summaryMsg = compactedMessages[0];
+
+        if (summaryMsg) {
+          const summaryDisplay: MessageDisplay = {
+            id: `summary-${Date.now()}`,
+            role: 'system',
+            content: summaryMsg.content,
+            toolCalls: [],
+            timestamp: summaryMsg.timestamp ?? Date.now(),
+          };
+          setMessages([summaryDisplay, ...preserved]);
+        } else {
+          setMessages(preserved);
+        }
+      } catch {
+        // If summarization fails, fall back to simple truncation
+        const preserved = currentMessages.slice(turnIndex);
         setMessages(preserved);
       }
     },
-    [messages, setMessages]
+    [setMessages]
   );
 
   const rewindTo = useCallback(
@@ -86,12 +98,10 @@ export function useRewind({ messages, setMessages }: UseRewindOptions): UseRewin
         await summarizeBefore(index);
       }
 
-      // Clear any streaming state
-      if (chat.isStreaming && chat.abortController) {
-        chat.abortController.abort();
-      }
+      // Clear any streaming state — abort unconditionally (no-op if not active)
+      chat.abortController?.abort();
     },
-    [discardAfter, summarizeBefore, chat.isStreaming, chat.abortController]
+    [discardAfter, summarizeBefore, chat]
   );
 
   return { discardAfter, summarizeBefore, rewindTo };
