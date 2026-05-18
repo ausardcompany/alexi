@@ -52,6 +52,7 @@ interface ToolCache {
 }
 
 const CACHE_TTL_MS = 30000; // 30 seconds
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds
 
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
@@ -185,7 +186,8 @@ export class McpClientManager {
       env: cleanEnv,
     });
 
-    await connection.client.connect(transport);
+    const timeoutMs = this.getTimeoutForServer(config.name);
+    await connection.client.connect(transport, { timeout: timeoutMs });
   }
 
   /**
@@ -370,6 +372,27 @@ export class McpClientManager {
   }
 
   /**
+   * Get the timeout for a specific server.
+   * Priority: per-server config > MCP_TOOL_TIMEOUT env var > default
+   */
+  private getTimeoutForServer(serverName: string): number {
+    const connection = this.connections.get(serverName);
+    if (connection?.config.timeout !== undefined) {
+      return connection.config.timeout;
+    }
+
+    const envTimeout = process.env.MCP_TOOL_TIMEOUT;
+    if (envTimeout !== undefined) {
+      const parsed = Number(envTimeout);
+      if (!isNaN(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+
+    return DEFAULT_TOOL_CALL_TIMEOUT_MS;
+  }
+
+  /**
    * Call a tool on an MCP server
    */
   async callTool(
@@ -387,11 +410,17 @@ export class McpClientManager {
       return { success: false, error: `Server not ready: ${serverName} (${connection.status})` };
     }
 
+    const timeoutMs = this.getTimeoutForServer(serverName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-      const result = await connection.client.callTool({
-        name: toolName,
-        arguments: args,
-      });
+      const result = await connection.client.callTool(
+        { name: toolName, arguments: args },
+        undefined,
+        { signal: controller.signal }
+      );
+      clearTimeout(timer);
 
       // Extract text content from result
       const content = (result.content || []) as Array<{ type: string; text?: string }>;
@@ -409,6 +438,10 @@ export class McpClientManager {
 
       return { success: true, result: textContent };
     } catch (error) {
+      clearTimeout(timer);
+      if (error instanceof Error && error.name === 'AbortError') {
+        return { success: false, error: `MCP tool call timed out after ${timeoutMs}ms` };
+      }
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
