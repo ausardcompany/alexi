@@ -200,8 +200,12 @@ export class SessionManager {
         sessions.push(session.metadata);
       }
 
-      // Sort by updated time (newest first)
-      sessions.sort((a, b) => b.updated - a.updated);
+      // Sort by updated time (newest first), with fallback to created time
+      sessions.sort((a, b) => {
+        const aTime = a.updated ?? a.created;
+        const bTime = b.updated ?? b.created;
+        return bTime - aTime;
+      });
 
       return sessions;
     } catch (error) {

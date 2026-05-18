@@ -16,6 +16,19 @@ const AGENT_CYCLE_ORDER = ['code', 'debug', 'plan', 'explore', 'orchestrator'] a
 /** Actions available via leader key sequences */
 export type LeaderAction = 'new-session' | 'model-picker' | 'agent-list' | 'status' | 'help';
 
+/** Default keybindings configuration */
+export const DEFAULT_KEYBINDS = {
+  submit: ['Enter'],
+  cancel: ['Escape'],
+  dialogSubmit: ['Enter', 'Ctrl+Enter'],
+};
+
+export interface KeybindConfig {
+  submit: string[];
+  cancel: string[];
+  dialogSubmit: string[];
+}
+
 /** Leader key mapping: key name → action */
 const LEADER_KEY_MAP: Record<string, LeaderAction> = {
   n: 'new-session',
