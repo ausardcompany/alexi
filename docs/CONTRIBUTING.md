@@ -244,11 +244,25 @@ import type { ToolContext } from '../tool/index.js';
 
 Key rules enforced:
 - `no-console: warn` -- Use logger utilities
+- `no-undef: error` -- All variables must be declared (use `/* eslint-disable no-undef */` for modules that intentionally reference browser globals)
 - `eqeqeq: error` -- Always use `===` and `!==`
 - `curly: error` -- Always use braces for control statements
 - `prefer-const: error` -- Use `const` when not reassigned
 - `@typescript-eslint/no-explicit-any: warn`
 - `@typescript-eslint/no-unused-vars: error`
+
+### Browser Globals in Node.js Modules
+
+Some modules (e.g., `src/cli/utils/clipboard.ts`) reference browser-only globals (`navigator`, `document`) for cross-platform clipboard or DOM operations in TUI/Electron contexts. For these files:
+
+1. Add `/* eslint-disable no-undef */` at the top of the file
+2. Include a comment explaining which browser globals are used and why
+3. Always guard access with `typeof` checks:
+   ```typescript
+   if (typeof navigator !== 'undefined' && navigator.clipboard) {
+     await navigator.clipboard.writeText(text);
+   }
+   ```
 
 ## Testing Guidelines
 

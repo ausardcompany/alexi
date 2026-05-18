@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.23] - 2026-05-18
+
+### Fixed
+
+- Suppressed ESLint `no-undef` errors for browser globals (`navigator`, `document`) in the clipboard utility (`src/cli/utils/clipboard.ts`) to resolve CI lint failures
+- Added inline documentation noting browser global usage in the clipboard module
+
 ## [0.4.22] - 2026-05-17
 
 ### Added
@@ -211,6 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
+[0.4.23]: https://github.com/ausardcompany/alexi/compare/v0.4.22...v0.4.23
 [0.4.22]: https://github.com/ausardcompany/alexi/compare/v0.4.17...v0.4.22
 [0.4.17]: https://github.com/ausardcompany/alexi/compare/v0.3.1...v0.4.17
 [0.3.1]: https://github.com/ausardcompany/alexi/compare/v0.3.0...v0.3.1

@@ -804,6 +804,21 @@ const customTool = defineTool({
 registerTool(customTool);
 ```
 
+## CLI Utilities
+
+### Clipboard (`src/cli/utils/clipboard.ts`)
+
+Cross-platform clipboard text copying with fallback support for environments where the Clipboard API is unavailable.
+
+```typescript
+import { copyToClipboard } from './cli/utils/clipboard.js';
+
+const success = await copyToClipboard('text to copy');
+// Returns true if copy succeeded, false otherwise
+```
+
+The utility first attempts the modern `navigator.clipboard.writeText()` API, then falls back to `document.execCommand('copy')` with a hidden textarea element. This module uses browser globals (`navigator`, `document`) and applies ESLint `no-undef` suppression accordingly.
+
 ## Error Handling
 
 All CLI commands handle errors gracefully:

@@ -94,6 +94,7 @@ graph TB
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js, registers 10 command groups |
 | Interactive | `src/cli/interactive.ts` | Legacy interactive mode (deprecated in favor of TUI) |
 | TUI | `src/cli/tui/` | Full-screen Ink/React TUI with streaming, dialogs, and slash commands |
+| CLI Utilities | `src/cli/utils/` | Shared utilities: clipboard (cross-platform copy with fallback), keybindings, model picker, autocomplete, colors |
 
 ### Core Layer
 
@@ -589,7 +590,7 @@ alexi/
 ├── src/
 │   ├── agent/          # Agent registry, custom loader, system prompt assembly
 │   ├── bus/            # Typed event bus (defineEvent, BusEvent)
-│   ├── cli/            # CLI program + TUI (Ink/React components)
+│   ├── cli/            # CLI program + TUI (Ink/React components) + utils (clipboard, keybindings)
 │   ├── command/        # Slash command system
 │   ├── compaction/     # Context compaction strategies
 │   ├── config/         # Environment, routing, user config, project context
