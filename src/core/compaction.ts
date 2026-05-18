@@ -368,6 +368,66 @@ export async function compactConversation(
 }
 
 /**
+ * Compact a partial range of messages (from startIdx to endIdx, exclusive).
+ * Returns a single summary message that can replace the specified range.
+ *
+ * @param messages - Full messages array
+ * @param startIdx - Start index (inclusive)
+ * @param endIdx - End index (exclusive)
+ * @param options - Optional compaction options
+ * @returns A single summary message with role 'system'
+ */
+export async function partialCompact(
+  messages: Message[],
+  startIdx: number,
+  endIdx: number,
+  options?: CompactionOptions
+): Promise<Message> {
+  const maxChunkTokens = options?.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
+
+  // Extract the range of messages to summarize
+  const messagesToSummarize = messages.slice(startIdx, endIdx);
+
+  if (messagesToSummarize.length === 0) {
+    return {
+      role: 'system',
+      content: '[PARTIAL SUMMARY]\nNo messages to summarize.',
+      timestamp: Date.now(),
+    };
+  }
+
+  let summary: string;
+
+  if (globalLLMSummarizeFn) {
+    const tokensInRange = estimateMessagesTokens(messagesToSummarize);
+
+    if (tokensInRange > maxChunkTokens) {
+      const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
+      summary = await summarizeChunks(chunks, globalLLMSummarizeFn);
+    } else {
+      const prompt = createSummaryPrompt(messagesToSummarize);
+      summary = await globalLLMSummarizeFn(prompt);
+    }
+
+    // Truncate if too long
+    const summaryMaxTokens = options?.summaryMaxTokens ?? DEFAULT_SUMMARY_MAX_TOKENS;
+    const summaryTokens = estimateTokens(summary);
+    if (summaryTokens > summaryMaxTokens) {
+      const maxChars = summaryMaxTokens * 4;
+      summary = summary.slice(0, maxChars) + '...';
+    }
+  } else {
+    summary = createFallbackSummary(messagesToSummarize);
+  }
+
+  return {
+    role: 'system',
+    content: `[PARTIAL SUMMARY]\n${summary}`,
+    timestamp: Date.now(),
+  };
+}
+
+/**
  * Create a fallback summary when no LLM function is available
  * Extracts basic information from messages
  */

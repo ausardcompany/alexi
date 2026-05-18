@@ -21,6 +21,7 @@ import { useAttachments } from '../context/AttachmentContext.js';
 import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { AgentOption } from '../dialogs/AgentSelector.js';
 import { getDataExporter } from '../../../core/dataExporter.js';
+import { getSessionManager } from '../../../core/sessionManager.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -370,6 +371,68 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           deps.addSystemMessage(`Export failed: ${message}`);
+        }
+        return true;
+      },
+    },
+
+    // /rewind [n] -----------------------------------------------------------
+    {
+      name: 'rewind',
+      description: 'Rewind the last N turns (default 1), undoing file changes',
+      category: 'session',
+      execute: async (args, _ctx) => {
+        const n = args.trim() ? parseInt(args.trim(), 10) : 1;
+
+        if (isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+          deps.addSystemMessage('Usage: /rewind [n] — n must be a positive integer');
+          return true;
+        }
+
+        try {
+          const sm = getSessionManager();
+          const result = await sm.rewind(n);
+          const filesMsg =
+            result.filesRestored.length > 0
+              ? ` File changes undone: ${result.filesRestored.length} file(s) restored.`
+              : '';
+          deps.addSystemMessage(
+            `Rewound ${result.turnsRemoved} turn(s) (${result.messagesRemoved} messages removed).${filesMsg}`
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          deps.addSystemMessage(`Rewind failed: ${message}`);
+        }
+        return true;
+      },
+    },
+
+    // /summarize-before [n] -------------------------------------------------
+    {
+      name: 'summarize-before',
+      aliases: ['sum-before'],
+      description: 'Summarize all turns before turn N, keeping recent context',
+      category: 'session',
+      execute: async (args, _ctx) => {
+        const n = args.trim() ? parseInt(args.trim(), 10) : 0;
+
+        if (isNaN(n) || n <= 0 || !Number.isInteger(n)) {
+          deps.addSystemMessage(
+            'Usage: /summarize-before [n] — n must be a positive integer (turn number)'
+          );
+          return true;
+        }
+
+        try {
+          const sm = getSessionManager();
+          const result = await sm.partialSummarize(n);
+          deps.addSystemMessage(
+            `Summarized turns 1-${n - 1} (${result.messagesSummarized} messages). ` +
+              `Recent context preserved (${result.messagesPreserved} messages).`
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          deps.addSystemMessage(`Summarize failed: ${message}`);
         }
         return true;
       },

@@ -266,6 +266,28 @@ export const SessionEnded = defineEvent(
   })
 );
 
+// Rewind events
+export const SessionRewind = defineEvent(
+  'session.rewind',
+  z.object({
+    sessionId: z.string(),
+    turnsRemoved: z.number(),
+    messagesRemoved: z.number(),
+    filesRestored: z.array(z.string()),
+    timestamp: z.number(),
+  })
+);
+
+export const SessionPartialSummarize = defineEvent(
+  'session.partial_summarize',
+  z.object({
+    sessionId: z.string(),
+    messagesSummarized: z.number(),
+    messagesPreserved: z.number(),
+    timestamp: z.number(),
+  })
+);
+
 // Error events
 export const ErrorOccurred = defineEvent(
   'error.occurred',
