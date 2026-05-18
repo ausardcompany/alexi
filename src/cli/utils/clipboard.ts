@@ -2,6 +2,7 @@
 /**
  * Clipboard text copy utility with fallback support
  * Provides cross-platform clipboard text copying functionality
+ * Note: This module uses browser globals (navigator, document) for clipboard access.
  */
 
 /* eslint-disable no-undef */
