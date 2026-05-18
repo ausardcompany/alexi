@@ -21,6 +21,7 @@ import { useAttachments } from '../context/AttachmentContext.js';
 import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { AgentOption } from '../dialogs/AgentSelector.js';
 import { getDataExporter } from '../../../core/dataExporter.js';
+import type { GoalDefinition } from '../../../core/goalEvaluator.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -70,6 +71,7 @@ interface BuildCommandsDeps {
   addFromFile: (filePath: string) => Promise<void>;
   clearAttachments: () => void;
   addSystemMessage: (text: string) => void;
+  startGoal: (goal: GoalDefinition) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +376,67 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         return true;
       },
     },
+
+    // /goal <description> ---------------------------------------------------
+    {
+      name: 'goal',
+      description: 'Set a completion condition and work autonomously until met',
+      category: 'general',
+      execute: async (args, _ctx) => {
+        const rawArgs = args.trim();
+        if (!rawArgs) {
+          deps.addSystemMessage(
+            'Usage: /goal <description> [--check "command"] [--max-turns N] [--max-time N]'
+          );
+          return true;
+        }
+
+        // Parse flags from the description
+        const goal: GoalDefinition = { description: '' };
+
+        // Extract --check "command" or --check 'command'
+        const checkMatch = rawArgs.match(/--check\s+["']([^"']+)["']/);
+        if (checkMatch) {
+          goal.checkCommand = checkMatch[1];
+        }
+
+        // Extract --max-turns N
+        const maxTurnsMatch = rawArgs.match(/--max-turns\s+(\d+)/);
+        if (maxTurnsMatch) {
+          goal.maxTurns = parseInt(maxTurnsMatch[1], 10);
+        }
+
+        // Extract --max-time N (seconds, converted to ms)
+        const maxTimeMatch = rawArgs.match(/--max-time\s+(\d+)/);
+        if (maxTimeMatch) {
+          goal.maxTimeMs = parseInt(maxTimeMatch[1], 10) * 1000;
+        }
+
+        // Everything that isn't a flag is the description
+        const description = rawArgs
+          .replace(/--check\s+["'][^"']+["']/, '')
+          .replace(/--max-turns\s+\d+/, '')
+          .replace(/--max-time\s+\d+/, '')
+          .trim();
+
+        if (!description) {
+          deps.addSystemMessage('Error: Goal description is required.');
+          return true;
+        }
+
+        goal.description = description;
+
+        deps.addSystemMessage(
+          `Goal started: "${goal.description}"` +
+            (goal.checkCommand ? ` | check: ${goal.checkCommand}` : '') +
+            (goal.maxTurns ? ` | max turns: ${goal.maxTurns}` : '') +
+            (goal.maxTimeMs ? ` | max time: ${goal.maxTimeMs / 1000}s` : '')
+        );
+
+        deps.startGoal(goal);
+        return true;
+      },
+    },
   ];
 }
 
@@ -384,6 +447,8 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
 export interface UseCommandsOptions {
   /** Callback to display a system-level message in the message list. */
   addSystemMessage?: (text: string) => void;
+  /** Callback to start a goal-driven autonomous loop. */
+  startGoal?: (goal: GoalDefinition) => void;
 }
 
 export interface UseCommandsReturn {
@@ -402,7 +467,10 @@ export function useCommands(options: UseCommandsOptions = {}): UseCommandsReturn
   const noop = (_text: string): void => {
     /* no-op default */
   };
-  const { addSystemMessage = noop } = options;
+  const noopGoal = (_goal: GoalDefinition): void => {
+    /* no-op default */
+  };
+  const { addSystemMessage = noop, startGoal = noopGoal } = options;
 
   const commands = useMemo(
     () =>
@@ -413,8 +481,9 @@ export function useCommands(options: UseCommandsOptions = {}): UseCommandsReturn
         addFromFile,
         clearAttachments,
         addSystemMessage,
+        startGoal,
       }),
-    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments, addSystemMessage]
+    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments, addSystemMessage, startGoal]
   );
 
   const handleCommand = useCallback(
