@@ -1,3 +1,4 @@
+/* eslint-disable no-undef */
 /**
  * Clipboard text copy utility with fallback support
  * Provides cross-platform clipboard text copying functionality
