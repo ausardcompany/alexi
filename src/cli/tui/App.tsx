@@ -36,8 +36,11 @@ import { FilePicker } from './dialogs/FilePicker.js';
 import { QuitDialog } from './dialogs/QuitDialog.js';
 import { ThemeDialog } from './dialogs/ThemeDialog.js';
 import { ArgDialog } from './dialogs/ArgDialog.js';
+import { RewindDialog } from './dialogs/RewindDialog.js';
+import type { RewindDialogProps, RewindResult } from './dialogs/RewindDialog.js';
 import type { HelpEntry, ArgField } from './types/props.js';
 import { useToolEvents } from './hooks/useToolEvents.js';
+import { useRewind } from './hooks/useRewind.js';
 import type { AgentName } from './theme/types.js';
 
 import type { MessageDisplay } from './components/MessageArea.js';
@@ -196,6 +199,10 @@ function DialogHost(): React.JSX.Element | null {
         />
       );
     }
+    case 'rewind': {
+      const rewindProps = currentEntry.props as unknown as RewindDialogProps;
+      return <RewindDialog {...rewindProps} />;
+    }
     default:
       return null;
   }
@@ -218,6 +225,18 @@ function AppLayout(): React.JSX.Element {
 
   const [messages, setMessages] = useState<MessageDisplay[]>([]);
 
+  const setMessagesCallback = useCallback((msgs: MessageDisplay[]) => {
+    setMessages(msgs);
+  }, []);
+
+  const { rewindTo } = useRewind({ messages, setMessages: setMessagesCallback });
+
+  // Wire up rewindTo to the ChatContext so dialogs can call it
+  const { setRewindHandler } = chat;
+  useEffect(() => {
+    setRewindHandler(rewindTo);
+  }, [setRewindHandler, rewindTo]);
+
   const addSystemMessage = useCallback(
     (text: string) => {
       const msg: MessageDisplay = {
@@ -232,7 +251,28 @@ function AppLayout(): React.JSX.Element {
     []
   );
 
-  const { handleCommand, commands } = useCommands({ addSystemMessage });
+  const handleRewindResult = useCallback(
+    (result: unknown) => {
+      if (
+        result != null &&
+        typeof result === 'object' &&
+        'turnIndex' in result &&
+        'mode' in result
+      ) {
+        const r = result as RewindResult;
+        void rewindTo(r.turnIndex, r.mode);
+      }
+    },
+    [rewindTo]
+  );
+
+  const getMessages = useCallback(() => messages, [messages]);
+
+  const { handleCommand, commands } = useCommands({
+    addSystemMessage,
+    onRewindResult: handleRewindResult,
+    getMessages,
+  });
   const sidebar = useSidebar();
   const { page } = usePage();
   const logCollector = useLogCollector();

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useRef } from 'react';
 
 // ---------------------------------------------------------------------------
 // Data-model interfaces
@@ -147,6 +147,10 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
 // Context value
 // ---------------------------------------------------------------------------
 
+export type RewindMode = 'discard' | 'summarize';
+
+export type RewindFn = (index: number, mode: RewindMode) => Promise<void>;
+
 export interface ChatContextValue extends ChatState {
   setStreaming: (streaming: boolean) => void;
   appendStreamText: (text: string) => void;
@@ -159,6 +163,8 @@ export interface ChatContextValue extends ChatState {
   setAbortController: (controller: AbortController | null) => void;
   setResponseModel: (model: string | null) => void;
   reset: () => void;
+  rewindTo: RewindFn;
+  setRewindHandler: (handler: RewindFn) => void;
 }
 
 export const ChatContext = createContext<ChatContextValue | null>(null);
@@ -173,6 +179,20 @@ interface ChatProviderProps {
 
 export function ChatProvider({ children }: ChatProviderProps) {
   const [state, dispatch] = useReducer(chatReducer, INITIAL_STATE);
+  const rewindHandlerRef = useRef<RewindFn>(async () => {
+    /* no-op until wired */
+  });
+
+  const setRewindHandler = useCallback((handler: RewindFn) => {
+    rewindHandlerRef.current = handler;
+  }, []);
+
+  const rewindTo: RewindFn = useCallback(
+    async (index: number, mode: RewindMode) => {
+      await rewindHandlerRef.current(index, mode);
+    },
+    []
+  );
 
   const setStreaming = useCallback((streaming: boolean) => {
     dispatch({ type: 'SET_STREAMING', payload: streaming });
@@ -231,6 +251,8 @@ export function ChatProvider({ children }: ChatProviderProps) {
     setAbortController,
     setResponseModel,
     reset,
+    rewindTo,
+    setRewindHandler,
   };
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

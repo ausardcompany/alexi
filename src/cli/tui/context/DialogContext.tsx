@@ -16,7 +16,8 @@ export type DialogType =
   | 'file-picker'
   | 'quit'
   | 'theme'
-  | 'arg-input';
+  | 'arg-input'
+  | 'rewind';
 
 export interface DialogEntry {
   id: string;
