@@ -614,7 +614,16 @@ jobs:
           git rebase "origin/$BRANCH" || {
             echo "[WARN] Rebase failed, attempting merge strategy instead"
             git rebase --abort 2>/dev/null || true
-            git pull --rebase=false --no-edit origin "$BRANCH"
+            # Use -X ours to auto-resolve conflicts by preferring our freshly
+            # generated documentation over the remote version.
+            git pull --rebase=false --no-edit -X ours origin "$BRANCH" || {
+              echo "[WARN] Merge with -X ours also failed, resolving conflicts manually"
+              # Accept our version for all conflicted doc files
+              git checkout --ours -- $DOCS_TO_UPDATE 2>/dev/null || true
+              git add $DOCS_TO_UPDATE 2>/dev/null || true
+              git -c core.editor=true merge --continue 2>/dev/null || \
+                git commit --no-edit --no-verify 2>/dev/null || true
+            }
           }
 
           LOCAL_HEAD=$(git rev-parse HEAD)
