@@ -34,6 +34,10 @@ import {
   type GroundingModule,
 } from '@sap-ai-sdk/orchestration';
 
+import { checkConnectivity } from './connectivity.js';
+import { StartupTimeoutError } from './auth.js';
+import { env } from '../config/env.js';
+
 // Types are exported from the main package
 type ChatCompletionTool = import('@sap-ai-sdk/orchestration').ChatCompletionTool;
 type FunctionObject = import('@sap-ai-sdk/orchestration').FunctionObject;
@@ -536,9 +540,62 @@ function toOrchestrationMessages(
  */
 export class SapOrchestrationProvider {
   private config: OrchestrationConfig;
+  private _connectivityChecked = false;
 
   constructor(config: OrchestrationConfig) {
     this.config = config;
+  }
+
+  /**
+   * Resolve the API base URL from environment configuration.
+   * Returns undefined if no URL can be determined.
+   */
+  private resolveApiBaseUrl(): string | undefined {
+    const proxyUrl = env('SAP_PROXY_BASE_URL');
+    if (proxyUrl) {
+      return proxyUrl;
+    }
+
+    const serviceKeyJson = env('AICORE_SERVICE_KEY');
+    if (serviceKeyJson) {
+      try {
+        const serviceKey = JSON.parse(serviceKeyJson);
+        if (serviceKey.serviceurls?.AI_API_URL) {
+          return serviceKey.serviceurls.AI_API_URL as string;
+        }
+      } catch {
+        // Invalid JSON — skip connectivity check
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Perform a one-time connectivity check on the first API call.
+   * Throws StartupTimeoutError if the API is unreachable.
+   */
+  private async ensureConnectivity(): Promise<void> {
+    if (this._connectivityChecked) {
+      return;
+    }
+
+    const baseUrl = this.resolveApiBaseUrl();
+    if (!baseUrl) {
+      // Cannot determine URL — skip check, let the SDK handle the error
+      this._connectivityChecked = true;
+      return;
+    }
+
+    const result = await checkConnectivity(baseUrl);
+    if (!result.reachable) {
+      throw new StartupTimeoutError(
+        'sap-ai-core',
+        result.error ?? 'API unreachable — check network connection'
+      );
+    }
+
+    this._connectivityChecked = true;
   }
 
   /**
@@ -662,6 +719,8 @@ export class SapOrchestrationProvider {
     messages: Array<{ role: string; content: string | unknown[] } | ChatMessage | ToolChatMessage>,
     options?: CompletionOptions
   ): Promise<CompletionResult> {
+    await this.ensureConnectivity();
+
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
 
@@ -734,6 +793,8 @@ export class SapOrchestrationProvider {
     messages: Array<{ role: string; content: string | unknown[] } | ChatMessage | ToolChatMessage>,
     options?: CompletionOptions
   ): AsyncGenerator<StreamChunk> {
+    await this.ensureConnectivity();
+
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
 

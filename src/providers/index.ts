@@ -9,6 +9,12 @@ import { env } from '../config/env.js';
 import { getConfigDefaultModel } from '../config/userConfig.js';
 import { SapOrchestrationProvider } from './sapOrchestration.js';
 
+// Re-export connectivity check
+export { checkConnectivity, type ConnectivityResult } from './connectivity.js';
+
+// Re-export auth errors
+export { StartupTimeoutError } from './auth.js';
+
 // Re-export everything from sapOrchestration
 export {
   SapOrchestrationProvider,

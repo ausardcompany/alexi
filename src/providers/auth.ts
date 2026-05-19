@@ -57,6 +57,16 @@ export class RateLimitError extends AuthError {
   }
 }
 
+export class StartupTimeoutError extends AuthError {
+  constructor(provider: string, detail?: string, cause?: unknown) {
+    const msg = detail
+      ? `Startup connectivity check failed for provider ${provider}: ${detail}`
+      : `Startup connectivity check failed for provider: ${provider}`;
+    super(msg, provider, cause);
+    this.name = 'StartupTimeoutError';
+  }
+}
+
 /**
  * Parse error response and return appropriate typed error
  */
@@ -78,6 +88,10 @@ export function parseAuthError(error: unknown, provider: string): AuthError {
 
   if (lowerMessage.includes('rate limit') || lowerMessage.includes('too many requests')) {
     return new RateLimitError(provider, undefined, error);
+  }
+
+  if (lowerMessage.includes('startup') && lowerMessage.includes('timeout')) {
+    return new StartupTimeoutError(provider, message, error);
   }
 
   if (
