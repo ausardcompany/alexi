@@ -24,6 +24,7 @@ graph TB
         StreamingOrch[streamingOrchestrator.ts]
         Compaction[compaction/index.ts]
         CompactionChunks[compaction-chunks.ts]
+        NetworkMgr[network.ts]
     end
 
     subgraph Provider["Provider Layer (SAP AI Core)"]
@@ -52,6 +53,12 @@ graph TB
         MCP[mcp/index.ts]
         Hooks[hooks/index.ts]
         Skill[skill/index.ts]
+        Reference[reference/index.ts]
+    end
+
+    subgraph Commands["Command System"]
+        Rewind[command/rewind.ts]
+        SessionReplay[cli/session-replay.ts]
     end
 
     Program --> Interactive
@@ -83,6 +90,11 @@ graph TB
     Orchestrator --> Agent
     Orchestrator --> MCP
     Orchestrator --> Skill
+    Orchestrator --> NetworkMgr
+    Interactive --> Rewind
+    Rewind --> Compaction
+    Interactive --> SessionReplay
+    Orchestrator --> Reference
 ```
 
 ## Module Descriptions
@@ -106,6 +118,7 @@ graph TB
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
 | Compaction | `src/compaction/index.ts` | Context compression with multiple strategies |
 | Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
+| Network Manager | `src/core/network.ts` | Auto-reconnection with exponential backoff |
 
 ### Provider Layer
 
@@ -180,6 +193,9 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
 | Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
 | Telemetry | `src/utils/telemetry.ts` | Usage metrics tracking |
+| Reference | `src/reference/index.ts` | External repository references with typed cache |
+| Plugin Tools | `src/tool/plugin-tools.ts` | Plugin tool compatibility wrappers |
+| Tool Registry | `src/tool/registry.ts` | Enhanced registry with prompt-based tool resolution |
 
 ## Data Flow
 
@@ -376,7 +392,7 @@ const MyEvent = defineEvent('MyEvent', z.object({
   duration: z.number(),
 }));
 
-// Subscribe
+// Subscribe (handler added eagerly to prevent race conditions)
 const unsub = MyEvent.subscribe((payload) => {
   console.log(payload.toolName, payload.duration);
 });
@@ -393,6 +409,10 @@ MyEvent.once((payload) => { /* ... */ });
 // Wait for event with predicate
 const result = await waitForEvent(MyEvent, (p) => p.toolName === 'bash', 5000);
 ```
+
+### Eager Subscription
+
+Subscriptions are acquired eagerly to prevent race conditions where events could be missed between the `subscribe()` call and the first `listen`. The handler is immediately added to the event handler set before the unsubscribe function is returned.
 
 ## Agent System
 
@@ -515,6 +535,128 @@ const result = await compactInChunks(content, async (chunk) => {
 }, 100000); // max tokens per chunk
 ```
 
+## Rewind Command
+
+The `/rewind` command (`src/command/rewind.ts`) provides conversation history manipulation by allowing users to navigate to a specific turn boundary and either discard or summarize messages:
+
+```mermaid
+flowchart TB
+    Input["/rewind [turn] [--summarize]"] --> Parse[Parse Arguments]
+    Parse --> HasTurn{Turn Number?}
+    
+    HasTurn -->|No| List[List Turn Boundaries]
+    HasTurn -->|Yes| HasSummarize{--summarize?}
+    
+    HasSummarize -->|Yes| Summarize[Summarize Mode]
+    HasSummarize -->|No| Discard[Discard Mode]
+    
+    List --> ShowBoundaries[Show User Messages<br/>with Turn Numbers]
+    
+    Discard --> FindBoundary[Find Turn Boundary]
+    FindBoundary --> KeepUpTo[Keep Messages Up To Turn End]
+    KeepUpTo --> UpdateSession[Update Session Messages]
+    
+    Summarize --> FindBoundary2[Find Turn Boundary]
+    FindBoundary2 --> PartialCompact[partialCompact: Summarize<br/>Messages Before Turn]
+    PartialCompact --> InsertSummary[Insert Summary as<br/>System Message]
+    InsertSummary --> KeepFrom[Keep Messages From Turn Onward]
+    KeepFrom --> UpdateSession
+    
+    UpdateSession --> Result[Return RewindResult]
+```
+
+### Turn Boundaries
+
+A "turn" is defined as starting at each user message (system messages are ignored). The rewind system identifies these boundaries and allows navigation:
+
+```typescript
+interface TurnBoundary {
+  turnNumber: number;
+  messageIndex: number;
+  preview: string;        // First 50 chars of user message
+  role: Message['role'];
+}
+```
+
+### Rewind Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `list` | Show all turn boundaries | Explore conversation structure |
+| `discard` | Remove messages after turn N | Undo recent conversation turns |
+| `summarize` | Compress messages before turn N | Free context while preserving history |
+
+The summarize mode delegates to `partialCompact()` from the compaction system, which uses the configured LLM summarize function to create a `[CONVERSATION SUMMARY]` system message.
+
+## Network Management
+
+The `NetworkManager` class (`src/core/network.ts`) provides automatic reconnection with exponential backoff to prevent session loss during network interruptions:
+
+```typescript
+class NetworkManager extends EventEmitter {
+  // Exponential backoff with configurable parameters
+  maxRetries: number;     // Default: 5
+  baseDelayMs: number;    // Default: 1000ms
+  maxDelayMs: number;     // Default: 30000ms
+}
+```
+
+Events emitted: `reconnect:attempt`, `reconnect:success`, `reconnect:failed`.
+
+## Reference System
+
+The reference module (`src/reference/`) manages external repository references with typed cache failures:
+
+| Component | File | Description |
+|-----------|------|-------------|
+| `ReferenceService` | `reference.ts` | Manages local and git repository references |
+| `RepositoryCache` | `repository-cache.ts` | TTL-based cache with typed error hierarchy |
+
+The cache uses typed failure classes (`CacheMissError`, `CacheStaleError`, `CacheCapacityError`) extending a base `CacheError` for precise error handling.
+
+## Plugin Tool System
+
+The plugin tool system (`src/tool/plugin-tools.ts`) provides a compatibility layer for external plugin tools:
+
+```typescript
+interface PluginToolContext {
+  workdir: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+  ask: (question: string) => Promise<string>;  // Promise-based, not Effect
+}
+```
+
+Plugin tools use `createPluginToolWrapper()` to adapt their simplified interface to Alexi's full tool system, ensuring the `ask` method returns a Promise instead of an Effect for backwards compatibility.
+
+## Enhanced Tool Registry
+
+The `EnhancedToolRegistry` (`src/tool/registry.ts`) extends the base tool system with dynamic prompt-based tool resolution:
+
+```typescript
+class EnhancedToolRegistry {
+  register(tool: Tool): void;
+  registerPromptResolver(name: string, resolver: PromptToolResolver): void;
+  resolveForPrompt(context: ToolResolutionContext): Promise<Tool[]>;
+}
+```
+
+This allows tools to be dynamically resolved based on session context, agent permissions, and prompt characteristics.
+
+## Session Replay
+
+The `SessionReplay` class (`src/cli/session-replay.ts`) enables replaying session history when resuming interactive sessions:
+
+```typescript
+class SessionReplay {
+  replay(messages: Message[], options?: ReplayOptions): Promise<ReplayResult>;
+  formatMessage(message: Message): string;
+  getSummary(messages: Message[]): SessionSummary;
+}
+```
+
+Options include: `maxMessages` (default: 50), `showToolCalls`, `showSystemMessages`, and an `onMessage` callback for each replayed message.
+
 ## Permission System
 
 ```mermaid
@@ -589,8 +731,8 @@ alexi/
 ├── src/
 │   ├── agent/          # Agent registry, custom loader, system prompt assembly
 │   ├── bus/            # Typed event bus (defineEvent, BusEvent)
-│   ├── cli/            # CLI program + TUI (Ink/React components)
-│   ├── command/        # Slash command system
+│   ├── cli/            # CLI program + TUI (Ink/React components) + session replay
+│   ├── command/        # Slash command system (rewind, etc.)
 │   ├── compaction/     # Context compaction strategies
 │   ├── config/         # Environment, routing, user config, project context
 │   ├── context/        # Repo map, symbol ranking, tree-sitter
@@ -600,6 +742,7 @@ alexi/
 │   ├── mcp/            # Model Context Protocol client/server
 │   ├── permission/     # Permission rules, doom loop detection
 │   ├── providers/      # SAP AI Core Orchestration (sole provider)
+│   ├── reference/      # External repository references and caching
 │   ├── skill/          # Specialized prompt skills
 │   ├── tool/           # Tool system + 30 built-in tool implementations
 │   ├── tui/            # Ink-based TUI components

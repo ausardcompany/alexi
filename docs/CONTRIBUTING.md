@@ -222,6 +222,11 @@ import type { ToolContext } from '../tool/index.js';
     }
     ```
 
+    For network errors, use the `NetworkError` class from `src/core/network.ts`:
+    ```typescript
+    throw new NetworkError('Max reconnection attempts exceeded', { cause: error });
+    ```
+
 5. **Null Safety**: Use optional chaining and nullish coalescing
    ```typescript
    const value = context?.workdir ?? process.cwd();
@@ -258,20 +263,26 @@ import type { ToolContext } from '../tool/index.js';
      ```
 
 11. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
-     ```typescript
-     import { defineEvent } from '../bus/index.js';
-     import { z } from 'zod';
+      ```typescript
+      import { defineEvent } from '../bus/index.js';
+      import { z } from 'zod';
 
-     export const ToolExecutionStarted = defineEvent(
-       'tool.execution.started',
-       z.object({
-         toolName: z.string(),
-         toolId: z.string(),
-         parameters: z.record(z.string(), z.unknown()),
-         timestamp: z.number(),
-       })
-     );
-     ```
+      export const ToolExecutionStarted = defineEvent(
+        'tool.execution.started',
+        z.object({
+          toolName: z.string(),
+          toolId: z.string(),
+          parameters: z.record(z.string(), z.unknown()),
+          timestamp: z.number(),
+        })
+      );
+      ```
+
+12. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
+
+13. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
+
+14. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
 
 ### ESLint Rules
 
@@ -506,6 +517,29 @@ When modifying workflows:
 3. Document new secrets or configuration
 4. Use concurrency groups to prevent parallel runs
 5. Set appropriate timeouts
+
+## Adding New Slash Commands
+
+When adding a new interactive REPL command (like `/rewind`):
+
+1. **Add to completer registry** (`src/cli/utils/completer.ts`):
+   ```typescript
+   { name: 'mycommand', description: 'What it does', category: 'session' }
+   ```
+
+2. **Implement handler** in `src/cli/interactive.ts` under the `handleCommand` switch:
+   ```typescript
+   case 'mycommand': {
+     // Implementation
+     return true;
+   }
+   ```
+
+3. **Create implementation module** in `src/command/mycommand.ts` for complex logic
+
+4. **Write tests** in `tests/command/mycommand.test.ts` following the pattern in `tests/command/rewind.test.ts`
+
+5. **Update documentation** in `docs/API.md` under Interactive Mode Commands
 
 ## Getting Help
 

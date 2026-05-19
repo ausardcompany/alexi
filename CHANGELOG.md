@@ -7,10 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.1] - 2026-05-19
 
+### Added
+
+- **Rewind command** (`/rewind`): Navigate conversation history by turn boundaries with discard and summarize modes (`src/command/rewind.ts`)
+- **Session replay** (`src/cli/session-replay.ts`): Replay session history when resuming interactive sessions with configurable message filtering
+- **Network manager** (`src/core/network.ts`): Automatic reconnection with exponential backoff to prevent session loss during network interruptions
+- **Partial compaction** (`partialCompact` in `src/core/compaction.ts`): Summarize a subset of messages up to a given index while preserving recent messages
+- **Enhanced tool registry** (`src/tool/registry.ts`): Dynamic prompt-based tool resolution with `PromptToolResolver` interface
+- **Plugin tool wrappers** (`src/tool/plugin-tools.ts`): Compatibility layer ensuring plugin tools receive Promise-based `ask` instead of Effect
+- **Reference service** (`src/reference/reference.ts`): External repository reference management with local and git source types
+- **Repository cache with typed failures** (`src/reference/repository-cache.ts`): TTL-based caching with `CacheMissError`, `CacheStaleError`, and `CacheCapacityError` error classes
+- **Rewind command tests** (`tests/command/rewind.test.ts`): Comprehensive test suite with 34 test cases covering all rewind modes
+
 ### Changed
 
-- Standardized whitespace formatting across event bus and reference modules (`src/bus/index.ts`, `src/reference/reference.ts`, `src/reference/repository-cache.ts`) via CI auto-fix
-- Removed trailing blank lines and extraneous trailing whitespace in class definitions and function bodies for consistent code style
+- Event bus subscriptions are now acquired eagerly to prevent race conditions where events could be missed between subscribe and first listen (`src/bus/index.ts`)
+- Slash command completer now includes `/rewind` with description and category (`src/cli/utils/completer.ts`)
+- Repo clone tool updated for reference system integration (`src/tool/tools/repo-clone.ts`)
+- Upstream sync state updated to latest commits (kilocode, opencode, claude-code) dated 2026-05-19
+- Standardized whitespace formatting across event bus and reference modules via CI auto-fix
 
 ## [0.5.0] - 2026-05-18
 
