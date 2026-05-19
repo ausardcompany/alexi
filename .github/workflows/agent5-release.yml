@@ -150,54 +150,37 @@ jobs:
       - name: Build release prompt
         if: steps.check.outputs.should_release == 'true' && steps.ci.outputs.ci_passed == 'true'
         run: |
-          LAST_TAG="${{ steps.check.outputs.last_tag }}"
-          NEW_VERSION="${{ steps.version.outputs.new }}"
-          DRY_RUN="${{ inputs.dry_run || 'false' }}"
+          LAST_TAG="${​{ steps.check.outputs.last_tag }}"
+          NEW_VERSION="${​{ steps.version.outputs.new }}"
+          BUMP_TYPE="${​{ steps.version.outputs.bump }}"
+          DRY_RUN="${​{ inputs.dry_run || 'false' }}"
 
-          {
-            echo "# Release Task — v$NEW_VERSION"
-            echo ""
-            echo "## Context"
-            echo ""
-            echo "- Last tag: $LAST_TAG"
-            echo "- New version: $NEW_VERSION"
-            echo "- Dry run: $DRY_RUN"
-            echo ""
-            echo "## Commits to include"
-            echo ""
-            echo '```'
-            git log ${LAST_TAG}..HEAD --format="- %s (%h)" --no-merges
-            echo '```'
-            echo ""
-            echo "## Instructions"
-            echo ""
-            echo "1. Generate CHANGELOG entry for v$NEW_VERSION"
-            echo "   - Categorize commits (Features, Bug Fixes, Maintenance, Dependencies)"
-            echo "   - Prepend to CHANGELOG.md"
-            echo ""
+          # Generate commit log
+          COMMIT_LOG=$(git log ${LAST_TAG}..HEAD --format="- %s (%h)" --no-merges)
 
-            if [ "$DRY_RUN" = "true" ]; then
-              echo "2. **DRY RUN** — only write the CHANGELOG. Do NOT bump version or create tags."
-              echo "   Save proposed release notes to /tmp/release-notes.md"
-            else
-              echo "2. Update version:"
-              echo "   - Run: \`npm version $NEW_VERSION --no-git-tag-version\`"
-              echo ""
-              echo "3. Commit and tag:"
-              echo '   ```bash'
-              echo "   git add package.json package-lock.json CHANGELOG.md"
-              echo "   git commit -m \"chore(release): v$NEW_VERSION\""
-              echo "   git tag -a \"v$NEW_VERSION\" -m \"Release v$NEW_VERSION\""
-              echo "   git push origin master --tags"
-              echo '   ```'
-              echo ""
-              echo "4. Create GitHub release:"
-              echo "   - Write release notes to /tmp/release-notes.md"
-              echo "   - Run: \`gh release create \"v$NEW_VERSION\" --title \"v$NEW_VERSION\" --notes-file /tmp/release-notes.md\`"
-            fi
-          } > /tmp/release-prompt.txt
+          # Read template and substitute variables
+          TEMPLATE=$(cat .github/prompts/agent5-release-task.md)
 
-          echo "[OK] Release prompt built"
+          PROMPT=$(echo "$TEMPLATE" | \
+            sed "s|{​{LAST_TAG}}|$LAST_TAG|g" | \
+            sed "s|{​{NEW_VERSION}}|$NEW_VERSION|g" | \
+            sed "s|{​{BUMP_TYPE}}|$BUMP_TYPE|g" | \
+            sed "s|{​{DRY_RUN}}|$DRY_RUN|g")
+
+          # Substitute commit log (multi-line)
+          echo "$PROMPT" | awk -v log="$COMMIT_LOG" '{gsub(/\{​\{COMMIT_LOG\}\}/, log); print}' > /tmp/release-prompt-raw.txt
+
+          # Handle conditional sections based on DRY_RUN
+          if [ "$DRY_RUN" = "true" ]; then
+            cat /tmp/release-prompt-raw.txt | sed '/{​{^DRY_RUN}}/,/{​{\/DRY_RUN}}/d' | \
+              grep -v '{​{​#DRY_RUN}}' | grep -v '{​{/DRY_RUN}}' > /tmp/release-prompt.txt
+          else
+            cat /tmp/release-prompt-raw.txt | sed '/{​{​#DRY_RUN}}/,/{​{\/DRY_RUN}}/d' | \
+              grep -v '{​{^DRY_RUN}}' | grep -v '{​{/DRY_RUN}}' > /tmp/release-prompt.txt
+          fi
+
+          rm -f /tmp/release-prompt-raw.txt
+          echo "[OK] Release prompt built from template ($(wc -l < /tmp/release-prompt.txt) lines)"
 
       - name: Run Agent 5 (Release)
         id: release

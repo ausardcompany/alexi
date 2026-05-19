@@ -189,8 +189,8 @@ jobs:
       - name: Build implementation prompt
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
-          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
+          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${​{ steps.pick.outputs.issue_title }}"
 
           # Restore issue body
           ISSUE_BODY=""
@@ -198,61 +198,18 @@ jobs:
             ISSUE_BODY=$(cat /tmp/issue-body.md)
           fi
 
-          {
-            echo "# Feature Implementation Task"
-            echo ""
-            echo "## Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
-            echo ""
-            echo "### Description"
-            echo ""
-            echo "$ISSUE_BODY"
-            echo ""
-            echo "---"
-            echo ""
-            echo "## Instructions"
-            echo ""
-            echo "You are implementing a feature for the **Alexi** project — a TypeScript/Node.js CLI application (intelligent LLM orchestrator for SAP AI Core)."
-            echo ""
-            echo "### Project conventions"
-            echo ""
-            echo "- TypeScript 5.x, ES2022 target, NodeNext module, strict mode"
-            echo "- 2 spaces, single quotes, semicolons, 100 char line width"
-            echo "- Always use \`.js\` extension for local imports"
-            echo "- Use \`unknown\` instead of \`any\`, prefix unused params with \`_\`"
-            echo "- Follow conventional commits: \`feat(scope)\`, \`fix(scope)\`, \`test(scope)\`"
-            echo "- Scopes: cli, core, providers, config, server, agent, tools, ci, deps, tests"
-            echo ""
-            echo "### Implementation steps"
-            echo ""
-            echo "1. **Read the issue description** carefully and understand the requirements"
-            echo "2. **Explore the codebase** — use \`glob\` and \`grep\` to find related files"
-            echo "3. **Read existing code** — understand the patterns, interfaces, and architecture"
-            echo "4. **Plan your changes** — identify which files to create or modify"
-            echo "5. **Implement** — write clean, well-typed code following project conventions"
-            echo "6. **Write tests** — add unit tests in \`tests/\` directory using Vitest"
-            echo "7. **Verify** — run these checks and fix any issues:"
-            echo "   - \`npm run typecheck\` — no type errors"
-            echo "   - \`npm run lint\` — no lint errors"
-            echo "   - \`npm run format:check\` — proper formatting"
-            echo "   - \`npm test\` — all tests pass"
-            echo "   - \`npm install -g @kilocode/cli
-          npm ci\` — builds successfully"
-            echo ""
-            echo "### Hard constraints"
-            echo ""
-            echo "- Do NOT change \`.github/\` workflow files"
-            echo "- Do NOT change \`package.json\` version field"
-            echo "- Do NOT add \`// eslint-disable\` or \`@ts-ignore\` comments"
-            echo "- All new code MUST have tests"
-            echo "- All checks MUST pass before you finish"
-            echo ""
-            echo "### Scope"
-            echo ""
-            echo "Implement ONLY what is described in the issue above."
-            echo "Do not refactor unrelated code or add features not requested."
-          } > /tmp/implement-prompt.txt
+          # Read template and substitute variables
+          TEMPLATE=$(cat .github/prompts/agent3-implement-task.md)
 
-          echo "[OK] Prompt built ($(wc -l < /tmp/implement-prompt.txt) lines)"
+          # Perform substitutions
+          PROMPT=$(echo "$TEMPLATE" | \
+            sed "s|{​{ISSUE_NUMBER}}|$ISSUE_NUMBER|g" | \
+            sed "s|{​{ISSUE_TITLE}}|$ISSUE_TITLE|g")
+
+          # Replace multi-line ISSUE_BODY using a temp file approach
+          echo "$PROMPT" | awk -v body="$ISSUE_BODY" '{gsub(/\{​\{ISSUE_BODY\}\}/, body); print}' > /tmp/implement-prompt.txt
+
+          echo "[OK] Prompt built from template ($(wc -l < /tmp/implement-prompt.txt) lines)"
 
       # ─── Step 6: Run Kilo CLI to implement the feature ─────────────────────────
       - name: Run Kilo CLI

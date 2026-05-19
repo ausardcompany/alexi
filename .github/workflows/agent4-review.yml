@@ -109,55 +109,45 @@ jobs:
 
       - name: Build review prompt
         run: |
-          PR_NUMBER="${{ steps.pr_info.outputs.pr_number }}"
-          BRANCH="${{ steps.pr_info.outputs.branch }}"
-          ALL_PASSED="${{ steps.checks.outputs.all_passed }}"
+          PR_NUMBER="${​{ steps.pr_info.outputs.pr_number }}"
+          BRANCH="${​{ steps.pr_info.outputs.branch }}"
+          ALL_PASSED="${​{ steps.checks.outputs.all_passed }}"
 
-          {
-            echo "# Code Review Task — PR #$PR_NUMBER"
-            echo ""
-            echo "Branch: \`$BRANCH\`"
-            echo ""
-            echo "## CI Check Results"
-            echo ""
-            cat check-results.txt
-            echo ""
+          # Collect check results and failure logs
+          CHECK_RESULTS=$(cat check-results.txt)
+          FAILURE_LOGS=""
 
-            if [ "$ALL_PASSED" != "true" ]; then
-              echo "## Failed Check Logs"
-              echo ""
-              for logfile in /tmp/check-*.log; do
-                CHECK_NAME=$(basename "$logfile" .log | sed 's/check-//')
-                if [ -f "$logfile" ] && [ "$(wc -l < "$logfile")" -gt 0 ]; then
-                  echo "### $CHECK_NAME"
-                  echo '```'
-                  tail -30 "$logfile"
-                  echo '```'
-                  echo ""
-                fi
-              done
-            fi
+          if [ "$ALL_PASSED" != "true" ]; then
+            for logfile in /tmp/check-*.log; do
+              CHECK_NAME=$(basename "$logfile" .log | sed 's/check-//')
+              if [ -f "$logfile" ] && [ "$(wc -l < "$logfile")" -gt 0 ]; then
+                FAILURE_LOGS="$FAILURE_LOGS### $CHECK_NAME\n\`\`\`\n$(tail -30 "$logfile")\n\`\`\`\n\n"
+              fi
+            done
+          fi
 
-            echo "## Your Task"
-            echo ""
-            echo "1. Review the code changes on this branch vs master:"
-            echo "   - Run: \`git diff master...HEAD\` to see all changes"
-            echo "   - Run: \`git log master..HEAD --oneline\` for commits"
-            echo ""
+          # Read template and substitute variables
+          TEMPLATE=$(cat .github/prompts/agent4-review-task.md)
 
-            if [ "$ALL_PASSED" != "true" ]; then
-              echo "2. **Fix all CI failures** first"
-              echo "3. Then review code quality using the checklist"
-            else
-              echo "2. Review code quality using the checklist in the system prompt"
-              echo "3. Check test coverage — add tests if needed"
-            fi
+          PROMPT=$(echo "$TEMPLATE" | \
+            sed "s|{​{PR_NUMBER}}|$PR_NUMBER|g" | \
+            sed "s|{​{BRANCH}}|$BRANCH|g")
 
-            echo ""
-            echo "4. Commit any fixes with: \`git commit -m \"fix(review): [description] [alexi-bot]\"\`"
-            echo "5. Push fixes: \`git push origin $BRANCH\`"
-            echo "6. Post review summary using: \`gh pr comment $PR_NUMBER --body-file /tmp/review.md\`"
-          } > /tmp/review-prompt.txt
+          # Substitute multi-line variables
+          echo "$PROMPT" | \
+            awk -v results="$CHECK_RESULTS" '{gsub(/\{​\{CHECK_RESULTS\}\}/, results); print}' | \
+            awk -v logs="$FAILURE_LOGS" '{gsub(/\{​\{FAILURE_LOGS\}\}/, logs); print}' > /tmp/review-prompt-raw.txt
+
+          # Handle conditional sections based on HAS_FAILURES
+          if [ "$ALL_PASSED" != "true" ]; then
+            cat /tmp/review-prompt-raw.txt | sed '/{​{^HAS_FAILURES}}/,/{​{\/HAS_FAILURES}}/d' | \
+              grep -v '{​{​#HAS_FAILURES}}' | grep -v '{​{/HAS_FAILURES}}' > /tmp/review-prompt.txt
+          else
+            cat /tmp/review-prompt-raw.txt | sed '/{​{​#HAS_FAILURES}}/,/{​{\/HAS_FAILURES}}/d' | \
+              grep -v '{​{^HAS_FAILURES}}' | grep -v '{​{/HAS_FAILURES}}' > /tmp/review-prompt.txt
+          fi
+
+          rm -f /tmp/review-prompt-raw.txt
 
       - name: Run Agent 4 (Review)
         id: review

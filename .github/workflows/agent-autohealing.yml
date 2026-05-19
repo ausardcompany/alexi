@@ -8,6 +8,7 @@ on:
       - "Agent 3: Auto-Implement"
       - "Agent 4: Code Review & QA"
       - "Agent 5: Release Management"
+      - "Agent 6: Prompt Optimizer"
       - "CI"
       - "CI Auto-Fix"
       - "Documentation Update"
@@ -208,57 +209,22 @@ jobs:
       - name: Build healing prompt
         if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
         run: |
-          WORKFLOW_NAME="${{ steps.failed_run.outputs.workflow_name }}"
-          BRANCH="${{ steps.failed_run.outputs.branch }}"
-          FAILED_JOBS="${{ steps.logs.outputs.failed_jobs }}"
+          WORKFLOW_NAME="${​{ steps.failed_run.outputs.workflow_name }}"
+          BRANCH="${​{ steps.failed_run.outputs.branch }}"
+          FAILED_JOBS="${​{ steps.logs.outputs.failed_jobs }}"
+          FAILURE_REPORT=$(cat /tmp/failure-report.md)
 
-          {
-            echo "# Autohealing Task"
-            echo ""
-            echo "A GitHub Actions workflow has failed and needs to be fixed."
-            echo ""
-            echo "## Failure Context"
-            echo ""
-            echo "- **Workflow**: $WORKFLOW_NAME"
-            echo "- **Branch**: $BRANCH"
-            echo "- **Failed jobs**: $FAILED_JOBS"
-            echo ""
-            echo "## Failure Report"
-            echo ""
-            cat /tmp/failure-report.md
-            echo ""
-            echo "---"
-            echo ""
-            echo "## Your Task"
-            echo ""
-            echo "1. **Analyze the error** — read the logs above carefully"
-            echo "2. **Identify root cause** — is it YAML syntax, shell error, missing dep, or code issue?"
-            echo "3. **Read the failing file(s)** — use the \`read\` tool"
-            echo "4. **Apply minimal fix** — change only what is broken"
-            echo "5. **Verify** — if it's a code file, run relevant checks:"
-            echo "   - \`npm run typecheck\` for TypeScript errors"
-            echo "   - \`npm run lint\` for lint errors"
-            echo "   - \`npm run format:check\` for formatting"
-            echo "   - \`npm test\` for test failures"
-            echo "6. **Commit and push** the fix:"
-            echo '   ```bash'
-            echo "   git add <fixed-files>"
-            echo "   git commit -m \"fix(ci): <description> [autohealing]\""
-            echo "   git push origin $BRANCH"
-            echo '   ```'
-            echo ""
-            echo "## Important Rules"
-            echo ""
-            echo "- Fix ONLY the immediate failure — do not refactor"
-            echo "- Maximum 3 files changed"
-            echo "- If the fix requires adding new secrets or major changes — do NOT fix it."
-            echo "  Instead, create an issue: \`gh issue create --title \"[Autohealing] Manual fix needed: $WORKFLOW_NAME\" --body \"...\"\`"
-            echo "- For YAML workflow files: validate after edit (check matching braces, proper indentation)"
-            echo "- For shell scripts: watch for quoting, variable expansion, and exit codes"
-            echo "- NEVER disable or remove CI checks to \"fix\" a failure"
-          } > /tmp/healing-prompt.txt
+          # Read template and substitute variables
+          TEMPLATE=$(cat .github/prompts/agent-autohealing-task.md)
 
-          echo "[OK] Healing prompt built ($(wc -l < /tmp/healing-prompt.txt) lines)"
+          echo "$TEMPLATE" | \
+            sed "s|{​{WORKFLOW_NAME}}|$WORKFLOW_NAME|g" | \
+            sed "s|{​{BRANCH}}|$BRANCH|g" | \
+            sed "s|{​{FAILED_JOBS}}|$FAILED_JOBS|g" | \
+            awk -v report="$FAILURE_REPORT" '{gsub(/\{​\{FAILURE_REPORT\}\}/, report); print}' \
+            > /tmp/healing-prompt.txt
+
+          echo "[OK] Healing prompt built from template ($(wc -l < /tmp/healing-prompt.txt) lines)"
 
       # ─── Step 7: Run Kilo CLI (Autohealing Agent) ──────────────────────────────
       - name: Run Autohealing Agent

@@ -77,50 +77,26 @@ jobs:
 
       - name: Build research prompt
         run: |
-          TODAY="${{ steps.context.outputs.date }}"
-          FOCUS="${{ steps.context.outputs.focus }}"
-          LAST_RESEARCH="${{ steps.context.outputs.last_research }}"
+          TODAY="${​{ steps.context.outputs.date }}"
+          FOCUS="${​{ steps.context.outputs.focus }}"
+          LAST_RESEARCH="${​{ steps.context.outputs.last_research }}"
 
-          {
-            echo "# Research Task — $TODAY"
-            echo ""
-            echo "Focus area: **$FOCUS**"
-            echo ""
+          # Read template and substitute variables
+          TEMPLATE=$(cat .github/prompts/agent1-research-task.md)
 
-            if [ -n "$LAST_RESEARCH" ]; then
-              echo "## Previous Research"
-              echo ""
-              echo "Last research was saved to: $LAST_RESEARCH"
-              echo "Read it to understand what was already analyzed and focus on NEW developments."
-              echo ""
-            fi
+          PROMPT=$(echo "$TEMPLATE" | \
+            sed "s|{​{DATE}}|$TODAY|g" | \
+            sed "s|{​{FOCUS}}|$FOCUS|g" | \
+            sed "s|{​{LAST_RESEARCH}}|$LAST_RESEARCH|g")
 
-            echo "## Instructions"
-            echo ""
-            echo "1. Use \`gh api\` to check recent commits (last 7 days) in these repos:"
-            echo "   - Kilo-Org/kilocode"
-            echo "   - anthropics/claude-code"
-            echo "   - cline/cline"
-            echo "   - aider-ai/aider"
-            echo "   - continuedev/continue"
-            echo ""
-            echo "2. Identify significant new features, patterns, or improvements"
-            echo ""
-            echo "3. Compare against our current codebase (explore src/ to see what we have)"
-            echo ""
-            echo "4. Save your findings to: \`.github/research/${TODAY}-research.md\`"
-            echo ""
-            echo "5. The file MUST include:"
-            echo "   - Executive Summary (5-10 bullet points)"
-            echo "   - Detailed Findings with priority/effort/category"
-            echo "   - Actionable Recommendations"
-            echo ""
-            echo "Use the format described in .github/prompts/agent1-research-system.md"
-            echo ""
-            echo "IMPORTANT: Save the file using the write tool. Do not skip this step."
-          } > /tmp/research-prompt.txt
+          # Handle conditional sections (simple approach: remove block markers)
+          if [ -n "$LAST_RESEARCH" ]; then
+            echo "$PROMPT" | grep -v '{​{#LAST_RESEARCH}}' | grep -v '{​{/LAST_RESEARCH}}' > /tmp/research-prompt.txt
+          else
+            echo "$PROMPT" | sed '/{​{#LAST_RESEARCH}}/,/{​{\/LAST_RESEARCH}}/d' > /tmp/research-prompt.txt
+          fi
 
-          echo "[OK] Research prompt built"
+          echo "[OK] Research prompt built from template ($(wc -l < /tmp/research-prompt.txt) lines)"
 
       - name: Run Agent 1 (Specify)
         id: research
