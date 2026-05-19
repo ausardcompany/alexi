@@ -1,4 +1,4 @@
-name: "Agent 6: Prompt Optimizer"
+name: "Agent 6: Prompt Improver"
 
 on:
   schedule:
@@ -146,21 +146,21 @@ jobs:
           echo "[OK] Optimizer prompt built ($(wc -l < /tmp/optimizer-prompt.txt) lines)"
 
       # ─── Step 4: Run Prompt Optimizer Agent ───────────────────────────────────
-      - name: Run Agent 6 (Prompt Optimizer)
+      - name: Run Agent 6 (Prompt Improver)
         id: optimize
         continue-on-error: true
         timeout-minutes: 12
         env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
           TASK_PROMPT=$(cat /tmp/optimizer-prompt.txt)
 
-          kilo run "$TASK_PROMPT" --title "Agent 6 Prompt Optimizer" \
+          kilo run "$TASK_PROMPT" --title "Agent 6 Prompt Improver" \
             --auto \
             -m "sap-ai-core/anthropic--claude-4.6-opus" \
             --variant max \
@@ -255,9 +255,9 @@ jobs:
 
           # Create PR
           cat > /tmp/pr-body.md <<PRBODY
-          ## Prompt Optimization — $TODAY
+          ## Prompt Improvements — $TODAY
 
-          Automated optimization of agent prompt templates by **Agent 6: Prompt Optimizer**.
+          Automated prompt improvements based on best practices by **Agent 6: Prompt Improver**.
 
           ### Changes
 
@@ -275,17 +275,17 @@ jobs:
           - Verify backward compatibility with workflow YAML files
 
           ---
-          Optimized by Agent 6 · [View optimization report](.github/research/$TODAY-prompt-optimization.md)
+          Improved by Agent 6 · [View improvement report](.github/research/$TODAY-prompt-improvements.md)
           PRBODY
 
-          gh label create "prompt-optimization" --description "PR from Agent 6 prompt optimizer" --color "7057ff" 2>/dev/null || true
+          gh label create "prompt-improvement" --description "PR from Agent 6 prompt improver" --color "7057ff" 2>/dev/null || true
 
           PR_URL=$(gh pr create \
-            --title "chore(prompts): optimize agent prompts — $TODAY" \
+            --title "chore(prompts): improve agent prompts — $TODAY" \
             --body-file /tmp/pr-body.md \
             --base master \
             --head "$BRANCH" \
-            --label "prompt-optimization" \
+            --label "prompt-improvement" \
             2>&1) || true
 
           if echo "$PR_URL" | grep -q "^https://"; then
@@ -300,7 +300,7 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Agent 6: Prompt Optimizer Summary"
+          echo "## Agent 6: Prompt Improver Summary"
           echo ""
           echo "- Target: ${{ inputs.target_agent || 'all' }}"
           echo "- Files analyzed: ${{ steps.targets.outputs.file_count }}"

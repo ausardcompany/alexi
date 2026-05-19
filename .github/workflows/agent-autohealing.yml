@@ -8,7 +8,7 @@ on:
       - "Agent 3: Auto-Implement"
       - "Agent 4: Code Review & QA"
       - "Agent 5: Release Management"
-      - "Agent 6: Prompt Optimizer"
+      - "Agent 6: Prompt Improver"
       - "CI"
       - "CI Auto-Fix"
       - "Documentation Update"
