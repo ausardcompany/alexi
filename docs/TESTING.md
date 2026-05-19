@@ -538,6 +538,95 @@ Key testing patterns:
 3. **Generous Timeouts**: Use ~2x the expected duration for CI scheduling variability
 4. **Non-null Assertions**: Use `taskResult.data!.taskId` (correct precedence)
 
+## Testing Cost Tracker
+
+### Per-Task Usage Tracking Tests
+
+The `CostTracker` per-task boundary system is tested in `src/core/__tests__/costTracker.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { CostTracker } from '../../src/core/costTracker.js';
+
+describe('per-task usage tracking', () => {
+  it('should create a boundary at the current record position', () => {
+    const tracker = new CostTracker({ dataDir: testDir });
+
+    // Pre-task usage
+    tracker.recordUsage('gpt-4o', 1000, 500);
+
+    // Start task boundary
+    tracker.startTask('task-1');
+
+    // Post-boundary usage
+    tracker.recordUsage('gpt-4o', 500, 200);
+
+    const taskRecords = tracker.getTaskUsage('task-1');
+    expect(taskRecords).toHaveLength(1);
+    expect(taskRecords[0].inputTokens).toBe(500);
+  });
+
+  it('should isolate usage between sequential tasks', () => {
+    const tracker = new CostTracker({ dataDir: testDir });
+
+    tracker.startTask('task-1');
+    tracker.recordUsage('gpt-4o', 1000, 500);
+
+    tracker.startTask('task-2');
+    tracker.recordUsage('gpt-4o', 300, 100);
+
+    // Task-2 only includes its own records
+    const task2Records = tracker.getTaskUsage('task-2');
+    expect(task2Records).toHaveLength(1);
+    expect(task2Records[0].inputTokens).toBe(300);
+  });
+
+  it('should compute summary from task records', () => {
+    const tracker = new CostTracker({ dataDir: testDir });
+
+    tracker.startTask('my-task');
+    tracker.recordUsage('gpt-4o', 1000, 500);
+    tracker.recordUsage('gpt-4o', 2000, 800);
+
+    const summary = tracker.getTaskSummary('my-task');
+    expect(summary!.inputTokens).toBe(3000);
+    expect(summary!.outputTokens).toBe(1300);
+    expect(summary!.callCount).toBe(2);
+  });
+});
+```
+
+### Testing agenticChat Task Integration
+
+The `agenticChat` function's per-task tracking is tested in `src/core/__tests__/agenticChat.test.ts`:
+
+```typescript
+describe('per-task usage tracking', () => {
+  it('should call startTask at the beginning of agenticChat()', async () => {
+    await agenticChat('Test', { taskId: 'explicit-task-id' });
+    expect(mockCostTracker.startTask).toHaveBeenCalledWith('explicit-task-id');
+  });
+
+  it('should generate a task ID when none is provided', async () => {
+    const result = await agenticChat('Test');
+    const calledTaskId = mockCostTracker.startTask.mock.calls[0][0];
+    expect(calledTaskId).toMatch(/^task-\d+-[a-z0-9]+$/);
+    expect(result.taskId).toBe(calledTaskId);
+  });
+
+  it('should return the taskId in the result', async () => {
+    const result = await agenticChat('Test', { taskId: 'my-task' });
+    expect(result.taskId).toBe('my-task');
+  });
+});
+```
+
+Key testing patterns for the cost tracker:
+1. **Boundary isolation**: Verify that records before a boundary are excluded from task queries
+2. **Sequential task independence**: Ensure separate `startTask()` calls create independent boundaries
+3. **Accumulator accuracy**: Validate that `getTaskSummary()` correctly aggregates from records
+4. **clearHistory integration**: Confirm that clearing history also clears task boundaries and accumulators
+
 ## Testing Routing
 
 ### Router Test Flow

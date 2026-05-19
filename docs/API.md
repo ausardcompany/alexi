@@ -284,6 +284,7 @@ interface AgenticChatOptions {
   repoMapManager?: RepoMapManager;
   effort?: EffortLevel;            // low | medium | high | max
   agentId?: string;                // Agent to use
+  taskId?: string;                 // Per-task usage tracking ID (auto-generated if not provided)
 }
 ```
 
@@ -321,6 +322,49 @@ interface AgenticChatResult {
     success: boolean;
     error?: string;
   }>;
+  taskId?: string;             // Task ID used for per-task usage tracking
+}
+```
+
+### Per-Task Usage Tracking
+
+Each `agenticChat()` call creates an isolated usage boundary in the `CostTracker`. If no `taskId` is provided in options, one is auto-generated with the pattern `task-<timestamp>-<random>`.
+
+```typescript
+import { agenticChat } from './core/agenticChat.js';
+import { getCostTracker } from './core/costTracker.js';
+
+const result = await agenticChat('Refactor the auth module', {
+  taskId: 'refactor-auth-001',
+});
+
+// Query usage for this specific task
+const tracker = getCostTracker();
+const taskUsage = tracker.getTaskUsage(result.taskId!);
+const summary = tracker.getTaskSummary(result.taskId!);
+// summary: { inputTokens, outputTokens, cost, callCount }
+```
+
+The `CostTracker` per-task API:
+
+```typescript
+class CostTracker {
+  /** Create a usage boundary at the current record position */
+  startTask(taskId: string): void;
+
+  /** Get records added after the task boundary */
+  getTaskUsage(taskId: string): UsageRecord[];
+
+  /** Get aggregated summary for a task */
+  getTaskSummary(taskId: string): {
+    inputTokens: number;
+    outputTokens: number;
+    cost: number;
+    callCount: number;
+  } | undefined;
+
+  /** Reset all task accumulators and move boundaries forward */
+  resetTaskCounters(): void;
 }
 ```
 

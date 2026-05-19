@@ -294,8 +294,38 @@ vi.mock('../src/providers/index.js', () => ({
   getDefaultModel: vi.fn(),
 }));
 
+// Mock the cost tracker for agentic chat tests
+const mockCostTracker = {
+  recordUsage: vi.fn(),
+  startTask: vi.fn(),
+  getTaskUsage: vi.fn(() => []),
+  getTaskSummary: vi.fn(() => undefined),
+};
+vi.mock('../src/core/costTracker.js', () => ({
+  getCostTracker: vi.fn(() => mockCostTracker),
+}));
+
 // Import after mocking
 import { sendChat } from '../src/core/orchestrator.js';
+```
+
+### Testing Per-Task Cost Tracking
+
+When testing code that calls `agenticChat()`, mock the `CostTracker` to verify task boundary creation:
+
+```typescript
+const mockCostTracker = {
+  recordUsage: vi.fn(),
+  startTask: vi.fn(),
+  getTaskUsage: vi.fn(() => []),
+  getTaskSummary: vi.fn(() => undefined),
+};
+vi.mock('../../src/core/costTracker.js', () => ({
+  getCostTracker: vi.fn(() => mockCostTracker),
+}));
+
+// Verify task boundary was created
+expect(mockCostTracker.startTask).toHaveBeenCalledWith('expected-task-id');
 ```
 
 ### Testing Async/Background Operations

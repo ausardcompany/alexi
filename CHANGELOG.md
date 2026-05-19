@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Per-task usage tracking in CostTracker**: `startTask(taskId)`, `getTaskUsage(taskId)`, `getTaskSummary(taskId)`, and `resetTaskCounters()` methods enable isolated cost attribution per agentic task invocation
+- **Task ID support in agenticChat**: `AgenticChatOptions.taskId` allows callers to provide an explicit task ID; auto-generated as `task-<timestamp>-<random>` when omitted
+- **TaskBoundary interface** (`src/core/costTracker.ts`): Defines the per-task boundary data structure with `taskId`, `startIndex`, and `startTimestamp` fields
+- **taskId in AgenticChatResult**: The result of `agenticChat()` now includes the `taskId` used for usage tracking
+
+### Changed
+
+- `CostTracker.clearHistory()` now also clears task boundaries and accumulators
+- `agenticChat()` creates a usage boundary at the start of each invocation via `getCostTracker().startTask()`
+
 ## [0.5.0] - 2026-05-18
 
 ### Added

@@ -100,9 +100,10 @@ graph TB
 | Module | File | Description |
 |--------|------|-------------|
 | Orchestrator | `src/core/orchestrator.ts` | Single-turn `sendChat()` with routing and session |
-| Agentic Chat | `src/core/agenticChat.ts` | Multi-turn autonomous agent with tool loop, compaction, and hooks |
+| Agentic Chat | `src/core/agenticChat.ts` | Multi-turn autonomous agent with tool loop, compaction, hooks, and per-task usage tracking |
 | Router | `src/core/router.ts` | Model selection based on prompt classification and routing rules |
 | Session Manager | `src/core/sessionManager.ts` | File-based session persistence to `~/.alexi/sessions/` |
+| Cost Tracker | `src/core/costTracker.ts` | Token usage recording, cost calculation, and per-task usage boundaries |
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
 | Compaction | `src/compaction/index.ts` | Context compression with multiple strategies |
 | Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
@@ -178,6 +179,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
 | MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration |
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
+| Cost Tracker | `src/core/costTracker.ts` | Per-session and per-task token/cost tracking with task boundaries |
 | Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
 | Telemetry | `src/utils/telemetry.ts` | Usage metrics tracking |
 
@@ -256,6 +258,33 @@ flowchart TB
     LoopStart -->|No| MaxReached[Max Iterations Reached]
     MaxReached --> End
 ```
+
+### Per-Task Usage Tracking
+
+Each `agenticChat()` invocation creates an isolated usage boundary in the `CostTracker`, enabling fine-grained cost attribution per task:
+
+```typescript
+// src/core/agenticChat.ts
+const taskId = options?.taskId ?? `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+getCostTracker().startTask(taskId);
+```
+
+The `CostTracker` maintains a `Map<string, TaskBoundary>` that records the index position in the usage records array when each task starts. This enables:
+
+- **Isolated usage queries**: `getTaskUsage(taskId)` returns only records after the boundary
+- **Per-task summaries**: `getTaskSummary(taskId)` computes input/output tokens, cost, and call count for a single task
+- **Sequential task isolation**: Multiple consecutive `agenticChat()` calls each get their own boundary
+- **Counter resets**: `resetTaskCounters()` moves all boundaries forward without removing them
+
+```typescript
+interface TaskBoundary {
+  taskId: string;
+  startIndex: number;       // Index in records array where this task starts
+  startTimestamp: number;   // Timestamp when the task started
+}
+```
+
+The `taskId` is returned in `AgenticChatResult` for downstream consumers to query task-specific usage.
 
 ### Context Overflow Recovery
 
@@ -634,7 +663,7 @@ Tools are implemented as independent modules with:
 - Event bus integration for observability
 - Support for background execution (experimental)
 
-### 3. Agentic Execution with Compaction
+### 3. Agentic Execution with Compaction and Per-Task Tracking
 
 The agentic chat system enables autonomous multi-turn operations:
 - Automatic permission configuration (priority 200 allow rules)
@@ -642,6 +671,7 @@ The agentic chat system enables autonomous multi-turn operations:
 - Lifecycle hooks with block cap and continueOnBlock
 - Configurable iteration limits (default: 50)
 - Effort levels controlling max tokens and behavior
+- Per-task usage boundaries for isolated cost attribution via `CostTracker.startTask()`
 
 ### 4. Event-Driven Architecture
 
