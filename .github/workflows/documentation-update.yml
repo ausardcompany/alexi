@@ -614,7 +614,17 @@ jobs:
           git rebase "origin/$BRANCH" || {
             echo "[WARN] Rebase failed, attempting merge strategy instead"
             git rebase --abort 2>/dev/null || true
-            git pull --rebase=false --no-edit origin "$BRANCH"
+            # Use -X ours to auto-resolve conflicts by preferring our local
+            # (freshly generated) documentation content over the remote version.
+            git pull --rebase=false --no-edit -X ours origin "$BRANCH" || {
+              echo "[WARN] Merge with -X ours failed, resolving conflicts manually"
+              # If merge is in progress with conflicts, accept ours for all conflicted files
+              git diff --name-only --diff-filter=U | while read -r conflicted; do
+                git checkout --ours "$conflicted"
+                git add "$conflicted"
+              done
+              git commit --no-edit --no-verify 2>/dev/null || true
+            }
           }
 
           LOCAL_HEAD=$(git rev-parse HEAD)
