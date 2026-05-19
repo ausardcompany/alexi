@@ -3,7 +3,7 @@
  * Based on opencode changes for session history replay on resume
  */
 
-import type { Message } from '../../core/sessionManager.js';
+import type { Message } from '../core/sessionManager.js';
 
 export interface ReplayOptions {
   /**
@@ -125,10 +125,10 @@ export class SessionReplay {
     let content = '';
     if (typeof message.content === 'string') {
       content = message.content;
-    } else if (Array.isArray(message.content)) {
+    } else if (Array.isArray(message.content as unknown)) {
       // Handle multimodal content
-      content = message.content
-        .map((item: any) => {
+      content = (message.content as unknown as { type: string; text?: string }[])
+        .map((item) => {
           if (item.type === 'text') {
             return item.text;
           }

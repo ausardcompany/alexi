@@ -178,14 +178,14 @@ function generateReferenceId(name: string, entry: ReferenceEntry): string {
  */
 function deriveAlias(entry: ReferenceEntry, name: string): string {
   if (entry.kind === 'local' && entry.path) {
-    const segments = entry.path.split(/[\/\\]/);
+    const segments = entry.path.split(/[/\\]/);
     const lastSegment = segments[segments.length - 1] || name;
     return lastSegment.replace(/\.[^.]+$/, ''); // Remove extension
   }
 
   if (entry.kind === 'git' && entry.repository) {
     // Extract repo name from URL (e.g., "owner/repo" from "https://github.com/owner/repo")
-    const match = entry.repository.match(/([^\/]+\/[^\/]+?)(?:\.git)?$/);
+    const match = entry.repository.match(/([^/]+\/[^/]+?)(?:\.git)?$/);
     if (match) {
       return match[1];
     }

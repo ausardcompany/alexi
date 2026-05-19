@@ -16,4 +16,5 @@ export {
   initRepositoryCache,
   getRepositoryCache,
   type CachedRepository,
+  RepositoryCache,
 } from './repository-cache.js';

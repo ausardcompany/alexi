@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
 import { defineTool, type ToolResult } from '../index.js';
-import { getRepositoryCache } from '../../reference/repository-cache.js';
+import { getRepositoryCacheService } from '../../reference/repository-cache.js';
 
 const RepoCloneParamsSchema = z.object({
   repository: z.string().describe('The git repository URL to clone'),
@@ -81,7 +81,7 @@ export const repoCloneTool = defineTool<typeof RepoCloneParamsSchema, RepoCloneR
 
     try {
       // Get repository cache
-      const cache = getRepositoryCache();
+      const cache = getRepositoryCacheService();
       if (!cache) {
         return {
           success: false,

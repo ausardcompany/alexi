@@ -5,7 +5,7 @@
 
 // Typed cache failures based on opencode refactor(repository): type cache failures
 export class CacheError extends Error {
-  readonly _tag = 'CacheError';
+  readonly _tag: string = 'CacheError';
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -180,4 +180,81 @@ export function getRepositoryCache(): RepositoryCache {
  */
 export function resetRepositoryCache(): void {
   globalRepositoryCache = null;
+}
+
+// --- Legacy API for backward compatibility ---
+
+export interface CachedRepository {
+  repository: string;
+  path: string;
+  branch?: string;
+  lastAccessed: Date;
+}
+
+/**
+ * Legacy RepositoryCacheService for backward compatibility
+ * Used by repo-clone tool and tests
+ */
+export class RepositoryCacheService {
+  private entries: Map<string, CachedRepository> = new Map();
+  private readonly cacheDir: string;
+
+  constructor(cacheDir: string) {
+    this.cacheDir = cacheDir;
+  }
+
+  private makeKey(repository: string, branch?: string): string {
+    return branch ? `${repository}#${branch}` : repository;
+  }
+
+  get(repository: string, branch?: string): CachedRepository | undefined {
+    const key = this.makeKey(repository, branch);
+    const entry = this.entries.get(key);
+    if (entry) {
+      entry.lastAccessed = new Date();
+    }
+    return entry;
+  }
+
+  set(repository: string, localPath: string, branch?: string): void {
+    const key = this.makeKey(repository, branch);
+    this.entries.set(key, {
+      repository,
+      path: localPath,
+      branch,
+      lastAccessed: new Date(),
+    });
+  }
+
+  getCachePath(repository: string, branch?: string): string {
+    const safeName = repository.replace(/[^a-zA-Z0-9]/g, '_');
+    const branchSuffix = branch ? `_${branch}` : '';
+    return `${this.cacheDir}/repos/${safeName}${branchSuffix}`;
+  }
+
+  getAll(): CachedRepository[] {
+    return Array.from(this.entries.values());
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+}
+
+// Global legacy cache service instance
+let globalRepositoryCacheService: RepositoryCacheService | null = null;
+
+/**
+ * Initialize the legacy repository cache service
+ */
+export function initRepositoryCache(cacheDir: string): RepositoryCacheService {
+  globalRepositoryCacheService = new RepositoryCacheService(cacheDir);
+  return globalRepositoryCacheService;
+}
+
+/**
+ * Get the legacy repository cache service instance
+ */
+export function getRepositoryCacheService(): RepositoryCacheService | null {
+  return globalRepositoryCacheService;
 }
