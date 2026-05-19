@@ -100,7 +100,7 @@ describe('Reactive Compaction Seeding', () => {
       const nonSystemMessages = messages.filter((m) => m.role !== 'system');
       const toSummarize = nonSystemMessages.slice(0, -preserveRecent);
       const totalOldTokens = estimateConversationTokens(toSummarize);
-      const expectedTarget = Math.max(1, Math.floor(totalOldTokens - overflowTokens * 1.5));
+      const expectedTarget = Math.max(500, totalOldTokens - Math.ceil(overflowTokens * 1.5));
 
       const options: CompactionOptions = {
         strategy: 'summarize',
@@ -114,7 +114,7 @@ describe('Reactive Compaction Seeding', () => {
       expect(lastPrompt).toContain(`under approximately ${expectedTarget} tokens`);
     });
 
-    it('should ensure targetSummaryTokens is at least 1', async () => {
+    it('should ensure targetSummaryTokens is at least 500', async () => {
       const manager = new CompactionManager({ summarizeFn });
       // Create short messages with very large overflow
       const messages = createConversation(10, 10);
@@ -128,8 +128,8 @@ describe('Reactive Compaction Seeding', () => {
       await manager.compact(messages, options);
 
       const lastPrompt = capturedPrompts[capturedPrompts.length - 1];
-      // Should still contain the instruction with at least 1 token target
-      expect(lastPrompt).toContain('Keep your summary under approximately 1 tokens');
+      // Should still contain the instruction with at least 500 token target (minimum floor)
+      expect(lastPrompt).toContain('Keep your summary under approximately 500 tokens');
     });
 
     it('should work with smart strategy when overflowTokens is provided', async () => {

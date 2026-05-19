@@ -616,8 +616,8 @@ export class CompactionManager {
 
     const totalOldTokens = estimateConversationTokens(messagesToSummarize);
     const targetSummaryTokens = Math.max(
-      1,
-      Math.floor(totalOldTokens - options.overflowTokens * 1.5)
+      500,
+      totalOldTokens - Math.ceil(options.overflowTokens * 1.5)
     );
 
     return `Keep your summary under approximately ${targetSummaryTokens} tokens.`;
