@@ -39,6 +39,7 @@ vi.mock('../../src/core/router.js', () => ({
 vi.mock('../../src/core/costTracker.js', () => ({
   getCostTracker: vi.fn(() => ({
     recordUsage: vi.fn(),
+    startTask: vi.fn(),
   })),
 }));
 

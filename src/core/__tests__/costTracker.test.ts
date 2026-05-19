@@ -292,4 +292,185 @@ describe('CostTracker', () => {
       }
     });
   });
+
+  describe('per-task usage tracking', () => {
+    describe('startTask', () => {
+      it('should create a boundary at the current record position', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        // Record some usage before starting the task
+        tracker.recordUsage('gpt-4o', 1000, 500);
+        tracker.recordUsage('gpt-4o', 2000, 800);
+
+        // Start a task - boundary should be at index 2
+        tracker.startTask('task-1');
+
+        // Record usage after the task boundary
+        tracker.recordUsage('gpt-4o', 500, 200);
+
+        const taskRecords = tracker.getTaskUsage('task-1');
+        expect(taskRecords).toHaveLength(1);
+        expect(taskRecords[0].inputTokens).toBe(500);
+        expect(taskRecords[0].outputTokens).toBe(200);
+      });
+
+      it('should reset boundary when same taskId is reused', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        tracker.startTask('task-1');
+        tracker.recordUsage('gpt-4o', 1000, 500);
+
+        // Restart the same task - boundary moves forward
+        tracker.startTask('task-1');
+        tracker.recordUsage('gpt-4o', 200, 100);
+
+        const taskRecords = tracker.getTaskUsage('task-1');
+        expect(taskRecords).toHaveLength(1);
+        expect(taskRecords[0].inputTokens).toBe(200);
+      });
+    });
+
+    describe('getTaskUsage', () => {
+      it('should return only records after the task boundary', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        // Pre-task usage
+        tracker.recordUsage('gpt-4o', 1000, 500, 'session-1');
+
+        tracker.startTask('task-a');
+
+        // Task-a usage
+        tracker.recordUsage('gpt-4o', 300, 100, 'session-1');
+        tracker.recordUsage('gpt-4o-mini', 500, 200, 'session-1');
+
+        const taskRecords = tracker.getTaskUsage('task-a');
+        expect(taskRecords).toHaveLength(2);
+        expect(taskRecords[0].inputTokens).toBe(300);
+        expect(taskRecords[1].modelId).toBe('gpt-4o-mini');
+      });
+
+      it('should return empty array for unknown task', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+        tracker.recordUsage('gpt-4o', 1000, 500);
+
+        const taskRecords = tracker.getTaskUsage('nonexistent-task');
+        expect(taskRecords).toEqual([]);
+      });
+    });
+
+    describe('resetTaskCounters', () => {
+      it('should reset accumulators and move boundary to current position', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        tracker.startTask('task-1');
+        tracker.recordUsage('gpt-4o', 1000, 500);
+        tracker.recordUsage('gpt-4o', 2000, 800);
+
+        // Verify we have 2 records in the task
+        expect(tracker.getTaskUsage('task-1')).toHaveLength(2);
+
+        // Reset counters
+        tracker.resetTaskCounters();
+
+        // Now the boundary has moved - no records after the new boundary
+        expect(tracker.getTaskUsage('task-1')).toHaveLength(0);
+
+        // New records should appear
+        tracker.recordUsage('gpt-4o', 100, 50);
+        expect(tracker.getTaskUsage('task-1')).toHaveLength(1);
+      });
+    });
+
+    describe('getTaskSummary', () => {
+      it('should compute summary from task records only', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        // Pre-task usage (should not be counted)
+        tracker.recordUsage('gpt-4o', 5000, 3000);
+
+        tracker.startTask('my-task');
+
+        // Task usage
+        tracker.recordUsage('gpt-4o', 1000, 500);
+        tracker.recordUsage('gpt-4o', 2000, 800);
+
+        const summary = tracker.getTaskSummary('my-task');
+        expect(summary).toBeDefined();
+        expect(summary!.inputTokens).toBe(3000);
+        expect(summary!.outputTokens).toBe(1300);
+        expect(summary!.callCount).toBe(2);
+        expect(summary!.cost).toBeGreaterThan(0);
+      });
+
+      it('should return undefined for unknown task', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+        expect(tracker.getTaskSummary('unknown')).toBeUndefined();
+      });
+    });
+
+    describe('task isolation across sequential tasks', () => {
+      it('should isolate usage between two sequential tasks', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        // First task
+        tracker.startTask('task-1');
+        tracker.recordUsage('gpt-4o', 1000, 500);
+        tracker.recordUsage('gpt-4o', 2000, 800);
+
+        // Second task
+        tracker.startTask('task-2');
+        tracker.recordUsage('gpt-4o', 300, 100);
+
+        // Task-1 should have its records plus task-2's (since startIndex is fixed)
+        const task1Records = tracker.getTaskUsage('task-1');
+        expect(task1Records).toHaveLength(3); // All records after task-1 boundary
+
+        // Task-2 should only have its own record
+        const task2Records = tracker.getTaskUsage('task-2');
+        expect(task2Records).toHaveLength(1);
+        expect(task2Records[0].inputTokens).toBe(300);
+
+        // Summaries should be accurate
+        const task2Summary = tracker.getTaskSummary('task-2');
+        expect(task2Summary!.inputTokens).toBe(300);
+        expect(task2Summary!.outputTokens).toBe(100);
+        expect(task2Summary!.callCount).toBe(1);
+      });
+
+      it('should maintain separate boundaries for concurrent tasks', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        tracker.startTask('task-a');
+        tracker.recordUsage('gpt-4o', 1000, 500);
+
+        tracker.startTask('task-b');
+        tracker.recordUsage('gpt-4o', 2000, 800);
+        tracker.recordUsage('gpt-4o-mini', 500, 200);
+
+        // Task-a boundary was set before task-b, so it includes all records after its boundary
+        const taskARecords = tracker.getTaskUsage('task-a');
+        expect(taskARecords).toHaveLength(3);
+
+        // Task-b boundary was set after the first record, so it only has 2 records
+        const taskBRecords = tracker.getTaskUsage('task-b');
+        expect(taskBRecords).toHaveLength(2);
+        expect(taskBRecords[0].inputTokens).toBe(2000);
+        expect(taskBRecords[1].inputTokens).toBe(500);
+      });
+    });
+
+    describe('clearHistory clears task state', () => {
+      it('should clear all task boundaries and accumulators', () => {
+        const tracker = new CostTracker({ dataDir: testDir });
+
+        tracker.startTask('task-1');
+        tracker.recordUsage('gpt-4o', 1000, 500);
+
+        tracker.clearHistory();
+
+        expect(tracker.getTaskUsage('task-1')).toEqual([]);
+        expect(tracker.getTaskSummary('task-1')).toBeUndefined();
+      });
+    });
+  });
 });

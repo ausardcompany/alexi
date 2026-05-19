@@ -80,6 +80,8 @@ export interface AgenticChatOptions {
   effort?: EffortLevel;
   /** Agent ID to use for assembled system prompt (e.g. 'code', 'debug') */
   agentId?: string;
+  /** Optional task ID for per-task usage tracking. When provided, creates a usage boundary in the CostTracker. */
+  taskId?: string;
 }
 
 export interface AgenticProgressEvent {
@@ -108,6 +110,8 @@ export interface AgenticChatResult {
     success: boolean;
     error?: string;
   }>;
+  /** Task ID used for per-task usage tracking (if provided or generated) */
+  taskId?: string;
 }
 
 // ============ Context Overflow Detection ============
@@ -270,6 +274,10 @@ export async function agenticChat(
 ): Promise<AgenticChatResult> {
   // Register built-in tools if not already registered
   registerBuiltInTools();
+
+  // Start per-task usage tracking boundary
+  const taskId = options?.taskId ?? `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  getCostTracker().startTask(taskId);
 
   const effortConfig = getEffortConfig(options?.effort ?? DEFAULT_EFFORT);
   const maxIterations = options?.maxIterations ?? effortConfig.maxIterations;
@@ -694,5 +702,6 @@ export async function agenticChat(
     iterations,
     toolCallsExecuted,
     toolCallSummary,
+    taskId,
   };
 }

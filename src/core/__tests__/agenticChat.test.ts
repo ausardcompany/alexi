@@ -33,10 +33,14 @@ vi.mock('../router.js', () => ({
 }));
 
 // Mock the cost tracker
+const mockCostTracker = {
+  recordUsage: vi.fn(),
+  startTask: vi.fn(),
+  getTaskUsage: vi.fn(() => []),
+  getTaskSummary: vi.fn(() => undefined),
+};
 vi.mock('../costTracker.js', () => ({
-  getCostTracker: vi.fn(() => ({
-    recordUsage: vi.fn(),
-  })),
+  getCostTracker: vi.fn(() => mockCostTracker),
 }));
 
 // Mock the tool registry
@@ -504,6 +508,64 @@ describe('agenticChat', () => {
 
       expect(options.tools).toHaveLength(1);
       expect(options.tools[0].function.name).toBe('read');
+    });
+  });
+
+  describe('per-task usage tracking', () => {
+    it('should call startTask at the beginning of agenticChat()', async () => {
+      mockProvider.complete.mockResolvedValue({
+        text: 'Hello',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+
+      await agenticChat('Test', { taskId: 'explicit-task-id' });
+
+      expect(mockCostTracker.startTask).toHaveBeenCalledWith('explicit-task-id');
+    });
+
+    it('should generate a task ID when none is provided', async () => {
+      mockProvider.complete.mockResolvedValue({
+        text: 'Hello',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+
+      const result = await agenticChat('Test');
+
+      expect(mockCostTracker.startTask).toHaveBeenCalledTimes(1);
+      const calledTaskId = mockCostTracker.startTask.mock.calls[0][0];
+      expect(calledTaskId).toMatch(/^task-\d+-[a-z0-9]+$/);
+      expect(result.taskId).toBe(calledTaskId);
+    });
+
+    it('should return the taskId in the result', async () => {
+      mockProvider.complete.mockResolvedValue({
+        text: 'Hello',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+
+      const result = await agenticChat('Test', { taskId: 'my-task' });
+
+      expect(result.taskId).toBe('my-task');
+    });
+
+    it('should produce isolated usage across consecutive calls', async () => {
+      mockProvider.complete.mockResolvedValue({
+        text: 'Response',
+        usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+      });
+
+      const result1 = await agenticChat('First task', { taskId: 'task-1' });
+      const result2 = await agenticChat('Second task', { taskId: 'task-2' });
+
+      // Each call should start its own task boundary
+      expect(mockCostTracker.startTask).toHaveBeenCalledWith('task-1');
+      expect(mockCostTracker.startTask).toHaveBeenCalledWith('task-2');
+
+      // Each result should have isolated usage (not accumulated)
+      expect(result1.usage.prompt_tokens).toBe(100);
+      expect(result2.usage.prompt_tokens).toBe(100);
+      expect(result1.taskId).toBe('task-1');
+      expect(result2.taskId).toBe('task-2');
     });
   });
 

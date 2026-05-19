@@ -147,12 +147,26 @@ export const MODEL_PRICING: ModelPricing[] = [
 
 // ============ Cost Tracker Class ============
 
+export interface TaskBoundary {
+  /** Task ID */
+  taskId: string;
+  /** Index in records array where this task starts */
+  startIndex: number;
+  /** Timestamp when the task started */
+  startTimestamp: number;
+}
+
 export class CostTracker {
   private dataDir: string;
   private costFilePath: string;
   private records: UsageRecord[] = [];
   private maxRecords: number;
   private customPricing: Map<string, ModelPricing> = new Map();
+  private taskBoundaries: Map<string, TaskBoundary> = new Map();
+  private taskAccumulators: Map<
+    string,
+    { inputTokens: number; outputTokens: number; cost: number; callCount: number }
+  > = new Map();
 
   constructor(options: CostTrackerOptions = {}) {
     this.dataDir = options.dataDir || path.join(os.homedir(), '.alexi');
@@ -348,10 +362,83 @@ export class CostTracker {
   }
 
   /**
+   * Start a new task boundary. Records added after this call are associated with the task.
+   * If the same taskId is reused, the boundary is reset to the current position.
+   */
+  startTask(taskId: string): void {
+    const boundary: TaskBoundary = {
+      taskId,
+      startIndex: this.records.length,
+      startTimestamp: Date.now(),
+    };
+    this.taskBoundaries.set(taskId, boundary);
+    this.taskAccumulators.set(taskId, {
+      inputTokens: 0,
+      outputTokens: 0,
+      cost: 0,
+      callCount: 0,
+    });
+  }
+
+  /**
+   * Get usage records that were added after the task boundary was created.
+   */
+  getTaskUsage(taskId: string): UsageRecord[] {
+    const boundary = this.taskBoundaries.get(taskId);
+    if (!boundary) {
+      return [];
+    }
+    return this.records.slice(boundary.startIndex);
+  }
+
+  /**
+   * Reset per-task accumulators without removing the boundary.
+   * This is useful if you want to restart counting within the same task.
+   */
+  resetTaskCounters(): void {
+    for (const [taskId] of this.taskAccumulators) {
+      this.taskAccumulators.set(taskId, {
+        inputTokens: 0,
+        outputTokens: 0,
+        cost: 0,
+        callCount: 0,
+      });
+      // Also update the boundary start index to current position
+      const boundary = this.taskBoundaries.get(taskId);
+      if (boundary) {
+        boundary.startIndex = this.records.length;
+        boundary.startTimestamp = Date.now();
+      }
+    }
+  }
+
+  /**
+   * Get the per-task accumulator summary for a specific task.
+   */
+  getTaskSummary(
+    taskId: string
+  ): { inputTokens: number; outputTokens: number; cost: number; callCount: number } | undefined {
+    const accumulator = this.taskAccumulators.get(taskId);
+    if (!accumulator) {
+      return undefined;
+    }
+    // Compute from actual records for accuracy
+    const records = this.getTaskUsage(taskId);
+    return {
+      inputTokens: records.reduce((sum, r) => sum + r.inputTokens, 0),
+      outputTokens: records.reduce((sum, r) => sum + r.outputTokens, 0),
+      cost: records.reduce((sum, r) => sum + r.cost, 0),
+      callCount: records.length,
+    };
+  }
+
+  /**
    * Clear all cost history
    */
   clearHistory(): void {
     this.records = [];
+    this.taskBoundaries.clear();
+    this.taskAccumulators.clear();
     this.saveRecords().catch(() => {});
   }
 
