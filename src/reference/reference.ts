@@ -182,7 +182,7 @@ function deriveAlias(entry: ReferenceEntry, name: string): string {
     const lastSegment = segments[segments.length - 1] || name;
     return lastSegment.replace(/\.[^.]+$/, ''); // Remove extension
   }
-  
+
   if (entry.kind === 'git' && entry.repository) {
     // Extract repo name from URL (e.g., "owner/repo" from "https://github.com/owner/repo")
     const match = entry.repository.match(/([^\/]+\/[^\/]+?)(?:\.git)?$/);
@@ -190,7 +190,7 @@ function deriveAlias(entry: ReferenceEntry, name: string): string {
       return match[1];
     }
   }
-  
+
   return name;
 }
 
@@ -205,7 +205,7 @@ export function normalizeReferenceConfig(
 ): NormalizedReference {
   try {
     const id = generateReferenceId(name, entry);
-    
+
     // Resolve path for local references
     let resolvedPath: string | undefined;
     if (entry.kind === 'local' && entry.path) {
@@ -217,16 +217,16 @@ export function normalizeReferenceConfig(
         resolvedPath = path.resolve(baseDir, entry.path);
       }
     }
-    
+
     // Generate alias if not provided
     const alias = deriveAlias(entry, name);
-    
+
     // Generate description
     const description =
       entry.kind === 'local'
         ? `Local reference to ${entry.path || name}`
         : `Git repository ${entry.repository || name}${entry.branch ? ` (${entry.branch})` : ''}`;
-    
+
     return {
       id,
       name,
@@ -254,7 +254,7 @@ export function normalizeAllReferences(
   baseDir: string
 ): Record<string, NormalizedReference> {
   const normalized: Record<string, NormalizedReference> = {};
-  
+
   for (const [name, entry] of Object.entries(references)) {
     try {
       normalized[name] = normalizeReferenceConfig(name, entry, baseDir);
@@ -263,7 +263,6 @@ export function normalizeAllReferences(
       // Continue with other references
     }
   }
-  
+
   return normalized;
 }
-

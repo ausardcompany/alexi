@@ -6,7 +6,7 @@
 // Typed cache failures based on opencode refactor(repository): type cache failures
 export class CacheError extends Error {
   readonly _tag = 'CacheError';
-  
+
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = 'CacheError';
@@ -15,7 +15,7 @@ export class CacheError extends Error {
 
 export class CacheMissError extends CacheError {
   readonly _tag = 'CacheMissError';
-  
+
   constructor(public readonly key: string) {
     super(`Cache miss for key: ${key}`);
     this.name = 'CacheMissError';
@@ -24,7 +24,7 @@ export class CacheMissError extends CacheError {
 
 export class CacheStaleError extends CacheError {
   readonly _tag = 'CacheStaleError';
-  
+
   constructor(
     public readonly key: string,
     public readonly ageMs: number
@@ -36,7 +36,7 @@ export class CacheStaleError extends CacheError {
 
 export class CacheCapacityError extends CacheError {
   readonly _tag = 'CacheCapacityError';
-  
+
   constructor(
     public readonly currentSize: number,
     public readonly maxSize: number

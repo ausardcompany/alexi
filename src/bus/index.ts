@@ -70,7 +70,7 @@ export function defineEvent<T extends z.ZodType<any>>(
       if (!eventHandlers.has(name)) {
         eventHandlers.set(name, new Set());
       }
-      
+
       // Immediately add handler to the set before returning
       const handlers = eventHandlers.get(name)!;
       handlers.add(handler);
