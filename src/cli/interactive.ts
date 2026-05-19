@@ -496,6 +496,61 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       return true;
     }
 
+    case 'rewind': {
+      const history = state.sessionManager.getHistory();
+      if (history.length === 0) {
+        console.log(c('yellow', '\n  No conversation to rewind\n'));
+        return true;
+      }
+      try {
+        const { executeRewind } = await import('../command/rewind.js');
+        const rewindResult = await executeRewind(history, args);
+        if (!rewindResult.success) {
+          if (rewindResult.mode === 'list' && rewindResult.error) {
+            console.log(c('yellow', `\n  ${rewindResult.error}\n`));
+          } else {
+            console.log(c('red', `\n  ${rewindResult.error}\n`));
+          }
+          return true;
+        }
+        if (rewindResult.mode === 'list' && rewindResult.turnBoundaries) {
+          console.log(c('cyan', '\n  Available turn boundaries:\n'));
+          for (const boundary of rewindResult.turnBoundaries) {
+            console.log(c('gray', `    Turn ${boundary.turnNumber}: ${boundary.preview}`));
+          }
+          console.log();
+          console.log(c('dim', '  Usage: /rewind <turn_number> [--summarize]'));
+          console.log();
+        } else if (rewindResult.mode === 'discard' && rewindResult.messages) {
+          const session = state.sessionManager.getCurrentSession();
+          if (session) {
+            session.messages = rewindResult.messages;
+            session.metadata.messageCount = rewindResult.messages.length;
+            session.metadata.updated = Date.now();
+          }
+          console.log(
+            c('green', `\n  Rewound: discarded ${rewindResult.discardedCount} message(s)\n`)
+          );
+        } else if (rewindResult.mode === 'summarize' && rewindResult.messages) {
+          const session = state.sessionManager.getCurrentSession();
+          if (session) {
+            session.messages = rewindResult.messages;
+            session.metadata.messageCount = rewindResult.messages.length;
+            session.metadata.updated = Date.now();
+          }
+          console.log(
+            c(
+              'green',
+              `\n  Summarized ${rewindResult.summarizedCount} message(s) before the specified turn\n`
+            )
+          );
+        }
+      } catch (err) {
+        console.log(c('red', `\n  Rewind failed: ${err}\n`));
+      }
+      return true;
+    }
+
     case 'context': {
       const history = state.sessionManager.getHistory();
       const content = history.map((m) => m.content).join('');
