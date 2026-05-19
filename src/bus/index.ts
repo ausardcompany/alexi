@@ -64,11 +64,18 @@ export function defineEvent<T extends z.ZodType<any>>(
     },
 
     subscribe(handler: EventHandler<z.infer<T>>): UnsubscribeFn {
+      // Eagerly acquire subscription to prevent race conditions
+      // where events could be missed between subscribe call and first listen
+      // Based on opencode fix: acquire PubSub subscription eagerly
       if (!eventHandlers.has(name)) {
         eventHandlers.set(name, new Set());
       }
-      eventHandlers.get(name)!.add(handler);
+      
+      // Immediately add handler to the set before returning
+      const handlers = eventHandlers.get(name)!;
+      handlers.add(handler);
 
+      // Return unsubscribe function
       return () => {
         eventHandlers.get(name)?.delete(handler);
       };

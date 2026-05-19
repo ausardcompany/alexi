@@ -7,6 +7,7 @@
 
 import * as path from 'path';
 import * as os from 'os';
+import { createHash } from 'crypto';
 
 export interface ReferenceEntry {
   kind: 'git' | 'local';
@@ -136,3 +137,133 @@ export function initReferenceService(config: ReferenceConfig): ReferenceService 
 export function getReferenceService(): ReferenceService | null {
   return globalReferenceService;
 }
+
+// ============ Reference Normalization ============
+
+/**
+ * Normalized reference with consistent structure
+ * Based on opencode refactor(reference): normalize config entries
+ */
+export interface NormalizedReference {
+  id: string;
+  name: string;
+  kind: 'git' | 'local';
+  resolvedPath?: string;
+  repository?: string;
+  branch?: string;
+  alias: string;
+  description: string;
+  metadata: Record<string, unknown>;
+}
+
+export class ReferenceNormalizationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ReferenceNormalizationError';
+  }
+}
+
+/**
+ * Generate a unique ID for a reference
+ */
+function generateReferenceId(name: string, entry: ReferenceEntry): string {
+  const hash = createHash('sha256');
+  const source = entry.kind === 'git' ? entry.repository : entry.path;
+  hash.update(`${entry.kind}:${source || name}`);
+  return hash.digest('hex').slice(0, 12);
+}
+
+/**
+ * Derive an alias from a path or repository URL
+ */
+function deriveAlias(entry: ReferenceEntry, name: string): string {
+  if (entry.kind === 'local' && entry.path) {
+    const segments = entry.path.split(/[\/\\]/);
+    const lastSegment = segments[segments.length - 1] || name;
+    return lastSegment.replace(/\.[^.]+$/, ''); // Remove extension
+  }
+  
+  if (entry.kind === 'git' && entry.repository) {
+    // Extract repo name from URL (e.g., "owner/repo" from "https://github.com/owner/repo")
+    const match = entry.repository.match(/([^\/]+\/[^\/]+?)(?:\.git)?$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  
+  return name;
+}
+
+/**
+ * Normalize reference config entries for consistent handling
+ * Based on opencode refactor(reference): normalize config entries
+ */
+export function normalizeReferenceConfig(
+  name: string,
+  entry: ReferenceEntry,
+  baseDir: string
+): NormalizedReference {
+  try {
+    const id = generateReferenceId(name, entry);
+    
+    // Resolve path for local references
+    let resolvedPath: string | undefined;
+    if (entry.kind === 'local' && entry.path) {
+      if (entry.path.startsWith('~/')) {
+        resolvedPath = path.join(os.homedir(), entry.path.slice(2));
+      } else if (path.isAbsolute(entry.path)) {
+        resolvedPath = entry.path;
+      } else {
+        resolvedPath = path.resolve(baseDir, entry.path);
+      }
+    }
+    
+    // Generate alias if not provided
+    const alias = deriveAlias(entry, name);
+    
+    // Generate description
+    const description =
+      entry.kind === 'local'
+        ? `Local reference to ${entry.path || name}`
+        : `Git repository ${entry.repository || name}${entry.branch ? ` (${entry.branch})` : ''}`;
+    
+    return {
+      id,
+      name,
+      kind: entry.kind,
+      resolvedPath,
+      repository: entry.repository,
+      branch: entry.branch,
+      alias,
+      description,
+      metadata: {},
+    };
+  } catch (error) {
+    throw new ReferenceNormalizationError(
+      `Failed to normalize reference '${name}': ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * Normalize all references in a config
+ */
+export function normalizeAllReferences(
+  references: Record<string, ReferenceEntry>,
+  baseDir: string
+): Record<string, NormalizedReference> {
+  const normalized: Record<string, NormalizedReference> = {};
+  
+  for (const [name, entry] of Object.entries(references)) {
+    try {
+      normalized[name] = normalizeReferenceConfig(name, entry, baseDir);
+    } catch (error) {
+      console.warn(`Failed to normalize reference '${name}':`, error);
+      // Continue with other references
+    }
+  }
+  
+  return normalized;
+}
+

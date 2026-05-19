@@ -1,105 +1,183 @@
 /**
- * Repository Cache Service - Manages cloned reference repositories
- *
- * This service prevents redundant cloning operations and provides
- * a consistent interface for accessing external code repositories.
+ * Repository Cache Service with Typed Failures
+ * Based on opencode refactor(repository): type cache failures
  */
 
-import * as path from 'path';
-import * as crypto from 'crypto';
+// Typed cache failures based on opencode refactor(repository): type cache failures
+export class CacheError extends Error {
+  readonly _tag = 'CacheError';
+  
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'CacheError';
+  }
+}
 
-export interface CachedRepository {
-  path: string;
-  repository: string;
-  branch?: string;
-  lastAccessed: Date;
+export class CacheMissError extends CacheError {
+  readonly _tag = 'CacheMissError';
+  
+  constructor(public readonly key: string) {
+    super(`Cache miss for key: ${key}`);
+    this.name = 'CacheMissError';
+  }
+}
+
+export class CacheStaleError extends CacheError {
+  readonly _tag = 'CacheStaleError';
+  
+  constructor(
+    public readonly key: string,
+    public readonly ageMs: number
+  ) {
+    super(`Cache entry stale for key: ${key} (age: ${ageMs}ms)`);
+    this.name = 'CacheStaleError';
+  }
+}
+
+export class CacheCapacityError extends CacheError {
+  readonly _tag = 'CacheCapacityError';
+  
+  constructor(
+    public readonly currentSize: number,
+    public readonly maxSize: number
+  ) {
+    super(`Cache at capacity: ${currentSize}/${maxSize}`);
+    this.name = 'CacheCapacityError';
+  }
+}
+
+export interface RepositoryCacheEntry {
+  content: string;
+  hash: string;
+  fetchedAt: Date;
+  expiresAt: Date;
+}
+
+export interface RepositoryCacheOptions {
+  capacity?: number;
+  ttlMs?: number;
 }
 
 /**
- * Repository Cache Service for managing cloned repositories
+ * Repository cache with properly typed failures
+ * Supports TTL-based expiration and capacity limits
  */
-export class RepositoryCacheService {
-  private cache = new Map<string, CachedRepository>();
-  private cacheDir: string;
+export class RepositoryCache {
+  private cache: Map<string, RepositoryCacheEntry> = new Map();
+  private readonly capacity: number;
+  private readonly ttlMs: number;
 
-  constructor(cacheDir: string) {
-    this.cacheDir = cacheDir;
+  constructor(options: RepositoryCacheOptions = {}) {
+    this.capacity = options.capacity ?? 1000;
+    this.ttlMs = options.ttlMs ?? 60 * 60 * 1000; // 1 hour default
   }
 
   /**
-   * Generate a cache key for a repository
+   * Get a cache entry
+   * Throws CacheMissError if not found or CacheStaleError if expired
    */
-  private getCacheKey(repository: string, branch?: string): string {
-    const hash = crypto.createHash('sha256');
-    hash.update(repository);
-    if (branch) {
-      hash.update(branch);
-    }
-    return hash.digest('hex').slice(0, 12);
-  }
-
-  /**
-   * Get a cached repository
-   */
-  get(repository: string, branch?: string): CachedRepository | undefined {
-    const key = this.getCacheKey(repository, branch);
+  async get(key: string): Promise<RepositoryCacheEntry> {
     const entry = this.cache.get(key);
-    if (entry) {
-      entry.lastAccessed = new Date();
+
+    if (!entry) {
+      throw new CacheMissError(key);
     }
+
+    // Check if entry is stale
+    const now = new Date();
+    if (entry.expiresAt < now) {
+      const ageMs = now.getTime() - entry.fetchedAt.getTime();
+      throw new CacheStaleError(key, ageMs);
+    }
+
     return entry;
   }
 
   /**
-   * Set a cached repository
+   * Set a cache entry
+   * Throws CacheCapacityError if cache is at capacity
    */
-  set(repository: string, localPath: string, branch?: string): void {
-    const key = this.getCacheKey(repository, branch);
-    this.cache.set(key, {
-      path: localPath,
-      repository,
-      branch,
-      lastAccessed: new Date(),
-    });
+  async set(key: string, entry: RepositoryCacheEntry): Promise<void> {
+    // Check capacity before adding new entry
+    if (!this.cache.has(key) && this.cache.size >= this.capacity) {
+      throw new CacheCapacityError(this.cache.size, this.capacity);
+    }
+
+    this.cache.set(key, entry);
   }
 
   /**
-   * Get the cache path for a repository
+   * Invalidate a specific cache entry
    */
-  getCachePath(repository: string, branch?: string): string {
-    const key = this.getCacheKey(repository, branch);
-    return path.join(this.cacheDir, 'repos', key);
+  async invalidate(key: string): Promise<void> {
+    this.cache.delete(key);
   }
 
   /**
-   * Clear the cache
+   * Clear all cache entries
    */
-  clear(): void {
+  async clear(): Promise<void> {
     this.cache.clear();
   }
 
   /**
-   * Get all cached repositories
+   * Get current cache size
    */
-  getAll(): CachedRepository[] {
-    return Array.from(this.cache.values());
+  size(): number {
+    return this.cache.size;
+  }
+
+  /**
+   * Clean up expired entries
+   * Returns the number of entries removed
+   */
+  async cleanup(): Promise<number> {
+    const now = new Date();
+    let removed = 0;
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.expiresAt < now) {
+        this.cache.delete(key);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getStats(): {
+    size: number;
+    capacity: number;
+    utilizationPercent: number;
+  } {
+    const size = this.cache.size;
+    return {
+      size,
+      capacity: this.capacity,
+      utilizationPercent: (size / this.capacity) * 100,
+    };
   }
 }
 
 // Global repository cache instance
-let globalRepositoryCache: RepositoryCacheService | null = null;
-
-/**
- * Initialize the global repository cache
- */
-export function initRepositoryCache(cacheDir: string): RepositoryCacheService {
-  globalRepositoryCache = new RepositoryCacheService(cacheDir);
-  return globalRepositoryCache;
-}
+let globalRepositoryCache: RepositoryCache | null = null;
 
 /**
  * Get the global repository cache instance
  */
-export function getRepositoryCache(): RepositoryCacheService | null {
+export function getRepositoryCache(): RepositoryCache {
+  if (!globalRepositoryCache) {
+    globalRepositoryCache = new RepositoryCache();
+  }
   return globalRepositoryCache;
+}
+
+/**
+ * Reset the global repository cache (useful for testing)
+ */
+export function resetRepositoryCache(): void {
+  globalRepositoryCache = null;
 }
