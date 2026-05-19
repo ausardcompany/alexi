@@ -194,16 +194,33 @@ import type { ToolContext } from '../tool/index.js';
    }
    ```
 
-4. **Error Handling**: Use the Result pattern
-   ```typescript
-   try {
-     const result = await riskyOperation();
-     return { success: true, data: result };
-   } catch (err) {
-     const message = err instanceof Error ? err.message : String(err);
-     return { success: false, error: message };
-   }
-   ```
+4. **Error Handling**: Use the Result pattern or typed error classes
+    ```typescript
+    // Result pattern for tool returns
+    try {
+      const result = await riskyOperation();
+      return { success: true, data: result };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { success: false, error: message };
+    }
+
+    // Typed error hierarchy (see src/reference/repository-cache.ts)
+    export class CacheError extends Error {
+      readonly _tag = 'CacheError';
+      constructor(message: string, options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'CacheError';
+      }
+    }
+    export class CacheMissError extends CacheError {
+      readonly _tag = 'CacheMissError';
+      constructor(public readonly key: string) {
+        super(`Cache miss for key: ${key}`);
+        this.name = 'CacheMissError';
+      }
+    }
+    ```
 
 5. **Null Safety**: Use optional chaining and nullish coalescing
    ```typescript
@@ -235,10 +252,26 @@ import type { ToolContext } from '../tool/index.js';
    ```
 
 10. **Permission Actions**: Use standard taxonomy
-    ```typescript
-    // Standard: 'read' | 'write' | 'execute' | 'network' | 'admin'
-    permission: { action: 'admin', getResource: (params) => params.action }
-    ```
+     ```typescript
+     // Standard: 'read' | 'write' | 'execute' | 'network' | 'admin'
+     permission: { action: 'admin', getResource: (params) => params.action }
+     ```
+
+11. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
+     ```typescript
+     import { defineEvent } from '../bus/index.js';
+     import { z } from 'zod';
+
+     export const ToolExecutionStarted = defineEvent(
+       'tool.execution.started',
+       z.object({
+         toolName: z.string(),
+         toolId: z.string(),
+         parameters: z.record(z.string(), z.unknown()),
+         timestamp: z.number(),
+       })
+     );
+     ```
 
 ### ESLint Rules
 
@@ -420,7 +453,7 @@ Reviewers check:
 
 ### Autonomous Sync
 
-Alexi automatically syncs from upstream repositories daily:
+Alexi automatically syncs from upstream repositories daily. The sync applies upstream changes and then runs the CI auto-fix pipeline to ensure consistent formatting:
 
 ```mermaid
 graph LR
@@ -428,9 +461,12 @@ graph LR
     B --> C[Analyze Changes]
     C --> D[AI Planning]
     D --> E[AI Execution]
-    E --> F[Create PR]
-    F --> G[CI + Auto-Merge]
+    E --> F[Style Auto-Fix]
+    F --> G[Create PR]
+    G --> H[CI + Auto-Merge]
 ```
+
+Sync commits follow the pattern `feat(sync): apply upstream changes (YYYY-MM-DD)` followed by a `style(ci): auto-fix lint/format issues [alexi-bot]` commit if formatting adjustments are needed.
 
 ### CI Autohealing
 
@@ -440,6 +476,19 @@ When CI fails on auto/* branches:
 3. Alexi agent applies targeted fixes
 4. Fixes verified and committed
 5. Rate-limited: max 2 runs/branch/day
+
+### Style Auto-Fix
+
+The CI pipeline automatically applies formatting and linting corrections on eligible branches. These changes are committed with the message format:
+
+```
+style(ci): auto-fix lint/format issues [alexi-bot]
+```
+
+This ensures consistent code style (trailing whitespace removal, blank line normalization, Prettier formatting) across all modules without manual intervention. Examples of auto-fixed patterns include:
+- Trailing whitespace in class definitions and function bodies
+- Inconsistent blank lines between code blocks
+- Missing or extra trailing newlines at end of file
 
 ### Daily PR Merge
 
