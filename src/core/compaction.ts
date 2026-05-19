@@ -18,6 +18,7 @@ export interface CompactionOptions {
   triggerThreshold?: number; // Auto-trigger at this % of context, default 90
   keepPruned?: boolean; // Keep pruned messages in history, default false
   maxChunkTokens?: number; // Max tokens per chunk for oversized payloads, default 80000
+  overflowTokens?: number; // Tokens that triggered overflow — seeds target summary size
 }
 
 export interface CompactionResult {
@@ -322,13 +323,31 @@ export async function compactConversation(
     // Check if messages exceed chunk size limit
     const messagesToSummarizeTokens = estimateMessagesTokens(messagesToSummarize);
 
+    // Build target size instruction if overflowTokens is provided
+    let targetInstruction: string | undefined;
+    if (options?.overflowTokens && options.overflowTokens > 0) {
+      const targetSummaryTokens = Math.max(
+        500,
+        messagesToSummarizeTokens - Math.ceil(options.overflowTokens * 1.5)
+      );
+      targetInstruction = `Keep your summary under approximately ${targetSummaryTokens} tokens.`;
+    }
+
     if (messagesToSummarizeTokens > maxChunkTokens) {
       // Oversized: use chunked summarization
       const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
       summary = await summarizeChunks(chunks, globalLLMSummarizeFn);
+      if (targetInstruction) {
+        // For chunked summaries, append the instruction as a refinement pass
+        const refinementPrompt = `${summary}\n\n${targetInstruction}`;
+        summary = await globalLLMSummarizeFn(refinementPrompt);
+      }
     } else {
       // Within limit: use existing single-call path
-      const prompt = createSummaryPrompt(messagesToSummarize);
+      let prompt = createSummaryPrompt(messagesToSummarize);
+      if (targetInstruction) {
+        prompt += `\n\n${targetInstruction}`;
+      }
       summary = await globalLLMSummarizeFn(prompt);
     }
 
