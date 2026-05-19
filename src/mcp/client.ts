@@ -53,10 +53,63 @@ interface ToolCache {
 
 const CACHE_TTL_MS = 30000; // 30 seconds
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds
+const MAX_PAGES = 100; // Safety cap for paginated tools/list
 
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
+
+  /**
+   * Fetch all tools from an MCP client, handling paginated responses.
+   * Loops until no nextCursor is returned or MAX_PAGES is reached.
+   */
+  private async listAllTools(
+    client: Client
+  ): Promise<Array<{ name: string; description?: string; inputSchema: unknown }>> {
+    const allTools: Array<{ name: string; description?: string; inputSchema: unknown }> = [];
+    let cursor: string | undefined;
+    let pages = 0;
+
+    do {
+      const result = await client.listTools(cursor ? { cursor } : undefined);
+      allTools.push(...(result.tools || []));
+      cursor = result.nextCursor;
+      pages++;
+    } while (cursor && pages < MAX_PAGES);
+
+    return allTools;
+  }
+
+  /**
+   * Map a raw MCP tool to McpToolInfo, tolerating malformed schemas.
+   */
+  private mapToolInfo(
+    tool: { name: string; description?: string; inputSchema: unknown },
+    serverName: string
+  ): McpToolInfo {
+    let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
+    try {
+      if (!inputSchema || typeof inputSchema !== 'object') {
+        throw new Error('Invalid schema structure');
+      }
+    } catch (error) {
+      console.warn(
+        `MCP tool schema parsing failed for ${tool.name} from ${serverName}, using permissive fallback:`,
+        error
+      );
+      inputSchema = {
+        type: 'object',
+        properties: {},
+      };
+    }
+
+    return {
+      name: tool.name,
+      description: tool.description,
+      inputSchema,
+      serverName,
+    };
+  }
 
   /**
    * Connect to an MCP server
@@ -87,34 +140,9 @@ export class McpClientManager {
         throw new Error(`Transport ${config.transport} not yet implemented`);
       }
 
-      // Fetch available tools
-      const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => {
-        // Tolerate malformed schemas - use permissive fallback if parsing fails
-        let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
-        try {
-          // Validate schema structure
-          if (!inputSchema || typeof inputSchema !== 'object') {
-            throw new Error('Invalid schema structure');
-          }
-        } catch (error) {
-          console.warn(
-            `MCP tool schema parsing failed for ${tool.name} from ${config.name}, using permissive fallback:`,
-            error
-          );
-          inputSchema = {
-            type: 'object',
-            properties: {},
-          };
-        }
-
-        return {
-          name: tool.name,
-          description: tool.description,
-          inputSchema,
-          serverName: config.name,
-        };
-      });
+      // Fetch available tools (with pagination support)
+      const rawTools = await this.listAllTools(connection.client);
+      connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
 
       connection.status = 'connected';
       console.log(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
@@ -332,33 +360,8 @@ export class McpClientManager {
     }
 
     try {
-      const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => {
-        // Tolerate malformed schemas - use permissive fallback if parsing fails
-        let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
-        try {
-          // Validate schema structure
-          if (!inputSchema || typeof inputSchema !== 'object') {
-            throw new Error('Invalid schema structure');
-          }
-        } catch (error) {
-          console.warn(
-            `MCP tool schema parsing failed for ${tool.name} from ${connection.config.name}, using permissive fallback:`,
-            error
-          );
-          inputSchema = {
-            type: 'object',
-            properties: {},
-          };
-        }
-
-        return {
-          name: tool.name,
-          description: tool.description,
-          inputSchema,
-          serverName: connection.config.name,
-        };
-      });
+      const rawTools = await this.listAllTools(connection.client);
+      connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, connection.config.name));
       connection.toolsCachedAt = Date.now();
 
       // Update cache
