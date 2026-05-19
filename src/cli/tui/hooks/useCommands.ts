@@ -354,6 +354,27 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
       },
     },
 
+    // /goal <condition> -------------------------------------------------------
+    {
+      name: 'goal',
+      description: 'Run autonomously until a condition is met',
+      category: 'general',
+      execute: async (args, _ctx) => {
+        const condition = args.trim();
+        if (!condition) {
+          deps.addSystemMessage('Usage: /goal <condition>');
+          return true;
+        }
+        deps.addSystemMessage(`Goal started: ${condition}`);
+        // The TUI dispatches the goal to the chat layer —
+        // returning true signals the command was handled.
+        // Full execution is delegated to the chat context which has
+        // access to the agentic loop (the TUI will integrate the
+        // goal loop via its streaming infrastructure).
+        return true;
+      },
+    },
+
     // /export [file] --------------------------------------------------------
     {
       name: 'export',

@@ -45,6 +45,7 @@ import { getStatsManager } from '../core/stats.js';
 import { getAliasManager } from '../core/aliases.js';
 import { getSnippetManager } from '../core/snippets.js';
 import { getTemplateManager } from '../core/templates.js';
+import type { GoalProgress } from '../command/goal.js';
 import {
   type EffortLevel,
   EFFORT_CONFIGS,
@@ -199,6 +200,9 @@ function printHelp(): void {
   console.log(
     c('yellow', '  /dod') +
       c('gray', '               - Run Definition of Done checks for current stage')
+  );
+  console.log(
+    c('yellow', '  /goal <condition>') + c('gray', '  - Run autonomously until condition is met')
   );
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
@@ -686,6 +690,72 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       console.log();
       console.log(c('gray', `  Summary: ${report.passed}/${report.totalChecks} passed`));
       console.log();
+      return true;
+    }
+
+    case 'goal': {
+      const condition = args.join(' ').trim();
+      if (!condition) {
+        console.log(c('yellow', '\n  Usage: /goal <condition>\n'));
+        console.log(c('gray', '  Example: /goal all tests pass'));
+        console.log(c('gray', '  Example: /goal no lint errors in src/\n'));
+        return true;
+      }
+
+      const goalAbortController = new AbortController();
+      const originalAbort = state.abortController;
+      state.abortController = goalAbortController;
+
+      console.log(c('cyan', `\n  Goal: ${condition}`));
+      console.log(c('dim', '  Press Ctrl+C to cancel\n'));
+
+      try {
+        const { executeGoal } = await import('../command/goal.js');
+        const goalResult = await executeGoal({
+          condition,
+          signal: goalAbortController.signal,
+          workdir: process.cwd(),
+          modelOverride: state.currentModel,
+          onProgress: (progress: GoalProgress) => {
+            if (progress.status === 'running') {
+              const elapsed = (progress.elapsedMs / 1000).toFixed(1);
+              console.log(
+                c(
+                  'dim',
+                  `  [Turn ${progress.turn}/${progress.maxTurns}] ` +
+                    `${elapsed}s elapsed, ${progress.totalTokens.toLocaleString()} tokens`
+                )
+              );
+            }
+          },
+        });
+
+        console.log();
+        if (goalResult.success) {
+          console.log(c('green', '  Goal completed!'));
+        } else if (goalResult.status === 'cancelled') {
+          console.log(c('yellow', '  Goal cancelled by user'));
+        } else {
+          console.log(c('yellow', `  Goal not met after ${goalResult.turns} turns`));
+        }
+        console.log(c('gray', `  Turns: ${goalResult.turns}`));
+        console.log(c('gray', `  Tokens: ${goalResult.totalTokens.toLocaleString()}`));
+        console.log(c('gray', `  Elapsed: ${(goalResult.elapsedMs / 1000).toFixed(1)}s`));
+        if (goalResult.finalEvaluation) {
+          console.log(c('dim', `  Evaluation: ${goalResult.finalEvaluation}`));
+        }
+        console.log();
+      } catch (err) {
+        if (!goalAbortController.signal.aborted) {
+          console.log(
+            c('red', `\n  Goal error: ${err instanceof Error ? err.message : String(err)}\n`)
+          );
+        } else {
+          console.log(c('yellow', '\n  Goal cancelled\n'));
+        }
+      } finally {
+        state.abortController = originalAbort;
+      }
       return true;
     }
 
