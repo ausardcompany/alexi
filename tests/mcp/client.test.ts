@@ -32,7 +32,7 @@ vi.mock('../../src/mcp/config.js', () => ({
   resolveEnvVars: vi.fn((env?: Record<string, string>) => env ?? {}),
 }));
 
-import { McpClientManager } from '../../src/mcp/client.js';
+import { McpClientManager, listAllTools } from '../../src/mcp/client.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { McpServerConfig } from '../../src/mcp/config.js';
 
@@ -138,6 +138,93 @@ describe('McpClientManager', () => {
           }),
         })
       );
+    });
+  });
+
+  describe('listAllTools pagination', () => {
+    it('should return tools from a single-page response (no nextCursor)', async () => {
+      const tools = [
+        { name: 'tool-a', inputSchema: { type: 'object' as const } },
+        { name: 'tool-b', inputSchema: { type: 'object' as const } },
+      ];
+      mockClientListTools.mockResolvedValueOnce({ tools });
+
+      const mockClient = { listTools: mockClientListTools } as unknown as Parameters<
+        typeof listAllTools
+      >[0];
+      const result = await listAllTools(mockClient);
+
+      expect(result).toEqual(tools);
+      expect(mockClientListTools).toHaveBeenCalledTimes(1);
+      expect(mockClientListTools).toHaveBeenCalledWith(undefined);
+    });
+
+    it('should aggregate tools from multi-page responses with cursors', async () => {
+      const page1Tools = [
+        { name: 'tool-1', inputSchema: { type: 'object' as const } },
+        { name: 'tool-2', inputSchema: { type: 'object' as const } },
+      ];
+      const page2Tools = [{ name: 'tool-3', inputSchema: { type: 'object' as const } }];
+      const page3Tools = [{ name: 'tool-4', inputSchema: { type: 'object' as const } }];
+
+      mockClientListTools
+        .mockResolvedValueOnce({ tools: page1Tools, nextCursor: 'cursor-1' })
+        .mockResolvedValueOnce({ tools: page2Tools, nextCursor: 'cursor-2' })
+        .mockResolvedValueOnce({ tools: page3Tools });
+
+      const mockClient = { listTools: mockClientListTools } as unknown as Parameters<
+        typeof listAllTools
+      >[0];
+      const result = await listAllTools(mockClient);
+
+      expect(result).toEqual([...page1Tools, ...page2Tools, ...page3Tools]);
+      expect(mockClientListTools).toHaveBeenCalledTimes(3);
+      expect(mockClientListTools).toHaveBeenNthCalledWith(1, undefined);
+      expect(mockClientListTools).toHaveBeenNthCalledWith(2, { cursor: 'cursor-1' });
+      expect(mockClientListTools).toHaveBeenNthCalledWith(3, { cursor: 'cursor-2' });
+    });
+
+    it('should return an empty array when tools list is empty', async () => {
+      mockClientListTools.mockResolvedValueOnce({ tools: [] });
+
+      const mockClient = { listTools: mockClientListTools } as unknown as Parameters<
+        typeof listAllTools
+      >[0];
+      const result = await listAllTools(mockClient);
+
+      expect(result).toEqual([]);
+      expect(mockClientListTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('should stop after MAX_PAGINATION_PAGES to prevent infinite loops', async () => {
+      // Simulate a misbehaving server that always returns a nextCursor
+      mockClientListTools.mockImplementation(() =>
+        Promise.resolve({
+          tools: [{ name: 'tool-x', inputSchema: { type: 'object' } }],
+          nextCursor: 'always-more',
+        })
+      );
+
+      const mockClient = { listTools: mockClientListTools } as unknown as Parameters<
+        typeof listAllTools
+      >[0];
+      const result = await listAllTools(mockClient);
+
+      // Should stop at 100 pages (MAX_PAGINATION_PAGES)
+      expect(mockClientListTools).toHaveBeenCalledTimes(100);
+      expect(result).toHaveLength(100);
+    });
+
+    it('should handle undefined tools in response gracefully', async () => {
+      mockClientListTools.mockResolvedValueOnce({ tools: undefined });
+
+      const mockClient = { listTools: mockClientListTools } as unknown as Parameters<
+        typeof listAllTools
+      >[0];
+      const result = await listAllTools(mockClient);
+
+      expect(result).toEqual([]);
+      expect(mockClientListTools).toHaveBeenCalledTimes(1);
     });
   });
 });

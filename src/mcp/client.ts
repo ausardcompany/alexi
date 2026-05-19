@@ -8,6 +8,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { spawn, type ChildProcess } from 'child_process';
 import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
 
+/** Maximum number of pagination iterations to prevent infinite loops from misbehaving servers */
+const MAX_PAGINATION_PAGES = 100;
+
 export interface McpToolInfo {
   /** Tool name */
   name: string;
@@ -54,6 +57,30 @@ interface ToolCache {
 const CACHE_TTL_MS = 30000; // 30 seconds
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds
 
+/**
+ * Fetch all tools from an MCP client, handling paginated responses.
+ * Loops until no `nextCursor` is returned, aggregating all pages of tools.
+ */
+export async function listAllTools(
+  client: Client
+): Promise<Awaited<ReturnType<Client['listTools']>>['tools']> {
+  const allTools: Awaited<ReturnType<Client['listTools']>>['tools'] = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < MAX_PAGINATION_PAGES; page++) {
+    const result = await client.listTools(cursor ? { cursor } : undefined);
+    if (result.tools) {
+      allTools.push(...result.tools);
+    }
+    if (!result.nextCursor) {
+      break;
+    }
+    cursor = result.nextCursor;
+  }
+
+  return allTools;
+}
+
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
@@ -87,9 +114,9 @@ export class McpClientManager {
         throw new Error(`Transport ${config.transport} not yet implemented`);
       }
 
-      // Fetch available tools
-      const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => {
+      // Fetch available tools (handles pagination)
+      const tools = await listAllTools(connection.client);
+      connection.tools = tools.map((tool) => {
         // Tolerate malformed schemas - use permissive fallback if parsing fails
         let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
         try {
@@ -332,8 +359,8 @@ export class McpClientManager {
     }
 
     try {
-      const toolsResult = await connection.client.listTools();
-      connection.tools = (toolsResult.tools || []).map((tool) => {
+      const tools = await listAllTools(connection.client);
+      connection.tools = tools.map((tool) => {
         // Tolerate malformed schemas - use permissive fallback if parsing fails
         let inputSchema = tool.inputSchema as McpToolInfo['inputSchema'];
         try {
