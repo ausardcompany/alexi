@@ -53,6 +53,17 @@ export interface CostSummary {
   byDate: Record<string, number>;
 }
 
+export interface TaskUsageSummary {
+  /** Task ID */
+  taskId: string;
+  /** Input tokens consumed during this task */
+  inputTokens: number;
+  /** Output tokens consumed during this task */
+  outputTokens: number;
+  /** Calculated cost in USD for this task */
+  cost: number;
+}
+
 export interface CostTrackerOptions {
   /** Directory to store cost data */
   dataDir?: string;
@@ -153,6 +164,8 @@ export class CostTracker {
   private records: UsageRecord[] = [];
   private maxRecords: number;
   private customPricing: Map<string, ModelPricing> = new Map();
+  private taskUsage: Map<string, { input: number; output: number; cost: number }> = new Map();
+  private activeTaskId: string | undefined;
 
   constructor(options: CostTrackerOptions = {}) {
     this.dataDir = options.dataDir || path.join(os.homedir(), '.alexi');
@@ -196,6 +209,40 @@ export class CostTracker {
   }
 
   /**
+   * Start tracking usage for a task.
+   * Initializes a fresh counter and sets this task as the active one.
+   */
+  startTask(taskId: string): void {
+    this.taskUsage.set(taskId, { input: 0, output: 0, cost: 0 });
+    this.activeTaskId = taskId;
+  }
+
+  /**
+   * End tracking for a task.
+   * Returns the task's usage summary and clears its counter.
+   */
+  endTask(taskId: string): TaskUsageSummary {
+    const usage = this.taskUsage.get(taskId) ?? { input: 0, output: 0, cost: 0 };
+    this.taskUsage.delete(taskId);
+    if (this.activeTaskId === taskId) {
+      this.activeTaskId = undefined;
+    }
+    return {
+      taskId,
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cost: usage.cost,
+    };
+  }
+
+  /**
+   * Get the currently active task ID, if any.
+   */
+  getActiveTaskId(): string | undefined {
+    return this.activeTaskId;
+  }
+
+  /**
    * Calculate cost for a given usage
    */
   calculateCost(modelId: string, inputTokens: number, outputTokens: number): number {
@@ -233,6 +280,16 @@ export class CostTracker {
     };
 
     this.records.push(record);
+
+    // Attribute to active task if one exists
+    if (this.activeTaskId) {
+      const taskEntry = this.taskUsage.get(this.activeTaskId);
+      if (taskEntry) {
+        taskEntry.input += inputTokens;
+        taskEntry.output += outputTokens;
+        taskEntry.cost += cost;
+      }
+    }
 
     // Trim if too many records
     if (this.records.length > this.maxRecords) {
