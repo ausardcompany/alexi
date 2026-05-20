@@ -502,6 +502,31 @@ export function getDefaultModel(): string {
 
 **Solution**: Check SAP AI Core quotas or use different resource group
 
+## Autocomplete Templates
+
+The provider layer includes an autocomplete template system (`src/providers/autocomplete/templates.ts`) that provides prompt templates for model-specific autocomplete behavior:
+
+```typescript
+// src/providers/autocomplete/templates.ts
+// Provides structured prompt templates for autocomplete suggestions
+// Supports different completion styles per model family
+```
+
+This enables context-aware suggestions in the TUI input, including slash command completion, model name completion, and file path completion.
+
+## Connectivity Checking
+
+Provider connectivity can be verified programmatically:
+
+```typescript
+import { checkConnectivity } from './providers/index.js';
+
+const result: ConnectivityResult = await checkConnectivity();
+// { connected: boolean, latencyMs?: number, error?: string }
+```
+
+The `StartupTimeoutError` class is thrown when the provider fails to initialize within the allowed time window.
+
 ## Performance Considerations
 
 ### Token Optimization

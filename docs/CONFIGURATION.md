@@ -91,6 +91,56 @@ Enable experimental background task execution in the task tool.
 export ALEXI_EXPERIMENTAL_BACKGROUND_TASKS=true
 ```
 
+#### ALEXI_EXPERIMENTAL_TOOLS
+
+Enable experimental tool features.
+
+```bash
+export ALEXI_EXPERIMENTAL_TOOLS=true
+```
+
+#### ALEXI_DEBUG
+
+Enable debug-level logging for troubleshooting.
+
+```bash
+export ALEXI_DEBUG=true
+```
+
+#### ALEXI_NATIVE_ANTHROPIC
+
+Enable native Anthropic runtime for Claude models (bypasses SAP orchestration for supported operations).
+
+```bash
+export ALEXI_NATIVE_ANTHROPIC=true
+```
+
+#### ALEXI_PERMISSION
+
+Permission configuration as a JSON object. Allows configuring permission rules, external directory access, and doom loop detection from environment variables.
+
+```bash
+export ALEXI_PERMISSION='{
+  "rules": [],
+  "allowExternalDirectories": false,
+  "doomLoop": {
+    "maxRetries": 3,
+    "windowMs": 60000,
+    "onDetected": "warn"
+  }
+}'
+```
+
+The system tolerates invalid JSON gracefully and falls back to defaults.
+
+#### ALEXI_WORKDIR
+
+Override the working directory for all operations.
+
+```bash
+export ALEXI_WORKDIR=/path/to/workdir
+```
+
 #### ALEXI_PROJECT_DIR
 
 Override the project directory for configuration resolution.
@@ -312,13 +362,15 @@ type CompactionStrategy = 'truncate' | 'summarize' | 'sliding' | 'smart';
 When context overflow is detected during LLM calls, compaction is triggered with an `overflowTokens` parameter that seeds the target summary size:
 
 ```typescript
-// Target calculation:
+// Target calculation (updated to use minimum 500 tokens):
 const targetSummaryTokens = Math.max(
-  1,
-  Math.floor(totalOldTokens - overflowTokens * 1.5)
+  500,
+  totalOldTokens - Math.ceil(overflowTokens * 1.5)
 );
 // Instruction: "Keep your summary under approximately N tokens."
 ```
+
+For chunked summaries (oversized contexts exceeding `maxChunkTokens`), the target instruction is applied as a refinement pass after initial chunk summarization.
 
 ### Chunked Compaction
 

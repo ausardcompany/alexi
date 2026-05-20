@@ -4,7 +4,7 @@ This document describes the GitHub Actions workflows and automation systems in t
 
 ## Overview
 
-Alexi uses 19 GitHub Actions workflows for continuous integration, automated documentation, autonomous upstream synchronization, AI-powered autohealing, and daily PR management. The automation system leverages Kilo CLI and Alexi's agentic capabilities.
+Alexi uses 20 GitHub Actions workflows for continuous integration, automated documentation, autonomous upstream synchronization, AI-powered autohealing, prompt optimization, and daily PR management. The automation system leverages Kilo CLI and Alexi's agentic capabilities.
 
 ## Workflow Architecture
 
@@ -26,6 +26,7 @@ graph TB
         CIFix[CI Auto-Fix]
         Autohealing[Autohealing]
         Release[Release]
+        PromptOpt[Prompt Improver]
     end
     
     subgraph Tools["Automation Tools"]
@@ -227,20 +228,20 @@ Maintained in `.github/last-sync-commits.json`:
 ```json
 {
   "kilocode": {
-    "last_synced_commit": "a23fe160d66d7e95d8d7f38a45afe228736652bb",
-    "last_synced_at": "2026-05-17T08:27:24Z",
+    "last_synced_commit": "39affcc140e4abc6486cc54d6b29c39f1a5b2285",
+    "last_synced_at": "2026-05-20T09:41:51Z",
     "upstream": "Kilo-Org/kilocode",
     "fork": "ausard/kilocode"
   },
   "opencode": {
-    "last_synced_commit": "53e89f9d5242e95c2b03a732e8bec69e6b8ba470",
-    "last_synced_at": "2026-05-17T08:27:24Z",
+    "last_synced_commit": "13006d6d7c9c84e790c9ecc001e6b42b34c05b96",
+    "last_synced_at": "2026-05-20T09:41:51Z",
     "upstream": "anomalyco/opencode",
     "fork": "ausard/opencode"
   },
   "claude-code": {
-    "last_synced_commit": "8bdbb7296d3fa2217283d3ef94452dd64097393b",
-    "last_synced_at": "2026-05-17T08:27:24Z",
+    "last_synced_commit": "cc898dc3692fb583f36ab327942aad20b7d3dbd0",
+    "last_synced_at": "2026-05-20T09:41:51Z",
     "upstream": "anthropics/claude-code",
     "fork": "direct-clone"
   }
@@ -316,9 +317,9 @@ alexi agent \
 
 **File**: `.github/workflows/agent-autohealing.yml`
 
-**Triggers**: After any workflow failure
+**Triggers**: After any workflow failure (including Agent 6: Prompt Improver)
 
-**Purpose**: AI-powered automatic recovery from workflow failures.
+**Purpose**: AI-powered automatic recovery from workflow failures. Uses external prompt template (`.github/prompts/agent-autohealing-task.md`) with variable substitution for the failure context.
 
 ### 7. Agent Workflows
 
@@ -326,11 +327,72 @@ alexi agent \
 |----------|------|----------|---------|
 | Agent 1: Research | `agent1-research.yml` | Daily 04:00 UTC | Research tasks and issue analysis |
 | Agent 2: Planning | `agent2-planning.yml` | Daily 06:00 UTC + after Agent 1 | Development planning |
+| Agent 3: Auto-Implement | `auto-implement.yml` | Every 30 minutes | Implement issues from backlog |
 | Agent 4: Review | `agent4-review.yml` | PR events (src/tests) | Automated code review |
 | Agent 5: Release | `agent5-release.yml` | Weekly Monday 10:00 UTC | Release management |
-| Auto-Implement | `auto-implement.yml` | Every 30 minutes | Implement issues from backlog |
+| Agent 6: Prompt Improver | `agent6-prompt-optimizer.yml` | Weekly Wednesday 08:00 UTC | Optimize agent prompt templates |
 
-### 8. Release Workflows
+### 8. Agent 6: Prompt Improver
+
+**File**: `.github/workflows/agent6-prompt-optimizer.yml`
+
+**Triggers**:
+- Weekly schedule: Wednesday at 08:00 UTC
+- Manual dispatch with `target_agent` selection and `dry_run` option
+
+**Purpose**: Analyzes agent workflow performance metrics (failure rates over 14 days) and optimizes agent prompt templates to improve reliability and output quality.
+
+#### Prompt Optimization Flow
+
+```mermaid
+flowchart TB
+    Start([Weekly Schedule / Manual]) --> Metrics[Collect Performance Metrics<br/>14-day failure rates per agent]
+    Metrics --> Target[Determine Target Prompt Files<br/>.github/prompts/agent*-system.md<br/>.github/prompts/agent*-task.md]
+    Target --> Build[Build Optimization Prompt<br/>from template + metrics]
+    Build --> Run[Run Agent 6 via Kilo CLI<br/>model: claude-4.6-opus]
+    Run --> Validate{Validate Outputs}
+    Validate -->|Non-empty + within limits| Commit[Commit Changes]
+    Validate -->|Failed| Skip[Skip - Log Validation Failure]
+    Commit --> PR[Create PR with<br/>prompt-improvement label]
+    PR --> Artifacts[Upload Logs + Metrics<br/>14-day retention]
+```
+
+#### Configuration
+
+```yaml
+inputs:
+  target_agent:
+    type: choice
+    options: [all, agent1-research, agent2-planning, agent3-implement,
+              agent4-review, agent5-release, agent-autohealing]
+  dry_run:
+    type: boolean
+    default: false
+```
+
+#### Validation Rules
+
+- System prompts: must be non-empty, maximum 60 lines
+- Task prompts: must be non-empty, maximum 100 lines
+
+### 9. Template-Based Prompt Assembly
+
+Agent workflows have been refactored to use external prompt templates in `.github/prompts/` instead of inline prompt construction. This separation enables:
+
+1. **Agent 6 optimization**: Prompt files can be modified independently of workflow logic
+2. **Cleaner workflows**: YAML files contain only orchestration logic
+3. **Template variables**: Prompts use `{{VARIABLE}}` substitution with `sed` and `awk`
+4. **Conditional sections**: `{{#CONDITION}}...{{/CONDITION}}` blocks for dynamic content
+
+Template locations:
+- `.github/prompts/agent1-research-task.md`
+- `.github/prompts/agent2-planning-task.md`
+- `.github/prompts/agent4-review-task.md`
+- `.github/prompts/agent5-release-task.md`
+- `.github/prompts/agent-autohealing-task.md`
+- `.github/prompts/agent*-system.md` (system prompts for each agent)
+
+### 10. Release Workflows
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
@@ -338,7 +400,7 @@ alexi agent \
 | Tag Release | `tag-release.yml` | Manual dispatch | Create version tag |
 | On Release Merge | `on-release-merge.yml` | PR closed (release/*) | Post-release tasks |
 
-### 9. Support Workflows
+### 11. Support Workflows
 
 | Workflow | File | Purpose |
 |----------|------|---------|

@@ -445,6 +445,11 @@ The TUI provides Tab completion for:
 | `SAP_PROXY_API_KEY` | -- | Proxy endpoint API key |
 | `MORPH_API_KEY` | -- | WarpGrep semantic search API key |
 | `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | -- | Enable background task execution |
+| `ALEXI_EXPERIMENTAL_TOOLS` | -- | Enable experimental tool features |
+| `ALEXI_DEBUG` | -- | Enable debug logging |
+| `ALEXI_NATIVE_ANTHROPIC` | -- | Enable native Anthropic runtime for Claude models |
+| `ALEXI_PERMISSION` | -- | Permission configuration as JSON (see Configuration) |
+| `ALEXI_WORKDIR` | cwd | Override working directory |
 
 ### AICORE_SERVICE_KEY Format
 
@@ -669,6 +674,53 @@ const tool = getTool('read');
 const schemas = getAllToolSchemas();
 ```
 
+### Enhanced Tool Registry (Prompt-Based Resolution)
+
+The enhanced registry (`src/tool/registry.ts`) supports dynamic tool resolution based on session context:
+
+```typescript
+import { getToolRegistry, EnhancedToolRegistry } from './tool/registry.js';
+
+const registry = getToolRegistry();
+
+// Register a prompt resolver for dynamic tool provisioning
+registry.registerPromptResolver({
+  async resolve(context: ToolResolutionContext): Promise<Tool[]> {
+    // Return tools based on session/agent context
+    return contextualTools;
+  },
+});
+
+// Resolve all tools for a given prompt context
+const tools = await registry.resolveForPrompt({
+  sessionId: 'session-123',
+  agentId: 'code',
+  permissions: ['read', 'write'],
+});
+```
+
+### Plugin Tool Wrappers
+
+External plugin tools are integrated via the plugin wrapper system (`src/tool/plugin-tools.ts`):
+
+```typescript
+import { createPluginToolWrapper, isPluginTool } from './tool/plugin-tools.js';
+
+const pluginTool: PluginToolDefinition<MyParams, MyResult> = {
+  name: 'my-plugin-tool',
+  description: 'A tool provided by a plugin',
+  schema: myParamsSchema,
+  async execute(params, context) {
+    // Plugin context provides simplified ask() -> Promise<string>
+    const answer = await context.ask('What environment?');
+    return { result: answer };
+  },
+};
+
+// Wrap for internal use
+const internalTool = createPluginToolWrapper(pluginTool);
+```
+
 ### Output Truncation
 
 Large tool outputs are automatically truncated:
@@ -822,6 +874,94 @@ try {
     console.error(`Error: ${error.message}`);
   }
 }
+```
+
+## Session Replay
+
+The session replay system (`src/cli/session-replay.ts`) allows users to review session history when resuming interactive sessions:
+
+```typescript
+import { getSessionReplay, SessionReplay } from './cli/session-replay.js';
+
+const replay = getSessionReplay();
+
+// Replay messages from a session
+const result = await replay.replay(messages, {
+  maxMessages: 50,
+  showToolCalls: true,
+  showSystemMessages: false,
+  onMessage: (message, index, total) => {
+    console.log(replay.formatMessage(message));
+  },
+});
+
+// Get session summary
+const summary = replay.getSummary(messages);
+// { totalMessages, userMessages, assistantMessages, systemMessages, toolCalls }
+```
+
+## CLI Prompt System
+
+The prompt system (`src/cli/cmd/run/prompt.ts`) supports multiple input modes:
+
+```typescript
+import { showPrompt, parseModeFromInput, createPromptState } from './cli/cmd/run/prompt.js';
+
+type PromptMode = 'default' | 'shell' | 'multiline';
+
+// Show a prompt with mode support
+const answer = await showPrompt({
+  message: 'Enter command',
+  mode: 'shell',  // Shows $ prefix
+  defaultValue: 'ls',
+});
+
+// Parse mode from input (auto-detect)
+const { mode, cleanInput } = parseModeFromInput('$ ls -la');
+// mode: 'shell', cleanInput: 'ls -la'
+```
+
+## Feature Flags
+
+Runtime feature flags (`src/core/flags.ts`) control experimental capabilities:
+
+```typescript
+import { getFeatureFlags, loadFeatureFlags } from './core/flags.js';
+
+interface FeatureFlags {
+  enableExperimentalTools: boolean;   // ALEXI_EXPERIMENTAL_TOOLS
+  enableDebugLogging: boolean;        // ALEXI_DEBUG
+  enableNativeAnthropicRuntime: boolean; // ALEXI_NATIVE_ANTHROPIC
+}
+
+const flags = getFeatureFlags();
+if (flags.enableExperimentalTools) {
+  // Enable experimental tools
+}
+```
+
+## Network Manager
+
+Auto-reconnection with exponential backoff (`src/core/network.ts`):
+
+```typescript
+import { NetworkManager } from './core/network.js';
+
+const network = new NetworkManager({
+  maxRetries: 5,
+  baseDelayMs: 1000,
+  maxDelayMs: 30000,
+});
+
+network.on('reconnect:attempt', ({ attempt, delay }) => {
+  console.log(`Reconnecting (attempt ${attempt}, delay ${delay}ms)...`);
+});
+
+network.on('reconnect:success', () => {
+  console.log('Reconnected successfully');
+});
+
+await network.reconnect();
 ```
 
 ## Logging

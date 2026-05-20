@@ -338,6 +338,7 @@ describe('continueOnBlock', () => {
 ### Compaction Test Files
 
 - `tests/compaction/reactive-seeding.test.ts` -- Tests overflow-triggered compaction with target sizing
+- `tests/compaction/overflow-seeding.test.ts` -- Tests overflow token seeding in core compaction with target instruction generation
 - `tests/core/compaction-chunked.test.ts` -- Tests chunked compaction for large contexts
 
 ### Testing Reactive Seeding
@@ -674,11 +675,85 @@ describe('resolveFileInclusions', () => {
 
 ## Testing MCP Client
 
+### Test Files
+
+- `tests/mcp/client.test.ts` -- Connection management, tool discovery, reconnection
+- `tests/mcp/client-pagination.test.ts` -- Paginated tool listing with MAX_PAGES safety cap
+
+### Testing Pagination
+
+```typescript
+import { describe, it, expect } from 'vitest';
+
+describe('MCP Client Pagination', () => {
+  it('should handle paginated tool lists', async () => {
+    // Tests that the client correctly iterates through
+    // paginated tool responses up to MAX_PAGES (100)
+  });
+
+  it('should respect safety cap for runaway pagination', async () => {
+    // Ensures MAX_PAGES prevents infinite loops
+  });
+
+  it('should gracefully handle malformed tool schemas', async () => {
+    // mapToolInfo() tolerates missing or invalid inputSchema
+  });
+});
+```
+
+## Testing Tool Registry
+
 ### Test File
 
-- `tests/mcp/client.test.ts`
+- `src/tool/registry.test.ts` -- Enhanced registry with prompt-based resolution
 
-The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+### Testing Pattern
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { EnhancedToolRegistry, getToolRegistry } from '../../src/tool/registry.js';
+
+describe('EnhancedToolRegistry', () => {
+  let registry: EnhancedToolRegistry;
+
+  beforeEach(() => {
+    registry = new EnhancedToolRegistry();
+  });
+
+  it('should register and retrieve tools', () => {
+    registry.register(mockTool);
+    expect(registry.get('mock-tool')).toBeDefined();
+  });
+
+  it('should resolve tools for prompt context', async () => {
+    registry.registerPromptResolver({
+      async resolve(context) {
+        return [dynamicTool];
+      },
+    });
+
+    const tools = await registry.resolveForPrompt({
+      sessionId: 'test',
+      permissions: ['read'],
+    });
+
+    expect(tools).toContain(dynamicTool);
+  });
+
+  it('should throw ToolResolutionError for invalid tool names', () => {
+    expect(() => registry.get('nonexistent')).not.toThrow();
+    expect(registry.get('nonexistent')).toBeUndefined();
+  });
+});
+```
+
+## Testing Entry Name Resolution
+
+### Test File
+
+- `src/core/entry-name.test.ts` -- Tests for `resolveEntryName`, `resolveAgentName`, `resolveCommandName`
+
+Covers path normalization, index file handling, Windows paths, and extension stripping.
 
 ## Best Practices
 

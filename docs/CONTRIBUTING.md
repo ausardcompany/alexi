@@ -415,7 +415,8 @@ How changes were tested.
 Pull requests trigger:
 1. **CI**: Tests, linting, build verification
 2. **Documentation Update**: AI-powered docs generation from code changes
-3. **CI Auto-Fix** (auto/* branches): Automatic fix for CI failures
+3. **Code Review** (auto/* branches): Agent 4 automated code review
+4. **CI Auto-Fix** (auto/* branches): Automatic fix for CI failures
 
 ### Code Review Expectations
 
@@ -450,6 +451,19 @@ Reviewers check:
 5. Use proper markdown formatting
 
 ## Automation System
+
+### Autonomous Agent Pipeline
+
+Alexi uses a multi-agent automation pipeline with 6 specialized agents:
+
+| Agent | Purpose | Schedule |
+|-------|---------|----------|
+| Agent 1: Research | Industry trend analysis | Daily 04:00 UTC |
+| Agent 2: Planning | Issue creation from research | Daily 06:00 UTC |
+| Agent 3: Auto-Implement | Issue implementation | Every 30 min |
+| Agent 4: Review | Code review and QA | On PR events |
+| Agent 5: Release | Version management | Weekly Monday |
+| Agent 6: Prompt Improver | Optimize agent prompts | Weekly Wednesday |
 
 ### Autonomous Sync
 

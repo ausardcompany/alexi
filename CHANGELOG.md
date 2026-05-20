@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-20
+
+### Added
+
+- **Agent 6: Prompt Improver** workflow (`.github/workflows/agent6-prompt-optimizer.yml`): Weekly automated optimization of agent prompt templates based on performance metrics
+- **CLI prompt system** (`src/cli/cmd/run/prompt.ts`): Enhanced prompt with shell mode (`$` prefix) and multiline support
+- **Session replay** (`src/cli/session-replay.ts`): Replay session history when resuming interactive sessions with configurable message filtering
+- **Core configuration** (`src/core/config.ts`): Permission and app configuration loading from environment variables (`ALEXI_PERMISSION`, `ALEXI_WORKDIR`, `ALEXI_DEBUG`) with defensive JSON parsing
+- **Feature flags** (`src/core/flags.ts`): Runtime feature flag system for experimental tools, debug logging, and native Anthropic runtime
+- **Network manager** (`src/core/network.ts`): Automatic reconnection with exponential backoff to prevent session loss during network interruptions
+- **Entry name resolution** (`src/core/entry-name.ts`): Canonical name extraction from file paths for agents and commands (handles index files, Windows paths, extensions)
+- **Enhanced tool registry** (`src/tool/registry.ts`): Prompt-based dynamic tool resolution with `PromptToolResolver` interface and `EnhancedToolRegistry` class
+- **Plugin tool wrappers** (`src/tool/plugin-tools.ts`): Compatibility layer for external plugin tools with simplified `ask()` API
+- **Reference normalization** (`src/reference/reference.ts`): External repository reference management with auto-generated IDs, aliases, and descriptions
+- **Repository cache typed errors** (`src/reference/repository-cache.ts`): `CacheMissError`, `CacheStaleError`, `CacheCapacityError` for precise failure handling
+- **Autocomplete templates** (`src/providers/autocomplete/templates.ts`): Prompt templates for provider-specific autocomplete suggestions
+- **MCP client pagination** (`src/mcp/client.ts`): Paginated tool listing with `MAX_PAGES = 100` safety cap and graceful malformed schema handling
+- **Overflow seeding tests** (`tests/compaction/overflow-seeding.test.ts`): Comprehensive tests for overflow token seeding in core compaction
+- **MCP pagination tests** (`tests/mcp/client-pagination.test.ts`): Tests for paginated tool listing and safety caps
+- **Tool registry tests** (`src/tool/registry.test.ts`): Tests for enhanced registry with prompt resolution
+
+### Changed
+
+- Compaction target summary token calculation updated: minimum raised from 1 to 500, uses `Math.ceil` instead of `Math.floor` for overflow multiplier (`src/compaction/index.ts`, `src/core/compaction.ts`)
+- Core compaction now builds target size instruction when `overflowTokens` is provided, with refinement pass for chunked summaries
+- Event bus subscription now eagerly acquires handler set to prevent race conditions between subscribe and first event (`src/bus/index.ts`)
+- MCP client refactored for paginated tool listing with `CACHE_TTL_MS`, `DEFAULT_TOOL_CALL_TIMEOUT_MS`, and `MAX_PAGES` constants
+- Agent workflows (1, 2, 4, 5, autohealing) refactored to use external prompt templates from `.github/prompts/` instead of inline prompt construction
+- Agent autohealing workflow now monitors Agent 6: Prompt Improver failures
+- Version bumped from 0.5.0 to 0.5.2
+- Upstream sync state updated to latest commits (kilocode, opencode, claude-code) dated 2026-05-20
+- `@kilocode/plugin` updated from 7.3.0 to 7.3.1
+
+### Fixed
+
+- Event bus race condition where events could be missed between subscribe call and first listen (eagerly acquired PubSub subscription)
+
 ## [0.5.1] - 2026-05-19
 
 ### Changed
@@ -229,6 +266,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
+[0.5.2]: https://github.com/ausardcompany/alexi/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ausardcompany/alexi/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ausardcompany/alexi/compare/v0.4.22...v0.5.0
 [0.4.22]: https://github.com/ausardcompany/alexi/compare/v0.4.17...v0.4.22

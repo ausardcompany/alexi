@@ -14,6 +14,8 @@ graph TB
         Program[program.ts]
         Interactive[interactive.ts]
         TUI[Ink TUI]
+        SessionReplay[session-replay.ts]
+        RunPrompt[cmd/run/prompt.ts]
     end
 
     subgraph Core["Core Layer"]
@@ -24,16 +26,23 @@ graph TB
         StreamingOrch[streamingOrchestrator.ts]
         Compaction[compaction/index.ts]
         CompactionChunks[compaction-chunks.ts]
+        CoreConfig[config.ts]
+        Flags[flags.ts]
+        Network[network.ts]
+        EntryName[entry-name.ts]
     end
 
     subgraph Provider["Provider Layer (SAP AI Core)"]
         SAPOrch[sapOrchestration.ts]
         Auth[auth.ts]
         Transform[transform.ts]
+        Autocomplete[autocomplete/templates.ts]
     end
 
     subgraph Tools["Tool System"]
         ToolIndex[tool/index.ts]
+        ToolRegistry[tool/registry.ts]
+        PluginTools[tool/plugin-tools.ts]
         Bash[bash.ts]
         Read[read.ts]
         Write[write.ts]
@@ -43,21 +52,25 @@ graph TB
         Task[task.ts]
         WebFetch[webfetch.ts]
         TaskStatus[task_status.ts]
+        RepoClone[repo-clone.ts]
     end
 
     subgraph Support["Support Systems"]
         Bus[bus/index.ts]
         Permission[permission/index.ts]
         Agent[agent/index.ts]
-        MCP[mcp/index.ts]
+        MCP[mcp/client.ts]
         Hooks[hooks/index.ts]
         Skill[skill/index.ts]
+        Reference[reference/index.ts]
+        RepoCache[repository-cache.ts]
     end
 
     Program --> Interactive
     Program --> TUI
     Interactive --> Orchestrator
     TUI --> Orchestrator
+    SessionReplay --> SessionManager
     Orchestrator --> Router
     Orchestrator --> SessionManager
     Orchestrator --> StreamingOrch
@@ -68,7 +81,10 @@ graph TB
     Router --> SAPOrch
     SAPOrch --> Auth
     SAPOrch --> Transform
+    SAPOrch --> Autocomplete
     AgenticChat --> ToolIndex
+    ToolIndex --> ToolRegistry
+    ToolRegistry --> PluginTools
     ToolIndex --> Bash
     ToolIndex --> Read
     ToolIndex --> Write
@@ -78,11 +94,16 @@ graph TB
     ToolIndex --> Task
     ToolIndex --> WebFetch
     ToolIndex --> TaskStatus
+    ToolIndex --> RepoClone
     Orchestrator --> Bus
     Orchestrator --> Permission
     Orchestrator --> Agent
     Orchestrator --> MCP
     Orchestrator --> Skill
+    MCP --> Reference
+    Reference --> RepoCache
+    CoreConfig --> Permission
+    Network --> SAPOrch
 ```
 
 ## Module Descriptions
@@ -94,6 +115,8 @@ graph TB
 | Program | `src/cli/program.ts` | CLI entry point using Commander.js, registers 10 command groups |
 | Interactive | `src/cli/interactive.ts` | Legacy interactive mode (deprecated in favor of TUI) |
 | TUI | `src/cli/tui/` | Full-screen Ink/React TUI with streaming, dialogs, and slash commands |
+| Session Replay | `src/cli/session-replay.ts` | Replay session history when resuming interactive sessions |
+| Run Prompt | `src/cli/cmd/run/prompt.ts` | Enhanced prompt system with shell and multiline input modes |
 
 ### Core Layer
 
@@ -105,7 +128,11 @@ graph TB
 | Session Manager | `src/core/sessionManager.ts` | File-based session persistence to `~/.alexi/sessions/` |
 | Streaming Orchestrator | `src/core/streamingOrchestrator.ts` | Real-time streaming support |
 | Compaction | `src/compaction/index.ts` | Context compression with multiple strategies |
-| Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
+| Compaction (Core) | `src/core/compaction.ts` | Overflow-seeded compaction with chunked summarization |
+| Config | `src/core/config.ts` | Permission and app configuration from environment variables |
+| Flags | `src/core/flags.ts` | Runtime feature flags (`ALEXI_EXPERIMENTAL_TOOLS`, `ALEXI_DEBUG`, `ALEXI_NATIVE_ANTHROPIC`) |
+| Network | `src/core/network.ts` | Network manager with exponential backoff auto-reconnection |
+| Entry Name | `src/core/entry-name.ts` | Canonical name resolution for agents and commands from file paths |
 
 ### Provider Layer
 
@@ -118,6 +145,7 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 | Transform | `src/providers/transform.ts` | Message format transformation for SAP API |
 | Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
 | Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
+| Autocomplete | `src/providers/autocomplete/templates.ts` | Prompt templates for autocomplete suggestions |
 
 Provider resolution:
 
@@ -136,7 +164,7 @@ function getProviderForModel(modelId: string): SapOrchestrationProvider {
 
 ### Tool System
 
-Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
+Alexi registers **30+ built-in tools** via `registerBuiltInTools()`, managed through an enhanced registry (`src/tool/registry.ts`) that supports dynamic prompt-based resolution and plugin tool wrappers:
 
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
@@ -168,17 +196,68 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | `apply-patch` | `apply-patch.ts` | write | Apply code patches |
 | `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
 
+#### Tool Registry Architecture
+
+The enhanced tool registry (`src/tool/registry.ts`) supports:
+
+```typescript
+interface ToolResolutionContext {
+  sessionId: string;
+  agentId?: string;
+  permissions: string[];
+}
+
+interface PromptToolResolver {
+  resolve(context: ToolResolutionContext): Promise<Tool[]>;
+}
+
+class EnhancedToolRegistry {
+  register(tool: Tool): void;
+  registerFromDefinition(definition: ToolDefinition): void;
+  registerPromptResolver(resolver: PromptToolResolver): void;
+  get(name: string): Tool | undefined;
+  resolveForPrompt(context: ToolResolutionContext): Promise<Tool[]>;
+  list(): Tool[];
+  clear(): void;
+}
+```
+
+#### Plugin Tool System
+
+External plugin tools are integrated via `src/tool/plugin-tools.ts`:
+
+```typescript
+interface PluginToolDefinition<TParams, TResult> {
+  name: string;
+  description: string;
+  schema: ZodSchema<TParams>;
+  execute(params: TParams, context: PluginToolContext): Promise<TResult>;
+}
+
+interface PluginToolContext {
+  workdir: string;
+  signal?: AbortSignal;
+  sessionId?: string;
+  ask(question: string): Promise<string>;
+}
+
+// Wrap plugin tools for internal use
+const internalTool = createPluginToolWrapper(pluginTool);
+```
+
 ### Support Systems
 
 | Module | File | Description |
 |--------|------|-------------|
-| Event Bus | `src/bus/index.ts` | Typed pub/sub event system with Zod validation |
+| Event Bus | `src/bus/index.ts` | Typed pub/sub event system with Zod validation and eager subscription |
 | Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
 | Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents |
 | Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
-| MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration |
+| MCP | `src/mcp/client.ts` | Model Context Protocol client with pagination and connection management |
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
 | Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
+| Reference | `src/reference/reference.ts` | External repository reference management with normalization |
+| Repository Cache | `src/reference/repository-cache.ts` | TTL-based cache with typed failure errors |
 | Telemetry | `src/utils/telemetry.ts` | Usage metrics tracking |
 
 ## Data Flow
@@ -271,13 +350,16 @@ const CONTEXT_OVERFLOW_PATTERNS = [
   // ...
 ];
 
-// Compaction with overflow seeding:
-const { messages: compactedMessages } = await checkAndCompact(
-  messages, { strategy: 'summarize', overflowTokens }
+// Compaction with overflow seeding (src/core/compaction.ts):
+const targetSummaryTokens = Math.max(
+  500,
+  messagesToSummarizeTokens - Math.ceil(options.overflowTokens * 1.5)
 );
+// Appended to summary prompt:
+// "Keep your summary under approximately N tokens."
 ```
 
-The `overflowTokens` parameter seeds the target summary length so the compacted context fits within limits.
+The `overflowTokens` parameter seeds the target summary length so the compacted context fits within limits. For oversized contexts that exceed `maxChunkTokens`, chunked summarization is used followed by a refinement pass with the target instruction.
 
 ## Routing Decision Flow
 
@@ -318,7 +400,7 @@ interface ModelCapability {
 
 ## Event Bus Architecture
 
-The event bus (`src/bus/index.ts`) provides typed pub/sub with Zod schema validation:
+The event bus (`src/bus/index.ts`) provides typed pub/sub with Zod schema validation and eager subscription acquisition to prevent race conditions:
 
 ```mermaid
 graph LR
@@ -376,7 +458,7 @@ const MyEvent = defineEvent('MyEvent', z.object({
   duration: z.number(),
 }));
 
-// Subscribe
+// Subscribe (eagerly acquires handler set to prevent race conditions)
 const unsub = MyEvent.subscribe((payload) => {
   console.log(payload.toolName, payload.duration);
 });
@@ -436,6 +518,7 @@ classDiagram
 | `debug` | Debug Agent | all | Debugging and fixing issues |
 | `plan` | Plan Agent | all | Architecture and planning (read-only tools) |
 | `explore` | Explore Agent | subagent | Fast codebase exploration |
+| `orchestrator` | Orchestrator Agent | primary | Task delegation via sub-agents |
 
 ### Custom Agent Loading
 
@@ -495,9 +578,10 @@ Context compaction manages conversation length when approaching token limits:
 When context overflow is detected during LLM calls, the system calculates optimal summary size:
 
 ```typescript
+// src/compaction/index.ts + src/core/compaction.ts
 const targetSummaryTokens = Math.max(
-  1,
-  Math.floor(totalOldTokens - overflowTokens * 1.5)
+  500,
+  totalOldTokens - Math.ceil(overflowTokens * 1.5)
 );
 // Appended to summary prompt:
 // "Keep your summary under approximately N tokens."
@@ -505,15 +589,119 @@ const targetSummaryTokens = Math.max(
 
 ### Chunked Compaction
 
-Large contexts are split into chunks at natural boundaries (newlines, paragraphs) before compaction:
+Large contexts exceeding `maxChunkTokens` (default: 80000) are split into chunks at natural boundaries. When `overflowTokens` is provided for chunked summaries, a refinement pass appends the target instruction:
 
 ```typescript
-import { compactInChunks } from './compaction-chunks.js';
-
-const result = await compactInChunks(content, async (chunk) => {
-  return await summarize(chunk);
-}, 100000); // max tokens per chunk
+// src/core/compaction.ts
+if (messagesToSummarizeTokens > maxChunkTokens) {
+  const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
+  summary = await summarizeChunks(chunks, globalLLMSummarizeFn);
+  if (targetInstruction) {
+    const refinementPrompt = `${summary}\n\n${targetInstruction}`;
+    summary = await globalLLMSummarizeFn(refinementPrompt);
+  }
+} else {
+  let prompt = createSummaryPrompt(messagesToSummarize);
+  if (targetInstruction) {
+    prompt += `\n\n${targetInstruction}`;
+  }
+  summary = await globalLLMSummarizeFn(prompt);
+}
 ```
+
+## Network Management
+
+The network manager (`src/core/network.ts`) provides automatic reconnection with exponential backoff:
+
+```typescript
+class NetworkManager extends EventEmitter {
+  reconnect(): Promise<void>;
+  cancelReconnect(): void;
+  getState(): NetworkState;
+  isConnected(): boolean;
+  isReconnecting(): boolean;
+}
+
+// Configuration
+interface NetworkManagerOptions {
+  maxRetries?: number;    // Default: 5
+  baseDelayMs?: number;   // Default: 1000
+  maxDelayMs?: number;    // Default: 30000
+}
+
+// Events emitted:
+// 'reconnect:attempt', 'reconnect:success', 'reconnect:failed'
+```
+
+## Reference System
+
+The reference system (`src/reference/`) manages external repository references that tools can safely access:
+
+```typescript
+interface ReferenceEntry {
+  kind: 'git' | 'local';
+  repository?: string;
+  branch?: string;
+  path?: string;
+}
+
+interface NormalizedReference {
+  id: string;
+  name: string;
+  kind: 'git' | 'local';
+  resolvedPath?: string;
+  repository?: string;
+  branch?: string;
+  alias: string;
+  description: string;
+  metadata: Record<string, unknown>;
+}
+
+class ReferenceService {
+  resolve(name: string): ResolvedReference;
+  ensure(name: string): Promise<string>;
+  contains(filePath: string): boolean;
+  getPrompt(): string;
+  getReferences(): NormalizedReference[];
+}
+```
+
+The repository cache (`src/reference/repository-cache.ts`) provides TTL-based caching with typed failure errors:
+
+```typescript
+class RepositoryCache {
+  get(key: string): RepositoryCacheEntry | CacheError;
+  set(key: string, entry: RepositoryCacheEntry): void;
+}
+
+// Typed errors for precise failure handling
+class CacheMissError extends CacheError { _tag = 'CacheMiss' }
+class CacheStaleError extends CacheError { ageMs: number }
+class CacheCapacityError extends CacheError { currentSize: number; maxSize: number }
+```
+
+## MCP Integration
+
+Model Context Protocol support allows external tool servers to be connected. The client (`src/mcp/client.ts`) now supports paginated tool listing:
+
+```typescript
+import { getMcpClientManager } from './mcp/index.js';
+
+const manager = getMcpClientManager();
+await manager.connect({
+  name: 'my-server',
+  transport: 'stdio',
+  command: 'npx',
+  args: ['@my/mcp-server'],
+});
+
+// MCP tools are automatically registered in the tool registry
+// Paginated listing with MAX_PAGES = 100 safety cap
+// Tool cache TTL: 30 seconds
+// Default tool call timeout: 60 seconds
+```
+
+Connections are managed with automatic reconnection, graceful schema handling for malformed tool definitions, and a 30-second tool cache TTL.
 
 ## Permission System
 
@@ -550,6 +738,26 @@ type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 type PermissionDecision = 'allow' | 'deny' | 'ask';
 ```
 
+### Permission Configuration from Environment
+
+Permission rules can be loaded from the `ALEXI_PERMISSION` environment variable (`src/core/config.ts`):
+
+```typescript
+interface PermissionConfig {
+  rules?: PermissionRule[];
+  allowExternalDirectories?: boolean;
+  doomLoop?: {
+    maxRetries?: number;   // Default: 3
+    windowMs?: number;     // Default: 60000
+    onDetected?: 'warn' | 'block' | 'ask';
+  };
+}
+
+// Load from env with defensive JSON parsing
+const config = loadPermissionConfig(); // reads ALEXI_PERMISSION
+const appConfig = loadAppConfig();     // reads all ALEXI_* env vars
+```
+
 ### Doom Loop Detection
 
 The permission system detects repeated denials and configures mitigation:
@@ -562,25 +770,24 @@ interface DoomLoopConfig {
 }
 ```
 
-## MCP Integration
+## Session Replay
 
-Model Context Protocol support allows external tool servers to be connected:
+The session replay system (`src/cli/session-replay.ts`) enables users to see context when resuming a session:
 
 ```typescript
-import { getMcpClientManager } from './mcp/index.js';
+class SessionReplay {
+  replay(messages: Message[], options?: ReplayOptions): Promise<ReplayResult>;
+  formatMessage(message: Message): string;
+  getSummary(messages: Message[]): SessionSummary;
+}
 
-const manager = getMcpClientManager();
-await manager.connect({
-  name: 'my-server',
-  transport: 'stdio',
-  command: 'npx',
-  args: ['@my/mcp-server'],
-});
-
-// MCP tools are automatically registered in the tool registry
+interface ReplayOptions {
+  maxMessages?: number;        // Default: 50
+  showToolCalls?: boolean;     // Default: true
+  showSystemMessages?: boolean; // Default: false
+  onMessage?: (message: Message, index: number, total: number) => void;
+}
 ```
-
-Connections are managed with automatic reconnection and a 30-second tool cache TTL.
 
 ## Directory Structure
 
@@ -594,20 +801,21 @@ alexi/
 │   ├── compaction/     # Context compaction strategies
 │   ├── config/         # Environment, routing, user config, project context
 │   ├── context/        # Repo map, symbol ranking, tree-sitter
-│   ├── core/           # Orchestrator, router, session, agentic chat
+│   ├── core/           # Orchestrator, router, session, agentic chat, network, flags
 │   ├── git/            # Auto-commit, attribution, dirty file tracking
 │   ├── hooks/          # Lifecycle hooks (command, HTTP, script)
-│   ├── mcp/            # Model Context Protocol client/server
+│   ├── mcp/            # Model Context Protocol client/server with pagination
 │   ├── permission/     # Permission rules, doom loop detection
 │   ├── providers/      # SAP AI Core Orchestration (sole provider)
+│   ├── reference/      # External repository references and caching
 │   ├── skill/          # Specialized prompt skills
-│   ├── tool/           # Tool system + 30 built-in tool implementations
+│   ├── tool/           # Tool system + 30 built-in tools + plugin wrappers
 │   ├── tui/            # Ink-based TUI components
 │   └── utils/          # Logger, telemetry, shared utilities
 ├── tests/              # Vitest test suites
 ├── docs/               # Generated documentation
 ├── .github/
-│   ├── workflows/      # 19 GitHub Actions workflows
+│   ├── workflows/      # 20 GitHub Actions workflows
 │   └── prompts/        # AI prompt templates for CI automation
 ├── CHANGELOG.md
 ├── AGENTS.md
@@ -625,25 +833,27 @@ All LLM calls route exclusively through SAP AI Core Orchestration API via `@sap-
 - Single authentication surface (AICORE_SERVICE_KEY)
 - Access to multiple underlying models (GPT-4o, Claude, Gemini) through one API
 
-### 2. Tool System with Permission Control
+### 2. Tool System with Plugin Support and Permission Control
 
 Tools are implemented as independent modules with:
 - Zod schema validation for parameters
 - Permission-based access control (last-match-wins rule evaluation)
 - Context-aware relative path resolution via workdir
 - Event bus integration for observability
+- Enhanced registry with prompt-based resolution and plugin tool wrappers
 - Support for background execution (experimental)
 
-### 3. Agentic Execution with Compaction
+### 3. Agentic Execution with Overflow-Seeded Compaction
 
 The agentic chat system enables autonomous multi-turn operations:
 - Automatic permission configuration (priority 200 allow rules)
-- Context overflow detection and reactive compaction
+- Context overflow detection and reactive compaction with overflow token seeding
+- Chunked summarization with refinement passes for oversized contexts
 - Lifecycle hooks with block cap and continueOnBlock
 - Configurable iteration limits (default: 50)
 - Effort levels controlling max tokens and behavior
 
-### 4. Event-Driven Architecture
+### 4. Event-Driven Architecture with Eager Subscription
 
 The typed event bus enables:
 - Loose coupling between modules
@@ -651,6 +861,7 @@ The typed event bus enables:
 - Real-time TUI updates
 - Telemetry collection
 - Permission dialog coordination
+- Eager subscription acquisition to prevent race conditions between subscribe and first event
 
 ### 5. Custom Agent System with File Inclusion
 
@@ -661,6 +872,10 @@ Custom agents support:
 - Tool allowlists and denylists
 - Model and temperature preferences
 
+### 6. Network Resilience
+
+The network manager provides automatic reconnection with exponential backoff, preventing session loss during transient network interruptions.
+
 ## Security Considerations
 
 1. **Secrets Management**: AICORE_SERVICE_KEY stored in environment, never in config files
@@ -669,3 +884,4 @@ Custom agents support:
 4. **Environment Isolation**: User config in `~/.alexi/`, never committed
 5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
 6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout
+7. **Defensive Configuration**: Environment variable parsing tolerates invalid JSON gracefully
