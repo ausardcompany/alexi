@@ -47,9 +47,7 @@ export class EnhancedToolRegistry {
 
     // Validate args is an object
     if (typeof args !== 'object' || args === null) {
-      console.warn(
-        `Tool ${definition.name}: invalid args, defaulting to empty object`
-      );
+      console.warn(`Tool ${definition.name}: invalid args, defaulting to empty object`);
     }
 
     const normalizedDefinition = {
@@ -59,7 +57,10 @@ export class EnhancedToolRegistry {
     };
 
     // If it's already a Tool instance, register directly
-    if (typeof definition.execute === 'function' && typeof definition.toFunctionSchema === 'function') {
+    if (
+      typeof definition.execute === 'function' &&
+      typeof definition.toFunctionSchema === 'function'
+    ) {
       this.register(definition as Tool<any, any>);
     } else {
       // Store the normalized definition

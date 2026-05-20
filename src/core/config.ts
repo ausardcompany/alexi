@@ -59,10 +59,9 @@ function validatePermissionConfig(config: unknown): PermissionConfig {
               typeof (cfg.doomLoop as any).windowMs === 'number'
                 ? (cfg.doomLoop as any).windowMs
                 : defaults.doomLoop!.windowMs,
-            onDetected:
-              ['warn', 'block', 'ask'].includes((cfg.doomLoop as any).onDetected)
-                ? (cfg.doomLoop as any).onDetected
-                : defaults.doomLoop!.onDetected,
+            onDetected: ['warn', 'block', 'ask'].includes((cfg.doomLoop as any).onDetected)
+              ? (cfg.doomLoop as any).onDetected
+              : defaults.doomLoop!.onDetected,
           }
         : defaults.doomLoop,
   };

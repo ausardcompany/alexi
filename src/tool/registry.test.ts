@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { EnhancedToolRegistry, registerTool, getToolRegistry, setToolRegistry } from './registry.js';
+import {
+  EnhancedToolRegistry,
+  registerTool,
+  getToolRegistry,
+  setToolRegistry,
+} from './registry.js';
 
 describe('Tool Registry', () => {
   beforeEach(() => {
