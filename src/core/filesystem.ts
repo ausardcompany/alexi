@@ -45,3 +45,18 @@ export async function mkdirSafe(dir: string): Promise<void> {
 export async function ensureDir(path: string): Promise<void> {
   await mkdirSafe(path);
 }
+
+/**
+ * Safely reads a file as a string, returning undefined instead of throwing on NotFound.
+ * Useful for optional file reading without try-catch boilerplate.
+ */
+export async function readFileStringSafe(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, 'utf-8');
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+      return undefined;
+    }
+    throw err;
+  }
+}

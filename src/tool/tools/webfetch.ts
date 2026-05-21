@@ -1,5 +1,6 @@
 /**
  * WebFetch Tool - Fetch content from URLs
+ * Enhanced with improved error handling and type safety
  */
 
 import { z } from 'zod';
@@ -14,6 +15,13 @@ const WebFetchParamsSchema = z.object({
     .default('markdown')
     .describe('Output format (default: markdown)'),
   timeout: z.number().optional().describe('Timeout in seconds (max 120, default 30)'),
+  method: z
+    .enum(['GET', 'POST', 'PUT', 'DELETE'])
+    .optional()
+    .default('GET')
+    .describe('HTTP method (default: GET)'),
+  headers: z.record(z.string()).optional().describe('Custom HTTP headers'),
+  body: z.string().optional().describe('Request body for POST/PUT requests'),
 });
 
 interface WebFetchResult {
@@ -21,6 +29,7 @@ interface WebFetchResult {
   contentType: string;
   content: string;
   statusCode: number;
+  headers?: Record<string, string>;
 }
 
 export const webfetchTool = defineTool<typeof WebFetchParamsSchema, WebFetchResult>({
@@ -31,13 +40,20 @@ Usage:
 - HTTP URLs are upgraded to HTTPS
 - Returns content in text, markdown, or html format
 - Timeout max is 120 seconds
-- Content may be summarized if very large`,
+- Content may be summarized if very large
+- Supports custom headers and request methods`,
 
   parameters: WebFetchParamsSchema,
 
   permission: {
     action: 'network',
-    getResource: (params) => new URL(params.url).hostname,
+    getResource: (params) => {
+      try {
+        return new URL(params.url).hostname;
+      } catch {
+        return params.url;
+      }
+    },
   },
 
   async execute(params, context): Promise<ToolResult<WebFetchResult>> {
@@ -57,10 +73,10 @@ Usage:
       let parsedUrl: URL;
       try {
         parsedUrl = new URL(url);
-      } catch {
+      } catch (err) {
         return {
           success: false,
-          error: `Invalid URL format: ${params.url}`,
+          error: `Invalid URL format: ${params.url} (${err instanceof Error ? err.message : String(err)})`,
         };
       }
 
@@ -73,12 +89,17 @@ Usage:
       context.signal?.addEventListener('abort', abortHandler);
 
       try {
+        const requestHeaders: Record<string, string> = {
+          'User-Agent': 'SAP-Bot-Orchestrator/1.0',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          ...params.headers,
+        };
+
         const response = await fetch(parsedUrl.toString(), {
+          method: params.method ?? 'GET',
           signal: controller.signal ?? AbortSignal.timeout(30000),
-          headers: {
-            'User-Agent': 'SAP-Bot-Orchestrator/1.0',
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
+          headers: requestHeaders,
+          body: params.body,
           redirect: 'follow',
         });
 
@@ -103,10 +124,23 @@ Usage:
           return {
             success: false,
             error: `HTTP ${response.status}: ${response.statusText}`,
+            data: {
+              url: finalUrl,
+              contentType: response.headers.get('content-type') ?? 'unknown',
+              content: '',
+              statusCode: response.status,
+            },
           };
         }
 
         const contentType = response.headers.get('content-type') ?? 'text/plain';
+
+        // Collect response headers
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          responseHeaders[key] = value;
+        });
+
         let content = await response.text();
 
         // Simple HTML to markdown/text conversion
@@ -123,6 +157,7 @@ Usage:
             contentType,
             content: truncatedContent,
             statusCode: response.status,
+            headers: responseHeaders,
           },
           truncated,
           hint: truncated ? 'Content truncated due to size.' : undefined,

@@ -1,9 +1,9 @@
 /**
- * Tests for the bash tool
+ * Tests for the bash/shell tool
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { bashTool } from '../bash.js';
+import { bashTool } from '../shell.js';
 import type { ToolContext } from '../../index.js';
 
 describe('bash tool', () => {

@@ -8,7 +8,7 @@ import { registerTool, type Tool } from '../index.js';
 import { readTool } from './read.js';
 import { writeTool } from './write.js';
 import { editTool } from './edit.js';
-import { bashTool } from './bash.js';
+import { shellTool, bashTool } from './shell.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webfetchTool } from './webfetch.js';
@@ -62,7 +62,7 @@ export const builtInTools = [
   readTool,
   writeTool,
   editTool,
-  bashTool,
+  shellTool, // Primary tool name
   globTool,
   grepToolMaybeHinted,
   webfetchTool,
@@ -107,7 +107,8 @@ export {
   readTool,
   writeTool,
   editTool,
-  bashTool,
+  shellTool,
+  bashTool, // Backward compatibility alias
   globTool,
   grepTool,
   webfetchTool,

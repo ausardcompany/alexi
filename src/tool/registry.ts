@@ -1,6 +1,7 @@
 /**
  * Enhanced Tool Registry with Prompt Tool Resolution
  * Based on opencode refactor(session): extract prompt tool resolution
+ * Updated with improved type safety and consistent naming conventions
  */
 
 import type { Tool } from './index.js';
@@ -9,6 +10,13 @@ export interface ToolResolutionContext {
   sessionId: string;
   agentId?: string;
   permissions: string[];
+}
+
+export interface ToolDefinition<TArgs = unknown, TResult = unknown> {
+  name: string;
+  description: string;
+  args: TArgs;
+  execute: (args: TArgs) => Promise<TResult>;
 }
 
 export interface PromptToolResolver {
@@ -33,7 +41,13 @@ export class EnhancedToolRegistry {
   private tools: Map<string, Tool<any, any>> = new Map();
   private promptResolvers: Map<string, PromptToolResolver> = new Map();
 
+  /**
+   * Register a static tool
+   */
   register(tool: Tool<any, any>): void {
+    if (!tool.name) {
+      throw new ToolResolutionError('Tool must have a name');
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -42,11 +56,24 @@ export class EnhancedToolRegistry {
    * Based on opencode refactor(session): extract prompt tool resolution
    */
   registerPromptResolver(name: string, resolver: PromptToolResolver): void {
+    if (!name) {
+      throw new ToolResolutionError('Resolver must have a name');
+    }
     this.promptResolvers.set(name, resolver);
   }
 
+  /**
+   * Get a tool by name
+   */
   get(name: string): Tool<any, any> | undefined {
     return this.tools.get(name);
+  }
+
+  /**
+   * Check if a tool exists
+   */
+  has(name: string): boolean {
+    return this.tools.has(name);
   }
 
   /**
@@ -77,6 +104,9 @@ export class EnhancedToolRegistry {
     return resolvedTools;
   }
 
+  /**
+   * Check if a tool has required permissions
+   */
   private hasPermission(tool: Tool<any, any>, permissions: string[]): boolean {
     // If tool doesn't specify required permissions, allow it
     const requiredPermissions = (tool as any).requiredPermissions;
@@ -86,10 +116,23 @@ export class EnhancedToolRegistry {
     return requiredPermissions.every((p: string) => permissions.includes(p));
   }
 
+  /**
+   * List all registered tools
+   */
   list(): Tool<any, any>[] {
     return Array.from(this.tools.values());
   }
 
+  /**
+   * Get count of registered tools
+   */
+  count(): number {
+    return this.tools.size;
+  }
+
+  /**
+   * Clear all tools and resolvers
+   */
   clear(): void {
     this.tools.clear();
     this.promptResolvers.clear();
