@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-21
+
+### Changed
+
+- Reformatted multi-line boolean expression in `isAllowEverythingEnabled()` (`src/permission/allow-everything.ts`) to single-line format per Prettier 100-character line width rule via CI auto-fix
+
 ## [0.5.1] - 2026-05-19
 
 ### Changed
@@ -229,6 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rule-based configuration system
 - Autonomous self-updating from upstream repositories
 
+[0.5.2]: https://github.com/ausardcompany/alexi/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ausardcompany/alexi/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ausardcompany/alexi/compare/v0.4.22...v0.5.0
 [0.4.22]: https://github.com/ausardcompany/alexi/compare/v0.4.17...v0.4.22
