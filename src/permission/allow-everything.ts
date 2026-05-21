@@ -38,8 +38,7 @@ export function createAllowEverythingHandler(config: AllowEverythingConfig) {
 
 export function isAllowEverythingEnabled(): boolean {
   return (
-    process.env.ALEXI_ALLOW_EVERYTHING === 'true' ||
-    process.env.ALEXI_ALLOW_EVERYTHING === '1'
+    process.env.ALEXI_ALLOW_EVERYTHING === 'true' || process.env.ALEXI_ALLOW_EVERYTHING === '1'
   );
 }
 
