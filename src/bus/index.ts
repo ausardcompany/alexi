@@ -283,3 +283,13 @@ export const ErrorOccurred = defineEvent(
     timestamp: z.number(),
   })
 );
+
+// Network events
+export const NetworkRestored = defineEvent(
+  'network.restored',
+  z.object({
+    restoredAt: z.number(),
+    sessionId: z.string(),
+    timestamp: z.number(),
+  })
+);
