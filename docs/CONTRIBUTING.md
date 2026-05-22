@@ -489,6 +489,8 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Trailing whitespace in class definitions and function bodies
 - Inconsistent blank lines between code blocks
 - Missing or extra trailing newlines at end of file
+- Line wrapping normalization for declarations that fit within the 100-character line width
+- Multi-line expressions collapsed to single lines when they do not exceed the configured print width
 
 ### Daily PR Merge
 
