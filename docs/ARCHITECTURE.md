@@ -615,6 +615,29 @@ alexi/
 └── tsconfig.json
 ```
 
+## Filesystem Utilities
+
+The `src/core/filesystem.ts` module provides Windows-resilient filesystem operations used throughout the codebase:
+
+```typescript
+// Windows-resilient mkdir with EEXIST handling (OneDrive, junctions, WSL)
+export async function mkdirSafe(dir: string): Promise<void>;
+
+// Ensure directory exists (delegates to mkdirSafe)
+export async function ensureDir(path: string): Promise<void>;
+
+// Read file as UTF-8 string (throws on missing file)
+export async function readFileString(path: string): Promise<string>;
+
+// Read file returning undefined if not found (for optional config files)
+export async function readFileStringSafe(path: string): Promise<string | undefined>;
+
+// Check if a path exists
+export async function exists(path: string): Promise<boolean>;
+```
+
+These utilities handle edge cases on Windows with NTFS reparse points, OneDrive, and WSL-served paths where `mkdir -p` can throw `EEXIST` even with `recursive: true`.
+
 ## Key Design Decisions
 
 ### 1. Single Provider Architecture (SAP AI Core)
@@ -660,6 +683,20 @@ Custom agents support:
 - User-global and project-local scopes
 - Tool allowlists and denylists
 - Model and temperature preferences
+
+### 6. Allow-Everything Development Mode
+
+For development and testing, the `AllowEverythingPermission` class (`src/permission/allow-everything.ts`) bypasses all permission checks:
+
+```typescript
+// Enabled when NODE_ENV=development OR ALEXI_ALLOW_ALL_PERMISSIONS=true
+AllowEverythingPermission.isEnabled(): boolean;
+
+// Wrap an operation to bypass permissions when enabled
+withAllowEverything<T>(operation: () => Promise<T>, enabled?: boolean): Promise<T>;
+```
+
+This is strictly for local development -- never for production deployments.
 
 ## Security Considerations
 

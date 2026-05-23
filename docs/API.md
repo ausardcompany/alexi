@@ -804,6 +804,33 @@ const customTool = defineTool({
 registerTool(customTool);
 ```
 
+## Development Permissions
+
+### Allow-Everything Mode
+
+For development and testing, all permission checks can be bypassed:
+
+```typescript
+import { AllowEverythingPermission, withAllowEverything } from './permission/allow-everything.js';
+
+// Check if enabled (NODE_ENV=development OR ALEXI_ALLOW_ALL_PERMISSIONS=true)
+if (AllowEverythingPermission.isEnabled()) {
+  // All operations will be allowed without prompts
+}
+
+// Wrap an operation to bypass permissions
+const result = await withAllowEverything(async () => {
+  return await dangerousOperation();
+});
+```
+
+| Variable | Effect |
+|----------|--------|
+| `NODE_ENV=development` | Enables allow-everything mode |
+| `ALEXI_ALLOW_ALL_PERMISSIONS=true` | Enables allow-everything mode |
+
+**WARNING**: Never use in production. This bypasses all security checks.
+
 ## Error Handling
 
 All CLI commands handle errors gracefully:

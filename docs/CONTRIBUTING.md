@@ -485,10 +485,13 @@ The CI pipeline automatically applies formatting and linting corrections on elig
 style(ci): auto-fix lint/format issues [alexi-bot]
 ```
 
-This ensures consistent code style (trailing whitespace removal, blank line normalization, Prettier formatting) across all modules without manual intervention. Examples of auto-fixed patterns include:
+This ensures consistent code style across all modules without manual intervention. Examples of auto-fixed patterns include:
 - Trailing whitespace in class definitions and function bodies
 - Inconsistent blank lines between code blocks
 - Missing or extra trailing newlines at end of file
+- Multi-line function signatures collapsed to single lines when within line-width limits
+- Multi-line conditional expressions reformatted to single-line when fitting within 100 characters
+- Multi-line return type annotations consolidated to single line per Prettier rules
 
 ### Daily PR Merge
 
