@@ -24,8 +24,7 @@ export class AllowEverythingPermission {
 
   static isEnabled(): boolean {
     return (
-      process.env.NODE_ENV === 'development' ||
-      process.env.ALEXI_ALLOW_ALL_PERMISSIONS === 'true'
+      process.env.NODE_ENV === 'development' || process.env.ALEXI_ALLOW_ALL_PERMISSIONS === 'true'
     );
   }
 }
@@ -34,10 +33,7 @@ export class AllowEverythingPermission {
  * Apply allow-everything permission to a context
  * Only applies if enabled via environment variables
  */
-export function withAllowEverything<T>(
-  operation: () => Promise<T>,
-  enabled?: boolean
-): Promise<T> {
+export function withAllowEverything<T>(operation: () => Promise<T>, enabled?: boolean): Promise<T> {
   const shouldAllow = enabled ?? AllowEverythingPermission.isEnabled();
 
   if (shouldAllow) {

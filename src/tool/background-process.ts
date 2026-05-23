@@ -171,9 +171,7 @@ The tool returns process IDs that can be used to check status or stop processes.
   async execute(
     params: BackgroundProcessParams,
     _context: ToolContext
-  ): Promise<
-    ToolResult<BackgroundProcess | BackgroundProcess[] | string | { stopped: string }>
-  > {
+  ): Promise<ToolResult<BackgroundProcess | BackgroundProcess[] | string | { stopped: string }>> {
     try {
       switch (params.action) {
         case 'list': {
