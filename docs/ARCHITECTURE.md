@@ -550,6 +550,22 @@ type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 type PermissionDecision = 'allow' | 'deny' | 'ask';
 ```
 
+### Allow-Everything Mode
+
+For trusted environments (CI/CD, automated testing), the `AllowEverythingPermission` class bypasses all permission checks:
+
+```typescript
+import { AllowEverythingPermission } from './permission/allow-everything.js';
+
+// Auto-detected from environment variables
+const isEnabled = AllowEverythingPermission.isEnabled();
+// Checks: ALEXI_ALLOW_EVERYTHING=true or KILO_ALLOW_EVERYTHING=true
+
+// Manual creation with optional audit logging
+const perm = AllowEverythingPermission.create({ auditLog: true });
+const result = await perm.check(ctx); // Always returns { decision: 'allow', granted: true }
+```
+
 ### Doom Loop Detection
 
 The permission system detects repeated denials and configures mitigation:
@@ -613,6 +629,55 @@ alexi/
 ├── AGENTS.md
 ├── package.json
 └── tsconfig.json
+```
+
+## Core Utilities
+
+### Filesystem Utilities (`src/core/filesystem.ts`)
+
+Windows-resilient filesystem operations used throughout the codebase:
+
+```typescript
+import { mkdirSafe, ensureDir, readFileStringSafe, existsSafe } from './core/filesystem.js';
+
+// Windows-resilient mkdir -p (handles EEXIST from OneDrive/WSL/junctions)
+await mkdirSafe('/path/to/dir');
+
+// Safe file read (returns undefined instead of throwing on ENOENT)
+const content = await readFileStringSafe('/path/to/file');
+
+// Safe existence check
+const exists = await existsSafe('/path/to/file');
+```
+
+### Background Process Port Management (`src/tool/tools/background-process/ports.ts`)
+
+Port allocation for background processes with availability checking:
+
+```typescript
+import { BackgroundProcessPorts } from './tool/tools/background-process/ports.js';
+
+const port = await BackgroundProcessPorts.allocate(3000); // Try preferred, fallback to range
+BackgroundProcessPorts.release(port);                      // Release when done
+const ports = await BackgroundProcessPorts.allocateMultiple(3); // Allocate multiple
+```
+
+### Shell Prompt Runner (`src/tool/tools/shell/prompt.ts`)
+
+Manages shell command execution with timeout, output streaming, and process lifecycle:
+
+```typescript
+import { ShellPrompt, type ShellPromptResult } from './tool/tools/shell/prompt.js';
+
+const runner = await ShellPrompt.create({
+  id: shellId,
+  command: 'npm test',
+  timeout: 30000,
+  workingDirectory: '/path/to/project',
+});
+
+const result: ShellPromptResult = await runner.run();
+// { exitCode, stdout, stderr, timedOut, duration }
 ```
 
 ## Key Design Decisions

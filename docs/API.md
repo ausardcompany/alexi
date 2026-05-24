@@ -728,6 +728,29 @@ interface PermissionRule {
 }
 ```
 
+### Allow-Everything Mode
+
+For CI/CD and trusted environments, all permission checks can be bypassed:
+
+```typescript
+interface AllowEverythingConfig {
+  enabled: boolean;
+  auditLog?: boolean;   // Log all permission grants
+}
+
+interface PermissionResult {
+  decision: 'allow';
+  granted: true;
+}
+```
+
+Enable via environment variable:
+```bash
+export ALEXI_ALLOW_EVERYTHING=true
+# or
+export KILO_ALLOW_EVERYTHING=true
+```
+
 ### Agentic Permission Configuration
 
 In agent mode, high-priority rules are automatically added:

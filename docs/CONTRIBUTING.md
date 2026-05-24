@@ -486,9 +486,11 @@ style(ci): auto-fix lint/format issues [alexi-bot]
 ```
 
 This ensures consistent code style (trailing whitespace removal, blank line normalization, Prettier formatting) across all modules without manual intervention. Examples of auto-fixed patterns include:
-- Trailing whitespace in class definitions and function bodies
+- Trailing whitespace in JSDoc comment blocks and class definitions
 - Inconsistent blank lines between code blocks
 - Missing or extra trailing newlines at end of file
+- Multi-line expressions that fit on a single line reformatted by Prettier (e.g., `console.log()` calls, template literals)
+- Whitespace-only lines in documentation comments (` * \n` to ` *\n`)
 
 ### Daily PR Merge
 
