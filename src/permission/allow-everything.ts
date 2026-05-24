@@ -1,7 +1,7 @@
 /**
  * Allow-Everything Permission Mode
  * Based on upstream kilocode permission system (67 new lines)
- * 
+ *
  * Bypasses all permission checks - useful for trusted environments
  * Can be enabled via environment variables for automated testing or CI/CD
  */
@@ -54,9 +54,7 @@ export class AllowEverythingPermission {
     }
 
     if (this.config.auditLog) {
-      console.log(
-        `[PERMISSION AUDIT] Allowing: ${ctx.toolName} - ${ctx.action} - ${ctx.resource}`
-      );
+      console.log(`[PERMISSION AUDIT] Allowing: ${ctx.toolName} - ${ctx.action} - ${ctx.resource}`);
     }
 
     return {

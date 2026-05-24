@@ -1,7 +1,7 @@
 /**
  * Shell Prompt Handling Module
  * Based on upstream kilocode shell tool refactor (297 new lines)
- * 
+ *
  * Comprehensive shell prompt handling with:
  * - Timeout management
  * - Output streaming

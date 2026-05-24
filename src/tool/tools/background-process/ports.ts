@@ -1,7 +1,7 @@
 /**
  * Background Process Port Management
  * Based on upstream kilocode port allocation (138 new lines)
- * 
+ *
  * Handles port allocation and availability checking for background processes
  */
 
