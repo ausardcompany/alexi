@@ -22,6 +22,7 @@ import {
 } from '../bus/index.js';
 import { ConfigProtection } from './config-paths.js';
 import { containsPath, safePathCheck } from '../utils/filesystem.js';
+import { AllowEverythingPermission } from './allow-everything.js';
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -451,8 +452,15 @@ export class PermissionManager {
   /**
    * Check permission with interactive ask flow
    * Enhanced with doom loop detection and external path checking
+   * Supports allow-everything mode for trusted environments
    */
   async check(ctx: PermissionContext): Promise<PermissionResult> {
+    // Check for allow-everything mode first
+    if (AllowEverythingPermission.isEnabled()) {
+      const allowAll = AllowEverythingPermission.create({ auditLog: false });
+      return allowAll.check(ctx);
+    }
+
     // Check for doom loop first
     const loopCheck = this.checkDoomLoop(ctx);
     if (loopCheck.isLoop) {

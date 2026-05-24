@@ -9,6 +9,8 @@ import { readTool } from './read.js';
 import { writeTool } from './write.js';
 import { editTool } from './edit.js';
 import { bashTool } from './bash.js';
+import { shellTool } from './shell.js';
+import { backgroundProcessTool } from './background-process.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webfetchTool } from './webfetch.js';
@@ -62,7 +64,9 @@ export const builtInTools = [
   readTool,
   writeTool,
   editTool,
-  bashTool,
+  shellTool, // New shell tool (replaces bash as primary)
+  bashTool, // Keep bash for backward compatibility (alias to shell)
+  backgroundProcessTool, // New background process management
   globTool,
   grepToolMaybeHinted,
   webfetchTool,
@@ -107,7 +111,9 @@ export {
   readTool,
   writeTool,
   editTool,
+  shellTool,
   bashTool,
+  backgroundProcessTool,
   globTool,
   grepTool,
   webfetchTool,

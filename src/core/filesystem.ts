@@ -23,6 +23,18 @@ function isEexist(err: unknown): boolean {
 }
 
 /**
+ * Checks if an error is an ENOENT error (file not found)
+ */
+function isEnoent(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as NodeJS.ErrnoException).code === 'ENOENT'
+  );
+}
+
+/**
  * Windows-resilient mkdir -p implementation.
  * Catches EEXIST errors that can occur on Windows with OneDrive,
  * directory junctions, or WSL-served paths.
@@ -45,3 +57,31 @@ export async function mkdirSafe(dir: string): Promise<void> {
 export async function ensureDir(path: string): Promise<void> {
   await mkdirSafe(path);
 }
+
+/**
+ * Safe file reading that returns undefined instead of throwing on NotFound
+ * Based on upstream kilocode filesystem utilities
+ */
+export async function readFileStringSafe(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, 'utf-8');
+  } catch (err: unknown) {
+    if (isEnoent(err)) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Check if a file exists safely
+ */
+export async function existsSafe(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
