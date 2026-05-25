@@ -8,7 +8,8 @@ import { registerTool, type Tool } from '../index.js';
 import { readTool } from './read.js';
 import { writeTool } from './write.js';
 import { editTool } from './edit.js';
-import { bashTool } from './bash.js';
+import { shellTool, bashTool } from './shell.js';
+import { backgroundProcessTool } from './background-process.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webfetchTool } from './webfetch.js';
@@ -62,7 +63,8 @@ export const builtInTools = [
   readTool,
   writeTool,
   editTool,
-  bashTool,
+  shellTool,
+  backgroundProcessTool,
   globTool,
   grepToolMaybeHinted,
   webfetchTool,
@@ -107,7 +109,9 @@ export {
   readTool,
   writeTool,
   editTool,
+  shellTool,
   bashTool,
+  backgroundProcessTool,
   globTool,
   grepTool,
   webfetchTool,
@@ -141,3 +145,8 @@ export {
 // Re-export UI utilities from specific tools
 export { getPendingQuestions, answerQuestion } from './question.js';
 export { getTodos, onTodosChange, clearTodos, type Todo } from './todowrite.js';
+export {
+  listBackgroundProcesses,
+  stopBackgroundProcess,
+  type BackgroundProcess,
+} from './background-process.js';
