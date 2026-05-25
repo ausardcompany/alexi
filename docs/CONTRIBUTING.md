@@ -477,6 +477,18 @@ When CI fails on auto/* branches:
 4. Fixes verified and committed
 5. Rate-limited: max 2 runs/branch/day
 
+### Pre-Commit Hooks
+
+The project uses **Husky** with **lint-staged** to enforce style at commit time. On every commit, the following runs automatically against staged `.ts` files:
+
+```json
+{
+  "*.ts": ["eslint --fix", "prettier --write"]
+}
+```
+
+Combined with **commitlint** (conventional commits), this ensures that local commits always pass basic quality checks before reaching CI.
+
 ### Style Auto-Fix
 
 The CI pipeline automatically applies formatting and linting corrections on eligible branches. These changes are committed with the message format:
@@ -485,10 +497,11 @@ The CI pipeline automatically applies formatting and linting corrections on elig
 style(ci): auto-fix lint/format issues [alexi-bot]
 ```
 
-This ensures consistent code style (trailing whitespace removal, blank line normalization, Prettier formatting) across all modules without manual intervention. Examples of auto-fixed patterns include:
-- Trailing whitespace in class definitions and function bodies
-- Inconsistent blank lines between code blocks
+This ensures consistent code style (trailing whitespace removal, blank line normalization, Prettier formatting) across all modules without manual intervention. Common auto-fixed patterns include:
+- Trailing whitespace in object return statements and function bodies (e.g., permission modules, tool implementations)
+- Extraneous blank lines between code blocks in tool definitions and shell prompt builders
 - Missing or extra trailing newlines at end of file
+- Inconsistent spacing in namespace and class method definitions
 
 ### Daily PR Merge
 
