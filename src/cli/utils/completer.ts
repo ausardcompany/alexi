@@ -114,6 +114,11 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
   { name: 'history', description: 'Show conversation history', category: 'session' },
   { name: 'tokens', description: 'Show token usage stats', category: 'session' },
   { name: 'compact', description: 'Trigger manual context compaction', category: 'session' },
+  {
+    name: 'rewind',
+    description: 'Rewind conversation to a specific turn or summarize up to a point',
+    category: 'session',
+  },
   { name: 'context', description: 'Show context usage', category: 'session' },
   { name: 'status', description: 'Show current status', category: 'session' },
   { name: 'fork', description: 'Fork current session', category: 'session' },

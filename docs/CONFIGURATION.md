@@ -646,6 +646,70 @@ Combined with user config:
 }
 ```
 
+## Network Configuration
+
+Network reconnection behavior is managed by the `NetworkManager` class with configurable retry parameters:
+
+### NetworkManager Options
+
+```typescript
+interface NetworkManagerOptions {
+  maxRetries?: number;    // Maximum reconnection attempts (default: 5)
+  baseDelayMs?: number;   // Initial backoff delay in ms (default: 1000)
+  maxDelayMs?: number;    // Maximum backoff delay cap in ms (default: 30000)
+}
+```
+
+### Exponential Backoff
+
+The reconnection delay follows the formula:
+
+```
+delay = min(baseDelayMs * 2^(retryCount - 1), maxDelayMs)
+```
+
+For example, with default settings: 1s, 2s, 4s, 8s, 16s (capped at 30s).
+
+### Events
+
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `reconnect:attempt` | `{ attempt, maxRetries }` | Reconnection attempt started |
+| `reconnect:success` | `{}` | Successfully reconnected |
+| `reconnect:failed` | `{ error }` | All retry attempts exhausted |
+
+## Reference System Configuration
+
+External repository references allow agents to access code from other repositories:
+
+### Reference Configuration
+
+```typescript
+interface ReferenceConfig {
+  type: 'local' | 'git';
+  path?: string;           // For local references
+  url?: string;            // For git references
+  branch?: string;         // Git branch (default: main)
+  sparse?: string[];       // Sparse checkout paths
+}
+```
+
+### Repository Cache
+
+The repository cache uses TTL-based expiration:
+
+```typescript
+interface RepositoryCacheOptions {
+  capacity?: number;  // Max cache entries (default: 1000)
+  ttlMs?: number;     // Time-to-live in ms (default: 3600000 = 1 hour)
+}
+```
+
+Typed error classes for cache operations:
+- `CacheMissError` -- Entry not found
+- `CacheStaleError` -- Entry expired (includes age in ms)
+- `CacheCapacityError` -- Cache at maximum capacity
+
 ## Configuration Validation
 
 Alexi validates configuration on startup:

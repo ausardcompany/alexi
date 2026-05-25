@@ -388,6 +388,64 @@ export async function compactConversation(
 }
 
 /**
+ * Partially compact a conversation by summarizing messages before a boundary index.
+ * Messages from the boundary onward are preserved intact.
+ *
+ * @param messages     Full message array
+ * @param boundaryIndex  Index at which to split; messages[0..boundaryIndex-1] are summarized
+ * @param summarizeFn  LLM function for generating the summary (optional, falls back to basic summary)
+ * @returns New message array: [system messages, summary message, ...messages from boundary onward]
+ */
+export async function partialCompact(
+  messages: Message[],
+  boundaryIndex: number,
+  summarizeFn?: LLMSummarizeFn
+): Promise<Message[]> {
+  if (!messages || messages.length === 0) {
+    return [];
+  }
+
+  if (boundaryIndex <= 0 || boundaryIndex >= messages.length) {
+    return [...messages];
+  }
+
+  const messagesToSummarize = messages.slice(0, boundaryIndex).filter((m) => m.role !== 'system');
+  const systemMessages = messages.slice(0, boundaryIndex).filter((m) => m.role === 'system');
+  const messagesToKeep = messages.slice(boundaryIndex);
+
+  if (messagesToSummarize.length === 0) {
+    return [...systemMessages, ...messagesToKeep];
+  }
+
+  // Generate summary
+  let summary: string;
+  const fn = summarizeFn ?? globalLLMSummarizeFn;
+
+  if (fn) {
+    const maxChunkTokens = DEFAULT_MAX_CHUNK_TOKENS;
+    const tokensToSummarize = estimateMessagesTokens(messagesToSummarize);
+
+    if (tokensToSummarize > maxChunkTokens) {
+      const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
+      summary = await summarizeChunks(chunks, fn);
+    } else {
+      const prompt = createSummaryPrompt(messagesToSummarize);
+      summary = await fn(prompt);
+    }
+  } else {
+    summary = createFallbackSummary(messagesToSummarize);
+  }
+
+  const summaryMessage: Message = {
+    role: 'system',
+    content: `[CONVERSATION SUMMARY]\n${summary}`,
+    timestamp: Date.now(),
+  };
+
+  return [...systemMessages, summaryMessage, ...messagesToKeep];
+}
+
+/**
  * Create a fallback summary when no LLM function is available
  * Extracts basic information from messages
  */

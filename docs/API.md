@@ -368,6 +368,7 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/history` | Show conversation history |
 | `/tokens` | Show token usage statistics |
 | `/compact` | Trigger manual context compaction |
+| `/rewind` | Rewind conversation to a specific turn or summarize up to a point |
 | `/context` | Show context usage |
 | `/status` | Show current status |
 | `/fork` | Fork current session |
@@ -375,6 +376,32 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/clear-history` | Clear conversation history |
 | `/cost` | Show cost summary |
 | `/stats` | Show usage statistics |
+
+### Conversation Rewind
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/rewind` | List all turn boundaries | `/rewind` |
+| `/rewind <N>` | Discard messages after turn N | `/rewind 3` |
+| `/rewind <N> --summarize` | Summarize messages before turn N | `/rewind 3 --summarize` |
+
+The `/rewind` command operates on conversation turns, where each turn starts at a user message. Modes:
+
+- **List mode** (no arguments): Shows all turn boundaries with previews
+- **Discard mode** (turn number only): Removes all messages after the specified turn
+- **Summarize mode** (`--summarize` flag): Compresses messages before the specified turn into a summary system message while keeping recent messages intact
+
+```typescript
+interface RewindResult {
+  success: boolean;
+  mode: 'discard' | 'summarize' | 'list';
+  messages?: Message[];
+  turnBoundaries?: TurnBoundary[];
+  error?: string;
+  discardedCount?: number;
+  summarizedCount?: number;
+}
+```
 
 ### Data Export/Import
 
@@ -802,6 +829,125 @@ const customTool = defineTool({
 });
 
 registerTool(customTool);
+```
+
+## Session Replay
+
+When resuming an interactive session, the `SessionReplay` class replays past messages so users can review context:
+
+```typescript
+import { getSessionReplay } from './cli/session-replay.js';
+
+const replay = getSessionReplay();
+
+const result = await replay.replay(messages, {
+  maxMessages: 50,           // Maximum messages to replay
+  showToolCalls: true,       // Include tool call messages
+  showSystemMessages: false, // Skip system messages
+  onMessage: (msg, index, total) => {
+    console.log(replay.formatMessage(msg));
+  },
+});
+
+// Get session summary statistics
+const summary = replay.getSummary(messages);
+// { totalMessages, userMessages, assistantMessages, systemMessages, toolCalls }
+```
+
+### ReplayOptions
+
+```typescript
+interface ReplayOptions {
+  maxMessages?: number;               // Default: 50
+  showToolCalls?: boolean;            // Default: true
+  showSystemMessages?: boolean;       // Default: false
+  onMessage?: (message: Message, index: number, total: number) => void;
+}
+```
+
+## Network Management
+
+The `NetworkManager` provides automatic reconnection with exponential backoff:
+
+```typescript
+import { NetworkManager, NetworkError } from './core/network.js';
+
+const manager = new NetworkManager({
+  maxRetries: 5,        // Default: 5
+  baseDelayMs: 1000,    // Default: 1000ms
+  maxDelayMs: 30000,    // Default: 30000ms
+});
+
+manager.on('reconnect:attempt', ({ attempt, maxRetries }) => {
+  console.log(`Reconnecting ${attempt}/${maxRetries}...`);
+});
+
+manager.on('reconnect:success', () => {
+  console.log('Reconnected');
+});
+
+manager.on('reconnect:failed', ({ error }) => {
+  console.error('Reconnection failed:', error.message);
+});
+
+// Trigger reconnection
+await manager.reconnect();
+
+// Query state
+manager.isConnected();     // boolean
+manager.isReconnecting();  // boolean
+manager.getState();        // NetworkState
+manager.cancelReconnect(); // Cancel in-progress reconnection
+```
+
+## Enhanced Tool Registry
+
+The `EnhancedToolRegistry` supports dynamic prompt-based tool resolution:
+
+```typescript
+import { EnhancedToolRegistry } from './tool/registry.js';
+
+const registry = new EnhancedToolRegistry();
+
+// Register static tools
+registry.register(myTool);
+
+// Register a prompt resolver for dynamic tools
+registry.registerPromptResolver('mcp', {
+  resolve: async (context) => {
+    // Return tools available for this session/agent context
+    return await fetchMcpTools(context.sessionId);
+  },
+});
+
+// Resolve all tools for a prompt context
+const tools = await registry.resolveForPrompt({
+  sessionId: 'session-123',
+  agentId: 'code',
+  permissions: ['read', 'write', 'execute'],
+});
+```
+
+## Plugin Tool System
+
+Plugin tools use a simplified interface with Promise-based `ask`:
+
+```typescript
+import { createPluginToolWrapper, type PluginToolDefinition } from './tool/plugin-tools.js';
+
+const myPlugin: PluginToolDefinition = {
+  name: 'my-plugin-tool',
+  description: 'A plugin tool',
+  schema: z.object({ query: z.string() }),
+  execute: async (params, context) => {
+    // context.ask returns a Promise (not an Effect)
+    const answer = await context.ask('Confirm action?');
+    return { success: true, data: { answer } };
+  },
+};
+
+// Wrap for Alexi's tool system
+const wrappedTool = createPluginToolWrapper(myPlugin);
 ```
 
 ## Error Handling

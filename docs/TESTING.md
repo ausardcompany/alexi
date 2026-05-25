@@ -14,6 +14,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
 - [Testing Routing](#testing-routing)
+- [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Best Practices](#best-practices)
 
@@ -537,6 +538,108 @@ Key testing patterns:
 2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach`
 3. **Generous Timeouts**: Use ~2x the expected duration for CI scheduling variability
 4. **Non-null Assertions**: Use `taskResult.data!.taskId` (correct precedence)
+
+## Testing Rewind Command
+
+### Test File
+
+- `tests/command/rewind.test.ts` -- Tests the `/rewind` command implementation
+
+### Testing Pattern
+
+The rewind command tests verify turn boundary detection, argument parsing, discard mode, and summarize mode:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { Message } from '../../src/core/sessionManager.js';
+import { setLLMSummarizeFn, type LLMSummarizeFn } from '../../src/core/compaction.js';
+import {
+  getTurnBoundaries,
+  parseRewindArgs,
+  validateTurnNumber,
+  rewindDiscard,
+  rewindSummarize,
+  rewindList,
+  executeRewind,
+} from '../../src/command/rewind.js';
+
+describe('Rewind Command', () => {
+  let mockSummarizeFn: LLMSummarizeFn;
+
+  beforeEach(() => {
+    mockSummarizeFn = vi.fn().mockResolvedValue('Summary of earlier conversation');
+    setLLMSummarizeFn(mockSummarizeFn);
+  });
+
+  afterEach(() => {
+    setLLMSummarizeFn((() => Promise.resolve('')) as LLMSummarizeFn);
+  });
+
+  describe('getTurnBoundaries', () => {
+    it('should identify user messages as turn boundaries', () => {
+      const messages = createConversation();
+      const boundaries = getTurnBoundaries(messages);
+      expect(boundaries).toHaveLength(4);
+    });
+
+    it('should skip system messages when counting turns', () => {
+      const messages = [
+        createMessage('system', 'System prompt'),
+        createMessage('user', 'First user message'),
+        createMessage('assistant', 'Response'),
+      ];
+      const boundaries = getTurnBoundaries(messages);
+      expect(boundaries).toHaveLength(1);
+      expect(boundaries[0].turnNumber).toBe(1);
+    });
+
+    it('should truncate preview to 50 characters', () => {
+      const longContent = 'a'.repeat(100);
+      const messages = [createMessage('user', longContent)];
+      const boundaries = getTurnBoundaries(messages);
+      expect(boundaries[0].preview).toContain('...');
+    });
+  });
+
+  describe('rewindDiscard', () => {
+    it('should discard messages after specified turn', () => {
+      const messages = createConversation();
+      const result = rewindDiscard(messages, 2);
+      expect(result.success).toBe(true);
+      expect(result.discardedCount).toBeGreaterThan(0);
+    });
+  });
+
+  describe('rewindSummarize', () => {
+    it('should summarize messages before specified turn', async () => {
+      const messages = createConversation();
+      const result = await rewindSummarize(messages, 3);
+      expect(result.success).toBe(true);
+      expect(result.summarizedCount).toBeGreaterThan(0);
+      expect(mockSummarizeFn).toHaveBeenCalled();
+    });
+  });
+});
+```
+
+### Key Testing Patterns
+
+1. **Mock LLM Summarize**: Use `setLLMSummarizeFn()` to inject a mock summarize function
+2. **Reset After Each Test**: Always restore the summarize function in `afterEach`
+3. **Helper Functions**: Use `createMessage()` and `createConversation()` helpers for test data
+4. **Boundary Validation**: Test edge cases like empty messages, system-only messages, and out-of-range turns
+
+### Test Coverage
+
+| Function | Test Cases |
+|----------|------------|
+| `getTurnBoundaries` | 6 cases (empty, system-only, truncation, standard) |
+| `parseRewindArgs` | 5 cases (number, flag, both, empty, non-numeric) |
+| `validateTurnNumber` | 5 cases (zero, negative, out-of-range, valid, empty) |
+| `rewindDiscard` | 5 cases (middle turn, first turn, last turn, invalid) |
+| `rewindSummarize` | 6 cases (middle, preserve recent, summary message, first turn, invalid, LLM called) |
+| `rewindList` | 3 cases (standard, empty, previews) |
+| `executeRewind` | 4 cases (no args, turn only, summarize flag, flag ordering) |
 
 ## Testing Routing
 
