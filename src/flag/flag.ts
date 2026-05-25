@@ -55,6 +55,12 @@ const OPENCODE_EXPERIMENTAL_CUSTOMIZE_SKILL = unstableDefault(
   'OPENCODE_EXPERIMENTAL_CUSTOMIZE_SKILL'
 );
 
+const ALEXI_EXPERIMENTAL = unstableDefault('ALEXI_EXPERIMENTAL');
+
+const ALEXI_EXPERIMENTAL_HTTPAPI = unstableDefault('ALEXI_EXPERIMENTAL_HTTPAPI');
+
+const ALEXI_EXPERIMENTAL_EVENT_SYSTEM = unstableDefault('ALEXI_EXPERIMENTAL_EVENT_SYSTEM');
+
 export const Flag = {
   set,
   get,
@@ -64,4 +70,9 @@ export const Flag = {
   // Default-on for dev/beta/local; opt-in for stable. Set
   // OPENCODE_EXPERIMENTAL_CUSTOMIZE_SKILL=false to force off, =true to force on.
   OPENCODE_EXPERIMENTAL_CUSTOMIZE_SKILL,
+
+  // Alexi experimental features
+  ALEXI_EXPERIMENTAL,
+  ALEXI_EXPERIMENTAL_HTTPAPI,
+  ALEXI_EXPERIMENTAL_EVENT_SYSTEM,
 };

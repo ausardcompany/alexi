@@ -15,7 +15,7 @@ const MAX_BATCH_SIZE = 25;
  * Non-critical tool failures (read, glob, grep) are tolerated — the batch
  * still reports partial success so the LLM can retry or work around them.
  */
-const CRITICAL_TOOLS = new Set(['bash', 'write', 'edit', 'multiedit', 'delete']);
+const CRITICAL_TOOLS = new Set(['bash', 'shell', 'write', 'edit', 'multiedit', 'delete']);
 
 const ToolInvocationSchema = z.object({
   tool: z.string().describe('The name of the tool to invoke'),
