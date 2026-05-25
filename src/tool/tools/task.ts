@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { getAgentRegistry, type Agent } from '../../agent/index.js';
+import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 
 const TaskParamsSchema = z.object({
   prompt: z.string().describe('The task for the agent to perform'),
@@ -75,6 +76,7 @@ interface TaskResult {
   completed: boolean;
   status?: TaskStatus;
   background?: boolean;
+  usage?: TaskUsageSummary;
 }
 
 // Store for ongoing tasks
@@ -250,6 +252,10 @@ Usage:
       taskData.status = 'queued';
       taskData.startedAt = new Date();
 
+      // Start per-task usage tracking for background task
+      const bgCostTracker = getCostTracker();
+      bgCostTracker.startTask(taskId!);
+
       const response = `[Task ${taskId} queued for background execution by agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task is running in the background. Use the task_status tool to check progress.`;
 
       taskData.messages.push({
@@ -265,6 +271,9 @@ Usage:
         taskData!.completedAt = new Date();
       });
 
+      // End per-task usage tracking for background task (captures initial dispatch cost)
+      const bgUsage = bgCostTracker.endTask(taskId!);
+
       return {
         success: true,
         data: {
@@ -274,9 +283,14 @@ Usage:
           completed: false,
           status: 'queued',
           background: true,
+          usage: bgUsage,
         },
       };
     }
+
+    // Start per-task usage tracking
+    const costTracker = getCostTracker();
+    costTracker.startTask(taskId!);
 
     // For now, return a placeholder since actual execution requires LLM integration
     // In a full implementation, this would call the LLM with the agent's system prompt
@@ -289,6 +303,9 @@ Usage:
       content: response,
     });
 
+    // End per-task usage tracking and capture summary
+    const usage = costTracker.endTask(taskId!);
+
     return {
       success: true,
       data: {
@@ -297,6 +314,7 @@ Usage:
         response,
         completed: true,
         status: 'completed',
+        usage,
       },
     };
   },
