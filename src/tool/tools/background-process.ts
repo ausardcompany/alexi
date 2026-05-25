@@ -42,10 +42,10 @@ async function detectPorts(child: ChildProcess): Promise<number[]> {
   if (!child.pid) {
     return [];
   }
-  
+
   // Wait a bit for the process to start and bind to ports
   await new Promise((resolve) => setTimeout(resolve, 2000));
-  
+
   return BackgroundPorts.detectForPid(child.pid);
 }
 

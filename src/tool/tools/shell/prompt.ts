@@ -50,7 +50,7 @@ export namespace ShellPrompt {
     options: PromptOptions = {}
   ): string {
     const prompt = build(shell, options);
-    
+
     if (!prompt) {
       return command;
     }

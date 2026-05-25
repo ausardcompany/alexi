@@ -26,8 +26,8 @@ export class AllowEverythingPermission {
 
   async check(request: PermissionRequest | PermissionContext): Promise<PermissionResult> {
     if (!this.config.enabled) {
-      return { 
-        decision: 'ask' as PermissionDecision, 
+      return {
+        decision: 'ask' as PermissionDecision,
         granted: false,
       };
     }
