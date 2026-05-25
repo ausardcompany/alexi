@@ -70,6 +70,7 @@ interface BuildCommandsDeps {
   addFromFile: (filePath: string) => Promise<void>;
   clearAttachments: () => void;
   addSystemMessage: (text: string) => void;
+  onRewindResult?: (result: unknown) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +396,25 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
         return true;
       },
     },
+
+    // /rewind ---------------------------------------------------------------
+    {
+      name: 'rewind',
+      aliases: ['rw'],
+      description: 'Rewind / Manage Context',
+      category: 'session',
+      execute: async (_args, _ctx) => {
+        try {
+          const result = await deps.openDialog('rewind', {});
+          if (result && deps.onRewindResult) {
+            deps.onRewindResult(result);
+          }
+        } catch {
+          // cancelled
+        }
+        return true;
+      },
+    },
   ];
 }
 
@@ -405,6 +425,10 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
 export interface UseCommandsOptions {
   /** Callback to display a system-level message in the message list. */
   addSystemMessage?: (text: string) => void;
+  /** Callback invoked when the rewind dialog returns a result. */
+  onRewindResult?: (result: unknown) => void;
+  /** Returns current messages for the rewind dialog. */
+  getMessages?: () => unknown[];
 }
 
 export interface UseCommandsReturn {
@@ -423,19 +447,34 @@ export function useCommands(options: UseCommandsOptions = {}): UseCommandsReturn
   const noop = (_text: string): void => {
     /* no-op default */
   };
-  const { addSystemMessage = noop } = options;
+  const { addSystemMessage = noop, onRewindResult, getMessages } = options;
 
   const commands = useMemo(
     () =>
       buildCommands({
-        openDialog: open as BuildCommandsDeps['openDialog'],
+        openDialog: (type, props) => {
+          if (type === 'rewind' && getMessages) {
+            return open(type, { ...props, messages: getMessages() });
+          }
+          return open(type, props);
+        },
         setTheme,
         pasteFromClipboard,
         addFromFile,
         clearAttachments,
         addSystemMessage,
+        onRewindResult,
       }),
-    [open, setTheme, pasteFromClipboard, addFromFile, clearAttachments, addSystemMessage]
+    [
+      open,
+      setTheme,
+      pasteFromClipboard,
+      addFromFile,
+      clearAttachments,
+      addSystemMessage,
+      onRewindResult,
+      getMessages,
+    ]
   );
 
   const handleCommand = useCallback(

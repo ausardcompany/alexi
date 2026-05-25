@@ -749,6 +749,79 @@ export async function compactConversation(
   return getCompactionManager().compact(messages, options);
 }
 
+// ============ Partial Compaction ============
+
+/**
+ * Partially compact a conversation by summarizing messages before a boundary index
+ * while keeping messages from the boundary onward intact.
+ *
+ * @param messages - Full conversation messages array
+ * @param boundaryIndex - Index at which to split; messages[0..boundaryIndex-1] are summarized,
+ *                        messages[boundaryIndex..] are preserved exactly
+ * @returns New messages array: [summaryMessage, ...preservedMessages]
+ */
+export async function partialCompact(
+  messages: Message[],
+  boundaryIndex: number
+): Promise<Message[]> {
+  // Edge case: boundary at 0 — nothing to summarize
+  if (boundaryIndex <= 0) {
+    return [...messages];
+  }
+
+  // Edge case: boundary at or beyond end — summarize everything
+  if (boundaryIndex >= messages.length) {
+    const manager = getCompactionManager();
+    const toSummarize = messages;
+    let summaryText: string;
+
+    try {
+      summaryText = await manager.summarize(toSummarize);
+    } catch {
+      // Fallback to basic extraction if no summarize function
+      const formattedMessages = toSummarize
+        .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+        .join('\n\n');
+      summaryText = `${formattedMessages.slice(0, 500)}...`;
+    }
+
+    const summaryMessage: Message = {
+      role: 'system',
+      content: `[CONVERSATION SUMMARY]\n${summaryText}`,
+      timestamp: Date.now(),
+      metadata: { isSummary: true, summarizedCount: toSummarize.length },
+    };
+
+    return [summaryMessage];
+  }
+
+  // Normal case: summarize before boundary, keep after
+  const toSummarize = messages.slice(0, boundaryIndex);
+  const toKeep = messages.slice(boundaryIndex);
+
+  const manager = getCompactionManager();
+  let summaryText: string;
+
+  try {
+    summaryText = await manager.summarize(toSummarize);
+  } catch {
+    // Fallback to basic extraction if no summarize function
+    const formattedMessages = toSummarize
+      .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+      .join('\n\n');
+    summaryText = `${formattedMessages.slice(0, 500)}...`;
+  }
+
+  const summaryMessage: Message = {
+    role: 'system',
+    content: `[CONVERSATION SUMMARY]\n${summaryText}`,
+    timestamp: Date.now(),
+    metadata: { isSummary: true, summarizedCount: toSummarize.length },
+  };
+
+  return [summaryMessage, ...toKeep];
+}
+
 // ============ Auto-Compaction Hook ============
 
 /**
