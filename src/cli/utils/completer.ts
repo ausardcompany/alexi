@@ -75,6 +75,7 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
   { name: 'agent', description: 'Switch agent', category: 'general' },
   { name: 'stage', description: 'Switch development stage', category: 'general' },
   { name: 'dod', description: 'Run Definition of Done checks', category: 'general' },
+  { name: 'goal', description: 'Run autonomously until condition is met', category: 'general' },
   {
     name: 'bug',
     aliases: ['feedback'],
