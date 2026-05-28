@@ -95,7 +95,7 @@ Agent rules:
 - **Runtime**: Node.js >= 22.12.0; ES Modules (`"type": "module"`); no CommonJS.
 - **Language**: TypeScript with `strict: true`; target ES2022; module NodeNext.
 - **LLM API**: SAP AI Core Orchestration API exclusively; model:
-  `sap-ai-core/anthropic--claude-4.6-opus` with `--variant max`.
+  `sap-ai-core/anthropic--claude-4.7-opus` with `--variant max`.
 - **Package manager**: npm; `package-lock.json` must be committed and in sync.
 - **Formatting & linting**: Prettier + ESLint as configured; CI enforces both.
 - **Dependency policy**: New runtime deps require justification; devDeps are free.
@@ -128,7 +128,7 @@ Agent rules:
 | 5: Release | Weekly Mon | direct prompt | Tag + Release |
 | Autohealing | On failure | direct prompt | Fix commit |
 
-All agents run: `kilo run --auto -m "sap-ai-core/anthropic--claude-4.6-opus" --variant max`
+All agents run: `kilo run --auto -m "sap-ai-core/anthropic--claude-4.7-opus" --variant max`
 
 ## Governance
 

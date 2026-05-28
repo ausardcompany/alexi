@@ -29,6 +29,11 @@ permissions:
   contents: write
   issues: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   plan:
     name: Create Development Plan
@@ -55,7 +60,6 @@ jobs:
       - name: Install Kilo CLI and dependencies
         run: |
           npm install -g @kilocode/cli
-          npm ci
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
@@ -133,29 +137,47 @@ jobs:
         run: |
           TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
 
-          # Run plan + tasks + issues in sequence via speckit
-          kilo run "$TASK_PROMPT" --title "Agent 2 Planning" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > planning-output.log 2>&1
+          # Helper: run kilo with retry on transient failure. Stops the
+          # whole sequence on hard failure so we don't, e.g., create
+          # GitHub issues from a half-baked plan.
+          run_kilo() {
+            local title="$1"
+            local prompt="$2"
+            local attempt=0
+            local code=1
+            while : ; do
+              echo ">>> $title (attempt $((attempt + 1)))" >> planning-output.log
+              if kilo run "$prompt" --title "$title" \
+                  $KILO_FLAGS \
+                  -m "$AGENT_MODEL" \
+                  >> planning-output.log 2>&1; then
+                return 0
+              fi
+              code=$?
+              attempt=$((attempt + 1))
+              if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+                return $code
+              fi
+              local backoff=$((attempt * 30))
+              echo "[WARN] $title exit $code — retry in ${backoff}s" >> planning-output.log
+              sleep "$backoff"
+            done
+          }
 
-          kilo run "Break the plan into implementable tasks and save to tasks.md" --title "Agent 2 Tasks" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            >> planning-output.log 2>&1
+          : > planning-output.log
+          if ! run_kilo "Agent 2 Planning" "$TASK_PROMPT"; then
+            EXIT_CODE=$?
+          elif ! run_kilo "Agent 2 Tasks" "Break the plan into implementable tasks and save to tasks.md"; then
+            EXIT_CODE=$?
+          elif ! run_kilo "Agent 2 Issues" "Create GitHub issues from tasks.md using gh issue create"; then
+            EXIT_CODE=$?
+          else
+            EXIT_CODE=0
+          fi
 
-          kilo run "Create GitHub issues from tasks.md using gh issue create" --title "Agent 2 Issues" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            >> planning-output.log 2>&1
-
-          EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
-          if [ $EXIT_CODE -eq 0 ]; then
+          if [ "$EXIT_CODE" -eq 0 ]; then
             echo "success=true" >> $GITHUB_OUTPUT
             echo "[OK] Planning completed"
           else

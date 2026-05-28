@@ -26,6 +26,11 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   research:
     name: Analyze Trends
@@ -47,7 +52,6 @@ jobs:
 
       - name: Install dependencies and build
         run: |
-          npm ci
           npm install -g @kilocode/cli
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
@@ -109,14 +113,28 @@ jobs:
         run: |
           TASK_PROMPT=$(cat /tmp/research-prompt.txt)
 
-          
-          kilo run "$TASK_PROMPT" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --title "Agent 1 Research" \
-            > research-output.log 2>&1
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running research agent, attempt $((attempt + 1)) ..."
+            if kilo run "$TASK_PROMPT" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                --title "Agent 1 Research" \
+                > research-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
@@ -124,7 +142,7 @@ jobs:
             echo "[OK] Research completed"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Research failed with exit code $EXIT_CODE"
+            echo "[WARN] Research failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
           fi
 
           echo "=== Output (last 50 lines) ==="

@@ -34,6 +34,11 @@ permissions:
   actions: read
   issues: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   heal:
     name: Self-Heal Failed Workflow
@@ -201,7 +206,6 @@ jobs:
         run: |
           npm install -g @kilocode/cli
           npm ci
-          npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
 
@@ -239,13 +243,27 @@ jobs:
         run: |
           PROMPT=$(cat /tmp/healing-prompt.txt)
 
-          kilo run "$PROMPT" --title "Autohealing" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > healing-output.log 2>&1
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running autohealing agent, attempt $((attempt + 1)) ..."
+            if kilo run "$PROMPT" --title "Autohealing" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > healing-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
@@ -253,7 +271,7 @@ jobs:
             echo "[OK] Autohealing completed"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Autohealing exited with code $EXIT_CODE"
+            echo "[WARN] Autohealing exited with code $EXIT_CODE after $((attempt)) retry(ies)"
           fi
 
           echo "=== Output (last 50 lines) ==="

@@ -29,6 +29,11 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   release:
     name: Prepare Release
@@ -51,7 +56,6 @@ jobs:
       - name: Install Kilo CLI and dependencies
         run: |
           npm install -g @kilocode/cli
-          npm ci
           npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
@@ -99,23 +103,28 @@ jobs:
       - name: Run CI checks
         if: steps.check.outputs.should_release == 'true'
         id: ci
+        # Run the gate explicitly, capture pass/fail without aborting the
+        # workflow so the summary step still runs.
+        continue-on-error: true
         run: |
-          echo "Running full CI check before release..."
+          set +e
+          echo "Running full CI gate before release..."
 
-          npm run typecheck && \
-          npm run lint && \
-          npm run format:check && \
-          npm install -g @kilocode/cli
-          npm ci && \
-          npm test
+          npm run typecheck \
+            && npm run lint \
+            && npm run format:check \
+            && npm run build \
+            && npm test
+          STATUS=$?
 
-          if [ $? -eq 0 ]; then
+          if [ "$STATUS" -eq 0 ]; then
             echo "ci_passed=true" >> $GITHUB_OUTPUT
             echo "[OK] All CI checks pass"
           else
             echo "ci_passed=false" >> $GITHUB_OUTPUT
-            echo "[FAIL] CI checks failed — cannot release"
+            echo "[FAIL] CI checks failed (status $STATUS) — cannot release"
           fi
+          exit 0
 
       - name: Determine version
         if: steps.check.outputs.should_release == 'true' && steps.ci.outputs.ci_passed == 'true'
@@ -197,13 +206,27 @@ jobs:
 
           TASK_PROMPT=$(cat /tmp/release-prompt.txt)
 
-          kilo run "$TASK_PROMPT" --title "Agent 5 Release" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > release-output.log 2>&1
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running release agent, attempt $((attempt + 1)) ..."
+            if kilo run "$TASK_PROMPT" --title "Agent 5 Release" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > release-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
@@ -211,7 +234,7 @@ jobs:
             echo "[OK] Release completed"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Release failed with exit code $EXIT_CODE"
+            echo "[WARN] Release failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
           fi
 
           tail -50 release-output.log

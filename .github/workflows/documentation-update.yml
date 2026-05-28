@@ -20,6 +20,10 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+
 jobs:
   generate-documentation:
     runs-on: ubuntu-latest
@@ -509,13 +513,11 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             echo "=== Attempt $ATTEMPT of $MAX_RETRIES ==="
             
-            # Use 'kilo run --auto' for autonomous non-interactive mode
-            # -m selects model via SAP AI Core provider
-            # --auto approves all tool permissions automatically
+            # Use 'kilo run --auto' for autonomous non-interactive mode.
+            # Flags and model centralised via workflow-level env (AGENT_MODEL, KILO_FLAGS).
             kilo run "$PROMPT" --title "Documentation Update" \
-              --auto \
-              -m "sap-ai-core/anthropic--claude-4.6-opus" \
-              --variant max \
+              $KILO_FLAGS \
+              -m "$AGENT_MODEL" \
               > bot-output.log 2>&1
             
             BOT_EXIT_CODE=$?

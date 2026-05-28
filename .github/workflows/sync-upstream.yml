@@ -402,13 +402,13 @@ jobs:
           mkdir -p .github/reports
           echo "plan_file=$PLAN_FILE" >> $GITHUB_OUTPUT
           
-          echo "=== Stage 1: Generating update plan with Claude 4.5 Opus ==="
+          echo "=== Stage 1: Generating update plan with Claude 4.7 Opus ==="
           echo "This may take a few minutes..."
-          
+
           # Use --message-file to avoid shell escaping issues with complex prompts
           node dist/cli/program.js chat \
             --message-file .github/prompts/planning-prompt.md \
-            --model "anthropic--claude-4.5-opus" \
+            --model "anthropic--claude-4.7-opus" \
             --system "You are a senior software architect. Analyze upstream changes and create a detailed, actionable update plan with code snippets. Output ONLY the plan in markdown format. Be thorough and precise." \
             > "$PLAN_FILE"
           
@@ -472,7 +472,7 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
         run: |
-          echo "=== Stage 2: Executing update plan with Claude 4.5 Sonnet (agentic mode) ==="
+          echo "=== Stage 2: Executing update plan with Claude 4.7 Opus (agentic mode) ==="
           echo "This stage uses tools to write/edit files directly..."
           
           # Create system prompt for execution
@@ -516,7 +516,7 @@ jobs:
             set +e
             node dist/cli/program.js agent \
               --message-file .github/prompts/execution-prompt.md \
-              --model "anthropic--claude-4.5-sonnet" \
+              --model "anthropic--claude-4.7-opus" \
               --max-iterations 50 \
               --tools "read,write,edit,glob,grep" \
               --workdir "$(pwd)" \
@@ -676,8 +676,8 @@ jobs:
           Version bump: $OLD_VERSION → $NEW_VERSION
 
           Two-stage AI process:
-          - Stage 1 (Planning): anthropic--claude-4.5-opus
-          - Stage 2 (Execution): anthropic--claude-4.5-sonnet"
+          - Stage 1 (Planning): anthropic--claude-4.7-opus
+          - Stage 2 (Execution): anthropic--claude-4.7-opus"
 
           git push -u origin "$BRANCH"
 
@@ -711,8 +711,8 @@ jobs:
           REPO_TABLE_PLACEHOLDER
 
           ### Process
-          1. **Planning** — `anthropic--claude-4.5-opus` analysed diffs and produced an update plan
-          2. **Execution** — `anthropic--claude-4.5-sonnet` applied the plan using file tools
+          1. **Planning** — `anthropic--claude-4.7-opus` analysed diffs and produced an update plan
+          2. **Execution** — `anthropic--claude-4.7-opus` applied the plan using file tools
 
           See `PLAN_FILE_PLACEHOLDER` for the full AI-generated plan.
           PRBODY_EOF
@@ -875,8 +875,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Stage | Model | Purpose |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|---------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 1. Planning | \`anthropic--claude-4.5-opus\` | Analyze changes, create detailed plan |" >> $GITHUB_STEP_SUMMARY
-          echo "| 2. Execution | \`anthropic--claude-4.5-sonnet\` | Execute plan, apply code changes |" >> $GITHUB_STEP_SUMMARY
+          echo "| 1. Planning | \`anthropic--claude-4.7-opus\` | Analyze changes, create detailed plan |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2. Execution | \`anthropic--claude-4.7-opus\` | Execute plan, apply code changes |" >> $GITHUB_STEP_SUMMARY
 
           if [ -f "${{ steps.plan.outputs.plan_file }}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY

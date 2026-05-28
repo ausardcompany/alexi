@@ -34,6 +34,11 @@ permissions:
   pull-requests: write
   actions: read
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   optimize:
     name: Optimize Agent Prompts
@@ -160,13 +165,27 @@ jobs:
 
           TASK_PROMPT=$(cat /tmp/optimizer-prompt.txt)
 
-          kilo run "$TASK_PROMPT" --title "Agent 6 Prompt Improver" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > optimizer-output.log 2>&1
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running prompt optimizer, attempt $((attempt + 1)) ..."
+            if kilo run "$TASK_PROMPT" --title "Agent 6 Prompt Improver" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > optimizer-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
@@ -174,7 +193,7 @@ jobs:
             echo "[OK] Prompt optimization completed"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Optimization failed with exit code $EXIT_CODE"
+            echo "[WARN] Optimization failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
           fi
 
           echo "=== Output (last 50 lines) ==="

@@ -22,6 +22,11 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   review:
     name: Code Review & QA
@@ -68,7 +73,6 @@ jobs:
         run: |
           npm install -g @kilocode/cli
           npm ci
-          npm ci
           echo "[OK] Kilo CLI: $(kilo --version)"
 
 
@@ -93,10 +97,9 @@ jobs:
           }
 
           run_check "typecheck" "npm run typecheck"
-          run_check "lint" "npm run lint 2>&1 | grep -c 'error' | xargs -I{} test {} -eq 0"
+          run_check "lint" "npm run lint"
           run_check "format" "npm run format:check"
-          run_check "build" "npm install -g @kilocode/cli
-          npm ci"
+          run_check "build" "npm run build"
           run_check "tests" "npm test"
 
           echo -e "$RESULTS" > check-results.txt
@@ -161,14 +164,36 @@ jobs:
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
 
-          # Use built-in local-review command for code review
-          kilo run "Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR." --title "Agent 4 Review" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > review-output.log 2>&1
+          # Prefer the rendered review prompt built from the template; fall back
+          # to a generic instruction if it failed to materialise (the prompt build
+          # step uses sed/awk, which has corner cases with binary content in diffs).
+          if [ -s /tmp/review-prompt.txt ]; then
+            REVIEW_PROMPT=$(cat /tmp/review-prompt.txt)
+          else
+            REVIEW_PROMPT="Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR."
+          fi
 
-          EXIT_CODE=$?
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running review agent, attempt $((attempt + 1)) ..."
+            if kilo run "$REVIEW_PROMPT" --title "Agent 4 Review" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > review-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
+
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
@@ -186,10 +211,12 @@ jobs:
           echo "Running final CI verification..."
           ALL_PASSED=true
 
-          npm run typecheck 2>/dev/null || ALL_PASSED=false
-          npm run lint 2>&1 | grep -q "0 errors" || ALL_PASSED=false
-          npm run format:check 2>/dev/null || ALL_PASSED=false
-          npm test 2>/dev/null || ALL_PASSED=false
+          # Surface failures (don't swallow stderr); ESLint exits non-zero
+          # when there are actual errors, which is the only signal we need.
+          npm run typecheck || ALL_PASSED=false
+          npm run lint || ALL_PASSED=false
+          npm run format:check || ALL_PASSED=false
+          npm test || ALL_PASSED=false
 
           if [ "$ALL_PASSED" = true ]; then
             echo "verified=true" >> $GITHUB_OUTPUT

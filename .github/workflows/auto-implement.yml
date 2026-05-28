@@ -25,6 +25,17 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  # Single source of truth for the agent model. Override per-run by
+  # bumping this value (e.g. when SAP AI Core publishes a new opus).
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  # Shared kilo CLI flags. Keep flags consistent across all agent workflows
+  # so behaviour does not silently diverge between agents.
+  KILO_FLAGS: --auto --variant max
+  # Retry budget for transient `kilo run` failures (network / auth flakes).
+  # Total attempts = KILO_RETRIES + 1.
+  KILO_RETRIES: '1'
+
 jobs:
   # ─── Job 1: Pick up to 3 issues to implement in parallel ─────────────────────
   pick-issues:
@@ -177,8 +188,8 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --add-label "in-progress" --remove-label "auto-implement" || true
           gh issue comment "$ISSUE_NUMBER" --body "🤖 **Kilo** is starting to implement this feature automatically.
 
-          - **Branch**: \`${{ steps.pick.outputs.branch_name }}\`
-          - **Model**: \`sap-ai-core/anthropic--claude-4.6-opus\`
+          - **Branch**: \`${​{ steps.pick.outputs.branch_name }}\`
+          - **Model**: \`${AGENT_MODEL}\`
           - **Run**: [View workflow](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
 
           Implementation in progress..."
@@ -223,14 +234,29 @@ jobs:
         run: |
           TASK_PROMPT=$(cat /tmp/implement-prompt.txt)
 
-          echo "Running Kilo CLI (speckit.implement) ..."
-          kilo run "$TASK_PROMPT" --title "Agent 3 Implement" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > kilo-output.log 2>&1
+          # Retry kilo run on transient failures (network / SAP AI Core hiccups).
+          # KILO_RETRIES controls the additional attempts after the first.
+          attempt=0
+          KILO_EXIT=1
+          while : ; do
+            echo "Running Kilo CLI (speckit.implement), attempt $((attempt + 1)) ..."
+            if kilo run "$TASK_PROMPT" --title "Agent 3 Implement" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > kilo-output.log 2>&1; then
+              KILO_EXIT=0
+              break
+            fi
+            KILO_EXIT=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $KILO_EXIT — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          KILO_EXIT=$?
           echo "exit_code=$KILO_EXIT" >> $GITHUB_OUTPUT
 
           if [ $KILO_EXIT -eq 0 ]; then
@@ -238,7 +264,7 @@ jobs:
             echo "[OK] Kilo CLI completed successfully"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Kilo CLI exited with code $KILO_EXIT"
+            echo "[WARN] Kilo CLI exited with code $KILO_EXIT after $((attempt)) retry(ies)"
           fi
 
           echo "=== Kilo Output (last 100 lines) ==="
@@ -270,8 +296,7 @@ jobs:
           run_check "typecheck" "npm run typecheck"
           run_check "lint" "npm run lint"
           run_check "format" "npm run format:check"
-          run_check "build" "npm install -g @kilocode/cli
-          npm ci"
+          run_check "build" "npm run build"
           run_check "tests" "npm test"
 
           echo -e "$RESULTS" > verify-results.txt
@@ -365,7 +390,7 @@ jobs:
 
           - **Files changed**: ${CHANGES_COUNT}
           - **Branch**: \`${BRANCH}\`
-          - **Model**: \`sap-ai-core/anthropic--claude-4.6-opus\`
+          - **Model**: \`${AGENT_MODEL}\`
 
           ## Review Checklist
 

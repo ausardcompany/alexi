@@ -21,6 +21,11 @@ permissions:
   pull-requests: write
   issues: write
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
 jobs:
   merge-prs:
     name: Merge Open PRs
@@ -81,13 +86,27 @@ jobs:
           AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          kilo run "/merge-prs" --title "Daily PR Merge" \
-            --auto \
-            -m "sap-ai-core/anthropic--claude-4.6-opus" \
-            --variant max \
-            > kilo-output.log 2>&1
+          attempt=0
+          KILO_EXIT=1
+          while : ; do
+            echo "Running merge-prs agent, attempt $((attempt + 1)) ..."
+            if kilo run "/merge-prs" --title "Daily PR Merge" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                > kilo-output.log 2>&1; then
+              KILO_EXIT=0
+              break
+            fi
+            KILO_EXIT=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $KILO_EXIT — retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
 
-          KILO_EXIT=$?
           echo "exit_code=$KILO_EXIT" >> $GITHUB_OUTPUT
 
           if [ $KILO_EXIT -eq 0 ]; then
@@ -95,7 +114,7 @@ jobs:
             echo "[OK] Kilo CLI completed successfully"
           else
             echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Kilo CLI exited with code $KILO_EXIT"
+            echo "[WARN] Kilo CLI exited with code $KILO_EXIT after $((attempt)) retry(ies)"
           fi
 
           echo "=== Kilo Output (last 100 lines) ==="

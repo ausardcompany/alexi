@@ -28,6 +28,10 @@ permissions:
   pull-requests: write
   actions: read
 
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+
 jobs:
   auto-fix:
     name: Auto-Fix CI Failures
@@ -318,11 +322,9 @@ jobs:
               *Format*|*format*)
                 run_check "format" "npm run format:check" ;;
               *Test*|*test*)
-                run_check "test" "npm install -g @kilocode/cli
-          npm ci && npm run test:coverage" ;;
+                run_check "test" "npm run test:coverage" ;;
               *Build*|*build*)
-                run_check "build" "npm install -g @kilocode/cli
-          npm ci && node dist/cli/program.js --help" ;;
+                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
             esac
           done
 
@@ -387,8 +389,7 @@ jobs:
             echo "   - For type errors: \`npm run typecheck\`"
             echo "   - For format failures: \`npm run format:check\`"
             echo "   - For test failures: \`npm test\`"
-            echo "   - For build failures: \`npm install -g @kilocode/cli
-          npm ci\`"
+            echo "   - For build failures: \`npm run build\`"
             echo ""
             echo "Focus **only** on the checks listed above. Do not touch unrelated code."
           } > ci-fix-prompt.md
@@ -420,9 +421,8 @@ jobs:
             echo "=== Attempt $ATTEMPT of $MAX_RETRIES ==="
 
             kilo run "$PROMPT" --title "CI Auto-Fix" \
-              --auto \
-              -m "sap-ai-core/anthropic--claude-4.6-opus" \
-              --variant max \
+              $KILO_FLAGS \
+              -m "$AGENT_MODEL" \
               > bot-output.log 2>&1
 
             BOT_EXIT_CODE=$?
@@ -495,11 +495,9 @@ jobs:
               *Format*|*format*)
                 run_check "format" "npm run format:check" ;;
               *Test*|*test*)
-                run_check "test" "npm install -g @kilocode/cli
-          npm ci && npm run test:coverage" ;;
+                run_check "test" "npm run test:coverage" ;;
               *Build*|*build*)
-                run_check "build" "npm install -g @kilocode/cli
-          npm ci && node dist/cli/program.js --help" ;;
+                run_check "build" "npm run build && node dist/cli/program.js --help" ;;
             esac
           done
 

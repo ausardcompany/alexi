@@ -117,7 +117,7 @@ permissions:
 ```bash
 kilo run "/merge-prs" --title "Daily PR Merge" \
   --auto \
-  -m "sap-ai-core/anthropic--claude-4.6-opus" \
+  -m "sap-ai-core/anthropic--claude-4.7-opus" \
   --variant max
 ```
 
