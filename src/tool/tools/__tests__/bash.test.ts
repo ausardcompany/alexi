@@ -182,7 +182,9 @@ describe('bash tool', () => {
 
   describe('tool metadata', () => {
     it('should have correct name', () => {
-      expect(bashTool.name).toBe('bash');
+      // bashTool is an alias of shellTool (see src/tool/tools/shell.ts);
+      // the registered tool name is 'shell'.
+      expect(bashTool.name).toBe('shell');
     });
 
     it('should have a description mentioning security', () => {
@@ -191,7 +193,7 @@ describe('bash tool', () => {
 
     it('should generate a valid function schema', () => {
       const schema = bashTool.toFunctionSchema();
-      expect(schema.name).toBe('bash');
+      expect(schema.name).toBe('shell');
       expect(schema.parameters).toHaveProperty('properties');
     });
   });
