@@ -77,6 +77,11 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
   { name: 'dod', description: 'Run Definition of Done checks', category: 'general' },
   { name: 'goal', description: 'Run autonomously until condition is met', category: 'general' },
   {
+    name: 'code-review',
+    description: 'Review uncommitted changes for correctness bugs',
+    category: 'general',
+  },
+  {
     name: 'bug',
     aliases: ['feedback'],
     description: 'Report issues and feedback',

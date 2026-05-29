@@ -376,6 +376,42 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
       },
     },
 
+    // /code-review [effort] ---------------------------------------------------
+    {
+      name: 'code-review',
+      description: 'Review uncommitted changes for correctness bugs',
+      category: 'general',
+      execute: async (args, _ctx) => {
+        const effortArg = args.trim().toLowerCase();
+        let effort: 'low' | 'medium' | 'high' = 'medium';
+        if (effortArg === 'low' || effortArg === 'medium' || effortArg === 'high') {
+          effort = effortArg;
+        } else if (effortArg !== '') {
+          deps.addSystemMessage(`Unknown effort '${effortArg}'. Using 'medium'.`);
+        }
+
+        deps.addSystemMessage(`Code review started (effort: ${effort})`);
+        try {
+          const { executeCodeReview } = await import('../../../command/codeReview.js');
+          const result = await executeCodeReview({
+            effort,
+            workdir: process.cwd(),
+          });
+          deps.addSystemMessage(result.review);
+          deps.addSystemMessage(
+            `effort=${result.effort}  diff=${result.diffBytes}B  ` +
+              `tokens=${result.totalTokens.toLocaleString()}  ` +
+              `elapsed=${(result.elapsedMs / 1000).toFixed(1)}s`
+          );
+        } catch (err) {
+          deps.addSystemMessage(
+            `Code review failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        return true;
+      },
+    },
+
     // /export [file] --------------------------------------------------------
     {
       name: 'export',
