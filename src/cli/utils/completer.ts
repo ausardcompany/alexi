@@ -82,7 +82,7 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
     name: 'code-review',
     description: 'Review uncommitted changes for correctness bugs',
     category: 'general',
-    options: ['--fix', '--fix-max'],
+    options: ['--fix', '--fix-max', '--comment', '--comment-dry-run'],
   },
   {
     name: 'bug',

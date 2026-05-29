@@ -20,6 +20,8 @@ interface CodeReviewCliOptions {
   workdir?: string;
   fix?: boolean;
   fixMax?: number;
+  comment?: boolean;
+  commentDryRun?: boolean;
 }
 
 function parseEffort(value: string | undefined): CodeReviewEffort {
@@ -45,6 +47,8 @@ export function registerCodeReviewCommand(program: Command): void {
       (v) => parseInt(v, 10),
       10
     )
+    .option('--comment', 'Post findings to the current GitHub PR via gh api')
+    .option('--comment-dry-run', 'Print the planned `gh api` invocations without executing them')
     .action(async (opts: CodeReviewCliOptions) => {
       try {
         const effort = parseEffort(opts.effort);
@@ -57,6 +61,8 @@ export function registerCodeReviewCommand(program: Command): void {
           modelOverride: opts.model,
           fix: opts.fix,
           fixMaxFindings: opts.fixMax,
+          comment: opts.comment,
+          commentDryRun: opts.commentDryRun,
           onProgress: (msg) => process.stderr.write(`[code-review] ${msg}\n`),
         });
 
@@ -86,6 +92,18 @@ export function registerCodeReviewCommand(program: Command): void {
           process.stderr.write(
             `\n[code-review] fixes: ${counts.applied} applied, ${counts.skipped} skipped, ${counts.failed} failed\n`
           );
+        }
+
+        if (result.comments) {
+          process.stderr.write(
+            `\n[code-review] comments: ${result.comments.posted} posted, ${result.comments.skipped} skipped\n`
+          );
+          if (result.comments.summaryCommentUrl) {
+            process.stderr.write(`[code-review] summary: ${result.comments.summaryCommentUrl}\n`);
+          }
+          for (const url of result.comments.inlineCommentUrls) {
+            process.stderr.write(`[code-review] inline:  ${url}\n`);
+          }
         }
 
         process.stderr.write(
