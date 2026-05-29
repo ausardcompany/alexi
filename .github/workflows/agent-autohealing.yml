@@ -306,8 +306,13 @@ jobs:
           RUN_ID="${{ steps.failed_run.outputs.run_id }}"
           BRANCH="${{ steps.failed_run.outputs.branch }}"
 
-          # Check if escalation issue already exists
-          EXISTING=$(gh issue list --label "autohealing-escalation" --state open \
+          # Check if escalation issue already exists.
+          # Pass --repo so this works even when the 'Checkout target branch'
+          # step was skipped (early-exit retry-limit path leaves no .git in
+          # the workspace, which would otherwise crash gh with
+          # "fatal: not a git repository").
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label "autohealing-escalation" --state open \
             --json title --jq "[.[] | select(.title | contains(\"$WORKFLOW_NAME\"))] | length")
 
           if [ "${EXISTING:-0}" -gt 0 ]; then
@@ -341,7 +346,7 @@ jobs:
           Auto-escalated by Autohealing Agent
           EOF
 
-          gh issue create \
+          gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "[Autohealing] Manual fix needed: $WORKFLOW_NAME on $BRANCH" \
             --body-file /tmp/escalation-body.md \
             --label "autohealing-escalation,bug"
