@@ -21,10 +21,18 @@ vi.mock('../../src/core/sessionContext.js', () => ({
 }));
 
 // Mock the providers module
-vi.mock('../../src/providers/index.js', () => ({
-  getProviderForModel: vi.fn(),
-  getDefaultModel: vi.fn(() => 'gpt-4o'),
-}));
+vi.mock('../../src/providers/index.js', () => {
+  const getProviderForModel = vi.fn();
+  return {
+    getProviderForModel,
+    getProviderForModelWithFallback: vi.fn((modelId: string) => ({
+      provider: getProviderForModel(modelId),
+      effectiveModelId: modelId,
+      usedFallback: false,
+    })),
+    getDefaultModel: vi.fn(() => 'gpt-4o'),
+  };
+});
 
 // Mock the router
 vi.mock('../../src/core/router.js', () => ({

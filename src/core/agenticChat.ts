@@ -9,7 +9,7 @@
  * Used by CLI for automated workflows that need to modify files.
  */
 
-import { getProviderForModel, getDefaultModel } from '../providers/index.js';
+import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -343,8 +343,13 @@ export async function agenticChat(
     modelId = getDefaultModel().trim();
   }
 
-  // Get provider
-  const provider = getProviderForModel(modelId);
+  // Get provider, automatically falling back to the configured fallback model
+  // if the primary id is not recognized (e.g. typo in AICORE_MODEL).
+  const resolution = getProviderForModelWithFallback(modelId);
+  const provider = resolution.provider;
+  if (resolution.usedFallback) {
+    modelId = resolution.effectiveModelId;
+  }
 
   // Build tool schemas for API — apply agent tool restrictions if present
   const registry = getToolRegistry();

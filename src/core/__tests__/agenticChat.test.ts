@@ -20,6 +20,7 @@ vi.mock('../sessionContext.js', () => ({
 // Mock the providers module
 vi.mock('../../providers/index.js', () => ({
   getProviderForModel: vi.fn(),
+  getProviderForModelWithFallback: vi.fn(),
   getDefaultModel: vi.fn(() => 'gpt-4o'),
 }));
 
@@ -56,7 +57,7 @@ vi.mock('../../tool/tools/index.js', () => ({
 }));
 
 import { agenticChat } from '../agenticChat.js';
-import { getProviderForModel } from '../../providers/index.js';
+import { getProviderForModel, getProviderForModelWithFallback } from '../../providers/index.js';
 import { getMemoryManager } from '../memory.js';
 import { getSessionContextString } from '../sessionContext.js';
 
@@ -70,6 +71,11 @@ describe('agenticChat', () => {
       complete: vi.fn(),
     };
     vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+    vi.mocked(getProviderForModelWithFallback).mockImplementation((modelId: string) => ({
+      provider: mockProvider as any,
+      effectiveModelId: modelId,
+      usedFallback: false,
+    }));
 
     // Default: no tools registered
     mockToolRegistry.list.mockReturnValue([]);
@@ -120,7 +126,7 @@ describe('agenticChat', () => {
       const result = await agenticChat('Test', { modelOverride: 'claude-3-opus' });
 
       expect(result.modelUsed).toBe('claude-3-opus');
-      expect(getProviderForModel).toHaveBeenCalledWith('claude-3-opus');
+      expect(getProviderForModelWithFallback).toHaveBeenCalledWith('claude-3-opus');
     });
   });
 
