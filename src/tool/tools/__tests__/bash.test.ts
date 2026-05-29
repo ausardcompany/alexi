@@ -180,6 +180,40 @@ describe('bash tool', () => {
     });
   });
 
+  describe('directory-escape audit integration', () => {
+    // These tests verify the bash/shell tool wires through `auditCommand`
+    // before spawning a subprocess. The detailed audit semantics are
+    // covered in src/permission/__tests__/shell-parser.test.ts; here we
+    // only assert the tool short-circuits with the right error shape.
+
+    it('blocks `cd` to a path outside the workspace', async () => {
+      const result = await bashTool.executeUnsafe({ command: 'cd /etc && ls' }, context);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/directory-escape audit/);
+      // No subprocess ran, so exitCode stays at the sentinel.
+      expect(result.data?.exitCode).toBe(-1);
+      expect(result.data?.stdout).toBe('');
+    });
+
+    it('blocks `pushd` outside the workspace', async () => {
+      const result = await bashTool.executeUnsafe({ command: 'pushd /etc' }, context);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/directory-escape audit/);
+    });
+
+    it('blocks inline `PWD=` assignments', async () => {
+      const result = await bashTool.executeUnsafe({ command: 'PWD=/etc cat foo' }, context);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/directory-escape audit/);
+    });
+
+    it('does not block ordinary commands that have no directory mutator', async () => {
+      const result = await bashTool.executeUnsafe({ command: 'echo audit-ok' }, context);
+      expect(result.success).toBe(true);
+      expect(result.data?.stdout.trim()).toBe('audit-ok');
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       // bashTool is an alias of shellTool (see src/tool/tools/shell.ts);
