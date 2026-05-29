@@ -119,6 +119,7 @@ graph TB
 | Compaction | `src/compaction/index.ts` | Context compression with multiple strategies |
 | Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
 | Network Manager | `src/core/network.ts` | Auto-reconnection with exponential backoff |
+| Core Flags | `src/core/flag.ts` | Minimal feature-flag module exposing environment-driven boolean flags consumed by `alexi` (e.g. `KILO_DISABLE_EXTERNAL_SKILLS`). Evaluated once at module load via a private `truthy()` helper that matches `"true"` or `"1"` (case-insensitive). |
 
 ### Provider Layer
 
