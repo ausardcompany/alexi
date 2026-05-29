@@ -23,6 +23,7 @@ import { agenticChat } from '../core/agenticChat.js';
 import { getDefaultModel } from '../providers/index.js';
 import { loadRoutingConfig } from '../config/routingConfig.js';
 import { codeReviewSkill } from '../skill/skills/index.js';
+import { detectCurrentPr, GhCliMissingError, type PrContext } from '../utils/githubPr.js';
 
 /**
  * Promise wrapper around `execFile` that reads stdout from the standard
@@ -78,6 +79,19 @@ export interface CodeReviewOptions {
   fix?: boolean;
   /** Hard cap on the number of `MUST FIX` findings to auto-apply. Default: 10. */
   fixMaxFindings?: number;
+  /**
+   * If true, post each finding as a GitHub PR review comment after the
+   * review pass. Inline (file+line) findings become inline review comments;
+   * the rest are aggregated into one PR-level summary comment.
+   * Requires `gh` on PATH and an open PR for the current branch.
+   */
+  comment?: boolean;
+  /**
+   * If true and `comment` is also true, print the planned `gh api ...`
+   * invocations to `onProgress` (or stdout when no progress callback is
+   * supplied) without executing them. Default: false.
+   */
+  commentDryRun?: boolean;
 }
 
 /** Per-finding outcome of an apply pass. */
@@ -102,6 +116,16 @@ export interface CodeReviewResult {
   error?: string;
   /** Per-finding outcome from the apply pass. Only set when `fix === true`. */
   fixesApplied?: FixApplied[];
+  /**
+   * GitHub PR comment posting summary. Only set when `comment === true`
+   * and a PR was successfully detected (or `commentDryRun === true`).
+   */
+  comments?: {
+    posted: number;
+    skipped: number;
+    summaryCommentUrl?: string;
+    inlineCommentUrls: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +530,322 @@ function buildApplyUserMessage(findings: ParsedFinding[], diff: string): string 
 }
 
 // ---------------------------------------------------------------------------
+// `--comment` helpers (post findings to GitHub PR via `gh api`)
+// ---------------------------------------------------------------------------
+
+/** Severity tag for a parsed review finding. */
+export type FindingSeverity = 'MUST FIX' | 'SHOULD IMPROVE' | 'NICE TO HAVE';
+
+/** A single finding extracted from the structured review for posting. */
+export interface ReviewFinding {
+  severity: FindingSeverity;
+  /** Repo-relative file path, when one could be parsed from the body. */
+  file?: string;
+  /** 1-based line number, when one could be parsed from the body. */
+  line?: number;
+  /** Bullet body, suitable for inclusion in a PR comment. */
+  body: string;
+}
+
+const SECTION_HEADERS: Array<{ severity: FindingSeverity; regex: RegExp }> = [
+  { severity: 'MUST FIX', regex: /^#{1,6}\s+MUST FIX\b/i },
+  { severity: 'SHOULD IMPROVE', regex: /^#{1,6}\s+SHOULD IMPROVE\b/i },
+  { severity: 'NICE TO HAVE', regex: /^#{1,6}\s+NICE TO HAVE\b/i },
+];
+
+/**
+ * Parse the structured review output into per-finding records keyed by
+ * severity. Tolerant of formatting variation: bullets can use `-`, `*`, or
+ * numbered prefixes; section headers can be `### MUST FIX` or
+ * `## MUST FIX (Critical)` etc.
+ *
+ * Exported for unit tests.
+ */
+export function parseAllFindings(review: string): ReviewFinding[] {
+  const lines = review.split('\n');
+  // Locate every section header, then for each one extract its bullets up
+  // to the next header (or end of file).
+  const headerLines: Array<{ severity: FindingSeverity; index: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    for (const h of SECTION_HEADERS) {
+      if (h.regex.test(lines[i])) {
+        headerLines.push({ severity: h.severity, index: i });
+        break;
+      }
+    }
+  }
+
+  if (headerLines.length === 0) {
+    return [];
+  }
+
+  const out: ReviewFinding[] = [];
+  const bulletStart = /^\s*(?:-|\*|\d+\.)\s+/;
+
+  for (let h = 0; h < headerLines.length; h++) {
+    const start = headerLines[h].index + 1;
+    const end = h + 1 < headerLines.length ? headerLines[h + 1].index : lines.length;
+    const sectionLines = lines.slice(start, end);
+
+    const bullets: string[] = [];
+    let current: string[] = [];
+    for (const ln of sectionLines) {
+      if (bulletStart.test(ln)) {
+        if (current.length > 0) {
+          bullets.push(current.join('\n').trim());
+        }
+        current = [ln.replace(bulletStart, '').trim()];
+      } else if (current.length > 0 && ln.trim().length > 0) {
+        current.push(ln.trim());
+      }
+    }
+    if (current.length > 0) {
+      bullets.push(current.join('\n').trim());
+    }
+
+    for (const body of bullets) {
+      if (body.length === 0) {
+        continue;
+      }
+      const { file, lineHint } = extractFileHint(body);
+      out.push({
+        severity: headerLines[h].severity,
+        file: file || undefined,
+        line: lineHint,
+        body,
+      });
+    }
+  }
+
+  return out;
+}
+
+/** Build the `gh api` argv for posting an inline pull-request review comment. */
+export function buildInlineCommentArgs(
+  pr: PrContext,
+  finding: ReviewFinding & { file: string; line: number }
+): string[] {
+  const body = `**[${finding.severity}]** ${finding.body}`;
+  return [
+    'api',
+    '-X',
+    'POST',
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/comments`,
+    '-f',
+    `body=${body}`,
+    '-f',
+    `commit_id=${pr.headSha}`,
+    '-f',
+    `path=${finding.file}`,
+    '-F',
+    `line=${finding.line}`,
+    '-f',
+    'side=RIGHT',
+  ];
+}
+
+/** Build the `gh api` argv for posting an issue (PR-level) summary comment. */
+export function buildSummaryCommentArgs(pr: PrContext, body: string): string[] {
+  return [
+    'api',
+    '-X',
+    'POST',
+    `repos/${pr.owner}/${pr.repo}/issues/${pr.number}/comments`,
+    '-f',
+    `body=${body}`,
+  ];
+}
+
+/**
+ * Compose the body of the PR-level summary comment from severity counts
+ * plus any leftover findings that lack a file/line and any per-comment
+ * failures rolled up here.
+ */
+export function buildSummaryBody(
+  findings: ReadonlyArray<ReviewFinding>,
+  unattributable: ReadonlyArray<ReviewFinding>,
+  failedInline: ReadonlyArray<{ finding: ReviewFinding; reason: string }>
+): string {
+  const counts: Record<FindingSeverity, number> = {
+    'MUST FIX': 0,
+    'SHOULD IMPROVE': 0,
+    'NICE TO HAVE': 0,
+  };
+  for (const f of findings) {
+    counts[f.severity]++;
+  }
+
+  const lines: string[] = [];
+  lines.push('## Code Review Summary');
+  lines.push('');
+  lines.push(
+    `- **MUST FIX:** ${counts['MUST FIX']}` +
+      ` · **SHOULD IMPROVE:** ${counts['SHOULD IMPROVE']}` +
+      ` · **NICE TO HAVE:** ${counts['NICE TO HAVE']}`
+  );
+
+  if (unattributable.length > 0) {
+    lines.push('');
+    lines.push('### Findings without a file/line');
+    lines.push('');
+    for (const f of unattributable) {
+      lines.push(`- **[${f.severity}]** ${f.body}`);
+    }
+  }
+
+  if (failedInline.length > 0) {
+    lines.push('');
+    lines.push('### Findings that could not be posted inline');
+    lines.push('');
+    for (const fi of failedInline) {
+      const loc = fi.finding.file
+        ? `${fi.finding.file}${fi.finding.line ? `:${fi.finding.line}` : ''}`
+        : '(no location)';
+      lines.push(`- **[${fi.finding.severity}]** ${loc} — ${fi.finding.body}`);
+      lines.push(`  - _inline post failed: ${fi.reason}_`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/** Extract a comment URL (`html_url`) from the JSON returned by `gh api`. */
+function extractCommentUrl(stdout: string): string | undefined {
+  try {
+    const parsed = JSON.parse(stdout) as { html_url?: string; url?: string };
+    return parsed.html_url ?? parsed.url ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Post a single `gh api` invocation. Returns `{ ok, url, error }` — never
+ * throws for normal failure modes (we want one bad inline post to fall
+ * back to the summary, not abort the whole pass). Re-throws
+ * `GhCliMissingError` because that's a setup problem the caller should
+ * surface immediately.
+ */
+async function runGhApi(
+  args: string[],
+  workdir: string
+): Promise<{ ok: boolean; url?: string; error?: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync('gh', args, {
+      cwd: workdir,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return { ok: true, url: extractCommentUrl(stdout), error: stderr || undefined };
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') {
+      throw new GhCliMissingError('gh CLI not found on PATH');
+    }
+    const e = err as Error & { stderr?: string | Buffer; stdout?: string | Buffer };
+    const stderr =
+      typeof e.stderr === 'string'
+        ? e.stderr
+        : Buffer.isBuffer(e.stderr)
+          ? e.stderr.toString('utf-8')
+          : '';
+    return { ok: false, error: (stderr || e.message || 'gh api failed').trim() };
+  }
+}
+
+/** Result of `postReviewComments`. */
+interface PostResult {
+  posted: number;
+  skipped: number;
+  summaryCommentUrl?: string;
+  inlineCommentUrls: string[];
+}
+
+/**
+ * Post the parsed findings to GitHub via `gh api`.
+ *
+ * - Inline findings (file+line) → `repos/{owner}/{repo}/pulls/{N}/comments`.
+ * - Findings without file/line, plus any inline post failures → a single
+ *   `repos/{owner}/{repo}/issues/{N}/comments` summary call.
+ *
+ * When `dryRun === true`, prints the planned argv arrays via `onProgress`
+ * (or stdout) and never executes anything.
+ *
+ * Exported for unit tests.
+ */
+export async function postReviewComments(
+  pr: PrContext,
+  findings: ReadonlyArray<ReviewFinding>,
+  workdir: string,
+  opts: { dryRun?: boolean; onProgress?: (msg: string) => void } = {}
+): Promise<PostResult> {
+  const dryRun = opts.dryRun === true;
+  const log = (msg: string): void => {
+    if (opts.onProgress) {
+      opts.onProgress(msg);
+    } else if (dryRun) {
+      // In dry-run mode without a progress callback, write to stdout so
+      // the user actually sees the planned commands.
+      process.stdout.write(`[code-review --comment] ${msg}\n`);
+    }
+  };
+
+  const result: PostResult = { posted: 0, skipped: 0, inlineCommentUrls: [] };
+
+  const inline: Array<ReviewFinding & { file: string; line: number }> = [];
+  const unattributable: ReviewFinding[] = [];
+  for (const f of findings) {
+    if (f.file && typeof f.line === 'number') {
+      inline.push(f as ReviewFinding & { file: string; line: number });
+    } else {
+      unattributable.push(f);
+    }
+  }
+
+  const failedInline: Array<{ finding: ReviewFinding; reason: string }> = [];
+
+  for (const f of inline) {
+    const argv = buildInlineCommentArgs(pr, f);
+    if (dryRun) {
+      log(`gh ${argv.map((a) => (a.includes(' ') ? JSON.stringify(a) : a)).join(' ')}`);
+      result.skipped++;
+      continue;
+    }
+    const r = await runGhApi(argv, workdir);
+    if (r.ok) {
+      result.posted++;
+      if (r.url) {
+        result.inlineCommentUrls.push(r.url);
+      }
+    } else {
+      failedInline.push({ finding: f, reason: r.error ?? 'unknown error' });
+    }
+  }
+
+  const needsSummary = unattributable.length > 0 || failedInline.length > 0 || findings.length > 0;
+  if (needsSummary) {
+    const body = buildSummaryBody(findings, unattributable, failedInline);
+    const argv = buildSummaryCommentArgs(pr, body);
+    if (dryRun) {
+      log(
+        `gh ${argv.map((a) => (a.includes(' ') || a.includes('\n') ? JSON.stringify(a) : a)).join(' ')}`
+      );
+      result.skipped++;
+    } else {
+      const r = await runGhApi(argv, workdir);
+      if (r.ok) {
+        result.posted++;
+        if (r.url) {
+          result.summaryCommentUrl = r.url;
+        }
+      } else {
+        result.skipped++;
+      }
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -537,6 +877,8 @@ export async function executeCodeReview(opts: CodeReviewOptions = {}): Promise<C
   const startTime = Date.now();
   const fix = opts.fix === true;
   const fixMaxFindings = opts.fixMaxFindings ?? DEFAULT_FIX_MAX_FINDINGS;
+  const comment = opts.comment === true;
+  const commentDryRun = opts.commentDryRun === true;
 
   if (opts.signal?.aborted) {
     throw new Error('Code review cancelled before start');
@@ -658,6 +1000,57 @@ export async function executeCodeReview(opts: CodeReviewOptions = {}): Promise<C
     }
   }
 
+  let commentsResult: CodeReviewResult['comments'];
+  if (comment) {
+    let pr: PrContext | null;
+    try {
+      pr = await detectCurrentPr(workdir);
+    } catch (err) {
+      if (err instanceof GhCliMissingError) {
+        return {
+          success: false,
+          diffBytes,
+          effort,
+          review,
+          modelUsed: result.modelUsed ?? modelId,
+          totalTokens: totalTokensWithFix,
+          elapsedMs: Date.now() - startTime,
+          fixesApplied,
+          error:
+            'gh CLI not found on PATH. Install GitHub CLI ' +
+            '(https://cli.github.com/) and authenticate with `gh auth login`, ' +
+            'or run without --comment.',
+        };
+      }
+      throw err;
+    }
+
+    if (pr === null) {
+      return {
+        success: false,
+        diffBytes,
+        effort,
+        review,
+        modelUsed: result.modelUsed ?? modelId,
+        totalTokens: totalTokensWithFix,
+        elapsedMs: Date.now() - startTime,
+        fixesApplied,
+        error:
+          'No PR found for the current branch. Push and open a PR first, or run without --comment.',
+      };
+    }
+
+    const findings = parseAllFindings(review);
+    opts.onProgress?.(
+      `Posting ${findings.length} finding(s) to PR #${pr.number}` +
+        (commentDryRun ? ' (dry-run)' : '')
+    );
+    commentsResult = await postReviewComments(pr, findings, workdir, {
+      dryRun: commentDryRun,
+      onProgress: opts.onProgress,
+    });
+  }
+
   return {
     success: true,
     diffBytes,
@@ -667,5 +1060,6 @@ export async function executeCodeReview(opts: CodeReviewOptions = {}): Promise<C
     totalTokens: totalTokensWithFix,
     elapsedMs: Date.now() - startTime,
     fixesApplied,
+    comments: commentsResult,
   };
 }

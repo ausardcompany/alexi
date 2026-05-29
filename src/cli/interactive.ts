@@ -205,8 +205,10 @@ function printHelp(): void {
     c('yellow', '  /goal <condition>') + c('gray', '  - Run autonomously until condition is met')
   );
   console.log(
-    c('yellow', '  /code-review [low|medium|high] [--fix] [--fix-max=N]') +
-      c('gray', ' - Review uncommitted changes (use --fix to auto-apply)')
+    c(
+      'yellow',
+      '  /code-review [low|medium|high] [--fix] [--fix-max=N] [--comment] [--comment-dry-run]'
+    ) + c('gray', ' - Review uncommitted changes (--comment posts to PR)')
   );
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
@@ -819,10 +821,13 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     }
 
     case 'code-review': {
-      // Parse positional effort token + flags `--fix`, `--fix-max=N` / `--fix-max N`
+      // Parse positional effort token + flags `--fix`, `--fix-max=N` / `--fix-max N`,
+      // `--comment`, `--comment-dry-run`.
       let effort: 'low' | 'medium' | 'high' = 'medium';
       let fix = false;
       let fixMaxFindings: number | undefined;
+      let comment = false;
+      let commentDryRun = false;
 
       for (let i = 0; i < args.length; i++) {
         const a = args[i];
@@ -839,6 +844,11 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
             fixMaxFindings = n;
             i++;
           }
+        } else if (a === '--comment') {
+          comment = true;
+        } else if (a === '--comment-dry-run') {
+          comment = true;
+          commentDryRun = true;
         } else {
           const lower = a.toLowerCase();
           if (lower === 'low' || lower === 'medium' || lower === 'high') {
@@ -853,7 +863,9 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       const prevAbort = state.abortController;
       state.abortController = reviewAbort;
 
-      console.log(c('cyan', `\n  Code review (effort: ${effort}${fix ? ', --fix' : ''})`));
+      const flagSummary =
+        (fix ? ', --fix' : '') + (comment ? `, --comment${commentDryRun ? '-dry-run' : ''}` : '');
+      console.log(c('cyan', `\n  Code review (effort: ${effort}${flagSummary})`));
       console.log(c('dim', '  Press Ctrl+C to cancel\n'));
 
       try {
@@ -864,6 +876,8 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           signal: reviewAbort.signal,
           fix,
           fixMaxFindings,
+          comment,
+          commentDryRun,
           onProgress: (msg) => console.log(c('dim', `  ${msg}`)),
         });
 
@@ -894,6 +908,22 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
               c(colour, `    [${fa.status}] ${fa.file || '(no file)'}`) +
                 (fa.reason ? c('gray', ` — ${fa.reason}`) : '')
             );
+          }
+        }
+
+        if (result.comments) {
+          console.log();
+          console.log(
+            c(
+              'cyan',
+              `  Comments: ${result.comments.posted} posted, ${result.comments.skipped} skipped`
+            )
+          );
+          if (result.comments.summaryCommentUrl) {
+            console.log(c('gray', `    summary: ${result.comments.summaryCommentUrl}`));
+          }
+          for (const url of result.comments.inlineCommentUrls) {
+            console.log(c('gray', `    inline:  ${url}`));
           }
         }
 

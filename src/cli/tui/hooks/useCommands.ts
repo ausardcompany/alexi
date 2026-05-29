@@ -376,16 +376,19 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
       },
     },
 
-    // /code-review [effort] [--fix] [--fix-max=N] -----------------------------
+    // /code-review [effort] [--fix] [--fix-max=N] [--comment] [--comment-dry-run] ---
     {
       name: 'code-review',
-      description: 'Review uncommitted changes for correctness bugs (use --fix to auto-apply)',
+      description:
+        'Review uncommitted changes for correctness bugs (use --fix to auto-apply, --comment to post on PR)',
       category: 'general',
       execute: async (args, _ctx) => {
         const tokens = args.trim().split(/\s+/).filter(Boolean);
         let effort: 'low' | 'medium' | 'high' = 'medium';
         let fix = false;
         let fixMaxFindings: number | undefined;
+        let comment = false;
+        let commentDryRun = false;
 
         for (let i = 0; i < tokens.length; i++) {
           const a = tokens[i];
@@ -402,6 +405,11 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
               fixMaxFindings = n;
               i++;
             }
+          } else if (a === '--comment') {
+            comment = true;
+          } else if (a === '--comment-dry-run') {
+            comment = true;
+            commentDryRun = true;
           } else {
             const lower = a.toLowerCase();
             if (lower === 'low' || lower === 'medium' || lower === 'high') {
@@ -412,7 +420,9 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
           }
         }
 
-        deps.addSystemMessage(`Code review started (effort: ${effort}${fix ? ', --fix' : ''})`);
+        const flagSummary =
+          (fix ? ', --fix' : '') + (comment ? `, --comment${commentDryRun ? '-dry-run' : ''}` : '');
+        deps.addSystemMessage(`Code review started (effort: ${effort}${flagSummary})`);
         try {
           const { executeCodeReview } = await import('../../../command/codeReview.js');
           const result = await executeCodeReview({
@@ -420,6 +430,8 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
             workdir: process.cwd(),
             fix,
             fixMaxFindings,
+            comment,
+            commentDryRun,
           });
           if (!result.success && result.error) {
             deps.addSystemMessage(result.error);
@@ -438,6 +450,17 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
               deps.addSystemMessage(
                 `  [${fa.status}] ${fa.file || '(no file)'}` + (fa.reason ? ` — ${fa.reason}` : '')
               );
+            }
+          }
+          if (result.comments) {
+            deps.addSystemMessage(
+              `Comments: ${result.comments.posted} posted, ${result.comments.skipped} skipped`
+            );
+            if (result.comments.summaryCommentUrl) {
+              deps.addSystemMessage(`  summary: ${result.comments.summaryCommentUrl}`);
+            }
+            for (const url of result.comments.inlineCommentUrls) {
+              deps.addSystemMessage(`  inline:  ${url}`);
             }
           }
           deps.addSystemMessage(
