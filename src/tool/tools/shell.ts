@@ -10,6 +10,7 @@ import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 import * as ShellId from './shell/id.js';
+import { auditCommand } from '../../permission/next.js';
 
 const ShellParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -86,6 +87,19 @@ Security:
         ? params.workdir
         : path.join(context.workdir, params.workdir)
       : context.workdir;
+
+    // Pre-flight audit: detect directory-mutating builtins (`cd`, `pushd`,
+    // `popd`, `chdir`, parenthesised subshells, `OLDPWD=…; cd -`) that
+    // would escape the workspace. See `src/permission/shell-parser.ts`.
+    const audit = auditCommand(params.command, { workspace: workdir });
+    if (audit.denials.length > 0) {
+      const reasons = audit.denials.map((d) => d.message).join('; ');
+      return {
+        success: false,
+        error: `Command blocked by directory-escape audit: ${reasons}`,
+        data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
+      };
+    }
 
     const timeout = params.timeout ?? DEFAULT_TIMEOUT;
 
