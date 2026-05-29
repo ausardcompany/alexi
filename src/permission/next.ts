@@ -3,6 +3,8 @@
  * Supports glob patterns with wildcards for granular permission control
  */
 
+import { auditShellCommand, type AuditOptions, type AuditResult } from './shell-parser.js';
+
 /**
  * Evaluates a permission pattern against a path.
  * Supports glob patterns with wildcards.
@@ -85,6 +87,30 @@ export interface PendingRequest {
  */
 function expand(pattern: string): string {
   return pattern;
+}
+
+/**
+ * Audit a shell command for directory-escape attempts before falling
+ * through to the regular pattern-match permission rules.
+ *
+ * This is the single chokepoint that callers (the bash tool wrapper, the
+ * permission gate) should use instead of splitting commands themselves.
+ * Returns the parser output along with any deny-by-default findings.
+ *
+ * Counterpart to claude-code v2.1.149's PowerShell `cd..` fix — see
+ * `shell-parser.ts` and `src/permission/README.md`.
+ */
+export function auditCommand(command: string, options: AuditOptions): AuditResult {
+  return auditShellCommand(command, options);
+}
+
+/**
+ * Convenience wrapper that returns `true` when a command should be denied
+ * outright by the parser-level audit (i.e. attempts to `cd` / `pushd` /
+ * `chdir` outside the workspace).
+ */
+export function isCommandDeniedByAudit(command: string, options: AuditOptions): boolean {
+  return auditShellCommand(command, options).denials.length > 0;
 }
 
 /**
