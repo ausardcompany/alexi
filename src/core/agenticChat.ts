@@ -300,7 +300,11 @@ export async function agenticChat(
   permissionManager.setAllowExternalDirectories(true);
 
   // Add explicit allow rule for writes in workdir (higher priority than default ask-write)
-  // This enables autonomous file operations without interactive prompts
+  // This enables autonomous file operations without interactive prompts.
+  // Remove any prior copies left over from an earlier agenticChat() invocation in
+  // the same process (e.g. long-running TUI sessions). addRule() does not de-dup
+  // by id; rebuilding the rule each call keeps the list bounded.
+  permissionManager.removeRule('agentic-allow-write');
   permissionManager.addRule({
     id: 'agentic-allow-write',
     name: 'Agentic Write Allow',
@@ -312,6 +316,7 @@ export async function agenticChat(
   });
 
   // Also allow execute for agentic operations (build, test, etc.)
+  permissionManager.removeRule('agentic-allow-execute');
   permissionManager.addRule({
     id: 'agentic-allow-execute',
     name: 'Agentic Execute Allow',
