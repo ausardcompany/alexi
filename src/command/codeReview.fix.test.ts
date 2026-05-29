@@ -248,6 +248,33 @@ describe('reconcileFindingsWithToolCalls', () => {
     ]);
     expect(outcomes.every((o) => o.status === 'skipped')).toBe(true);
   });
+
+  it('distributes multiple successful edits across same-file findings', () => {
+    // Two findings both targeting src/foo.ts: a single batched-mode model
+    // emitting two edit calls should mark BOTH applied, not collapse onto
+    // findings[0] only.
+    const sameFileReview = `### MUST FIX
+- First issue in \`src/foo.ts\`
+- Second issue in \`src/foo.ts\``;
+    const sameFileFindings = parseMustFixFindings(sameFileReview);
+    expect(sameFileFindings).toHaveLength(2);
+
+    const outcomes = reconcileFindingsWithToolCalls(sameFileFindings, [
+      {
+        name: 'edit',
+        success: true,
+        arguments: JSON.stringify({ filePath: 'src/foo.ts', oldString: 'a', newString: 'b' }),
+      },
+      {
+        name: 'edit',
+        success: true,
+        arguments: JSON.stringify({ filePath: 'src/foo.ts', oldString: 'c', newString: 'd' }),
+      },
+    ]);
+
+    expect(outcomes[0].status).toBe('applied');
+    expect(outcomes[1].status).toBe('applied');
+  });
 });
 
 // ---------------------------------------------------------------------------

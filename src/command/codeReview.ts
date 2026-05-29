@@ -407,6 +407,11 @@ export function reconcileFindingsWithToolCalls(
     const argFileBase = argFile ? path.posix.basename(argFile) : '';
 
     if (tc.name === 'edit' || tc.name === 'multiedit') {
+      // Prefer matching to a finding that has not yet been resolved so that
+      // multiple tool calls referencing the same file are distributed across
+      // distinct findings instead of all collapsing onto findings[0].
+      let matchedIdx = -1;
+      let fallbackIdx = -1;
       for (let i = 0; i < findings.length; i++) {
         const fnFile = norm(findings[i].file);
         if (!fnFile) {
@@ -414,21 +419,32 @@ export function reconcileFindingsWithToolCalls(
         }
         const fnBase = path.posix.basename(fnFile);
         if (argFile === fnFile || (fnBase && fnBase === argFileBase)) {
-          if (tc.success) {
-            outcomes[i] = {
-              file: findings[i].file,
-              finding: findings[i].summary,
-              status: 'applied',
-            };
-          } else if (outcomes[i].status !== 'applied') {
-            outcomes[i] = {
-              file: findings[i].file,
-              finding: findings[i].summary,
-              status: 'failed',
-              reason: tc.error ?? 'edit tool failed',
-            };
+          if (fallbackIdx === -1) {
+            fallbackIdx = i;
           }
-          break;
+          if (outcomes[i].status === 'skipped' && outcomes[i].reason?.startsWith('No matching')) {
+            matchedIdx = i;
+            break;
+          }
+        }
+      }
+      if (matchedIdx === -1) {
+        matchedIdx = fallbackIdx;
+      }
+      if (matchedIdx >= 0) {
+        if (tc.success) {
+          outcomes[matchedIdx] = {
+            file: findings[matchedIdx].file,
+            finding: findings[matchedIdx].summary,
+            status: 'applied',
+          };
+        } else if (outcomes[matchedIdx].status !== 'applied') {
+          outcomes[matchedIdx] = {
+            file: findings[matchedIdx].file,
+            finding: findings[matchedIdx].summary,
+            status: 'failed',
+            reason: tc.error ?? 'edit tool failed',
+          };
         }
       }
     } else if (tc.name === 'suggest') {
