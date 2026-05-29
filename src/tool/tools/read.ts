@@ -184,21 +184,40 @@ Usage:
       const numberedLines = selectedLines.map((line, i) => `${startIdx + i + 1}: ${line}`);
 
       const output = numberedLines.join('\n');
-      const { content: truncated, truncated: wasTruncated } = truncateOutput(output);
+      const { content: truncatedRaw, truncated: wasTruncated } = truncateOutput(output);
+
+      // When `truncateOutput` cuts mid-line (byte budget), drop the trailing
+      // partial line from the displayed content so it ends on a complete line
+      // and `shownLines` / next-offset hint stay consistent with what the
+      // caller actually sees.
+      let truncated = truncatedRaw;
+      let actualShownLines: number;
+      if (!wasTruncated) {
+        actualShownLines = selectedLines.length;
+      } else {
+        const lastNewline = truncatedRaw.lastIndexOf('\n');
+        if (lastNewline === -1) {
+          // No full line fit within the byte budget; emit empty content rather
+          // than a misleading partial line.
+          truncated = '';
+          actualShownLines = 0;
+        } else {
+          truncated = truncatedRaw.slice(0, lastNewline);
+          actualShownLines = truncated === '' ? 0 : truncated.split('\n').length;
+        }
+      }
 
       // Implicit whole-file read: caller did not specify offset or limit.
       const isImplicitWholeFileRead = params.offset === undefined && params.limit === undefined;
       const isPartialView = wasTruncated && isImplicitWholeFileRead;
 
-      // Compute the next offset for resumed reads. When the rendered output is
-      // truncated by line budget we may have shown fewer than `selectedLines.length`
-      // lines, but for both branches `endIdx + 1` is the next 1-indexed line that
-      // was not yet shown (capped by `Math.min` against `lines.length` above).
-      const nextOffset = endIdx + 1;
+      // Next 1-indexed line that has not been fully shown.
+      const lastShownLineNumber = startIdx + actualShownLines;
+      const nextOffset = lastShownLineNumber + 1;
 
       let hint: string | undefined;
       if (isPartialView) {
-        hint = `PARTIAL view — file has ${totalLines} lines, showing 1..${endIdx}. Call read again with offset=${nextOffset} to continue.`;
+        hint = `PARTIAL view — file has ${totalLines} lines, showing ${offset}..${lastShownLineNumber}. Call read again with offset=${nextOffset} to continue.`;
       } else if (wasTruncated) {
         hint = `Output truncated. Use offset=${nextOffset} to continue reading.`;
       }
@@ -210,7 +229,7 @@ Usage:
           path: filePath,
           content: truncated,
           totalLines,
-          shownLines: selectedLines.length,
+          shownLines: actualShownLines,
           offset,
           ...(isPartialView ? { partial: true } : {}),
         },

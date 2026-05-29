@@ -266,11 +266,21 @@ describe('Read Tool', () => {
       if (result.data?.type === 'file') {
         expect(result.data.partial).toBe(true);
         expect(result.data.totalLines).toBe(totalLines);
-        // Default limit is MAX_LINES = 2000 starting from offset 1, so the next
-        // continuation offset should be 2001.
-        expect(result.hint).toContain('offset=2001');
         expect(result.hint).toContain(`file has ${totalLines} lines`);
-        expect(result.hint).toContain('showing 1..2000');
+
+        // The next-offset hint must equal shownLines + 1 so resuming does not
+        // skip any content. Byte truncation may bring shown lines well below
+        // the 2000-line limit (~570 lines for this fixture).
+        const shown = result.data.shownLines;
+        expect(shown).toBeGreaterThan(0);
+        expect(shown).toBeLessThan(2000);
+        expect(result.hint).toContain(`showing 1..${shown}`);
+        expect(result.hint).toContain(`offset=${shown + 1}`);
+
+        // The displayed content should end on a complete line that matches
+        // shownLines (i.e. no skipped lines between content and next offset).
+        const lastNumberedLine = result.data.content.split('\n').pop() ?? '';
+        expect(lastNumberedLine.startsWith(`${shown}: `)).toBe(true);
       }
     });
 
@@ -297,6 +307,8 @@ describe('Read Tool', () => {
       expect(result.hint).toContain('Output truncated');
       if (result.data?.type === 'file') {
         expect(result.data.partial).toBeUndefined();
+        // Resume offset must not skip lines that were not actually shown.
+        expect(result.hint).toContain(`offset=${result.data.shownLines + 1}`);
       }
     });
 
@@ -314,6 +326,35 @@ describe('Read Tool', () => {
         expect(result.data.partial).toBeUndefined();
         expect(result.data.totalLines).toBe(50);
         expect(result.data.shownLines).toBe(50);
+      }
+    });
+
+    it('should resume from the next-offset hint without skipping content', async () => {
+      const testFile = path.join(tempDir, 'huge-resume.txt');
+      const lineContent = 'z'.repeat(80);
+      const totalLines = 3000;
+      const content = Array.from({ length: totalLines }, (_, i) => `${lineContent}-${i}`).join(
+        '\n'
+      );
+      await fs.writeFile(testFile, content);
+
+      const first = await readTool.execute({ filePath: testFile }, context);
+      expect(first.success).toBe(true);
+      if (first.data?.type !== 'file') {
+        throw new Error('expected file result');
+      }
+
+      const match = first.hint?.match(/offset=(\d+)/);
+      expect(match).not.toBeNull();
+      const nextOffset = Number(match?.[1]);
+      // The resume offset should be the line immediately after shownLines.
+      expect(nextOffset).toBe(first.data.shownLines + 1);
+
+      const second = await readTool.execute({ filePath: testFile, offset: nextOffset }, context);
+      expect(second.success).toBe(true);
+      if (second.data?.type === 'file') {
+        // The second read must begin exactly at nextOffset, with no gap.
+        expect(second.data.content.startsWith(`${nextOffset}: `)).toBe(true);
       }
     });
   });
