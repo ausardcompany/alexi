@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
+import { ProviderModelFellBack } from '../../../bus/index.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { Spinner } from './Spinner.js';
 
@@ -53,6 +54,22 @@ export function StatusBar({
   const { theme } = useTheme();
   const { colors } = theme;
 
+  // Subscribe to provider fallback events so the user can see when their
+  // configured model id was not recognized and a different one is being used.
+  // Persists for the rest of the session (matches the dedup-once semantics on
+  // the publisher side in src/providers/index.ts).
+  const [fallbackWarning, setFallbackWarning] = React.useState<{
+    requested: string;
+    effective: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    const unsub = ProviderModelFellBack.subscribe((p) => {
+      setFallbackWarning({ requested: p.requestedModel, effective: p.effectiveModel });
+    });
+    return unsub;
+  }, []);
+
   const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
   const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
 
@@ -96,6 +113,15 @@ export function StatusBar({
           </Text>
         )}
       </Box>
+
+      {/* Fallback warning (only when model id was not recognized) */}
+      {fallbackWarning && (
+        <Box backgroundColor={colors.backgroundDarker} paddingX={1}>
+          <Text color={colors.warning} backgroundColor={colors.backgroundDarker}>
+            ! model {fallbackWarning.requested} unavailable → using {fallbackWarning.effective}
+          </Text>
+        </Box>
+      )}
 
       {/* Segment 3: Streaming indicator or agent */}
       <Box backgroundColor={colors.backgroundSecondary} paddingX={1}>

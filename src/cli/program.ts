@@ -8,10 +8,23 @@
 
 import { Command } from 'commander';
 import { createRequire } from 'module';
+import { ProviderModelFellBack } from '../bus/index.js';
 import { registerAllCommands } from './commands/index.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
+
+// Default fallback subscriber for non-TUI runs (CLI one-shots, scripts, tests).
+// The TUI subscribes its own handler in StatusBar.tsx and always renders,
+// regardless of TTY state. This subscriber only writes to stderr when stdout
+// is not a TTY (piped output) or when ALEXI_NON_INTERACTIVE is explicitly set.
+ProviderModelFellBack.subscribe((p) => {
+  if (!process.stdout.isTTY || process.env.ALEXI_NON_INTERACTIVE) {
+    process.stderr.write(
+      `warning: model '${p.requestedModel}' not recognized — using '${p.effectiveModel}' for this session\n`
+    );
+  }
+});
 
 const program = new Command();
 program

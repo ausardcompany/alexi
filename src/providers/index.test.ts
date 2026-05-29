@@ -32,10 +32,12 @@ vi.mock('../config/userConfig.js', () => ({
 
 import { isOrchestrationModel } from './sapOrchestration.js';
 import { loadRoutingConfig } from '../config/routingConfig.js';
+import { ProviderModelFellBack } from '../bus/index.js';
 import { getProviderForModelWithFallback, _resetFallbackWarningCache } from './index.js';
 
 describe('getProviderForModelWithFallback', () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let events: Array<{ requestedModel: string; effectiveModel: string; timestamp: number }>;
+  let unsubscribe: () => void;
 
   beforeEach(() => {
     _resetFallbackWarningCache();
@@ -52,30 +54,35 @@ describe('getProviderForModelWithFallback', () => {
         fallbackModel: 'gpt-4o',
       },
     });
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    events = [];
+    unsubscribe = ProviderModelFellBack.subscribe((p) => {
+      events.push(p);
+    });
   });
 
   afterEach(() => {
-    warnSpy.mockRestore();
+    unsubscribe();
     vi.clearAllMocks();
   });
 
   describe('fallback path', () => {
-    it('returns the fallback model and warns once when primary is unknown', () => {
+    it('returns the fallback model and publishes once when primary is unknown', () => {
       const result = getProviderForModelWithFallback('gpt-typo');
 
       expect(result.effectiveModelId).toBe('gpt-4o');
       expect(result.usedFallback).toBe(true);
       expect(result.provider).toBeDefined();
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "Primary model 'gpt-typo' not recognized, falling back to 'gpt-4o' for this session"
-        )
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual(
+        expect.objectContaining({
+          requestedModel: 'gpt-typo',
+          effectiveModel: 'gpt-4o',
+        })
       );
+      expect(typeof events[0].timestamp).toBe('number');
     });
 
-    it('deduplicates the warning across repeated calls with the same bad id', () => {
+    it('deduplicates the event across repeated calls with the same bad id', () => {
       const first = getProviderForModelWithFallback('gpt-typo');
       const second = getProviderForModelWithFallback('gpt-typo');
 
@@ -85,15 +92,17 @@ describe('getProviderForModelWithFallback', () => {
       expect(second).toEqual(
         expect.objectContaining({ effectiveModelId: 'gpt-4o', usedFallback: true })
       );
-      // Only one warn for the same bad id, even after two calls
-      expect(warnSpy).toHaveBeenCalledTimes(1);
+      // Only one publish for the same bad id, even after two calls
+      expect(events).toHaveLength(1);
     });
 
-    it('warns separately for distinct bad model ids', () => {
+    it('publishes separately for distinct bad model ids', () => {
       getProviderForModelWithFallback('gpt-typo');
       getProviderForModelWithFallback('another-bad-id');
 
-      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(events).toHaveLength(2);
+      expect(events[0].requestedModel).toBe('gpt-typo');
+      expect(events[1].requestedModel).toBe('another-bad-id');
     });
 
     it('honors an explicit fallbackModel argument over routing config', () => {
@@ -101,8 +110,11 @@ describe('getProviderForModelWithFallback', () => {
 
       expect(result.effectiveModelId).toBe('gemini-2.5-pro');
       expect(result.usedFallback).toBe(true);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("falling back to 'gemini-2.5-pro'")
+      expect(events[0]).toEqual(
+        expect.objectContaining({
+          requestedModel: 'gpt-typo',
+          effectiveModel: 'gemini-2.5-pro',
+        })
       );
     });
 
@@ -119,21 +131,21 @@ describe('getProviderForModelWithFallback', () => {
   });
 
   describe('no-fallback path (regression)', () => {
-    it("returns the primary model and never warns when 'gpt-4o' is valid", () => {
+    it("returns the primary model and never publishes when 'gpt-4o' is valid", () => {
       const result = getProviderForModelWithFallback('gpt-4o');
 
       expect(result.effectiveModelId).toBe('gpt-4o');
       expect(result.usedFallback).toBe(false);
       expect(result.provider).toBeDefined();
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(events).toHaveLength(0);
     });
 
-    it('does not warn for any number of valid-id calls', () => {
+    it('does not publish for any number of valid-id calls', () => {
       getProviderForModelWithFallback('gpt-4o');
       getProviderForModelWithFallback('gemini-2.5-pro');
       getProviderForModelWithFallback('gpt-4o');
 
-      expect(warnSpy).not.toHaveBeenCalled();
+      expect(events).toHaveLength(0);
     });
   });
 });

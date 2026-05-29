@@ -5,6 +5,7 @@
  * for all LLM operations through SAP AI Core.
  */
 
+import { ProviderModelFellBack } from '../bus/index.js';
 import { env } from '../config/env.js';
 import { loadRoutingConfig } from '../config/routingConfig.js';
 import { getConfigDefaultModel } from '../config/userConfig.js';
@@ -109,11 +110,14 @@ function resolveFallbackModelId(fallbackModel?: string): string {
  * falling back to the configured `fallbackModel` if the primary id is not
  * recognized.
  *
- * If `modelId` is unknown, a single `console.warn` is emitted (deduplicated
- * per bad-model-id for the process lifetime) and a provider is built for the
- * fallback id instead. This mirrors Claude Code v2.1.152 behavior so a
- * misconfigured `AICORE_MODEL` (typo, renamed deployment id, etc.) does not
- * break every chat turn.
+ * If `modelId` is unknown, a `ProviderModelFellBack` event is published on the
+ * application bus (deduplicated per bad-model-id for the process lifetime) and
+ * a provider is built for the fallback id instead. The TUI subscribes to this
+ * event to surface a one-line status banner; non-TUI callers (e.g. the
+ * `alexi chat -m ...` one-shot path) print a stderr warning. This mirrors
+ * Claude Code v2.1.152 behavior so a misconfigured `AICORE_MODEL` (typo,
+ * renamed deployment id, etc.) is visible at first turn instead of silently
+ * masquerading as a working configuration.
  *
  * `getProviderForModel` remains the low-level primitive that does no
  * validation; this helper is the recommended entry point for chat pipelines.
@@ -138,9 +142,11 @@ export function getProviderForModelWithFallback(
 
   if (!warnedFor.has(modelId)) {
     warnedFor.add(modelId);
-    console.warn(
-      `Primary model '${modelId}' not recognized, falling back to '${fallbackId}' for this session`
-    );
+    ProviderModelFellBack.publish({
+      requestedModel: modelId,
+      effectiveModel: fallbackId,
+      timestamp: Date.now(),
+    });
   }
 
   return {
