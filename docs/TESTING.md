@@ -641,6 +641,146 @@ describe('Rewind Command', () => {
 | `rewindList` | 3 cases (standard, empty, previews) |
 | `executeRewind` | 4 cases (no args, turn only, summarize flag, flag ordering) |
 
+## Testing Code Review Command
+
+### Test Files
+
+- `tests/command/codeReview.test.ts` -- Core executor tests (`executeCodeReview`, `pickModelForEffort`, `buildSystemPrompt`)
+- `src/cli/commands/__tests__/codeReview.test.ts` -- Commander wiring smoke test for `alexi code-review`
+
+### Testing the Core Executor
+
+The core executor reads `git diff` via `child_process.execFile` and calls `sendChat`. Both must
+be mocked to keep tests hermetic and parallel-safe. Order matters: `vi.mock` calls are hoisted
+above imports, but stating the imports explicitly after the mocks keeps the file readable.
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('child_process', () => ({
+  execFile: vi.fn(),
+}));
+vi.mock('../../src/core/orchestrator.js', () => ({
+  sendChat: vi.fn(),
+}));
+vi.mock('../../src/providers/index.js', () => ({
+  getDefaultModel: vi.fn(() => 'sap-ai-core/default'),
+}));
+vi.mock('../../src/config/routingConfig.js', () => ({
+  loadRoutingConfig: vi.fn(),
+}));
+
+import { executeCodeReview, pickModelForEffort } from '../../src/command/codeReview.js';
+import { execFile } from 'child_process';
+import { sendChat } from '../../src/core/orchestrator.js';
+
+describe('executeCodeReview', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(execFile).mockImplementation((_file, _args, _opts, cb: any) => {
+      cb(null, 'diff --git a/x.ts b/x.ts\n', '');
+      return {} as any;
+    });
+    vi.mocked(sendChat).mockResolvedValue({
+      text: 'MUST FIX\n- nothing\n',
+      modelUsed: 'sap-ai-core/default',
+      usage: { total_tokens: 42 },
+    } as any);
+  });
+
+  it('returns the empty-diff fast path without calling sendChat', async () => {
+    vi.mocked(execFile).mockImplementation((_f, _a, _o, cb: any) => {
+      cb(null, '', '');
+      return {} as any;
+    });
+    const result = await executeCodeReview({ effort: 'medium' });
+    expect(result.review).toBe('No changes to review.');
+    expect(result.modelUsed).toBe('');
+    expect(sendChat).not.toHaveBeenCalled();
+  });
+
+  it('respects --base by invoking git diff <base>...HEAD', async () => {
+    await executeCodeReview({ target: { base: 'main' } });
+    const args = vi.mocked(execFile).mock.calls[0][1];
+    expect(args).toEqual(['diff', 'main...HEAD']);
+  });
+
+  it('aborts before invoking the model when signal is already aborted', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(executeCodeReview({ signal: ctrl.signal })).rejects.toThrow(/cancelled/);
+  });
+});
+```
+
+### Testing Commander Wiring
+
+The `alexi code-review` subcommand is wired through `registerCodeReviewCommand`. The smoke test
+mocks the core executor and uses `Command.exitOverride()` so Commander throws instead of calling
+`process.exit`:
+
+```typescript
+import { Command } from 'commander';
+import { registerCodeReviewCommand } from '../codeReview.js';
+import { executeCodeReview } from '../../../command/codeReview.js';
+
+vi.mock('../../../command/codeReview.js', () => ({
+  executeCodeReview: vi.fn(),
+}));
+
+it('forwards --effort high and --base main', async () => {
+  const program = new Command();
+  program.exitOverride();
+  registerCodeReviewCommand(program);
+
+  await program.parseAsync([
+    'node', 'alexi', 'code-review', '--effort', 'high', '--base', 'main',
+  ]);
+
+  const opts = vi.mocked(executeCodeReview).mock.calls[0][0];
+  expect(opts?.effort).toBe('high');
+  expect(opts?.target).toEqual({ base: 'main' });
+});
+```
+
+### Testing Effort-Based Model Routing
+
+`pickModelForEffort` is pure and easy to test by stubbing `loadRoutingConfig`:
+
+```typescript
+import { loadRoutingConfig } from '../../src/config/routingConfig.js';
+
+it('picks a reasoning + expensive model for high effort', () => {
+  vi.mocked(loadRoutingConfig).mockReturnValue({
+    models: [
+      { id: 'cheap', costTier: 'cheap', enabled: true },
+      { id: 'expensive', costTier: 'expensive', enabled: true },
+      { id: 'reasoning', costTier: 'expensive', reasoning: true, enabled: true },
+    ],
+  } as any);
+  expect(pickModelForEffort('high')).toBe('reasoning');
+});
+
+it('picks a cheap model for low effort', () => {
+  vi.mocked(loadRoutingConfig).mockReturnValue({
+    models: [{ id: 'cheap', costTier: 'cheap', enabled: true }],
+  } as any);
+  expect(pickModelForEffort('low')).toBe('cheap');
+});
+```
+
+### Key Testing Patterns
+
+1. **Mock `child_process.execFile` directly**, not `util.promisify`. The executor wraps the
+   raw callback signature so tests can stub the module without attaching a custom promisify symbol.
+2. **Mock `sendChat` and `getDefaultModel`** to avoid network calls and keep tests deterministic.
+3. **Use `Command.exitOverride()`** in Commander wiring tests so failures throw instead of
+   killing the test process.
+4. **Test the empty-diff fast path** explicitly -- it short-circuits before the LLM call and
+   returns `modelUsed: ''`.
+5. **Test cancellation** by aborting the `AbortSignal` before calling `executeCodeReview`; the
+   executor checks the signal both before reading the diff and before invoking the model.
+
 ## Testing Routing
 
 ### Router Test Flow
