@@ -5,15 +5,43 @@
 import type { Command } from 'commander';
 import { SessionManager } from '../../core/sessionManager.js';
 
+/**
+ * JSON output shape for `alexi sessions --json` (public contract):
+ *   {
+ *     id: string,
+ *     title: string | null,
+ *     model: string | null,
+ *     updatedAt: number,   // unix epoch milliseconds
+ *     messageCount: number,
+ *     totalTokens: number
+ *   }
+ */
 export function registerSessionCommands(program: Command): void {
   // List all sessions
   program
     .command('sessions')
-    .description('List all saved sessions')
-    .action(async () => {
+    .description(
+      'List all saved sessions. Use --json to emit a stable JSON array ' +
+        '({ id, title, model, updatedAt, messageCount, totalTokens }) for scripting.'
+    )
+    .option('--json', 'Output sessions as JSON array')
+    .action(async (opts: { json?: boolean }) => {
       try {
         const sessionManager = new SessionManager();
         const sessions = sessionManager.listSessions();
+
+        if (opts.json) {
+          const out = sessions.map((s) => ({
+            id: s.id,
+            title: s.title || null,
+            model: s.modelId ?? null,
+            updatedAt: s.updated,
+            messageCount: s.messageCount,
+            totalTokens: s.totalTokens,
+          }));
+          console.log(JSON.stringify(out, null, 2));
+          return;
+        }
 
         if (sessions.length === 0) {
           console.log('No sessions found');
