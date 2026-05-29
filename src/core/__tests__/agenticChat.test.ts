@@ -513,6 +513,145 @@ describe('agenticChat', () => {
     });
   });
 
+  describe('active skill disabled tools filter', () => {
+    it('should remove skill-disabled tools from the per-turn tool list', async () => {
+      const readTool = {
+        name: 'read',
+        description: 'Read',
+        toFunctionSchema: () => ({
+          name: 'read',
+          description: 'Read',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+      const bashTool = {
+        name: 'bash',
+        description: 'Bash',
+        toFunctionSchema: () => ({
+          name: 'bash',
+          description: 'Bash',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+
+      mockToolRegistry.list.mockReturnValue([readTool, bashTool]);
+
+      mockProvider.complete.mockResolvedValue({
+        text: 'Response',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      await agenticChat('Test', {
+        activeSkill: {
+          id: 'no-bash',
+          name: 'No Bash',
+          description: '',
+          prompt: '',
+          disabledTools: ['bash'],
+        },
+      });
+
+      const completionCall = mockProvider.complete.mock.calls[0];
+      const options = completionCall[1];
+
+      const toolNames = (options.tools as Array<{ function: { name: string } }>).map(
+        (t) => t.function.name
+      );
+      expect(toolNames).toEqual(['read']);
+      expect(toolNames).not.toContain('bash');
+
+      // Global registry must not have been mutated
+      expect(mockToolRegistry.list()).toHaveLength(2);
+    });
+
+    it('should leave the tool list unfiltered when activeSkill has no disabledTools', async () => {
+      const readTool = {
+        name: 'read',
+        description: 'Read',
+        toFunctionSchema: () => ({
+          name: 'read',
+          description: 'Read',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+      const bashTool = {
+        name: 'bash',
+        description: 'Bash',
+        toFunctionSchema: () => ({
+          name: 'bash',
+          description: 'Bash',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+
+      mockToolRegistry.list.mockReturnValue([readTool, bashTool]);
+
+      mockProvider.complete.mockResolvedValue({
+        text: 'Response',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      await agenticChat('Test', {
+        activeSkill: {
+          id: 'open-skill',
+          name: 'Open Skill',
+          description: '',
+          prompt: '',
+        },
+      });
+
+      const completionCall = mockProvider.complete.mock.calls[0];
+      const options = completionCall[1];
+      const toolNames = (options.tools as Array<{ function: { name: string } }>).map(
+        (t) => t.function.name
+      );
+      expect(toolNames.sort()).toEqual(['bash', 'read']);
+    });
+
+    it('should leave the tool list unfiltered when no activeSkill is provided', async () => {
+      const readTool = {
+        name: 'read',
+        description: 'Read',
+        toFunctionSchema: () => ({
+          name: 'read',
+          description: 'Read',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+      const bashTool = {
+        name: 'bash',
+        description: 'Bash',
+        toFunctionSchema: () => ({
+          name: 'bash',
+          description: 'Bash',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+
+      mockToolRegistry.list.mockReturnValue([readTool, bashTool]);
+
+      mockProvider.complete.mockResolvedValue({
+        text: 'Response',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      await agenticChat('Test');
+
+      const completionCall = mockProvider.complete.mock.calls[0];
+      const options = completionCall[1];
+      const toolNames = (options.tools as Array<{ function: { name: string } }>).map(
+        (t) => t.function.name
+      );
+      expect(toolNames.sort()).toEqual(['bash', 'read']);
+    });
+  });
+
   describe('system prompt context injection', () => {
     beforeEach(() => {
       // Reset context mocks to return empty by default

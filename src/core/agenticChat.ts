@@ -80,6 +80,12 @@ export interface AgenticChatOptions {
   effort?: EffortLevel;
   /** Agent ID to use for assembled system prompt (e.g. 'code', 'debug') */
   agentId?: string;
+  /**
+   * Active skill for this turn. If provided, its `disabledTools` denylist is
+   * applied as a per-turn filter (the global tool registry is NOT mutated).
+   * Honors the upstream `disallowed-tools` frontmatter field on skill markdown.
+   */
+  activeSkill?: import('../skill/index.js').Skill;
 }
 
 export interface AgenticProgressEvent {
@@ -366,6 +372,16 @@ export async function agenticChat(
   } else {
     enabledToolNames = allTools.map((t) => t.name);
   }
+
+  // Apply active skill's disabledTools denylist as a per-turn filter.
+  // This honors `disallowed-tools` frontmatter on skill markdown files
+  // (Claude Code v2.1.152 compatibility) without mutating the global registry.
+  const skillDisabled = options?.activeSkill?.disabledTools;
+  if (skillDisabled && skillDisabled.length > 0) {
+    const denied = new Set(skillDisabled);
+    enabledToolNames = enabledToolNames.filter((n) => !denied.has(n));
+  }
+
   const enabledTools = allTools.filter((t) => enabledToolNames.includes(t.name));
 
   const toolSchemas = enabledTools.map((t) => formatToolForApi(t.toFunctionSchema()));
