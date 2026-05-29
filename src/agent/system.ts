@@ -145,29 +145,88 @@ function loadTextFile(filePath: string): string {
 }
 
 /**
+ * Resolve a path to its real (canonical) form. Falls back to the literal path
+ * if resolution fails (e.g. file does not exist or symlink loop).
+ */
+function safeRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Find the first existing user-level AGENTS.md, searching in this order:
+ *   1. $XDG_CONFIG_HOME/AGENTS.md (if XDG_CONFIG_HOME is set)
+ *   2. ~/.config/AGENTS.md
+ *   3. ~/AGENTS.md
+ *
+ * Returns the resolved (realpath) path of the first hit, or null if none exist.
+ * Skips any candidate whose resolved path equals `excludeResolved` (used to
+ * de-dup against the project AGENTS.md).
+ */
+function findGlobalAgentsMd(excludeResolved: string | null): string | null {
+  const candidates: string[] = [];
+  if (process.env.XDG_CONFIG_HOME) {
+    candidates.push(path.join(process.env.XDG_CONFIG_HOME, 'AGENTS.md'));
+  }
+  candidates.push(path.join(os.homedir(), '.config', 'AGENTS.md'));
+  candidates.push(path.join(os.homedir(), 'AGENTS.md'));
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    const resolved = safeRealpath(candidate);
+    if (excludeResolved !== null && resolved === excludeResolved) {
+      // Same file as project AGENTS.md — skip to avoid duplication.
+      continue;
+    }
+    return resolved;
+  }
+  return null;
+}
+
+/**
  * Load all instruction files and return them as a combined tagged block.
  *
  * Sources (in order):
  *   1. Project-level AGENTS.md  (workdir/AGENTS.md)
- *   2. User-level ALEXI.md     (~/.alexi/ALEXI.md)
- *   3. Project-level rule files (workdir/.alexi/rules/*.md)
+ *   2. Global AGENTS.md         ($XDG_CONFIG_HOME/AGENTS.md → ~/.config/AGENTS.md → ~/AGENTS.md)
+ *   3. User-level ALEXI.md      (~/.alexi/ALEXI.md)
+ *   4. Project-level rule files (workdir/.alexi/rules/*.md)
  */
 function loadInstructionFiles(workdir: string): string {
   const parts: string[] = [];
 
   // 1. Project AGENTS.md
-  const agentsMd = loadTextFile(path.join(workdir, 'AGENTS.md'));
+  const projectAgentsPath = path.join(workdir, 'AGENTS.md');
+  const agentsMd = loadTextFile(projectAgentsPath);
+  let projectAgentsResolved: string | null = null;
   if (agentsMd) {
     parts.push(`<agents-md>\n${agentsMd}\n</agents-md>`);
+    projectAgentsResolved = safeRealpath(projectAgentsPath);
   }
 
-  // 2. User-level ~/.alexi/ALEXI.md
+  // 2. Global AGENTS.md (XDG_CONFIG_HOME → ~/.config → ~)
+  const globalAgentsPath = findGlobalAgentsMd(projectAgentsResolved);
+  if (globalAgentsPath) {
+    const globalAgentsContent = loadTextFile(globalAgentsPath);
+    if (globalAgentsContent) {
+      parts.push(
+        `<global-agents-md path="${globalAgentsPath}">\n${globalAgentsContent}\n</global-agents-md>`
+      );
+    }
+  }
+
+  // 3. User-level ~/.alexi/ALEXI.md
   const userMd = loadTextFile(path.join(os.homedir(), '.alexi', 'ALEXI.md'));
   if (userMd) {
     parts.push(`<user-instructions>\n${userMd}\n</user-instructions>`);
   }
 
-  // 3. Project .alexi/rules/*.md
+  // 4. Project .alexi/rules/*.md
   const rulesDir = path.join(workdir, '.alexi', 'rules');
   try {
     const ruleFiles = fs
@@ -216,7 +275,7 @@ export interface AssembleOptions {
  *   2. Model-specific prompt (based on modelId)
  *   3. Environment info block
  *   4. Agent role prompt (based on agentId)
- *   5. Instruction files (AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
+ *   5. Instruction files (AGENTS.md, global AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
  *   6. Custom rules (user-provided)
  */
 export function buildAssembledSystemPrompt(options: AssembleOptions = {}): string {
