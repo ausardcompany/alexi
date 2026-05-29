@@ -28,6 +28,7 @@ interface ReadFileResult {
   totalLines: number;
   shownLines: number;
   offset: number;
+  partial?: boolean;
 }
 
 interface ReadDirResult {
@@ -185,6 +186,23 @@ Usage:
       const output = numberedLines.join('\n');
       const { content: truncated, truncated: wasTruncated } = truncateOutput(output);
 
+      // Implicit whole-file read: caller did not specify offset or limit.
+      const isImplicitWholeFileRead = params.offset === undefined && params.limit === undefined;
+      const isPartialView = wasTruncated && isImplicitWholeFileRead;
+
+      // Compute the next offset for resumed reads. When the rendered output is
+      // truncated by line budget we may have shown fewer than `selectedLines.length`
+      // lines, but for both branches `endIdx + 1` is the next 1-indexed line that
+      // was not yet shown (capped by `Math.min` against `lines.length` above).
+      const nextOffset = endIdx + 1;
+
+      let hint: string | undefined;
+      if (isPartialView) {
+        hint = `PARTIAL view — file has ${totalLines} lines, showing 1..${endIdx}. Call read again with offset=${nextOffset} to continue.`;
+      } else if (wasTruncated) {
+        hint = `Output truncated. Use offset=${nextOffset} to continue reading.`;
+      }
+
       return {
         success: true,
         data: {
@@ -194,11 +212,10 @@ Usage:
           totalLines,
           shownLines: selectedLines.length,
           offset,
+          ...(isPartialView ? { partial: true } : {}),
         },
         truncated: wasTruncated,
-        hint: wasTruncated
-          ? `Output truncated. Use offset=${endIdx + 1} to continue reading.`
-          : undefined,
+        hint,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
