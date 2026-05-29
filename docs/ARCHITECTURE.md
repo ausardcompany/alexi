@@ -589,6 +589,81 @@ interface TurnBoundary {
 
 The summarize mode delegates to `partialCompact()` from the compaction system, which uses the configured LLM summarize function to create a `[CONVERSATION SUMMARY]` system message.
 
+## Code Review Command
+
+The `code-review` command (`src/command/codeReview.ts`) runs a structured correctness-bug review
+over `git diff`. The same `executeCodeReview` core is exposed through three surfaces:
+
+| Surface | Entry point | File |
+|---------|-------------|------|
+| Non-interactive CLI | `alexi code-review` | `src/cli/commands/codeReview.ts` |
+| Legacy interactive REPL | `/code-review [effort]` | `src/cli/interactive.ts` (`handleCommand`) |
+| Ink TUI slash command | `/code-review [effort]` | `src/cli/tui/hooks/useCommands.ts` |
+
+The executor reads the diff with `child_process.execFile('git', ['diff', ...])` (no shell) so
+user-provided `--base <branch>` values cannot be interpreted as shell metacharacters. Reusing
+`execFile` instead of the bash tool also keeps the executor self-contained and easy to mock in
+unit tests.
+
+```mermaid
+flowchart TB
+    Entry["alexi code-review<br/>or /code-review"] --> Opts[Parse effort and target]
+    Opts --> Diff["readGitDiff()<br/>execFile('git', ['diff', ...])"]
+    Diff --> Empty{Diff empty?}
+    Empty -->|Yes| Skip["Return: 'No changes to review.'<br/>modelUsed=''  totalTokens=0"]
+    Empty -->|No| Pick["pickModelForEffort(effort)"]
+    Pick --> Override{modelOverride set?}
+    Override -->|Yes| UseOverride[Use modelOverride]
+    Override -->|No| ByEffort{effort?}
+    ByEffort -->|high| Reasoning["Find reasoning + expensive model<br/>fallback: any expensive<br/>fallback: getDefaultModel()"]
+    ByEffort -->|low| Cheap["Find costTier='cheap'<br/>fallback: getDefaultModel()"]
+    ByEffort -->|medium| Default["getDefaultModel()"]
+    Reasoning --> Build
+    Cheap --> Build
+    Default --> Build
+    UseOverride --> Build["buildSystemPrompt(effort)<br/>= EFFORT_PREAMBLE + codeReviewSkill.prompt"]
+    Build --> Send["sendChat(diff, { modelOverride, systemPrompt })"]
+    Send --> Result[Return CodeReviewResult]
+```
+
+### Effort levels
+
+The effort level controls both the system prompt preamble and the model selection:
+
+| Effort | Preamble | Model preference |
+|--------|----------|------------------|
+| `low` | "Focus only on critical correctness bugs. Skip style and nice-to-haves." | `costTier === 'cheap'` |
+| `medium` | _(none)_ | `getDefaultModel()` |
+| `high` | "Be thorough: trace edge cases, race conditions, error handling, security implications, and test coverage gaps." | `reasoning === true` AND `costTier === 'expensive'` |
+
+The base system prompt is the `code-review` skill prompt from `src/skill/skills/index.ts`,
+preserving the structured `MUST FIX / SHOULD IMPROVE / NICE TO HAVE` review format.
+
+### Targets
+
+```typescript
+export type CodeReviewTarget = 'uncommitted' | { base: string };
+```
+
+- `'uncommitted'` (default) → `git diff HEAD`
+- `{ base: 'main' }` → `git diff main...HEAD`
+
+The non-interactive CLI exposes both targets via `--base <branch>`. The interactive slash
+commands only review uncommitted changes; use the CLI for base-branch reviews.
+
+### Cancellation
+
+The legacy REPL slash command creates a dedicated `AbortController` for the review and stores
+it as `state.abortController` so Ctrl+C cancels the in-flight review without cancelling the
+session. The original abort controller is restored in a `finally` block. The executor itself
+checks `opts.signal?.aborted` before reading the diff and again before invoking the model.
+
+### Empty-diff fast path
+
+When `git diff` returns an empty string the executor returns
+`{ success: true, review: 'No changes to review.', modelUsed: '', totalTokens: 0 }` without
+invoking `sendChat`. Both interactive surfaces and the CLI handle this transparently.
+
 ## Network Management
 
 The `NetworkManager` class (`src/core/network.ts`) provides automatic reconnection with exponential backoff to prevent session loss during network interruptions:

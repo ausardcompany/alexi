@@ -533,26 +533,74 @@ When modifying workflows:
 
 ## Adding New Slash Commands
 
-When adding a new interactive REPL command (like `/rewind`):
+When adding a new interactive REPL command (like `/rewind` or `/code-review`):
 
 1. **Add to completer registry** (`src/cli/utils/completer.ts`):
    ```typescript
-   { name: 'mycommand', description: 'What it does', category: 'session' }
+   { name: 'mycommand', description: 'What it does', category: 'general' }
    ```
 
-2. **Implement handler** in `src/cli/interactive.ts` under the `handleCommand` switch:
+2. **Implement handler in the legacy REPL** (`src/cli/interactive.ts`) under the
+   `handleCommand` switch. If the command runs a long-running async task, swap in a
+   dedicated `AbortController` so Ctrl+C cancels only the task and not the session,
+   then restore the previous controller in `finally`:
    ```typescript
    case 'mycommand': {
-     // Implementation
+     const taskAbort = new AbortController();
+     const prev = state.abortController;
+     state.abortController = taskAbort;
+     try {
+       const { executeMyCommand } = await import('../command/mycommand.js');
+       await executeMyCommand({ signal: taskAbort.signal });
+     } finally {
+       state.abortController = prev;
+     }
      return true;
    }
    ```
 
-3. **Create implementation module** in `src/command/mycommand.ts` for complex logic
+3. **Wire the Ink TUI slash command** (`src/cli/tui/hooks/useCommands.ts`) by appending
+   to the array returned from `buildCommands`. Use `addSystemMessage` to surface output:
+   ```typescript
+   {
+     name: 'mycommand',
+     description: 'What it does',
+     category: 'general',
+     execute: async (args, _ctx) => {
+       const { executeMyCommand } = await import('../../../command/mycommand.js');
+       const result = await executeMyCommand({ /* ... */ });
+       deps.addSystemMessage(result.output);
+       return true;
+     },
+   }
+   ```
 
-4. **Write tests** in `tests/command/mycommand.test.ts` following the pattern in `tests/command/rewind.test.ts`
+4. **Create the implementation module** in `src/command/mycommand.ts`. Keep it
+   self-contained (no `process.exit`, no direct stdout writes) so it can be reused
+   by the CLI subcommand and both interactive surfaces. Accept an `AbortSignal` and
+   an `onProgress` callback when applicable.
 
-5. **Update documentation** in `docs/API.md` under Interactive Mode Commands
+5. **Add a non-interactive CLI subcommand** in `src/cli/commands/mycommand.ts` and
+   register it in `src/cli/commands/index.ts` (`registerAllCommands`):
+   ```typescript
+   import { registerMyCommand } from './mycommand.js';
+   // inside registerAllCommands:
+   registerMyCommand(program);
+   ```
+
+6. **Write tests** in two places:
+   - `tests/command/mycommand.test.ts` -- core executor (mock external deps like
+     `child_process` or `sendChat`). See `tests/command/codeReview.test.ts` for a
+     reference covering effort routing, cancellation, and an empty-input fast path.
+   - `src/cli/commands/__tests__/mycommand.test.ts` -- Commander wiring smoke test
+     using `Command.exitOverride()`. See `src/cli/commands/__tests__/codeReview.test.ts`.
+
+7. **Update documentation**:
+   - `docs/API.md` under both **CLI Commands** (subcommand) and **Interactive Mode
+     Commands** (slash command)
+   - `docs/ARCHITECTURE.md` if the command introduces a non-trivial flow
+   - `docs/TESTING.md` if the test pattern differs from existing commands
+   - `CHANGELOG.md` under `[Unreleased]`
 
 ## Getting Help
 

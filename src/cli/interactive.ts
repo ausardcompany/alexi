@@ -204,6 +204,10 @@ function printHelp(): void {
   console.log(
     c('yellow', '  /goal <condition>') + c('gray', '  - Run autonomously until condition is met')
   );
+  console.log(
+    c('yellow', '  /code-review [low|medium|high]') +
+      c('gray', ' - Review uncommitted changes for correctness bugs')
+  );
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
   console.log();
@@ -810,6 +814,57 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         }
       } finally {
         state.abortController = originalAbort;
+      }
+      return true;
+    }
+
+    case 'code-review': {
+      const effortArg = (args[0] ?? '').toLowerCase();
+      let effort: 'low' | 'medium' | 'high' = 'medium';
+      if (effortArg === 'low' || effortArg === 'medium' || effortArg === 'high') {
+        effort = effortArg;
+      } else if (effortArg !== '') {
+        console.log(c('yellow', `\n  Unknown effort '${effortArg}'. Using 'medium'.\n`));
+      }
+
+      const reviewAbort = new AbortController();
+      const prevAbort = state.abortController;
+      state.abortController = reviewAbort;
+
+      console.log(c('cyan', `\n  Code review (effort: ${effort})`));
+      console.log(c('dim', '  Press Ctrl+C to cancel\n'));
+
+      try {
+        const { executeCodeReview } = await import('../command/codeReview.js');
+        const result = await executeCodeReview({
+          effort,
+          workdir: process.cwd(),
+          signal: reviewAbort.signal,
+          onProgress: (msg) => console.log(c('dim', `  ${msg}`)),
+        });
+
+        console.log();
+        console.log(result.review);
+        console.log();
+        console.log(
+          c(
+            'gray',
+            `  effort=${result.effort}  diff=${result.diffBytes}B  ` +
+              `tokens=${result.totalTokens.toLocaleString()}  ` +
+              `elapsed=${(result.elapsedMs / 1000).toFixed(1)}s`
+          )
+        );
+        console.log();
+      } catch (err) {
+        if (reviewAbort.signal.aborted) {
+          console.log(c('yellow', '\n  Code review cancelled\n'));
+        } else {
+          console.log(
+            c('red', `\n  Code review error: ${err instanceof Error ? err.message : String(err)}\n`)
+          );
+        }
+      } finally {
+        state.abortController = prevAbort;
       }
       return true;
     }
