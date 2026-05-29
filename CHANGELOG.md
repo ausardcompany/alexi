@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored the `truthy()` helper in the core flag module (`src/core/flag.ts`) that the `KILO_DISABLE_EXTERNAL_SKILLS` export depends on. The helper had been removed in an earlier change, leaving an unreferenced symbol that broke compilation and prevented the flag from being evaluated. The exported flag now correctly resolves to `true` when the environment variable is set to `"true"` or `"1"` (case-insensitive) and `false` otherwise.
+
 ### Changed
 
-- Normalized string quote style in core flag module (`src/core/flag.ts`): replaced escaped double quotes with single quotes for the `KILO_DISABLE_EXTERNAL_SKILLS` environment variable lookup, aligning with the project Prettier `singleQuote: true` convention. No behavioral change.
+- Documented `KILO_DISABLE_EXTERNAL_SKILLS` as a supported optional environment variable in `docs/API.md`.
 
 ## [0.5.2] - 2026-05-25
 

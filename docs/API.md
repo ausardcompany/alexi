@@ -472,6 +472,7 @@ The TUI provides Tab completion for:
 | `SAP_PROXY_API_KEY` | -- | Proxy endpoint API key |
 | `MORPH_API_KEY` | -- | WarpGrep semantic search API key |
 | `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | -- | Enable background task execution |
+| `KILO_DISABLE_EXTERNAL_SKILLS` | `false` | When set to `true` or `1` (case-insensitive), disables loading of external skills. Evaluated once at module load time via `src/core/flag.ts`. |
 
 ### AICORE_SERVICE_KEY Format
 
