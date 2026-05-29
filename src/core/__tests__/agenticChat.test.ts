@@ -179,7 +179,7 @@ describe('agenticChat', () => {
       expect(result.text).toBe('I have written the file.');
       expect(result.iterations).toBe(2);
       expect(result.toolCallsExecuted).toBe(1);
-      expect(result.toolCallSummary).toEqual([{ name: 'write', success: true }]);
+      expect(result.toolCallSummary).toMatchObject([{ name: 'write', success: true }]);
       expect(mockWriteTool.execute).toHaveBeenCalledWith(
         { filePath: '/test.txt', content: 'hello' },
         expect.objectContaining({ workdir: expect.any(String) })
@@ -317,7 +317,7 @@ describe('agenticChat', () => {
 
       const result = await agenticChat('Use unknown tool');
 
-      expect(result.toolCallSummary).toEqual([
+      expect(result.toolCallSummary).toMatchObject([
         { name: 'unknown_tool', success: false, error: 'Unknown tool: unknown_tool' },
       ]);
     });
@@ -391,7 +391,7 @@ describe('agenticChat', () => {
 
       const result = await agenticChat('Run failing tool');
 
-      expect(result.toolCallSummary).toEqual([
+      expect(result.toolCallSummary).toMatchObject([
         { name: 'failing', success: false, error: 'Tool execution error: Tool crashed' },
       ]);
     });

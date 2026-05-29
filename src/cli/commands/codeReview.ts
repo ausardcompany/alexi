@@ -18,6 +18,8 @@ interface CodeReviewCliOptions {
   base?: string;
   model?: string;
   workdir?: string;
+  fix?: boolean;
+  fixMax?: number;
 }
 
 function parseEffort(value: string | undefined): CodeReviewEffort {
@@ -36,6 +38,13 @@ export function registerCodeReviewCommand(program: Command): void {
     .option('--base <branch>', 'Compare against this base branch instead of HEAD')
     .option('--model <id>', 'Override the model used for the review')
     .option('--workdir <path>', 'Working directory for the git invocation')
+    .option('--fix', 'Apply MUST FIX findings as edits via the agentic loop')
+    .option(
+      '--fix-max <n>',
+      'Maximum findings to auto-apply when --fix is set (default: 10)',
+      (v) => parseInt(v, 10),
+      10
+    )
     .action(async (opts: CodeReviewCliOptions) => {
       try {
         const effort = parseEffort(opts.effort);
@@ -46,13 +55,39 @@ export function registerCodeReviewCommand(program: Command): void {
           target,
           workdir: opts.workdir,
           modelOverride: opts.model,
+          fix: opts.fix,
+          fixMaxFindings: opts.fixMax,
           onProgress: (msg) => process.stderr.write(`[code-review] ${msg}\n`),
         });
+
+        if (!result.success && result.error) {
+          process.stderr.write(`code-review failed: ${result.error}\n`);
+          process.exit(1);
+        }
 
         process.stdout.write(result.review);
         if (!result.review.endsWith('\n')) {
           process.stdout.write('\n');
         }
+
+        if (result.fixesApplied) {
+          const counts = { applied: 0, skipped: 0, failed: 0 };
+          for (const fa of result.fixesApplied) {
+            counts[fa.status]++;
+          }
+          process.stdout.write('\n## Fixes\n');
+          for (const fa of result.fixesApplied) {
+            process.stdout.write(
+              `- [${fa.status}] ${fa.file || '(no file)'}` +
+                (fa.reason ? ` — ${fa.reason}` : '') +
+                '\n'
+            );
+          }
+          process.stderr.write(
+            `\n[code-review] fixes: ${counts.applied} applied, ${counts.skipped} skipped, ${counts.failed} failed\n`
+          );
+        }
+
         process.stderr.write(
           `\n[code-review] effort=${result.effort} diff=${result.diffBytes}B ` +
             `tokens=${result.totalTokens.toLocaleString()} ` +

@@ -107,6 +107,8 @@ export interface AgenticChatResult {
     name: string;
     success: boolean;
     error?: string;
+    /** Raw JSON arguments string emitted by the model (best-effort, may be invalid JSON) */
+    arguments?: string;
   }>;
 }
 
@@ -451,7 +453,12 @@ export async function agenticChat(
   // Tracking
   let iterations = 0;
   let toolCallsExecuted = 0;
-  const toolCallSummary: Array<{ name: string; success: boolean; error?: string }> = [];
+  const toolCallSummary: Array<{
+    name: string;
+    success: boolean;
+    error?: string;
+    arguments?: string;
+  }> = [];
   const totalUsage: TokenUsage = {
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -600,6 +607,7 @@ export async function agenticChat(
           name: toolCall.function.name,
           success: toolResult.success,
           error: toolResult.error,
+          arguments: toolCall.function.arguments,
         });
 
         // Add tool response to messages

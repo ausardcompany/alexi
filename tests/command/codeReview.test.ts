@@ -2,9 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mocks must be declared before importing the module under test.
 vi.mock('child_process', async () => {
-  // Provide both `execFile` (used via promisify) and a passthrough object.
+  // Provide `execFile` (used directly by codeReview.ts), `exec` (used via
+  // promisify by tool subsystems imported transitively via agenticChat),
+  // plus a `spawn` stub so transitive imports don't blow up.
   return {
     execFile: vi.fn(),
+    exec: vi.fn(),
+    spawn: vi.fn(),
   };
 });
 

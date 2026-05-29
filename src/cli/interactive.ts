@@ -205,8 +205,8 @@ function printHelp(): void {
     c('yellow', '  /goal <condition>') + c('gray', '  - Run autonomously until condition is met')
   );
   console.log(
-    c('yellow', '  /code-review [low|medium|high]') +
-      c('gray', ' - Review uncommitted changes for correctness bugs')
+    c('yellow', '  /code-review [low|medium|high] [--fix] [--fix-max=N]') +
+      c('gray', ' - Review uncommitted changes (use --fix to auto-apply)')
   );
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
@@ -819,19 +819,41 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     }
 
     case 'code-review': {
-      const effortArg = (args[0] ?? '').toLowerCase();
+      // Parse positional effort token + flags `--fix`, `--fix-max=N` / `--fix-max N`
       let effort: 'low' | 'medium' | 'high' = 'medium';
-      if (effortArg === 'low' || effortArg === 'medium' || effortArg === 'high') {
-        effort = effortArg;
-      } else if (effortArg !== '') {
-        console.log(c('yellow', `\n  Unknown effort '${effortArg}'. Using 'medium'.\n`));
+      let fix = false;
+      let fixMaxFindings: number | undefined;
+
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === '--fix') {
+          fix = true;
+        } else if (a.startsWith('--fix-max=')) {
+          const n = parseInt(a.slice('--fix-max='.length), 10);
+          if (!Number.isNaN(n) && n > 0) {
+            fixMaxFindings = n;
+          }
+        } else if (a === '--fix-max') {
+          const n = parseInt(args[i + 1] ?? '', 10);
+          if (!Number.isNaN(n) && n > 0) {
+            fixMaxFindings = n;
+            i++;
+          }
+        } else {
+          const lower = a.toLowerCase();
+          if (lower === 'low' || lower === 'medium' || lower === 'high') {
+            effort = lower;
+          } else if (lower !== '') {
+            console.log(c('yellow', `\n  Unknown argument '${a}'.`));
+          }
+        }
       }
 
       const reviewAbort = new AbortController();
       const prevAbort = state.abortController;
       state.abortController = reviewAbort;
 
-      console.log(c('cyan', `\n  Code review (effort: ${effort})`));
+      console.log(c('cyan', `\n  Code review (effort: ${effort}${fix ? ', --fix' : ''})`));
       console.log(c('dim', '  Press Ctrl+C to cancel\n'));
 
       try {
@@ -840,11 +862,41 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           effort,
           workdir: process.cwd(),
           signal: reviewAbort.signal,
+          fix,
+          fixMaxFindings,
           onProgress: (msg) => console.log(c('dim', `  ${msg}`)),
         });
 
+        if (!result.success && result.error) {
+          console.log(c('red', `\n  ${result.error}\n`));
+          return true;
+        }
+
         console.log();
         console.log(result.review);
+
+        if (result.fixesApplied) {
+          console.log();
+          const counts = { applied: 0, skipped: 0, failed: 0 };
+          for (const fa of result.fixesApplied) {
+            counts[fa.status]++;
+          }
+          console.log(
+            c(
+              'cyan',
+              `  Fixes: ${counts.applied} applied, ${counts.skipped} skipped, ${counts.failed} failed`
+            )
+          );
+          for (const fa of result.fixesApplied) {
+            const colour =
+              fa.status === 'applied' ? 'green' : fa.status === 'failed' ? 'red' : 'yellow';
+            console.log(
+              c(colour, `    [${fa.status}] ${fa.file || '(no file)'}`) +
+                (fa.reason ? c('gray', ` — ${fa.reason}`) : '')
+            );
+          }
+        }
+
         console.log();
         console.log(
           c(

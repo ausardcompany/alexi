@@ -59,6 +59,8 @@ export interface CommandDef {
   completesModel?: boolean;
   /** When `true` the first argument should be completed as a file path. */
   completesPath?: boolean;
+  /** Long-form option flags this command accepts (e.g. `'--fix'`, `'--fix-max'`). */
+  options?: readonly string[];
 }
 
 /**
@@ -80,6 +82,7 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
     name: 'code-review',
     description: 'Review uncommitted changes for correctness bugs',
     category: 'general',
+    options: ['--fix', '--fix-max'],
   },
   {
     name: 'bug',
@@ -398,9 +401,10 @@ function findCommandForLine(line: string): CommandDef | undefined {
  * Dispatch rules (evaluated in order):
  * 1. `/` with no space → slash-command completion
  * 2. `/model <partial>` → model-name completion
- * 3. Slash command with `completesPath` + space → file-path completion
- * 4. `@<partial>` anywhere in the line → file-path completion
- * 5. Otherwise → empty result
+ * 3. Slash command with `options` + cursor on `--…` token → option completion
+ * 4. Slash command with `completesPath` + space → file-path completion
+ * 5. `@<partial>` anywhere in the line → file-path completion
+ * 6. Otherwise → empty result
  *
  * @param line The full current input line.
  * @param cwd  Working directory for path resolution.
@@ -420,8 +424,37 @@ export function completeLine(line: string, cwd: string): CompletionResult {
     return completeModelName(partial);
   }
 
-  // 3. Path completion for commands flagged with `completesPath`.
+  // 3. Long-option completion: when the cursor sits on a `--…` token for a
+  //    command that declares an `options` list, complete it against that list.
   const cmd = findCommandForLine(line);
+  if (cmd?.options && cmd.options.length > 0) {
+    const lastSpace = line.lastIndexOf(' ');
+    const tail = lastSpace === -1 ? '' : line.slice(lastSpace + 1);
+    if (tail.startsWith('--')) {
+      const lowerTail = tail.toLowerCase();
+      const items: CompletionItem[] = [];
+      for (const opt of cmd.options) {
+        if (opt.toLowerCase().startsWith(lowerTail)) {
+          items.push({
+            text: opt,
+            display: opt,
+            score: 100 - (opt.length - tail.length),
+            kind: 'command',
+          });
+        }
+      }
+      if (items.length > 0) {
+        items.sort((a, b) => b.score - a.score);
+        return {
+          items,
+          replacementStart: lastSpace + 1,
+          replacementLength: tail.length,
+        };
+      }
+    }
+  }
+
+  // 4. Path completion for commands flagged with `completesPath`.
   if (cmd?.completesPath) {
     const spaceIdx = line.indexOf(' ');
     if (spaceIdx !== -1) {
@@ -436,7 +469,7 @@ export function completeLine(line: string, cwd: string): CompletionResult {
     }
   }
 
-  // 4. `@path` completion — find the last `@` and complete the text after it.
+  // 5. `@path` completion — find the last `@` and complete the text after it.
   const atIdx = line.lastIndexOf('@');
   if (atIdx !== -1) {
     const partial = line.slice(atIdx + 1);
