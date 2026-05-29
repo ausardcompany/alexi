@@ -273,6 +273,16 @@ export const SessionEnded = defineEvent(
   })
 );
 
+// Provider events
+export const ProviderModelFellBack = defineEvent(
+  'provider.modelFellBack',
+  z.object({
+    requestedModel: z.string(),
+    effectiveModel: z.string(),
+    timestamp: z.number(),
+  })
+);
+
 // Error events
 export const ErrorOccurred = defineEvent(
   'error.occurred',
