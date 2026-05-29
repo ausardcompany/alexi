@@ -10,7 +10,6 @@ import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 import { ShellId } from './shell/id.js';
-import { ShellPrompt } from './shell/prompt.js';
 
 const ShellParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
