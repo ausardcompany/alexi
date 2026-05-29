@@ -128,8 +128,8 @@ jobs:
 
           # Substitute variables
           TASK_PROMPT=$(echo "$TASK_TEMPLATE" | \
-            sed "s|{​{PROMPT_FILES}}|$FILE_LIST|g" | \
-            sed "s|{​{DATE}}|$TODAY|g")
+            sed "s|{{PROMPT_FILES}}|$FILE_LIST|g" | \
+            sed "s|{{DATE}}|$TODAY|g")
 
           # Append metrics context
           {
@@ -156,9 +156,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 12
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${​{ secrets.GITHUB_TOKEN }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "alexi-bot[bot]"
           git config user.email "alexi-bot[bot]@users.noreply.github.com"
@@ -289,7 +289,7 @@ jobs:
           ### Review Notes
 
           - Review each prompt change for correctness and clarity
-          - Ensure no template variables (`{​{VAR}}`) were accidentally removed
+          - Ensure no template variables (`{{VAR}}`) were accidentally removed
           - Check that safety constraints ("Do NOT" sections) are preserved
           - Verify backward compatibility with workflow YAML files
 

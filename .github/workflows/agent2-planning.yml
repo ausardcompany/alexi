@@ -98,29 +98,29 @@ jobs:
       - name: Build planning prompt
         if: steps.research.outputs.has_research == 'true' && steps.existing.outputs.should_skip != 'true'
         run: |
-          RESEARCH_FILE="${​{ steps.research.outputs.file }}"
-          MAX_ISSUES="${​{ inputs.max_issues || '5' }}"
-          DRY_RUN="${​{ inputs.dry_run || 'false' }}"
-          OPEN_COUNT="${​{ steps.existing.outputs.open_count }}"
+          RESEARCH_FILE="${{ steps.research.outputs.file }}"
+          MAX_ISSUES="${{ inputs.max_issues || '5' }}"
+          DRY_RUN="${{ inputs.dry_run || 'false' }}"
+          OPEN_COUNT="${{ steps.existing.outputs.open_count }}"
           TODAY=$(date -u +%Y-%m-%d)
 
           # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent2-planning-task.md)
 
           PROMPT=$(echo "$TEMPLATE" | \
-            sed "s|{​{RESEARCH_FILE}}|$RESEARCH_FILE|g" | \
-            sed "s|{​{MAX_ISSUES}}|$MAX_ISSUES|g" | \
-            sed "s|{​{DRY_RUN}}|$DRY_RUN|g" | \
-            sed "s|{​{OPEN_COUNT}}|$OPEN_COUNT|g" | \
-            sed "s|{​{DATE}}|$TODAY|g")
+            sed "s|{{RESEARCH_FILE}}|$RESEARCH_FILE|g" | \
+            sed "s|{{MAX_ISSUES}}|$MAX_ISSUES|g" | \
+            sed "s|{{DRY_RUN}}|$DRY_RUN|g" | \
+            sed "s|{{OPEN_COUNT}}|$OPEN_COUNT|g" | \
+            sed "s|{{DATE}}|$TODAY|g")
 
           # Handle conditional sections based on DRY_RUN
           if [ "$DRY_RUN" = "true" ]; then
-            echo "$PROMPT" | sed '/{​{^DRY_RUN}}/,/{​{\/DRY_RUN}}/d' | \
-              grep -v '{​{​#DRY_RUN}}' | grep -v '{​{/DRY_RUN}}' > /tmp/planning-prompt.txt
+            echo "$PROMPT" | sed '/{{^DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
+              grep -v '{{#DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/planning-prompt.txt
           else
-            echo "$PROMPT" | sed '/{​{​#DRY_RUN}}/,/{​{\/DRY_RUN}}/d' | \
-              grep -v '{​{^DRY_RUN}}' | grep -v '{​{/DRY_RUN}}' > /tmp/planning-prompt.txt
+            echo "$PROMPT" | sed '/{{#DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
+              grep -v '{{^DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/planning-prompt.txt
           fi
 
           echo "[OK] Planning prompt built from template ($(wc -l < /tmp/planning-prompt.txt) lines)"

@@ -112,9 +112,9 @@ jobs:
 
       - name: Build review prompt
         run: |
-          PR_NUMBER="${​{ steps.pr_info.outputs.pr_number }}"
-          BRANCH="${​{ steps.pr_info.outputs.branch }}"
-          ALL_PASSED="${​{ steps.checks.outputs.all_passed }}"
+          PR_NUMBER="${{ steps.pr_info.outputs.pr_number }}"
+          BRANCH="${{ steps.pr_info.outputs.branch }}"
+          ALL_PASSED="${{ steps.checks.outputs.all_passed }}"
 
           # Collect check results and failure logs
           CHECK_RESULTS=$(cat check-results.txt)
@@ -133,21 +133,21 @@ jobs:
           TEMPLATE=$(cat .github/prompts/agent4-review-task.md)
 
           PROMPT=$(echo "$TEMPLATE" | \
-            sed "s|{​{PR_NUMBER}}|$PR_NUMBER|g" | \
-            sed "s|{​{BRANCH}}|$BRANCH|g")
+            sed "s|{{PR_NUMBER}}|$PR_NUMBER|g" | \
+            sed "s|{{BRANCH}}|$BRANCH|g")
 
           # Substitute multi-line variables
           echo "$PROMPT" | \
-            awk -v results="$CHECK_RESULTS" '{gsub(/\{​\{CHECK_RESULTS\}\}/, results); print}' | \
-            awk -v logs="$FAILURE_LOGS" '{gsub(/\{​\{FAILURE_LOGS\}\}/, logs); print}' > /tmp/review-prompt-raw.txt
+            awk -v results="$CHECK_RESULTS" '{gsub(/\{\{CHECK_RESULTS\}\}/, results); print}' | \
+            awk -v logs="$FAILURE_LOGS" '{gsub(/\{\{FAILURE_LOGS\}\}/, logs); print}' > /tmp/review-prompt-raw.txt
 
           # Handle conditional sections based on HAS_FAILURES
           if [ "$ALL_PASSED" != "true" ]; then
-            cat /tmp/review-prompt-raw.txt | sed '/{​{^HAS_FAILURES}}/,/{​{\/HAS_FAILURES}}/d' | \
-              grep -v '{​{​#HAS_FAILURES}}' | grep -v '{​{/HAS_FAILURES}}' > /tmp/review-prompt.txt
+            cat /tmp/review-prompt-raw.txt | sed '/{{^HAS_FAILURES}}/,/{{\/HAS_FAILURES}}/d' | \
+              grep -v '{{#HAS_FAILURES}}' | grep -v '{{/HAS_FAILURES}}' > /tmp/review-prompt.txt
           else
-            cat /tmp/review-prompt-raw.txt | sed '/{​{​#HAS_FAILURES}}/,/{​{\/HAS_FAILURES}}/d' | \
-              grep -v '{​{^HAS_FAILURES}}' | grep -v '{​{/HAS_FAILURES}}' > /tmp/review-prompt.txt
+            cat /tmp/review-prompt-raw.txt | sed '/{{#HAS_FAILURES}}/,/{{\/HAS_FAILURES}}/d' | \
+              grep -v '{{^HAS_FAILURES}}' | grep -v '{{/HAS_FAILURES}}' > /tmp/review-prompt.txt
           fi
 
           rm -f /tmp/review-prompt-raw.txt

@@ -213,19 +213,19 @@ jobs:
       - name: Build healing prompt
         if: steps.limits.outputs.should_skip != 'true' && steps.logs.outputs.has_failures == 'true'
         run: |
-          WORKFLOW_NAME="${​{ steps.failed_run.outputs.workflow_name }}"
-          BRANCH="${​{ steps.failed_run.outputs.branch }}"
-          FAILED_JOBS="${​{ steps.logs.outputs.failed_jobs }}"
+          WORKFLOW_NAME="${{ steps.failed_run.outputs.workflow_name }}"
+          BRANCH="${{ steps.failed_run.outputs.branch }}"
+          FAILED_JOBS="${{ steps.logs.outputs.failed_jobs }}"
           FAILURE_REPORT=$(cat /tmp/failure-report.md)
 
           # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent-autohealing-task.md)
 
           echo "$TEMPLATE" | \
-            sed "s|{​{WORKFLOW_NAME}}|$WORKFLOW_NAME|g" | \
-            sed "s|{​{BRANCH}}|$BRANCH|g" | \
-            sed "s|{​{FAILED_JOBS}}|$FAILED_JOBS|g" | \
-            awk -v report="$FAILURE_REPORT" '{gsub(/\{​\{FAILURE_REPORT\}\}/, report); print}' \
+            sed "s|{{WORKFLOW_NAME}}|$WORKFLOW_NAME|g" | \
+            sed "s|{{BRANCH}}|$BRANCH|g" | \
+            sed "s|{{FAILED_JOBS}}|$FAILED_JOBS|g" | \
+            awk -v report="$FAILURE_REPORT" '{gsub(/\{\{FAILURE_REPORT\}\}/, report); print}' \
             > /tmp/healing-prompt.txt
 
           echo "[OK] Healing prompt built from template ($(wc -l < /tmp/healing-prompt.txt) lines)"

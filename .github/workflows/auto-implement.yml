@@ -188,7 +188,7 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --add-label "in-progress" --remove-label "auto-implement" || true
           gh issue comment "$ISSUE_NUMBER" --body "🤖 **Kilo** is starting to implement this feature automatically.
 
-          - **Branch**: \`${​{ steps.pick.outputs.branch_name }}\`
+          - **Branch**: \`${{ steps.pick.outputs.branch_name }}\`
           - **Model**: \`${AGENT_MODEL}\`
           - **Run**: [View workflow](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
 
@@ -200,8 +200,8 @@ jobs:
       - name: Build implementation prompt
         if: steps.pick.outputs.has_issue == 'true'
         run: |
-          ISSUE_NUMBER="${​{ steps.pick.outputs.issue_number }}"
-          ISSUE_TITLE="${​{ steps.pick.outputs.issue_title }}"
+          ISSUE_NUMBER="${{ steps.pick.outputs.issue_number }}"
+          ISSUE_TITLE="${{ steps.pick.outputs.issue_title }}"
 
           # Restore issue body
           ISSUE_BODY=""
@@ -214,11 +214,11 @@ jobs:
 
           # Perform substitutions
           PROMPT=$(echo "$TEMPLATE" | \
-            sed "s|{​{ISSUE_NUMBER}}|$ISSUE_NUMBER|g" | \
-            sed "s|{​{ISSUE_TITLE}}|$ISSUE_TITLE|g")
+            sed "s|{{ISSUE_NUMBER}}|$ISSUE_NUMBER|g" | \
+            sed "s|{{ISSUE_TITLE}}|$ISSUE_TITLE|g")
 
           # Replace multi-line ISSUE_BODY using a temp file approach
-          echo "$PROMPT" | awk -v body="$ISSUE_BODY" '{gsub(/\{​\{ISSUE_BODY\}\}/, body); print}' > /tmp/implement-prompt.txt
+          echo "$PROMPT" | awk -v body="$ISSUE_BODY" '{gsub(/\{\{ISSUE_BODY\}\}/, body); print}' > /tmp/implement-prompt.txt
 
           echo "[OK] Prompt built from template ($(wc -l < /tmp/implement-prompt.txt) lines)"
 

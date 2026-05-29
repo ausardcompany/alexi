@@ -81,23 +81,23 @@ jobs:
 
       - name: Build research prompt
         run: |
-          TODAY="${​{ steps.context.outputs.date }}"
-          FOCUS="${​{ steps.context.outputs.focus }}"
-          LAST_RESEARCH="${​{ steps.context.outputs.last_research }}"
+          TODAY="${{ steps.context.outputs.date }}"
+          FOCUS="${{ steps.context.outputs.focus }}"
+          LAST_RESEARCH="${{ steps.context.outputs.last_research }}"
 
           # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent1-research-task.md)
 
           PROMPT=$(echo "$TEMPLATE" | \
-            sed "s|{​{DATE}}|$TODAY|g" | \
-            sed "s|{​{FOCUS}}|$FOCUS|g" | \
-            sed "s|{​{LAST_RESEARCH}}|$LAST_RESEARCH|g")
+            sed "s|{{DATE}}|$TODAY|g" | \
+            sed "s|{{FOCUS}}|$FOCUS|g" | \
+            sed "s|{{LAST_RESEARCH}}|$LAST_RESEARCH|g")
 
           # Handle conditional sections (simple approach: remove block markers)
           if [ -n "$LAST_RESEARCH" ]; then
-            echo "$PROMPT" | grep -v '{​{#LAST_RESEARCH}}' | grep -v '{​{/LAST_RESEARCH}}' > /tmp/research-prompt.txt
+            echo "$PROMPT" | grep -v '{{#LAST_RESEARCH}}' | grep -v '{{/LAST_RESEARCH}}' > /tmp/research-prompt.txt
           else
-            echo "$PROMPT" | sed '/{​{#LAST_RESEARCH}}/,/{​{\/LAST_RESEARCH}}/d' > /tmp/research-prompt.txt
+            echo "$PROMPT" | sed '/{{#LAST_RESEARCH}}/,/{{\/LAST_RESEARCH}}/d' > /tmp/research-prompt.txt
           fi
 
           echo "[OK] Research prompt built from template ($(wc -l < /tmp/research-prompt.txt) lines)"
