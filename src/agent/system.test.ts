@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -156,6 +157,147 @@ describe('Prompt System', () => {
           expect(prompt).toContain(getAgentPrompt(agentId));
         }
       }
+    });
+  });
+
+  describe('Global AGENTS.md resolution', () => {
+    let tmpRoot: string;
+    let tmpHome: string;
+    let tmpProject: string;
+    let originalHome: string | undefined;
+    let originalUserProfile: string | undefined;
+    let originalXdg: string | undefined;
+
+    beforeEach(() => {
+      tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-agents-test-'));
+      tmpHome = path.join(tmpRoot, 'home');
+      tmpProject = path.join(tmpRoot, 'project');
+      fs.mkdirSync(tmpHome, { recursive: true });
+      fs.mkdirSync(tmpProject, { recursive: true });
+
+      originalHome = process.env.HOME;
+      originalUserProfile = process.env.USERPROFILE;
+      originalXdg = process.env.XDG_CONFIG_HOME;
+
+      process.env.HOME = tmpHome;
+      // Windows uses USERPROFILE for os.homedir()
+      process.env.USERPROFILE = tmpHome;
+      delete process.env.XDG_CONFIG_HOME;
+    });
+
+    afterEach(() => {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalXdg === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = originalXdg;
+      }
+
+      try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    });
+
+    it('honors $XDG_CONFIG_HOME/AGENTS.md', () => {
+      const xdgDir = path.join(tmpRoot, 'xdg');
+      fs.mkdirSync(xdgDir, { recursive: true });
+      const xdgFile = path.join(xdgDir, 'AGENTS.md');
+      fs.writeFileSync(xdgFile, 'XDG_FIXTURE_CONTENT');
+      process.env.XDG_CONFIG_HOME = xdgDir;
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      const resolved = fs.realpathSync(xdgFile);
+      expect(prompt).toContain(`<global-agents-md path="${resolved}">`);
+      expect(prompt).toContain('XDG_FIXTURE_CONTENT');
+      expect(prompt).toContain('</global-agents-md>');
+    });
+
+    it('falls back to ~/.config/AGENTS.md when XDG_CONFIG_HOME unset', () => {
+      const configDir = path.join(tmpHome, '.config');
+      fs.mkdirSync(configDir, { recursive: true });
+      const configFile = path.join(configDir, 'AGENTS.md');
+      fs.writeFileSync(configFile, 'CONFIG_FIXTURE_CONTENT');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      const resolved = fs.realpathSync(configFile);
+      expect(prompt).toContain(`<global-agents-md path="${resolved}">`);
+      expect(prompt).toContain('CONFIG_FIXTURE_CONTENT');
+    });
+
+    it('falls back to ~/AGENTS.md last', () => {
+      const homeFile = path.join(tmpHome, 'AGENTS.md');
+      fs.writeFileSync(homeFile, 'HOME_FIXTURE_CONTENT');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      const resolved = fs.realpathSync(homeFile);
+      expect(prompt).toContain(`<global-agents-md path="${resolved}">`);
+      expect(prompt).toContain('HOME_FIXTURE_CONTENT');
+    });
+
+    it('first hit wins (XDG > ~/.config > ~)', () => {
+      // Write all three.
+      const xdgDir = path.join(tmpRoot, 'xdg');
+      fs.mkdirSync(xdgDir, { recursive: true });
+      fs.writeFileSync(path.join(xdgDir, 'AGENTS.md'), 'XDG_WINS');
+      process.env.XDG_CONFIG_HOME = xdgDir;
+
+      const configDir = path.join(tmpHome, '.config');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(path.join(configDir, 'AGENTS.md'), 'CONFIG_LOSES');
+
+      fs.writeFileSync(path.join(tmpHome, 'AGENTS.md'), 'HOME_LOSES');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      expect(prompt).toContain('XDG_WINS');
+      expect(prompt).not.toContain('CONFIG_LOSES');
+      expect(prompt).not.toContain('HOME_LOSES');
+    });
+
+    it('de-dupes when ~/AGENTS.md is a symlink to project AGENTS.md', () => {
+      const projectFile = path.join(tmpProject, 'AGENTS.md');
+      fs.writeFileSync(projectFile, 'PROJECT_FIXTURE_UNIQUE_TOKEN');
+
+      const homeLink = path.join(tmpHome, 'AGENTS.md');
+      fs.symlinkSync(projectFile, homeLink);
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      // Project block present exactly once.
+      expect(prompt).toContain('<agents-md>');
+      const matches = prompt.match(/PROJECT_FIXTURE_UNIQUE_TOKEN/g) ?? [];
+      expect(matches.length).toBe(1);
+      // No global block when it would point at the same file.
+      expect(prompt).not.toContain('<global-agents-md');
     });
   });
 });
