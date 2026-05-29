@@ -121,23 +121,93 @@ export function loadSkillFromFile(filePath: string): Skill | null {
 }
 
 /**
- * Load all skills from a directory
+ * Check whether a path has a skill file extension.
  */
-export function loadSkillsFromDirectory(dirPath: string): Skill[] {
+function isSkillFileName(name: string): boolean {
+  return name.endsWith('.md') || name.endsWith('.yaml') || name.endsWith('.yml');
+}
+
+/**
+ * Load all skills from a directory.
+ *
+ * Follows symlinks: a symlinked file with a skill extension is loaded, and a
+ * symlinked subdirectory is recursed into. Cycles are guarded by a visited
+ * set keyed on resolved (`fs.realpathSync`) paths. Broken symlinks are logged
+ * via `console.warn` and skipped without aborting the rest of the traversal.
+ */
+export function loadSkillsFromDirectory(dirPath: string, visited?: Set<string>): Skill[] {
   const skills: Skill[] = [];
 
   if (!fs.existsSync(dirPath)) {
     return skills;
   }
 
-  const files = fs.readdirSync(dirPath);
+  const seen = visited ?? new Set<string>();
 
-  for (const file of files) {
-    if (file.endsWith('.md') || file.endsWith('.yaml') || file.endsWith('.yml')) {
-      const skill = loadSkillFromFile(path.join(dirPath, file));
-      if (skill) {
-        skills.push(skill);
+  let resolvedDir: string;
+  try {
+    resolvedDir = fs.realpathSync(dirPath);
+  } catch (error) {
+    console.warn(`Failed to resolve skill directory ${dirPath}:`, error);
+    return skills;
+  }
+
+  if (seen.has(resolvedDir)) {
+    return skills;
+  }
+  seen.add(resolvedDir);
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
+  } catch (error) {
+    console.warn(`Failed to read skill directory ${resolvedDir}:`, error);
+    return skills;
+  }
+
+  for (const entry of entries) {
+    const entryPath = path.join(resolvedDir, entry.name);
+
+    if (entry.isFile()) {
+      if (isSkillFileName(entry.name)) {
+        const skill = loadSkillFromFile(entryPath);
+        if (skill) {
+          skills.push(skill);
+        }
       }
+      continue;
+    }
+
+    if (entry.isSymbolicLink()) {
+      let resolvedTarget: string;
+      try {
+        resolvedTarget = fs.realpathSync(entryPath);
+      } catch (error) {
+        console.warn(`Skipping broken skill symlink ${entryPath}:`, error);
+        continue;
+      }
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(resolvedTarget);
+      } catch (error) {
+        console.warn(`Skipping broken skill symlink ${entryPath}:`, error);
+        continue;
+      }
+
+      if (stat.isFile() && isSkillFileName(entry.name)) {
+        const skill = loadSkillFromFile(entryPath);
+        if (skill) {
+          skills.push(skill);
+        }
+      } else if (stat.isDirectory()) {
+        skills.push(...loadSkillsFromDirectory(resolvedTarget, seen));
+      }
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      skills.push(...loadSkillsFromDirectory(entryPath, seen));
     }
   }
 
@@ -145,23 +215,39 @@ export function loadSkillsFromDirectory(dirPath: string): Skill[] {
 }
 
 /**
- * Get skill directories in precedence order (project first, then global)
+ * Get skill directories in precedence order (project first, then global).
+ *
+ * Each directory is resolved with `fs.realpathSync` so that, e.g., a project
+ * `.alexi/skills` symlinked to the global skills dir is not loaded twice.
  */
 export function skillDirectories(projectRoot: string): string[] {
   const dirs: string[] = [];
+  const seenResolved = new Set<string>();
   const globalPaths = getGlobalPaths();
 
+  const tryAdd = (candidate: string): void => {
+    if (!fs.existsSync(candidate)) {
+      return;
+    }
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(candidate);
+    } catch (error) {
+      console.warn(`Failed to resolve skill directory ${candidate}:`, error);
+      return;
+    }
+    if (seenResolved.has(resolved)) {
+      return;
+    }
+    seenResolved.add(resolved);
+    dirs.push(candidate);
+  };
+
   // Add project skills FIRST (higher precedence)
-  const projectSkillsDir = path.join(projectRoot, '.alexi', 'skills');
-  if (fs.existsSync(projectSkillsDir)) {
-    dirs.push(projectSkillsDir);
-  }
+  tryAdd(path.join(projectRoot, '.alexi', 'skills'));
 
   // Add global skills (lower precedence)
-  const globalSkillsDir = globalPaths.skills;
-  if (fs.existsSync(globalSkillsDir)) {
-    dirs.push(globalSkillsDir);
-  }
+  tryAdd(globalPaths.skills);
 
   return dirs;
 }
