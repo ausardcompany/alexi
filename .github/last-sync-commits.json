@@ -1,25 +1,25 @@
 {
   "kilocode": {
-    "last_synced_commit": "cd915e8337cf09c0686ea25dd8e84d1c7b43a411",
-    "last_synced_at": "2026-05-25T10:15:22Z",
+    "last_synced_commit": "cf9b7ea421305c2db4b5b28350af8d7ae22e829e",
+    "last_synced_at": "2026-05-29T09:57:49Z",
     "upstream": "Kilo-Org/kilocode",
     "fork": "ausard/kilocode"
   },
   "opencode": {
-    "last_synced_commit": "7703786498e2d3609f649168e54919c344fe10ee",
-    "last_synced_at": "2026-05-25T10:15:22Z",
+    "last_synced_commit": "710ed7cb3380b3ff923ff4d91fe505b9d24701de",
+    "last_synced_at": "2026-05-29T09:57:49Z",
     "upstream": "anomalyco/opencode",
     "fork": "ausard/opencode"
   },
   "claude-code": {
-    "last_synced_commit": "39e853e4074d90f27afdfb7ea601e0fc378bd0c5",
-    "last_synced_at": "2026-05-25T10:15:22Z",
+    "last_synced_commit": "2d5c3c6c85048de7a4426a91268076807ebaeba5",
+    "last_synced_at": "2026-05-29T09:57:49Z",
     "upstream": "anthropics/claude-code",
     "fork": "direct-clone"
   },
   "metadata": {
     "version": "1.1.0",
-    "workflow_run": "26395066055",
+    "workflow_run": "26630714849",
     "description": "Tracks last synced commits from upstream repositories"
   }
 }
