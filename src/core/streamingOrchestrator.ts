@@ -3,7 +3,11 @@
  * Uses SAP AI SDK Orchestration provider exclusively
  */
 
-import { getProviderForModel, getDefaultModel, type StreamChunk } from '../providers/index.js';
+import {
+  getProviderForModelWithFallback,
+  getDefaultModel,
+  type StreamChunk,
+} from '../providers/index.js';
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -112,8 +116,13 @@ export async function* streamChat(
   // Add current user message
   messages.push({ role: 'user', content: message });
 
-  // Get SAP Orchestration provider for this model
-  const provider = getProviderForModel(modelId);
+  // Get SAP Orchestration provider for this model, falling back to
+  // routingConfig.preferences.fallbackModel if the primary id is not recognized.
+  const resolution = getProviderForModelWithFallback(modelId);
+  const provider = resolution.provider;
+  if (resolution.usedFallback) {
+    modelId = resolution.effectiveModelId;
+  }
 
   // Build agent observability headers
   const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;

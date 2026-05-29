@@ -1,10 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock dependencies before importing the module
-vi.mock('../src/providers/index.js', () => ({
-  getProviderForModel: vi.fn(),
-  getDefaultModel: vi.fn(),
-}));
+vi.mock('../src/providers/index.js', () => {
+  const getProviderForModel = vi.fn();
+  return {
+    getProviderForModel,
+    // Delegate to getProviderForModel so existing tests that mock
+    // getProviderForModel continue to work without modification.
+    getProviderForModelWithFallback: vi.fn((modelId: string) => ({
+      provider: getProviderForModel(modelId),
+      effectiveModelId: modelId,
+      usedFallback: false,
+    })),
+    getDefaultModel: vi.fn(),
+  };
+});
 
 vi.mock('../src/core/router.js', () => ({
   routePrompt: vi.fn(),

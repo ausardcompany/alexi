@@ -4,7 +4,7 @@
  */
 
 import { routePrompt } from '../core/router.js';
-import { getProviderForModel } from '../providers/index.js';
+import { getProviderForModelWithFallback } from '../providers/index.js';
 import type { GitConfig } from './config.js';
 
 export interface ChangedFile {
@@ -62,11 +62,17 @@ export function buildHeuristicMessage(files: ChangedFile[], conventional: boolea
  */
 async function generateWithLLM(files: ChangedFile[], config: GitConfig): Promise<string | null> {
   try {
-    const modelId = config.commitMessage.model
+    let modelId = config.commitMessage.model
       ? config.commitMessage.model
       : routePrompt('summarize in 10 words', { preferCheap: true }).modelId;
 
-    const provider = getProviderForModel(modelId);
+    // Resolve provider, falling back to routingConfig.preferences.fallbackModel
+    // if the primary id is not recognized (e.g. typo in user config).
+    const resolution = getProviderForModelWithFallback(modelId);
+    const provider = resolution.provider;
+    if (resolution.usedFallback) {
+      modelId = resolution.effectiveModelId;
+    }
 
     const fileList = files
       .map((f) => {
