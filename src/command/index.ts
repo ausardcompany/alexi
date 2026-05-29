@@ -28,6 +28,17 @@ export const CommandSchema = z.object({
   arguments: z.array(CommandArgumentSchema).optional(),
   template: z.string(),
   source: z.string().optional(), // file path if loaded from file
+  /**
+   * Tools this command is allowed to use (allowlist). Loaded from the `tools`
+   * frontmatter field of markdown commands.
+   */
+  tools: z.array(z.string()).optional(),
+  /**
+   * Tools that must not be available while this command is active (denylist).
+   * Loaded from `disallowed-tools` (upstream kebab-case), `disallowedTools`,
+   * or the legacy `disabledTools` frontmatter field — all three are synonyms.
+   */
+  disabledTools: z.array(z.string()).optional(),
 });
 
 export type Command = z.infer<typeof CommandSchema>;
@@ -234,6 +245,8 @@ export function loadCommandFromFile(filePath: string): Command | null {
       arguments: parsedArguments,
       template: templateContent.trim(),
       source: filePath,
+      tools: data.tools,
+      disabledTools: data['disallowed-tools'] ?? data.disallowedTools ?? data.disabledTools,
     };
 
     // Validate the command schema

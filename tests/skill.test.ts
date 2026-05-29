@@ -133,6 +133,110 @@ You are a simple assistant.
       expect(skill).toBeNull();
     });
 
+    it('should accept kebab-case "disallowed-tools" frontmatter (upstream alias)', () => {
+      const skillContent = `---
+id: kebab-skill
+name: Kebab Skill
+description: Uses kebab-case disallowed-tools
+disallowed-tools:
+  - bash
+  - write
+---
+
+You may not use bash or write.
+`;
+      const filePath = path.join(tempDir, 'kebab-skill.md');
+      fs.writeFileSync(filePath, skillContent);
+
+      const skill = loadSkillFromFile(filePath);
+
+      expect(skill).not.toBeNull();
+      expect(skill!.disabledTools).toEqual(['bash', 'write']);
+    });
+
+    it('should accept camelCase "disallowedTools" frontmatter alias', () => {
+      const skillContent = `---
+id: camel-skill
+name: Camel Skill
+description: Uses camelCase disallowedTools
+disallowedTools:
+  - bash
+---
+
+No bash here.
+`;
+      const filePath = path.join(tempDir, 'camel-skill.md');
+      fs.writeFileSync(filePath, skillContent);
+
+      const skill = loadSkillFromFile(filePath);
+
+      expect(skill).not.toBeNull();
+      expect(skill!.disabledTools).toEqual(['bash']);
+    });
+
+    it('should accept legacy "disabledTools" frontmatter', () => {
+      const skillContent = `---
+id: legacy-skill
+name: Legacy Skill
+description: Uses legacy disabledTools
+disabledTools:
+  - bash
+  - delete
+---
+
+Legacy form.
+`;
+      const filePath = path.join(tempDir, 'legacy-skill.md');
+      fs.writeFileSync(filePath, skillContent);
+
+      const skill = loadSkillFromFile(filePath);
+
+      expect(skill).not.toBeNull();
+      expect(skill!.disabledTools).toEqual(['bash', 'delete']);
+    });
+
+    it('should prefer kebab-case "disallowed-tools" over other aliases', () => {
+      const skillContent = `---
+id: prio-skill
+name: Priority Skill
+description: All three present, kebab wins
+disallowed-tools:
+  - bash
+disallowedTools:
+  - write
+disabledTools:
+  - read
+---
+
+Priority test.
+`;
+      const filePath = path.join(tempDir, 'prio-skill.md');
+      fs.writeFileSync(filePath, skillContent);
+
+      const skill = loadSkillFromFile(filePath);
+
+      expect(skill).not.toBeNull();
+      expect(skill!.disabledTools).toEqual(['bash']);
+    });
+
+    it('should leave disabledTools undefined when no denylist field is present', () => {
+      const skillContent = `---
+id: nodeny-skill
+name: No Deny Skill
+description: No denylist
+---
+
+Nothing to deny.
+`;
+      const filePath = path.join(tempDir, 'nodeny-skill.md');
+      fs.writeFileSync(filePath, skillContent);
+
+      const skill = loadSkillFromFile(filePath);
+
+      expect(skill).not.toBeNull();
+      expect(skill!.disabledTools).toBeUndefined();
+    });
+
     it('should handle file with no frontmatter', () => {
       const skillContent = `You are a plain assistant without frontmatter.`;
 

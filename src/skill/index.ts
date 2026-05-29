@@ -82,7 +82,13 @@ export function defineSkill(definition: SkillDefinition): Skill {
 }
 
 /**
- * Load skill from markdown file with frontmatter
+ * Load skill from markdown file with frontmatter.
+ *
+ * Recognized frontmatter fields:
+ * - `tools` — allowlist of tools the skill may use
+ * - `disallowed-tools` (kebab-case, upstream Claude Code convention) — denylist of tools
+ *   the skill may not use. Also accepted as `disallowedTools` and the legacy `disabledTools`.
+ *   All three spellings are honored as synonyms; the kebab-case form takes precedence.
  */
 export function loadSkillFromFile(filePath: string): Skill | null {
   try {
@@ -96,7 +102,7 @@ export function loadSkillFromFile(filePath: string): Skill | null {
       prompt: promptContent.trim(),
       prompts: data.prompts,
       tools: data.tools,
-      disabledTools: data.disabledTools,
+      disabledTools: data['disallowed-tools'] ?? data.disallowedTools ?? data.disabledTools,
       preferredModel: data.preferredModel || data.model,
       temperature: data.temperature,
       maxTokens: data.maxTokens,
