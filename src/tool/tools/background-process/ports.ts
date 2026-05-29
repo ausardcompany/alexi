@@ -8,58 +8,56 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-export namespace BackgroundPorts {
-  export async function detectForPid(pid: number): Promise<number[]> {
-    const platform = process.platform;
+export async function detectForPid(pid: number): Promise<number[]> {
+  const platform = process.platform;
 
-    try {
-      if (platform === 'darwin' || platform === 'linux') {
-        return await detectUnixPorts(pid);
-      } else if (platform === 'win32') {
-        return await detectWindowsPorts(pid);
-      }
-    } catch {
-      return [];
+  try {
+    if (platform === 'darwin' || platform === 'linux') {
+      return await detectUnixPorts(pid);
+    } else if (platform === 'win32') {
+      return await detectWindowsPorts(pid);
     }
-
+  } catch {
     return [];
   }
 
-  async function detectUnixPorts(pid: number): Promise<number[]> {
-    try {
-      const { stdout } = await execAsync(`lsof -Pan -p ${pid} -i`);
-      const ports: number[] = [];
-      const lines = stdout.split('\n');
+  return [];
+}
 
-      for (const line of lines) {
-        const match = line.match(/:(\d+)\s+\(LISTEN\)/);
-        if (match) {
-          ports.push(parseInt(match[1], 10));
-        }
+async function detectUnixPorts(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execAsync(`lsof -Pan -p ${pid} -i`);
+    const ports: number[] = [];
+    const lines = stdout.split('\n');
+
+    for (const line of lines) {
+      const match = line.match(/:(\d+)\s+\(LISTEN\)/);
+      if (match) {
+        ports.push(parseInt(match[1], 10));
       }
-
-      return [...new Set(ports)];
-    } catch {
-      return [];
     }
+
+    return [...new Set(ports)];
+  } catch {
+    return [];
   }
+}
 
-  async function detectWindowsPorts(pid: number): Promise<number[]> {
-    try {
-      const { stdout } = await execAsync(`netstat -ano | findstr ${pid}`);
-      const ports: number[] = [];
-      const lines = stdout.split('\n');
+async function detectWindowsPorts(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execAsync(`netstat -ano | findstr ${pid}`);
+    const ports: number[] = [];
+    const lines = stdout.split('\n');
 
-      for (const line of lines) {
-        const match = line.match(/:(\d+)\s+.*LISTENING/);
-        if (match) {
-          ports.push(parseInt(match[1], 10));
-        }
+    for (const line of lines) {
+      const match = line.match(/:(\d+)\s+.*LISTENING/);
+      if (match) {
+        ports.push(parseInt(match[1], 10));
       }
-
-      return [...new Set(ports)];
-    } catch {
-      return [];
     }
+
+    return [...new Set(ports)];
+  } catch {
+    return [];
   }
 }

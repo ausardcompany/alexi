@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import { spawn, type ChildProcess } from 'child_process';
 import { defineTool, type ToolResult } from '../index.js';
-import { BackgroundPorts } from './background-process/ports.js';
+import * as BackgroundPorts from './background-process/ports.js';
 
 const BackgroundProcessParamsSchema = z.object({
   command: z.string().describe('The command to run as a background process'),

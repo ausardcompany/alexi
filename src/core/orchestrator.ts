@@ -1,4 +1,4 @@
-import { getProviderForModel, getDefaultModel } from '../providers/index.js';
+import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -60,8 +60,13 @@ export async function sendChat(
   // Add current user message
   messages.push({ role: 'user', content: message });
 
-  // Get SAP Orchestration provider for this model
-  const provider = getProviderForModel(modelId);
+  // Get SAP Orchestration provider for this model, automatically falling back
+  // to the configured fallback model if the primary id is not recognized.
+  const resolution = getProviderForModelWithFallback(modelId);
+  const provider = resolution.provider;
+  if (resolution.usedFallback) {
+    modelId = resolution.effectiveModelId;
+  }
 
   // Use SAP Orchestration complete() method
   const result = await provider.complete(messages, { maxTokens: 4096 });

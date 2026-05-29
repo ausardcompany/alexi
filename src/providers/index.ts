@@ -6,8 +6,9 @@
  */
 
 import { env } from '../config/env.js';
+import { loadRoutingConfig } from '../config/routingConfig.js';
 import { getConfigDefaultModel } from '../config/userConfig.js';
-import { SapOrchestrationProvider } from './sapOrchestration.js';
+import { isOrchestrationModel, SapOrchestrationProvider } from './sapOrchestration.js';
 
 // Re-export connectivity check
 export { checkConnectivity, type ConnectivityResult } from './connectivity.js';
@@ -58,6 +59,105 @@ export function getProviderForModel(modelId: string): SapOrchestrationProvider {
     modelName: modelId,
     resourceGroup: resourceGroup || undefined,
   });
+}
+
+/**
+ * Result of a fallback-aware provider resolution.
+ */
+export interface ProviderResolution {
+  provider: SapOrchestrationProvider;
+  effectiveModelId: string;
+  usedFallback: boolean;
+}
+
+/**
+ * Module-level dedup set so the "primary model not recognized" warning
+ * fires at most once per (badModelId, processLifetime) pair.
+ *
+ * Mirrors the dedup pattern used elsewhere for one-time startup notices.
+ */
+const warnedFor = new Set<string>();
+
+/**
+ * Resolve the fallback model id.
+ *
+ * Resolution order (first non-empty wins):
+ *   1. Explicit `fallbackModel` argument
+ *   2. `routingConfig.preferences.fallbackModel`
+ *   3. Hardcoded 'gpt-4o'
+ */
+function resolveFallbackModelId(fallbackModel?: string): string {
+  if (fallbackModel && fallbackModel.trim().length > 0) {
+    return fallbackModel.trim();
+  }
+
+  try {
+    const cfg = loadRoutingConfig();
+    const fromConfig = cfg.preferences?.fallbackModel;
+    if (fromConfig && fromConfig.trim().length > 0) {
+      return fromConfig.trim();
+    }
+  } catch {
+    // Routing config failed to load — fall through to hardcoded default
+  }
+
+  return 'gpt-4o';
+}
+
+/**
+ * Get the SAP Orchestration provider for the specified model, automatically
+ * falling back to the configured `fallbackModel` if the primary id is not
+ * recognized.
+ *
+ * If `modelId` is unknown, a single `console.warn` is emitted (deduplicated
+ * per bad-model-id for the process lifetime) and a provider is built for the
+ * fallback id instead. This mirrors Claude Code v2.1.152 behavior so a
+ * misconfigured `AICORE_MODEL` (typo, renamed deployment id, etc.) does not
+ * break every chat turn.
+ *
+ * `getProviderForModel` remains the low-level primitive that does no
+ * validation; this helper is the recommended entry point for chat pipelines.
+ *
+ * @param modelId - The configured/primary model identifier
+ * @param fallbackModel - Optional explicit fallback override
+ * @returns The provider, the model id actually used, and whether fallback fired
+ */
+export function getProviderForModelWithFallback(
+  modelId: string,
+  fallbackModel?: string
+): ProviderResolution {
+  if (isOrchestrationModel(modelId)) {
+    return {
+      provider: getProviderForModel(modelId),
+      effectiveModelId: modelId,
+      usedFallback: false,
+    };
+  }
+
+  const fallbackId = resolveFallbackModelId(fallbackModel);
+
+  if (!warnedFor.has(modelId)) {
+    warnedFor.add(modelId);
+    console.warn(
+      `Primary model '${modelId}' not recognized, falling back to '${fallbackId}' for this session`
+    );
+  }
+
+  return {
+    provider: getProviderForModel(fallbackId),
+    effectiveModelId: fallbackId,
+    usedFallback: true,
+  };
+}
+
+/**
+ * Test-only hook: clear the dedup cache so each unit test starts from
+ * a clean slate. Not part of the public surface.
+ *
+ * @internal
+ */
+export function _resetFallbackWarningCache(): void {
+  warnedFor.clear();
 }
 
 /**
