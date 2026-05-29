@@ -1,0 +1,19 @@
+name: Encoding Guard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for U+200B and other invisible chars
+        run: |
+          # U+200B (zero-width space)
+          if grep -rl $'\xe2\x80\x8b' .github/workflows src tests 2>/dev/null; then
+            echo "::error::Files above contain U+200B. Strip with: perl -i -pe 's/\\x{200b}//g' <file>"
+            exit 1
+          fi
+          echo "OK — no zero-width spaces detected"
