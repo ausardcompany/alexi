@@ -244,6 +244,80 @@ describe('Read Tool', () => {
     });
   });
 
+  describe('partial view for oversized files', () => {
+    it('should set partial=true and PARTIAL view hint on implicit whole-file read of oversized file', async () => {
+      const testFile = path.join(tempDir, 'huge.txt');
+      // Create > MAX_LINES (2000) lines, each long enough to push past the 50KB byte budget.
+      // 3000 lines x ~80 chars => ~240KB, so both line and byte budgets are exceeded.
+      const lineContent = 'x'.repeat(80);
+      const totalLines = 3000;
+      const content = Array.from({ length: totalLines }, (_, i) => `${lineContent}-${i}`).join(
+        '\n'
+      );
+      await fs.writeFile(testFile, content);
+
+      const result = await readTool.execute({ filePath: testFile }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.truncated).toBe(true);
+      expect(result.hint).toContain('PARTIAL view');
+      expect(result.hint).toMatch(/offset=\d+/);
+
+      if (result.data?.type === 'file') {
+        expect(result.data.partial).toBe(true);
+        expect(result.data.totalLines).toBe(totalLines);
+        // Default limit is MAX_LINES = 2000 starting from offset 1, so the next
+        // continuation offset should be 2001.
+        expect(result.hint).toContain('offset=2001');
+        expect(result.hint).toContain(`file has ${totalLines} lines`);
+        expect(result.hint).toContain('showing 1..2000');
+      }
+    });
+
+    it('should NOT set partial when caller explicitly provides offset/limit even if truncated', async () => {
+      const testFile = path.join(tempDir, 'huge-windowed.txt');
+      const lineContent = 'y'.repeat(80);
+      const totalLines = 3000;
+      const content = Array.from({ length: totalLines }, (_, i) => `${lineContent}-${i}`).join(
+        '\n'
+      );
+      await fs.writeFile(testFile, content);
+
+      // Explicit windowed read that still triggers byte-budget truncation.
+      const result = await readTool.execute(
+        { filePath: testFile, offset: 1, limit: 2000 },
+        context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.truncated).toBe(true);
+      // Should keep the existing (non-PARTIAL) hint behavior.
+      expect(result.hint).toBeDefined();
+      expect(result.hint).not.toContain('PARTIAL view');
+      expect(result.hint).toContain('Output truncated');
+      if (result.data?.type === 'file') {
+        expect(result.data.partial).toBeUndefined();
+      }
+    });
+
+    it('should NOT set partial on small files that fit within the budget', async () => {
+      const testFile = path.join(tempDir, 'small.txt');
+      const content = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join('\n');
+      await fs.writeFile(testFile, content);
+
+      const result = await readTool.execute({ filePath: testFile }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.truncated).toBeFalsy();
+      expect(result.hint).toBeUndefined();
+      if (result.data?.type === 'file') {
+        expect(result.data.partial).toBeUndefined();
+        expect(result.data.totalLines).toBe(50);
+        expect(result.data.shownLines).toBe(50);
+      }
+    });
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(readTool.name).toBe('read');
