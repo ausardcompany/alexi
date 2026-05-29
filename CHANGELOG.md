@@ -7,13 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- Restored the `truthy()` helper in the core flag module (`src/core/flag.ts`) that the `KILO_DISABLE_EXTERNAL_SKILLS` export depends on. The helper had been removed in an earlier change, leaving an unreferenced symbol that broke compilation and prevented the flag from being evaluated. The exported flag now correctly resolves to `true` when the environment variable is set to `"true"` or `"1"` (case-insensitive) and `false` otherwise.
+- **`code-review` command** (`src/command/codeReview.ts`): Structured correctness-bug review over `git diff`. Three new surfaces wire the same `executeCodeReview` core:
+  - Non-interactive CLI subcommand `alexi code-review` (`src/cli/commands/codeReview.ts`) with `--effort low|medium|high`, `--base <branch>`, `--model <id>`, and `--workdir <path>` flags
+  - Slash command `/code-review [low|medium|high]` in the legacy interactive REPL (`src/cli/interactive.ts`) with cancellation via Ctrl+C through a dedicated `AbortController`
+  - Slash command `/code-review` in the Ink-based TUI (`src/cli/tui/hooks/useCommands.ts`) routed through the shared command registry
+- **Effort-based model routing for code review** (`pickModelForEffort` in `src/command/codeReview.ts`): `high` prefers a reasoning + `expensive` cost-tier model, `low` prefers a `cheap` cost-tier model, `medium` uses `getDefaultModel()`. Falls back to the default model when no candidate matches.
+- **Empty-diff fast path**: Returns `No changes to review.` without invoking the LLM when `git diff HEAD` (or `git diff <base>...HEAD`) is empty, with `modelUsed: ''` and `totalTokens: 0` in the result.
+- **Slash command autocomplete entry** for `/code-review` (`src/cli/utils/completer.ts`).
+- **Tests** for the new code-review surfaces:
+  - `tests/command/codeReview.test.ts` — core executor, effort routing, empty-diff path, abort signal, and base-branch target
+  - `src/cli/commands/__tests__/codeReview.test.ts` — Commander wiring smoke test (subcommand registration, default uncommitted target, `--effort` and `--base` propagation)
 
 ### Changed
 
+- Interactive REPL `/help` listing now includes `/code-review [low|medium|high]` under the general commands section (`src/cli/interactive.ts`).
 - Documented `KILO_DISABLE_EXTERNAL_SKILLS` as a supported optional environment variable in `docs/API.md`.
+
+### Fixed
+
+- Restored the `truthy()` helper in the core flag module (`src/core/flag.ts`) that the `KILO_DISABLE_EXTERNAL_SKILLS` export depends on. The helper had been removed in an earlier change, leaving an unreferenced symbol that broke compilation and prevented the flag from being evaluated. The exported flag now correctly resolves to `true` when the environment variable is set to `"true"` or `"1"` (case-insensitive) and `false` otherwise.
 
 ## [0.5.2] - 2026-05-25
 

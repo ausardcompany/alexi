@@ -376,6 +376,84 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
       },
     },
 
+    // /code-review [effort] [--fix] [--fix-max=N] -----------------------------
+    {
+      name: 'code-review',
+      description: 'Review uncommitted changes for correctness bugs (use --fix to auto-apply)',
+      category: 'general',
+      execute: async (args, _ctx) => {
+        const tokens = args.trim().split(/\s+/).filter(Boolean);
+        let effort: 'low' | 'medium' | 'high' = 'medium';
+        let fix = false;
+        let fixMaxFindings: number | undefined;
+
+        for (let i = 0; i < tokens.length; i++) {
+          const a = tokens[i];
+          if (a === '--fix') {
+            fix = true;
+          } else if (a.startsWith('--fix-max=')) {
+            const n = parseInt(a.slice('--fix-max='.length), 10);
+            if (!Number.isNaN(n) && n > 0) {
+              fixMaxFindings = n;
+            }
+          } else if (a === '--fix-max') {
+            const n = parseInt(tokens[i + 1] ?? '', 10);
+            if (!Number.isNaN(n) && n > 0) {
+              fixMaxFindings = n;
+              i++;
+            }
+          } else {
+            const lower = a.toLowerCase();
+            if (lower === 'low' || lower === 'medium' || lower === 'high') {
+              effort = lower;
+            } else {
+              deps.addSystemMessage(`Unknown argument '${a}'.`);
+            }
+          }
+        }
+
+        deps.addSystemMessage(`Code review started (effort: ${effort}${fix ? ', --fix' : ''})`);
+        try {
+          const { executeCodeReview } = await import('../../../command/codeReview.js');
+          const result = await executeCodeReview({
+            effort,
+            workdir: process.cwd(),
+            fix,
+            fixMaxFindings,
+          });
+          if (!result.success && result.error) {
+            deps.addSystemMessage(result.error);
+            return true;
+          }
+          deps.addSystemMessage(result.review);
+          if (result.fixesApplied) {
+            const counts = { applied: 0, skipped: 0, failed: 0 };
+            for (const fa of result.fixesApplied) {
+              counts[fa.status]++;
+            }
+            deps.addSystemMessage(
+              `Fixes: ${counts.applied} applied, ${counts.skipped} skipped, ${counts.failed} failed`
+            );
+            for (const fa of result.fixesApplied) {
+              deps.addSystemMessage(
+                `  [${fa.status}] ${fa.file || '(no file)'}` + (fa.reason ? ` — ${fa.reason}` : '')
+              );
+            }
+          }
+          deps.addSystemMessage(
+            `effort=${result.effort}  diff=${result.diffBytes}B  ` +
+              `tokens=${result.totalTokens.toLocaleString()}  ` +
+              `elapsed=${(result.elapsedMs / 1000).toFixed(1)}s`
+          );
+        } catch (err) {
+          deps.addSystemMessage(
+            `Code review failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        return true;
+      },
+    },
+
     // /export [file] --------------------------------------------------------
     {
       name: 'export',

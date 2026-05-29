@@ -262,6 +262,117 @@ List all available Definition of Done checks.
 alexi dod-list
 ```
 
+### code-review
+
+Run a structured correctness-bug review over the current `git diff`. The command reuses the
+`code-review` skill prompt and is implemented in `src/command/codeReview.ts` (`executeCodeReview`).
+By default it reviews uncommitted changes (`git diff HEAD`); pass `--base <branch>` to compare
+against a base branch instead (`git diff <base>...HEAD`).
+
+```bash
+alexi code-review [options]
+```
+
+#### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--effort <level>` | `low` \| `medium` \| `high` | `medium` | Review effort. Controls prompt verbosity and model routing. |
+| `--base <branch>` | string | _(uncommitted)_ | Compare against this base branch instead of `HEAD`. |
+| `--model <id>` | string | _(routed by effort)_ | Override the model used for the review. Takes precedence over effort-based routing. |
+| `--workdir <path>` | string | `process.cwd()` | Working directory for the `git diff` invocation. |
+
+#### Examples
+
+```bash
+# Review uncommitted changes at medium effort
+alexi code-review
+
+# High-effort review (prefers a reasoning model)
+alexi code-review --effort high
+
+# Compare against main branch
+alexi code-review --base main
+
+# Override model and effort
+alexi code-review --effort low --model anthropic--claude-4-sonnet
+
+# Run against a different working directory
+alexi code-review --workdir /path/to/repo
+```
+
+#### Output
+
+The review is written to `stdout`. Progress messages and a final summary line
+(`effort`, `diff` size in bytes, total tokens, elapsed seconds) are written to `stderr`,
+making it safe to redirect the review to a file:
+
+```bash
+alexi code-review --effort high > review.md
+```
+
+If the diff is empty the command exits successfully with `No changes to review.` and does
+not invoke the LLM.
+
+#### Effort-based model routing
+
+`pickModelForEffort` in `src/command/codeReview.ts` selects the model when `--model` is not set:
+
+| Effort | Strategy |
+|--------|----------|
+| `high` | Prefer a model where `reasoning === true` AND `costTier === 'expensive'`; fall back to any `expensive` model; otherwise `getDefaultModel()`. |
+| `medium` | Use `getDefaultModel()` directly. |
+| `low` | Prefer a model where `costTier === 'cheap'`; otherwise `getDefaultModel()`. |
+
+The candidate set is the enabled-model list from `loadRoutingConfig()`
+(`src/config/routingConfig.ts`).
+
+#### Programmatic API
+
+`executeCodeReview` can also be called directly from TypeScript:
+
+```typescript
+import { executeCodeReview } from './src/command/codeReview.js';
+
+const result = await executeCodeReview({
+  effort: 'high',
+  target: { base: 'main' },          // or 'uncommitted'
+  workdir: process.cwd(),
+  modelOverride: undefined,
+  signal: abortController.signal,    // optional cancellation
+  onProgress: (msg) => console.log(msg),
+});
+
+console.log(result.review);
+console.log(`tokens=${result.totalTokens} elapsedMs=${result.elapsedMs}`);
+```
+
+The relevant TypeScript types:
+
+```typescript
+export type CodeReviewEffort = 'low' | 'medium' | 'high';
+export type CodeReviewTarget = 'uncommitted' | { base: string };
+
+export interface CodeReviewOptions {
+  effort?: CodeReviewEffort;          // default: 'medium'
+  target?: CodeReviewTarget;          // default: 'uncommitted'
+  workdir?: string;                   // default: process.cwd()
+  modelOverride?: string;
+  signal?: AbortSignal;
+  onProgress?: (msg: string) => void;
+}
+
+export interface CodeReviewResult {
+  success: boolean;
+  diffBytes: number;
+  effort: CodeReviewEffort;
+  review: string;                     // structured review or 'No changes to review.'
+  modelUsed: string;                  // empty for the empty-diff path
+  totalTokens: number;
+  elapsedMs: number;
+}
+```
+
 ## Agent Mode
 
 The `alexi agent` command provides fully autonomous task execution with tool access.
@@ -350,6 +461,7 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/map` | | Show repository map |
 | `/map-refresh` | | Rebuild repository map from scratch |
 | `/map-tokens` | | Set token budget for repository map |
+| `/code-review` | | Review uncommitted changes for correctness bugs (see below) |
 
 ### Model Management
 
@@ -402,6 +514,27 @@ interface RewindResult {
   summarizedCount?: number;
 }
 ```
+
+### Code Review
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/code-review` | Review uncommitted changes at medium effort | `/code-review` |
+| `/code-review <effort>` | Review uncommitted changes at the given effort level | `/code-review high` |
+
+The slash command is wired in two places that share the same `executeCodeReview` core:
+
+- **Legacy interactive REPL** (`src/cli/interactive.ts`): supports cancellation via Ctrl+C through a
+  dedicated `AbortController`. Progress and summary lines are printed to the terminal.
+- **Ink-based TUI** (`src/cli/tui/hooks/useCommands.ts`): the review and summary are surfaced as
+  system messages via `addSystemMessage`.
+
+Both surfaces only review uncommitted changes (`git diff HEAD`). Use the non-interactive
+`alexi code-review --base <branch>` form to compare against a base branch.
+
+Unknown effort values fall back to `medium` with a warning. Effort routing matches the CLI:
+`high` prefers a reasoning + expensive-tier model, `low` prefers a cheap-tier model, and
+`medium` uses `getDefaultModel()`.
 
 ### Data Export/Import
 

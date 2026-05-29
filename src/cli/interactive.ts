@@ -204,6 +204,10 @@ function printHelp(): void {
   console.log(
     c('yellow', '  /goal <condition>') + c('gray', '  - Run autonomously until condition is met')
   );
+  console.log(
+    c('yellow', '  /code-review [low|medium|high] [--fix] [--fix-max=N]') +
+      c('gray', ' - Review uncommitted changes (use --fix to auto-apply)')
+  );
   console.log();
   console.log(c('cyan', '  Configuration & System:'));
   console.log();
@@ -810,6 +814,109 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
         }
       } finally {
         state.abortController = originalAbort;
+      }
+      return true;
+    }
+
+    case 'code-review': {
+      // Parse positional effort token + flags `--fix`, `--fix-max=N` / `--fix-max N`
+      let effort: 'low' | 'medium' | 'high' = 'medium';
+      let fix = false;
+      let fixMaxFindings: number | undefined;
+
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === '--fix') {
+          fix = true;
+        } else if (a.startsWith('--fix-max=')) {
+          const n = parseInt(a.slice('--fix-max='.length), 10);
+          if (!Number.isNaN(n) && n > 0) {
+            fixMaxFindings = n;
+          }
+        } else if (a === '--fix-max') {
+          const n = parseInt(args[i + 1] ?? '', 10);
+          if (!Number.isNaN(n) && n > 0) {
+            fixMaxFindings = n;
+            i++;
+          }
+        } else {
+          const lower = a.toLowerCase();
+          if (lower === 'low' || lower === 'medium' || lower === 'high') {
+            effort = lower;
+          } else if (lower !== '') {
+            console.log(c('yellow', `\n  Unknown argument '${a}'.`));
+          }
+        }
+      }
+
+      const reviewAbort = new AbortController();
+      const prevAbort = state.abortController;
+      state.abortController = reviewAbort;
+
+      console.log(c('cyan', `\n  Code review (effort: ${effort}${fix ? ', --fix' : ''})`));
+      console.log(c('dim', '  Press Ctrl+C to cancel\n'));
+
+      try {
+        const { executeCodeReview } = await import('../command/codeReview.js');
+        const result = await executeCodeReview({
+          effort,
+          workdir: process.cwd(),
+          signal: reviewAbort.signal,
+          fix,
+          fixMaxFindings,
+          onProgress: (msg) => console.log(c('dim', `  ${msg}`)),
+        });
+
+        if (!result.success && result.error) {
+          console.log(c('red', `\n  ${result.error}\n`));
+          return true;
+        }
+
+        console.log();
+        console.log(result.review);
+
+        if (result.fixesApplied) {
+          console.log();
+          const counts = { applied: 0, skipped: 0, failed: 0 };
+          for (const fa of result.fixesApplied) {
+            counts[fa.status]++;
+          }
+          console.log(
+            c(
+              'cyan',
+              `  Fixes: ${counts.applied} applied, ${counts.skipped} skipped, ${counts.failed} failed`
+            )
+          );
+          for (const fa of result.fixesApplied) {
+            const colour =
+              fa.status === 'applied' ? 'green' : fa.status === 'failed' ? 'red' : 'yellow';
+            console.log(
+              c(colour, `    [${fa.status}] ${fa.file || '(no file)'}`) +
+                (fa.reason ? c('gray', ` — ${fa.reason}`) : '')
+            );
+          }
+        }
+
+        console.log();
+        console.log(
+          c(
+            'gray',
+            `  effort=${result.effort}  diff=${result.diffBytes}B  ` +
+              `tokens=${result.totalTokens.toLocaleString()}  ` +
+              `elapsed=${(result.elapsedMs / 1000).toFixed(1)}s`
+          )
+        );
+        console.log();
+      } catch (err) {
+        if (reviewAbort.signal.aborted) {
+          console.log(c('yellow', '\n  Code review cancelled\n'));
+        } else {
+          console.log(
+            c('red', `\n  Code review error: ${err instanceof Error ? err.message : String(err)}\n`)
+          );
+        }
+      } finally {
+        state.abortController = prevAbort;
       }
       return true;
     }

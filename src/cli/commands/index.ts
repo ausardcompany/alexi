@@ -13,6 +13,7 @@ import { registerNotesCommand } from './notes.js';
 import { registerDoDCommands } from './dod.js';
 import { registerInteractiveCommand } from './interactive.js';
 import { registerAgentCommand } from './agent.js';
+import { registerCodeReviewCommand } from './codeReview.js';
 
 /**
  * Register all CLI commands on the program
@@ -29,6 +30,7 @@ export function registerAllCommands(program: Command): void {
   registerStageCommands(program);
   registerNotesCommand(program);
   registerDoDCommands(program);
+  registerCodeReviewCommand(program);
 }
 
 export {
@@ -42,4 +44,5 @@ export {
   registerNotesCommand,
   registerDoDCommands,
   registerInteractiveCommand,
+  registerCodeReviewCommand,
 };
