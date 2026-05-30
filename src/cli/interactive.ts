@@ -28,6 +28,7 @@ import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { getCheckpointManager } from '../core/checkpoints.js';
 import { completeLine } from './utils/completer.js';
+import { hyperlink } from './tui/utils/hyperlink.js';
 import { compactConversation, estimateTokens } from '../core/compaction.js';
 import { DoDChecker } from '../core/dodChecker.js';
 import { getStageManager, type ConversationStage } from '../core/stageManager.js';
@@ -1173,8 +1174,12 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
     case 'bug':
     case 'feedback': {
       console.log(c('cyan', '\n  Report Issues & Feedback:\n'));
-      console.log(c('gray', '    GitHub Issues: https://github.com/user/alexi/issues'));
-      console.log(c('gray', '    Discussions:   https://github.com/user/alexi/discussions'));
+      console.log(
+        c('gray', `    GitHub Issues: ${hyperlink('https://github.com/user/alexi/issues')}`)
+      );
+      console.log(
+        c('gray', `    Discussions:   ${hyperlink('https://github.com/user/alexi/discussions')}`)
+      );
       console.log();
       console.log(c('dim', '  Please include:'));
       console.log(c('dim', '    - Steps to reproduce'));
