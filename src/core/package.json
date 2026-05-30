@@ -1,8 +1,0 @@
-{
-  "version": "7.3.18",
-  "description": "Core package for Alexi",
-  "main": "index.js",
-  "dependencies": {
-    // list of dependencies
-  }
-}
