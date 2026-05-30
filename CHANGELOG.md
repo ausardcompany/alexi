@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Broken upstream-sync stub files** (autohealing cleanup, commit `085951af`): The CI autohealer removed seven scaffold/stub files that had been emitted into the wrong locations by the daily upstream sync and were breaking the build:
+  - `src/tool/agent-manager.ts` (7-line stub referencing the non-existent `kilocode/tool` package; the real agent registry lives in `src/agent/`)
+  - `src/tool/notebook.ts` (12-line incomplete stub; the canonical notebook tool implementation is `src/tool/tools/notebook.ts`, registered via `src/tool/registry.ts`)
+  - `src/tool/read-docx.ts` (12-line stub depending on the un-installed `mammoth` package; no canonical implementation — `.docx` reading is not currently a supported tool)
+  - `src/tool/xlsx.ts` (single-line placeholder; XLSX text extraction is not currently a supported tool)
+  - `src/tool/task.ts` (single-line placeholder; the canonical task tool is `src/tool/tools/task.ts`)
+  - `src/tool/recall.test.ts` (single-line placeholder test; the canonical recall tool tests live alongside `src/tool/tools/recall.ts`)
+  - `src/core/package.json` (8-line malformed JSON fragment containing a `// list of dependencies` comment, which is not valid JSON; Alexi is a single-package npm project — the only valid `package.json` is the repository root one)
+- These deletions correct an earlier, incorrect changelog entry that claimed the document reader tools at `src/tool/notebook.ts` and `src/tool/read-docx.ts` had received a quote-style normalization. Those paths were never canonical implementations; only the stubs at those paths existed, and they have now been removed.
+
 ### Added
 
 - **`code-review` command** (`src/command/codeReview.ts`): Structured correctness-bug review over `git diff`. Three new surfaces wire the same `executeCodeReview` core:
