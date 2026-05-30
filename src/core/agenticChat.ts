@@ -487,11 +487,16 @@ export async function agenticChat(
   };
 
   // Tool context
+  // `agentsMdSeen` is per-execute: file-touching tools (e.g. `read`) walk
+  // parent dirs for AGENTS.md and emit them as `<system-reminder>` blocks the
+  // first time each one is encountered during this execution.
+  const agentsMdSeen = new Set<string>();
   const toolContext: ToolContext = {
     workdir,
     signal: options?.signal,
     sessionId: options?.sessionManager?.getCurrentSession()?.metadata.id,
     gitManager: options?.gitManager,
+    agentsMdSeen,
   };
 
   // Agent loop
@@ -637,6 +642,17 @@ export async function agenticChat(
           tool_call_id: id,
           content: JSON.stringify(toolResult),
         });
+
+        // If the tool surfaced any per-directory AGENTS.md reminders, inject
+        // them as a single synthetic user-role message so the model sees
+        // them on the next turn. Mirrors upstream kilocode #10707.
+        const reminders = (toolResult as ToolResult).metadata?.systemReminders;
+        if (reminders && reminders.length > 0) {
+          const body = reminders
+            .map((r) => `<system-reminder source="${r.source}">\n${r.content}\n</system-reminder>`)
+            .join('\n\n');
+          messages.push({ role: 'user', content: body });
+        }
 
         // Execute PostToolUse hooks and handle rejection feedback
         const hookContext = createHookContext('PostToolUse', {
