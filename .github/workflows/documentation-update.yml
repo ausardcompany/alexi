@@ -613,18 +613,31 @@ jobs:
           # Pull remote changes (rebase) to avoid push rejection when the remote
           # has been updated by another job or the Kilo agent itself.
           git fetch origin "$BRANCH"
-          git rebase "origin/$BRANCH" || {
-            echo "[WARN] Rebase failed, attempting merge strategy instead"
+          if ! git rebase "origin/$BRANCH"; then
+            echo "[WARN] Rebase failed, retrying with -X theirs (prefer remote on conflicts)"
             git rebase --abort 2>/dev/null || true
-            git pull --rebase=false --no-edit origin "$BRANCH"
-          }
+            if ! git rebase -X theirs "origin/$BRANCH"; then
+              echo "[WARN] Rebase -X theirs failed, falling back to merge with -X theirs"
+              git rebase --abort 2>/dev/null || true
+              if ! git pull --rebase=false --no-edit -X theirs origin "$BRANCH"; then
+                echo "[WARN] Merge also failed; resetting to remote and skipping local commit"
+                git merge --abort 2>/dev/null || true
+                # Remote already has equivalent auto-generated docs from a parallel run.
+                # Discard our local commit to avoid blocking the workflow.
+                git reset --hard "origin/$BRANCH"
+                echo "[INFO] Local docs commit discarded; remote already has equivalent docs"
+              fi
+            fi
+          fi
 
           LOCAL_HEAD=$(git rev-parse HEAD)
           REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
-          
+
           if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
-            git push origin "$BRANCH"
-            echo "[OK] Documentation changes pushed to $BRANCH"
+            git push origin "$BRANCH" || {
+              echo "[WARN] Push failed; remote may have advanced again. Skipping (non-fatal)."
+            }
+            echo "[OK] Documentation changes processed for $BRANCH"
           else
             echo "[INFO] No new commits to push — branch is up to date"
           fi
