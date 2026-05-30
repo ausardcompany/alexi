@@ -155,7 +155,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
 | `bash` | `bash.ts` | execute | Execute shell commands with timeout |
-| `read` | `read.ts` | read | Read files and directories |
+| `read` | `read.ts` | read | Read files and directories (auto-extracts text from `.docx` via mammoth and `.xlsx`/`.xlsm` via xlsx) |
 | `write` | `write.ts` | write | Write/create files |
 | `edit` | `edit.ts` | write | Exact string replacement in files |
 | `glob` | `glob.ts` | read | Find files by pattern |

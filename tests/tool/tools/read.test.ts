@@ -24,6 +24,7 @@ vi.mock('../../../src/tool/index.js', async () => {
 
 import { readTool } from '../../../src/tool/tools/read.js';
 import type { ToolContext } from '../../../src/tool/index.js';
+import * as XLSX from 'xlsx';
 
 describe('Read Tool', () => {
   let tempDir: string;
@@ -314,6 +315,33 @@ describe('Read Tool', () => {
         expect(result.data.partial).toBeUndefined();
         expect(result.data.totalLines).toBe(50);
         expect(result.data.shownLines).toBe(50);
+      }
+    });
+  });
+
+  describe('office documents', () => {
+    it('extracts XLSX content via the office branch instead of treating it as binary', async () => {
+      const file = path.join(tempDir, 'data.xlsx');
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet([
+          ['name', 'value'],
+          ['foo', 1],
+          ['bar', 2],
+        ]),
+        'Alpha'
+      );
+      XLSX.writeFile(wb, file);
+
+      const result = await readTool.execute({ filePath: file }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        expect(result.data.content).toContain('Workbook: data.xlsx');
+        expect(result.data.content).toContain('## Sheet: Alpha');
+        expect(result.data.content).toContain('foo,1');
+        expect(result.data.offset).toBe(1);
       }
     });
   });
