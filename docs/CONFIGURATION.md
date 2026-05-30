@@ -114,11 +114,18 @@ User configuration is stored in `~/.alexi/config.json` and persists settings acr
 ```typescript
 interface UserConfig {
   defaultModel?: string;          // Persistent default model
+  agent?: string;                 // Default agent slug for `alexi agent` / `alexi chat`
+                                  //   (overridden per-invocation by `--agent <name>`)
   soundEnabled?: boolean;         // Enable notification sounds
   autoRoute?: boolean;            // Auto-routing preference
   [key: string]: unknown;         // Extensible for custom settings
 }
 ```
+
+The `agent` field accepts any built-in agent slug (`code`, `debug`, `plan`,
+`explore`, `orchestrator`) or a custom agent slug loaded from
+`~/.alexi/agents/*.md` or `<project>/.alexi/agents/*.md`. Unknown slugs log
+a warning and fall back to the default agent (no crash).
 
 ### Managing Configuration
 

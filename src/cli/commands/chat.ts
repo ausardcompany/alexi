@@ -6,6 +6,9 @@ import { readFileSync } from 'node:fs';
 import type { Command } from 'commander';
 import { sendChat } from '../../core/orchestrator.js';
 import { SessionManager } from '../../core/sessionManager.js';
+import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
+import { getConfigDefaultAgent } from '../../config/userConfig.js';
+import { getAgentRegistry } from '../../agent/index.js';
 
 interface ChatOptions {
   message?: string;
@@ -15,6 +18,7 @@ interface ChatOptions {
   preferCheap?: boolean;
   session?: string;
   system?: string;
+  agent?: string;
 }
 
 export function registerChatCommand(program: Command): void {
@@ -27,6 +31,10 @@ export function registerChatCommand(program: Command): void {
     .option('--prefer-cheap', 'Prefer cheaper models when auto-routing')
     .option('--session <id>', 'Continue existing session')
     .option('--system <prompt>', 'System prompt for the conversation')
+    .option(
+      '--agent <name>',
+      'Agent slug whose system prompt and model become defaults (overrides `agent` field in user config). Tools are not enabled in chat mode, so agent tool restrictions are ignored.'
+    )
     .action(async (opts: ChatOptions) => {
       try {
         // Get message from either --message or --message-file
@@ -52,12 +60,36 @@ export function registerChatCommand(program: Command): void {
           console.log(`[Continuing session: ${session.metadata.title || opts.session}]`);
         }
 
+        // Resolve agent: --agent flag > config `agent` field > undefined.
+        // Unknown slugs log a warning and fall back to defaults.
+        const agentId = await resolveDefaultAgent({
+          cliFlag: opts.agent,
+          configValue: getConfigDefaultAgent(),
+        });
+
+        // For chat, the agent's system prompt and model become defaults.
+        // Tools are not enabled on this path, so `tools`/`disabledTools`
+        // on the agent are intentionally ignored.
+        let effectiveSystemPrompt = opts.system;
+        let effectiveModel = opts.model;
+        if (agentId) {
+          const agent = getAgentRegistry().get(agentId);
+          if (agent) {
+            if (!effectiveSystemPrompt) {
+              effectiveSystemPrompt = agent.systemPrompt;
+            }
+            if (!effectiveModel && agent.preferredModel) {
+              effectiveModel = agent.preferredModel;
+            }
+          }
+        }
+
         const res = await sendChat(message, {
-          modelOverride: opts.model,
+          modelOverride: effectiveModel,
           autoRoute: opts.autoRoute,
           preferCheap: opts.preferCheap,
           sessionManager,
-          systemPrompt: opts.system,
+          systemPrompt: effectiveSystemPrompt,
         });
 
         console.log(res.text);
