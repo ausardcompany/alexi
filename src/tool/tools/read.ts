@@ -15,6 +15,7 @@ import {
 } from '../encoded-io.js';
 import { getReferenceService } from '../../reference/reference.js';
 import { extractDocxText, extractXlsxText, isOfficeDocument } from './read-office.js';
+import { instructionsForPath } from '../../agent/system.js';
 
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
@@ -42,6 +43,37 @@ type ReadResult = ReadFileResult | ReadDirResult;
 
 // Store encoding info for later write operations
 const fileEncodings = new Map<string, EncodingInfo>();
+
+/**
+ * If `context.agentsMdSeen` is provided, walk parent directories of `absPath`
+ * looking for AGENTS.md files and attach any new finds to
+ * `result.metadata.systemReminders` as workdir-relative `source` entries.
+ *
+ * No-op when `context.agentsMdSeen` is absent (e.g. test harnesses, one-shot
+ * CLI commands) — the read tool stays a pure read in that case.
+ */
+function attachAgentsMdReminders(
+  result: ToolResult<ReadResult>,
+  absPath: string,
+  context: { workdir: string; agentsMdSeen?: Set<string> }
+): void {
+  if (!context.agentsMdSeen) {
+    return;
+  }
+
+  const reminders = instructionsForPath(absPath, context.workdir, context.agentsMdSeen);
+  if (reminders.length === 0) {
+    return;
+  }
+
+  result.metadata = {
+    ...(result.metadata ?? {}),
+    systemReminders: reminders.map((r) => ({
+      source: path.relative(context.workdir, r.path),
+      content: r.content,
+    })),
+  };
+}
 
 export function getFileEncoding(filePath: string): EncodingInfo | undefined {
   return fileEncodings.get(filePath);
@@ -141,7 +173,7 @@ Usage:
           .sort()
           .join('\n');
 
-        return {
+        const dirResult: ToolResult<ReadResult> = {
           success: true,
           data: {
             type: 'directory',
@@ -149,6 +181,8 @@ Usage:
             entries: formatted,
           },
         };
+        attachAgentsMdReminders(dirResult, filePath, context);
+        return dirResult;
       }
 
       // Office document branch — DOCX/XLSX/XLSM are zip files that would
@@ -165,7 +199,7 @@ Usage:
           : await extractXlsxText(filePath);
 
         const officeLines = officeContent.split('\n');
-        return {
+        const officeResult: ToolResult<ReadResult> = {
           success: true,
           data: {
             type: 'file',
@@ -178,6 +212,8 @@ Usage:
           truncated: officeTruncated,
           hint: officeHint,
         };
+        attachAgentsMdReminders(officeResult, filePath, context);
+        return officeResult;
       }
 
       // Read file
@@ -233,7 +269,7 @@ Usage:
         hint = `Output truncated. Use offset=${nextOffset} to continue reading.`;
       }
 
-      return {
+      const fileResult: ToolResult<ReadResult> = {
         success: true,
         data: {
           type: 'file',
@@ -247,6 +283,8 @@ Usage:
         truncated: wasTruncated,
         hint,
       };
+      attachAgentsMdReminders(fileResult, filePath, context);
+      return fileResult;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
 

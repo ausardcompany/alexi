@@ -705,6 +705,19 @@ interface PluginToolContext {
 
 Plugin tools use `createPluginToolWrapper()` to adapt their simplified interface to Alexi's full tool system, ensuring the `ask` method returns a Promise instead of an Effect for backwards compatibility.
 
+### Plugin auto-load and `alexi plugin init`
+
+Any directory under `.alexi/skills/<name>/` (project) or `~/.alexi/skills/<name>/` (global) that contains a valid `plugin.json` is auto-discovered by `PluginManager.loadAutoDiscovered()` (see `src/plugin/index.ts`). The manifest format is validated by `PluginManifestSchema` (Zod) and supports `name`, `version`, `description`, `author`, `dependencies`, and a `commands` array of relative markdown paths. Discovery dedupes by `fs.realpathSync` so symlinks pointing at the same target load only once; invalid manifests emit a `PluginError` event and do not block sibling plugins.
+
+To bootstrap a new plugin, run:
+
+```sh
+alexi plugin init <name>             # scaffold under .alexi/skills/<name>/
+alexi plugin init <name> --global    # scaffold under ~/.alexi/skills/<name>/
+```
+
+The scaffolder creates `plugin.json`, `commands/<name>.md`, and `README.md`. Reload via `/reload-skills` (when available) or restart Alexi.
+
 ## Enhanced Tool Registry
 
 The `EnhancedToolRegistry` (`src/tool/registry.ts`) extends the base tool system with dynamic prompt-based tool resolution:
