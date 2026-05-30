@@ -12,7 +12,7 @@ import { pathToFileURL } from 'url';
 import { defineEvent, type BusEvent } from '../bus/index.js';
 import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
 import { type SkillDefinition, registerSkill } from '../skill/index.js';
-import { registerCommand, defineCommand } from '../command/index.js';
+import { registerCommand, defineCommand, loadCommandFromFile } from '../command/index.js';
 
 // ============ Plugin Events ============
 
@@ -276,6 +276,86 @@ export const PLUGIN_DIRS = [
   path.join(os.homedir(), '.alexi', 'plugins'), // Global plugins
   path.join(process.cwd(), '.alexi', 'plugins'), // Project plugins
 ];
+
+// ============ Plugin Manifest (plugin.json) ============
+
+/**
+ * Zod schema for `plugin.json` manifests located under
+ * `.alexi/skills/<name>/plugin.json` (project) or `~/.alexi/skills/<name>/plugin.json`
+ * (global). The shape mirrors `definePlugin`'s static-feature surface — runtime
+ * `setup`/`teardown` and JS-defined hooks are out of scope for the JSON format.
+ */
+export const PluginManifestSchema = z.object({
+  name: z.string().min(1),
+  version: z.string().min(1),
+  description: z.string().optional(),
+  author: z.string().optional(),
+  dependencies: z.array(z.string()).optional(),
+  /**
+   * Relative paths (from the plugin root) to markdown command files. Each file
+   * is loaded via `loadCommandFromFile` so the same frontmatter conventions as
+   * project commands apply.
+   */
+  commands: z.array(z.string()).optional(),
+});
+
+export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
+/**
+ * Discover plugin roots under `.alexi/skills/<name>/plugin.json` (project) and
+ * `~/.alexi/skills/<name>/plugin.json` (global).
+ *
+ * Mirrors the symlink-aware dedup pattern from `src/skill/index.ts` so that
+ * a project skills dir symlinked to the global skills dir, or a `dup` entry
+ * symlinking to a sibling, does not load the same plugin twice.
+ *
+ * Failures (missing dirs, unreadable entries, broken symlinks) are logged
+ * via `console.warn` and skipped — discovery never throws.
+ */
+export function autoDiscoverPluginRoots(projectRoot: string): string[] {
+  const roots: string[] = [];
+  const seenResolved = new Set<string>();
+  const candidates = [
+    path.join(projectRoot, '.alexi', 'skills'),
+    path.join(os.homedir(), '.alexi', 'skills'),
+  ];
+
+  for (const dir of candidates) {
+    if (!fs.existsSync(dir)) {
+      continue;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      console.warn(`Failed to scan plugin auto-load dir ${dir}:`, err);
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) {
+        continue;
+      }
+      const pluginRoot = path.join(dir, entry.name);
+      const manifest = path.join(pluginRoot, 'plugin.json');
+      if (!fs.existsSync(manifest)) {
+        continue;
+      }
+      let resolved: string;
+      try {
+        resolved = fs.realpathSync(pluginRoot);
+      } catch (err) {
+        console.warn(`Failed to resolve plugin dir ${pluginRoot}:`, err);
+        continue;
+      }
+      if (seenResolved.has(resolved)) {
+        continue;
+      }
+      seenResolved.add(resolved);
+      roots.push(pluginRoot);
+    }
+  }
+  return roots;
+}
 
 // ============ Plugin Manager ============
 
@@ -739,6 +819,120 @@ export class PluginManager {
   }
 
   /**
+   * Load a plugin from a `plugin.json` manifest at the given plugin root.
+   * Validation failures emit a `PluginError` event and return a failed
+   * `LoadResult` rather than throwing, so a single bad manifest cannot
+   * break auto-discovery for siblings.
+   */
+  async loadFromManifest(pluginRoot: string): Promise<LoadResult> {
+    const manifestPath = path.join(pluginRoot, 'plugin.json');
+    const fallbackName = path.basename(pluginRoot);
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(manifestPath, 'utf-8');
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      PluginError.publish({
+        pluginName: fallbackName,
+        error: errorMessage,
+        context: 'manifest:read',
+        timestamp: Date.now(),
+      });
+      return {
+        success: false,
+        pluginName: fallbackName,
+        error: `Failed to read plugin manifest at ${manifestPath}: ${errorMessage}`,
+      };
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      PluginError.publish({
+        pluginName: fallbackName,
+        error: errorMessage,
+        context: 'manifest:parse',
+        timestamp: Date.now(),
+      });
+      return {
+        success: false,
+        pluginName: fallbackName,
+        error: `Invalid JSON in ${manifestPath}: ${errorMessage}`,
+      };
+    }
+
+    const validation = PluginManifestSchema.safeParse(parsedJson);
+    if (!validation.success) {
+      const errorMessage = validation.error.issues.map((i) => i.message).join('; ');
+      PluginError.publish({
+        pluginName: (parsedJson as { name?: string } | null)?.name?.toString() || fallbackName,
+        error: errorMessage,
+        context: 'manifest:validate',
+        timestamp: Date.now(),
+      });
+      return {
+        success: false,
+        pluginName: fallbackName,
+        error: `Invalid plugin.json at ${manifestPath}: ${errorMessage}`,
+      };
+    }
+
+    const manifest = validation.data;
+    const warnings: string[] = [];
+
+    // Resolve commands declared in the manifest by reading their markdown files.
+    const commands: CommandDefinition[] = [];
+    if (manifest.commands) {
+      for (const relPath of manifest.commands) {
+        const commandPath = path.isAbsolute(relPath) ? relPath : path.join(pluginRoot, relPath);
+        const cmd = loadCommandFromFile(commandPath);
+        if (!cmd) {
+          warnings.push(`Failed to load command file: ${relPath}`);
+          continue;
+        }
+        commands.push({
+          name: cmd.name,
+          description: cmd.description,
+          arguments: cmd.arguments,
+          template: cmd.template,
+        });
+      }
+    }
+
+    const plugin: Plugin = {
+      name: manifest.name,
+      version: manifest.version,
+      description: manifest.description,
+      author: manifest.author,
+      dependencies: manifest.dependencies,
+      commands,
+    };
+
+    const result = await this.load(plugin);
+    if (warnings.length > 0) {
+      result.warnings = [...(result.warnings ?? []), ...warnings];
+    }
+    return result;
+  }
+
+  /**
+   * Auto-discover and load plugins from `.alexi/skills/<name>/plugin.json`
+   * (project) and `~/.alexi/skills/<name>/plugin.json` (global).
+   */
+  async loadAutoDiscovered(projectRoot?: string): Promise<LoadResult[]> {
+    const root = projectRoot ?? this.workdir;
+    const roots = autoDiscoverPluginRoots(root);
+    const results: LoadResult[] = [];
+    for (const pluginRoot of roots) {
+      results.push(await this.loadFromManifest(pluginRoot));
+    }
+    return results;
+  }
+
+  /**
    * Unload a plugin
    */
   async unload(pluginName: string): Promise<void> {
@@ -1094,6 +1288,14 @@ export async function loadPlugin(plugin: Plugin): Promise<LoadResult> {
  */
 export async function loadPluginsFromDefaultLocations(): Promise<LoadResult[]> {
   return getPluginManager().loadFromDefaultLocations();
+}
+
+/**
+ * Auto-discover and load plugins from `.alexi/skills/<name>/plugin.json`
+ * (project) and `~/.alexi/skills/<name>/plugin.json` (global).
+ */
+export async function loadAutoDiscoveredPlugins(projectRoot?: string): Promise<LoadResult[]> {
+  return getPluginManager().loadAutoDiscovered(projectRoot);
 }
 
 /**
