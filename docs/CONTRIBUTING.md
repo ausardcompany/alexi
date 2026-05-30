@@ -488,6 +488,8 @@ When CI fails on auto/* branches:
 4. Fixes verified and committed
 5. Rate-limited: max 2 runs/branch/day
 
+A common autohealing pattern is removing **broken upstream-sync stub files**: the daily upstream sync occasionally produces TypeScript scaffolds at non-canonical paths (for example, single-line placeholders directly under `src/tool/` instead of registered tools under `src/tool/tools/`, or stray `package.json` fragments inside source subdirectories). These fail `npm run build` and `npm run lint` because they reference packages that are not installed or contain JavaScript-style comments inside JSON. The autohealer detects the build/lint failure and deletes the offending stubs in a `fix(ci): remove broken stub files from upstream sync [autohealing]` commit. When reviewing such commits, verify that none of the deletions touch a registered tool in `src/tool/tools/` (those are the canonical tool implementations) — only stray paths under `src/tool/` itself or non-root `package.json` files should be removed.
+
 ### Pre-Commit Hooks
 
 The project uses **Husky** with **lint-staged** to enforce style at commit time. On every commit, the following runs automatically against staged `.ts` files:
@@ -513,7 +515,7 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Extraneous blank lines between code blocks in tool definitions and shell prompt builders
 - Missing or extra trailing newlines at end of file
 - Inconsistent spacing in namespace and class method definitions
-- Quote-style normalization from double to single quotes per Prettier `singleQuote: true` (e.g., `src/tool/notebook.ts`, `src/tool/read-docx.ts`)
+- Quote-style normalization from double to single quotes per Prettier `singleQuote: true` (applied across `src/` and `tests/`)
 
 ### Daily PR Merge
 
