@@ -20,6 +20,26 @@ export interface ToolContext {
   sessionId?: string;
   /** Optional git auto-commit manager — injected by agenticChat when enabled */
   gitManager?: AutoCommitManager;
+  /**
+   * Per-session set of realpath()ed AGENTS.md files that have already been
+   * surfaced to the agent as system-reminders. File-touching tools use this
+   * to de-duplicate per-directory AGENTS.md emissions across a single
+   * orchestrator execution.
+   */
+  agentsMdSeen?: Set<string>;
+}
+
+/**
+ * A single per-directory AGENTS.md the agent should be reminded of after a
+ * file-touching tool call. Emitted via `ToolResult.metadata.systemReminders`
+ * and re-injected by the orchestrator as a synthetic user-role message
+ * containing one or more `<system-reminder source="...">` blocks.
+ */
+export interface ToolSystemReminder {
+  /** Workdir-relative path of the AGENTS.md, used as `source="..."`. */
+  source: string;
+  /** Trimmed contents of the AGENTS.md. */
+  content: string;
 }
 
 // Tool result
@@ -29,7 +49,15 @@ export interface ToolResult<T = unknown> {
   error?: string;
   truncated?: boolean;
   hint?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: {
+    /**
+     * Per-directory AGENTS.md reminders discovered by this tool call.
+     * Re-emitted by the orchestrator as `<system-reminder source="...">`
+     * blocks in a synthetic user message before the next assistant turn.
+     */
+    systemReminders?: ToolSystemReminder[];
+    [k: string]: unknown;
+  };
 }
 
 // Tool definition options

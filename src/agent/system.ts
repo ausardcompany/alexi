@@ -247,6 +247,85 @@ function loadInstructionFiles(workdir: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Per-directory AGENTS.md discovery (used by file-touching tools at runtime)
+// ---------------------------------------------------------------------------
+
+/** A single per-directory AGENTS.md discovered during a tool call. */
+export interface InstructionFile {
+  /** Absolute realpath of the AGENTS.md file. */
+  path: string;
+  /** Trimmed contents of the file. */
+  content: string;
+}
+
+/** Hard cap on the number of upward iterations to defend against cycles/symlink loops. */
+const MAX_INSTRUCTION_WALK_DEPTH = 32;
+
+/**
+ * Walk from `path.dirname(absPath)` upward toward `workdir` (exclusive),
+ * collecting any AGENTS.md found at each level. Skips files whose
+ * realpath is already in `seen`. Mutates `seen` to add freshly emitted
+ * paths. Returns nearest-first.
+ *
+ * Refuses to walk above `workdir`: if `absPath` is not inside `workdir`,
+ * returns []. The project root AGENTS.md is intentionally excluded
+ * because `loadInstructionFiles()` already injects it once per session.
+ */
+export function instructionsForPath(
+  absPath: string,
+  workdir: string,
+  seen: Set<string>
+): InstructionFile[] {
+  const resolvedWorkdir = path.resolve(workdir);
+  const resolvedAbs = path.resolve(absPath);
+
+  // Refuse paths outside the workdir.
+  const rel = path.relative(resolvedWorkdir, resolvedAbs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return [];
+  }
+
+  const collected: InstructionFile[] = [];
+  let dir = path.dirname(resolvedAbs);
+  let iterations = 0;
+
+  while (iterations < MAX_INSTRUCTION_WALK_DEPTH) {
+    iterations++;
+
+    // Stop when we hit the workdir (exclusive) or filesystem root.
+    if (dir === resolvedWorkdir) {
+      break;
+    }
+    // Confirm dir is still strictly inside workdir.
+    const dirRel = path.relative(resolvedWorkdir, dir);
+    if (dirRel.startsWith('..') || path.isAbsolute(dirRel) || dirRel === '') {
+      break;
+    }
+
+    const candidate = path.join(dir, 'AGENTS.md');
+    if (fs.existsSync(candidate)) {
+      const realpath = safeRealpath(candidate);
+      if (!seen.has(realpath)) {
+        seen.add(realpath);
+        const content = loadTextFile(candidate);
+        if (content) {
+          collected.push({ path: realpath, content });
+        }
+      }
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      // Reached filesystem root.
+      break;
+    }
+    dir = parent;
+  }
+
+  return collected;
+}
+
+// ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
 

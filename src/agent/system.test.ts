@@ -9,6 +9,7 @@ import {
   getModelPrompt,
   getSoulPrompt,
   getModelPromptKey,
+  instructionsForPath,
 } from './system.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -298,6 +299,162 @@ describe('Prompt System', () => {
       expect(matches.length).toBe(1);
       // No global block when it would point at the same file.
       expect(prompt).not.toContain('<global-agents-md');
+    });
+  });
+
+  describe('instructionsForPath', () => {
+    let workdir: string;
+
+    beforeEach(() => {
+      workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'agents-walk-')));
+    });
+
+    afterEach(() => {
+      try {
+        fs.rmSync(workdir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    it('returns [] when no AGENTS.md exists between workdir and the file', () => {
+      const file = path.join(workdir, 'apps', 'api', 'src', 'index.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'export {}');
+
+      const seen = new Set<string>();
+      const result = instructionsForPath(file, workdir, seen);
+
+      expect(result).toEqual([]);
+      expect(seen.size).toBe(0);
+    });
+
+    it('returns reminders for apps/api/AGENTS.md when reading apps/api/src/index.ts', () => {
+      const file = path.join(workdir, 'apps', 'api', 'src', 'index.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'export {}');
+      const agentsPath = path.join(workdir, 'apps', 'api', 'AGENTS.md');
+      fs.writeFileSync(agentsPath, 'API_RULES_TOKEN');
+
+      const seen = new Set<string>();
+      const result = instructionsForPath(file, workdir, seen);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toBe(fs.realpathSync(agentsPath));
+      expect(result[0].content).toBe('API_RULES_TOKEN');
+      expect(seen.has(fs.realpathSync(agentsPath))).toBe(true);
+    });
+
+    it('returns nearest-first when multiple AGENTS.md exist on the path', () => {
+      const file = path.join(workdir, 'apps', 'api', 'src', 'index.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'export {}');
+      const apiAgents = path.join(workdir, 'apps', 'api', 'AGENTS.md');
+      const srcAgents = path.join(workdir, 'apps', 'api', 'src', 'AGENTS.md');
+      fs.writeFileSync(apiAgents, 'API_RULES');
+      fs.writeFileSync(srcAgents, 'SRC_RULES');
+
+      const seen = new Set<string>();
+      const result = instructionsForPath(file, workdir, seen);
+
+      expect(result).toHaveLength(2);
+      // Nearest first: src/AGENTS.md before api/AGENTS.md.
+      expect(result[0].content).toBe('SRC_RULES');
+      expect(result[1].content).toBe('API_RULES');
+    });
+
+    it('excludes the project-root AGENTS.md', () => {
+      const file = path.join(workdir, 'apps', 'api', 'index.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'export {}');
+      fs.writeFileSync(path.join(workdir, 'AGENTS.md'), 'ROOT_RULES');
+
+      const seen = new Set<string>();
+      const result = instructionsForPath(file, workdir, seen);
+
+      expect(result).toEqual([]);
+    });
+
+    it('de-dupes when the same file is read twice with a shared seen set', () => {
+      const file = path.join(workdir, 'apps', 'api', 'src', 'index.ts');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'export {}');
+      fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_RULES');
+
+      const seen = new Set<string>();
+      const first = instructionsForPath(file, workdir, seen);
+      const second = instructionsForPath(file, workdir, seen);
+
+      expect(first).toHaveLength(1);
+      expect(second).toEqual([]);
+    });
+
+    it('refuses paths outside workdir', () => {
+      const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'outside-')));
+      try {
+        const file = path.join(outside, 'apps', 'index.ts');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, 'export {}');
+        fs.writeFileSync(path.join(outside, 'apps', 'AGENTS.md'), 'OUTSIDE_RULES');
+
+        const seen = new Set<string>();
+        const result = instructionsForPath(file, workdir, seen);
+
+        expect(result).toEqual([]);
+        expect(seen.size).toBe(0);
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('symlinked AGENTS.md de-dupes via realpath', () => {
+      // Two sibling subtrees whose AGENTS.md both point to the same target.
+      const target = path.join(workdir, 'shared-rules.md');
+      fs.writeFileSync(target, 'SHARED_RULES_TOKEN');
+
+      const fileA = path.join(workdir, 'apps', 'a', 'index.ts');
+      const fileB = path.join(workdir, 'apps', 'b', 'index.ts');
+      fs.mkdirSync(path.dirname(fileA), { recursive: true });
+      fs.mkdirSync(path.dirname(fileB), { recursive: true });
+      fs.writeFileSync(fileA, 'export {}');
+      fs.writeFileSync(fileB, 'export {}');
+
+      const linkA = path.join(workdir, 'apps', 'a', 'AGENTS.md');
+      const linkB = path.join(workdir, 'apps', 'b', 'AGENTS.md');
+      fs.symlinkSync(target, linkA);
+      fs.symlinkSync(target, linkB);
+
+      const seen = new Set<string>();
+      const firstResult = instructionsForPath(fileA, workdir, seen);
+      const secondResult = instructionsForPath(fileB, workdir, seen);
+
+      expect(firstResult).toHaveLength(1);
+      expect(firstResult[0].content).toBe('SHARED_RULES_TOKEN');
+      // Second call hits the same realpath via the symlink and is skipped.
+      expect(secondResult).toEqual([]);
+    });
+
+    it('caps walk depth at 32', () => {
+      // Build a deeply nested path: workdir/d1/d2/.../d40/leaf.ts
+      // and place AGENTS.md at every level. The cap should keep us from
+      // walking the full chain.
+      let cur = workdir;
+      const totalLevels = 40;
+      for (let i = 0; i < totalLevels; i++) {
+        cur = path.join(cur, `d${i}`);
+        fs.mkdirSync(cur);
+        fs.writeFileSync(path.join(cur, 'AGENTS.md'), `RULES_${i}`);
+      }
+      const file = path.join(cur, 'leaf.ts');
+      fs.writeFileSync(file, 'export {}');
+
+      const seen = new Set<string>();
+      const result = instructionsForPath(file, workdir, seen);
+
+      // Cap is 32; the walker may visit up to 32 directories upward,
+      // never the workdir itself nor anything beyond it.
+      expect(result.length).toBeLessThanOrEqual(32);
+      expect(result.length).toBeGreaterThan(0);
     });
   });
 });
