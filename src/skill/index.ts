@@ -9,6 +9,23 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 import { getGlobalPaths } from '../utils/global.js';
+import { defineEvent } from '../bus/index.js';
+
+// ============ Events ============
+
+/**
+ * Emitted whenever the skill registry is re-scanned and replaced via
+ * {@link reloadSkills}.
+ */
+export const SkillReloaded = defineEvent(
+  'skill.reloaded',
+  z.object({
+    added: z.number(),
+    removed: z.number(),
+    total: z.number(),
+    timestamp: z.number(),
+  })
+);
 
 // Skill definition schema
 export const SkillSchema = z.object({
@@ -419,6 +436,88 @@ export function getSkill(idOrAlias: string): Skill | undefined {
 
 export function listSkills(): Skill[] {
   return getSkillRegistry().list();
+}
+
+/**
+ * Re-scan all skill directories and replace the file-sourced entries in the
+ * active registry.
+ *
+ * - Built-in skills (anything not loaded from a file) are preserved verbatim.
+ * - File-sourced skills that no longer appear on disk are removed.
+ * - New on-disk skills are added.
+ * - Existing on-disk skills are refreshed in case their content changed.
+ *
+ * Publishes a `skill.reloaded` event with `{ added, removed, total }` counts.
+ */
+export function reloadSkills(projectRoot: string): {
+  added: number;
+  removed: number;
+  total: number;
+} {
+  const registry = getSkillRegistry();
+
+  // Snapshot the current file-sourced skills before re-scanning.
+  const previousFileIds = new Set<string>();
+  for (const skill of registry.list()) {
+    if (skill.source === 'file') {
+      previousFileIds.add(skill.id);
+    }
+  }
+
+  // Re-scan all configured skill directories with a fresh visited set so a
+  // call after a directory was newly created actually picks up the entries.
+  const directories = skillDirectories(projectRoot);
+  const seen = new Set<string>();
+  const discovered: Skill[] = [];
+  for (const dir of directories) {
+    discovered.push(...loadSkillsFromDirectory(dir, seen));
+  }
+
+  // Deduplicate by id; first occurrence wins (project before global because
+  // skillDirectories returns them in precedence order).
+  const discoveredById = new Map<string, Skill>();
+  for (const skill of discovered) {
+    if (!discoveredById.has(skill.id)) {
+      discoveredById.set(skill.id, skill);
+    }
+  }
+
+  // Remove file-sourced skills that have disappeared. Built-ins (any non-file
+  // source) are never touched here. We also defensively skip ids in the
+  // BUILTIN_SKILLS set in case a built-in was somehow loaded as a file.
+  let removed = 0;
+  for (const id of previousFileIds) {
+    if (discoveredById.has(id)) {
+      continue;
+    }
+    if (isBuiltinSkill(id)) {
+      continue;
+    }
+    if (registry.remove(id)) {
+      removed++;
+    }
+  }
+
+  // Register / refresh discovered skills. Track adds (skills that weren't
+  // present as file-sourced before this reload).
+  let added = 0;
+  for (const skill of discoveredById.values()) {
+    if (!previousFileIds.has(skill.id)) {
+      added++;
+    }
+    registry.register(skill);
+  }
+
+  const total = registry.list().length;
+
+  SkillReloaded.publish({
+    added,
+    removed,
+    total,
+    timestamp: Date.now(),
+  });
+
+  return { added, removed, total };
 }
 
 // Re-export
