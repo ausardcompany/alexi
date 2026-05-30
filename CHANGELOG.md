@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Normalized string literal quote style in document reader tools (`src/tool/notebook.ts`, `src/tool/read-docx.ts`) from double quotes to single quotes via CI auto-fix to align with the project Prettier configuration (`singleQuote: true`). No behavior change: `isFile()` in `notebook.ts` and `accepts()` in `read-docx.ts` continue to detect `.ipynb` and `.docx` files respectively.
+
 ### Added
 
 - **`code-review` command** (`src/command/codeReview.ts`): Structured correctness-bug review over `git diff`. Three new surfaces wire the same `executeCodeReview` core:

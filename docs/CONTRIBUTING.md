@@ -513,6 +513,7 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Extraneous blank lines between code blocks in tool definitions and shell prompt builders
 - Missing or extra trailing newlines at end of file
 - Inconsistent spacing in namespace and class method definitions
+- Quote-style normalization from double to single quotes per Prettier `singleQuote: true` (e.g., `src/tool/notebook.ts`, `src/tool/read-docx.ts`)
 
 ### Daily PR Merge
 
