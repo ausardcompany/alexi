@@ -17,6 +17,7 @@ import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
 import { defineEvent } from '../bus/index.js';
+import { logger } from '../utils/logger.js';
 
 // ============ Type Definitions ============
 
@@ -73,6 +74,17 @@ export interface HookContext {
   error?: string;
 }
 
+export interface HookSpecificOutput {
+  /**
+   * When true on a SessionStart result, the runtime re-scans skill
+   * directories and replaces the active skill registry. Other events
+   * ignore this flag.
+   */
+  reloadSkills?: boolean;
+  /** Reserved for future SessionStart customisations. */
+  sessionTitle?: string;
+}
+
 export interface HookResult {
   success: boolean;
   output?: string;
@@ -82,9 +94,35 @@ export interface HookResult {
   capped?: boolean;
   /** When true, callers should feed the rejection reason back to the model instead of halting */
   continueOnBlock?: boolean;
+
+  /**
+   * Hook-specific structured output. Hooks can populate selected fields to
+   * request follow-up actions from the runtime. Currently only meaningful
+   * for `SessionStart` hooks.
+   *
+   * Surfaced from a hook by emitting a JSON object on stdout (command hooks),
+   * the HTTP response body (http hooks), or the function return value
+   * (script hooks) with shape `{ "hookSpecificOutput": { ... } }`.
+   */
+  hookSpecificOutput?: HookSpecificOutput;
 }
 
 // Zod schemas for validation
+export const HookSpecificOutputSchema = z.object({
+  reloadSkills: z.boolean().optional(),
+  sessionTitle: z.string().optional(),
+});
+
+export const HookResultSchema = z.object({
+  success: z.boolean(),
+  output: z.string().optional(),
+  error: z.string().optional(),
+  duration: z.number(),
+  capped: z.boolean().optional(),
+  continueOnBlock: z.boolean().optional(),
+  hookSpecificOutput: HookSpecificOutputSchema.optional(),
+});
+
 export const HookDefinitionSchema = z.object({
   event: z.enum([
     'SessionStart',
@@ -175,6 +213,47 @@ export function getBlockCap(): number {
     }
   }
   return STOP_HOOK_BLOCK_CAP;
+}
+
+// ============ Hook-Specific Output Parsing ============
+
+/**
+ * Attempt to extract a `hookSpecificOutput` block from arbitrary hook output.
+ *
+ * Accepts either a raw string (stdout / HTTP body) or an object (script return
+ * value). Strings are parsed as JSON; if the parse fails or the shape is wrong
+ * the function returns `undefined`. Unknown extra fields are ignored — only
+ * the keys defined on {@link HookSpecificOutputSchema} are honored.
+ */
+export function parseHookSpecificOutput(value: unknown): HookSpecificOutput | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  let candidate: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{')) {
+      return undefined;
+    }
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (typeof candidate !== 'object' || candidate === null) {
+    return undefined;
+  }
+
+  const block = (candidate as { hookSpecificOutput?: unknown }).hookSpecificOutput;
+  if (block === undefined) {
+    return undefined;
+  }
+
+  const parsed = HookSpecificOutputSchema.safeParse(block);
+  return parsed.success ? parsed.data : undefined;
 }
 
 // ============ Template Substitution ============
@@ -282,11 +361,16 @@ async function executeCommandHook(hook: HookDefinition, context: HookContext): P
           duration,
         });
       } else {
-        resolve({
+        const result: HookResult = {
           success: true,
           output: stdout,
           duration,
-        });
+        };
+        const hso = parseHookSpecificOutput(stdout);
+        if (hso) {
+          result.hookSpecificOutput = hso;
+        }
+        resolve(result);
       }
     });
 
@@ -353,11 +437,16 @@ async function executeHttpHook(hook: HookDefinition, context: HookContext): Prom
       };
     }
 
-    return {
+    const result: HookResult = {
       success: true,
       output: responseText,
       duration,
     };
+    const hso = parseHookSpecificOutput(responseText);
+    if (hso) {
+      result.hookSpecificOutput = hso;
+    }
+    return result;
   } catch (err) {
     const duration = Date.now() - startTime;
     const error = err instanceof Error ? err.message : String(err);
@@ -427,14 +516,20 @@ async function executeScriptHook(hook: HookDefinition, context: HookContext): Pr
       return hookFn(context);
     })();
 
-    const result = await Promise.race([executePromise, timeoutPromise]);
+    const scriptReturn = await Promise.race([executePromise, timeoutPromise]);
     const duration = Date.now() - startTime;
 
-    return {
+    const hookResult: HookResult = {
       success: true,
-      output: result !== undefined ? JSON.stringify(result) : undefined,
+      output: scriptReturn !== undefined ? JSON.stringify(scriptReturn) : undefined,
       duration,
     };
+    // Script return values are objects, not strings — pass through directly.
+    const hso = parseHookSpecificOutput(scriptReturn);
+    if (hso) {
+      hookResult.hookSpecificOutput = hso;
+    }
+    return hookResult;
   } catch (err) {
     const duration = Date.now() - startTime;
     const error = err instanceof Error ? err.message : String(err);
@@ -444,6 +539,32 @@ async function executeScriptHook(hook: HookDefinition, context: HookContext): Pr
       error: `Script execution failed: ${error}`,
       duration,
     };
+  }
+}
+
+// ============ SessionStart Side-Effects ============
+
+/**
+ * Inspect SessionStart hook results and, if any successful result requested a
+ * skill reload, perform exactly one reload of the active skill registry.
+ *
+ * The skill module is imported lazily so the hooks module stays usable in
+ * environments that don't load skills (and to avoid an import cycle).
+ */
+async function maybeReloadSkillsFromResults(results: HookResult[]): Promise<void> {
+  const wantsReload = results.some((r) => r.success && r.hookSpecificOutput?.reloadSkills === true);
+  if (!wantsReload) {
+    return;
+  }
+
+  try {
+    const skillModule = await import('../skill/index.js');
+    const counts = skillModule.reloadSkills(process.cwd());
+    logger.info(
+      `Skills reloaded by SessionStart hook: +${counts.added} -${counts.removed} (total ${counts.total})`
+    );
+  } catch (err) {
+    logger.warn(`Skill reload failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -607,6 +728,12 @@ export class HookManagerImpl implements HookManager {
           timestamp: Date.now(),
         });
       }
+    }
+
+    // SessionStart hooks may request a skill registry refresh. Honor it once
+    // per execute() call regardless of how many hooks asked.
+    if (event === 'SessionStart') {
+      await maybeReloadSkillsFromResults(results);
     }
 
     return results;

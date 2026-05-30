@@ -150,6 +150,11 @@ export const SLASH_COMMANDS: readonly CommandDef[] = [
   { name: 'effort', description: 'Set effort level', category: 'config' },
   { name: 'doctor', description: 'Run environment health checks', category: 'config' },
   { name: 'memory', description: 'List/edit instruction files', category: 'config' },
+  {
+    name: 'reload-skills',
+    description: 'Re-scan skill directories and refresh the active registry',
+    category: 'config',
+  },
   { name: 'alias', description: 'Manage command aliases', category: 'config' },
   { name: 'snippet', description: 'Manage code snippets', category: 'config' },
   { name: 'template', description: 'Manage message templates', category: 'config' },

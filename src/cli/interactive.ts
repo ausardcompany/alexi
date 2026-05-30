@@ -229,6 +229,9 @@ function printHelp(): void {
     c('yellow', '  /effort [low|med|high]') + c('gray', ' - Set effort level (cost/quality)')
   );
   console.log(c('yellow', '  /doctor') + c('gray', '            - Run environment health checks'));
+  console.log(
+    c('yellow', '  /reload-skills') + c('gray', '     - Re-scan skill directories without restart')
+  );
   console.log(c('yellow', '  /clear-history') + c('gray', '     - Clear conversation history'));
   console.log(c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback'));
   console.log();
@@ -2071,6 +2074,19 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
       console.log(
         c('green', `\n  Repo map token budget set to ${n}. Run /map-refresh to apply.\n`)
       );
+      return true;
+    }
+
+    case 'reload-skills': {
+      try {
+        const { runReloadSkills } = await import('../command/reloadSkills.js');
+        const summary = await runReloadSkills(process.cwd());
+        console.log(c('green', `\n  ${summary}\n`));
+      } catch (err) {
+        console.log(
+          c('red', `\n  Skill reload failed: ${err instanceof Error ? err.message : String(err)}\n`)
+        );
+      }
       return true;
     }
 

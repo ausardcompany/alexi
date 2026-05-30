@@ -498,6 +498,25 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
       },
     },
 
+    // /reload-skills --------------------------------------------------------
+    {
+      name: 'reload-skills',
+      description: 'Re-scan skill directories and refresh the active registry',
+      category: 'config',
+      execute: async (_args, _ctx) => {
+        try {
+          const { runReloadSkills } = await import('../../../command/reloadSkills.js');
+          const summary = await runReloadSkills(process.cwd());
+          deps.addSystemMessage(summary);
+        } catch (err) {
+          deps.addSystemMessage(
+            `Skill reload failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        return true;
+      },
+    },
+
     // /rewind ---------------------------------------------------------------
     {
       name: 'rewind',
