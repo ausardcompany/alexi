@@ -884,10 +884,23 @@ export class PluginManager {
     const warnings: string[] = [];
 
     // Resolve commands declared in the manifest by reading their markdown files.
+    // Paths are constrained to `pluginRoot` to prevent a malicious or buggy
+    // manifest from loading files outside its own plugin directory via
+    // absolute paths or `..` traversal.
     const commands: CommandDefinition[] = [];
+    const pluginRootResolved = path.resolve(pluginRoot);
     if (manifest.commands) {
       for (const relPath of manifest.commands) {
-        const commandPath = path.isAbsolute(relPath) ? relPath : path.join(pluginRoot, relPath);
+        if (path.isAbsolute(relPath)) {
+          warnings.push(`Refusing absolute command path: ${relPath}`);
+          continue;
+        }
+        const commandPath = path.resolve(pluginRootResolved, relPath);
+        const rel = path.relative(pluginRootResolved, commandPath);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+          warnings.push(`Refusing command path outside plugin root: ${relPath}`);
+          continue;
+        }
         const cmd = loadCommandFromFile(commandPath);
         if (!cmd) {
           warnings.push(`Failed to load command file: ${relPath}`);

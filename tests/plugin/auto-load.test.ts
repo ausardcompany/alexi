@@ -181,6 +181,46 @@ describe('Plugin auto-load (.alexi/skills/<name>/plugin.json)', () => {
       expect(info?.commandCount).toBe(1);
     });
 
+    it('refuses command paths that escape the plugin root', async () => {
+      // Place a target markdown file outside the plugin's own directory.
+      const outsideDir = path.join(projectRoot, 'outside');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(outsideDir, 'evil.md'),
+        '---\nname: evil\ndescription: nope\n---\n\nNope.\n'
+      );
+
+      const pluginRoot = path.join(projectRoot, '.alexi', 'skills', 'escape');
+      writePluginManifest(pluginRoot, {
+        name: 'escape',
+        version: '0.1.0',
+        commands: ['../../../outside/evil.md'],
+      });
+
+      const manager = new PluginManager(projectRoot);
+      const results = await manager.loadAutoDiscovered(projectRoot);
+      const escape = results.find((r) => r.pluginName === 'escape');
+      expect(escape?.success).toBe(true);
+      expect(escape?.warnings?.some((w) => /outside plugin root/i.test(w))).toBe(true);
+      const info = manager.list().find((p) => p.name === 'escape');
+      expect(info?.commandCount).toBe(0);
+    });
+
+    it('refuses absolute command paths', async () => {
+      const pluginRoot = path.join(projectRoot, '.alexi', 'skills', 'absolute');
+      writePluginManifest(pluginRoot, {
+        name: 'absolute',
+        version: '0.1.0',
+        commands: ['/etc/passwd.md'],
+      });
+
+      const manager = new PluginManager(projectRoot);
+      const results = await manager.loadAutoDiscovered(projectRoot);
+      const absolute = results.find((r) => r.pluginName === 'absolute');
+      expect(absolute?.success).toBe(true);
+      expect(absolute?.warnings?.some((w) => /absolute command path/i.test(w))).toBe(true);
+    });
+
     it('handles invalid JSON gracefully', async () => {
       const badRoot = path.join(projectRoot, '.alexi', 'skills', 'bad');
       writePluginManifest(badRoot, '{not valid json');
