@@ -14,6 +14,9 @@ import {
   deleteConfigValue,
   getConfigDefaultModel,
   setConfigDefaultModel,
+  getConfigDefaultAgent,
+  setConfigDefaultAgent,
+  clearConfigDefaultAgent,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -169,6 +172,66 @@ describe('userConfig', () => {
       expect(config.defaultModel).toBe('gpt-4.1');
       expect(config.theme).toBe('dark');
       expect(config.sounds).toEqual({ enabled: true });
+    });
+  });
+
+  describe('getConfigDefaultAgent / setConfigDefaultAgent / clearConfigDefaultAgent', () => {
+    it('should return undefined when no agent is set', () => {
+      saveFullConfig({});
+      expect(getConfigDefaultAgent()).toBeUndefined();
+    });
+
+    it('should return undefined for empty string', () => {
+      saveFullConfig({ agent: '' });
+      expect(getConfigDefaultAgent()).toBeUndefined();
+    });
+
+    it('should return undefined for whitespace-only string', () => {
+      saveFullConfig({ agent: '   ' });
+      expect(getConfigDefaultAgent()).toBeUndefined();
+    });
+
+    it('should return undefined for non-string values', () => {
+      saveFullConfig({ agent: 42 });
+      expect(getConfigDefaultAgent()).toBeUndefined();
+    });
+
+    it('should return trimmed agent slug', () => {
+      saveFullConfig({ agent: '  debug  ' });
+      expect(getConfigDefaultAgent()).toBe('debug');
+    });
+
+    it('should persist agent via setConfigDefaultAgent', () => {
+      saveFullConfig({});
+      setConfigDefaultAgent('debug');
+      expect(getConfigDefaultAgent()).toBe('debug');
+    });
+
+    it('should preserve other config keys when setting default agent', () => {
+      saveFullConfig({ defaultModel: 'gpt-4.1', theme: 'dark' });
+      setConfigDefaultAgent('plan');
+
+      const config = loadFullConfig();
+      expect(config.agent).toBe('plan');
+      expect(config.defaultModel).toBe('gpt-4.1');
+      expect(config.theme).toBe('dark');
+    });
+
+    it('should clear the agent key via clearConfigDefaultAgent', () => {
+      saveFullConfig({ agent: 'debug', defaultModel: 'gpt-4.1' });
+      clearConfigDefaultAgent();
+
+      const config = loadFullConfig();
+      expect(config.agent).toBeUndefined();
+      expect(config.defaultModel).toBe('gpt-4.1');
+      expect(getConfigDefaultAgent()).toBeUndefined();
+    });
+
+    it('should be a no-op when clearing an unset agent', () => {
+      saveFullConfig({ defaultModel: 'gpt-4.1' });
+      expect(() => clearConfigDefaultAgent()).not.toThrow();
+      expect(getConfigDefaultAgent()).toBeUndefined();
+      expect(loadFullConfig().defaultModel).toBe('gpt-4.1');
     });
   });
 });

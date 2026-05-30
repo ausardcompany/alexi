@@ -18,6 +18,8 @@ import { commitDirtyFiles } from '../../git/dirtyFiles.js';
 import { RepoMapManager } from '../../context/repoMap.js';
 import { parseEffortLevel, type EffortLevel } from '../../core/effortLevel.js';
 import { createWorktree } from '../../utils/gitWorktree.js';
+import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
+import { getConfigDefaultAgent } from '../../config/userConfig.js';
 
 interface AgentOptions {
   message?: string;
@@ -43,6 +45,8 @@ interface AgentOptions {
   mapTokens?: string;
   // Effort level
   effort?: string;
+  // Custom agent slug (overrides config default)
+  agent?: string;
 }
 
 export function registerAgentCommand(program: Command): void {
@@ -72,6 +76,10 @@ export function registerAgentCommand(program: Command): void {
     .option('--map-tokens <n>', 'Repo map token budget (default: 2000; set to 0 to disable)')
     // Effort level
     .option('--effort <level>', 'Effort level: low, medium, high (default: medium)')
+    .option(
+      '--agent <name>',
+      'Custom agent slug to dispatch (overrides `agent` field in user config)'
+    )
     .action(async (opts: AgentOptions) => {
       let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
@@ -210,6 +218,14 @@ export function registerAgentCommand(program: Command): void {
               }
             : undefined;
 
+        // Resolve agent: --agent flag > config `agent` field > undefined.
+        // Unknown slugs log a warning and fall back to the default agent.
+        const agentId = await resolveDefaultAgent({
+          cliFlag: opts.agent,
+          configValue: getConfigDefaultAgent(),
+          workdir,
+        });
+
         const res = await agenticChat(message, {
           modelOverride: opts.model,
           autoRoute: opts.autoRoute,
@@ -223,6 +239,7 @@ export function registerAgentCommand(program: Command): void {
           gitManager,
           repoMapManager,
           effort,
+          agentId,
         });
 
         // Flush any pending auto-commits

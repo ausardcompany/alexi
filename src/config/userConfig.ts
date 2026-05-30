@@ -183,6 +183,35 @@ export function setConfigDefaultModel(modelId: string): void {
   setConfigValue('defaultModel', modelId);
 }
 
+/**
+ * Get the user's persisted default agent slug, or undefined if not set.
+ * Read from the `agent` top-level key in ~/.alexi/config.json.
+ *
+ * Returns `undefined` for non-string values, empty strings, or
+ * whitespace-only strings.
+ */
+export function getConfigDefaultAgent(): string | undefined {
+  const value = getConfigValue('agent');
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Persist the user's chosen default agent slug.
+ */
+export function setConfigDefaultAgent(slug: string): void {
+  setConfigValue('agent', slug);
+}
+
+/**
+ * Clear the user's default agent setting.
+ */
+export function clearConfigDefaultAgent(): void {
+  deleteConfigValue('agent');
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {
