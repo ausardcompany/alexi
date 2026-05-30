@@ -14,6 +14,7 @@ import {
   type EncodingInfo,
 } from '../encoded-io.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { extractDocxText, extractXlsxText, isOfficeDocument } from './read-office.js';
 
 const ReadParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file or directory to read'),
@@ -147,6 +148,35 @@ Usage:
             path: filePath,
             entries: formatted,
           },
+        };
+      }
+
+      // Office document branch — DOCX/XLSX/XLSM are zip files that would
+      // otherwise either fail the binary check or stream as garbage. Detect by
+      // extension and dispatch to mammoth/xlsx for a readable text preview.
+      const officeKind = isOfficeDocument(filePath);
+      if (officeKind) {
+        const {
+          content: officeContent,
+          truncated: officeTruncated,
+          hint: officeHint,
+        } = officeKind === 'docx'
+          ? await extractDocxText(filePath)
+          : await extractXlsxText(filePath);
+
+        const officeLines = officeContent.split('\n');
+        return {
+          success: true,
+          data: {
+            type: 'file',
+            path: filePath,
+            content: officeContent,
+            totalLines: officeLines.length,
+            shownLines: officeLines.length,
+            offset: 1,
+          },
+          truncated: officeTruncated,
+          hint: officeHint,
         };
       }
 
