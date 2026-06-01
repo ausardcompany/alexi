@@ -189,6 +189,21 @@ describe('runRuleCommand', () => {
     expect(result.stderr.length).toBeGreaterThan(0);
   });
 
+  it('handles synchronous spawn validation errors without crashing', async () => {
+    // `spawn()` validates `options.cwd` synchronously and throws if it is
+    // not a string/Buffer/URL. Cast to bypass our compile-time guard so the
+    // runner's catch path is exercised — this used to hit a TDZ
+    // ReferenceError on `clearTimeout(timer)` before `timer` was declared.
+    const result = await runRuleCommand({
+      pluginRoot: 12345 as unknown as string,
+      command: [NODE, '-e', 'process.stdout.write("x")'],
+    });
+    expect(result.exitCode).toBeNull();
+    expect(result.timedOut).toBe(false);
+    expect(result.truncated).toBe(false);
+    expect(result.stderr.length).toBeGreaterThan(0);
+  });
+
   it('does not invoke a shell (metacharacters are literal)', async () => {
     // If a shell were involved, `;` would split commands. Here we expect
     // the child program (node) to receive the literal string as argv.

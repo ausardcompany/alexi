@@ -254,13 +254,21 @@ export async function runRuleCommand(opts: RunRuleCommandOptions): Promise<RunRu
     let truncated = false;
     let timedOut = false;
     let settled = false;
+    // `timer` is assigned after the spawn attempt below. Declared here (with a
+    // mutable binding) so `finalize` can safely reference it from any code
+    // path, including the synchronous spawn-error catch block where the timer
+    // has not yet been started — using `const` would put it in the TDZ.
+    // eslint-disable-next-line prefer-const
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const finalize = (exitCode: number | null): void => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
       // Cap stdout at maxBytes. If we tripped the size guard mid-chunk, the
       // accumulated buffer may be slightly over by the size of one chunk —
       // slice at maxBytes for a deterministic upper bound.
@@ -292,7 +300,7 @@ export async function runRuleCommand(opts: RunRuleCommandOptions): Promise<RunRu
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
       try {
         controller.abort();
