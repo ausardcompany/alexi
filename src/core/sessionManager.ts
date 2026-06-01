@@ -9,6 +9,16 @@ import { randomUUID } from 'crypto';
 import { shouldCompact, compactConversation, estimateMessagesTokens } from './compaction.js';
 import { closeSession } from './sessionClose.js';
 
+/**
+ * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
+ * separators, and lowercases on Windows where filesystem paths are
+ * case-insensitive.
+ */
+function normalizeWorkdir(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
@@ -27,6 +37,12 @@ export interface SessionMetadata {
   totalTokens: number;
   messageCount: number;
   title?: string;
+  /**
+   * Working directory where the session was created (typically `process.cwd()`
+   * at session-creation time). Optional because sessions created before this
+   * field was introduced have no recorded workdir.
+   */
+  workdir?: string;
 }
 
 export interface Session {
@@ -72,6 +88,7 @@ export class SessionManager {
         modelId,
         totalTokens: 0,
         messageCount: 0,
+        workdir: process.cwd(),
       },
       messages: [],
     };
@@ -183,15 +200,23 @@ export class SessionManager {
   }
 
   /**
-   * List all sessions
+   * List all sessions.
+   *
+   * @param opts.workdir When set, only sessions whose recorded `workdir`
+   *   resolves to the same path are returned. Sessions with no recorded
+   *   workdir (legacy sessions created before the field was introduced) are
+   *   excluded from filtered results — they have no opinion. Path comparison
+   *   is performed via `path.resolve` and is case-insensitive on Windows.
    */
-  listSessions(): SessionMetadata[] {
+  listSessions(opts?: { workdir?: string }): SessionMetadata[] {
     try {
       const files = fs.readdirSync(this.sessionsDir);
       const sessions: SessionMetadata[] = [];
 
       for (const file of files) {
-        if (!file.endsWith('.json')) continue;
+        if (!file.endsWith('.json')) {
+          continue;
+        }
 
         const sessionPath = path.join(this.sessionsDir, file);
         const content = fs.readFileSync(sessionPath, 'utf-8');
@@ -202,6 +227,16 @@ export class SessionManager {
 
       // Sort by updated time (newest first)
       sessions.sort((a, b) => b.updated - a.updated);
+
+      if (opts?.workdir !== undefined) {
+        const target = normalizeWorkdir(opts.workdir);
+        return sessions.filter((s) => {
+          if (s.workdir === undefined) {
+            return false;
+          }
+          return normalizeWorkdir(s.workdir) === target;
+        });
+      }
 
       return sessions;
     } catch (error) {

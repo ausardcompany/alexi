@@ -109,6 +109,13 @@ describe('SessionManager', () => {
 
       expect(session.metadata.modelId).toBe('gpt-4');
     });
+
+    it('should populate workdir from process.cwd() at creation time', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession();
+
+      expect(session.metadata.workdir).toBe(process.cwd());
+    });
   });
 
   // ========== 3. loadSession ==========
@@ -355,6 +362,97 @@ describe('SessionManager', () => {
       const manager = new SessionManager(emptyDir);
 
       expect(manager.listSessions()).toEqual([]);
+    });
+
+    describe('workdir filter', () => {
+      function writeRawSession(
+        sessionsDir: string,
+        id: string,
+        workdir: string | undefined,
+        updated: number
+      ): void {
+        const meta: Record<string, unknown> = {
+          id,
+          created: updated,
+          updated,
+          totalTokens: 0,
+          messageCount: 0,
+        };
+        if (workdir !== undefined) {
+          meta.workdir = workdir;
+        }
+        const session = { metadata: meta, messages: [] };
+        fs.writeFileSync(
+          path.join(sessionsDir, `${id}.json`),
+          JSON.stringify(session, null, 2),
+          'utf-8'
+        );
+      }
+
+      it('should return all sessions when no opts are passed (unchanged behavior)', () => {
+        const dir = path.join(tempDir, 'filter-default');
+        fs.mkdirSync(dir, { recursive: true });
+        writeRawSession(dir, 'a', '/foo', 1000);
+        writeRawSession(dir, 'b', '/bar', 2000);
+        writeRawSession(dir, 'c', undefined, 3000);
+
+        const manager = new SessionManager(dir);
+        const sessions = manager.listSessions();
+
+        expect(sessions.map((s) => s.id).sort()).toEqual(['a', 'b', 'c']);
+      });
+
+      it('should filter to only sessions with matching workdir', () => {
+        const dir = path.join(tempDir, 'filter-match');
+        fs.mkdirSync(dir, { recursive: true });
+        writeRawSession(dir, 'match1', '/foo', 1000);
+        writeRawSession(dir, 'nomatch', '/bar', 2000);
+        writeRawSession(dir, 'match2', '/foo', 3000);
+
+        const manager = new SessionManager(dir);
+        const sessions = manager.listSessions({ workdir: '/foo' });
+
+        expect(sessions.map((s) => s.id).sort()).toEqual(['match1', 'match2']);
+      });
+
+      it('should exclude sessions with undefined workdir from filtered listings', () => {
+        const dir = path.join(tempDir, 'filter-exclude-legacy');
+        fs.mkdirSync(dir, { recursive: true });
+        writeRawSession(dir, 'legacy', undefined, 1000);
+        writeRawSession(dir, 'matching', '/foo', 2000);
+
+        const manager = new SessionManager(dir);
+        const sessions = manager.listSessions({ workdir: '/foo' });
+
+        expect(sessions.map((s) => s.id)).toEqual(['matching']);
+      });
+
+      it('should resolve paths so /foo, /foo/, and /foo/. all match', () => {
+        const dir = path.join(tempDir, 'filter-resolve');
+        fs.mkdirSync(dir, { recursive: true });
+        writeRawSession(dir, 's1', '/foo', 1000);
+        writeRawSession(dir, 's2', '/foo/', 2000);
+        writeRawSession(dir, 's3', '/foo/.', 3000);
+
+        const manager = new SessionManager(dir);
+
+        for (const target of ['/foo', '/foo/', '/foo/.']) {
+          const sessions = manager.listSessions({ workdir: target });
+          expect(sessions.map((s) => s.id).sort()).toEqual(['s1', 's2', 's3']);
+        }
+      });
+
+      it('should return an empty array when no sessions match the workdir', () => {
+        const dir = path.join(tempDir, 'filter-empty');
+        fs.mkdirSync(dir, { recursive: true });
+        writeRawSession(dir, 'a', '/foo', 1000);
+        writeRawSession(dir, 'b', undefined, 2000);
+
+        const manager = new SessionManager(dir);
+        const sessions = manager.listSessions({ workdir: '/nope' });
+
+        expect(sessions).toEqual([]);
+      });
     });
   });
 

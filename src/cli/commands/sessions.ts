@@ -13,7 +13,8 @@ import { SessionManager } from '../../core/sessionManager.js';
  *     model: string | null,
  *     updatedAt: number,   // unix epoch milliseconds
  *     messageCount: number,
- *     totalTokens: number
+ *     totalTokens: number,
+ *     workdir: string | null
  *   }
  */
 export function registerSessionCommands(program: Command): void {
@@ -22,13 +23,31 @@ export function registerSessionCommands(program: Command): void {
     .command('sessions')
     .description(
       'List all saved sessions. Use --json to emit a stable JSON array ' +
-        '({ id, title, model, updatedAt, messageCount, totalTokens }) for scripting.'
+        '({ id, title, model, updatedAt, messageCount, totalTokens, workdir }) for scripting. ' +
+        'Use --here to filter to sessions created in the current directory, ' +
+        '--workdir <dir> to filter to a specific directory, or --all (default) ' +
+        'to list every saved session including legacy ones with no recorded workdir.'
     )
     .option('--json', 'Output sessions as JSON array')
-    .action(async (opts: { json?: boolean }) => {
+    .option('--here', 'Only list sessions created in the current working directory')
+    .option('--workdir <dir>', 'Only list sessions created in the specified directory')
+    .option('--all', 'List all sessions (default behavior; explicit no-filter form)')
+    .action(async (opts: { json?: boolean; here?: boolean; workdir?: string; all?: boolean }) => {
       try {
+        if (opts.here && opts.workdir !== undefined) {
+          console.error('Error: --here and --workdir are mutually exclusive');
+          process.exit(1);
+        }
+
+        let filter: { workdir?: string } | undefined;
+        if (opts.here) {
+          filter = { workdir: process.cwd() };
+        } else if (opts.workdir !== undefined) {
+          filter = { workdir: opts.workdir };
+        }
+
         const sessionManager = new SessionManager();
-        const sessions = sessionManager.listSessions();
+        const sessions = sessionManager.listSessions(filter);
 
         if (opts.json) {
           const out = sessions.map((s) => ({
@@ -38,6 +57,7 @@ export function registerSessionCommands(program: Command): void {
             updatedAt: s.updated,
             messageCount: s.messageCount,
             totalTokens: s.totalTokens,
+            workdir: s.workdir ?? null,
           }));
           console.log(JSON.stringify(out, null, 2));
           return;
@@ -57,6 +77,7 @@ export function registerSessionCommands(program: Command): void {
           console.log(`  Updated: ${date}`);
           console.log(`  Messages: ${session.messageCount}, Tokens: ${session.totalTokens}`);
           console.log(`  Model: ${session.modelId || 'N/A'}`);
+          console.log(`  Workdir: ${session.workdir || 'N/A'}`);
           console.log();
         });
       } catch (e) {
