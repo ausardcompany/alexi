@@ -8,6 +8,7 @@ import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { encodeWithEncoding, type EncodingInfo } from '../encoded-io.js';
 import { getFileEncoding } from './read.js';
+import { attachAgentsMdReminders } from '../../agent/agentsMdReminders.js';
 
 const WriteParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file to write'),
@@ -86,7 +87,7 @@ Usage:
       await fs.writeFile(filePath, buffer);
       const bytesWritten = buffer.length;
 
-      const toolResult = {
+      const toolResult: ToolResult<WriteResult> = {
         success: true,
         data: {
           path: filePath,
@@ -100,6 +101,8 @@ Usage:
         'write',
         !exists ? 'created file' : 'overwrote file'
       );
+
+      attachAgentsMdReminders(toolResult, filePath, context);
 
       return toolResult;
     } catch (err) {
