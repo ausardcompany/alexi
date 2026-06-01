@@ -89,6 +89,35 @@ This plugin was scaffolded by \`alexi plugin init\`.
 ## Reload
 
 Reload via \`/reload-skills\` or restart Alexi.
+
+## Rules
+
+Plugins can contribute markdown into the agent's system prompt via \`rules\`
+in \`plugin.json\`. Three sources are supported:
+
+- \`inline\`  — content lives in the manifest:
+  \`\`\`json
+  { "name": "style", "source": "inline", "content": "Always run npm test before committing." }
+  \`\`\`
+- \`file\`    — content read from a path resolved against the plugin root:
+  \`\`\`json
+  { "name": "team", "source": "file", "path": "rules/team.md" }
+  \`\`\`
+- \`command\` — content produced by spawning a script (no shell). The command
+  has a 5s timeout and 32 KB stdout cap. Output is cached for the process
+  lifetime when \`scope: "always"\` (default) or per-session when
+  \`scope: "session"\`. Useful for dynamic rules like today's TODOs:
+  \`\`\`json
+  {
+    "name": "todos",
+    "scope": "session",
+    "source": "command",
+    "command": ["node", "scripts/todos.js"]
+  }
+  \`\`\`
+  Strings are also accepted (\`"command": "node scripts/todos.js"\`) — they are
+  tokenised internally and never passed through a shell, so \`;\`, \`|\`, and
+  \`$(...)\` have no effect.
 `;
   writeFileSync(path.join(root, 'README.md'), readme);
 

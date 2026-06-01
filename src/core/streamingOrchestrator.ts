@@ -12,7 +12,7 @@ import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
-import { buildAssembledSystemPrompt } from '../agent/system.js';
+import { buildAssembledSystemPromptAsync } from '../agent/system.js';
 import { buildSessionHeaders } from '../providers/sessionHeaders.js';
 
 export interface StreamingOptions {
@@ -77,11 +77,12 @@ export async function* streamChat(
   // Assemble the effective system prompt using the pipeline.
   // buildAssembledSystemPrompt handles soul → model → env → agent → AGENTS.md layers.
   // A manual systemPrompt (e.g. from /system command) is appended as custom rules.
-  const assembledPrompt = buildAssembledSystemPrompt({
+  const assembledPrompt = await buildAssembledSystemPromptAsync({
     modelId,
     agentId: options?.agentId,
     workdir: options?.workdir,
     customRules: options?.systemPrompt,
+    sessionId: options?.sessionManager?.getCurrentSession()?.metadata.id,
   });
 
   // Build messages array with history if session manager provided

@@ -20,7 +20,7 @@ import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
-import { buildAssembledSystemPrompt } from '../agent/system.js';
+import { buildAssembledSystemPromptAsync } from '../agent/system.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
@@ -424,21 +424,32 @@ export async function agenticChat(
    * Uses the assembled prompt pipeline (soul → model → env → agent → AGENTS.md → custom rules)
    * as the stable base, then appends volatile content (memory → session → repoMap) last.
    */
-  function buildSystemPrompt(customRules?: string): string {
-    // Assembled prompt: stable layers first (best prefix for prompt caching)
-    const assembled = buildAssembledSystemPrompt({
+  async function buildSystemPrompt(customRules?: string): Promise<string> {
+    // Assembled prompt: stable layers first (best prefix for prompt caching).
+    // Awaited form so plugin command-source rules can materialize.
+    const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+    const assembled = await buildAssembledSystemPromptAsync({
       modelId,
       agentId: options?.agentId,
       agentPrompt: activeAgent?.systemPrompt,
       workdir,
       customRules,
+      sessionId,
     });
     const parts: string[] = [];
-    if (assembled) parts.push(assembled);
+    if (assembled) {
+      parts.push(assembled);
+    }
     // Volatile layers appended last so stable prefix is cache-friendly
-    if (memoryContext) parts.push(memoryContext);
-    if (sessionContext) parts.push(sessionContext);
-    if (repoMapText) parts.push(repoMapText);
+    if (memoryContext) {
+      parts.push(memoryContext);
+    }
+    if (sessionContext) {
+      parts.push(sessionContext);
+    }
+    if (repoMapText) {
+      parts.push(repoMapText);
+    }
     return parts.join('\n\n');
   }
 
@@ -454,7 +465,7 @@ export async function agenticChat(
     const history = options.sessionManager.getHistory(20);
     if (!history.some((m) => m.role === 'system')) {
       // Always include assembled system prompt for new conversations
-      const systemContent = buildSystemPrompt(options?.systemPrompt);
+      const systemContent = await buildSystemPrompt(options?.systemPrompt);
       if (systemContent) {
         messages.push({ role: 'system', content: systemContent });
       }
@@ -463,7 +474,7 @@ export async function agenticChat(
       ...history.map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
     );
   } else {
-    const effectiveSystemPrompt = buildSystemPrompt(options?.systemPrompt);
+    const effectiveSystemPrompt = await buildSystemPrompt(options?.systemPrompt);
     if (effectiveSystemPrompt) {
       messages.push({ role: 'system', content: effectiveSystemPrompt });
     }
