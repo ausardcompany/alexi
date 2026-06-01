@@ -1077,7 +1077,8 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           if (!serverConfig) {
             console.log(c('red', `  Server '${serverName}' not found in config\n`));
           } else {
-            const result = await mcpManager.connect(serverConfig);
+            const sessionId = state.sessionManager.getCurrentSession()?.metadata.id;
+            const result = await mcpManager.connect(serverConfig, { sessionId });
             if (result.status === 'connected') {
               console.log(
                 c('green', `  Connected to ${serverName} (${result.tools.length} tools)\n`)
