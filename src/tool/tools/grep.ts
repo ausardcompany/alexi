@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { instructionsForPath } from '../../agent/system.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -205,7 +206,7 @@ Usage:
       // Limit total matches
       const limitedMatches = matches.slice(0, 1000);
 
-      return {
+      const grepResult: ToolResult<GrepResult> = {
         success: true,
         data: {
           matches: limitedMatches,
@@ -218,6 +219,37 @@ Usage:
             ? `Showing first 1000 of ${matches.length} matches. Narrow your search.`
             : undefined,
       };
+
+      // Per-directory AGENTS.md reminders — for each unique file in the
+      // returned matches, walk parent directories looking for AGENTS.md.
+      // The shared `agentsMdSeen` set guarantees one reminder per unique
+      // AGENTS.md per session, even if many matches live under the same
+      // subtree. Mirror read.ts:55-76.
+      if (context.agentsMdSeen) {
+        const uniqueFiles = new Set<string>();
+        for (const m of limitedMatches) {
+          // m.file is relative to searchPath; rebuild absolute path.
+          uniqueFiles.add(path.join(searchPath, m.file));
+        }
+        const allReminders: { source: string; content: string }[] = [];
+        for (const absFile of uniqueFiles) {
+          const reminders = instructionsForPath(absFile, context.workdir, context.agentsMdSeen);
+          for (const r of reminders) {
+            allReminders.push({
+              source: path.relative(context.workdir, r.path),
+              content: r.content,
+            });
+          }
+        }
+        if (allReminders.length > 0) {
+          grepResult.metadata = {
+            ...(grepResult.metadata ?? {}),
+            systemReminders: allReminders,
+          };
+        }
+      }
+
+      return grepResult;
     } catch (err) {
       if (err instanceof SyntaxError) {
         return {

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { instructionsForPath } from '../../agent/system.js';
 
 const EditParamsSchema = z.object({
   filePath: z
@@ -136,7 +137,7 @@ Usage:
         }
       }
 
-      const toolResult = {
+      const toolResult: ToolResult<EditResult> = {
         success: true,
         data: {
           path: filePath,
@@ -148,6 +149,20 @@ Usage:
       };
 
       context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);
+
+      // Per-directory AGENTS.md reminders — mirror read.ts:55-76
+      if (context.agentsMdSeen) {
+        const reminders = instructionsForPath(filePath, context.workdir, context.agentsMdSeen);
+        if (reminders.length > 0) {
+          toolResult.metadata = {
+            ...(toolResult.metadata ?? {}),
+            systemReminders: reminders.map((r) => ({
+              source: path.relative(context.workdir, r.path),
+              content: r.content,
+            })),
+          };
+        }
+      }
 
       return toolResult;
     } catch (err) {

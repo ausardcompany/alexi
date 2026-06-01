@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { instructionsForPath } from '../../agent/system.js';
 
 const EditItemSchema = z.object({
   oldString: z.string().describe('The text to replace'),
@@ -148,6 +149,23 @@ Usage:
       }
 
       context.gitManager?.onFileChanged(filePath, 'multiedit', `${changes.length} edit(s) applied`);
+
+      // Per-directory AGENTS.md reminders — mirror read.ts:55-76.
+      // multiedit operates on a single file, so a single instructionsForPath
+      // walk is sufficient; the shared `agentsMdSeen` set guarantees one
+      // emission per AGENTS.md per session across calls.
+      if (context.agentsMdSeen) {
+        const reminders = instructionsForPath(filePath, context.workdir, context.agentsMdSeen);
+        if (reminders.length > 0) {
+          result.metadata = {
+            ...(result.metadata ?? {}),
+            systemReminders: reminders.map((r) => ({
+              source: path.relative(context.workdir, r.path),
+              content: r.content,
+            })),
+          };
+        }
+      }
 
       return result;
     } catch (err) {
