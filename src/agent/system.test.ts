@@ -144,6 +144,114 @@ describe('Prompt System', () => {
       expect(prompt).toContain(customRule);
     });
 
+    it('includes plugin rules under per-plugin headers when provided', () => {
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: [
+          {
+            pluginName: 'team-rules',
+            name: 'no-stdout-in-workers',
+            scope: 'always',
+            source: 'inline',
+            content: 'Never log to stdout in workers.',
+          },
+        ],
+      });
+
+      expect(prompt).toContain('## Rules from plugin "team-rules"');
+      expect(prompt).toContain('Never log to stdout in workers.');
+    });
+
+    it('appends plugin rules AFTER the AGENTS.md block', () => {
+      const tmpProject = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-order-'));
+      try {
+        fs.writeFileSync(path.join(tmpProject, 'AGENTS.md'), 'AGENTS_MD_UNIQUE_TOKEN');
+
+        const prompt = buildAssembledSystemPrompt({
+          workdir: tmpProject,
+          skipEnv: true,
+          pluginRules: [
+            {
+              pluginName: 'team-rules',
+              name: 'r1',
+              scope: 'always',
+              source: 'inline',
+              content: 'PLUGIN_RULE_UNIQUE_TOKEN',
+            },
+          ],
+        });
+
+        const agentsIdx = prompt.indexOf('AGENTS_MD_UNIQUE_TOKEN');
+        const ruleIdx = prompt.indexOf('PLUGIN_RULE_UNIQUE_TOKEN');
+        expect(agentsIdx).toBeGreaterThanOrEqual(0);
+        expect(ruleIdx).toBeGreaterThanOrEqual(0);
+        // Plugin rules must appear AFTER AGENTS.md so AGENTS.md wins on conflicts.
+        expect(ruleIdx).toBeGreaterThan(agentsIdx);
+        expect(prompt).toContain('## Rules from plugin "team-rules"');
+      } finally {
+        fs.rmSync(tmpProject, { recursive: true, force: true });
+      }
+    });
+
+    it('omits the rules block entirely when no plugin rules are provided', () => {
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: [],
+      });
+      expect(prompt).not.toContain('## Rules from plugin');
+    });
+
+    it('respects skipPluginRules: true', () => {
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        skipPluginRules: true,
+        pluginRules: [
+          {
+            pluginName: 'p1',
+            name: 'r1',
+            scope: 'always',
+            source: 'inline',
+            content: 'RULE_THAT_SHOULD_BE_SKIPPED',
+          },
+        ],
+      });
+      expect(prompt).not.toContain('RULE_THAT_SHOULD_BE_SKIPPED');
+      expect(prompt).not.toContain('## Rules from plugin');
+    });
+
+    it('renders multiple plugin rules in order with separate headers', () => {
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: [
+          {
+            pluginName: 'a',
+            name: 'r1',
+            scope: 'always',
+            source: 'inline',
+            content: 'CONTENT_A',
+          },
+          {
+            pluginName: 'b',
+            name: 'r2',
+            scope: 'always',
+            source: 'inline',
+            content: 'CONTENT_B',
+          },
+        ],
+      });
+
+      const aHeader = prompt.indexOf('## Rules from plugin "a"');
+      const bHeader = prompt.indexOf('## Rules from plugin "b"');
+      expect(aHeader).toBeGreaterThanOrEqual(0);
+      expect(bHeader).toBeGreaterThan(aHeader);
+      expect(prompt).toContain('CONTENT_A');
+      expect(prompt).toContain('CONTENT_B');
+    });
+
     it('produces valid output for all agent + model combinations', () => {
       for (const agentId of AGENT_IDS) {
         for (const modelId of MODEL_IDS) {
