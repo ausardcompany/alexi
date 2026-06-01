@@ -34,6 +34,7 @@ const FIXTURE_SESSIONS: SessionMetadata[] = [
     totalTokens: 1234,
     messageCount: 7,
     title: 'Refactor router',
+    workdir: '/repo/alexi',
   },
   {
     id: 'sess-002',
@@ -43,6 +44,7 @@ const FIXTURE_SESSIONS: SessionMetadata[] = [
     totalTokens: 0,
     messageCount: 0,
     // title intentionally omitted to exercise the null fallback
+    // workdir intentionally omitted (legacy session)
   },
 ];
 
@@ -88,9 +90,10 @@ describe('alexi sessions command', () => {
         updatedAt: 1_700_000_500_000,
         messageCount: 7,
         totalTokens: 1234,
+        workdir: '/repo/alexi',
       });
 
-      // Second session exercises the null fallbacks for title and model.
+      // Second session exercises the null fallbacks for title, model, and workdir.
       expect(arr[1]).toEqual({
         id: 'sess-002',
         title: null,
@@ -98,10 +101,19 @@ describe('alexi sessions command', () => {
         updatedAt: 1_700_001_500_000,
         messageCount: 0,
         totalTokens: 0,
+        workdir: null,
       });
 
       // Each entry must have exactly the documented set of keys.
-      const expectedKeys = ['id', 'title', 'model', 'updatedAt', 'messageCount', 'totalTokens'];
+      const expectedKeys = [
+        'id',
+        'title',
+        'model',
+        'updatedAt',
+        'messageCount',
+        'totalTokens',
+        'workdir',
+      ];
       for (const entry of arr) {
         expect(Object.keys(entry).sort()).toEqual([...expectedKeys].sort());
       }
@@ -136,6 +148,8 @@ describe('alexi sessions command', () => {
       expect(output).toContain('Messages: 7, Tokens: 1234');
       expect(output).toContain('Model: sap-ai-core/anthropic--claude-4.7-opus');
       expect(output).toContain('Model: N/A');
+      expect(output).toContain('Workdir: /repo/alexi');
+      expect(output).toContain('Workdir: N/A');
     });
 
     it('prints "No sessions found" when there are no sessions', async () => {
@@ -147,6 +161,65 @@ describe('alexi sessions command', () => {
       const output = (logSpy.mock.calls as unknown[][]).map((c) => c.join(' ')).join('\n');
       expect(output).toContain('No sessions found');
       expect(output).not.toContain('=== Saved Sessions ===');
+    });
+  });
+
+  describe('--here / --workdir / --all flags', () => {
+    it('passes { workdir: process.cwd() } to listSessions when --here is set', async () => {
+      listSessionsMock.mockReturnValue([]);
+
+      const program = buildProgram();
+      await program.parseAsync(['node', 'alexi', 'sessions', '--here']);
+
+      expect(listSessionsMock).toHaveBeenCalledTimes(1);
+      expect(listSessionsMock).toHaveBeenCalledWith({ workdir: process.cwd() });
+    });
+
+    it('passes { workdir: <dir> } to listSessions when --workdir is set', async () => {
+      listSessionsMock.mockReturnValue([]);
+
+      const program = buildProgram();
+      await program.parseAsync(['node', 'alexi', 'sessions', '--workdir', '/some/explicit/path']);
+
+      expect(listSessionsMock).toHaveBeenCalledWith({ workdir: '/some/explicit/path' });
+    });
+
+    it('passes no filter to listSessions when no flag is set (default)', async () => {
+      listSessionsMock.mockReturnValue([]);
+
+      const program = buildProgram();
+      await program.parseAsync(['node', 'alexi', 'sessions']);
+
+      expect(listSessionsMock).toHaveBeenCalledWith(undefined);
+    });
+
+    it('passes no filter to listSessions when --all is set', async () => {
+      listSessionsMock.mockReturnValue([]);
+
+      const program = buildProgram();
+      await program.parseAsync(['node', 'alexi', 'sessions', '--all']);
+
+      expect(listSessionsMock).toHaveBeenCalledWith(undefined);
+    });
+
+    it('errors out when --here and --workdir are both set', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+        throw new Error('process.exit called');
+      }) as never);
+
+      const program = buildProgram();
+
+      await expect(
+        program.parseAsync(['node', 'alexi', 'sessions', '--here', '--workdir', '/some/path'])
+      ).rejects.toThrow('process.exit called');
+
+      expect(listSessionsMock).not.toHaveBeenCalled();
+      expect(errSpy).toHaveBeenCalledWith('Error: --here and --workdir are mutually exclusive');
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
     });
   });
 });
