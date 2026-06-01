@@ -13,6 +13,8 @@ import { defineEvent, type BusEvent } from '../bus/index.js';
 import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
 import { type SkillDefinition, registerSkill } from '../skill/index.js';
 import { registerCommand, defineCommand, loadCommandFromFile } from '../command/index.js';
+import { runRuleCommand } from './ruleCommandRunner.js';
+import logger from '../utils/logger.js';
 
 // ============ Plugin Events ============
 
@@ -299,28 +301,39 @@ export const PLUGIN_RULE_TRUNCATION_MARKER =
  * Zod schema for a `PluginRule` declaration in `plugin.json`.
  *
  * A rule ships markdown that gets injected into the agent's system prompt
- * when the plugin is enabled. Two source types are supported in this issue:
+ * when the plugin is enabled. Three source types are supported:
  *
- *   - `inline`: content lives inline in `plugin.json` (`content` field).
- *   - `file`:   content is read from `path` resolved against the plugin root.
+ *   - `inline`:  content lives inline in `plugin.json` (`content` field).
+ *   - `file`:    content is read from `path` resolved against the plugin root.
+ *   - `command`: content is produced by spawning `command` (no shell) inside
+ *                the plugin root. See `runRuleCommand` for safety bounds.
  *
- * `command` (a script that produces dynamic rule content) is deliberately
- * deferred to a follow-up issue.
+ * For `command` sources, `command` may be either a single string (parsed via
+ * a small whitespace + quote tokeniser) or a pre-tokenised string array. In
+ * both cases the spawn is shell-free.
  */
 export const PluginRuleSchema = z
   .object({
     name: z.string().min(1),
     scope: z.enum(['session', 'always']).default('always'),
-    source: z.enum(['inline', 'file']),
+    source: z.enum(['inline', 'file', 'command']),
     content: z.string().optional(),
     path: z.string().optional(),
+    /** Command line for `source: 'command'` rules. */
+    command: z.union([z.string(), z.array(z.string())]).optional(),
+    /** Optional override of the per-rule 5s spawn timeout (in milliseconds). */
+    timeoutMs: z.number().int().positive().optional(),
+    /** Optional override of the per-rule 32 KB stdout cap (in bytes). */
+    maxBytes: z.number().int().positive().optional(),
   })
   .refine(
     (r) =>
       (r.source === 'inline' && r.content !== undefined) ||
-      (r.source === 'file' && r.path !== undefined),
+      (r.source === 'file' && r.path !== undefined) ||
+      (r.source === 'command' && r.command !== undefined),
     {
-      message: "rule must have 'content' for inline source or 'path' for file source",
+      message:
+        "rule must have 'content' for inline source, 'path' for file source, or 'command' for command source",
     }
   );
 
@@ -328,8 +341,12 @@ export type PluginRule = z.infer<typeof PluginRuleSchema>;
 
 /**
  * A `PluginRule` whose declared source has been materialized — the `content`
- * field is guaranteed populated for both `inline` and `file` sources, with the
+ * field is guaranteed populated for `inline` and `file` sources, with the
  * 32 KB cap applied. Consumed by the system-prompt assembler.
+ *
+ * For `command` sources, materialization is deferred to prompt-assembly time
+ * (so we can look up the per-session cache and respect `scope`); a deferred
+ * descriptor is carried through alongside the resolved metadata.
  */
 export interface ResolvedPluginRule {
   /** Plugin that contributed the rule. */
@@ -338,10 +355,28 @@ export interface ResolvedPluginRule {
   name: string;
   /** Currently 'always' or 'session' — both included verbatim in the prompt today. */
   scope: 'session' | 'always';
-  /** Original declared source ('inline' or 'file'). */
-  source: 'inline' | 'file';
-  /** Materialized rule content (already capped + truncation-marked). */
+  /** Original declared source ('inline', 'file', or 'command'). */
+  source: 'inline' | 'file' | 'command';
+  /**
+   * Materialized rule content (already capped + truncation-marked). Empty
+   * for unresolved `command` sources — callers should consult `command`
+   * and run {@link materializeCommandRule} to obtain the dynamic content.
+   */
   content: string;
+  /**
+   * For `command` sources, the spawn descriptor needed to materialize the
+   * rule on demand. Always undefined for `inline` and `file` sources.
+   */
+  command?: {
+    /** Working directory for the spawn (typically the plugin root). */
+    pluginRoot: string;
+    /** Command line — either a single string or pre-tokenised argv. */
+    command: string | string[];
+    /** Per-rule timeout override (defaults to 5000 ms). */
+    timeoutMs?: number;
+    /** Per-rule stdout cap override (defaults to 32 KB). */
+    maxBytes?: number;
+  };
 }
 
 /**
@@ -416,38 +451,170 @@ export function resolvePluginRule(
     };
   }
 
-  // source === 'file'
-  if (rule.path === undefined) {
-    return { ok: false, error: `rule '${rule.name}' missing 'path' for file source` };
-  }
+  if (rule.source === 'file') {
+    if (rule.path === undefined) {
+      return { ok: false, error: `rule '${rule.name}' missing 'path' for file source` };
+    }
 
-  const resolved = path.resolve(pluginRoot, rule.path);
-  const rel = path.relative(pluginRoot, resolved);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    const resolved = path.resolve(pluginRoot, rule.path);
+    const rel = path.relative(pluginRoot, resolved);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      return {
+        ok: false,
+        error: `rule '${rule.name}' path '${rule.path}' escapes plugin root`,
+      };
+    }
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(resolved, 'utf-8');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `rule '${rule.name}' failed to read '${rule.path}': ${msg}` };
+    }
+
     return {
-      ok: false,
-      error: `rule '${rule.name}' path '${rule.path}' escapes plugin root`,
+      ok: true,
+      rule: {
+        pluginName,
+        name: rule.name,
+        scope: rule.scope,
+        source: 'file',
+        content: capRuleContent(raw),
+      },
     };
   }
 
-  let raw: string;
-  try {
-    raw = fs.readFileSync(resolved, 'utf-8');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `rule '${rule.name}' failed to read '${rule.path}': ${msg}` };
+  // source === 'command'
+  if (rule.command === undefined) {
+    return { ok: false, error: `rule '${rule.name}' missing 'command' for command source` };
   }
-
+  // Defer execution to prompt-assembly time so we can apply per-session
+  // caching. The descriptor is carried verbatim — `runRuleCommand` does the
+  // tokenisation / env-scrub / spawn-bounding.
   return {
     ok: true,
     rule: {
       pluginName,
       name: rule.name,
       scope: rule.scope,
-      source: 'file',
-      content: capRuleContent(raw),
+      source: 'command',
+      content: '',
+      command: {
+        pluginRoot,
+        command: rule.command,
+        timeoutMs: rule.timeoutMs,
+        maxBytes: rule.maxBytes,
+      },
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Command-rule cache + materialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Module-scope cache of command-rule outputs.
+ *
+ * Cache key shape:
+ *   - `${pluginName}::${ruleName}::always`                  — process lifetime.
+ *   - `${pluginName}::${ruleName}::session::${sessionId}`   — dropped on session close.
+ *
+ * Stored value is the *capped* rule content, ready to drop into the prompt.
+ * Errors are not cached — a transient failure should re-run on the next
+ * prompt assembly so a fixed environment can recover automatically.
+ */
+const commandRuleCache = new Map<string, string>();
+
+/** Build a cache key from the rule's identity and effective scope. */
+function commandRuleCacheKey(
+  pluginName: string,
+  ruleName: string,
+  scope: 'session' | 'always',
+  sessionId: string | undefined
+): string {
+  if (scope === 'always') {
+    return `${pluginName}::${ruleName}::always`;
+  }
+  return `${pluginName}::${ruleName}::session::${sessionId ?? 'default'}`;
+}
+
+/**
+ * Drop cache entries.
+ *
+ *   - With `sessionId` set: drop only entries scoped to that session.
+ *   - Without `sessionId`: drop *all* entries (process-wide reset). Used by
+ *     tests; production callers should always pass a session ID.
+ */
+export function clearRuleCommandCache(sessionId?: string): void {
+  if (sessionId === undefined) {
+    commandRuleCache.clear();
+    return;
+  }
+  const suffix = `::session::${sessionId}`;
+  for (const key of Array.from(commandRuleCache.keys())) {
+    if (key.endsWith(suffix)) {
+      commandRuleCache.delete(key);
+    }
+  }
+}
+
+/**
+ * Resolve a single `command`-source rule, consulting the cache first. On
+ * cache miss, the command is spawned via {@link runRuleCommand} and the
+ * (capped) output is stored under the appropriate scope key.
+ *
+ * Truncation/timeout/non-zero exits emit a single `logger.warn` line — the
+ * rule is still returned (potentially partial) so a flaky generator does
+ * not silently disappear from the prompt.
+ */
+export async function materializeCommandRule(
+  rule: ResolvedPluginRule,
+  sessionId?: string
+): Promise<string> {
+  if (rule.source !== 'command' || !rule.command) {
+    return rule.content;
+  }
+
+  const key = commandRuleCacheKey(rule.pluginName, rule.name, rule.scope, sessionId);
+  const cached = commandRuleCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const result = await runRuleCommand({
+    pluginRoot: rule.command.pluginRoot,
+    command: rule.command.command,
+    timeoutMs: rule.command.timeoutMs,
+    maxBytes: rule.command.maxBytes,
+  });
+
+  let content = result.stdout;
+  if (result.truncated) {
+    content += '\n\n[... truncated: command rule stdout exceeded cap ...]';
+    logger.warn(
+      `Plugin rule '${rule.pluginName}/${rule.name}' command stdout exceeded cap (truncated)`
+    );
+  }
+  if (result.timedOut) {
+    content += '\n\n[... truncated: command rule timed out ...]';
+    logger.warn(`Plugin rule '${rule.pluginName}/${rule.name}' command timed out`);
+  }
+  if (result.exitCode !== null && result.exitCode !== 0 && !result.timedOut) {
+    logger.warn(
+      `Plugin rule '${rule.pluginName}/${rule.name}' command exited with code ${result.exitCode}: ${result.stderr.trim()}`
+    );
+  } else if (result.exitCode === null && !result.timedOut && !result.truncated) {
+    // Only treat exitCode===null as a spawn failure when neither the timeout
+    // nor the size guard fired (those paths SIGKILL the child themselves).
+    logger.warn(
+      `Plugin rule '${rule.pluginName}/${rule.name}' command failed to spawn: ${result.stderr.trim()}`
+    );
+  }
+
+  commandRuleCache.set(key, content);
+  return content;
 }
 
 /**
@@ -1537,9 +1704,37 @@ export function disablePlugin(name: string, options?: { force?: boolean }): Disa
  * Return resolved rule contributions from all enabled plugins in the global
  * manager. Used by the system-prompt assembler to layer plugin rules after
  * AGENTS.md.
+ *
+ * NOTE: For `command`-source rules this returns the *unmaterialized* descriptor
+ * with `content: ''`. Callers that want the dynamic output should go through
+ * {@link resolvePluginRulesForPrompt} which materializes commands in parallel.
  */
 export function getEnabledPluginRules(): ResolvedPluginRule[] {
   return getPluginManager().getEnabledRules();
+}
+
+/**
+ * Resolve all enabled plugin rules with command-source rules materialized.
+ *
+ * Inline and file rules are passed through unchanged. Command rules are
+ * spawned in parallel (each respecting its own timeout/cap) and their
+ * outputs are cached per `scope` — `'always'` for the process lifetime,
+ * `'session'` keyed by `sessionId`. The cache is the same map drained by
+ * {@link clearRuleCommandCache} on session close.
+ */
+export async function resolvePluginRulesForPrompt(
+  sessionId?: string
+): Promise<ResolvedPluginRule[]> {
+  const rules = getEnabledPluginRules();
+  return Promise.all(
+    rules.map(async (rule) => {
+      if (rule.source !== 'command') {
+        return rule;
+      }
+      const content = await materializeCommandRule(rule, sessionId);
+      return { ...rule, content };
+    })
+  );
 }
 
 // Type exports are already included via class declarations above

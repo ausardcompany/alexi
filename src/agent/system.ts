@@ -17,7 +17,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { getEnabledPluginRules, type ResolvedPluginRule } from '../plugin/index.js';
+import {
+  getEnabledPluginRules,
+  resolvePluginRulesForPrompt,
+  type ResolvedPluginRule,
+} from '../plugin/index.js';
 
 // ---------------------------------------------------------------------------
 // Prompt file loading
@@ -366,10 +370,14 @@ export interface AssembleOptions {
  * conflicts — plugin rules supplement project guidance, they don't override it.
  */
 function formatPluginRules(rules: ResolvedPluginRule[]): string {
-  if (rules.length === 0) {
+  // Skip rules whose content is empty — primarily unmaterialized `command`
+  // rules from a sync `buildAssembledSystemPrompt` call. Async callers that
+  // want dynamic content should pre-resolve via `resolvePluginRulesForPrompt`.
+  const filled = rules.filter((rule) => rule.content.trim().length > 0);
+  if (filled.length === 0) {
     return '';
   }
-  const sections = rules.map(
+  const sections = filled.map(
     (rule) => `## Rules from plugin "${rule.pluginName}"\n${rule.content}`
   );
   return sections.join('\n\n');
@@ -456,6 +464,29 @@ export function buildAssembledSystemPrompt(options: AssembleOptions = {}): strin
   }
 
   return parts.join('\n\n');
+}
+
+/**
+ * Async variant of {@link buildAssembledSystemPrompt} that materializes
+ * `command`-source plugin rules in parallel before assembling the prompt.
+ *
+ * Use this from request handlers (chat / agentic loop) so that dynamic rule
+ * generators contribute their content. The synchronous version skips command
+ * rules whose content has not been pre-materialized.
+ *
+ * `sessionId` keys the per-session cache for `scope: 'session'` rules. Pass
+ * the active session ID when available so cached output is dropped when the
+ * session ends.
+ */
+export async function buildAssembledSystemPromptAsync(
+  options: AssembleOptions & { sessionId?: string } = {}
+): Promise<string> {
+  // If the caller already supplied resolved rules, trust them and stay sync.
+  if (options.pluginRules || options.skipPluginRules) {
+    return buildAssembledSystemPrompt(options);
+  }
+  const pluginRules = await resolvePluginRulesForPrompt(options.sessionId);
+  return buildAssembledSystemPrompt({ ...options, pluginRules });
 }
 
 // ---------------------------------------------------------------------------

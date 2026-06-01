@@ -8,6 +8,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { shouldCompact, compactConversation, estimateMessagesTokens } from './compaction.js';
 import { closeSession } from './sessionClose.js';
+import { clearRuleCommandCache } from '../plugin/index.js';
 
 /**
  * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
@@ -259,6 +260,9 @@ export class SessionManager {
           this.activeSession = null;
         }
 
+        // Drop any plugin command-rule output cached against this session.
+        clearRuleCommandCache(sessionId);
+
         return true;
       }
       return false;
@@ -272,7 +276,11 @@ export class SessionManager {
    * Clear current session (reset conversation)
    */
   clearSession(): void {
+    const sessionId = this.activeSession?.metadata.id;
     this.activeSession = null;
+    if (sessionId) {
+      clearRuleCommandCache(sessionId);
+    }
   }
 
   /**
@@ -290,6 +298,8 @@ export class SessionManager {
     const memoriesCreated = closeSession(messages, sessionId);
 
     this.activeSession = null;
+    // Drop any plugin command-rule output cached against this session.
+    clearRuleCommandCache(sessionId);
 
     return { memoriesCreated };
   }
