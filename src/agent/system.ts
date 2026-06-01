@@ -7,7 +7,8 @@
  *   3. Environment info
  *   4. Agent role prompt
  *   5. Instruction files (AGENTS.md, ~/.alexi/ALEXI.md, .alexi/rules/*.md)
- *   6. Custom rules (user-provided)
+ *   6. Plugin rule contributions (from enabled plugins' plugin.json)
+ *   7. Custom rules (user-provided)
  *
  * Each layer is optional and only included when applicable.
  */
@@ -16,6 +17,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { getEnabledPluginRules, type ResolvedPluginRule } from '../plugin/index.js';
 
 // ---------------------------------------------------------------------------
 // Prompt file loading
@@ -344,6 +346,33 @@ export interface AssembleOptions {
   skipEnv?: boolean;
   /** Whether to skip instruction file loading — AGENTS.md, ALEXI.md, rules (useful for tests). */
   skipAgentsMd?: boolean;
+  /**
+   * Override plugin rule resolution. When omitted, the assembler calls
+   * `getEnabledPluginRules()` against the global plugin manager. Tests use
+   * this hook to inject deterministic rules without touching disk.
+   */
+  pluginRules?: ResolvedPluginRule[];
+  /** Skip plugin rule injection entirely (useful for tests). */
+  skipPluginRules?: boolean;
+}
+
+/**
+ * Format resolved plugin rules into a system-prompt block. Each rule is
+ * wrapped in a small Markdown section so the model can still distinguish
+ * which plugin contributed which guidance.
+ *
+ * NOTE on precedence: plugin rules are appended *after* the AGENTS.md block.
+ * Models treat later content as additive, so AGENTS.md still wins on direct
+ * conflicts — plugin rules supplement project guidance, they don't override it.
+ */
+function formatPluginRules(rules: ResolvedPluginRule[]): string {
+  if (rules.length === 0) {
+    return '';
+  }
+  const sections = rules.map(
+    (rule) => `## Rules from plugin "${rule.pluginName}"\n${rule.content}`
+  );
+  return sections.join('\n\n');
 }
 
 /**
@@ -410,7 +439,18 @@ export function buildAssembledSystemPrompt(options: AssembleOptions = {}): strin
     }
   }
 
-  // 6. Custom rules
+  // 6. Plugin rule contributions — appended *after* AGENTS.md so the project
+  //    AGENTS.md takes precedence on direct conflicts (the model treats later
+  //    content as additive supplementation).
+  if (!options.skipPluginRules) {
+    const pluginRules = options.pluginRules ?? getEnabledPluginRules();
+    const block = formatPluginRules(pluginRules);
+    if (block) {
+      parts.push(block);
+    }
+  }
+
+  // 7. Custom rules
   if (options.customRules?.trim()) {
     parts.push(options.customRules.trim());
   }

@@ -268,6 +268,12 @@ interface PluginState {
   registeredSkills: string[];
   registeredCommands: string[];
   hookSubscriptions: Array<() => void>;
+  /**
+   * Resolved rule contributions from this plugin's manifest. Empty for plugins
+   * loaded via `load()` / `loadFromFile()` (i.e. JS plugins) since they don't
+   * yet expose a `rules` surface — only manifest-declared rules are tracked.
+   */
+  resolvedRules: ResolvedPluginRule[];
 }
 
 // ============ Default Plugin Directories ============
@@ -278,6 +284,65 @@ export const PLUGIN_DIRS = [
 ];
 
 // ============ Plugin Manifest (plugin.json) ============
+
+/**
+ * Maximum number of bytes a single resolved rule may contribute to the system
+ * prompt. Rules exceeding this size are truncated with a clear marker.
+ */
+export const PLUGIN_RULE_MAX_BYTES = 32 * 1024;
+
+/** Truncation marker appended to a rule whose resolved content exceeded the cap. */
+export const PLUGIN_RULE_TRUNCATION_MARKER =
+  '\n\n[... truncated: rule content exceeded 32 KB cap ...]';
+
+/**
+ * Zod schema for a `PluginRule` declaration in `plugin.json`.
+ *
+ * A rule ships markdown that gets injected into the agent's system prompt
+ * when the plugin is enabled. Two source types are supported in this issue:
+ *
+ *   - `inline`: content lives inline in `plugin.json` (`content` field).
+ *   - `file`:   content is read from `path` resolved against the plugin root.
+ *
+ * `command` (a script that produces dynamic rule content) is deliberately
+ * deferred to a follow-up issue.
+ */
+export const PluginRuleSchema = z
+  .object({
+    name: z.string().min(1),
+    scope: z.enum(['session', 'always']).default('always'),
+    source: z.enum(['inline', 'file']),
+    content: z.string().optional(),
+    path: z.string().optional(),
+  })
+  .refine(
+    (r) =>
+      (r.source === 'inline' && r.content !== undefined) ||
+      (r.source === 'file' && r.path !== undefined),
+    {
+      message: "rule must have 'content' for inline source or 'path' for file source",
+    }
+  );
+
+export type PluginRule = z.infer<typeof PluginRuleSchema>;
+
+/**
+ * A `PluginRule` whose declared source has been materialized — the `content`
+ * field is guaranteed populated for both `inline` and `file` sources, with the
+ * 32 KB cap applied. Consumed by the system-prompt assembler.
+ */
+export interface ResolvedPluginRule {
+  /** Plugin that contributed the rule. */
+  pluginName: string;
+  /** Rule identifier (unique within a plugin). */
+  name: string;
+  /** Currently 'always' or 'session' — both included verbatim in the prompt today. */
+  scope: 'session' | 'always';
+  /** Original declared source ('inline' or 'file'). */
+  source: 'inline' | 'file';
+  /** Materialized rule content (already capped + truncation-marked). */
+  content: string;
+}
 
 /**
  * Zod schema for `plugin.json` manifests located under
@@ -297,9 +362,93 @@ export const PluginManifestSchema = z.object({
    * project commands apply.
    */
   commands: z.array(z.string()).optional(),
+  /**
+   * Markdown rule contributions injected into the agent's system prompt when
+   * the plugin is enabled. See `PluginRuleSchema` for the per-rule shape.
+   */
+  rules: z.array(PluginRuleSchema).optional(),
 });
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
+/**
+ * Apply the per-rule 32 KB content cap. Truncation is byte-based so that
+ * downstream prompt-size accounting doesn't have to re-measure.
+ */
+function capRuleContent(content: string): string {
+  const buf = Buffer.from(content, 'utf-8');
+  if (buf.byteLength <= PLUGIN_RULE_MAX_BYTES) {
+    return content;
+  }
+  // Truncate at the byte boundary, then drop any trailing partial UTF-8
+  // sequence so we never emit invalid encoding into the prompt.
+  const sliced = buf.subarray(0, PLUGIN_RULE_MAX_BYTES).toString('utf-8');
+  return sliced + PLUGIN_RULE_TRUNCATION_MARKER;
+}
+
+/**
+ * Resolve a single declared `PluginRule` to its materialized content, applying
+ * the path-escape guard for `file` sources and the 32 KB cap.
+ *
+ * Returns `{ ok: true, rule }` on success or `{ ok: false, error }` on failure
+ * so callers can surface a warning without throwing.
+ */
+export function resolvePluginRule(
+  pluginRoot: string,
+  pluginName: string,
+  rule: PluginRule
+): { ok: true; rule: ResolvedPluginRule } | { ok: false; error: string } {
+  if (rule.source === 'inline') {
+    if (rule.content === undefined) {
+      // Should be unreachable thanks to the schema refine, but keep the guard
+      // so callers don't have to reason about partially-validated input.
+      return { ok: false, error: `rule '${rule.name}' missing 'content' for inline source` };
+    }
+    return {
+      ok: true,
+      rule: {
+        pluginName,
+        name: rule.name,
+        scope: rule.scope,
+        source: 'inline',
+        content: capRuleContent(rule.content),
+      },
+    };
+  }
+
+  // source === 'file'
+  if (rule.path === undefined) {
+    return { ok: false, error: `rule '${rule.name}' missing 'path' for file source` };
+  }
+
+  const resolved = path.resolve(pluginRoot, rule.path);
+  const rel = path.relative(pluginRoot, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return {
+      ok: false,
+      error: `rule '${rule.name}' path '${rule.path}' escapes plugin root`,
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(resolved, 'utf-8');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `rule '${rule.name}' failed to read '${rule.path}': ${msg}` };
+  }
+
+  return {
+    ok: true,
+    rule: {
+      pluginName,
+      name: rule.name,
+      scope: rule.scope,
+      source: 'file',
+      content: capRuleContent(raw),
+    },
+  };
+}
 
 /**
  * Discover plugin roots under `.alexi/skills/<name>/plugin.json` (project) and
@@ -624,6 +773,7 @@ export class PluginManager {
       registeredSkills: [],
       registeredCommands: [],
       hookSubscriptions: [],
+      resolvedRules: [],
     };
 
     // Create context
@@ -902,6 +1052,27 @@ export class PluginManager {
       }
     }
 
+    // Resolve rule contributions declared in the manifest. We materialize them
+    // *before* `load()` so an invalid file source (escape, missing file) can
+    // surface a warning while the rest of the plugin loads normally.
+    const resolvedRules: ResolvedPluginRule[] = [];
+    if (manifest.rules) {
+      for (const rule of manifest.rules) {
+        const result = resolvePluginRule(pluginRoot, manifest.name, rule);
+        if (result.ok) {
+          resolvedRules.push(result.rule);
+        } else {
+          warnings.push(`Failed to resolve rule: ${result.error}`);
+          PluginError.publish({
+            pluginName: manifest.name,
+            error: result.error,
+            context: 'manifest:rule',
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
+
     const plugin: Plugin = {
       name: manifest.name,
       version: manifest.version,
@@ -912,10 +1083,32 @@ export class PluginManager {
     };
 
     const result = await this.load(plugin);
+    if (result.success && resolvedRules.length > 0) {
+      const state = this.plugins.get(manifest.name);
+      if (state) {
+        state.resolvedRules = resolvedRules;
+      }
+    }
     if (warnings.length > 0) {
       result.warnings = [...(result.warnings ?? []), ...warnings];
     }
     return result;
+  }
+
+  /**
+   * Return all resolved rule contributions from currently *enabled* plugins,
+   * in plugin-load order. Disabled plugins are skipped so the system-prompt
+   * builder can call this once per assembly without further filtering.
+   */
+  getEnabledRules(): ResolvedPluginRule[] {
+    const rules: ResolvedPluginRule[] = [];
+    for (const state of this.plugins.values()) {
+      if (!state.enabled) {
+        continue;
+      }
+      rules.push(...state.resolvedRules);
+    }
+    return rules;
   }
 
   /**
@@ -1338,6 +1531,15 @@ export function enablePlugin(name: string): EnableResult {
  */
 export function disablePlugin(name: string, options?: { force?: boolean }): DisableResult {
   return getPluginManager().disable(name, options);
+}
+
+/**
+ * Return resolved rule contributions from all enabled plugins in the global
+ * manager. Used by the system-prompt assembler to layer plugin rules after
+ * AGENTS.md.
+ */
+export function getEnabledPluginRules(): ResolvedPluginRule[] {
+  return getPluginManager().getEnabledRules();
 }
 
 // Type exports are already included via class declarations above
