@@ -44,6 +44,8 @@ export interface McpConnection {
 export interface McpConnectOptions {
   /** Project working directory to pass as ALEXI_PROJECT_DIR */
   workdir?: string;
+  /** Active Alexi session id to pass as ALEXI_SESSION_ID */
+  sessionId?: string;
 }
 
 interface ToolCache {
@@ -167,10 +169,13 @@ export class McpClientManager {
     }
 
     // Resolve environment variables
-    // ALEXI_PROJECT_DIR is injected before user config.env so users can override it
+    // ALEXI_PROJECT_DIR, ALEXI_SESSION_ID and ALEXICODE are injected before user
+    // config.env so users can override them (last-write semantics).
     const env = {
       ...process.env,
       ALEXI_PROJECT_DIR: options?.workdir ?? process.cwd(),
+      ALEXI_SESSION_ID: options?.sessionId ?? '',
+      ALEXICODE: '1',
       ...resolveEnvVars(config.env),
     };
 

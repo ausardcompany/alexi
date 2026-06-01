@@ -140,4 +140,94 @@ describe('McpClientManager', () => {
       );
     });
   });
+
+  describe('ALEXI_SESSION_ID and ALEXICODE injection', () => {
+    it('should set ALEXI_SESSION_ID from options.sessionId and ALEXICODE=1', async () => {
+      await manager.connect(stdioConfig, { sessionId: 'test-session-123' });
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_SESSION_ID: 'test-session-123',
+            ALEXICODE: '1',
+          }),
+        })
+      );
+    });
+
+    it('should default ALEXI_SESSION_ID to empty string when no sessionId is provided', async () => {
+      await manager.connect(stdioConfig);
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_SESSION_ID: '',
+            ALEXICODE: '1',
+          }),
+        })
+      );
+    });
+
+    it('should pass ALEXI_SESSION_ID and ALEXICODE to spawn env as well', async () => {
+      const { resolveEnvVars } = await import('../../src/mcp/config.js');
+      vi.mocked(resolveEnvVars).mockReturnValue({});
+
+      await manager.connect(stdioConfig, { sessionId: 'spawn-session-456' });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'node',
+        ['server.js'],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_SESSION_ID: 'spawn-session-456',
+            ALEXICODE: '1',
+          }),
+        })
+      );
+    });
+
+    it('should allow user-configured env to override ALEXI_SESSION_ID and ALEXICODE', async () => {
+      const { resolveEnvVars } = await import('../../src/mcp/config.js');
+      vi.mocked(resolveEnvVars).mockReturnValue({
+        ALEXI_SESSION_ID: 'user-override-session',
+        ALEXICODE: '0',
+      });
+
+      const configWithEnv: McpServerConfig = {
+        ...stdioConfig,
+        env: { ALEXI_SESSION_ID: 'user-override-session', ALEXICODE: '0' },
+      };
+
+      await manager.connect(configWithEnv, { sessionId: 'alexi-internal-id' });
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_SESSION_ID: 'user-override-session',
+            ALEXICODE: '0',
+          }),
+        })
+      );
+    });
+
+    it('should preserve ALEXI_PROJECT_DIR alongside ALEXI_SESSION_ID and ALEXICODE', async () => {
+      const { resolveEnvVars } = await import('../../src/mcp/config.js');
+      vi.mocked(resolveEnvVars).mockReturnValue({});
+
+      await manager.connect(stdioConfig, {
+        workdir: '/proj/dir',
+        sessionId: 'sess-789',
+      });
+
+      expect(StdioClientTransport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            ALEXI_PROJECT_DIR: '/proj/dir',
+            ALEXI_SESSION_ID: 'sess-789',
+            ALEXICODE: '1',
+          }),
+        })
+      );
+    });
+  });
 });
