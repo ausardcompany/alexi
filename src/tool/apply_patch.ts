@@ -1,6 +1,6 @@
 function applyPatch(patch: Patch) {
-    if (!patch.isValid()) {
-        throw new Error("Invalid patch");
-    }
-    // updated logic
+  if (!patch.isValid()) {
+    throw new Error('Invalid patch');
+  }
+  // updated logic
 }
