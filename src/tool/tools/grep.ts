@@ -16,6 +16,7 @@ import { spawn } from 'child_process';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
 import { logger } from '../../utils/logger.js';
+import { attachAgentsMdRemindersForPaths } from '../../agent/agentsMdReminders.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -579,7 +580,7 @@ Usage:
           );
           // Apply the same 1000-match cap as the JS path.
           const limited = value.matches.slice(0, 1000);
-          return {
+          const rgResult: ToolResult<GrepResult> = {
             success: true,
             data: {
               matches: limited,
@@ -592,6 +593,14 @@ Usage:
                 ? `Showing first 1000 of ${value.totalMatches} matches. Narrow your search.`
                 : undefined,
           };
+          if (limited.length > 0) {
+            attachAgentsMdRemindersForPaths(
+              rgResult,
+              limited.map((m) => path.join(searchPath, m.file)),
+              context
+            );
+          }
+          return rgResult;
         } catch (err) {
           // Aborted searches should surface as aborted, not silently fall
           // through to the JS path.
@@ -669,7 +678,7 @@ Usage:
       // Limit total matches
       const limitedMatches = matches.slice(0, 1000);
 
-      return {
+      const jsResult: ToolResult<GrepResult> = {
         success: true,
         data: {
           matches: limitedMatches,
@@ -682,6 +691,14 @@ Usage:
             ? `Showing first 1000 of ${matches.length} matches. Narrow your search.`
             : undefined,
       };
+      if (limitedMatches.length > 0) {
+        attachAgentsMdRemindersForPaths(
+          jsResult,
+          limitedMatches.map((m) => path.join(searchPath, m.file)),
+          context
+        );
+      }
+      return jsResult;
     } catch (err) {
       if (err instanceof SyntaxError) {
         return {

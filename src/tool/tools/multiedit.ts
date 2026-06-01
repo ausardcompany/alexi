@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { attachAgentsMdReminders } from '../../agent/agentsMdReminders.js';
 
 const EditItemSchema = z.object({
   oldString: z.string().describe('The text to replace'),
@@ -148,6 +149,8 @@ Usage:
       }
 
       context.gitManager?.onFileChanged(filePath, 'multiedit', `${changes.length} edit(s) applied`);
+
+      attachAgentsMdReminders(result, filePath, context);
 
       return result;
     } catch (err) {

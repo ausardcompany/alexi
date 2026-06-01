@@ -6,6 +6,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { attachAgentsMdReminders } from '../../agent/agentsMdReminders.js';
 
 const EditParamsSchema = z.object({
   filePath: z
@@ -136,7 +137,7 @@ Usage:
         }
       }
 
-      const toolResult = {
+      const toolResult: ToolResult<EditResult> = {
         success: true,
         data: {
           path: filePath,
@@ -148,6 +149,8 @@ Usage:
       };
 
       context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);
+
+      attachAgentsMdReminders(toolResult, filePath, context);
 
       return toolResult;
     } catch (err) {
