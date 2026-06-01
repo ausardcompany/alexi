@@ -148,9 +148,9 @@ Usage:
         },
       };
 
-      context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);
-
       attachAgentsMdReminders(toolResult, filePath, context);
+
+      context.gitManager?.onFileChanged(filePath, 'edit', `${replacements} replacement(s)`);
 
       return toolResult;
     } catch (err) {
