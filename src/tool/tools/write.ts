@@ -96,13 +96,13 @@ Usage:
         },
       };
 
+      attachAgentsMdReminders(toolResult, filePath, context);
+
       context.gitManager?.onFileChanged(
         filePath,
         'write',
         !exists ? 'created file' : 'overwrote file'
       );
-
-      attachAgentsMdReminders(toolResult, filePath, context);
 
       return toolResult;
     } catch (err) {
