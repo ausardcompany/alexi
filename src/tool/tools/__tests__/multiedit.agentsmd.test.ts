@@ -52,6 +52,30 @@ describe('multiedit tool — per-directory AGENTS.md reminders', () => {
     }
   });
 
+  it('emits no reminder when there is no AGENTS.md between workdir and target', async () => {
+    const srcDir = path.join(workdir, 'apps', 'api', 'src');
+    fs.mkdirSync(srcDir, { recursive: true });
+    const target = path.join(srcDir, 'foo.ts');
+    fs.writeFileSync(target, 'export const a = 1;\nexport const b = 2;\n');
+
+    const agentsMdSeen = new Set<string>();
+    const context: ToolContext = { workdir, agentsMdSeen };
+
+    const result = await multieditTool.executeUnsafe(
+      {
+        filePath: target,
+        edits: [
+          { oldString: 'a = 1', newString: 'a = 10' },
+          { oldString: 'b = 2', newString: 'b = 20' },
+        ],
+      },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.systemReminders).toBeUndefined();
+  });
+
   it('does not re-emit a reminder for an already-seen AGENTS.md', async () => {
     const apiDir = path.join(workdir, 'apps', 'api');
     const srcDir = path.join(apiDir, 'src');
