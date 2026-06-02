@@ -137,4 +137,23 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
     expect(result.success).toBe(true);
     expect(result.metadata?.systemReminders).toBeUndefined();
   });
+
+  it('emits no reminders when there are zero matches', async () => {
+    const apiSrc = path.join(workdir, 'apps', 'api', 'src');
+    fs.mkdirSync(apiSrc, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(apiSrc, 'foo.ts'), 'const value = 1;\n');
+
+    const agentsMdSeen = new Set<string>();
+    const context: ToolContext = { workdir, agentsMdSeen };
+
+    const result = await grepTool.executeUnsafe(
+      { pattern: 'NO_SUCH_TOKEN_FOO', path: workdir },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data?.matches).toHaveLength(0);
+    expect(result.metadata?.systemReminders).toBeUndefined();
+  });
 });
