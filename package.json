@@ -34,7 +34,7 @@
     "@sap-ai-sdk/ai-api": "^2.9.0",
     "@sap-ai-sdk/orchestration": "^2.11.0",
     "cli-highlight": "^2.1.11",
-    "commander": "^14.0.3",
+    "commander": "^15.0.0",
     "diff": "^9.0.0",
     "dotenv": "^17.4.2",
     "duck-duck-scrape": "^2.2.7",
