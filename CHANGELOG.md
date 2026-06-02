@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Interactive REPL `/help` listing now includes `/code-review [low|medium|high]` under the general commands section (`src/cli/interactive.ts`).
 - Documented `KILO_DISABLE_EXTERNAL_SKILLS` as a supported optional environment variable in `docs/API.md`.
+- Normalized formatting in three orphaned scaffold files via CI auto-fix (commit `3ed5b5b1`): added a final newline at end of file in `src/core/global.ts` and `src/tool/codesearch.ts`, and added a trailing comma plus final newline in `src/permission/schema.ts`. These are pure Prettier conformance changes (no behavioral or API impact) applied to files that are not yet wired into the runtime — they remain isolated scaffolds (referencing the unresolved `Path` symbol in `src/core/global.ts` and the non-existent `@opencode-ai/core` and `@opencode-ai/tool` packages in the other two) and should be either implemented or removed in a follow-up, similar to the stub cleanup in commit `085951af`.
 
 ### Fixed
 
