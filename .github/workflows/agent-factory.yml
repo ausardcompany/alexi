@@ -141,8 +141,12 @@ jobs:
           echo "[OK] system prompt composed: $(wc -l < /tmp/system-prompt.md) lines"
 
       - name: Resolve task prompt
+        env:
+          # Pass via env to avoid shell interpretation (backticks, $VARS) of
+          # the inline prompt body when GitHub interpolates ${​{ inputs.* }}.
+          TASK_PROMPT_RAW: ${​{ inputs.task_prompt }}
         run: |
-          RAW="${{ inputs.task_prompt }}"
+          RAW="$TASK_PROMPT_RAW"
           if [ "${RAW#file:}" != "$RAW" ]; then
             FILE="${RAW#file:}"
             if [ ! -f "$FILE" ]; then
