@@ -45,6 +45,23 @@ describe('write tool — per-directory AGENTS.md reminders', () => {
     }
   });
 
+  it('does not emit reminders when no AGENTS.md exists between workdir and target', async () => {
+    const srcDir = path.join(workdir, 'apps', 'api', 'src');
+    fs.mkdirSync(srcDir, { recursive: true });
+    const target = path.join(srcDir, 'foo.ts');
+
+    const agentsMdSeen = new Set<string>();
+    const context: ToolContext = { workdir, agentsMdSeen };
+
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'export const v = 1;\n' },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.metadata?.systemReminders).toBeUndefined();
+  });
+
   it('does not re-emit a reminder for an already-seen AGENTS.md', async () => {
     const apiDir = path.join(workdir, 'apps', 'api');
     const srcDir = path.join(apiDir, 'src');
