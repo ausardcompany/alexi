@@ -11,6 +11,14 @@
  *   7. Custom rules (user-provided)
  *
  * Each layer is optional and only included when applicable.
+ *
+ * Plugin rules (layer 6) are consumed as a flat
+ * `Array<{ source, content, ... }>`. Source-aware materialization (`inline`
+ * content, `file` reads, and `command` spawns with their per-session cache)
+ * happens upstream in the plugin loader and `resolvePluginRulesForPrompt`.
+ * `system.ts` only needs to render whatever content has been resolved, so
+ * adding new source types in the future is a no-op for this file as long as
+ * the loader keeps populating `content`.
  */
 
 import * as fs from 'fs';
