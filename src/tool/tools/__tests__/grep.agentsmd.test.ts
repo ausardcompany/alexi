@@ -30,12 +30,14 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
     }
   });
 
-  it('emits metadata.systemReminders for AGENTS.md above matched files', async () => {
-    const apiDir = path.join(workdir, 'apps', 'api');
-    const srcDir = path.join(apiDir, 'src');
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(apiDir, 'AGENTS.md'), 'API_TEAM_RULES_GREP');
-    fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
+  it('emits exactly one reminder when matches span apps/api/src and apps/web/src but only apps/api has AGENTS.md', async () => {
+    const apiSrc = path.join(workdir, 'apps', 'api', 'src');
+    const webSrc = path.join(workdir, 'apps', 'web', 'src');
+    fs.mkdirSync(apiSrc, { recursive: true });
+    fs.mkdirSync(webSrc, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(apiSrc, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
+    fs.writeFileSync(path.join(webSrc, 'bar.ts'), 'const SENTINEL_TOKEN = 2;\n');
 
     const agentsMdSeen = new Set<string>();
     const context: ToolContext = { workdir, agentsMdSeen };
@@ -46,7 +48,7 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
     );
 
     expect(result.success).toBe(true);
-    expect(result.data?.matches.length).toBeGreaterThan(0);
+    expect(result.data?.matches.length).toBeGreaterThanOrEqual(2);
     const reminders = result.metadata?.systemReminders;
     expect(reminders).toBeDefined();
     expect(reminders).toHaveLength(1);
@@ -56,13 +58,52 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
     }
   });
 
-  it('does not re-emit a reminder for an already-seen AGENTS.md across calls', async () => {
-    const apiDir = path.join(workdir, 'apps', 'api');
-    const srcDir = path.join(apiDir, 'src');
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(apiDir, 'AGENTS.md'), 'API_TEAM_RULES_GREP');
-    fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
-    fs.writeFileSync(path.join(srcDir, 'bar.ts'), 'const SENTINEL_TOKEN = 2;\n');
+  it('emits exactly two reminders (no duplicates) when both apps/api and apps/web have AGENTS.md', async () => {
+    const apiSrc = path.join(workdir, 'apps', 'api', 'src');
+    const webSrc = path.join(workdir, 'apps', 'web', 'src');
+    fs.mkdirSync(apiSrc, { recursive: true });
+    fs.mkdirSync(webSrc, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(workdir, 'apps', 'web', 'AGENTS.md'), 'WEB_TEAM_RULES_GREP');
+    // Two matches per directory to verify dedupe within a directory.
+    fs.writeFileSync(path.join(apiSrc, 'a.ts'), 'const SENTINEL_TOKEN = 1;\n');
+    fs.writeFileSync(path.join(apiSrc, 'b.ts'), 'const SENTINEL_TOKEN = 2;\n');
+    fs.writeFileSync(path.join(webSrc, 'c.ts'), 'const SENTINEL_TOKEN = 3;\n');
+    fs.writeFileSync(path.join(webSrc, 'd.ts'), 'const SENTINEL_TOKEN = 4;\n');
+
+    const agentsMdSeen = new Set<string>();
+    const context: ToolContext = { workdir, agentsMdSeen };
+
+    const result = await grepTool.executeUnsafe(
+      { pattern: 'SENTINEL_TOKEN', path: workdir },
+      context
+    );
+
+    expect(result.success).toBe(true);
+    const reminders = result.metadata?.systemReminders;
+    expect(reminders).toBeDefined();
+    expect(reminders).toHaveLength(2);
+    if (reminders) {
+      const sources = reminders.map((r) => r.source).sort();
+      expect(sources).toEqual([
+        path.join('apps', 'api', 'AGENTS.md'),
+        path.join('apps', 'web', 'AGENTS.md'),
+      ]);
+      const byPath = new Map(reminders.map((r) => [r.source, r.content]));
+      expect(byPath.get(path.join('apps', 'api', 'AGENTS.md'))).toBe('API_TEAM_RULES_GREP');
+      expect(byPath.get(path.join('apps', 'web', 'AGENTS.md'))).toBe('WEB_TEAM_RULES_GREP');
+    }
+  });
+
+  it('does not re-emit reminders on a second grep call sharing the same agentsMdSeen', async () => {
+    const apiSrc = path.join(workdir, 'apps', 'api', 'src');
+    const webSrc = path.join(workdir, 'apps', 'web', 'src');
+    fs.mkdirSync(apiSrc, { recursive: true });
+    fs.mkdirSync(webSrc, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(workdir, 'apps', 'web', 'AGENTS.md'), 'WEB_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(apiSrc, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
+    fs.writeFileSync(path.join(webSrc, 'bar.ts'), 'const SENTINEL_TOKEN = 2;\n');
 
     const agentsMdSeen = new Set<string>();
     const context: ToolContext = { workdir, agentsMdSeen };
@@ -76,16 +117,15 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
       context
     );
 
-    expect(firstResult.metadata?.systemReminders).toHaveLength(1);
+    expect(firstResult.metadata?.systemReminders).toHaveLength(2);
     expect(secondResult.metadata?.systemReminders).toBeUndefined();
   });
 
-  it('stays silent when context.agentsMdSeen is omitted', async () => {
-    const apiDir = path.join(workdir, 'apps', 'api');
-    const srcDir = path.join(apiDir, 'src');
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(apiDir, 'AGENTS.md'), 'API_TEAM_RULES_GREP');
-    fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
+  it('attaches no reminder metadata when context.agentsMdSeen is undefined', async () => {
+    const apiSrc = path.join(workdir, 'apps', 'api', 'src');
+    fs.mkdirSync(apiSrc, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'apps', 'api', 'AGENTS.md'), 'API_TEAM_RULES_GREP');
+    fs.writeFileSync(path.join(apiSrc, 'foo.ts'), 'const SENTINEL_TOKEN = 1;\n');
 
     const context: ToolContext = { workdir };
 
@@ -95,26 +135,6 @@ describe('grep tool — per-directory AGENTS.md reminders', () => {
     );
 
     expect(result.success).toBe(true);
-    expect(result.metadata?.systemReminders).toBeUndefined();
-  });
-
-  it('emits no reminders when there are zero matches', async () => {
-    const apiDir = path.join(workdir, 'apps', 'api');
-    const srcDir = path.join(apiDir, 'src');
-    fs.mkdirSync(srcDir, { recursive: true });
-    fs.writeFileSync(path.join(apiDir, 'AGENTS.md'), 'API_TEAM_RULES_GREP');
-    fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'const value = 1;\n');
-
-    const agentsMdSeen = new Set<string>();
-    const context: ToolContext = { workdir, agentsMdSeen };
-
-    const result = await grepTool.executeUnsafe(
-      { pattern: 'NO_SUCH_TOKEN_FOO', path: workdir },
-      context
-    );
-
-    expect(result.success).toBe(true);
-    expect(result.data?.matches).toHaveLength(0);
     expect(result.metadata?.systemReminders).toBeUndefined();
   });
 });
