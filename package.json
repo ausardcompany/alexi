@@ -81,7 +81,7 @@
     "husky": "^9.1.7",
     "ink-testing-library": "^4.0.0",
     "jszip": "^3.10.1",
-    "lint-staged": "^17.0.5",
+    "lint-staged": "^17.0.7",
     "prettier": "^3.8.3",
     "tsc-files": "^1.1.4",
     "tsx": "^4.22.3",
