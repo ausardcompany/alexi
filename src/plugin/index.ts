@@ -304,6 +304,85 @@ export const PLUGIN_RULE_TRUNCATION_MARKER =
   '\n\n[... truncated: rule content exceeded 32 KB cap ...]';
 
 /**
+ * Default timeout (in ms) for `source: 'command'` rules when none is specified.
+ */
+export const PLUGIN_RULE_COMMAND_DEFAULT_TIMEOUT_MS = 5_000;
+
+/**
+ * Maximum permitted value for a `source: 'command'` rule's `timeoutMs`. Keeps
+ * a misbehaving plugin from stalling system-prompt assembly indefinitely.
+ */
+export const PLUGIN_RULE_COMMAND_MAX_TIMEOUT_MS = 30_000;
+
+/**
+ * Zod schema for an `inline` rule declaration. Content lives directly in
+ * `plugin.json` via the `content` field.
+ *
+ * Inline rules are mutually exclusive with `file` and `command` rules — a
+ * single rule entry must declare exactly one source. The discriminator is
+ * the `source` literal, which keeps the union variants statically distinct.
+ */
+const InlineRuleSchema = z
+  .object({
+    name: z.string().min(1),
+    scope: z.enum(['session', 'always']).default('always'),
+    source: z.literal('inline'),
+    content: z.string(),
+  })
+  .strict();
+
+/**
+ * Zod schema for a `file` rule declaration. Content is read from `path`,
+ * resolved against the plugin root with a `..` escape guard at load time.
+ */
+const FileRuleSchema = z
+  .object({
+    name: z.string().min(1),
+    scope: z.enum(['session', 'always']).default('always'),
+    source: z.literal('file'),
+    path: z.string().min(1),
+  })
+  .strict();
+
+/**
+ * Zod schema for a `command` rule declaration. Content is produced by
+ * spawning `argv` (shell-free) inside the plugin root, with strict
+ * timeout, stdout-cap, and env-scrub bounds.
+ *
+ * Defaults (per parent tracker #633 / B003):
+ *   - `scope` defaults to `'session'` so a freshly-spawned command rule
+ *     observes session-scoped state, but is re-evaluated for each new
+ *     session unless a plugin opts into `'always'` for process-lifetime
+ *     caching.
+ *   - `timeoutMs` defaults to 5_000 ms and is capped at 30_000 ms.
+ *
+ * Mutual exclusion with `inline`/`file` is enforced by the discriminated
+ * union: a `command` rule cannot carry `content` or `path` fields and a
+ * non-`command` rule cannot carry `argv` / `timeoutMs` / `maxBytes`.
+ */
+const CommandRuleSchema = z
+  .object({
+    name: z.string().min(1),
+    scope: z.enum(['session', 'always']).default('session'),
+    source: z.literal('command'),
+    /** Argv array. `argv[0]` is the binary, `argv.slice(1)` are arguments. */
+    argv: z.array(z.string()).min(1),
+    /**
+     * Optional per-rule timeout override. Bounded at 30_000 ms so a misbehaving
+     * plugin can't stall system-prompt assembly indefinitely.
+     */
+    timeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(PLUGIN_RULE_COMMAND_MAX_TIMEOUT_MS)
+      .default(PLUGIN_RULE_COMMAND_DEFAULT_TIMEOUT_MS),
+    /** Optional override of the per-rule 32 KB stdout cap (in bytes). */
+    maxBytes: z.number().int().positive().optional(),
+  })
+  .strict();
+
+/**
  * Zod schema for a `PluginRule` declaration in `plugin.json`.
  *
  * A rule ships markdown that gets injected into the agent's system prompt
@@ -311,37 +390,18 @@ export const PLUGIN_RULE_TRUNCATION_MARKER =
  *
  *   - `inline`:  content lives inline in `plugin.json` (`content` field).
  *   - `file`:    content is read from `path` resolved against the plugin root.
- *   - `command`: content is produced by spawning `command` (no shell) inside
+ *   - `command`: content is produced by spawning `argv` (no shell) inside
  *                the plugin root. See `runRuleCommand` for safety bounds.
  *
- * For `command` sources, `command` may be either a single string (parsed via
- * a small whitespace + quote tokeniser) or a pre-tokenised string array. In
- * both cases the spawn is shell-free.
+ * Variants are a Zod discriminated union over `source` — fields from one
+ * source cannot be mixed with another (e.g. a `command` rule cannot carry
+ * `content` / `path`, and inline/file rules cannot carry `argv`).
  */
-export const PluginRuleSchema = z
-  .object({
-    name: z.string().min(1),
-    scope: z.enum(['session', 'always']).default('always'),
-    source: z.enum(['inline', 'file', 'command']),
-    content: z.string().optional(),
-    path: z.string().optional(),
-    /** Command line for `source: 'command'` rules. */
-    command: z.union([z.string(), z.array(z.string())]).optional(),
-    /** Optional override of the per-rule 5s spawn timeout (in milliseconds). */
-    timeoutMs: z.number().int().positive().optional(),
-    /** Optional override of the per-rule 32 KB stdout cap (in bytes). */
-    maxBytes: z.number().int().positive().optional(),
-  })
-  .refine(
-    (r) =>
-      (r.source === 'inline' && r.content !== undefined) ||
-      (r.source === 'file' && r.path !== undefined) ||
-      (r.source === 'command' && r.command !== undefined),
-    {
-      message:
-        "rule must have 'content' for inline source, 'path' for file source, or 'command' for command source",
-    }
-  );
+export const PluginRuleSchema = z.discriminatedUnion('source', [
+  InlineRuleSchema,
+  FileRuleSchema,
+  CommandRuleSchema,
+]);
 
 export type PluginRule = z.infer<typeof PluginRuleSchema>;
 
@@ -376,9 +436,9 @@ export interface ResolvedPluginRule {
   command?: {
     /** Working directory for the spawn (typically the plugin root). */
     pluginRoot: string;
-    /** Command line — either a single string or pre-tokenised argv. */
-    command: string | string[];
-    /** Per-rule timeout override (defaults to 5000 ms). */
+    /** Argv array. `argv[0]` is the binary, `argv.slice(1)` are arguments. */
+    argv: string[];
+    /** Per-rule timeout override (defaults to 5000 ms, capped at 30_000 ms). */
     timeoutMs?: number;
     /** Per-rule stdout cap override (defaults to 32 KB). */
     maxBytes?: number;
@@ -440,11 +500,6 @@ export function resolvePluginRule(
   rule: PluginRule
 ): { ok: true; rule: ResolvedPluginRule } | { ok: false; error: string } {
   if (rule.source === 'inline') {
-    if (rule.content === undefined) {
-      // Should be unreachable thanks to the schema refine, but keep the guard
-      // so callers don't have to reason about partially-validated input.
-      return { ok: false, error: `rule '${rule.name}' missing 'content' for inline source` };
-    }
     return {
       ok: true,
       rule: {
@@ -458,10 +513,6 @@ export function resolvePluginRule(
   }
 
   if (rule.source === 'file') {
-    if (rule.path === undefined) {
-      return { ok: false, error: `rule '${rule.name}' missing 'path' for file source` };
-    }
-
     const resolved = path.resolve(pluginRoot, rule.path);
     const rel = path.relative(pluginRoot, resolved);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -492,12 +543,9 @@ export function resolvePluginRule(
   }
 
   // source === 'command'
-  if (rule.command === undefined) {
-    return { ok: false, error: `rule '${rule.name}' missing 'command' for command source` };
-  }
   // Defer execution to prompt-assembly time so we can apply per-session
   // caching. The descriptor is carried verbatim — `runRuleCommand` does the
-  // tokenisation / env-scrub / spawn-bounding.
+  // env-scrub / spawn-bounding.
   return {
     ok: true,
     rule: {
@@ -508,7 +556,7 @@ export function resolvePluginRule(
       content: '',
       command: {
         pluginRoot,
-        command: rule.command,
+        argv: rule.argv,
         timeoutMs: rule.timeoutMs,
         maxBytes: rule.maxBytes,
       },
@@ -553,7 +601,7 @@ async function loadCommandRuleContent(rule: ResolvedPluginRule): Promise<string>
 
   const result = await runRuleCommandLenient({
     pluginRoot: rule.command.pluginRoot,
-    command: rule.command.command,
+    command: rule.command.argv,
     timeoutMs: rule.command.timeoutMs,
     maxBytes: rule.command.maxBytes,
   });

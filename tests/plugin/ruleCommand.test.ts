@@ -46,28 +46,120 @@ function writeScript(pluginRoot: string, name: string, body: string): string {
 }
 
 describe('PluginRuleSchema — command source', () => {
-  it('accepts a command rule with string command', () => {
+  it('accepts a command rule with argv array and applies session/timeout defaults', () => {
     const r = PluginRuleSchema.parse({
       name: 'todos',
       source: 'command',
-      command: 'echo hi',
+      argv: ['echo', 'hi'],
     });
-    expect(r.scope).toBe('always');
+    // Default scope for command rules is 'session' (vs 'always' for inline/file).
+    expect(r.scope).toBe('session');
     expect(r.source).toBe('command');
-    expect(r.command).toBe('echo hi');
+    if (r.source === 'command') {
+      expect(r.argv).toEqual(['echo', 'hi']);
+      // Default timeoutMs is 5_000.
+      expect(r.timeoutMs).toBe(5_000);
+    }
   });
 
-  it('accepts a command rule with array command', () => {
+  it('accepts an explicit timeoutMs within the 30_000 cap', () => {
     const r = PluginRuleSchema.parse({
       name: 'todos',
       source: 'command',
-      command: ['node', '-e', 'console.log("x")'],
+      argv: ['node', '-e', 'console.log("x")'],
+      timeoutMs: 10_000,
     });
-    expect(r.command).toEqual(['node', '-e', 'console.log("x")']);
+    if (r.source === 'command') {
+      expect(r.timeoutMs).toBe(10_000);
+    }
   });
 
-  it('rejects a command rule missing the command field', () => {
+  it('rejects a timeoutMs above the 30_000 cap', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: ['echo'],
+      timeoutMs: 60_000,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a non-positive timeoutMs', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: ['echo'],
+      timeoutMs: 0,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a non-integer timeoutMs', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: ['echo'],
+      timeoutMs: 1.5,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a command rule missing argv', () => {
     expect(() => PluginRuleSchema.parse({ name: 'todos', source: 'command' })).toThrow();
+  });
+
+  it('rejects a command rule with an empty argv array', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: [],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a command rule that mixes inline `content`', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: ['echo', 'hi'],
+      content: 'inline body',
+    });
+    // Strict-mode discriminated union: foreign fields are an error, not stripped.
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const msg = result.error.issues.map((i) => i.message).join(';');
+      expect(msg.toLowerCase()).toMatch(/unrecognized|unknown/);
+    }
+  });
+
+  it('rejects a command rule that mixes file-source `path`', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'command',
+      argv: ['echo', 'hi'],
+      path: 'rules/x.md',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an inline rule that carries command-source `argv`', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'inline',
+      content: 'rule body',
+      argv: ['echo', 'hi'],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a file rule that carries command-source `argv`', () => {
+    const result = PluginRuleSchema.safeParse({
+      name: 'todos',
+      source: 'file',
+      path: 'rules/x.md',
+      argv: ['echo', 'hi'],
+    });
+    expect(result.success).toBe(false);
   });
 });
 
@@ -249,7 +341,7 @@ describe('materializeCommandRule + cache', () => {
       content: '',
       command: {
         pluginRoot: tmpdir,
-        command: [NODE, '-e', script],
+        argv: [NODE, '-e', script],
       },
     };
   }
@@ -310,7 +402,7 @@ describe('materializeCommandRule + cache', () => {
       content: '',
       command: {
         pluginRoot: tmpdir,
-        command: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
+        argv: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
         maxBytes: 8192,
       },
     };
@@ -329,7 +421,7 @@ describe('materializeCommandRule + cache', () => {
       content: '',
       command: {
         pluginRoot: tmpdir,
-        command: [NODE, '-e', 'process.stdout.write("partial");setTimeout(()=>{},1000)'],
+        argv: [NODE, '-e', 'process.stdout.write("partial");setTimeout(()=>{},1000)'],
         timeoutMs: 200,
       },
     };
@@ -347,7 +439,7 @@ describe('materializeCommandRule + cache', () => {
       content: '',
       command: {
         pluginRoot: tmpdir,
-        command: [
+        argv: [
           NODE,
           '-e',
           'process.stdout.write("partial");process.stderr.write("oops");process.exit(3)',
@@ -373,27 +465,19 @@ describe('resolvePluginRule (command source)', () => {
   it('returns a deferred descriptor with empty content', () => {
     const result = resolvePluginRule(tmpdir, 'p1', {
       name: 'r1',
-      scope: 'always',
+      scope: 'session',
       source: 'command',
-      command: ['echo', 'ok'],
+      argv: ['echo', 'ok'],
+      timeoutMs: 5_000,
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.rule.source).toBe('command');
       expect(result.rule.content).toBe('');
-      expect(result.rule.command?.command).toEqual(['echo', 'ok']);
+      expect(result.rule.command?.argv).toEqual(['echo', 'ok']);
       expect(result.rule.command?.pluginRoot).toBe(tmpdir);
+      expect(result.rule.command?.timeoutMs).toBe(5_000);
     }
-  });
-
-  it('rejects when command is missing', () => {
-    // Bypass schema (which would normally catch this) to exercise the guard.
-    const result = resolvePluginRule(tmpdir, 'p1', {
-      name: 'r1',
-      scope: 'always',
-      source: 'command',
-    } as unknown as Parameters<typeof resolvePluginRule>[2]);
-    expect(result.ok).toBe(false);
   });
 });
 
@@ -423,7 +507,7 @@ describe('resolvePluginRulesForPrompt — manifest end-to-end', () => {
         {
           name: 'todos',
           source: 'command',
-          command: [NODE, '-e', 'process.stdout.write("# Today\\n- ship it")'],
+          argv: [NODE, '-e', 'process.stdout.write("# Today\\n- ship it")'],
         },
       ],
     });
