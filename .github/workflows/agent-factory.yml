@@ -141,8 +141,14 @@ jobs:
           echo "[OK] system prompt composed: $(wc -l < /tmp/system-prompt.md) lines"
 
       - name: Resolve task prompt
+        env:
+          # Pass via env to avoid shell-injection / command-substitution from
+          # backticks or `$(...)` inside the caller's task_prompt. Direct
+          # `${​{ inputs.task_prompt }}` interpolation would let any backticks
+          # in the prompt body execute as shell commands.
+          RAW_TASK_PROMPT: ${​{ inputs.task_prompt }}
         run: |
-          RAW="${{ inputs.task_prompt }}"
+          RAW="$RAW_TASK_PROMPT"
           if [ "${RAW#file:}" != "$RAW" ]; then
             FILE="${RAW#file:}"
             if [ ! -f "$FILE" ]; then
