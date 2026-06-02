@@ -24,7 +24,11 @@ import {
   resolvePluginRulesForPrompt,
   type ResolvedPluginRule,
 } from '../../src/plugin/index.js';
-import { runRuleCommand, scrubEnv, tokenizeCommand } from '../../src/plugin/ruleCommandRunner.js';
+import {
+  runRuleCommandLenient,
+  scrubEnv,
+  tokenizeCommand,
+} from '../../src/plugin/ruleCommandRunner.js';
 
 const NODE = process.execPath;
 
@@ -121,7 +125,7 @@ describe('scrubEnv', () => {
   });
 });
 
-describe('runRuleCommand', () => {
+describe('runRuleCommandLenient', () => {
   let tmpdir: string;
 
   beforeEach(() => {
@@ -133,7 +137,7 @@ describe('runRuleCommand', () => {
   });
 
   it('captures stdout from a successful command', async () => {
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: [NODE, '-e', 'process.stdout.write("# rule\\nfoo")'],
     });
@@ -145,7 +149,7 @@ describe('runRuleCommand', () => {
 
   it('flags timedOut and preserves partial stdout', async () => {
     // Print a chunk, then sleep longer than timeout.
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: [
         NODE,
@@ -162,7 +166,7 @@ describe('runRuleCommand', () => {
 
   it('flags truncated when stdout exceeds maxBytes', async () => {
     // Generate ~64 KB of output.
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
       maxBytes: 8192,
@@ -172,7 +176,7 @@ describe('runRuleCommand', () => {
   });
 
   it('returns non-zero exit code with stderr captured', async () => {
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: [NODE, '-e', 'process.stderr.write("boom");process.exit(2)'],
     });
@@ -181,7 +185,7 @@ describe('runRuleCommand', () => {
   });
 
   it('handles spawn errors (non-existent program) without rejecting', async () => {
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: ['/this/binary/does/not/exist-xyz'],
     });
@@ -194,7 +198,7 @@ describe('runRuleCommand', () => {
     // the child program (node) to receive the literal string as argv.
     // Note: when a node `-e` script runs, process.argv is
     // [node-bin, '[eval]', ...userArgs], so user args start at index 2.
-    const result = await runRuleCommand({
+    const result = await runRuleCommandLenient({
       pluginRoot: tmpdir,
       command: [NODE, '-e', 'process.stdout.write(process.argv[1]||"")', ';rm -rf /'],
     });

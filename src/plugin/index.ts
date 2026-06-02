@@ -13,7 +13,7 @@ import { defineEvent, type BusEvent } from '../bus/index.js';
 import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
 import { type SkillDefinition, registerSkill } from '../skill/index.js';
 import { registerCommand, defineCommand, loadCommandFromFile } from '../command/index.js';
-import { runRuleCommand } from './ruleCommandRunner.js';
+import { runRuleCommandLenient } from './ruleCommandRunner.js';
 import logger from '../utils/logger.js';
 
 // ============ Plugin Events ============
@@ -583,7 +583,7 @@ export async function materializeCommandRule(
     return cached;
   }
 
-  const result = await runRuleCommand({
+  const result = await runRuleCommandLenient({
     pluginRoot: rule.command.pluginRoot,
     command: rule.command.command,
     timeoutMs: rule.command.timeoutMs,
