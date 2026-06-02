@@ -14,6 +14,12 @@ import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
 import { type SkillDefinition, registerSkill } from '../skill/index.js';
 import { registerCommand, defineCommand, loadCommandFromFile } from '../command/index.js';
 import { runRuleCommandLenient } from './ruleCommandRunner.js';
+import {
+  clearAll as clearAllRuleCache,
+  clearSession as clearSessionRuleCache,
+  getOrLoad as ruleCacheGetOrLoad,
+  ruleCacheKey,
+} from './ruleCache.js';
 import logger from '../utils/logger.js';
 
 // ============ Plugin Events ============
@@ -513,32 +519,10 @@ export function resolvePluginRule(
 // ---------------------------------------------------------------------------
 // Command-rule cache + materialization
 // ---------------------------------------------------------------------------
-
-/**
- * Module-scope cache of command-rule outputs.
- *
- * Cache key shape:
- *   - `${pluginName}::${ruleName}::always`                  — process lifetime.
- *   - `${pluginName}::${ruleName}::session::${sessionId}`   — dropped on session close.
- *
- * Stored value is the *capped* rule content, ready to drop into the prompt.
- * Errors are not cached — a transient failure should re-run on the next
- * prompt assembly so a fixed environment can recover automatically.
- */
-const commandRuleCache = new Map<string, string>();
-
-/** Build a cache key from the rule's identity and effective scope. */
-function commandRuleCacheKey(
-  pluginName: string,
-  ruleName: string,
-  scope: 'session' | 'always',
-  sessionId: string | undefined
-): string {
-  if (scope === 'always') {
-    return `${pluginName}::${ruleName}::always`;
-  }
-  return `${pluginName}::${ruleName}::session::${sessionId ?? 'default'}`;
-}
+//
+// The cache itself lives in `./ruleCache.ts` (B004). This module hosts the
+// loader that translates a `ResolvedPluginRule` into a (capped) string and
+// hands it to `getOrLoad`.
 
 /**
  * Drop cache entries.
@@ -549,38 +533,22 @@ function commandRuleCacheKey(
  */
 export function clearRuleCommandCache(sessionId?: string): void {
   if (sessionId === undefined) {
-    commandRuleCache.clear();
+    clearAllRuleCache();
     return;
   }
-  const suffix = `::session::${sessionId}`;
-  for (const key of Array.from(commandRuleCache.keys())) {
-    if (key.endsWith(suffix)) {
-      commandRuleCache.delete(key);
-    }
-  }
+  clearSessionRuleCache(sessionId);
 }
 
 /**
- * Resolve a single `command`-source rule, consulting the cache first. On
- * cache miss, the command is spawned via {@link runRuleCommand} and the
- * (capped) output is stored under the appropriate scope key.
- *
- * Truncation/timeout/non-zero exits emit a single `logger.warn` line — the
- * rule is still returned (potentially partial) so a flaky generator does
- * not silently disappear from the prompt.
+ * Run the command described by `rule` and produce the (capped) string to
+ * cache. Pulled out as a standalone helper so {@link materializeCommandRule}
+ * stays readable — the spawn + post-processing is a screenful on its own.
  */
-export async function materializeCommandRule(
-  rule: ResolvedPluginRule,
-  sessionId?: string
-): Promise<string> {
+async function loadCommandRuleContent(rule: ResolvedPluginRule): Promise<string> {
   if (rule.source !== 'command' || !rule.command) {
+    // Defensive: callers gate on this, but TypeScript's narrowing doesn't
+    // carry through async closures cleanly.
     return rule.content;
-  }
-
-  const key = commandRuleCacheKey(rule.pluginName, rule.name, rule.scope, sessionId);
-  const cached = commandRuleCache.get(key);
-  if (cached !== undefined) {
-    return cached;
   }
 
   const result = await runRuleCommandLenient({
@@ -613,8 +581,28 @@ export async function materializeCommandRule(
     );
   }
 
-  commandRuleCache.set(key, content);
   return content;
+}
+
+/**
+ * Resolve a single `command`-source rule, consulting the cache first. On
+ * cache miss, the command is spawned via {@link runRuleCommandLenient} and
+ * the (capped) output is stored under the appropriate scope key.
+ *
+ * Truncation/timeout/non-zero exits emit a single `logger.warn` line — the
+ * rule is still returned (potentially partial) so a flaky generator does
+ * not silently disappear from the prompt.
+ */
+export async function materializeCommandRule(
+  rule: ResolvedPluginRule,
+  sessionId?: string
+): Promise<string> {
+  if (rule.source !== 'command' || !rule.command) {
+    return rule.content;
+  }
+
+  const key = ruleCacheKey(rule.pluginName, rule.name);
+  return ruleCacheGetOrLoad(rule.scope, key, sessionId, () => loadCommandRuleContent(rule));
 }
 
 /**
