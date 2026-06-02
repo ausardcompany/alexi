@@ -64,7 +64,7 @@
     "puppeteer": "^25.1.0"
   },
   "devDependencies": {
-    "@commitlint/cli": "^21.0.1",
+    "@commitlint/cli": "^21.0.2",
     "@commitlint/config-conventional": "^21.0.2",
     "@eslint/js": "^10.0.1",
     "@testing-library/react": "^16.3.2",
