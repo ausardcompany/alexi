@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `src/tool/recall.test.ts` (single-line placeholder test; the canonical recall tool tests live alongside `src/tool/tools/recall.ts`)
   - `src/core/package.json` (8-line malformed JSON fragment containing a `// list of dependencies` comment, which is not valid JSON; Alexi is a single-package npm project — the only valid `package.json` is the repository root one)
 - These deletions correct an earlier, incorrect changelog entry that claimed the document reader tools at `src/tool/notebook.ts` and `src/tool/read-docx.ts` had received a quote-style normalization. Those paths were never canonical implementations; only the stubs at those paths existed, and they have now been removed.
+- **Additional broken upstream-sync stub files** (autohealing cleanup, commit `dff69219`, 2026-06-02): The CI autohealer removed three more scaffold/stub files emitted by the same daily upstream sync that were breaking `typecheck`, `lint`, and `format:check`:
+  - `src/core/global.ts` (16-line stub defining a `Path`-based `Interface` against an undefined `Path` global; not imported anywhere in the codebase — the canonical filesystem-path utilities live in `src/utils/` and `src/core/filesystem.ts`)
+  - `src/permission/schema.ts` (7-line stub importing a non-existent `PermissionSchema` from `@opencode-ai/core`; the canonical permission types and `PermissionManager` live in `src/permission/index.ts`, the rule evaluator in `src/permission/next.ts`, and the Zod schemas in `src/permission/index.ts`)
+  - `src/tool/codesearch.ts` (6-line stub importing a non-existent `CodeSearch` from `@opencode-ai/tool`; code search inside Alexi is provided by the `grep` and `glob` tools under `src/tool/tools/` and registered via `src/tool/registry.ts`)
+- The `@opencode-ai/*` packages are not part of Alexi's dependency graph — these stubs were never wired into any module, registry, or build target.
 
 ### Added
 
