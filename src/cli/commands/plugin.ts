@@ -104,20 +104,22 @@ in \`plugin.json\`. Three sources are supported:
   { "name": "team", "source": "file", "path": "rules/team.md" }
   \`\`\`
 - \`command\` — content produced by spawning a script (no shell). The command
-  has a 5s timeout and 32 KB stdout cap. Output is cached for the process
-  lifetime when \`scope: "always"\` (default) or per-session when
-  \`scope: "session"\`. Useful for dynamic rules like today's TODOs:
+  has a 5s default timeout (capped at 30s) and a 32 KB stdout cap. Output is
+  cached per-session by default (\`scope: "session"\`), or for the process
+  lifetime when \`scope: "always"\`. Useful for dynamic rules like today's
+  TODOs:
   \`\`\`json
   {
     "name": "todos",
     "scope": "session",
     "source": "command",
-    "command": ["node", "scripts/todos.js"]
+    "argv": ["node", "scripts/todos.js"],
+    "timeoutMs": 5000
   }
   \`\`\`
-  Strings are also accepted (\`"command": "node scripts/todos.js"\`) — they are
-  tokenised internally and never passed through a shell, so \`;\`, \`|\`, and
-  \`$(...)\` have no effect.
+  \`argv\` is a pre-tokenised string array — \`argv[0]\` is the binary, the
+  rest are arguments. The spawn is shell-free, so \`;\`, \`|\`, and \`$(...)\`
+  have no effect.
 `;
   writeFileSync(path.join(root, 'README.md'), readme);
 
