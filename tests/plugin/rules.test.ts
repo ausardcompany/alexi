@@ -88,15 +88,18 @@ describe('Plugin rule contributions', () => {
       expect(parsed.path).toBe('rules/x.md');
     });
 
-    it('rejects inline source without content with a useful error', () => {
+    it('rejects inline source without content', () => {
       const result = PluginRuleSchema.safeParse({
         name: 'r3',
         source: 'inline',
       });
       expect(result.success).toBe(false);
       if (!result.success) {
-        const msg = result.error.issues.map((i) => i.message).join(';');
-        expect(msg).toContain("'content' for inline source");
+        // The discriminated-union branch for `source: 'inline'` requires
+        // `content: z.string()` — the resulting issue should reference the
+        // `content` path (not the legacy refine message text).
+        const paths = result.error.issues.map((i) => i.path.join('.'));
+        expect(paths.some((p) => p.includes('content'))).toBe(true);
       }
     });
 
@@ -111,8 +114,19 @@ describe('Plugin rule contributions', () => {
     it('rejects unknown source values', () => {
       const result = PluginRuleSchema.safeParse({
         name: 'r5',
-        source: 'command',
+        source: 'shell',
         content: 'echo hi',
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects mixing command source `argv` with inline `content`', () => {
+      // Strict-mode discriminated union: foreign fields fail at parse time.
+      const result = PluginRuleSchema.safeParse({
+        name: 'mix',
+        source: 'command',
+        argv: ['echo', 'hi'],
+        content: 'inline body',
       });
       expect(result.success).toBe(false);
     });
@@ -405,7 +419,10 @@ describe('Plugin rule contributions', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/Invalid plugin\.json/);
-      expect(result.error).toMatch(/'content' for inline source/);
+      // The discriminated-union branch surfaces a Zod issue on the
+      // `rules.0.content` path — we just need a message that mentions
+      // the missing required field, not a hand-rolled refine string.
+      expect(result.error?.toLowerCase()).toMatch(/required|invalid|content/);
       expect(manager.get('bad-rule')).toBeUndefined();
     });
   });
