@@ -1,5 +1,11 @@
 name: "Agent 2: Planning & Issues"
 
+# Thin caller: delegates the planning agent run to the factory with
+# role=product. The prepare job finds the latest research file, checks
+# the existing-issues backlog gate, and renders a single comprehensive
+# task that asks for plan -> tasks -> issues in one run (the original
+# workflow ran 3 sequential `kilo run` calls — collapsed into one here).
+
 on:
   workflow_run:
     workflows:
@@ -29,40 +35,25 @@ permissions:
   contents: write
   issues: write
 
-env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
-  KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
-
 jobs:
-  plan:
-    name: Create Development Plan
+  prepare:
+    name: Find research and gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.event.workflow_run.conclusion == 'success'
-
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      task_prompt: ${{ steps.build.outputs.task_prompt }}
+      open_count: ${{ steps.existing.outputs.open_count }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install Kilo CLI and dependencies
-        run: |
-          npm install -g @kilocode/cli
-          npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
-
 
       - name: Find latest research
         id: research
@@ -80,12 +71,10 @@ jobs:
       - name: Check existing issues
         id: existing
         run: |
-          # Count open auto-implement issues
-          OPEN_COUNT=$(gh issue list --label "auto-implement" --state open --json number --jq 'length')
+          OPEN_COUNT=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "auto-implement" --state open --json number --jq 'length')
           echo "open_count=$OPEN_COUNT" >> $GITHUB_OUTPUT
           echo "[INFO] Open auto-implement issues: $OPEN_COUNT"
 
-          # If too many open, skip creating new ones
           if [ "$OPEN_COUNT" -ge 10 ]; then
             echo "should_skip=true" >> $GITHUB_OUTPUT
             echo "[SKIP] Too many open issues ($OPEN_COUNT >= 10). Skipping."
@@ -95,8 +84,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Gate decision
+        id: gate
+        run: |
+          if [ "${{ steps.research.outputs.has_research }}" = "true" ] && \
+             [ "${{ steps.existing.outputs.should_skip }}" != "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build planning prompt
-        if: steps.research.outputs.has_research == 'true' && steps.existing.outputs.should_skip != 'true'
+        if: steps.gate.outputs.should_run == 'true'
+        id: build
         run: |
           RESEARCH_FILE="${{ steps.research.outputs.file }}"
           MAX_ISSUES="${{ inputs.max_issues || '5' }}"
@@ -104,7 +104,6 @@ jobs:
           OPEN_COUNT="${{ steps.existing.outputs.open_count }}"
           TODAY=$(date -u +%Y-%m-%d)
 
-          # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent2-planning-task.md)
 
           PROMPT=$(echo "$TEMPLATE" | \
@@ -114,119 +113,68 @@ jobs:
             sed "s|{{OPEN_COUNT}}|$OPEN_COUNT|g" | \
             sed "s|{{DATE}}|$TODAY|g")
 
-          # Handle conditional sections based on DRY_RUN
           if [ "$DRY_RUN" = "true" ]; then
-            echo "$PROMPT" | sed '/{{^DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
-              grep -v '{{#DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/planning-prompt.txt
+            RENDERED=$(echo "$PROMPT" | sed '/{{^DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
+              grep -v '{{#DRY_RUN}}' | grep -v '{{/DRY_RUN}}')
           else
-            echo "$PROMPT" | sed '/{{#DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
-              grep -v '{{^DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/planning-prompt.txt
+            RENDERED=$(echo "$PROMPT" | sed '/{{#DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
+              grep -v '{{^DRY_RUN}}' | grep -v '{{/DRY_RUN}}')
           fi
 
-          echo "[OK] Planning prompt built from template ($(wc -l < /tmp/planning-prompt.txt) lines)"
+          # Collapse the original 3-step sequence (plan -> tasks -> issues)
+          # into a single comprehensive instruction block.
+          {
+            echo "$RENDERED"
+            echo ""
+            echo "## Workflow (do all three stages in this single run)"
+            echo ""
+            echo "1. **Plan** — produce the development plan derived from $RESEARCH_FILE."
+            echo "2. **Tasks** — break the plan into implementable tasks and save the breakdown to tasks.md."
+            echo "3. **Issues** — for each task, create a GitHub issue using"
+            echo "   \`gh issue create --repo \"\$GITHUB_REPOSITORY\" --label auto-implement\`."
+            echo "   Cap at $MAX_ISSUES new issues."
+            if [ "$DRY_RUN" = "true" ]; then
+              echo ""
+              echo "**DRY RUN**: skip step 3 — do not call \`gh issue create\`."
+            fi
+          } > /tmp/planning-prompt.txt
 
-      - name: Run Agent 2 (Planning)
-        id: planning
-        if: steps.research.outputs.has_research == 'true' && steps.existing.outputs.should_skip != 'true'
-        continue-on-error: true
-        timeout-minutes: 12
-        env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TASK_PROMPT=$(cat /tmp/planning-prompt.txt)
+          {
+            echo "task_prompt<<__EOF_PROMPT__"
+            cat /tmp/planning-prompt.txt
+            echo "__EOF_PROMPT__"
+          } >> "$GITHUB_OUTPUT"
 
-          # Helper: run kilo with retry on transient failure. Stops the
-          # whole sequence on hard failure so we don't, e.g., create
-          # GitHub issues from a half-baked plan.
-          run_kilo() {
-            local title="$1"
-            local prompt="$2"
-            local attempt=0
-            local code=1
-            while : ; do
-              echo ">>> $title (attempt $((attempt + 1)))" >> planning-output.log
-              if kilo run "$prompt" --title "$title" \
-                  $KILO_FLAGS \
-                  -m "$AGENT_MODEL" \
-                  >> planning-output.log 2>&1; then
-                return 0
-              fi
-              code=$?
-              attempt=$((attempt + 1))
-              if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
-                return $code
-              fi
-              local backoff=$((attempt * 30))
-              echo "[WARN] $title exit $code — retry in ${backoff}s" >> planning-output.log
-              sleep "$backoff"
-            done
-          }
+          echo "[OK] Planning prompt rendered"
 
-          : > planning-output.log
-          if ! run_kilo "Agent 2 Planning" "$TASK_PROMPT"; then
-            EXIT_CODE=$?
-          elif ! run_kilo "Agent 2 Tasks" "Break the plan into implementable tasks and save to tasks.md"; then
-            EXIT_CODE=$?
-          elif ! run_kilo "Agent 2 Issues" "Create GitHub issues from tasks.md using gh issue create"; then
-            EXIT_CODE=$?
-          else
-            EXIT_CODE=0
-          fi
+  plan:
+    name: Run planning agent
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: product
+      task_prompt: ${{ needs.prepare.outputs.task_prompt }}
+      title: 'Agent 2: Planning & Issues'
+      commit_scope: ci
+      commit_changes: true
+      timeout_minutes: 18
+      branch: master
 
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          if [ "$EXIT_CODE" -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-            echo "[OK] Planning completed"
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Planning failed with exit code $EXIT_CODE"
-          fi
-
-          echo "=== Output (last 50 lines) ==="
-          tail -50 planning-output.log
-
-      - name: Commit plan
-        if: steps.planning.outputs.success == 'true'
-        run: |
-          git config user.name "alexi-bot[bot]"
-          git config user.email "alexi-bot[bot]@users.noreply.github.com"
-
-          git add .github/research/ 2>/dev/null || true
-
-          if ! git diff --cached --quiet; then
-            git commit -m "plan: development roadmap $(date -u +%Y-%m-%d) [alexi-bot]" --no-verify
-            git push origin master
-            echo "[OK] Plan committed"
-          else
-            echo "[INFO] No plan changes to commit"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Report results
-        if: always()
+  report:
+    name: Report results
+    needs: [prepare, plan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
         run: |
           echo "## Agent 2 Summary"
-          echo ""
-          echo "- Research available: ${{ steps.research.outputs.has_research }}"
-          echo "- Open issues before: ${{ steps.existing.outputs.open_count }}"
-          echo "- Planning success: ${{ steps.planning.outputs.success || 'skipped' }}"
-
-          # Count new issues created
-          NEW_ISSUES=$(gh issue list --label "auto-implement" --state open --json number --jq 'length' 2>/dev/null || echo "?")
+          echo "- Should run: ${{ needs.prepare.outputs.should_run }}"
+          echo "- Open issues before: ${{ needs.prepare.outputs.open_count }}"
+          NEW_ISSUES=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "auto-implement" --state open --json number --jq 'length' 2>/dev/null || echo "?")
           echo "- Open issues after: $NEW_ISSUES"
+          echo "- Plan result: ${{ needs.plan.result || 'skipped' }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent2-planning-${{ github.run_id }}
-          path: |
-            planning-output.log
-          retention-days: 14
-          if-no-files-found: ignore

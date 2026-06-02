@@ -67,6 +67,6 @@ How this should improve agent behavior
 - Rewrite prompts from scratch — iterate on what works
 - Remove safety constraints or "Do NOT" sections
 - Add verbosity without clear purpose
-- Change template variables (`{​{VARIABLE}}`)
+- Change template variables (`{{VARIABLE}}`)
 - Introduce tools or capabilities that don't exist
 - Optimize for token count at the expense of clarity

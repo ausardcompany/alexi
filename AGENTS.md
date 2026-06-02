@@ -62,6 +62,46 @@ Routing is JSON-driven: `routing-config.json` (and `routing-config.example.json`
 - `ci-auto-fix.yml` and `documentation-update.yml` have their own pre-existing retry logic that detects transient network errors (`socket hang up`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `fetch failed`) — keep that intact when refactoring.
 - Watch for the `npm install -g @kilocode/cli` mid-pipe trap: in older versions of these workflows it was accidentally embedded into `run_check "build"` / `run_check "test"` definitions, silently turning the build verification into a CLI reinstall. Use `npm run build` / `npm run test:coverage` directly.
 
+## Agent factory architecture
+
+The agent fleet has been refactored into a T-shape model. There is one shared baseline + 10 role verticals + one reusable workflow that runs them. Stop copy-pasting the `kilo run` + retry-with-backoff block into every new workflow — it lives in the factory now.
+
+- **Baseline**: `.github/prompts/baseline-system.md` — shared system prompt for ALL agents (tone, safety, output format). Touching this file changes every agent's behaviour. Coordinate carefully.
+- **Roles**: `.github/prompts/role-{consulting,product,design,architecture,engineering,quality,data,infrastructure,security,management}.md` — one vertical per file. Each declares what the role owns, what it must NOT do, inputs it reads, outputs it produces, and definition-of-done.
+- **Factory**: `.github/workflows/agent-factory.yml` — reusable workflow (`workflow_call`). Inputs: `role`, `task_prompt` (inline string OR `file:<path>`), `title`, `timeout_minutes` (default 15), `commit_changes` (default true), `commit_scope` (default `agent`), `branch` (default `master`). Composes `baseline + role + task` into one combined prompt, runs `kilo run` with the shared retry budget, optionally commits and pushes, uploads prompt + log artefacts.
+
+### Agent ↔ role mapping (reality check before changing one)
+
+| Workflow file                                  | Role             | Trigger                  |
+| ---------------------------------------------- | ---------------- | ------------------------ |
+| `.github/workflows/agent1-research.yml`        | `consulting`     | cron 04:00 UTC + manual  |
+| `.github/workflows/agent2-planning.yml`        | `product`        | after agent1 + cron 06:00 |
+| `.github/workflows/auto-implement.yml`         | `engineering`    | cron */30, matrix of 3   |
+| `.github/workflows/agent4-review.yml`          | `quality`        | pull_request             |
+| `.github/workflows/agent5-release.yml`         | `infrastructure` | cron Mon 10:00 UTC       |
+| `.github/workflows/agent6-prompt-optimizer.yml`| `management`     | cron Wed 08:00 UTC       |
+| `.github/workflows/agent-architecture.yml`     | `architecture`   | cron Mon 05:00 + PR      |
+| `.github/workflows/agent-design.yml`           | `design`         | manual / scheduled       |
+| `.github/workflows/agent-data.yml`             | `data`           | manual / scheduled       |
+| `.github/workflows/agent-security.yml`         | `security`       | manual / scheduled       |
+
+### Adding a new agent (~30 lines of YAML)
+
+1. If a new vertical is needed, write `.github/prompts/role-<name>.md` following the existing role-file shape (identity / vertical knowledge / what you own / must NOT do / inputs / outputs / DoD). Keep it under ~80 lines.
+2. If only the *task* is new (existing role works), drop a markdown file under `.github/prompts/tasks/<task>.md`.
+3. Create a thin caller workflow that `uses: ./.github/workflows/agent-factory.yml` with `secrets: inherit`. Set `role`, `task_prompt: 'file:.github/prompts/tasks/<task>.md'`, `title`, and any non-default `commit_changes` / `commit_scope` / `branch` / `timeout_minutes`. See `agent-architecture.yml` for the cleanest reference.
+4. Commit. Done — no `kilo run`, no retries, no checkout/install boilerplate.
+
+### Pre-/post-step pattern
+
+Caller workflows that need per-run context (today's date, an issue body, a PR number) keep a `prepare:` job that builds the rendered prompt, exposes it via `outputs.task_prompt`, and the factory job consumes it as an inline string. Anything that runs *after* the agent (PR creation, issue comments, version tagging) goes in a `followup:` job that `needs: [prepare, <factory job>]`. Keep `commit_changes: false` for review-only roles so the factory does not push to the PR branch.
+
+### Reminders
+
+- Every change to `.github/prompts/baseline-system.md` affects ALL 10+ agents simultaneously. Treat it like a constitution amendment.
+- The factory hardcodes `--no-verify` on its commit because lint-staged + commitlint can race with auto-pushed branches. The shared scope-enum (`cli, core, providers, config, server, agent, tools, ci, deps, tests`) still applies to anything an agent commits *itself* via tools.
+- Model is set in ONE place: `env.AGENT_MODEL` inside `agent-factory.yml`. Do not re-pin it in caller workflows.
+
 ## Existing instruction sources to respect
 
 - `.kilo/` and `.kilocode/rules/` — agent rules already loaded by tooling; check before adding overlapping guidance here

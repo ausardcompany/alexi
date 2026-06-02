@@ -1,5 +1,11 @@
 name: "Agent 5: Release Management"
 
+# Thin caller: delegates the release agent run to the factory with
+# role=infrastructure. The prepare job decides whether a release is
+# warranted (commit count, version bump detection, CI gate) and renders
+# the release prompt with the commit log + new version. If the gate
+# fails the factory job is skipped via `needs.prepare.outputs.should_run`.
+
 on:
   workflow_dispatch:
     inputs:
@@ -29,17 +35,16 @@ permissions:
   contents: write
   pull-requests: write
 
-env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
-  KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
-
 jobs:
-  release:
-    name: Prepare Release
+  prepare:
+    name: Gate and build release prompt
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 10
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+      task_prompt: ${{ steps.build.outputs.task_prompt }}
+      new_version: ${{ steps.version.outputs.new }}
+      current_version: ${{ steps.version.outputs.current }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -53,21 +58,15 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install Kilo CLI and dependencies
-        run: |
-          npm install -g @kilocode/cli
-          npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
-
+      - name: Install dependencies
+        run: npm ci
 
       - name: Check if release needed
         id: check
         run: |
-          # Get last release tag
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "$LAST_TAG" ]; then
-            echo "[INFO] No previous tags found. First release."
             LAST_TAG=$(git rev-list --max-parents=0 HEAD | head -1)
             echo "is_first=true" >> $GITHUB_OUTPUT
           else
@@ -76,7 +75,6 @@ jobs:
 
           echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
 
-          # Count commits since last tag
           COMMIT_COUNT=$(git log ${LAST_TAG}..HEAD --oneline --no-merges | wc -l | tr -d ' ')
           echo "commit_count=$COMMIT_COUNT" >> $GITHUB_OUTPUT
           echo "[INFO] Commits since $LAST_TAG: $COMMIT_COUNT"
@@ -86,11 +84,8 @@ jobs:
             echo "should_release=false" >> $GITHUB_OUTPUT
           else
             echo "should_release=true" >> $GITHUB_OUTPUT
-
-            # Auto-detect version bump
             HAS_FEAT=$(git log ${LAST_TAG}..HEAD --format="%s" --no-merges | grep -c "^feat" || echo "0")
             HAS_BREAKING=$(git log ${LAST_TAG}..HEAD --format="%s" --no-merges | grep -c "BREAKING" || echo "0")
-
             if [ "$HAS_BREAKING" -gt 0 ]; then
               echo "auto_bump=major" >> $GITHUB_OUTPUT
             elif [ "$HAS_FEAT" -gt 0 ]; then
@@ -103,13 +98,9 @@ jobs:
       - name: Run CI checks
         if: steps.check.outputs.should_release == 'true'
         id: ci
-        # Run the gate explicitly, capture pass/fail without aborting the
-        # workflow so the summary step still runs.
         continue-on-error: true
         run: |
           set +e
-          echo "Running full CI gate before release..."
-
           npm run typecheck \
             && npm run lint \
             && npm run format:check \
@@ -135,17 +126,12 @@ jobs:
             BUMP="${{ steps.check.outputs.auto_bump }}"
           fi
 
-          # Block major without explicit manual trigger
           if [ "$BUMP" = "major" ] && [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "[WARN] Major version bump detected but running on schedule. Downgrading to minor."
+            echo "[WARN] Major bump on schedule. Downgrading to minor."
             BUMP="minor"
           fi
 
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          echo "bump=$BUMP" >> $GITHUB_OUTPUT
-
-          # Calculate new version
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
           case "$BUMP" in
             major) NEW_VERSION="$((MAJOR + 1)).0.0" ;;
@@ -153,33 +139,41 @@ jobs:
             patch) NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))" ;;
           esac
 
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
           echo "new=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "[OK] Version: $CURRENT_VERSION → $NEW_VERSION ($BUMP)"
+          echo "[OK] Version: $CURRENT_VERSION -> $NEW_VERSION ($BUMP)"
+
+      - name: Gate decision
+        id: gate
+        run: |
+          if [ "${{ steps.check.outputs.should_release }}" = "true" ] && \
+             [ "${{ steps.ci.outputs.ci_passed }}" = "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build release prompt
-        if: steps.check.outputs.should_release == 'true' && steps.ci.outputs.ci_passed == 'true'
+        if: steps.gate.outputs.should_run == 'true'
+        id: build
         run: |
           LAST_TAG="${{ steps.check.outputs.last_tag }}"
           NEW_VERSION="${{ steps.version.outputs.new }}"
           BUMP_TYPE="${{ steps.version.outputs.bump }}"
           DRY_RUN="${{ inputs.dry_run || 'false' }}"
 
-          # Generate commit log
           COMMIT_LOG=$(git log ${LAST_TAG}..HEAD --format="- %s (%h)" --no-merges)
 
-          # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent5-release-task.md)
-
           PROMPT=$(echo "$TEMPLATE" | \
             sed "s|{{LAST_TAG}}|$LAST_TAG|g" | \
             sed "s|{{NEW_VERSION}}|$NEW_VERSION|g" | \
             sed "s|{{BUMP_TYPE}}|$BUMP_TYPE|g" | \
             sed "s|{{DRY_RUN}}|$DRY_RUN|g")
 
-          # Substitute commit log (multi-line)
           echo "$PROMPT" | awk -v log="$COMMIT_LOG" '{gsub(/\{\{COMMIT_LOG\}\}/, log); print}' > /tmp/release-prompt-raw.txt
 
-          # Handle conditional sections based on DRY_RUN
           if [ "$DRY_RUN" = "true" ]; then
             cat /tmp/release-prompt-raw.txt | sed '/{{^DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
               grep -v '{{#DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/release-prompt.txt
@@ -188,73 +182,44 @@ jobs:
               grep -v '{{^DRY_RUN}}' | grep -v '{{/DRY_RUN}}' > /tmp/release-prompt.txt
           fi
 
-          rm -f /tmp/release-prompt-raw.txt
-          echo "[OK] Release prompt built from template ($(wc -l < /tmp/release-prompt.txt) lines)"
+          {
+            echo "task_prompt<<__EOF_PROMPT__"
+            cat /tmp/release-prompt.txt
+            echo "__EOF_PROMPT__"
+          } >> "$GITHUB_OUTPUT"
+          echo "[OK] Release prompt rendered"
 
-      - name: Run Agent 5 (Release)
-        id: release
-        if: steps.check.outputs.should_release == 'true' && steps.ci.outputs.ci_passed == 'true'
-        continue-on-error: true
-        timeout-minutes: 8
-        env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      - name: Summary (skipped path)
+        if: steps.gate.outputs.should_run != 'true'
         run: |
-          git config user.name "alexi-bot[bot]"
-          git config user.email "alexi-bot[bot]@users.noreply.github.com"
-
-          TASK_PROMPT=$(cat /tmp/release-prompt.txt)
-
-          attempt=0
-          EXIT_CODE=1
-          while : ; do
-            echo "Running release agent, attempt $((attempt + 1)) ..."
-            if kilo run "$TASK_PROMPT" --title "Agent 5 Release" \
-                $KILO_FLAGS \
-                -m "$AGENT_MODEL" \
-                > release-output.log 2>&1; then
-              EXIT_CODE=0
-              break
-            fi
-            EXIT_CODE=$?
-            attempt=$((attempt + 1))
-            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
-              break
-            fi
-            backoff=$((attempt * 30))
-            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
-            sleep "$backoff"
-          done
-
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-            echo "[OK] Release completed"
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Release failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
-          fi
-
-          tail -50 release-output.log
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "## Agent 5 Release Summary"
-          echo ""
+          echo "## Agent 5 Release — skipped"
           echo "- Should release: ${{ steps.check.outputs.should_release }}"
           echo "- CI passed: ${{ steps.ci.outputs.ci_passed || 'n/a' }}"
-          echo "- Version: ${{ steps.version.outputs.current || '?' }} → ${{ steps.version.outputs.new || '?' }}"
-          echo "- Success: ${{ steps.release.outputs.success || 'skipped' }}"
 
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent5-release-${{ github.run_id }}
-          path: |
-            release-output.log
-          retention-days: 14
-          if-no-files-found: ignore
+  release:
+    name: Run release agent
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: infrastructure
+      task_prompt: ${{ needs.prepare.outputs.task_prompt }}
+      title: 'Agent 5: Release'
+      commit_scope: ci
+      commit_changes: true
+      timeout_minutes: 12
+      branch: master
+
+  summary:
+    name: Summary
+    needs: [prepare, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print summary
+        run: |
+          echo "## Agent 5 Release Summary"
+          echo "- Should run: ${{ needs.prepare.outputs.should_run }}"
+          echo "- Version: ${{ needs.prepare.outputs.current_version || '?' }} -> ${{ needs.prepare.outputs.new_version || '?' }}"
+          echo "- Result: ${{ needs.release.result || 'skipped' }}"

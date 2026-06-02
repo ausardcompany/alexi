@@ -2,6 +2,169 @@
 
 This document describes the GitHub Actions workflows and automation systems in the Alexi project.
 
+## Agent Factory (T-shape)
+
+The agent fleet is organised as a **T-shape**: one shared baseline ("the
+horizontal bar") + N role verticals + a single reusable workflow that runs
+any role with consistent retry, commit, and artefact policies. Caller
+workflows are thin (~30 lines of YAML each) and only carry their own
+trigger + per-run context.
+
+### Composition
+
+```
+                 ┌──────────────────────────────────────────┐
+                 │   .github/prompts/baseline-system.md     │  shared by ALL agents
+                 │   (tone, safety, output format)          │
+                 └──────────────────────────────────────────┘
+                                    +
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  .github/prompts/role-<vertical>.md                                  │
+   │  one of: consulting | product | design | architecture | engineering  │
+   │          quality    | data    | infrastructure | security | management│
+   └──────────────────────────────────────────────────────────────────────┘
+                                    +
+                 ┌──────────────────────────────────────────┐
+                 │   task_prompt   (inline string OR        │
+                 │                  file:<path>)            │
+                 └──────────────────────────────────────────┘
+                                    │
+                                    ▼
+                 ┌──────────────────────────────────────────┐
+                 │  .github/workflows/agent-factory.yml     │
+                 │  workflow_call                           │
+                 │  - validates role                        │
+                 │  - composes baseline + role + task       │
+                 │  - runs `kilo run` with retry budget     │
+                 │  - optionally commits + pushes           │
+                 │  - uploads prompt + log artefacts        │
+                 └──────────────────────────────────────────┘
+```
+
+### Reusable workflow inputs
+
+`.github/workflows/agent-factory.yml` is invoked via `workflow_call` and
+accepts:
+
+| Input              | Type    | Default  | Description                                                     |
+| ------------------ | ------- | -------- | --------------------------------------------------------------- |
+| `role`             | string  | required | One of the 10 role verticals (validated at runtime).            |
+| `task_prompt`      | string  | required | Inline task text, or `file:<path>` to load from a repo file.    |
+| `title`            | string  | required | Human-readable title displayed in the kilo run.                 |
+| `timeout_minutes`  | number  | `15`     | Hard timeout for the `kilo run` step.                           |
+| `commit_changes`   | boolean | `true`   | Whether the factory should `git add/commit/push` after the run. |
+| `commit_scope`     | string  | `agent`  | commitlint scope for the auto-commit (must be in scope-enum).   |
+| `branch`           | string  | `master` | Branch to checkout and push to. Set to a feature branch for     |
+|                    |         |          | PR-style flows or to a PR head ref for review-only roles.       |
+
+Secrets are passed via `secrets: inherit` from the caller — the factory
+declares `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` as required, and
+`GH_PAT` as optional (falls back to `GITHUB_TOKEN`).
+
+### Agent ↔ role mapping
+
+| Caller workflow                                | Role             | Trigger                       | Commits? |
+| ---------------------------------------------- | ---------------- | ----------------------------- | -------- |
+| `.github/workflows/agent1-research.yml`        | `consulting`     | cron 04:00 UTC + dispatch     | yes      |
+| `.github/workflows/agent2-planning.yml`        | `product`        | workflow_run + cron 06:00 UTC | yes      |
+| `.github/workflows/auto-implement.yml`         | `engineering`    | cron */30, matrix of 3        | yes (per feature branch) |
+| `.github/workflows/agent4-review.yml`          | `quality`        | pull_request                  | **no** (review-only) |
+| `.github/workflows/agent5-release.yml`         | `infrastructure` | cron Mon 10:00 UTC + dispatch | yes      |
+| `.github/workflows/agent6-prompt-optimizer.yml`| `management`     | cron Wed 08:00 UTC + dispatch | yes (when not dry-run) |
+| `.github/workflows/agent-architecture.yml`     | `architecture`   | cron Mon 05:00 + PR + manual  | only on cron |
+| `.github/workflows/agent-design.yml`           | `design`         | manual / scheduled            | varies   |
+| `.github/workflows/agent-data.yml`             | `data`           | manual / scheduled            | varies   |
+| `.github/workflows/agent-security.yml`         | `security`       | manual / scheduled            | varies   |
+
+### Caller workflow shape
+
+A typical caller has three jobs:
+
+1. **`prepare`** — gathers per-run context (latest research file, open issue
+   count, PR number, today's date, etc.) and emits the fully-rendered task
+   prompt as `outputs.task_prompt`. This is just bash + GitHub Actions
+   outputs; no AI involved.
+2. **factory call** — `uses: ./.github/workflows/agent-factory.yml` with
+   `secrets: inherit`. Passes `role`, `task_prompt: ${{ needs.prepare.outputs.task_prompt }}`,
+   `title`, and any non-default `commit_*` / `branch` / `timeout_minutes`.
+3. **`followup`** (optional) — runs after the agent. Verifies CI, opens a
+   PR, posts an issue comment, tags a release. Anything the agent
+   shouldn't be doing itself.
+
+The cleanest reference today is `.github/workflows/agent-architecture.yml`
+(no prepare/followup; just two thin factory calls split by trigger). The
+most complex is `auto-implement.yml` (matrix prepare → factory → followup
+with PR creation).
+
+### Manual invocation
+
+Every caller workflow is `workflow_dispatch`-able. To run an architecture
+review on demand:
+
+```bash
+gh workflow run agent-architecture.yml
+gh run watch  # or: gh run list --workflow=agent-architecture.yml --limit 1
+```
+
+To run a specific implementation against an issue:
+
+```bash
+gh workflow run auto-implement.yml -f issue_number=123
+```
+
+To dry-run the prompt optimiser:
+
+```bash
+gh workflow run agent6-prompt-optimizer.yml -f dry_run=true
+```
+
+### Retries, secrets, artefacts
+
+- **Retries**: the factory wraps `kilo run` in a bash loop with exponential
+  backoff (`KILO_RETRIES`, default 1 additional attempt = 2 total). Total
+  attempts and backoff happen *inside* the factory; callers must NOT
+  re-implement retries.
+- **Secrets**: `secrets: inherit` is mandatory. The factory expects
+  `AICORE_SERVICE_KEY` (full SAP service-key JSON), `AICORE_RESOURCE_GROUP`,
+  and optionally `GH_PAT` (used in preference to `GITHUB_TOKEN` when
+  pushing, since the default token can't trigger downstream workflows).
+- **Artefacts**: every factory run uploads `system-prompt.md`,
+  `task-prompt.md`, `combined-prompt.md`, and `kilo-output.log` under
+  `factory-<role>-<run_id>` (30-day retention). Caller `prepare` jobs
+  upload their own check logs separately if needed.
+
+### Adding a new agent (cookbook)
+
+1. **Pick a role.** If an existing `role-*.md` covers your vertical
+   (consulting / product / design / architecture / engineering / quality /
+   data / infrastructure / security / management), reuse it. If not,
+   write a new `role-<name>.md` (~80 lines max) following the same shape:
+   identity → vertical knowledge → what you own → must NOT do → inputs →
+   outputs → definition of done.
+2. **Write the task prompt.** Either drop a static markdown under
+   `.github/prompts/tasks/<task>.md`, or build it dynamically in a
+   `prepare` job and pass it inline.
+3. **Create the caller workflow.** Copy `agent-architecture.yml` as a
+   template — strip the `pull_request` trigger if you don't need it,
+   adjust `commit_changes`, set `branch`, give the role + task. Total
+   YAML: ~30 lines.
+4. **Commit.** No `kilo run`, no retry-with-backoff, no `npm install -g
+   @kilocode/cli`, no checkout boilerplate. The factory owns all of that.
+
+### Constitution-level reminders
+
+- **Every** edit to `.github/prompts/baseline-system.md` affects ALL 10+
+  agents simultaneously. Test against at least one cron and one
+  pull_request workflow before merging.
+- Model is pinned in **one place**: `env.AGENT_MODEL` inside
+  `agent-factory.yml`. Do not re-declare it in caller workflows.
+- The factory commits with `--no-verify` because husky's lint-staged
+  hooks race with auto-pushed branches. The commitlint scope-enum
+  (`cli, core, providers, config, server, agent, tools, ci, deps, tests`)
+  still applies to anything the agent commits *itself* via tools.
+- Review-only roles (e.g. `quality` in `agent4-review.yml`) MUST set
+  `commit_changes: false`. The factory will skip the commit step.
+
 ## Overview
 
 Alexi uses 19 GitHub Actions workflows for continuous integration, automated documentation, autonomous upstream synchronization, AI-powered autohealing, and daily PR management. The automation system leverages Kilo CLI and Alexi's agentic capabilities.

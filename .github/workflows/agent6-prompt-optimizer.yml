@@ -1,5 +1,9 @@
 name: "Agent 6: Prompt Improver"
 
+# Thin caller: delegates the prompt-optimizer agent run to the factory
+# with role=management. The prepare job collects agent performance metrics
+# from recent workflow runs and renders the optimizer task prompt.
+
 on:
   schedule:
     # Run weekly on Wednesday at 08:00 UTC
@@ -34,43 +38,23 @@ permissions:
   pull-requests: write
   actions: read
 
-env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
-  KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
-
 jobs:
-  optimize:
-    name: Optimize Agent Prompts
+  prepare:
+    name: Collect metrics and build prompt
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 10
+    outputs:
+      task_prompt: ${{ steps.build.outputs.task_prompt }}
+      file_count: ${{ steps.targets.outputs.file_count }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install Kilo CLI and dependencies
-        run: |
-          npm install -g @kilocode/cli
-          npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
-
-      # ─── Step 1: Collect metrics on agent performance ─────────────────────────
       - name: Collect agent performance metrics
         id: metrics
         run: |
-          echo "Collecting workflow run metrics (last 14 days)..."
-
-          # Get failure rates per agent workflow
           METRICS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?created=>=$(date -u -d '14 days ago' +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v-14d +%Y-%m-%dT00:00:00Z)&per_page=100" \
             --jq '[.workflow_runs[] | {name: .name, conclusion: .conclusion}] | group_by(.name) | map({
               name: .[0].name,
@@ -81,13 +65,10 @@ jobs:
 
           echo "$METRICS" > /tmp/agent-metrics.json
           echo "[OK] Metrics collected"
-
-          # Summary for logs
           echo "$METRICS" | jq -r '.[] | select(.failure > 0) | "\(.name): \(.failure)/\(.total) failures"'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ─── Step 2: Determine which prompts to optimize ──────────────────────────
       - name: Determine target prompts
         id: targets
         run: |
@@ -105,33 +86,31 @@ jobs:
           fi
 
           FILE_COUNT=$(echo "$PROMPT_FILES" | wc -l | tr -d ' ')
-          echo "prompt_files<<EOF" >> $GITHUB_OUTPUT
-          echo "$PROMPT_FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
 
-          echo "[OK] Found $FILE_COUNT prompt files to optimize"
-          echo "$PROMPT_FILES"
+          {
+            echo "prompt_files<<__EOF_FILES__"
+            echo "$PROMPT_FILES"
+            echo "__EOF_FILES__"
+          } >> "$GITHUB_OUTPUT"
 
-      # ─── Step 3: Build optimization prompt ────────────────────────────────────
+          echo "[OK] Found $FILE_COUNT prompt files"
+
       - name: Build optimization prompt
+        id: build
         run: |
           TODAY=$(date -u +%Y-%m-%d)
           DRY_RUN="${{ inputs.dry_run || 'false' }}"
-          PROMPT_FILES="${{ steps.targets.outputs.prompt_files }}"
+          PROMPT_FILES='${{ steps.targets.outputs.prompt_files }}'
 
-          # Format prompt files as bullet list
           FILE_LIST=$(echo "$PROMPT_FILES" | sed 's/^/- /')
 
-          # Read task template
           TASK_TEMPLATE=$(cat .github/prompts/agent6-prompt-optimizer-task.md)
 
-          # Substitute variables
           TASK_PROMPT=$(echo "$TASK_TEMPLATE" | \
             sed "s|{{PROMPT_FILES}}|$FILE_LIST|g" | \
             sed "s|{{DATE}}|$TODAY|g")
 
-          # Append metrics context
           {
             echo "$TASK_PROMPT"
             echo ""
@@ -148,194 +127,48 @@ jobs:
             fi
           } > /tmp/optimizer-prompt.txt
 
-          echo "[OK] Optimizer prompt built ($(wc -l < /tmp/optimizer-prompt.txt) lines)"
+          {
+            echo "task_prompt<<__EOF_PROMPT__"
+            cat /tmp/optimizer-prompt.txt
+            echo "__EOF_PROMPT__"
+          } >> "$GITHUB_OUTPUT"
 
-      # ─── Step 4: Run Prompt Optimizer Agent ───────────────────────────────────
-      - name: Run Agent 6 (Prompt Improver)
-        id: optimize
-        continue-on-error: true
-        timeout-minutes: 12
-        env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "alexi-bot[bot]"
-          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+          echo "[OK] Optimizer prompt rendered ($(wc -l < /tmp/optimizer-prompt.txt) lines)"
 
-          TASK_PROMPT=$(cat /tmp/optimizer-prompt.txt)
-
-          attempt=0
-          EXIT_CODE=1
-          while : ; do
-            echo "Running prompt optimizer, attempt $((attempt + 1)) ..."
-            if kilo run "$TASK_PROMPT" --title "Agent 6 Prompt Improver" \
-                $KILO_FLAGS \
-                -m "$AGENT_MODEL" \
-                > optimizer-output.log 2>&1; then
-              EXIT_CODE=0
-              break
-            fi
-            EXIT_CODE=$?
-            attempt=$((attempt + 1))
-            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
-              break
-            fi
-            backoff=$((attempt * 30))
-            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
-            sleep "$backoff"
-          done
-
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-            echo "[OK] Prompt optimization completed"
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Optimization failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
-          fi
-
-          echo "=== Output (last 50 lines) ==="
-          tail -50 optimizer-output.log
-
-      # ─── Step 5: Validate prompts after optimization ──────────────────────────
-      - name: Validate optimized prompts
-        id: validate
-        if: steps.optimize.outputs.success == 'true' && inputs.dry_run != true
-        run: |
-          ALL_VALID=true
-          VALIDATION_RESULTS=""
-
-          for file in .github/prompts/agent*.md; do
-            # Check file exists and is non-empty
-            if [ ! -s "$file" ]; then
-              echo "[FAIL] $file is empty"
-              ALL_VALID=false
-              VALIDATION_RESULTS="$VALIDATION_RESULTS\n- ❌ $file: empty"
-              continue
-            fi
-
-            # Check line count (system < 50, task < 80)
-            LINES=$(wc -l < "$file")
-            FILENAME=$(basename "$file")
-
-            if echo "$FILENAME" | grep -q "system"; then
-              if [ "$LINES" -gt 60 ]; then
-                echo "[WARN] $file: $LINES lines (limit: 50)"
-                VALIDATION_RESULTS="$VALIDATION_RESULTS\n- ⚠️ $file: $LINES lines (over limit)"
-              else
-                VALIDATION_RESULTS="$VALIDATION_RESULTS\n- ✅ $file: $LINES lines"
-              fi
-            elif echo "$FILENAME" | grep -q "task"; then
-              if [ "$LINES" -gt 100 ]; then
-                echo "[WARN] $file: $LINES lines (limit: 80)"
-                VALIDATION_RESULTS="$VALIDATION_RESULTS\n- ⚠️ $file: $LINES lines (over limit)"
-              else
-                VALIDATION_RESULTS="$VALIDATION_RESULTS\n- ✅ $file: $LINES lines"
-              fi
-            fi
-          done
-
-          echo -e "$VALIDATION_RESULTS" > /tmp/validation-results.txt
-
-          if [ "$ALL_VALID" = true ]; then
-            echo "valid=true" >> $GITHUB_OUTPUT
-            echo "[OK] All prompts valid"
-          else
-            echo "valid=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Some prompts have issues"
-          fi
-
-      # ─── Step 6: Commit and create PR ─────────────────────────────────────────
-      - name: Commit and create PR
-        if: steps.optimize.outputs.success == 'true' && inputs.dry_run != true
-        run: |
-          TODAY=$(date -u +%Y-%m-%d)
-          BRANCH="auto/prompt-optimization-$TODAY"
-
-          # Check for changes
-          git add .github/prompts/ .github/research/ 2>/dev/null || true
-          STAGED=$(git diff --cached --name-only)
-
-          if [ -z "$STAGED" ]; then
-            echo "[INFO] No prompt changes to commit"
-            exit 0
-          fi
-
-          CHANGES_COUNT=$(echo "$STAGED" | wc -l | tr -d ' ')
-          echo "Committing $CHANGES_COUNT file(s):"
-          echo "$STAGED"
-
-          # Create branch and commit
-          git checkout -b "$BRANCH"
-          git commit -m "chore(prompts): optimize agent prompts $TODAY [alexi-bot]" --no-verify
-          git push origin "$BRANCH"
-
-          # Create PR
-          cat > /tmp/pr-body.md <<PRBODY
-          ## Prompt Improvements — $TODAY
-
-          Automated prompt improvements based on best practices by **Agent 6: Prompt Improver**.
-
-          ### Changes
-
-          $STAGED
-
-          ### Validation
-
-          $(cat /tmp/validation-results.txt 2>/dev/null || echo "N/A")
-
-          ### Review Notes
-
-          - Review each prompt change for correctness and clarity
-          - Ensure no template variables (`{{VAR}}`) were accidentally removed
-          - Check that safety constraints ("Do NOT" sections) are preserved
-          - Verify backward compatibility with workflow YAML files
-
-          ---
-          Improved by Agent 6 · [View improvement report](.github/research/$TODAY-prompt-improvements.md)
-          PRBODY
-
-          gh label create "prompt-improvement" --description "PR from Agent 6 prompt improver" --color "7057ff" 2>/dev/null || true
-
-          PR_URL=$(gh pr create \
-            --title "chore(prompts): improve agent prompts — $TODAY" \
-            --body-file /tmp/pr-body.md \
-            --base master \
-            --head "$BRANCH" \
-            --label "prompt-improvement" \
-            2>&1) || true
-
-          if echo "$PR_URL" | grep -q "^https://"; then
-            echo "[OK] PR created: $PR_URL"
-          else
-            echo "[WARN] PR creation issue: $PR_URL"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      # ─── Step 7: Summary ──────────────────────────────────────────────────────
-      - name: Summary
-        if: always()
-        run: |
-          echo "## Agent 6: Prompt Improver Summary"
-          echo ""
-          echo "- Target: ${{ inputs.target_agent || 'all' }}"
-          echo "- Files analyzed: ${{ steps.targets.outputs.file_count }}"
-          echo "- Dry run: ${{ inputs.dry_run || 'false' }}"
-          echo "- Success: ${{ steps.optimize.outputs.success || 'skipped' }}"
-          echo "- Valid: ${{ steps.validate.outputs.valid || 'n/a' }}"
-
-      # ─── Step 8: Upload artifacts ─────────────────────────────────────────────
-      - name: Upload artifacts
+      - name: Upload prep artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent6-optimizer-${{ github.run_id }}
+          name: agent6-optimizer-prep-${{ github.run_id }}
           path: |
-            optimizer-output.log
             /tmp/agent-metrics.json
-            /tmp/validation-results.txt
           retention-days: 14
           if-no-files-found: ignore
+
+  optimize:
+    name: Run prompt optimizer agent
+    needs: prepare
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: management
+      task_prompt: ${{ needs.prepare.outputs.task_prompt }}
+      title: 'Agent 6: Prompt Improver'
+      commit_scope: ci
+      commit_changes: ${{ inputs.dry_run != true }}
+      timeout_minutes: 15
+      branch: master
+
+  summary:
+    name: Summary
+    needs: [prepare, optimize]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print summary
+        run: |
+          echo "## Agent 6: Prompt Improver Summary"
+          echo "- Target: ${{ inputs.target_agent || 'all' }}"
+          echo "- Files analyzed: ${{ needs.prepare.outputs.file_count }}"
+          echo "- Dry run: ${{ inputs.dry_run || 'false' }}"
+          echo "- Result: ${{ needs.optimize.result || 'skipped' }}"

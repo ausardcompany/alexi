@@ -4,7 +4,7 @@
 
 Improve the agent prompt templates in `.github/prompts/`:
 
-{​{PROMPT_FILES}}
+{{PROMPT_FILES}}
 
 ## Context
 
@@ -25,7 +25,7 @@ Agents run via Kilo CLI (`kilo run "<prompt>" --auto`) on Claude Opus through SA
 ### How prompts are structured
 
 - **System prompts** (`*-system.md`): Persona/role definition. Stable, concise.
-- **Task prompts** (`*-task.md`): Runtime templates with `{​{VARIABLES}}`. Specific instructions.
+- **Task prompts** (`*-task.md`): Runtime templates with `{{VARIABLES}}`. Specific instructions.
 
 ## Instructions
 
@@ -54,7 +54,7 @@ Agents run via Kilo CLI (`kilo run "<prompt>" --auto`) on Claude Opus through SA
    - Adding exit criteria where agents don't know when to stop
    - Replacing vague verbs with specific tool/command instructions
 
-5. **Save improvement report** to `.github/research/{​{DATE}}-prompt-improvements.md`
+5. **Save improvement report** to `.github/research/{{DATE}}-prompt-improvements.md`
 
 ## Improvement Priorities
 
@@ -65,7 +65,7 @@ Agents run via Kilo CLI (`kilo run "<prompt>" --auto`) on Claude Opus through SA
 
 ## Constraints
 
-- Do NOT change `{​{VARIABLE}}` template names — workflows depend on them
+- Do NOT change `{{VARIABLE}}` template names — workflows depend on them
 - Do NOT change the fundamental goal of any prompt
 - Do NOT remove "Do NOT" sections or safety constraints
 - Do NOT add instructions for tools the agent doesn't have
@@ -76,7 +76,7 @@ Agents run via Kilo CLI (`kilo run "<prompt>" --auto`) on Claude Opus through SA
 ## Verification
 
 Before finishing, validate each modified prompt:
-- All `{​{VARIABLE}}` placeholders still present
+- All `{{VARIABLE}}` placeholders still present
 - Instructions are still logically ordered
 - No contradictions between system and task prompts for same agent
 - The prompt still clearly tells the agent: what to do, how to verify, when to stop

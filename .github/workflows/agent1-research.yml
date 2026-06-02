@@ -1,5 +1,11 @@
 name: "Agent 1: Research & Trends"
 
+# Thin caller: delegates the agent run to the reusable factory at
+# .github/workflows/agent-factory.yml with role=consulting.
+# The prepare job renders the per-run context (date, focus, last research
+# file) and emits the fully-rendered task prompt as an output, which the
+# factory consumes via its inline `task_prompt` input.
+
 on:
   schedule:
     # Run daily at 04:00 UTC (before planning at 06:00)
@@ -26,66 +32,27 @@ concurrency:
 permissions:
   contents: write
 
-env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
-  KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
-
 jobs:
-  research:
-    name: Analyze Trends
+  prepare:
+    name: Prepare research context
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
+    outputs:
+      task_prompt: ${{ steps.build.outputs.task_prompt }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install dependencies and build
-        run: |
-          npm install -g @kilocode/cli
-          npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
-
-
-      - name: Prepare research context
-        id: context
-        run: |
-          TODAY=$(date -u +%Y-%m-%d)
-          echo "date=$TODAY" >> $GITHUB_OUTPUT
-
-          FOCUS="${{ inputs.focus_area || 'all' }}"
-          echo "focus=$FOCUS" >> $GITHUB_OUTPUT
-
-          # Ensure research directory exists
-          mkdir -p .github/research
-
-          # Get last research date
-          LAST_RESEARCH=$(ls -1 .github/research/*-research.md 2>/dev/null | sort | tail -1 || echo "")
-          if [ -n "$LAST_RESEARCH" ]; then
-            echo "last_research=$LAST_RESEARCH" >> $GITHUB_OUTPUT
-            echo "[INFO] Last research: $LAST_RESEARCH"
-          else
-            echo "last_research=" >> $GITHUB_OUTPUT
-            echo "[INFO] No previous research found"
-          fi
+          fetch-depth: 1
 
       - name: Build research prompt
+        id: build
         run: |
-          TODAY="${{ steps.context.outputs.date }}"
-          FOCUS="${{ steps.context.outputs.focus }}"
-          LAST_RESEARCH="${{ steps.context.outputs.last_research }}"
+          TODAY=$(date -u +%Y-%m-%d)
+          FOCUS="${{ inputs.focus_area || 'all' }}"
 
-          # Read template and substitute variables
+          mkdir -p .github/research
+          LAST_RESEARCH=$(ls -1 .github/research/*-research.md 2>/dev/null | sort | tail -1 || echo "")
+
           TEMPLATE=$(cat .github/prompts/agent1-research-task.md)
 
           PROMPT=$(echo "$TEMPLATE" | \
@@ -93,89 +60,31 @@ jobs:
             sed "s|{{FOCUS}}|$FOCUS|g" | \
             sed "s|{{LAST_RESEARCH}}|$LAST_RESEARCH|g")
 
-          # Handle conditional sections (simple approach: remove block markers)
           if [ -n "$LAST_RESEARCH" ]; then
-            echo "$PROMPT" | grep -v '{{#LAST_RESEARCH}}' | grep -v '{{/LAST_RESEARCH}}' > /tmp/research-prompt.txt
+            RENDERED=$(echo "$PROMPT" | grep -v '{{#LAST_RESEARCH}}' | grep -v '{{/LAST_RESEARCH}}')
           else
-            echo "$PROMPT" | sed '/{{#LAST_RESEARCH}}/,/{{\/LAST_RESEARCH}}/d' > /tmp/research-prompt.txt
+            RENDERED=$(echo "$PROMPT" | sed '/{{#LAST_RESEARCH}}/,/{{\/LAST_RESEARCH}}/d')
           fi
 
-          echo "[OK] Research prompt built from template ($(wc -l < /tmp/research-prompt.txt) lines)"
+          # Multi-line outputs use the heredoc form
+          {
+            echo "task_prompt<<__EOF_PROMPT__"
+            echo "$RENDERED"
+            echo "__EOF_PROMPT__"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Run Agent 1 (Specify)
-        id: research
-        continue-on-error: true
-        timeout-minutes: 15
-        env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TASK_PROMPT=$(cat /tmp/research-prompt.txt)
+          echo "[OK] Research prompt rendered ($(echo "$RENDERED" | wc -l) lines)"
 
-          attempt=0
-          EXIT_CODE=1
-          while : ; do
-            echo "Running research agent, attempt $((attempt + 1)) ..."
-            if kilo run "$TASK_PROMPT" \
-                $KILO_FLAGS \
-                -m "$AGENT_MODEL" \
-                --title "Agent 1 Research" \
-                > research-output.log 2>&1; then
-              EXIT_CODE=0
-              break
-            fi
-            EXIT_CODE=$?
-            attempt=$((attempt + 1))
-            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
-              break
-            fi
-            backoff=$((attempt * 30))
-            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
-            sleep "$backoff"
-          done
-
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-            echo "[OK] Research completed"
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Research failed with exit code $EXIT_CODE after $((attempt)) retry(ies)"
-          fi
-
-          echo "=== Output (last 50 lines) ==="
-          tail -50 research-output.log
-
-      - name: Commit research results
-        if: always()
-        run: |
-          TODAY="${{ steps.context.outputs.date }}"
-
-          git config user.name "alexi-bot[bot]"
-          git config user.email "alexi-bot[bot]@users.noreply.github.com"
-
-          # spec-kit writes to .specify/ — commit any generated specs
-          git add .specify/ .github/research/ 2>/dev/null || true
-
-          if ! git diff --cached --quiet; then
-            git commit -m "docs(ci): research trends $TODAY [alexi-bot]" --no-verify
-            git push origin master
-            echo "[OK] Spec committed"
-          else
-            echo "[INFO] No spec changes to commit"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent1-research-${{ github.run_id }}
-          path: |
-            research-output.log
-            .github/research/
-          retention-days: 30
-          if-no-files-found: ignore
+  research:
+    name: Run research agent
+    needs: prepare
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: consulting
+      task_prompt: ${{ needs.prepare.outputs.task_prompt }}
+      title: 'Agent 1: Research & Trends'
+      commit_scope: ci
+      commit_changes: true
+      timeout_minutes: 20
+      branch: master

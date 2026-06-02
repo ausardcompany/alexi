@@ -1,5 +1,10 @@
 name: "Agent 4: Code Review & QA"
 
+# Thin caller: delegates the agent run to the factory with role=quality.
+# The prepare job runs CI checks on the PR branch and renders the review
+# prompt with check results + failure logs, then passes it to the factory.
+# `commit_changes: false` because reviews must NOT push to the PR branch.
+
 on:
   pull_request:
     types: [opened, synchronize]
@@ -22,22 +27,20 @@ permissions:
   contents: write
   pull-requests: write
 
-env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
-  KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
-
 jobs:
-  review:
-    name: Code Review & QA
+  prepare:
+    name: Run CI checks and build review prompt
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     # Only review PRs from bot branches (auto-implement or auto-fix)
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.user.login == 'github-actions[bot]' ||
        contains(github.event.pull_request.head.ref, 'auto/'))
-
+    outputs:
+      pr_number: ${{ steps.pr_info.outputs.pr_number }}
+      branch: ${{ steps.pr_info.outputs.branch }}
+      task_prompt: ${{ steps.build.outputs.task_prompt }}
     steps:
       - name: Determine PR info
         id: pr_info
@@ -49,7 +52,6 @@ jobs:
             PR_NUMBER="${{ inputs.pr_number }}"
             BRANCH=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.ref')
           fi
-
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           echo "PR #$PR_NUMBER on branch: $BRANCH"
@@ -69,12 +71,8 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install Kilo CLI and dependencies
-        run: |
-          npm install -g @kilocode/cli
-          npm ci
-          echo "[OK] Kilo CLI: $(kilo --version)"
-
+      - name: Install dependencies
+        run: npm ci
 
       - name: Run CI checks
         id: checks
@@ -111,12 +109,12 @@ jobs:
           fi
 
       - name: Build review prompt
+        id: build
         run: |
           PR_NUMBER="${{ steps.pr_info.outputs.pr_number }}"
           BRANCH="${{ steps.pr_info.outputs.branch }}"
           ALL_PASSED="${{ steps.checks.outputs.all_passed }}"
 
-          # Collect check results and failure logs
           CHECK_RESULTS=$(cat check-results.txt)
           FAILURE_LOGS=""
 
@@ -129,19 +127,15 @@ jobs:
             done
           fi
 
-          # Read template and substitute variables
           TEMPLATE=$(cat .github/prompts/agent4-review-task.md)
-
           PROMPT=$(echo "$TEMPLATE" | \
             sed "s|{{PR_NUMBER}}|$PR_NUMBER|g" | \
             sed "s|{{BRANCH}}|$BRANCH|g")
 
-          # Substitute multi-line variables
           echo "$PROMPT" | \
             awk -v results="$CHECK_RESULTS" '{gsub(/\{\{CHECK_RESULTS\}\}/, results); print}' | \
             awk -v logs="$FAILURE_LOGS" '{gsub(/\{\{FAILURE_LOGS\}\}/, logs); print}' > /tmp/review-prompt-raw.txt
 
-          # Handle conditional sections based on HAS_FAILURES
           if [ "$ALL_PASSED" != "true" ]; then
             cat /tmp/review-prompt-raw.txt | sed '/{{^HAS_FAILURES}}/,/{{\/HAS_FAILURES}}/d' | \
               grep -v '{{#HAS_FAILURES}}' | grep -v '{{/HAS_FAILURES}}' > /tmp/review-prompt.txt
@@ -150,89 +144,37 @@ jobs:
               grep -v '{{^HAS_FAILURES}}' | grep -v '{{/HAS_FAILURES}}' > /tmp/review-prompt.txt
           fi
 
-          rm -f /tmp/review-prompt-raw.txt
-
-      - name: Run Agent 4 (Review)
-        id: review
-        continue-on-error: true
-        timeout-minutes: 12
-        env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "alexi-bot[bot]"
-          git config user.email "alexi-bot[bot]@users.noreply.github.com"
-
-          # Prefer the rendered review prompt built from the template; fall back
-          # to a generic instruction if it failed to materialise (the prompt build
-          # step uses sed/awk, which has corner cases with binary content in diffs).
-          if [ -s /tmp/review-prompt.txt ]; then
-            REVIEW_PROMPT=$(cat /tmp/review-prompt.txt)
-          else
-            REVIEW_PROMPT="Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR."
+          # Fallback to a generic instruction if rendering produced nothing
+          if [ ! -s /tmp/review-prompt.txt ]; then
+            echo "Review the code changes on this branch vs master. Run all CI checks. Fix any issues. Post review comment on the PR." > /tmp/review-prompt.txt
           fi
 
-          attempt=0
-          EXIT_CODE=1
-          while : ; do
-            echo "Running review agent, attempt $((attempt + 1)) ..."
-            if kilo run "$REVIEW_PROMPT" --title "Agent 4 Review" \
-                $KILO_FLAGS \
-                -m "$AGENT_MODEL" \
-                > review-output.log 2>&1; then
-              EXIT_CODE=0
-              break
-            fi
-            EXIT_CODE=$?
-            attempt=$((attempt + 1))
-            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
-              break
-            fi
-            backoff=$((attempt * 30))
-            echo "[WARN] Kilo CLI exit $EXIT_CODE — retrying in ${backoff}s ..."
-            sleep "$backoff"
-          done
+          {
+            echo "task_prompt<<__EOF_PROMPT__"
+            cat /tmp/review-prompt.txt
+            echo "__EOF_PROMPT__"
+          } >> "$GITHUB_OUTPUT"
 
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
-          else
-            echo "success=false" >> $GITHUB_OUTPUT
-          fi
-
-          tail -50 review-output.log
-
-      - name: Final verification
-        id: final_check
-        if: always()
-        run: |
-          echo "Running final CI verification..."
-          ALL_PASSED=true
-
-          # Surface failures (don't swallow stderr); ESLint exits non-zero
-          # when there are actual errors, which is the only signal we need.
-          npm run typecheck || ALL_PASSED=false
-          npm run lint || ALL_PASSED=false
-          npm run format:check || ALL_PASSED=false
-          npm test || ALL_PASSED=false
-
-          if [ "$ALL_PASSED" = true ]; then
-            echo "verified=true" >> $GITHUB_OUTPUT
-            echo "[OK] All checks pass after review"
-          else
-            echo "verified=false" >> $GITHUB_OUTPUT
-            echo "[WARN] Some checks still failing"
-          fi
-
-      - name: Upload artifacts
+      - name: Upload prep artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent4-review-${{ github.run_id }}
+          name: agent4-review-prep-${{ github.run_id }}
           path: |
-            review-output.log
             check-results.txt
           retention-days: 14
           if-no-files-found: ignore
+
+  review:
+    name: Run review agent
+    needs: prepare
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: quality
+      task_prompt: ${{ needs.prepare.outputs.task_prompt }}
+      title: 'Agent 4: Code Review'
+      commit_scope: agent
+      commit_changes: false
+      timeout_minutes: 15
+      branch: ${{ needs.prepare.outputs.branch }}
