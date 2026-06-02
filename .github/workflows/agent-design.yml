@@ -1,0 +1,33 @@
+name: "Agent: Design Review"
+
+on:
+  pull_request:
+    paths:
+      - 'src/cli/**'
+      - 'src/cli/tui/**'
+      - '!src/cli/**/__tests__/**'
+      - '!src/cli/**/*.test.ts'
+      - '!src/cli/**/*.test.tsx'
+  workflow_dispatch:
+
+concurrency:
+  group: agent-design-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  design:
+    name: Design Review
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: design
+      task_prompt: 'file:.github/prompts/tasks/design-review.md'
+      title: 'Agent: Design Review'
+      commit_scope: agent
+      commit_changes: ${{ github.event_name != 'pull_request' }}
+      timeout_minutes: 20
+      branch: ${{ github.head_ref || github.ref_name || 'master' }}

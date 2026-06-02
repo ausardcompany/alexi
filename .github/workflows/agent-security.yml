@@ -1,0 +1,52 @@
+name: "Agent: Security Scan"
+
+on:
+  schedule:
+    # Mondays 03:00 UTC (before architecture at 05:00)
+    - cron: '0 3 * * 1'
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'src/permission/**'
+      - 'src/providers/**'
+      - 'src/server/**'
+      - '.github/**'
+  workflow_dispatch:
+
+concurrency:
+  group: agent-security-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  security-pr:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: Security Scan (PR)
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: security
+      task_prompt: 'file:.github/prompts/tasks/security-scan.md'
+      title: 'Agent: Security Scan (PR)'
+      commit_scope: agent
+      commit_changes: false
+      timeout_minutes: 20
+      branch: ${{ github.head_ref || github.ref_name }}
+
+  security-cron:
+    if: ${{ github.event_name != 'pull_request' }}
+    name: Security Scan (Scheduled)
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: security
+      task_prompt: 'file:.github/prompts/tasks/security-scan.md'
+      title: 'Agent: Security Scan (Weekly)'
+      commit_scope: agent
+      commit_changes: true
+      timeout_minutes: 25
+      branch: master

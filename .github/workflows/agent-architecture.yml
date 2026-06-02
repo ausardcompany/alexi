@@ -1,0 +1,50 @@
+name: "Agent: Architecture Review"
+
+on:
+  schedule:
+    # Mondays 05:00 UTC
+    - cron: '0 5 * * 1'
+  pull_request:
+    paths:
+      - 'src/**'
+      - '!src/**/__tests__/**'
+      - '!src/**/*.test.ts'
+      - '!src/**/*.test.tsx'
+  workflow_dispatch:
+
+concurrency:
+  group: agent-architecture-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  architecture-pr:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: Architecture Review (PR)
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: architecture
+      task_prompt: 'file:.github/prompts/tasks/architecture-review.md'
+      title: 'Agent: Architecture Review (PR)'
+      commit_scope: agent
+      commit_changes: false
+      timeout_minutes: 20
+      branch: ${{ github.head_ref || github.ref_name }}
+
+  architecture-cron:
+    if: ${{ github.event_name != 'pull_request' }}
+    name: Architecture Review (Scheduled)
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: architecture
+      task_prompt: 'file:.github/prompts/tasks/architecture-review.md'
+      title: 'Agent: Architecture Review (Weekly)'
+      commit_scope: agent
+      commit_changes: true
+      timeout_minutes: 25
+      branch: master

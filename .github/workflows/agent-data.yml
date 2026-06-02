@@ -1,0 +1,34 @@
+name: "Agent: Data Review"
+
+on:
+  pull_request:
+    paths:
+      - 'routing-config.json'
+      - 'routing-config.example.json'
+      - 'src/core/costTracker.ts'
+      - 'src/core/sessionManager.ts'
+      - 'src/core/router.ts'
+      - 'src/config/routingConfig.ts'
+  workflow_dispatch:
+
+concurrency:
+  group: agent-data-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  data:
+    name: Data Review
+    uses: ./.github/workflows/agent-factory.yml
+    secrets: inherit
+    with:
+      role: data
+      task_prompt: 'file:.github/prompts/tasks/data-review.md'
+      title: 'Agent: Data Review'
+      commit_scope: agent
+      commit_changes: ${{ github.event_name != 'pull_request' }}
+      timeout_minutes: 20
+      branch: ${{ github.head_ref || github.ref_name || 'master' }}

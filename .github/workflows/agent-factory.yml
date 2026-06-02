@@ -1,0 +1,266 @@
+name: "Agent Factory (Reusable)"
+
+# Reusable workflow that composes the shared baseline-system prompt with a
+# role-specific prompt and runs `kilo run` with consistent retry/commit/
+# artefact policies. Callers invoke it via `workflow_call`.
+#
+# NOTE: Kilo CLI (current version) has no `--system-file` flag (verified via
+# `kilo run --help`). System prompt is therefore concatenated onto the front
+# of the task prompt and passed as a single positional message.
+
+on:
+  workflow_call:
+    inputs:
+      role:
+        description: "Role vertical (consulting|product|design|architecture|engineering|quality|data|infrastructure|security|management)"
+        required: true
+        type: string
+      task_prompt:
+        description: "Inline task prompt OR 'file:<path>' to read from a file"
+        required: true
+        type: string
+      title:
+        description: "Human-readable run title"
+        required: true
+        type: string
+      timeout_minutes:
+        description: "Timeout for the kilo run step (minutes)"
+        required: false
+        type: number
+        default: 15
+      commit_changes:
+        description: "Whether to git add/commit/push after the agent runs"
+        required: false
+        type: boolean
+        default: true
+      commit_scope:
+        description: "commitlint scope for the commit message"
+        required: false
+        type: string
+        default: agent
+      branch:
+        description: "Branch to checkout and push to"
+        required: false
+        type: string
+        default: master
+    secrets:
+      AICORE_SERVICE_KEY:
+        required: true
+      AICORE_RESOURCE_GROUP:
+        required: true
+      GH_PAT:
+        required: false
+    outputs:
+      success:
+        description: "Whether the kilo run succeeded"
+        value: ${{ jobs.run.outputs.success }}
+      commit_sha:
+        description: "SHA of the commit produced by this run (if any)"
+        value: ${{ jobs.run.outputs.commit_sha }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  KILO_FLAGS: --auto --variant max
+  KILO_RETRIES: '1'
+
+jobs:
+  run:
+    name: "Factory: ${{ inputs.role }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    outputs:
+      success: ${{ steps.agent.outputs.success }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+
+    steps:
+      - name: Validate role
+        run: |
+          ROLE="${{ inputs.role }}"
+          ALLOWED="consulting product design architecture engineering quality data infrastructure security management"
+          MATCH=0
+          for r in $ALLOWED; do
+            if [ "$r" = "$ROLE" ]; then
+              MATCH=1
+              break
+            fi
+          done
+          if [ "$MATCH" -ne 1 ]; then
+            echo "::error::Invalid role '$ROLE'. Allowed: $ALLOWED"
+            exit 1
+          fi
+          echo "[OK] role=$ROLE"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies and Kilo CLI
+        run: |
+          npm install -g @kilocode/cli
+          npm ci
+          echo "[OK] Kilo CLI: $(kilo --version)"
+
+      - name: Verify role prompt files exist
+        run: |
+          ROLE="${{ inputs.role }}"
+          BASELINE=".github/prompts/baseline-system.md"
+          ROLE_FILE=".github/prompts/role-${ROLE}.md"
+          if [ ! -f "$BASELINE" ]; then
+            echo "::error::Missing baseline prompt: $BASELINE"
+            exit 1
+          fi
+          if [ ! -f "$ROLE_FILE" ]; then
+            echo "::error::Missing role prompt: $ROLE_FILE"
+            exit 1
+          fi
+          echo "[OK] baseline=$(wc -l < $BASELINE) lines, role=$(wc -l < $ROLE_FILE) lines"
+
+      - name: Compose system prompt
+        run: |
+          ROLE="${{ inputs.role }}"
+          {
+            cat ".github/prompts/baseline-system.md"
+            echo ""
+            echo "---"
+            echo ""
+            cat ".github/prompts/role-${ROLE}.md"
+          } > /tmp/system-prompt.md
+          echo "[OK] system prompt composed: $(wc -l < /tmp/system-prompt.md) lines"
+
+      - name: Resolve task prompt
+        run: |
+          RAW="${{ inputs.task_prompt }}"
+          if [ "${RAW#file:}" != "$RAW" ]; then
+            FILE="${RAW#file:}"
+            if [ ! -f "$FILE" ]; then
+              echo "::error::task_prompt file not found: $FILE"
+              exit 1
+            fi
+            cp "$FILE" /tmp/task-prompt.md
+            echo "[OK] task prompt loaded from $FILE ($(wc -l < /tmp/task-prompt.md) lines)"
+          else
+            printf '%s\n' "$RAW" > /tmp/task-prompt.md
+            echo "[OK] task prompt loaded inline ($(wc -l < /tmp/task-prompt.md) lines)"
+          fi
+
+      - name: Build combined prompt
+        run: |
+          {
+            echo "# SYSTEM INSTRUCTIONS"
+            echo ""
+            cat /tmp/system-prompt.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "# TASK"
+            echo ""
+            cat /tmp/task-prompt.md
+          } > /tmp/combined-prompt.md
+          echo "[OK] combined prompt: $(wc -l < /tmp/combined-prompt.md) lines, $(wc -c < /tmp/combined-prompt.md) bytes"
+
+      - name: Run agent (kilo run)
+        id: agent
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          PROMPT="$(cat /tmp/combined-prompt.md)"
+
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running factory agent (role=${{ inputs.role }}), attempt $((attempt + 1)) ..."
+            if kilo run "$PROMPT" \
+                $KILO_FLAGS \
+                -m "$AGENT_MODEL" \
+                --title "$TITLE" \
+                > kilo-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
+              break
+            fi
+            backoff=$((attempt * 30))
+            echo "[WARN] Kilo CLI exit $EXIT_CODE - retrying in ${backoff}s ..."
+            sleep "$backoff"
+          done
+
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "[OK] Agent run completed"
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "[WARN] Agent failed with exit code $EXIT_CODE after $attempt retry(ies)"
+          fi
+
+          echo "=== Output (last 80 lines) ==="
+          tail -80 kilo-output.log || true
+
+      - name: Commit and push changes
+        id: commit
+        if: ${{ inputs.commit_changes }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          ROLE="${{ inputs.role }}"
+          SCOPE="${{ inputs.commit_scope }}"
+          BRANCH="${{ inputs.branch }}"
+
+          git config user.name "alexi-bot[bot]"
+          git config user.email "alexi-bot[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "[INFO] No changes to commit"
+            echo "commit_sha=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          git commit -m "chore(${SCOPE}): factory ${ROLE} run [agent]" --no-verify
+          SHA=$(git rev-parse HEAD)
+          echo "commit_sha=$SHA" >> $GITHUB_OUTPUT
+
+          git push origin "$BRANCH"
+          echo "[OK] Committed $SHA and pushed to $BRANCH"
+
+      - name: Upload artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-${{ inputs.role }}-${{ github.run_id }}
+          path: |
+            /tmp/system-prompt.md
+            /tmp/task-prompt.md
+            /tmp/combined-prompt.md
+            kilo-output.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Fail if agent failed
+        if: steps.agent.outputs.success != 'true'
+        run: |
+          echo "::error::Factory agent run failed. See artefacts for details."
+          exit 1
