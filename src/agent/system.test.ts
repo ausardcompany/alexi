@@ -5,12 +5,18 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import {
   buildAssembledSystemPrompt,
+  buildAssembledSystemPromptAsync,
   getAgentPrompt,
   getModelPrompt,
   getSoulPrompt,
   getModelPromptKey,
   instructionsForPath,
 } from './system.js';
+import {
+  clearRuleCommandCache,
+  materializeCommandRule,
+  type ResolvedPluginRule,
+} from '../plugin/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const promptsDir = path.join(__dirname, 'prompts');
@@ -266,6 +272,277 @@ describe('Prompt System', () => {
           expect(prompt).toContain(getAgentPrompt(agentId));
         }
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // B006: command-sourced plugin rules.
+  //
+  // `system.ts` only sees a flat `Array<{ source, content, ... }>`. Materialization
+  // happens upstream (in the loader / `resolvePluginRulesForPrompt`). These
+  // tests assert that:
+  //   1. The sync builder skips unmaterialized command rules (content === ''),
+  //      so an unresolved command rule cannot leak an empty header into the
+  //      prompt.
+  //   2. The sync builder DOES render command rules whose content was
+  //      pre-materialized by the caller — i.e. the surface area is uniform
+  //      across source types.
+  //   3. The async builder (`buildAssembledSystemPromptAsync`) materializes
+  //      command rules and emits their stdout in the assembled prompt.
+  //   4. Ordering: when a plugin declares mixed-source rules
+  //      (inline + command + file), the rendered order in the prompt matches
+  //      the declared order.
+  // -------------------------------------------------------------------------
+  describe('command-source plugin rules in system prompt (B006)', () => {
+    const NODE = process.execPath;
+    let tmpdir: string;
+
+    beforeEach(() => {
+      tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-system-cmd-rules-'));
+      clearRuleCommandCache();
+    });
+
+    afterEach(() => {
+      clearRuleCommandCache();
+      try {
+        fs.rmSync(tmpdir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    });
+
+    it('sync builder skips unmaterialized command rules (content empty)', () => {
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'p1',
+          name: 'r-cmd',
+          scope: 'session',
+          source: 'command',
+          content: '',
+          command: { pluginRoot: tmpdir, argv: [NODE, '-e', 'process.stdout.write("X")'] },
+        },
+      ];
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: rules,
+      });
+      // Unmaterialized → no header, no body.
+      expect(prompt).not.toContain('## Rules from plugin "p1"');
+    });
+
+    it('sync builder renders pre-materialized command rules verbatim', () => {
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'p1',
+          name: 'r-cmd',
+          scope: 'session',
+          source: 'command',
+          content: 'CMD_OUTPUT_TOKEN',
+          command: { pluginRoot: tmpdir, argv: [NODE, '-e', 'process.stdout.write("X")'] },
+        },
+      ];
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: rules,
+      });
+      expect(prompt).toContain('## Rules from plugin "p1"');
+      expect(prompt).toContain('CMD_OUTPUT_TOKEN');
+    });
+
+    it('async builder materializes command rules and renders their stdout', async () => {
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'todo-plugin',
+          name: 'todos',
+          scope: 'always',
+          source: 'command',
+          content: '',
+          command: {
+            pluginRoot: tmpdir,
+            argv: [NODE, '-e', 'process.stdout.write("# Today\\n- ship B006")'],
+          },
+        },
+      ];
+
+      // Pre-materialize so the async builder sees populated content via the
+      // shared cache. We don't go through the global plugin manager here to
+      // avoid polluting other suites.
+      const materialized: ResolvedPluginRule[] = await Promise.all(
+        rules.map(async (r) =>
+          r.source === 'command' ? { ...r, content: await materializeCommandRule(r) } : r
+        )
+      );
+
+      const prompt = await buildAssembledSystemPromptAsync({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: materialized,
+      });
+
+      expect(prompt).toContain('## Rules from plugin "todo-plugin"');
+      expect(prompt).toContain('# Today');
+      expect(prompt).toContain('- ship B006');
+    });
+
+    it('preserves plugin-declared order across inline + command + file sources', async () => {
+      // Single plugin contributes three rules in this exact order:
+      //   1. inline  — RULE_INLINE_TOKEN
+      //   2. command — RULE_COMMAND_TOKEN (via stdout)
+      //   3. file    — RULE_FILE_TOKEN
+      // The rendered prompt must preserve that order regardless of source type.
+
+      // Materialize the command rule via the same loader path the async
+      // builder uses, so the resulting array mirrors what
+      // `resolvePluginRulesForPrompt` would produce.
+      const cmdRule: ResolvedPluginRule = {
+        pluginName: 'mixed',
+        name: 'r-cmd',
+        scope: 'always',
+        source: 'command',
+        content: '',
+        command: {
+          pluginRoot: tmpdir,
+          argv: [NODE, '-e', 'process.stdout.write("RULE_COMMAND_TOKEN")'],
+        },
+      };
+      const cmdMaterialized: ResolvedPluginRule = {
+        ...cmdRule,
+        content: await materializeCommandRule(cmdRule),
+      };
+
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'mixed',
+          name: 'r-inline',
+          scope: 'always',
+          source: 'inline',
+          content: 'RULE_INLINE_TOKEN',
+        },
+        cmdMaterialized,
+        {
+          pluginName: 'mixed',
+          name: 'r-file',
+          scope: 'always',
+          source: 'file',
+          content: 'RULE_FILE_TOKEN',
+        },
+      ];
+
+      const prompt = await buildAssembledSystemPromptAsync({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: rules,
+      });
+
+      const inlineIdx = prompt.indexOf('RULE_INLINE_TOKEN');
+      const commandIdx = prompt.indexOf('RULE_COMMAND_TOKEN');
+      const fileIdx = prompt.indexOf('RULE_FILE_TOKEN');
+      expect(inlineIdx).toBeGreaterThanOrEqual(0);
+      expect(commandIdx).toBeGreaterThan(inlineIdx);
+      expect(fileIdx).toBeGreaterThan(commandIdx);
+    });
+
+    it('preserves declared order even when a command rule is sandwiched between inlines', () => {
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'order-test',
+          name: 'a',
+          scope: 'always',
+          source: 'inline',
+          content: 'TOKEN_A',
+        },
+        {
+          pluginName: 'order-test',
+          name: 'b',
+          scope: 'session',
+          source: 'command',
+          content: 'TOKEN_B',
+          command: { pluginRoot: tmpdir, argv: [NODE, '-e', '0'] },
+        },
+        {
+          pluginName: 'order-test',
+          name: 'c',
+          scope: 'always',
+          source: 'inline',
+          content: 'TOKEN_C',
+        },
+      ];
+
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: rules,
+      });
+
+      const aIdx = prompt.indexOf('TOKEN_A');
+      const bIdx = prompt.indexOf('TOKEN_B');
+      const cIdx = prompt.indexOf('TOKEN_C');
+      expect(aIdx).toBeGreaterThanOrEqual(0);
+      expect(bIdx).toBeGreaterThan(aIdx);
+      expect(cIdx).toBeGreaterThan(bIdx);
+    });
+
+    it('surface-area: pluginRules accepts a flat array regardless of source mix', () => {
+      // Confirms the typed surface — a command rule (with an extra `command`
+      // descriptor) and inline rules sit in the same `ResolvedPluginRule[]`
+      // without `system.ts` needing source-specific branching.
+      const rules: ResolvedPluginRule[] = [
+        {
+          pluginName: 'flat',
+          name: 'inline-1',
+          scope: 'always',
+          source: 'inline',
+          content: 'INLINE_FLAT',
+        },
+        {
+          pluginName: 'flat',
+          name: 'cmd-1',
+          scope: 'session',
+          source: 'command',
+          content: 'CMD_FLAT', // pre-materialized
+          command: { pluginRoot: tmpdir, argv: [NODE, '-e', '0'] },
+        },
+      ];
+
+      const prompt = buildAssembledSystemPrompt({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: rules,
+      });
+      expect(prompt).toContain('INLINE_FLAT');
+      expect(prompt).toContain('CMD_FLAT');
+    });
+
+    it('async builder still skips command rules whose materialized content is empty', async () => {
+      // A command rule whose stdout is empty (e.g. /bin/true) should NOT
+      // emit an empty header — that would be visual noise in the prompt.
+      const rule: ResolvedPluginRule = {
+        pluginName: 'empty-cmd',
+        name: 'r1',
+        scope: 'always',
+        source: 'command',
+        content: '',
+        command: {
+          pluginRoot: tmpdir,
+          // Writes nothing to stdout.
+          argv: [NODE, '-e', '0'],
+        },
+      };
+      const materialized: ResolvedPluginRule = {
+        ...rule,
+        content: await materializeCommandRule(rule),
+      };
+      // Sanity: the loader returned an empty (or whitespace-only) string.
+      expect(materialized.content.trim()).toBe('');
+
+      const prompt = await buildAssembledSystemPromptAsync({
+        skipEnv: true,
+        skipAgentsMd: true,
+        pluginRules: [materialized],
+      });
+      expect(prompt).not.toContain('## Rules from plugin "empty-cmd"');
     });
   });
 
