@@ -13,7 +13,11 @@ import { defineEvent, type BusEvent } from '../bus/index.js';
 import { type Tool, type ToolDefinition, registerTool } from '../tool/index.js';
 import { type SkillDefinition, registerSkill } from '../skill/index.js';
 import { registerCommand, defineCommand, loadCommandFromFile } from '../command/index.js';
-import { runRuleCommandLenient } from './ruleCommandRunner.js';
+import {
+  runRuleCommand,
+  runRuleCommandLenient,
+  type RunRuleCommandError,
+} from './ruleCommandRunner.js';
 import {
   clearAll as clearAllRuleCache,
   clearSession as clearSessionRuleCache,
@@ -651,6 +655,83 @@ export async function materializeCommandRule(
 
   const key = ruleCacheKey(rule.pluginName, rule.name);
   return ruleCacheGetOrLoad(rule.scope, key, sessionId, () => loadCommandRuleContent(rule));
+}
+
+/**
+ * Synthetic session id used by {@link materializeCommandRuleStrict} (and
+ * therefore by {@link resolvePluginRulesForPrompt}) when no active session
+ * is available. Keeps `scope: 'session'` rules deterministically keyed in
+ * one-shot CLI invocations and tests, instead of crashing on a missing id.
+ */
+export const NO_SESSION_ID = 'no-session';
+
+/**
+ * Strict materialization path for `command`-source rules — wires the loader
+ * (B005) per parent tracker #633:
+ *
+ *   1. Build the cache key with {@link ruleCacheKey}.
+ *   2. Look up / populate the cache via {@link ruleCacheGetOrLoad}, falling
+ *      back to {@link NO_SESSION_ID} when the caller has no active session.
+ *   3. On a cache miss, spawn the rule via the strict {@link runRuleCommand}
+ *      from B001 (argv-based, `shell:false`, env-scrubbed). A rejection
+ *      ({@code TIMEOUT}, {@code EXIT}, {@code SPAWN_ERROR}, {@code EMPTY_ARGV})
+ *      propagates to the caller — by design, since the loader entry point
+ *      ({@link resolvePluginRulesForPrompt}) decides what to do with that
+ *      failure (log + omit the single rule).
+ *   4. On success, the (possibly truncated) stdout is capped via
+ *      {@link capRuleContent} and stored in the cache.
+ *
+ * Does NOT swallow runner errors — callers control failure policy. Compare
+ * with the legacy {@link materializeCommandRule} which uses the lenient
+ * runner and never rejects.
+ */
+async function materializeCommandRuleStrict(
+  rule: ResolvedPluginRule,
+  sessionId: string
+): Promise<string> {
+  if (rule.source !== 'command' || !rule.command) {
+    return rule.content;
+  }
+
+  const key = ruleCacheKey(rule.pluginName, rule.name);
+  return ruleCacheGetOrLoad(rule.scope, key, sessionId, async () => {
+    // command/argv/timeoutMs/maxBytes are guaranteed populated by the
+    // discriminator above — narrow once for readability.
+    const cmd = rule.command!;
+    const result = await runRuleCommand({
+      argv: cmd.argv,
+      cwd: cmd.pluginRoot,
+      timeoutMs: cmd.timeoutMs,
+      maxBytes: cmd.maxBytes,
+    });
+    let content = result.stdout;
+    if (result.truncated) {
+      content += PLUGIN_RULE_TRUNCATION_MARKER;
+    }
+    return capRuleContent(content);
+  });
+}
+
+/**
+ * Format a {@link RunRuleCommandError} into a human-readable line for the
+ * plugin logger. Centralised so the warning shape stays consistent across
+ * call sites (and is greppable in CI logs).
+ */
+function describeRunnerError(err: unknown): string {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const e = err as RunRuleCommandError;
+    switch (e.code) {
+      case 'TIMEOUT':
+        return e.message;
+      case 'EXIT':
+        return `${e.message}${e.stderr ? `: ${e.stderr.trim()}` : ''}`;
+      case 'SPAWN_ERROR':
+        return `failed to spawn: ${e.message}`;
+      case 'EMPTY_ARGV':
+        return e.message;
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -1762,15 +1843,37 @@ export async function resolvePluginRulesForPrompt(
   sessionId?: string
 ): Promise<ResolvedPluginRule[]> {
   const rules = getEnabledPluginRules();
-  return Promise.all(
-    rules.map(async (rule) => {
+  // Per B005: fall back to a synthetic id when no active session is
+  // available so `scope: 'session'` rules still cache deterministically.
+  // Production callers should resolve the active id via
+  // `sessionManager.getCurrentSession()?.metadata.id` and pass it in;
+  // tests / one-shot invocations land on NO_SESSION_ID.
+  const sid = sessionId ?? NO_SESSION_ID;
+  // Materialize each rule independently so a single failing command rule
+  // can be omitted without dropping its siblings. We collect into a sparse
+  // array and filter out the omissions at the end (preserves declared
+  // order for the surviving rules).
+  const results = await Promise.all(
+    rules.map(async (rule): Promise<ResolvedPluginRule | null> => {
       if (rule.source !== 'command') {
         return rule;
       }
-      const content = await materializeCommandRule(rule, sessionId);
-      return { ...rule, content };
+      try {
+        const content = await materializeCommandRuleStrict(rule, sid);
+        return { ...rule, content };
+      } catch (err) {
+        // Runner rejection (TIMEOUT / EXIT / SPAWN_ERROR / EMPTY_ARGV).
+        // Log via the existing plugin logger and omit *this* rule — other
+        // rules continue loading so one bad command does not break the
+        // whole plugin.
+        logger.warn(
+          `[plugin:${rule.pluginName}] omitting command rule '${rule.name}': ${describeRunnerError(err)}`
+        );
+        return null;
+      }
     })
   );
+  return results.filter((r): r is ResolvedPluginRule => r !== null);
 }
 
 // Type exports are already included via class declarations above
