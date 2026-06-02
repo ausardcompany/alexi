@@ -1,10 +1,19 @@
 /**
- * Tests for the strict, spec-conformant `runRuleCommand` API
- * (issue #648 / parent tracker #633).
+ * Unit tests for the strict, spec-conformant `runRuleCommand` API
+ * (issue #649 / B002 — parent tracker #633).
  *
- * The strict API is argv-based, rejects with typed errors on TIMEOUT / EXIT,
- * resolves with `{ stdout, truncated }` on success, and applies the secret
- * env denylist via {@link scrubEnvDeny}.
+ * Covers (verbatim from tasks.md):
+ *   1. Successful command (`echo hello`-equivalent via a tiny inline node
+ *      script) → stdout returned untruncated, `truncated: false`.
+ *   2. Timeout: command sleeps past `timeoutMs` → rejects with `code: 'TIMEOUT'`.
+ *   3. Oversized stdout: command emits > 32 KB → returns first 32 KB with
+ *      `truncated: true` and the child is killed (no zombie).
+ *   4. Non-zero exit → rejects with `code: 'EXIT'` and captured stderr.
+ *   5. Empty `argv` → synchronous reject with a clear error.
+ *   6. Secret denylist: env entries matching the denylist regex are dropped;
+ *      `PATH` and `HOME` survive.
+ *
+ * Plus a few supporting cases for the env scrubber and the no-shell guarantee.
  *
  * The legacy lenient API and its helpers (`tokenizeCommand`, `scrubEnv`)
  * are exercised separately in `tests/plugin/ruleCommand.test.ts`.
@@ -13,11 +22,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  runRuleCommand,
-  scrubEnvDeny,
-  type RunRuleCommandError,
-} from '../../src/plugin/ruleCommandRunner.js';
+import { runRuleCommand, scrubEnvDeny, type RunRuleCommandError } from '../ruleCommandRunner.js';
 
 const NODE = process.execPath;
 
@@ -81,6 +86,7 @@ describe('runRuleCommand (strict)', () => {
     fs.rmSync(tmpdir, { recursive: true, force: true });
   });
 
+  // Case 1
   it('resolves with stdout and truncated:false on success', async () => {
     const result = await runRuleCommand({
       argv: [NODE, '-e', 'process.stdout.write("hello world")'],
@@ -90,6 +96,7 @@ describe('runRuleCommand (strict)', () => {
     expect(result.truncated).toBe(false);
   });
 
+  // Case 5
   it('rejects with EMPTY_ARGV when argv is empty', async () => {
     await expect(
       runRuleCommand({
@@ -109,6 +116,7 @@ describe('runRuleCommand (strict)', () => {
     ).rejects.toMatchObject({ code: 'EMPTY_ARGV' });
   });
 
+  // Case 2
   it('rejects with TIMEOUT when the command exceeds timeoutMs', async () => {
     const start = Date.now();
     await expect(
@@ -122,6 +130,7 @@ describe('runRuleCommand (strict)', () => {
     expect(Date.now() - start).toBeLessThan(2000);
   });
 
+  // Case 4
   it('rejects with EXIT (carrying exitCode + stderr) on non-zero exit', async () => {
     let caught: RunRuleCommandError | undefined;
     try {
@@ -140,7 +149,21 @@ describe('runRuleCommand (strict)', () => {
     }
   });
 
-  it('caps stdout at maxBytes and resolves with truncated:true', async () => {
+  // Case 3 — explicit 32 KB default
+  it('caps stdout at the default 32 KB and resolves with truncated:true', async () => {
+    // Emit 64 KB; the runner should kill the child and return the first
+    // 32 768 bytes with truncated:true.
+    const result = await runRuleCommand({
+      argv: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
+      cwd: tmpdir,
+      // No maxBytes override — exercise the documented 32 KB default.
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.stdout.length).toBe(32 * 1024);
+    expect(result.stdout).toMatch(/^x+$/);
+  });
+
+  it('caps stdout at a custom maxBytes and resolves with truncated:true', async () => {
     const result = await runRuleCommand({
       argv: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
       cwd: tmpdir,
@@ -149,6 +172,21 @@ describe('runRuleCommand (strict)', () => {
     expect(result.truncated).toBe(true);
     expect(result.stdout.length).toBe(4096);
     expect(result.stdout).toMatch(/^x+$/);
+  });
+
+  // No-zombie sanity check tied to case 3: the runner must settle the
+  // promise itself, so awaiting it must not hang.
+  it('does not leave a zombie child after truncation (settles within a bounded time)', async () => {
+    const start = Date.now();
+    const result = await runRuleCommand({
+      argv: [NODE, '-e', 'process.stdout.write("x".repeat(64*1024))'],
+      cwd: tmpdir,
+      maxBytes: 1024,
+      timeoutMs: 5000,
+    });
+    expect(result.truncated).toBe(true);
+    // Should settle on the kill, well before the 5s timeout fallback.
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 
   it('does not invoke a shell — argv values are literal', async () => {
@@ -161,7 +199,8 @@ describe('runRuleCommand (strict)', () => {
     expect(result.stdout).toBe(';rm -rf /');
   });
 
-  it('passes only the scrubbed env to the child', async () => {
+  // Case 6
+  it('passes only the scrubbed env to the child (PATH and HOME survive)', async () => {
     const result = await runRuleCommand({
       argv: [
         NODE,
