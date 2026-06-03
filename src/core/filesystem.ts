@@ -3,7 +3,7 @@
  * Windows-resilient filesystem operations
  */
 
-import * as fs from 'fs/promises';
+import { FSUtil } from './fs-util';
 
 /**
  * Checks if an error is an EEXIST error (directory already exists)
