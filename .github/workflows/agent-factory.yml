@@ -141,14 +141,27 @@ jobs:
           echo "[OK] system prompt composed: $(wc -l < /tmp/system-prompt.md) lines"
 
       - name: Resolve task prompt
+        env:
+          RAW_TASK_PROMPT: ${​{ inputs.task_prompt }}
         run: |
-          RAW="${{ inputs.task_prompt }}"
+          # Read RAW from env (NOT from `${​{ ... }}` direct substitution) so
+          # backticks, parentheses, and other shell metacharacters in the
+          # prompt are not interpreted as shell syntax.
+          RAW="$RAW_TASK_PROMPT"
           if [ "${RAW#file:}" != "$RAW" ]; then
             FILE="${RAW#file:}"
             if [ ! -f "$FILE" ]; then
               echo "::error::task_prompt file not found: $FILE"
               exit 1
             fi
+            cp "$FILE" /tmp/task-prompt.md
+            echo "[OK] task prompt loaded from $FILE ($(wc -l < /tmp/task-prompt.md) lines)"
+          else
+            # Use printenv to write the raw env var value verbatim to disk,
+            # avoiding any further shell expansion of backticks/`$(...)`.
+            printenv RAW_TASK_PROMPT > /tmp/task-prompt.md
+            echo "[OK] task prompt loaded inline ($(wc -l < /tmp/task-prompt.md) lines)"
+          fi
             cp "$FILE" /tmp/task-prompt.md
             echo "[OK] task prompt loaded from $FILE ($(wc -l < /tmp/task-prompt.md) lines)"
           else
