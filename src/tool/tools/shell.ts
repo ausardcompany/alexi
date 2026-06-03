@@ -12,21 +12,6 @@ import { normalizeUrls } from '../../utils/url.js';
 import * as ShellId from './shell/id.js';
 import { auditCommand } from '../../permission/next.js';
 
-const ask = Effect.fn('ShellTool.ask')(function* (
-  ctx: Tool.Context,
-  scan: Scan,
-  command: string,
-  description?: string
-) {
-  // Updated logic with description handling
-  yield* ctx.require({
-    permission: 'external_directory',
-    patterns: Array.from(scan.patterns),
-    always: Array.from(scan.always),
-    metadata: { command, ...(description ? { description } : {}) },
-  });
-});
-
 const ShellParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
   workdir: z.string().optional().describe('Working directory for command execution'),
