@@ -162,12 +162,6 @@ jobs:
             printenv RAW_TASK_PROMPT > /tmp/task-prompt.md
             echo "[OK] task prompt loaded inline ($(wc -l < /tmp/task-prompt.md) lines)"
           fi
-            cp "$FILE" /tmp/task-prompt.md
-            echo "[OK] task prompt loaded from $FILE ($(wc -l < /tmp/task-prompt.md) lines)"
-          else
-            printf '%s\n' "$RAW" > /tmp/task-prompt.md
-            echo "[OK] task prompt loaded inline ($(wc -l < /tmp/task-prompt.md) lines)"
-          fi
 
       - name: Build combined prompt
         run: |
