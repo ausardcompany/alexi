@@ -1818,6 +1818,57 @@ export function disablePlugin(name: string, options?: { force?: boolean }): Disa
 }
 
 /**
+ * Result of {@link togglePlugin}: reports the post-toggle `enabled` state and
+ * whether the operation succeeded. On failure (plugin not loaded, dependents
+ * preventing disable, etc.) `enabled` reflects the unchanged current state.
+ */
+export interface TogglePluginResult {
+  success: boolean;
+  pluginName: string;
+  enabled: boolean;
+  error?: string;
+  enabledDependencies?: string[];
+}
+
+/**
+ * Toggle a plugin's enabled flag in the global manager. If currently enabled
+ * the plugin is disabled (refusing if dependents would break, unless `force`
+ * is set); if currently disabled it is enabled, recursively enabling its
+ * dependencies.
+ */
+export function togglePlugin(name: string, options?: { force?: boolean }): TogglePluginResult {
+  const manager = getPluginManager();
+  if (!manager.get(name)) {
+    return {
+      success: false,
+      pluginName: name,
+      enabled: false,
+      error: `Plugin '${name}' is not loaded`,
+    };
+  }
+
+  const currentlyEnabled = manager.isEnabled(name);
+  if (currentlyEnabled) {
+    const result = manager.disable(name, options);
+    return {
+      success: result.success,
+      pluginName: name,
+      enabled: result.success ? false : true,
+      error: result.error,
+    };
+  }
+
+  const result = manager.enable(name);
+  return {
+    success: result.success,
+    pluginName: name,
+    enabled: result.success ? true : false,
+    error: result.error,
+    enabledDependencies: result.enabledDependencies,
+  };
+}
+
+/**
  * Return resolved rule contributions from all enabled plugins in the global
  * manager. Used by the system-prompt assembler to layer plugin rules after
  * AGENTS.md.

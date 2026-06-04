@@ -75,7 +75,7 @@ export interface InteractiveOptions {
   repoMapManager?: RepoMapManager;
 }
 
-interface ReplState {
+export interface ReplState {
   sessionManager: SessionManager;
   currentModel: string;
   autoRoute: boolean;
@@ -128,8 +128,11 @@ function printHeader(state: ReplState): void {
 
 /**
  * Print help message
+ *
+ * Exported so unit tests can capture the rendered help text without booting
+ * the full REPL.
  */
-function printHelp(): void {
+export function printHelp(): void {
   console.log();
   console.log(c('cyan', '  Available Commands:'));
   console.log();
@@ -233,6 +236,14 @@ function printHelp(): void {
   console.log(
     c('yellow', '  /reload-skills') + c('gray', '     - Re-scan skill directories without restart')
   );
+  console.log(
+    c('yellow', '  /plugins') +
+      c('gray', '           - List loaded plugins (or /plugins toggle <name>)')
+  );
+  console.log(
+    c('yellow', '  /skills') +
+      c('gray', '            - List loaded skills (or /skills toggle <id>)')
+  );
   console.log(c('yellow', '  /clear-history') + c('gray', '     - Clear conversation history'));
   console.log(c('yellow', '  /bug, /feedback') + c('gray', '    - Report issues and feedback'));
   console.log();
@@ -301,8 +312,13 @@ function printHelp(): void {
 
 /**
  * Handle slash commands
+ *
+ * Exported so unit tests can drive `/plugins`, `/skills`, and other slash
+ * commands without booting the full REPL. The `state` parameter is mutable
+ * by design — commands such as `/agent`, `/effort`, and `/think` flip flags
+ * on it in place, so tests should pass a fresh `ReplState` per case.
  */
-async function handleCommand(input: string, state: ReplState): Promise<boolean> {
+export async function handleCommand(input: string, state: ReplState): Promise<boolean> {
   // Resolve aliases first
   const aliasManager = getAliasManager();
   const resolvedInput = aliasManager.resolve(input);
@@ -2093,6 +2109,92 @@ async function handleCommand(input: string, state: ReplState): Promise<boolean> 
           c('red', `\n  Skill reload failed: ${err instanceof Error ? err.message : String(err)}\n`)
         );
       }
+      return true;
+    }
+
+    case 'plugins': {
+      const pluginManager = await import('../plugin/index.js');
+      if (args[0] === 'toggle' && args[1]) {
+        const target = args[1];
+        const result = pluginManager.togglePlugin(target);
+        if (result.success) {
+          const stateLabel = result.enabled ? c('green', 'enabled') : c('yellow', 'disabled');
+          console.log(c('green', `\n  Plugin '${result.pluginName}' ${stateLabel}\n`));
+          if (result.enabledDependencies && result.enabledDependencies.length > 0) {
+            console.log(
+              c('gray', `  Also enabled dependencies: ${result.enabledDependencies.join(', ')}\n`)
+            );
+          }
+        } else {
+          console.log(c('red', `\n  ${result.error || 'Toggle failed'}\n`));
+        }
+        return true;
+      }
+
+      const plugins = pluginManager.listPlugins();
+      if (plugins.length === 0) {
+        console.log(c('yellow', '\n  No plugins loaded\n'));
+        return true;
+      }
+      console.log(c('cyan', '\n  Loaded Plugins:\n'));
+      for (const info of plugins) {
+        const statusIcon = info.enabled ? c('green', '●') : c('red', '○');
+        const enabledLabel = info.enabled ? c('green', 'enabled') : c('yellow', 'disabled');
+        console.log(
+          c('gray', `    ${statusIcon} ${info.name} v${info.version} `) +
+            `(${enabledLabel}` +
+            c(
+              'gray',
+              `, tools: ${info.toolCount}, skills: ${info.skillCount}, commands: ${info.commandCount}, hooks: ${info.hookCount})`
+            )
+        );
+        if (info.description) {
+          console.log(c('dim', `        ${info.description}`));
+        }
+      }
+      console.log();
+      console.log(c('dim', '  Usage: /plugins toggle <name>'));
+      console.log();
+      return true;
+    }
+
+    case 'skills': {
+      const skillModule = await import('../skill/index.js');
+      if (args[0] === 'toggle' && args[1]) {
+        const target = args[1];
+        const result = skillModule.toggleSkill(target);
+        if (result.success) {
+          const stateLabel = result.enabled ? c('green', 'enabled') : c('yellow', 'disabled');
+          console.log(c('green', `\n  Skill '${result.skillId}' ${stateLabel}\n`));
+        } else {
+          console.log(c('red', `\n  ${result.error || 'Toggle failed'}\n`));
+        }
+        return true;
+      }
+
+      const skills = skillModule.listSkills();
+      if (skills.length === 0) {
+        console.log(c('yellow', '\n  No skills loaded\n'));
+        return true;
+      }
+      console.log(c('cyan', '\n  Loaded Skills:\n'));
+      for (const skill of skills) {
+        const enabled = skillModule.isSkillEnabled(skill.id);
+        const statusIcon = enabled ? c('green', '●') : c('red', '○');
+        const enabledLabel = enabled ? c('green', 'enabled') : c('yellow', 'disabled');
+        const sourceLabel = skill.source ? ` [${skill.source}]` : '';
+        console.log(
+          c('gray', `    ${statusIcon} ${skill.id} `) +
+            `(${enabledLabel}` +
+            c('gray', `${sourceLabel})`)
+        );
+        if (skill.description) {
+          console.log(c('dim', `        ${skill.description}`));
+        }
+      }
+      console.log();
+      console.log(c('dim', '  Usage: /skills toggle <id>'));
+      console.log();
       return true;
     }
 
