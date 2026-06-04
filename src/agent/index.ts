@@ -4,12 +4,10 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 
-import { z } from 'zod';
-import { AgentSwitched } from '../bus/index.js';
-import { getAgentPrompt } from './system.js';
-import { loadAllCustomAgents } from './customAgentLoader.js';
+import { withStatics, type DeepMutable } from "@opencode-ai/core/schema";
+import * as KiloAgent from "@/kilocode/agent";
 
-// Agent mode - determines when agent is available
+// New agent setup code following upstream patterns
 export type AgentMode = 'primary' | 'subagent' | 'all';
 
 // Agent schema for validation
