@@ -144,9 +144,9 @@ jobs:
         env:
           RAW_TASK_PROMPT: "${{ inputs.task_prompt }}"
         run: |
-          # Read RAW from env (NOT from `${{ ... }}` direct substitution) so
-          # backticks, parentheses, and other shell metacharacters in the
-          # prompt are not interpreted as shell syntax.
+          # Read RAW from the env var (NOT from a GitHub Actions expression
+          # substitution) so backticks, parentheses, and other shell
+          # metacharacters in the prompt are not interpreted as shell syntax.
           RAW="$RAW_TASK_PROMPT"
           if [ "${RAW#file:}" != "$RAW" ]; then
             FILE="${RAW#file:}"
