@@ -311,6 +311,50 @@ export function removeSkill(skillId: string): { success: boolean; error?: string
 class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
   private aliasMap: Map<string, string> = new Map();
+  /**
+   * In-memory set of skill ids that the user has explicitly disabled via the
+   * interactive REPL or the public {@link toggleSkill} helper. Disabling does
+   * not remove the skill from the registry; it just opts it out of the
+   * default activation surface (see {@link isSkillEnabled}). Persistence to
+   * disk is intentionally deferred until a follow-up issue.
+   */
+  private disabledSkillIds: Set<string> = new Set();
+
+  /**
+   * Mark a skill as disabled (opted out of activation). Idempotent.
+   */
+  disable(idOrAlias: string): boolean {
+    const skill = this.get(idOrAlias);
+    if (!skill) {
+      return false;
+    }
+    this.disabledSkillIds.add(skill.id);
+    return true;
+  }
+
+  /**
+   * Re-enable a previously disabled skill. Idempotent.
+   */
+  enable(idOrAlias: string): boolean {
+    const skill = this.get(idOrAlias);
+    if (!skill) {
+      return false;
+    }
+    this.disabledSkillIds.delete(skill.id);
+    return true;
+  }
+
+  /**
+   * Whether a skill is currently considered enabled. Skills default to
+   * enabled; only explicit `disable()` calls flip the flag.
+   */
+  isEnabled(idOrAlias: string): boolean {
+    const skill = this.get(idOrAlias);
+    if (!skill) {
+      return false;
+    }
+    return !this.disabledSkillIds.has(skill.id);
+  }
 
   /**
    * Register a skill
@@ -404,6 +448,7 @@ class SkillRegistry {
       }
     }
 
+    this.disabledSkillIds.delete(id);
     return this.skills.delete(id);
   }
 
@@ -413,6 +458,7 @@ class SkillRegistry {
   clear(): void {
     this.skills.clear();
     this.aliasMap.clear();
+    this.disabledSkillIds.clear();
   }
 }
 
@@ -436,6 +482,51 @@ export function getSkill(idOrAlias: string): Skill | undefined {
 
 export function listSkills(): Skill[] {
   return getSkillRegistry().list();
+}
+
+/**
+ * Result of {@link toggleSkill}. Mirrors the shape of `TogglePluginResult` so
+ * UI callers can format both with the same helper.
+ */
+export interface ToggleSkillResult {
+  success: boolean;
+  skillId: string;
+  enabled: boolean;
+  error?: string;
+}
+
+/**
+ * Whether a skill (by id or alias) is currently enabled. Skills default to
+ * enabled; only explicit `toggleSkill` calls or registry `disable()` flip
+ * the flag.
+ */
+export function isSkillEnabled(idOrAlias: string): boolean {
+  return getSkillRegistry().isEnabled(idOrAlias);
+}
+
+/**
+ * Toggle a skill's in-memory enabled flag. Built-in skills can be toggled
+ * (they remain registered either way); the only failure mode is the skill
+ * not being registered at all.
+ */
+export function toggleSkill(idOrAlias: string): ToggleSkillResult {
+  const registry = getSkillRegistry();
+  const skill = registry.get(idOrAlias);
+  if (!skill) {
+    return {
+      success: false,
+      skillId: idOrAlias,
+      enabled: false,
+      error: `Skill not found: ${idOrAlias}`,
+    };
+  }
+  const currentlyEnabled = registry.isEnabled(skill.id);
+  if (currentlyEnabled) {
+    registry.disable(skill.id);
+    return { success: true, skillId: skill.id, enabled: false };
+  }
+  registry.enable(skill.id);
+  return { success: true, skillId: skill.id, enabled: true };
 }
 
 /**
