@@ -818,34 +818,58 @@ Connections are managed with automatic reconnection and a 30-second tool cache T
 ```
 alexi/
 ├── src/
-│   ├── agent/          # Agent registry, custom loader, system prompt assembly
+│   ├── agent/          # Agent registry, custom loader, system prompt assembly,
+│   │                   #   AGENTS.md reminder helpers
 │   ├── bus/            # Typed event bus (defineEvent, BusEvent)
-│   ├── cli/            # CLI program + TUI (Ink/React components) + session replay
-│   ├── command/        # Slash command system (rewind, etc.)
+│   ├── ci/             # CI integration helpers (e.g. PR comment formatting)
+│   ├── cli/            # CLI program + Ink/React TUI + session replay
+│   ├── command/        # Slash command system (rewind, code-review, ...)
 │   ├── compaction/     # Context compaction strategies
 │   ├── config/         # Environment, routing, user config, project context
 │   ├── context/        # Repo map, symbol ranking, tree-sitter
-│   ├── core/           # Orchestrator, router, session, agentic chat
-│   ├── git/            # Auto-commit, attribution, dirty file tracking
+│   ├── core/           # Orchestrator, router, session, agentic chat,
+│   │                   #   compaction-chunks, network, flag
+│   ├── doctor/         # `alexi doctor` self-check command
+│   ├── flag/           # User-facing feature-flag command surface
+│   ├── git/            # Auto-commit message generation, attribution
 │   ├── hooks/          # Lifecycle hooks (command, HTTP, script)
+│   ├── i18n/           # Internationalization tables
+│   ├── init/           # `alexi init` project bootstrap
+│   ├── log/            # Log surface (separate from utils/logger)
 │   ├── mcp/            # Model Context Protocol client/server
-│   ├── permission/     # Permission rules, doom loop detection
-│   ├── providers/      # SAP AI Core Orchestration (sole provider)
+│   ├── permission/     # Permission rules, doom loop detection,
+│   │                   #   shell-parser
+│   ├── plan/           # Plan-mode helpers
+│   ├── plugin/         # Plugin auto-load + rule command runner
+│   ├── profile/        # Profile management
+│   ├── providers/      # SAP AI Core Orchestration (SOLE provider surface)
 │   ├── reference/      # External repository references and caching
-│   ├── skill/          # Specialized prompt skills
-│   ├── tool/           # Tool system + 30 built-in tool implementations
-│   ├── tui/            # Ink-based TUI components
+│   ├── server/         # Embedded server entrypoint
+│   ├── share/          # Sharing / export helpers
+│   ├── skill/          # Specialized prompt skills (with reload)
+│   ├── sound/          # Audio notification surface
+│   ├── sync/           # Sync helpers (e.g. upstream sync)
+│   ├── tool/           # Tool system + built-in tool implementations
+│   ├── undo/           # Undo / rewind state
+│   ├── update/         # Self-update command
 │   └── utils/          # Logger, telemetry, shared utilities
-├── tests/              # Vitest test suites
-├── docs/               # Generated documentation
+├── tests/              # Vitest test suites (also colocated under src/)
+├── docs/
+│   ├── adr/            # Architecture Decision Records (ADR 001 onward)
+│   └── *.md            # Architecture, providers, routing, testing docs
 ├── .github/
-│   ├── workflows/      # 19 GitHub Actions workflows
-│   └── prompts/        # AI prompt templates for CI automation
+│   ├── workflows/      # GitHub Actions workflows (T-shape agent factory)
+│   └── prompts/        # baseline-system + role-* prompts
 ├── CHANGELOG.md
 ├── AGENTS.md
 ├── package.json
 └── tsconfig.json
 ```
+
+The current top-level layout has grown beyond the original ~10 modules.
+ADR 001 (`docs/adr/001-establish-adr-process.md`) records the layering
+rules these directories must respect; planned follow-up ADRs will
+backfill rationale for each newer top-level module.
 
 ## Key Design Decisions
 
