@@ -612,8 +612,16 @@ jobs:
 
           # Pull remote changes (rebase) to avoid push rejection when the remote
           # has been updated by another job or the Kilo agent itself.
-          git fetch origin "$BRANCH"
-          if ! git rebase "origin/$BRANCH"; then
+          # The PR branch may have been merged & deleted between checkout and now;
+          # if `git fetch` cannot find the ref, treat it as "no remote to rebase
+          # against" and skip the rebase block (push step below will handle it).
+          if ! git fetch origin "$BRANCH" 2>/dev/null; then
+            echo "[WARN] Remote ref origin/$BRANCH not found (likely deleted after merge). Skipping rebase."
+            REMOTE_GONE=true
+          else
+            REMOTE_GONE=false
+          fi
+          if [ "$REMOTE_GONE" = "false" ] && ! git rebase "origin/$BRANCH"; then
             echo "[WARN] Rebase failed, retrying with -X theirs (prefer remote on conflicts)"
             git rebase --abort 2>/dev/null || true
             if ! git rebase -X theirs "origin/$BRANCH"; then
@@ -630,16 +638,20 @@ jobs:
             fi
           fi
 
-          LOCAL_HEAD=$(git rev-parse HEAD)
-          REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
-
-          if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
-            git push origin "$BRANCH" || {
-              echo "[WARN] Push failed; remote may have advanced again. Skipping (non-fatal)."
-            }
-            echo "[OK] Documentation changes processed for $BRANCH"
+          if [ "$REMOTE_GONE" = "true" ]; then
+            echo "[INFO] Remote branch $BRANCH no longer exists; skipping push (PR likely merged)."
           else
-            echo "[INFO] No new commits to push — branch is up to date"
+            LOCAL_HEAD=$(git rev-parse HEAD)
+            REMOTE_HEAD=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+
+            if [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+              git push origin "$BRANCH" || {
+                echo "[WARN] Push failed; remote may have advanced again. Skipping (non-fatal)."
+              }
+              echo "[OK] Documentation changes processed for $BRANCH"
+            else
+              echo "[INFO] No new commits to push — branch is up to date"
+            fi
           fi
 
           # Restore stashed changes (non-critical, best-effort)

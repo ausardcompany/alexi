@@ -142,9 +142,9 @@ jobs:
 
       - name: Resolve task prompt
         env:
-          RAW_TASK_PROMPT: ${​{ inputs.task_prompt }}
+          RAW_TASK_PROMPT: ${{ inputs.task_prompt }}
         run: |
-          # Read RAW from env (NOT from `${​{ ... }}` direct substitution) so
+          # Read RAW from env (NOT from `${{ ... }}` direct substitution) so
           # backticks, parentheses, and other shell metacharacters in the
           # prompt are not interpreted as shell syntax.
           RAW="$RAW_TASK_PROMPT"
