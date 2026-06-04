@@ -4,8 +4,8 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 
-import { withStatics, type DeepMutable } from "@opencode-ai/core/schema";
-import * as KiloAgent from "@/kilocode/agent";
+import { withStatics, type DeepMutable } from '@opencode-ai/core/schema';
+import * as KiloAgent from '@/kilocode/agent';
 
 // New agent setup code following upstream patterns
 export type AgentMode = 'primary' | 'subagent' | 'all';
