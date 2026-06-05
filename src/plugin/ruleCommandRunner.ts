@@ -33,6 +33,45 @@
 
 import { execFile, spawn } from 'child_process';
 
+import logger from '../utils/logger.js';
+
+// ---------------------------------------------------------------------------
+// Env override (issue #711)
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional process-wide override for the default 5000 ms rule-command timeout,
+ * sourced from `ALEXI_PLUGIN_RULE_TIMEOUT_MS`. Resolved exactly once at module
+ * load to keep behaviour predictable across long-running sessions and child
+ * forks; runtime mutations to `process.env` are intentionally ignored.
+ *
+ * Precedence (highest to lowest), applied by both
+ * {@link runRuleCommand} and {@link runRuleCommandLenient}:
+ *
+ *   1. `opts.timeoutMs` (per-call / per-rule override)
+ *   2. `ENV_TIMEOUT_MS` (this value)
+ *   3. `DEFAULT_TIMEOUT_MS` / `STRICT_DEFAULT_TIMEOUT_MS` (5000 ms)
+ *
+ * Mirrors the precedent set by cline's `CLINE_PLUGIN_IMPORT_TIMEOUT_MS`
+ * escape hatch: an unset var stays silent; an *invalid* value (non-numeric,
+ * zero, negative, NaN) emits a single warning at module load and falls back
+ * to the hardcoded default.
+ */
+export const ENV_TIMEOUT_MS: number | undefined = (() => {
+  const raw = process.env.ALEXI_PLUGIN_RULE_TIMEOUT_MS;
+  if (raw === undefined || raw === '') {
+    return undefined;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) {
+    return n;
+  }
+  logger.warn(
+    `ALEXI_PLUGIN_RULE_TIMEOUT_MS=${JSON.stringify(raw)} is not a positive integer; ignoring (using 5000 ms default).`
+  );
+  return undefined;
+})();
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -49,7 +88,11 @@ export interface RunRuleCommandOptions {
    * passed as-is to the child program (i.e. they have no meaning).
    */
   command: string | string[];
-  /** Optional override for the default 5000 ms timeout. */
+  /**
+   * Optional override for the default 5000 ms timeout. When omitted, the
+   * `ALEXI_PLUGIN_RULE_TIMEOUT_MS` env var (resolved once at module load)
+   * is consulted before falling back to the 5000 ms default.
+   */
   timeoutMs?: number;
   /** Optional override for the default 32 KB stdout cap. */
   maxBytes?: number;
@@ -230,7 +273,7 @@ export function tokenizeCommand(input: string): string[] {
 export async function runRuleCommandLenient(
   opts: RunRuleCommandOptions
 ): Promise<RunRuleCommandResult> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? ENV_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
 
   let argv: string[];
@@ -378,7 +421,11 @@ export interface RunRuleCommandStrictOptions {
    * is used as the source.
    */
   env?: NodeJS.ProcessEnv;
-  /** Timeout in milliseconds. Defaults to 5000. */
+  /**
+   * Timeout in milliseconds. Defaults to 5000. When omitted, the
+   * `ALEXI_PLUGIN_RULE_TIMEOUT_MS` env var (resolved once at module load)
+   * is consulted before falling back to the 5000 ms default.
+   */
   timeoutMs?: number;
   /** Stdout cap in bytes. Defaults to 32 KB (32 768 bytes). */
   maxBytes?: number;
@@ -477,7 +524,7 @@ export function runRuleCommand(
       return;
     }
 
-    const timeoutMs = opts.timeoutMs ?? STRICT_DEFAULT_TIMEOUT_MS;
+    const timeoutMs = opts.timeoutMs ?? ENV_TIMEOUT_MS ?? STRICT_DEFAULT_TIMEOUT_MS;
     const maxBytes = opts.maxBytes ?? STRICT_DEFAULT_MAX_BYTES;
     const baseEnv = opts.env ?? process.env;
     const childEnv = scrubEnvDeny(baseEnv);
