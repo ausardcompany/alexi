@@ -205,7 +205,7 @@ jobs:
       title: "Agent 3: Implement #${{ needs.prepare.outputs.issue_number }}"
       commit_scope: agent
       commit_changes: true
-      timeout_minutes: 22
+      timeout_minutes: 45
       branch: ${{ needs.prepare.outputs.branch_name }}
 
   # ─── Job 4: Post-implementation verify + open PR + comment back ──────────────
