@@ -18,7 +18,7 @@
  * The legacy lenient API and its helpers (`tokenizeCommand`, `scrubEnv`)
  * are exercised separately in `tests/plugin/ruleCommand.test.ts`.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -251,5 +251,108 @@ describe('runRuleCommand (strict)', () => {
     // Either SPAWN_ERROR (ENOENT path) or EXIT (some platforms surface it as
     // exit-with-code on the child). Both are acceptable failure modes here.
     expect(['SPAWN_ERROR', 'EXIT']).toContain(caught?.code);
+  });
+});
+
+/**
+ * Tests for the `ALEXI_PLUGIN_RULE_TIMEOUT_MS` env override (issue #711).
+ *
+ * The override is resolved exactly once at module load, so each test must
+ * call `vi.resetModules()` after stubbing the env var and then dynamically
+ * import the runner so the `ENV_TIMEOUT_MS` constant picks up the test value.
+ *
+ * Precedence asserted here (highest to lowest):
+ *   1. `opts.timeoutMs` (per-rule / per-call override)
+ *   2. `ALEXI_PLUGIN_RULE_TIMEOUT_MS`
+ *   3. 5000 ms hardcoded default
+ */
+describe('runRuleCommand — ALEXI_PLUGIN_RULE_TIMEOUT_MS env override', () => {
+  let tmpdir: string;
+
+  beforeEach(() => {
+    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rule-cmd-env-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('uses ALEXI_PLUGIN_RULE_TIMEOUT_MS as the timeout when no per-call override is given', async () => {
+    vi.stubEnv('ALEXI_PLUGIN_RULE_TIMEOUT_MS', '150');
+    vi.resetModules();
+    const { runRuleCommand: runFresh } = await import('../ruleCommandRunner.js');
+
+    const start = Date.now();
+    let caught: RunRuleCommandError | undefined;
+    try {
+      await runFresh({
+        // ~1000ms sleep — well past the 150ms env-derived budget but well
+        // under the 5000ms hardcoded default.
+        argv: [NODE, '-e', 'setTimeout(() => {}, 1000)'],
+        cwd: tmpdir,
+      });
+    } catch (err) {
+      caught = err as RunRuleCommandError;
+    }
+    expect(caught).toBeDefined();
+    expect(caught?.code).toBe('TIMEOUT');
+    // Should reject in roughly the env-derived budget, definitely well under
+    // the 5000ms default.
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it('per-call timeoutMs wins over ALEXI_PLUGIN_RULE_TIMEOUT_MS', async () => {
+    // Env says 150ms; per-call says 2000ms; child sleeps 400ms then exits 0.
+    // If per-call did NOT win, this would reject with TIMEOUT at ~150ms.
+    vi.stubEnv('ALEXI_PLUGIN_RULE_TIMEOUT_MS', '150');
+    vi.resetModules();
+    const { runRuleCommand: runFresh } = await import('../ruleCommandRunner.js');
+
+    const result = await runFresh({
+      argv: [NODE, '-e', 'setTimeout(() => process.stdout.write("ok"), 400)'],
+      cwd: tmpdir,
+      timeoutMs: 2000,
+    });
+    expect(result.stdout).toBe('ok');
+    expect(result.truncated).toBe(false);
+  });
+
+  it('falls back to the 5000 ms default when ALEXI_PLUGIN_RULE_TIMEOUT_MS is invalid', async () => {
+    // 'abc' is not a positive integer — the override must be ignored and the
+    // 5000 ms default re-applied. A short sleep finishes well under that.
+    vi.stubEnv('ALEXI_PLUGIN_RULE_TIMEOUT_MS', 'abc');
+    vi.resetModules();
+    const { runRuleCommand: runFresh } = await import('../ruleCommandRunner.js');
+
+    const start = Date.now();
+    const result = await runFresh({
+      argv: [NODE, '-e', 'setTimeout(() => process.stdout.write("ok"), 200)'],
+      cwd: tmpdir,
+    });
+    expect(result.stdout).toBe('ok');
+    expect(result.truncated).toBe(false);
+    // No early timeout — 200ms sleep should not be cut short by a misread
+    // env value, and we should be nowhere near the 5000ms default ceiling.
+    expect(Date.now() - start).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - start).toBeLessThan(5000);
+  });
+
+  it('also ignores zero and negative values (keeps 5000 ms default)', async () => {
+    // Zero / negative values would degenerate to instant timeouts if applied
+    // verbatim, so the runner must reject them at parse time and keep the
+    // 5000 ms default.
+    for (const bogus of ['0', '-1']) {
+      vi.stubEnv('ALEXI_PLUGIN_RULE_TIMEOUT_MS', bogus);
+      vi.resetModules();
+      const { runRuleCommand: runFresh } = await import('../ruleCommandRunner.js');
+      const result = await runFresh({
+        argv: [NODE, '-e', 'process.stdout.write("ok")'],
+        cwd: tmpdir,
+      });
+      expect(result.stdout).toBe('ok');
+      expect(result.truncated).toBe(false);
+    }
   });
 });
