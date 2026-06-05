@@ -355,4 +355,23 @@ describe('runRuleCommand — ALEXI_PLUGIN_RULE_TIMEOUT_MS env override', () => {
       expect(result.truncated).toBe(false);
     }
   });
+
+  it('runRuleCommandLenient (the production materialization path) also honours the env override', async () => {
+    // The lenient API is what `src/plugin/index.ts` actually calls when
+    // materializing `source: 'command'` rules, so the env override must
+    // apply there too — not just to the strict API.
+    vi.stubEnv('ALEXI_PLUGIN_RULE_TIMEOUT_MS', '150');
+    vi.resetModules();
+    const { runRuleCommandLenient } = await import('../ruleCommandRunner.js');
+
+    const start = Date.now();
+    const result = await runRuleCommandLenient({
+      command: [NODE, '-e', 'setTimeout(() => {}, 1000)'],
+      pluginRoot: tmpdir,
+    });
+    // Lenient API never rejects; timeout surfaces via the result fields.
+    expect(result.timedOut).toBe(true);
+    // Should hit the env-derived 150ms budget, well under the 5000ms default.
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
 });
