@@ -22,6 +22,20 @@ import {
 } from '../bus/index.js';
 import { ConfigProtection } from './config-paths.js';
 import { containsPath, safePathCheck } from '../utils/filesystem.js';
+import { logger } from '../utils/logger.js';
+import { getAllToolNames } from '../tool/registry.js';
+
+// Glob characters that flag a tool entry as a pattern rather than a literal name.
+const GLOB_CHARS = /[*?]/;
+
+// MCP-namespaced tools follow the cline/claude convention of "mcp__server__tool".
+// Allow rules with globs in this namespace are an explicit, well-understood
+// exemption to the asymmetric allow-rule guard.
+const MCP_TOOL_PREFIX = 'mcp__';
+
+function hasGlobChars(value: string): boolean {
+  return GLOB_CHARS.test(value);
+}
 
 // Permission action types
 export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
@@ -48,25 +62,53 @@ interface OperationAttempt {
   firstAttempt: number;
 }
 
-// Rule schema - enhanced with external path and home expansion options
-export const PermissionRuleSchema = z.object({
-  id: z.string().optional(),
-  name: z.string().optional(),
-  description: z.string().optional(),
-  // Matching criteria
-  tools: z.array(z.string()).optional(), // Tool name patterns
-  actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin'])).optional(),
-  paths: z.array(z.string()).optional(), // File path patterns
-  commands: z.array(z.string()).optional(), // Command patterns
-  hosts: z.array(z.string()).optional(), // Network host patterns
-  // Decision
-  decision: z.enum(['allow', 'deny', 'ask']),
-  // Priority (higher = evaluated later in last-match-wins)
-  priority: z.number().default(0),
-  // Enhanced options
-  externalPaths: z.boolean().optional(), // Whether rule applies to external paths
-  homeExpansion: z.boolean().optional(), // Expand ~/ to home directory in paths
-});
+// Rule schema - enhanced with external path and home expansion options.
+//
+// Asymmetric allow-rule guard: glob patterns ('*' / '?') in `tools` are
+// rejected for `decision: 'allow'` rules unless the tool name is prefixed
+// with `mcp__` (cline/claude MCP-namespaced tools). Deny rules may freely
+// use globs since wildcard denies are intentional. This mirrors the
+// behaviour shipped in claude-code v2.1.166.
+export const PermissionRuleSchema = z
+  .object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    description: z.string().optional(),
+    // Matching criteria
+    tools: z.array(z.string()).optional(), // Tool name patterns
+    actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin'])).optional(),
+    paths: z.array(z.string()).optional(), // File path patterns
+    commands: z.array(z.string()).optional(), // Command patterns
+    hosts: z.array(z.string()).optional(), // Network host patterns
+    // Decision
+    decision: z.enum(['allow', 'deny', 'ask']),
+    // Priority (higher = evaluated later in last-match-wins)
+    priority: z.number().default(0),
+    // Enhanced options
+    externalPaths: z.boolean().optional(), // Whether rule applies to external paths
+    homeExpansion: z.boolean().optional(), // Expand ~/ to home directory in paths
+  })
+  .superRefine((rule, ctx) => {
+    if (rule.decision !== 'allow' || !rule.tools) {
+      return;
+    }
+    rule.tools.forEach((entry, idx) => {
+      if (!hasGlobChars(entry)) {
+        return;
+      }
+      if (entry.startsWith(MCP_TOOL_PREFIX)) {
+        return;
+      }
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tools', idx],
+        message:
+          `Allow rules may not use glob patterns ('*' / '?') in 'tools' ` +
+          `(found '${entry}'). Use literal tool names, or an 'mcp__'-prefixed ` +
+          `pattern for MCP-namespaced tools.`,
+      });
+    });
+  });
 
 export type PermissionRule = z.infer<typeof PermissionRuleSchema>;
 
@@ -126,6 +168,7 @@ export class PermissionManager {
 
   constructor(rules: PermissionRule[] = []) {
     this.rules = this.sortRules(rules);
+    this.warnOnUnknownDenyToolNames();
   }
 
   /**
@@ -133,6 +176,51 @@ export class PermissionManager {
    */
   private sortRules(rules: PermissionRule[]): PermissionRule[] {
     return [...rules].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  }
+
+  /**
+   * Emit a one-line warning for every deny-rule `tools` entry that is a
+   * literal name (no glob chars) and does not match any registered tool.
+   * This catches typos like `tools: ['Bsah']` which would otherwise be a
+   * silent no-op. Skipped when the registry has no tools registered (e.g.
+   * during early bootstrap or in isolated unit tests) to avoid spurious
+   * warnings.
+   */
+  private warnOnUnknownDenyToolNames(): void {
+    const denyRules = this.rules.filter((r) => r.decision === 'deny' && r.tools?.length);
+    if (denyRules.length === 0) {
+      return;
+    }
+
+    let knownNames: Set<string>;
+    try {
+      // The tool registry import is part of an existing circular module
+      // graph (permission <-> tool); calling it here is safe because the
+      // constructor runs after both modules have finished evaluating.
+      knownNames = new Set(getAllToolNames());
+    } catch {
+      return;
+    }
+
+    if (knownNames.size === 0) {
+      return;
+    }
+
+    for (const rule of denyRules) {
+      for (const entry of rule.tools ?? []) {
+        if (hasGlobChars(entry)) {
+          continue;
+        }
+        if (knownNames.has(entry)) {
+          continue;
+        }
+        const ruleLabel = rule.id ?? rule.name ?? '<unnamed>';
+        logger.warn(
+          `Permission deny rule '${ruleLabel}' references unknown tool '${entry}'; ` +
+            `entry will not match anything. Check for typos.`
+        );
+      }
+    }
   }
 
   // ============ Doom Loop Detection ============
