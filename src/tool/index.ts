@@ -507,6 +507,16 @@ export function getAllToolSchemas(): Array<{
   return getToolRegistry().getSchemas();
 }
 
+/**
+ * Get the names of every registered tool (static and dynamic).
+ * Used by the permission system to validate deny-rule tool entries.
+ */
+export function getAllToolNames(): string[] {
+  return getToolRegistry()
+    .list()
+    .map((t) => t.name);
+}
+
 // Re-export for convenience
 export {
   truncateOutput,

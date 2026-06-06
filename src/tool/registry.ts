@@ -5,6 +5,10 @@
 
 import type { Tool } from './index.js';
 
+// Re-export the registry-name accessor used by the permission system to
+// cross-check deny-rule tool entries against the actual registered tools.
+export { getAllToolNames } from './index.js';
+
 export interface ToolResolutionContext {
   sessionId: string;
   agentId?: string;
