@@ -1,9 +1,0 @@
-{
-  "name": "alexi-core",
-  "version": "1.16.2",
-  "dependencies": {
-    "typescript": "^4.5.2",
-    "@sap/aicore": "^1.3.4",
-    "@types/node": "^16.11.7"
-  }
-}
