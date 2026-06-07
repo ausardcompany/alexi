@@ -1,3 +1,0 @@
-function newCode() {
-  // refactored implementation
-}
