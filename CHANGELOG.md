@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Skill tool description guard test** (`src/tool/skill.test.ts`): A regression test asserting that the registered skill tool's description does not contain the placeholder strings `tool-skill` or `Skill for tool tests.`, both of which were used by an upstream test scaffold and must not leak into the production tool description rendered to the LLM. The canonical skill tool implementation lives in `src/tool/tools/skill.ts` and is exported as `skillTool` (registered under the name `'skill'`).
+
+### Changed
+
+- **Version bumped** from `0.5.12` to `0.5.13` in `package.json` and `package-lock.json`.
+- **Dev-dependency patch updates** (Dependabot, PR #735): `@types/node` from `^25.9.1` to `^25.9.2` and `@types/react` from `^19.2.16` to `^19.2.17`. Type-only updates with no runtime impact; covered by the existing `npm run typecheck` and `npm run build` CI gates.
+- **Upstream sync metadata refreshed** in `.github/last-sync-commits.json`: pulled commit `0050134d` from `anomalyco/opencode` (previously `e82542b8`), and refreshed the `last_synced_at` timestamps for `kilocode`, `opencode`, and `claude-code` to `2026-06-08T10:58:44Z`. Workflow run id updated to `27132986362`. The `kilocode` and `claude-code` upstream HEADs were unchanged in this sync.
+
+### Known issues
+
+- The new `src/tool/skill.test.ts` file imports a `tool` symbol from `./registry`, but `src/tool/registry.ts` does not currently export such a binding (it exports `EnhancedToolRegistry`, `ToolResolutionContext`, `PromptToolResolver`, `ToolResolutionError`, and re-exports `getAllToolNames`). The test therefore fails with `TypeError: Cannot read properties of undefined (reading 'description')` at runtime. Either the test must import `skillTool` from `./tools/skill.js` (and the assertions adjusted to read `skillTool.description`), or `registry.ts` must export a named `tool` binding pointing at the registered skill tool. This is tracked as an autohealing follow-up.
+
 ### Removed
 
 - **Broken upstream-sync stub files** (autohealing cleanup, commit `085951af`): The CI autohealer removed seven scaffold/stub files that had been emitted into the wrong locations by the daily upstream sync and were breaking the build:
