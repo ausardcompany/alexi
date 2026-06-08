@@ -262,6 +262,41 @@ describe('Write Tool', () => {
 | `bash` | `tests/tool/tools/bash.test.ts` | 10+ cases |
 | `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
 | `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
+| `skill` (description guard) | `src/tool/skill.test.ts` | 1 case |
+
+### Skill Tool Description Guard
+
+The skill tool exposes a description string to the LLM that is rendered into the
+agentic system prompt. To prevent an upstream-sync placeholder description from
+leaking into the production tool catalogue, a single regression test asserts
+that the registered skill tool description does not contain the placeholder
+phrases `tool-skill` or `Skill for tool tests.`:
+
+```ts
+// src/tool/skill.test.ts
+import { describe, expect, it } from 'vitest';
+import { tool } from './registry';
+
+describe('Skill Tool Test', () => {
+  it('should not contain deprecated descriptions', () => {
+    expect(tool.description).not.toContain('tool-skill');
+    expect(tool.description).not.toContain('Skill for tool tests.');
+  });
+});
+```
+
+The canonical skill tool implementation is in `src/tool/tools/skill.ts`, which
+exports `skillTool` (registered under the name `'skill'`). When extending or
+maintaining the skill tool's description, run `npm test -- src/tool/skill.test.ts`
+to verify the placeholder strings are not reintroduced.
+
+> **Maintainer note**: As of version `0.5.13`, this test imports a `tool`
+> binding from `./registry` that is not currently exported by `src/tool/registry.ts`.
+> The test will fail at import-time with a `TypeError` until either the import
+> is changed to `import { skillTool } from './tools/skill.js'` (and the
+> assertions adjusted accordingly) or `registry.ts` is updated to re-export a
+> `tool` symbol pointing at the registered skill tool. See the `Known issues`
+> section in `CHANGELOG.md` for the autohealing follow-up.
 
 ## Testing Hooks
 

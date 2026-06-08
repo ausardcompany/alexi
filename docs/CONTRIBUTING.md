@@ -371,12 +371,27 @@ await new Promise((resolve) => setTimeout(resolve, 2000));
 ### Running Tests
 
 ```bash
-npm test                              # All tests
-npm test -- tests/tool/tools/         # Directory
-npm test -- tests/hooks/blockCap.test.ts  # Single file
-npm test -- --grep "compaction"       # Pattern match
-npm run test:coverage                 # With coverage
+npm test                                       # All tests (single pass, not watch)
+npm test -- tests/tool/tools/                  # Directory
+npm test -- tests/hooks/blockCap.test.ts       # Single file
+npm test -- src/tool/skill.test.ts             # Co-located test next to source
+npm test -- -t "compaction"                    # Pattern match (vitest uses -t / --testNamePattern, NOT --grep)
+npm run test:coverage                          # With coverage
 ```
+
+### Test File Locations
+
+Vitest is configured (`vitest.config.ts`) to pick up tests from **both**
+locations:
+
+- `tests/**/*.test.{ts,tsx}` — the conventional out-of-tree test tree
+- `src/**/*.test.{ts,tsx}` — co-located tests next to the source they cover
+
+Either layout is acceptable. Co-located tests (e.g. `src/tool/skill.test.ts`)
+are appropriate for narrow guards over a single module's exported surface;
+broader integration or scenario tests should live under `tests/`. When adding a
+co-located test, remember the ESM `.js` import rule still applies: imports of
+local TypeScript files must end in `.js` even when the file is `.ts`.
 
 ## Pull Request Process
 
