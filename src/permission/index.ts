@@ -590,7 +590,7 @@ export class PermissionManager {
     // Check if this is a config file edit
     const isConfigEdit =
       (ctx.action === 'write' || ctx.action === 'admin') &&
-      ConfigProtection.isRelative(ctx.resource);
+      ConfigProtection.isProtectedPath(ctx.resource);
 
     // For config edits, add metadata to disable "always allow" option
     const metadata = isConfigEdit ? ConfigProtection.getMetadata() : {};
