@@ -40,7 +40,14 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 }));
 
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
-  StdioClientTransport: vi.fn().mockImplementation(() => ({})),
+  // Use a real class so `new StdioClientTransport(...)` is constructable.
+  // vi.fn().mockImplementation(() => ({})) records calls but cannot be
+  // invoked with `new`, which causes client.ts:216 to throw and the
+  // surrounding try/catch to swallow the failure - the assertions still
+  // pass on mock.calls but the connection error is misleading noise.
+  StdioClientTransport: vi.fn(function MockStdioClientTransport(this: object) {
+    return this;
+  }),
 }));
 
 // Mock loadMcpConfig (only resolveEnvVars is exercised at runtime)
