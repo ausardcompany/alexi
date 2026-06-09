@@ -531,6 +531,7 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Missing or extra trailing newlines at end of file
 - Inconsistent spacing in namespace and class method definitions
 - Quote-style normalization from double to single quotes per Prettier `singleQuote: true` (applied across `src/` and `tests/`)
+- Missing trailing semicolons on statements (e.g., bare `return` inside an early-exit branch) per Prettier `semi: true` -- a recent example is the semicolon added after the early `return` in `cancel(sessionID)` inside `src/session/prompt-queue.ts` (commit `8a005f03`). When writing new code, run `npm run format` locally to avoid these no-op fix-up commits from the autohealer.
 
 ### Daily PR Merge
 
