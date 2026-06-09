@@ -67,6 +67,15 @@ const exploreAgentPrompt = getAgentPrompt('explore');
 const orchestratorPrompt = getAgentPrompt('orchestrator');
 
 // Built-in agents
+export const layer = Layer.effect(
+  // Updated initialization with KiloAgent patch and preprocessConfig
+  KiloAgent.patchAgents(agents, defaults, user, cfg, kilo, ctx.worktree, whitelistedDirs)
+  const agentConfigs = KiloAgent.preprocessConfig(cfg.agent ?? {})
+  for (const [key, value] of Object.entries(agentConfigs)) {
+    // Process config
+  }
+)
+
 export const builtInAgents: AgentConfig[] = [
   {
     id: 'code',
