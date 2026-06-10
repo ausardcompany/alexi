@@ -9,7 +9,7 @@ abstract class BaseSearchToolView extends SecondarySessionPartView {
   private initialize(tool: Tool, parts: ToolParts, repo?: string): void {
     // Initialization logic here
   }
-  
+
   abstract toolIcon(tool: Tool): Icon;
   abstract toolTitle(tool: Tool): string;
   abstract targets(tool: Tool, repo?: string): string[];

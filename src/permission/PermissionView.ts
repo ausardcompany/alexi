@@ -1,1 +1,1 @@
-card.setHeaderIcon(SessionViewIcons.warning, KiloBundle.message("session.permission.title"))
+card.setHeaderIcon(SessionViewIcons.warning, KiloBundle.message('session.permission.title'));
