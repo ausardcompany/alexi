@@ -2,7 +2,6 @@
  * Enhanced Tool Registry with Prompt Tool Resolution
  * Based on opencode refactor(session): extract prompt tool resolution
  */
-
 import type { Tool } from './index.js';
 
 // updated registry logic

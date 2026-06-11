@@ -2,7 +2,6 @@
  * Model Catalog System
  * Centralized model information and capability tracking
  */
-
 import { z } from 'zod';
 
 export const ModelCapability = z.enum([
