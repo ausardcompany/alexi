@@ -13,6 +13,7 @@ Write file: `.github/research/YYYY-MM-DD-spec.md`
    - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`
    - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`
    - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`
+   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`
 
 2. Check what we already have: `ls src/tool/tools/ && ls src/core/`
 
@@ -28,7 +29,7 @@ Write file: `.github/research/YYYY-MM-DD-spec.md`
 ### 1. [Feature Name]
 - **What**: One sentence describing the feature
 - **Why**: Why users need it
-- **Source**: Which repo/commit inspired this
+- **Source**: Which repo/commit inspired this (e.g. `sst/opencode#31752`)
 - **Category**: tool | provider | command | mcp | config
 - **Size**: small (< 4h) | medium (1-2 days)
 
