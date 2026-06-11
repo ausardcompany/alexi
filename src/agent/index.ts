@@ -2,16 +2,7 @@
  * Agent System
  * Defines specialized agents with different capabilities and prompts
  * Based on kilocode/opencode agent patterns with @syntax for switching
- * Updated logic to integrate new permission and subagent patterns
  */
-import { SubagentPermissions } from 'opencode/src/agent/subagent-permissions';
-
-// New permission handling logic
-function updatePermissions(agent) {
-  const permissions = SubagentPermissions.getPermissions(agent.id);
-  // Integrate permissions into agent logic
-}
-
 import { z } from 'zod';
 import { AgentSwitched } from '../bus/index.js';
 import { getAgentPrompt } from './system.js';

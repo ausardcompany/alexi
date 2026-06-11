@@ -1,16 +1,7 @@
 /**
  * Enhanced Tool Registry with Prompt Tool Resolution
  * Based on opencode refactor(session): extract prompt tool resolution
- * Enhanced tool registry with updated task management and integrate new task status tracking
  */
-import { TaskStatus } from 'opencode/src/tool/task_status';
-
-function registerTool(tool) {
-  const status = TaskStatus.get(tool.id);
-  // Integrate status tracking into tool registration
-  toolRegistry.add(tool, status);
-}
-
 import type { Tool } from './index.js';
 
 // updated registry logic

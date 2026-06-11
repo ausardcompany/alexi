@@ -1,18 +1,7 @@
 /**
  * Model Catalog System
  * Centralized model information and capability tracking
- * Optimize provider and model retrieval to align with updated catalog structure
  */
-import { Catalog } from 'core/src/catalog';
-
-function fetchProvider(providerID) {
-  return Catalog.provider.get(providerID);
-}
-
-function fetchAllModels() {
-  return Catalog.model.all();
-}
-
 import { z } from 'zod';
 
 export const ModelCapability = z.enum([
