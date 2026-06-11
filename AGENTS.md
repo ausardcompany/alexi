@@ -85,6 +85,8 @@ The agent fleet has been refactored into a T-shape model. There is one shared ba
 | `.github/workflows/agent-data.yml`             | `data`           | manual / scheduled       |
 | `.github/workflows/agent-security.yml`         | `security`       | manual / scheduled       |
 
+`agent1-research.yml` polls these reference repos for daily commit signal: `Kilo-Org/kilocode`, `anthropics/claude-code`, `cline/cline`, `aider-ai/aider`, and `sst/opencode`. Update the list in `.github/prompts/agent1-research-system.md` (not in the workflow YAML).
+
 ### Adding a new agent (~30 lines of YAML)
 
 1. If a new vertical is needed, write `.github/prompts/role-<name>.md` following the existing role-file shape (identity / vertical knowledge / what you own / must NOT do / inputs / outputs / DoD). Keep it under ~80 lines.
