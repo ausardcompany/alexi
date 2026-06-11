@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Version bumped** from `1.17.1` to `1.17.2` in `package.json` (release reference: PR #758, commit `1b0df735` — `feat(sync): apply upstream changes (2026-06-11)`).
+- **Upstream sync metadata refreshed** in `.github/last-sync-commits.json` (workflow run `27340436170`, timestamp `2026-06-11T10:27:47Z`):
+  - `kilocode` upstream HEAD advanced from `c7a06d2f` to `8b2a1000` (`Kilo-Org/kilocode`).
+  - `opencode` upstream HEAD advanced from `97e713e8` to `318dbe93` (`anomalyco/opencode`).
+  - `claude-code` upstream HEAD advanced from `1c5f951a` to `3a7c7361` (`anthropics/claude-code`).
+- **Header-comment formatting normalization** (commit `9e105b7c`, agent factory engineering run): Removed the extra blank line between the JSDoc header comment and the first `import` statement in three files to satisfy the repository's Prettier configuration. Pure formatting change with no behavioral, API, runtime, or type-shape impact:
+  - `src/agent/index.ts` (Agent System — `AgentSchema`, `AgentMode`, agent registry and `@syntax` switching).
+  - `src/core/catalog.ts` (Model Catalog — `ModelCapability` Zod enum and centralized model capability tracking).
+  - `src/tool/registry.ts` (Enhanced Tool Registry — `EnhancedToolRegistry`, `PromptToolResolver`, `ToolResolutionContext`, `ToolResolutionError`).
+
 ### Added
 
 - **Skill tool description guard test** (`src/tool/skill.test.ts`): A regression test asserting that the registered skill tool's description does not contain the placeholder strings `tool-skill` or `Skill for tool tests.`, both of which were used by an upstream test scaffold and must not leak into the production tool description rendered to the LLM. The canonical skill tool implementation lives in `src/tool/tools/skill.ts` and is exported as `skillTool` (registered under the name `'skill'`).
