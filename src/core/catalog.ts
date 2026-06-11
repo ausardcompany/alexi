@@ -6,11 +6,11 @@
 import { Catalog } from 'core/src/catalog';
 
 function fetchProvider(providerID) {
-    return Catalog.provider.get(providerID);
+  return Catalog.provider.get(providerID);
 }
 
 function fetchAllModels() {
-    return Catalog.model.all();
+  return Catalog.model.all();
 }
 
 import { z } from 'zod';

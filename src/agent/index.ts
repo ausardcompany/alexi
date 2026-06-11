@@ -8,8 +8,8 @@ import { SubagentPermissions } from 'opencode/src/agent/subagent-permissions';
 
 // New permission handling logic
 function updatePermissions(agent) {
-    const permissions = SubagentPermissions.getPermissions(agent.id);
-    // Integrate permissions into agent logic
+  const permissions = SubagentPermissions.getPermissions(agent.id);
+  // Integrate permissions into agent logic
 }
 
 import { z } from 'zod';

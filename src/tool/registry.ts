@@ -6,9 +6,9 @@
 import { TaskStatus } from 'opencode/src/tool/task_status';
 
 function registerTool(tool) {
-    const status = TaskStatus.get(tool.id);
-    // Integrate status tracking into tool registration
-    toolRegistry.add(tool, status);
+  const status = TaskStatus.get(tool.id);
+  // Integrate status tracking into tool registration
+  toolRegistry.add(tool, status);
 }
 
 import type { Tool } from './index.js';
