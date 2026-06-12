@@ -1,0 +1,1 @@
+-- Removed deprecated SQL migration script
