@@ -16,7 +16,7 @@ Read it to understand what was already analyzed and focus on NEW developments.
    - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`
    - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`
    - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/continuedev/continue/commits?per_page=20 --jq '.[].commit.message'`
+   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`
 
 2. Identify significant new features, patterns, or improvements
 
