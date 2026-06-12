@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Quote-style normalization in `src/core/billing.ts`** (commit `b85d2f47`, `style(ci): auto-fix lint/format issues`): The two `setup_future_usage: "off_session"` string literals inside the `paymentOptions.payment_method_options.card` and `.link` blocks were rewritten from double quotes to single quotes to satisfy the repository's Prettier `singleQuote: true` setting. Pure formatting change with no behavioral, API, runtime, or type-shape impact. The file remains a 10-line orphan export (`paymentOptions`) that is not imported by any module in the current source tree; it is a leftover scaffold from an upstream sync and should either be wired into a payment/billing surface or removed in a follow-up cleanup, similar to the stub-removal pattern recorded in earlier `### Removed` entries.
 - **Version bumped** from `1.17.1` to `1.17.2` in `package.json` (release reference: PR #758, commit `1b0df735` — `feat(sync): apply upstream changes (2026-06-11)`).
 - **Upstream sync metadata refreshed** in `.github/last-sync-commits.json` (workflow run `27340436170`, timestamp `2026-06-11T10:27:47Z`):
   - `kilocode` upstream HEAD advanced from `c7a06d2f` to `8b2a1000` (`Kilo-Org/kilocode`).
