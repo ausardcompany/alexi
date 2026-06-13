@@ -430,6 +430,19 @@ export class McpClientManager {
       );
       clearTimeout(timer);
 
+      // Per the MCP spec, `structuredContent` is the canonical machine-readable
+      // output and `content` is human-readable narration. Spec-compliant servers
+      // (Qt Creator, several Codex-pattern servers) emit ONLY `structuredContent`,
+      // so prefer it when present and fall back to `content` flattening otherwise.
+      const structured = (result as { structuredContent?: unknown }).structuredContent;
+      if (structured !== undefined && structured !== null) {
+        const text = typeof structured === 'string' ? structured : JSON.stringify(structured);
+        if (result.isError) {
+          return { success: false, error: text || 'Unknown error' };
+        }
+        return { success: true, result: text };
+      }
+
       // Extract text content from result
       const content = (result.content || []) as Array<{ type: string; text?: string }>;
       const textContent = content
