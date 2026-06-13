@@ -22,12 +22,33 @@ const ShellParamsSchema = z.object({
     .describe('Optional description of what the command does (recommended for complex commands)'),
 });
 
+// NOTE: the input `command` is intentionally NOT echoed back in the
+// result. The provider already has it as the tool-call input;
+// duplicating it inflates every cached turn (heredoc payloads double
+// in size). See research 2026-06-13 item #2 (cline/cline#11463,
+// commit 7f9d5461, 2026-06-11).
 interface ShellResult {
   stdout: string;
   stderr: string;
   exitCode: number;
   timedOut: boolean;
   shellType?: string;
+}
+
+/**
+ * Test-only guard: throws if the input command appears anywhere in the
+ * serialized result payload. Gated by NODE_ENV === 'test' so production
+ * has zero overhead. Bound to commands of length > 64 to avoid false
+ * positives on short commands like `ls` or `pwd` whose text might
+ * legitimately appear in stdout (e.g. when the command is `pwd`).
+ */
+function assertNoCommandEcho(result: ShellResult, command: string): void {
+  if (process.env.NODE_ENV === 'test' && command.length > 64) {
+    const serialized = JSON.stringify(result);
+    if (serialized.includes(command)) {
+      throw new Error('command echoed back in shell tool result');
+    }
+  }
 }
 
 const DEFAULT_TIMEOUT = 120000; // 2 minutes
@@ -200,6 +221,8 @@ Security:
           shellType: shellInfo.type,
         };
 
+        assertNoCommandEcho(result, params.command);
+
         if (context.signal?.aborted) {
           resolve({
             success: false,
@@ -240,16 +263,20 @@ Security:
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
 
+        const errorResult: ShellResult = {
+          stdout,
+          stderr,
+          exitCode: -1,
+          timedOut: false,
+          shellType: shellInfo.type,
+        };
+
+        assertNoCommandEcho(errorResult, params.command);
+
         resolve({
           success: false,
           error: err.message,
-          data: {
-            stdout,
-            stderr,
-            exitCode: -1,
-            timedOut: false,
-            shellType: shellInfo.type,
-          },
+          data: errorResult,
         });
       });
     });
