@@ -53,7 +53,9 @@ export async function runCommandNonInteractive(
   const registry = getCommandRegistry();
   const rendered = await registry.execute(commandName, args);
   const command = registry.get(commandName) as CustomCommand | undefined;
-  const submitPrompt = command ? renderSubmitPrompt(command, args, registry.getWorkdir()) : undefined;
+  const submitPrompt = command
+    ? renderSubmitPrompt(command, args, registry.getWorkdir())
+    : undefined;
   if (submitPrompt && submitPrompt.trim().length > 0) {
     return {
       rendered,

@@ -129,10 +129,7 @@ describe('renderSubmitPrompt - variable expansion', () => {
     const cmd = defineCommand({
       name: 'x',
       template: 'body',
-      arguments: [
-        { name: 'file', required: true },
-        { name: 'goal' },
-      ],
+      arguments: [{ name: 'file', required: true }, { name: 'goal' }],
       submitPrompt: 'work on ${file} (goal: ${goal})',
     });
     expect(renderSubmitPrompt(cmd, ['main.ts', 'speed'])).toBe('work on main.ts (goal: speed)');

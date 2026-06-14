@@ -67,8 +67,6 @@ describe('runCommandNonInteractive', () => {
   });
 
   it('throws CommandError when command does not exist', async () => {
-    await expect(runCommandNonInteractive('nonexistent', [])).rejects.toThrow(
-      /Command not found/
-    );
+    await expect(runCommandNonInteractive('nonexistent', [])).rejects.toThrow(/Command not found/);
   });
 });
