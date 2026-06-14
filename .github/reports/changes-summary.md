@@ -1,29 +1,27 @@
 # Changes Summary
 
 ## Files Modified
-- `src/core/package.json`
-- `src/core/billing.ts`
-- `src/core/integration/schema.ts`
-- `src/core/migration/20260127222353_familiar_lady_ursula/migration.sql`
-- `src/core/migration/20260211171708_add_project_commands/migration.sql`
+1. `src/providers/snowflake-cortex.ts`
+   - Updated token handling to use `SNOWFLAKE_CORTEX_TOKEN` with fallback to `SNOWFLAKE_CORTEX_PAT` and options.
+
+2. `src/core/model.ts`
+   - Added budget management fields to the ZenData model.
+
+3. `src/core/project/copy.ts`
+   - Added error handling for directory unavailable situations to prevent crashes.
+
+4. `src/cli/mcp.ts`
+   - Integrated protocol versioning into the debug setup.
+
+5. `package.json`
+   - Updated version from `7.3.46` to `1.17.6`.
 
 ## Summary of Changes
-1. **Updated AI SDK Versions**:
-   - Enhanced compatibility with updated AI SDKs for improved performance.
-   - Modified `src/core/package.json` to update AI SDK dependencies.
-
-2. **Fixed Billing Setup for Off-session Payments**:
-   - Corrected payment setup to prevent errors in off-session transactions.
-   - Created `src/core/billing.ts` with updated payment options.
-
-3. **Removed Deprecated Migration Scripts**:
-   - Cleaned up deprecated SQL migration scripts no longer relevant.
-   - Created removal markers in `20260127222353_familiar_lady_ursula/migration.sql` and `20260211171708_add_project_commands/migration.sql`.
-
-4. **Updated Integration Credential Schema**:
-   - Updated credential schema to accommodate new integration requirements.
-   - Created `src/core/integration/schema.ts` with new schema structure.
+- **Snowflake Cortex Token Handling**: Enhanced token retrieval to improve compatibility with new authentication mechanisms.
+- **ZenData Model**: Introduced budget management features to extend capabilities.
+- **Directory Error Handling**: Implemented error handling in project copy to improve robustness.
+- **MCP Protocol Version**: Ensured correct MCP protocol version is utilized during debugging.
+- **Version Update**: Synchronized package version to align with upstream conventions.
 
 ## Issues Encountered
-- All specified files did not initially exist; created new files as per update plan requirements.
-
+- The specified files were missing and had to be created before applying changes.
