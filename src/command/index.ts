@@ -39,6 +39,23 @@ export const CommandSchema = z.object({
    * or the legacy `disabledTools` frontmatter field — all three are synonyms.
    */
   disabledTools: z.array(z.string()).optional(),
+  /**
+   * Optional follow-up prompt to submit as the next user turn after this
+   * command's `template` is rendered. Supports a *restricted* form of
+   * variable substitution (positional `$1`, `$2`, ..., named `${name}` /
+   * `${name:default}`, plus `$ARGUMENTS`, `$PWD`, `$DATE`) — see
+   * {@link renderSubmitPrompt}.
+   *
+   * Unlike `template`, NO shell injection (`!`...`) and NO `@file`
+   * expansion is performed on `submitPrompt`. This keeps the chained
+   * follow-up free of side effects (file reads, subprocess spawns) — the
+   * intent is a queued user turn, not another command body.
+   *
+   * Honoured by `src/cli/interactive.ts` (REPL enqueue). Non-interactive
+   * entry points (`src/cli/commands/chat.ts`) surface it as a `hint` and
+   * never auto-submit.
+   */
+  submitPrompt: z.string().optional(),
 });
 
 export type Command = z.infer<typeof CommandSchema>;
@@ -179,6 +196,76 @@ async function processTemplate(template: string, context: TemplateContext): Prom
 }
 
 /**
+ * Render a command's `submitPrompt` with the same restricted variable
+ * substitution rules documented on {@link CommandSchema.submitPrompt}.
+ *
+ * Supported expansions:
+ *   - `$ARGUMENTS`            → all `args` joined by a space
+ *   - `$PWD`                  → `workdir`
+ *   - `$DATE`                 → today's date (`YYYY-MM-DD`)
+ *   - `$N` (1-indexed)        → positional argument
+ *   - `${name}` / `${name:def}` → named argument from the command's
+ *                                 `arguments` declaration, with optional
+ *                                 default
+ *
+ * Explicitly NOT supported (in contrast to `template`): `@file` reads and
+ * shell injection (`` !`cmd` ``). A queued follow-up prompt should not
+ * trigger filesystem or subprocess side effects when the REPL replays it
+ * as a user turn — the user can always invoke another command for that.
+ */
+export function renderSubmitPrompt(
+  command: Command,
+  args: string[],
+  workdir: string = process.cwd()
+): string | undefined {
+  if (!command.submitPrompt) {
+    return undefined;
+  }
+  // Apply defaults from the command's declared arguments so positional and
+  // named lookups see the same resolved values that `template` saw.
+  const finalArgs = applyDefaults(command, args);
+
+  let result = command.submitPrompt;
+
+  // Named arguments: ${name} or ${name:default}
+  if (command.arguments && command.arguments.length > 0) {
+    const argsByName = new Map<string, string | undefined>();
+    for (let i = 0; i < command.arguments.length; i++) {
+      argsByName.set(command.arguments[i].name, finalArgs[i]);
+    }
+    result = result.replace(/\$\{([a-zA-Z_][\w-]*)(?::([^}]*))?\}/g, (_match, name, def) => {
+      const value = argsByName.get(name);
+      if (value !== undefined && value !== '') {
+        return value;
+      }
+      return def ?? '';
+    });
+  } else {
+    // No declared arguments → still expand bare `${name:default}` to the
+    // default (or empty), so authors can use `${maybe:fallback}` even on
+    // arg-less commands without leaking the literal `${maybe}` token.
+    result = result.replace(/\$\{([a-zA-Z_][\w-]*)(?::([^}]*))?\}/g, (_match, _name, def) => {
+      return def ?? '';
+    });
+  }
+
+  // $ARGUMENTS - all positional args joined
+  result = result.replace(/\$ARGUMENTS/g, finalArgs.join(' '));
+
+  // $PWD / $DATE
+  result = result.replace(/\$PWD/g, workdir);
+  result = result.replace(/\$DATE/g, new Date().toISOString().split('T')[0]);
+
+  // Positional $1, $2, ...
+  result = result.replace(/\$(\d+)/g, (_match, index: string) => {
+    const argIndex = parseInt(index, 10) - 1;
+    return finalArgs[argIndex] ?? '';
+  });
+
+  return result;
+}
+
+/**
  * Validate arguments against command definition
  */
 function validateArguments(command: Command, args: string[]): { valid: boolean; errors: string[] } {
@@ -247,6 +334,7 @@ export function loadCommandFromFile(filePath: string): Command | null {
       source: filePath,
       tools: data.tools,
       disabledTools: data['disallowed-tools'] ?? data.disallowedTools ?? data.disabledTools,
+      submitPrompt: typeof data.submitPrompt === 'string' ? data.submitPrompt : undefined,
     };
 
     // Validate the command schema
@@ -300,6 +388,11 @@ export function defineCommand(definition: {
     default?: string;
   }>;
   template: string;
+  /**
+   * Optional follow-up prompt to enqueue as the next user turn after the
+   * command's `template` is rendered. See {@link CommandSchema.submitPrompt}.
+   */
+  submitPrompt?: string;
 }): Command {
   return CommandSchema.parse({
     ...definition,
@@ -410,6 +503,29 @@ export class CommandRegistry {
     });
 
     return result;
+  }
+
+  /**
+   * Execute a command and additionally resolve its optional `submitPrompt`
+   * follow-up. The rendered template is identical to {@link execute}; the
+   * `submitPrompt` (when declared) is expanded with the restricted
+   * variable substitution rules in {@link renderSubmitPrompt} — no shell
+   * injection, no `@file` reads.
+   *
+   * Returns `submitPrompt: undefined` when the command does not declare
+   * one, so callers can branch with a single check.
+   */
+  async executeWithSubmitPrompt(
+    name: string,
+    args: string[]
+  ): Promise<{ rendered: string; submitPrompt?: string }> {
+    const command = this.get(name);
+    if (!command) {
+      throw new CommandError(`Command not found: ${name}`, 'COMMAND_NOT_FOUND', { name });
+    }
+    const rendered = await this.execute(name, args);
+    const submitPrompt = renderSubmitPrompt(command, args, this.workdir);
+    return { rendered, submitPrompt };
   }
 
   /**

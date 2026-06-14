@@ -167,6 +167,14 @@ export interface CommandDefinition {
     default?: string;
   }>;
   template: string;
+  /**
+   * Optional follow-up prompt to enqueue as the next user turn after the
+   * command's `template` is rendered in the interactive REPL. Honoured by
+   * `src/cli/interactive.ts`; non-interactive entry points report it via a
+   * hint and never auto-submit. See `CommandSchema.submitPrompt` for the
+   * variable substitution rules.
+   */
+  submitPrompt?: string;
 }
 
 // Plugin context provided to plugins
@@ -1332,6 +1340,7 @@ export class PluginManager {
           description: cmd.description,
           arguments: cmd.arguments,
           template: cmd.template,
+          submitPrompt: cmd.submitPrompt,
         });
       }
     }
