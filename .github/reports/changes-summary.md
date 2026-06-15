@@ -1,27 +1,19 @@
 # Changes Summary
 
 ## Files Modified
-1. `src/providers/snowflake-cortex.ts`
-   - Updated token handling to use `SNOWFLAKE_CORTEX_TOKEN` with fallback to `SNOWFLAKE_CORTEX_PAT` and options.
-
-2. `src/core/model.ts`
-   - Added budget management fields to the ZenData model.
-
-3. `src/core/project/copy.ts`
-   - Added error handling for directory unavailable situations to prevent crashes.
-
-4. `src/cli/mcp.ts`
-   - Integrated protocol versioning into the debug setup.
-
-5. `package.json`
-   - Updated version from `7.3.46` to `1.17.6`.
+- src/agent/index.ts
+- src/core/event.ts
+- src/core/catalog.ts
+- src/tool/task.ts
+- src/core/location.ts
 
 ## Summary of Changes
-- **Snowflake Cortex Token Handling**: Enhanced token retrieval to improve compatibility with new authentication mechanisms.
-- **ZenData Model**: Introduced budget management features to extend capabilities.
-- **Directory Error Handling**: Implemented error handling in project copy to improve robustness.
-- **MCP Protocol Version**: Ensured correct MCP protocol version is utilized during debugging.
-- **Version Update**: Synchronized package version to align with upstream conventions.
+1. **src/agent/index.ts**: Attempted model reference update but the exact string was not found for replacement.
+2. **src/core/event.ts**: Created new file with event system integration code.
+3. **src/core/catalog.ts**: Attempted structure update but the exact string was not found for replacement.
+4. **src/tool/task.ts**: Created new file with updated task execution logic supporting options.
+5. **src/core/location.ts**: Created new file reflecting updated location management strategies.
 
 ## Issues Encountered
-- The specified files were missing and had to be created before applying changes.
+- String replacement failed in `src/agent/index.ts` and `src/core/catalog.ts` due to missing exact matches.
+- Files `src/core/event.ts`, `src/tool/task.ts`, and `src/core/location.ts` were created as they did not exist prior to execution.
