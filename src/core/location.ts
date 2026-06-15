@@ -1,3 +1,3 @@
 export class LocationManager {
-    // updated methods reflecting new location management strategies
+  // updated methods reflecting new location management strategies
 }
