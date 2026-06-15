@@ -20,13 +20,56 @@ interface ApplyPatchResult {
 }
 
 /**
- * Apply a unified diff patch to content
+ * Error thrown when a patch hunk does not match the file contents.
+ *
+ * Carries enough context to surface the failure back to the caller without
+ * silently corrupting the file: which hunk failed, which line in the source
+ * file, and what was expected vs. actually present.
  */
-function applyPatchToContent(originalContent: string, patch: string): string {
+export class PatchHunkError extends Error {
+  readonly hunkNumber: number;
+  readonly filePath: string;
+  readonly expected: string;
+  readonly actual: string;
+  readonly lineNumber: number;
+
+  constructor(opts: {
+    hunkNumber: number;
+    filePath: string;
+    expected: string;
+    actual: string;
+    lineNumber: number;
+  }) {
+    super(
+      `Patch hunk ${opts.hunkNumber} failed at line ${opts.lineNumber}: ` +
+        `expected ${JSON.stringify(opts.expected)}, got ${JSON.stringify(opts.actual)}`
+    );
+    this.name = 'PatchHunkError';
+    this.hunkNumber = opts.hunkNumber;
+    this.filePath = opts.filePath;
+    this.expected = opts.expected;
+    this.actual = opts.actual;
+    this.lineNumber = opts.lineNumber;
+  }
+}
+
+/**
+ * Apply a unified diff patch to content.
+ *
+ * Validates context (` `) and deletion (`-`) lines against the actual file
+ * contents and throws {@link PatchHunkError} on any mismatch so a stale or
+ * wrong patch cannot silently corrupt the file.
+ */
+function applyPatchToContent(
+  originalContent: string,
+  patch: string,
+  filePath: string = ''
+): string {
   const lines = originalContent.split('\n');
   const patchLines = patch.split('\n');
 
   let lineIndex = 0;
+  let hunkNumber = 0;
   const result: string[] = [];
   let i = 0;
 
@@ -35,6 +78,7 @@ function applyPatchToContent(originalContent: string, patch: string): string {
 
     // Parse hunk header: @@ -start,count +start,count @@
     if (line.startsWith('@@')) {
+      hunkNumber++;
       const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
       if (match) {
         const oldStart = parseInt(match[1], 10) - 1; // Convert to 0-indexed
@@ -51,7 +95,27 @@ function applyPatchToContent(originalContent: string, patch: string): string {
 
     // Context line (unchanged)
     if (line.startsWith(' ')) {
-      result.push(lines[lineIndex]);
+      const expected = line.slice(1);
+      if (lineIndex >= lines.length) {
+        throw new PatchHunkError({
+          hunkNumber,
+          filePath,
+          expected,
+          actual: '<EOF>',
+          lineNumber: lineIndex + 1,
+        });
+      }
+      const actual = lines[lineIndex];
+      if (actual !== expected) {
+        throw new PatchHunkError({
+          hunkNumber,
+          filePath,
+          expected,
+          actual,
+          lineNumber: lineIndex + 1,
+        });
+      }
+      result.push(actual);
       lineIndex++;
       i++;
       continue;
@@ -59,6 +123,26 @@ function applyPatchToContent(originalContent: string, patch: string): string {
 
     // Deletion line
     if (line.startsWith('-')) {
+      const expected = line.slice(1);
+      if (lineIndex >= lines.length) {
+        throw new PatchHunkError({
+          hunkNumber,
+          filePath,
+          expected,
+          actual: '<EOF>',
+          lineNumber: lineIndex + 1,
+        });
+      }
+      const actual = lines[lineIndex];
+      if (actual !== expected) {
+        throw new PatchHunkError({
+          hunkNumber,
+          filePath,
+          expected,
+          actual,
+          lineNumber: lineIndex + 1,
+        });
+      }
       // Skip this line in original
       lineIndex++;
       i++;
@@ -160,8 +244,21 @@ Usage:
       // Decode with detected encoding
       const originalContent = decodeWithEncoding(buffer, encoding);
 
-      // Apply patch
-      const patchedContent = applyPatchToContent(originalContent, params.patch);
+      // Apply patch (may throw PatchHunkError before any file write)
+      let patchedContent: string;
+      try {
+        patchedContent = applyPatchToContent(originalContent, params.patch, filePath);
+      } catch (err) {
+        if (err instanceof PatchHunkError) {
+          return {
+            success: false,
+            error:
+              `Patch hunk ${err.hunkNumber} failed at line ${err.lineNumber}: ` +
+              `expected ${JSON.stringify(err.expected)}, got ${JSON.stringify(err.actual)}`,
+          };
+        }
+        throw err;
+      }
 
       // Encode back with original encoding
       const encodedBuffer = encodeWithEncoding(patchedContent, encoding);
