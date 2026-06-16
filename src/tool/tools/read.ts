@@ -144,11 +144,11 @@ async function readLinesStreaming(
   }
 
   // Strip a leading BOM character that readline may have surfaced as part of
-  // the very first line when the file started with a UTF-8 BOM.
+  // the very first line. Both UTF-8 and UTF-16LE BOMs decode to U+FEFF, and
+  // readline does not strip them automatically.
   if (
     captured.length > 0 &&
     encoding.hasBOM &&
-    encoding.encoding === 'utf-8' &&
     startIdx === 1 &&
     captured[0].charCodeAt(0) === 0xfeff
   ) {

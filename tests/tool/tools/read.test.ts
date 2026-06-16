@@ -437,6 +437,23 @@ describe('Read Tool', () => {
         expect(result.data.content).toContain('4: last');
       }
     });
+
+    it('strips a UTF-8 BOM from the first line on the streaming path', async () => {
+      const testFile = path.join(tempDir, 'utf8-bom-streamed.txt');
+      // UTF-8 BOM (EF BB BF) followed by content.
+      const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+      const body = Buffer.from('first\nsecond\nthird', 'utf-8');
+      await fs.writeFile(testFile, Buffer.concat([bom, body]));
+
+      const result = await readTool.execute({ filePath: testFile, offset: 1, limit: 10 }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        // Numbered output must NOT include a U+FEFF before "first".
+        expect(result.data.content).toContain('1: first');
+        expect(result.data.content).not.toMatch(/1: \ufefffirst/);
+      }
+    });
   });
 
   describe('whole-file size guard', () => {
