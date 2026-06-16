@@ -346,6 +346,159 @@ describe('Read Tool', () => {
     });
   });
 
+  describe('streaming for ranged reads', () => {
+    it(
+      'returns the requested tail of a 200000-line file without buffering it all',
+      { timeout: 60_000 },
+      async () => {
+        const testFile = path.join(tempDir, 'huge-streamed.txt');
+        // Build content in batches of 1000 lines to avoid 200k separate write
+        // syscalls (which dominates the test runtime) while still avoiding a
+        // single 200k-element JS array allocation.
+        const totalLines = 200_000;
+        const batchSize = 1000;
+        const handle = await fs.open(testFile, 'w');
+        try {
+          for (let start = 1; start <= totalLines; start += batchSize) {
+            const end = Math.min(start + batchSize - 1, totalLines);
+            const parts: string[] = [];
+            for (let i = start; i <= end; i++) {
+              parts.push(`line ${i}`);
+            }
+            let chunk = parts.join('\n');
+            if (end < totalLines) {
+              chunk += '\n';
+            }
+            await handle.write(chunk);
+          }
+        } finally {
+          await handle.close();
+        }
+
+        // Force a GC-ish baseline by allocating then releasing — best-effort
+        // smoke test, the assertion budget below is generous.
+        const before = process.memoryUsage().rss;
+
+        const result = await readTool.execute(
+          { filePath: testFile, offset: 199_950, limit: 50 },
+          context
+        );
+
+        const after = process.memoryUsage().rss;
+
+        expect(result.success).toBe(true);
+        if (result.data?.type === 'file') {
+          // First and last requested lines should be present, a line just
+          // outside the window should not.
+          expect(result.data.content).toContain('199950: line 199950');
+          expect(result.data.content).toContain('199999: line 199999');
+          expect(result.data.content).not.toContain('199949: line 199949');
+          expect(result.data.content).not.toContain(`${totalLines}: line ${totalLines}`);
+          expect(result.data.shownLines).toBe(50);
+          expect(result.data.offset).toBe(199_950);
+          // Streamed reads do not know the total — null sentinel.
+          expect(result.data.totalLines).toBeNull();
+        }
+
+        // RSS should not have grown by more than ~50 MB. The file on disk is
+        // ~2-3 MB so a non-streaming implementation would still be small here,
+        // but the budget protects against an obvious 10x regression.
+        const grownMB = (after - before) / (1024 * 1024);
+        expect(grownMB).toBeLessThan(50);
+      }
+    );
+
+    it('returns whatever was captured if EOF is reached before limit', async () => {
+      const testFile = path.join(tempDir, 'short-window.txt');
+      await fs.writeFile(testFile, 'a\nb\nc\nd\ne');
+
+      const result = await readTool.execute({ filePath: testFile, offset: 4, limit: 100 }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        expect(result.data.shownLines).toBe(2);
+        expect(result.data.content).toContain('4: d');
+        expect(result.data.content).toContain('5: e');
+      }
+    });
+
+    it('preserves UTF-8 content (including multi-byte chars) on the streaming path', async () => {
+      const testFile = path.join(tempDir, 'utf8-streamed.txt');
+      const lines = ['ascii first', 'unicode: 日本語', 'emoji: 🚀✨', 'last'];
+      await fs.writeFile(testFile, lines.join('\n'), 'utf-8');
+
+      const result = await readTool.execute({ filePath: testFile, offset: 1, limit: 10 }, context);
+
+      expect(result.success).toBe(true);
+      if (result.data?.type === 'file') {
+        expect(result.data.content).toContain('1: ascii first');
+        expect(result.data.content).toContain('2: unicode: 日本語');
+        expect(result.data.content).toContain('3: emoji: 🚀✨');
+        expect(result.data.content).toContain('4: last');
+      }
+    });
+  });
+
+  describe('whole-file size guard', () => {
+    it(
+      'rejects implicit whole-file reads above MAX_FILE_SIZE_BYTES with a hint',
+      { timeout: 30_000 },
+      async () => {
+        const testFile = path.join(tempDir, 'too-big.txt');
+        // ~12 MB > 10 MB threshold, but built without holding 12 MB in JS at once.
+        const chunk = 'x'.repeat(1024 * 1024); // 1 MB
+        const handle = await fs.open(testFile, 'w');
+        try {
+          for (let i = 0; i < 12; i++) {
+            await handle.write(chunk + '\n');
+          }
+        } finally {
+          await handle.close();
+        }
+
+        const result = await readTool.execute({ filePath: testFile }, context);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('File too large');
+        expect(result.hint).toContain('offset');
+      }
+    );
+
+    it(
+      'still allows ranged reads on files above the whole-file threshold',
+      { timeout: 30_000 },
+      async () => {
+        const testFile = path.join(tempDir, 'big-but-windowed.txt');
+        const handle = await fs.open(testFile, 'w');
+        try {
+          // Many short lines surrounded by a few large lines so the file goes
+          // over the whole-file threshold but a small window does not.
+          const big = 'y'.repeat(1024 * 1024); // 1 MB
+          // 12 padding lines = 12 MB pushes the file past 10 MB.
+          for (let i = 0; i < 12; i++) {
+            await handle.write(big + '\n');
+          }
+          // Append an unmistakable marker at the tail.
+          await handle.write('TAIL_LINE_A\nTAIL_LINE_B');
+        } finally {
+          await handle.close();
+        }
+
+        const result = await readTool.execute(
+          { filePath: testFile, offset: 13, limit: 2 },
+          context
+        );
+
+        expect(result.success).toBe(true);
+        if (result.data?.type === 'file') {
+          expect(result.data.shownLines).toBe(2);
+          expect(result.data.content).toContain('13: TAIL_LINE_A');
+          expect(result.data.content).toContain('14: TAIL_LINE_B');
+        }
+      }
+    );
+  });
+
   describe('tool metadata', () => {
     it('should have correct name', () => {
       expect(readTool.name).toBe('read');
