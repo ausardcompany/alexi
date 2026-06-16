@@ -11,7 +11,13 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { defineTool, type ToolResult } from '../index.js';
+import { defineTool, truncateOutput, type ToolResult } from '../index.js';
+
+// Hard cap on matches/symbols returned per query, to prevent context-window
+// blow-ups on broad queries over large repos. Aligns with grep.ts (1000) but
+// stricter for codesearch which also emits context lines per match.
+// Byte-level cap is enforced by truncateOutput (MAX_BYTES = 50KB).
+const MAX_MATCHES = 100;
 
 // ============ Types ============
 
@@ -55,6 +61,8 @@ export interface CodeSearchResult {
   symbols: CodeSymbol[];
   filesSearched: number;
   totalMatches: number;
+  truncated?: boolean;
+  hint?: string;
 }
 
 // ============ Schema ============
@@ -328,7 +336,9 @@ Examples:
 - Find usages of "useState": query="useState", searchType="content"
 - Find class definitions: searchType="symbol", symbolTypes=["class"]
 
-Returns matches with file location, content, context, and symbol information.`,
+Returns matches with file location, content, context, and symbol information.
+
+Returns at most ${MAX_MATCHES} matches per query; narrow with include for more.`,
 
   parameters: CodeSearchParamsSchema,
 
@@ -404,10 +414,29 @@ Returns matches with file location, content, context, and symbol information.`,
         return fileCompare !== 0 ? fileCompare : a.line - b.line;
       });
 
-      // Limit results
-      const limitedMatches = allMatches.slice(0, maxResults);
-      const limitedSymbols = allSymbols.slice(0, maxResults);
-      const truncated = allMatches.length > maxResults || allSymbols.length > maxResults;
+      // Apply hard cap (MAX_MATCHES) on top of caller-provided maxResults to
+      // prevent context-window blow-ups on broad queries.
+      const effectiveCap = Math.min(maxResults, MAX_MATCHES);
+      const limitedMatches = allMatches.slice(0, effectiveCap);
+      const limitedSymbols = allSymbols.slice(0, effectiveCap);
+      const matchTruncated = allMatches.length > effectiveCap || allSymbols.length > effectiveCap;
+
+      // Apply byte-level truncation to the formatted preview so callers that
+      // render the result cannot blow past MAX_BYTES (50KB).
+      const formatted = formatCodeSearchResults({
+        query,
+        searchType,
+        matches: limitedMatches,
+        symbols: limitedSymbols,
+        filesSearched: files.length,
+        totalMatches: allMatches.length + allSymbols.length,
+      });
+      const { truncated: byteTruncated } = truncateOutput(formatted);
+
+      const truncated = matchTruncated || byteTruncated;
+      const hint = truncated
+        ? 'Result truncated. Narrow the query with the include filter or a more specific pattern.'
+        : undefined;
 
       return {
         success: true,
@@ -418,11 +447,11 @@ Returns matches with file location, content, context, and symbol information.`,
           symbols: limitedSymbols,
           filesSearched: files.length,
           totalMatches: allMatches.length + allSymbols.length,
+          truncated,
+          hint,
         },
         truncated,
-        hint: truncated
-          ? `Results limited to ${maxResults}. Use more specific query or filters.`
-          : undefined,
+        hint,
       };
     } catch (err) {
       return {
