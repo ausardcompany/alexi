@@ -35,7 +35,7 @@ export const AgentSchema = z.object({
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
-// Updated agent creation logic reflecting new patterns from opencode
+// Agent definition with utilities
 export interface Agent extends AgentConfig {
   canUseTool(toolId: string): boolean;
 }

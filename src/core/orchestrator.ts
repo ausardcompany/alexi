@@ -29,7 +29,7 @@ export async function sendChat(
     modelId = (options?.modelOverride ?? getDefaultModel()).trim();
   }
 
-  // Improved orchestration logic with better error handling and processing
+  // Build messages array with history if session manager provided
   const messages: Array<{ role: string; content: string }> = [];
 
   if (options?.sessionManager) {
