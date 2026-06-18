@@ -97,34 +97,166 @@ const MAX_LINES = 2000;
 const MAX_BYTES = 51200; // 50KB
 
 /**
- * Truncate output if it exceeds limits
+ * Build the elision marker line that is inserted between the kept head and
+ * kept tail of a truncated output. The marker text reports both omitted
+ * lines and omitted bytes so the model can reason about how much was
+ * dropped (and follow up with `read` against the persisted file if needed).
+ */
+function buildElisionMarker(omittedLines: number, omittedBytes: number): string {
+  return `[... ${omittedLines} lines / ${omittedBytes} bytes elided ...]`;
+}
+
+/**
+ * Find the largest index `i` (i <= maxBytes) into `buf` such that `i` is
+ * either right after a `\n` byte or at a UTF-8 codepoint boundary. Used to
+ * snap a head slice back to the previous line boundary, falling back to a
+ * codepoint boundary if no newline is reachable inside the budget.
+ */
+function snapHeadToBoundary(buf: Buffer, maxBytes: number): number {
+  if (maxBytes <= 0) {
+    return 0;
+  }
+  if (maxBytes >= buf.length) {
+    return buf.length;
+  }
+
+  // Prefer snapping back to the last '\n' (byte 0x0A) within budget so we
+  // never cut a line in half.
+  for (let i = maxBytes; i > 0; i--) {
+    if (buf[i - 1] === 0x0a) {
+      return i;
+    }
+  }
+
+  // No newline reachable — fall back to a UTF-8 codepoint boundary. UTF-8
+  // continuation bytes match 0b10xxxxxx (0x80..0xBF). Walk back until the
+  // next byte is NOT a continuation byte.
+  let i = maxBytes;
+  while (i > 0 && (buf[i] & 0xc0) === 0x80) {
+    i--;
+  }
+  return i;
+}
+
+/**
+ * Find the smallest index `i` (i >= buf.length - maxBytes) into `buf` such
+ * that `i` is either right after a `\n` byte or at a UTF-8 codepoint
+ * boundary. Used to snap a tail slice start forward to the next line
+ * boundary, falling back to a codepoint boundary if no newline is
+ * reachable inside the budget.
+ */
+function snapTailToBoundary(buf: Buffer, maxBytes: number): number {
+  if (maxBytes <= 0) {
+    return buf.length;
+  }
+  if (maxBytes >= buf.length) {
+    return 0;
+  }
+
+  const minStart = buf.length - maxBytes;
+
+  // Prefer snapping forward to the byte right after a '\n' so the tail
+  // begins at the start of a complete line.
+  for (let i = minStart; i < buf.length; i++) {
+    if (i > 0 && buf[i - 1] === 0x0a) {
+      return i;
+    }
+  }
+
+  // No newline reachable — fall back to a UTF-8 codepoint boundary. Walk
+  // forward until `buf[i]` is NOT a continuation byte (0b10xxxxxx).
+  let i = minStart;
+  while (i < buf.length && (buf[i] & 0xc0) === 0x80) {
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Truncate output if it exceeds the line or byte budget, preserving BOTH
+ * the head and the tail of the output. Failure-relevant content (final
+ * assertion, last stack frame, "X tests failed" summary) lives at the END
+ * of long tool runs, so a head-only strategy clips the most useful part.
+ *
+ * Strategy:
+ * - If both budgets fit: return as-is, `truncated: false`.
+ * - If line count exceeds `MAX_LINES`: keep `floor(MAX_LINES/2)` head
+ *   lines and the remaining tail lines, joined with a single elision
+ *   marker line in the middle.
+ * - If the (possibly already line-truncated) result still exceeds
+ *   `MAX_BYTES`: split the byte budget roughly 50/50 between head and
+ *   tail, snapping each slice to a newline boundary (or a UTF-8 codepoint
+ *   boundary if no newline is reachable inside the budget) so we never
+ *   cut a line or codepoint in half. Concatenate as
+ *   `head + '\n' + marker + '\n' + tail`.
+ *
+ * The full original output is still persisted by `persistLargeOutput` so
+ * the truncated text is recoverable; this function only governs what is
+ * surfaced inline to the model.
  */
 function truncateOutput(output: string): { content: string; truncated: boolean } {
   const lines = output.split('\n');
-  const bytes = Buffer.byteLength(output, 'utf-8');
+  const totalBytes = Buffer.byteLength(output, 'utf-8');
 
-  if (lines.length <= MAX_LINES && bytes <= MAX_BYTES) {
+  if (lines.length <= MAX_LINES && totalBytes <= MAX_BYTES) {
     return { content: output, truncated: false };
   }
 
-  // Truncate by lines first
-  const truncatedLines = lines.slice(0, MAX_LINES);
-  let result = truncatedLines.join('\n');
+  let result = output;
 
-  // Then check bytes
+  // Line-budget head + tail truncation.
+  if (lines.length > MAX_LINES) {
+    const headCount = Math.floor(MAX_LINES / 2);
+    const tailCount = MAX_LINES - headCount;
+    const headLines = lines.slice(0, headCount);
+    const tailLines = lines.slice(lines.length - tailCount);
+    const elidedLines = lines.slice(headCount, lines.length - tailCount);
+    const omittedLineCount = elidedLines.length;
+    const omittedByteCount = Buffer.byteLength(elidedLines.join('\n'), 'utf-8');
+    const marker = buildElisionMarker(omittedLineCount, omittedByteCount);
+    result = [...headLines, marker, ...tailLines].join('\n');
+  }
+
+  // Byte-budget head + tail truncation. Either the line-truncated result
+  // is still too big, or the input fit in lines but exceeds bytes (e.g.
+  // a single very long line).
   if (Buffer.byteLength(result, 'utf-8') > MAX_BYTES) {
-    // Binary search for the right length
-    let left = 0;
-    let right = result.length;
-    while (left < right) {
-      const mid = Math.floor((left + right + 1) / 2);
-      if (Buffer.byteLength(result.slice(0, mid), 'utf-8') <= MAX_BYTES) {
-        left = mid;
-      } else {
-        right = mid - 1;
+    const buf = Buffer.from(result, 'utf-8');
+
+    // Reserve space for the elision marker plus its surrounding newlines.
+    // We can only finalise the marker text once we know how many bytes
+    // were elided, so first reserve a conservative upper bound, then
+    // recompute.
+    const markerOverhead = (marker: string): number => Buffer.byteLength(`\n${marker}\n`, 'utf-8');
+    const placeholderMarker = buildElisionMarker(buf.length, buf.length);
+    const reserved = markerOverhead(placeholderMarker);
+    const usable = Math.max(0, MAX_BYTES - reserved);
+    const headBudget = Math.floor(usable / 2);
+    const tailBudget = usable - headBudget;
+
+    const headEnd = snapHeadToBoundary(buf, headBudget);
+    const tailStart = snapTailToBoundary(buf, tailBudget);
+    // Guarantee head and tail do not overlap (can happen for tiny
+    // budgets). When they would, fall back to a head-only slice.
+    const safeTailStart = Math.max(tailStart, headEnd);
+    const headSlice = buf.subarray(0, headEnd);
+    const tailSlice = buf.subarray(safeTailStart);
+    const omittedBytes = Math.max(0, buf.length - headSlice.length - tailSlice.length);
+    // Approximate omitted lines from the elided byte slice.
+    const elidedSlice = buf.subarray(headEnd, safeTailStart);
+    let omittedLines = 0;
+    for (const byte of elidedSlice) {
+      if (byte === 0x0a) {
+        omittedLines++;
       }
     }
-    result = result.slice(0, left);
+    const finalMarker = buildElisionMarker(omittedLines, omittedBytes);
+    result = `${headSlice.toString('utf-8')}\n${finalMarker}\n${tailSlice.toString('utf-8')}`;
+
+    // If the recomputed marker is shorter than the placeholder we may now
+    // have a few free bytes; we deliberately do not try to grow head/tail
+    // to claim them — the simpler structure is easier to reason about and
+    // the persisted full output is the source of truth.
   }
 
   return { content: result, truncated: true };
