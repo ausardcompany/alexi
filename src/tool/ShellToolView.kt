@@ -8,8 +8,15 @@ import javax.swing.JPanel
 
 class ShellToolView(
     tool: Tool,
-    selection: SessionSelection? = null,
-) : SecondarySessionPartView(tool.id, { JPanel() }) {
+    private val selection: SessionSelection? = null,
+) : SecondarySessionPartView(tool.id, { JPanel() }), UiDataProvider {
+
+    override fun uiDataSnapshot(sink: DataSink) {
+        selection?.provideCopy(sink) { "Markdown content" ?: fallbackText() }
+    }
+
+    private fun fallbackText() = "Fallback content"
+}
 
     init {
         // Initialization code here
