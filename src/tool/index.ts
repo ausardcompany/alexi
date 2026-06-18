@@ -128,7 +128,7 @@ function snapHeadToBoundary(buf: Buffer, maxBytes: number): number {
     }
   }
 
-  // No newline reachable — fall back to a UTF-8 codepoint boundary. UTF-8
+  // No newline reachable - fall back to a UTF-8 codepoint boundary. UTF-8
   // continuation bytes match 0b10xxxxxx (0x80..0xBF). Walk back until the
   // next byte is NOT a continuation byte.
   let i = maxBytes;
@@ -163,7 +163,7 @@ function snapTailToBoundary(buf: Buffer, maxBytes: number): number {
     }
   }
 
-  // No newline reachable — fall back to a UTF-8 codepoint boundary. Walk
+  // No newline reachable - fall back to a UTF-8 codepoint boundary. Walk
   // forward until `buf[i]` is NOT a continuation byte (0b10xxxxxx).
   let i = minStart;
   while (i < buf.length && (buf[i] & 0xc0) === 0x80) {
@@ -255,7 +255,7 @@ function truncateOutput(output: string): { content: string; truncated: boolean }
 
     // If the recomputed marker is shorter than the placeholder we may now
     // have a few free bytes; we deliberately do not try to grow head/tail
-    // to claim them — the simpler structure is easier to reason about and
+    // to claim them - the simpler structure is easier to reason about and
     // the persisted full output is the source of truth.
   }
 

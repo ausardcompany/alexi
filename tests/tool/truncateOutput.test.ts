@@ -53,14 +53,14 @@ describe('truncateOutput', () => {
     it('preserves the LAST line (failing assertion case)', () => {
       const total = MAX_LINES + overflow;
       const lines = Array.from({ length: total - 1 }, (_, i) => `setup line ${i + 1}`);
-      lines.push('AssertionError: expected 1 to equal 2 — FAILED');
+      lines.push('AssertionError: expected 1 to equal 2 -- FAILED');
       const output = lines.join('\n');
 
       const result = truncateOutput(output);
 
       expect(result.truncated).toBe(true);
       const tailLine = result.content.split('\n').pop();
-      expect(tailLine).toBe('AssertionError: expected 1 to equal 2 — FAILED');
+      expect(tailLine).toBe('AssertionError: expected 1 to equal 2 -- FAILED');
     });
 
     it('reports omitted line and byte counts in the elision marker', () => {
@@ -123,13 +123,11 @@ describe('truncateOutput', () => {
     });
 
     it('does not split UTF-8 codepoints when snapping head/tail', () => {
-      // A long stream of 4-byte emoji codepoints with no newlines. If we
-      // sliced by raw byte index without snapping to a codepoint
-      // boundary, the resulting string would contain the U+FFFD
+      // A long stream of 4-byte emoji codepoints (U+1F680 ROCKET) with no
+      // newlines. If we sliced by raw byte index without snapping to a
+      // codepoint boundary, the resulting string would contain the U+FFFD
       // replacement character.
-      const emoji = 'rocket'; // 4 bytes in UTF-8
       const filler = '\uD83D\uDE80'.repeat(Math.ceil(MAX_BYTES / 2)); // ~MAX_BYTES * 2 bytes
-      void emoji;
 
       const result = truncateOutput(filler);
 
