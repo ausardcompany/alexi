@@ -151,7 +151,7 @@ export class McpClientManager {
 
     // Default `properties` to `{}` when the schema declares an object type but
     // omits it. We deliberately do NOT rewrite schemas that already have
-    // `properties` set (even to a truthy non-object value) — those are the
+    // `properties` set (even to a truthy non-object value) -- those are the
     // user's responsibility.
     const schemaType = (inputSchema as { type?: unknown }).type;
     const isObjectType =
