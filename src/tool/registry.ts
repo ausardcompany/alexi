@@ -4,6 +4,8 @@
  */
 import type { Tool } from './index.js';
 
+// Refactor tool registry with upstream patterns
+
 // updated registry logic
 // Re-export the registry-name accessor used by the permission system to
 // cross-check deny-rule tool entries against the actual registered tools.

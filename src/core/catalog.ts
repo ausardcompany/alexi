@@ -4,6 +4,9 @@
  */
 import { z } from 'zod';
 
+export type Loader = (update: (ctx: Context) => void) => Effect<void>;
+
+// Implement loader logic
 export const ModelCapability = z.enum([
   'text',
   'vision',
