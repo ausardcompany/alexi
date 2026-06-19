@@ -120,6 +120,14 @@ export class McpClientManager {
 
   /**
    * Map a raw MCP tool to McpToolInfo, tolerating malformed schemas.
+   *
+   * Also normalizes object schemas that omit `properties` to an empty object,
+   * because OpenAI-shaped function-tool registration (used by SAP AI Core
+   * deployments) rejects the entire `tools` payload when an object schema
+   * lacks `properties`. Spec-compliant MCP servers (e.g. the official
+   * `@modelcontextprotocol/server-time`) emit `{ type: 'object' }` with no
+   * `properties` for zero-arg tools; without this fix the whole server
+   * silently disables for that session. See opencode `25cb2be6`.
    */
   private mapToolInfo(
     tool: { name: string; description?: string; inputSchema: unknown },
@@ -139,6 +147,17 @@ export class McpClientManager {
         type: 'object',
         properties: {},
       };
+    }
+
+    // Default `properties` to `{}` when the schema declares an object type but
+    // omits it. We deliberately do NOT rewrite schemas that already have
+    // `properties` set (even to a truthy non-object value) — those are the
+    // user's responsibility.
+    const schemaType = (inputSchema as { type?: unknown }).type;
+    const isObjectType =
+      schemaType === 'object' || (Array.isArray(schemaType) && schemaType.includes('object'));
+    if (isObjectType && (inputSchema as { properties?: unknown }).properties === undefined) {
+      inputSchema = { ...inputSchema, properties: {} };
     }
 
     return {
