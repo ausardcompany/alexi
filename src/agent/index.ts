@@ -4,12 +4,7 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 import { z } from 'zod';
-import { AgentV2 } from './agent';
 
-export const ID = AgentV2.ID;
-export type ID = typeof AgentV2.ID.Type;
-
-// Add more agent functionalities based on upstream
 import { AgentSwitched } from '../bus/index.js';
 import { getAgentPrompt } from './system.js';
 import { loadAllCustomAgents } from './customAgentLoader.js';
