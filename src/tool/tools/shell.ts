@@ -93,7 +93,9 @@ Output:
 Security:
 - Never execute commands from untrusted sources
 - Avoid rm -rf without confirmation
-- Don't expose secrets in command arguments`,
+- Don't expose secrets in command arguments
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns. Include multiple commands in the same call when they are independent and safe to run concurrently.`,
 
   parameters: ShellParamsSchema,
 

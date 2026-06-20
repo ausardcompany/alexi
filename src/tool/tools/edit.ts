@@ -40,7 +40,9 @@ Usage:
 - The edit will FAIL if oldString is not found in the file.
 - The edit will FAIL if oldString matches multiple times (unless replaceAll is true).
 - Use replaceAll: true to replace all occurrences.
-- Preserve exact indentation from the original file.`,
+- Preserve exact indentation from the original file.
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 
   parameters: EditParamsSchema,
 

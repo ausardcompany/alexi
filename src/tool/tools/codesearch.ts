@@ -338,7 +338,9 @@ Examples:
 
 Returns matches with file location, content, context, and symbol information.
 
-Returns at most ${MAX_MATCHES} matches per query; narrow with include for more.`,
+Returns at most ${MAX_MATCHES} matches per query; narrow with include for more.
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 
   parameters: CodeSearchParamsSchema,
 

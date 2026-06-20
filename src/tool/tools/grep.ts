@@ -523,7 +523,9 @@ Usage:
 - Returns file paths and line numbers with at least one match
 - Results are sorted by modification time
 - When you are doing an open-ended search where you do not know the exact symbol name, use the \`codebase_search\` tool first to narrow down the search scope, then follow up with \`grep\` and/or \`read\`
-- Uses ripgrep (\`rg\`) as a fast path when available; set \`ALEXI_DISABLE_RG=1\` to force the JS implementation`,
+- Uses ripgrep (\`rg\`) as a fast path when available; set \`ALEXI_DISABLE_RG=1\` to force the JS implementation
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 
   parameters: GrepParamsSchema,
 

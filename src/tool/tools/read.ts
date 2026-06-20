@@ -167,7 +167,9 @@ Usage:
 - By default, returns up to 2000 lines from the start of the file.
 - Use offset to read from a specific line.
 - For directories, returns a list of entries.
-- Lines are prefixed with line numbers like "1: content".`,
+- Lines are prefixed with line numbers like "1: content".
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 
   parameters: ReadParamsSchema,
 
