@@ -6,6 +6,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawn, type ChildProcess } from 'child_process';
+import path from 'path';
 import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
 
 export interface McpToolInfo {
@@ -179,11 +180,27 @@ export class McpClientManager {
       ...resolveEnvVars(config.env),
     };
 
-    // Spawn the MCP server process
-    const proc = spawn(config.command, config.args || [], {
+    // Resolve optional working directory for the stdio server. Relative
+    // paths are resolved against options.workdir (or process.cwd() if
+    // not supplied). When undefined, the cwd key is omitted so the child
+    // inherits the parent process cwd (preserves prior behaviour).
+    const baseDir = options?.workdir ?? process.cwd();
+    const resolvedCwd = config.cwd
+      ? path.isAbsolute(config.cwd)
+        ? config.cwd
+        : path.resolve(baseDir, config.cwd)
+      : undefined;
+
+    const spawnOptions: Parameters<typeof spawn>[2] = {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    };
+    if (resolvedCwd !== undefined) {
+      spawnOptions.cwd = resolvedCwd;
+    }
+
+    // Spawn the MCP server process
+    const proc = spawn(config.command, config.args || [], spawnOptions);
 
     connection.process = proc;
 
