@@ -9,6 +9,62 @@ import { SessionManager } from '../../core/sessionManager.js';
 import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
 import { getConfigDefaultAgent } from '../../config/userConfig.js';
 import { getAgentRegistry } from '../../agent/index.js';
+import {
+  type Command as CustomCommand,
+  renderSubmitPrompt,
+  getCommandRegistry,
+} from '../../command/index.js';
+
+/**
+ * Result of running a custom command in non-interactive (chat) mode.
+ *
+ * `submitPrompt`, when present, is the *resolved* follow-up prompt the
+ * command would have queued in the interactive REPL. Non-interactive
+ * callers MUST NOT auto-submit it — chat is one-shot — but should surface
+ * `hint` so the user knows the command intended a follow-up turn and can
+ * re-run with the `alexi` REPL to chain it.
+ */
+export interface NonInteractiveCommandResult {
+  rendered: string;
+  submitPrompt?: string;
+  hint?: string;
+}
+
+/**
+ * Hint surfaced to non-interactive chat callers when a custom command's
+ * `submitPrompt` is ignored. Exported as a constant so tests and other
+ * callers can match on it without re-typing the string.
+ */
+export const SUBMIT_PROMPT_NON_INTERACTIVE_HINT =
+  'submitPrompt was ignored in non-interactive mode; use `alexi` REPL to chain commands';
+
+/**
+ * Run a custom command in non-interactive (chat) mode and surface a hint
+ * when the command declares a `submitPrompt` follow-up. Does NOT
+ * auto-submit — chat is one-shot.
+ *
+ * Exported so tests and other non-interactive entry points can assert on
+ * the hint without booting the full Commander pipeline.
+ */
+export async function runCommandNonInteractive(
+  commandName: string,
+  args: string[]
+): Promise<NonInteractiveCommandResult> {
+  const registry = getCommandRegistry();
+  const rendered = await registry.execute(commandName, args);
+  const command = registry.get(commandName) as CustomCommand | undefined;
+  const submitPrompt = command
+    ? renderSubmitPrompt(command, args, registry.getWorkdir())
+    : undefined;
+  if (submitPrompt && submitPrompt.trim().length > 0) {
+    return {
+      rendered,
+      submitPrompt,
+      hint: SUBMIT_PROMPT_NON_INTERACTIVE_HINT,
+    };
+  }
+  return { rendered };
+}
 
 interface ChatOptions {
   message?: string;

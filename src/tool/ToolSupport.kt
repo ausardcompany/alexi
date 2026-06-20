@@ -1,0 +1,1 @@
+val center = JPanel(BorderLayout(UiStyle.Gap.md(), 0)).apply { isOpaque = false }

@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import { createReadStream } from 'fs';
+import * as readline from 'readline';
 import * as path from 'path';
 import { defineTool, truncateOutput, MAX_LINES, type ToolResult } from '../index.js';
 import {
@@ -27,7 +28,13 @@ interface ReadFileResult {
   type: 'file';
   path: string;
   content: string;
-  totalLines: number;
+  /**
+   * Total number of lines in the file. For ranged reads (caller supplied an
+   * `offset` and/or `limit`) this is `null` because we stream the file rather
+   * than loading it into memory, so an exact count would require a second
+   * pass. Callers can rely on `eof` / `nextOffset` (in the hint) instead.
+   */
+  totalLines: number | null;
   shownLines: number;
   offset: number;
   partial?: boolean;
@@ -49,49 +56,106 @@ export function getFileEncoding(filePath: string): EncodingInfo | undefined {
 }
 
 /**
- * Read file with streaming for better UTF-8 handling and memory efficiency
+ * Maximum file size for implicit whole-file reads (no offset/limit). Files
+ * above this threshold must be read with an explicit offset/limit so the
+ * streaming path is used and the whole file is never buffered into memory.
  */
-async function readFileStreaming(
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Number of bytes read from the head of the file purely to detect encoding
+ * (BOM markers, UTF-8 fallback) before streaming the rest of the file.
+ */
+const ENCODING_PROBE_BYTES = 64 * 1024; // 64 KB
+
+/**
+ * Read up to `ENCODING_PROBE_BYTES` from the head of the file so we can
+ * detect the encoding (and binary-ness) without buffering the whole file.
+ */
+async function readEncodingProbe(filePath: string): Promise<Buffer> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(ENCODING_PROBE_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, ENCODING_PROBE_BYTES, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+interface StreamedLines {
+  /** Captured 1-based slice [offset, offset+limit-1]. */
+  lines: string[];
+  /** Last 1-based line number scanned (== total lines if eof). */
+  totalLinesScanned: number;
+  /** True if the stream reached end-of-file before `limit` lines were captured. */
+  eof: boolean;
+}
+
+/**
+ * Stream a file line-by-line and return the requested 1-based [offset,
+ * offset+limit-1] window without buffering the whole file. Lines are decoded
+ * from the supplied encoding when Node accepts it directly; otherwise raw
+ * UTF-8 is assumed (matches `decodeWithEncoding`'s fallback).
+ *
+ * NOTE: `totalLinesScanned` only equals the file's true total line count
+ * when `eof === true`. For ranged reads we never re-scan the tail of the
+ * file just to compute a total; callers should use `eof` instead.
+ */
+async function readLinesStreaming(
   filePath: string,
-  options?: { offset?: number; limit?: number; maxBytes?: number }
-): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    const maxBytes = options?.maxBytes;
+  opts: { offset: number; limit: number; encoding: EncodingInfo }
+): Promise<StreamedLines> {
+  const { offset, limit, encoding } = opts;
+  const startIdx = Math.max(1, offset);
+  const endIdx = startIdx + limit - 1;
 
-    const stream = createReadStream(filePath, {
-      encoding: undefined, // Read as Buffer for proper UTF-8 handling
-      start: options?.offset ? options.offset - 1 : undefined,
-      end: options?.limit && options?.offset ? options.offset + options.limit - 1 : undefined,
-    });
+  // readline accepts a small set of named encodings via stream.setEncoding.
+  // For everything else we let readline operate on Buffer chunks (default)
+  // and rely on the UTF-8 fallback path used elsewhere in this module.
+  const stream = createReadStream(filePath);
+  const nodeEncoding: 'utf-8' | 'utf16le' =
+    encoding.encoding === 'utf-16le' || encoding.encoding === 'utf16le' ? 'utf16le' : 'utf-8';
+  stream.setEncoding(nodeEncoding);
 
-    stream.on('data', (chunk: Buffer) => {
-      if (maxBytes && totalBytes + chunk.length > maxBytes) {
-        // Only take what we need to reach maxBytes
-        const remaining = maxBytes - totalBytes;
-        if (remaining > 0) {
-          chunks.push(chunk.subarray(0, remaining));
-        }
-        stream.destroy(); // Stop reading
-      } else {
-        chunks.push(chunk);
-        totalBytes += chunk.length;
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+  const captured: string[] = [];
+  let lineNo = 0;
+  let eof = true;
+
+  try {
+    for await (const line of rl) {
+      lineNo++;
+      if (lineNo < startIdx) {
+        continue;
       }
-    });
+      if (lineNo > endIdx) {
+        // We have all requested lines; close the stream early so we don't
+        // continue reading the rest of the file.
+        eof = false;
+        break;
+      }
+      captured.push(line);
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
 
-    stream.on('end', () => {
-      const buffer = Buffer.concat(chunks);
-      resolve(buffer);
-    });
+  // Strip a leading BOM character that readline may have surfaced as part of
+  // the very first line when the file started with a UTF-8 BOM.
+  if (
+    captured.length > 0 &&
+    encoding.hasBOM &&
+    encoding.encoding === 'utf-8' &&
+    startIdx === 1 &&
+    captured[0].charCodeAt(0) === 0xfeff
+  ) {
+    captured[0] = captured[0].slice(1);
+  }
 
-    stream.on('close', () => {
-      const buffer = Buffer.concat(chunks);
-      resolve(buffer);
-    });
-
-    stream.on('error', reject);
-  });
+  return { lines: captured, totalLinesScanned: lineNo, eof };
 }
 
 export const readTool = defineTool<typeof ReadParamsSchema, ReadResult>({
@@ -185,57 +249,106 @@ Usage:
         return officeResult;
       }
 
-      // Read file
-      // Use streaming for better UTF-8 handling
-      const buffer = await readFileStreaming(filePath);
+      // Probe the head of the file once so we can both classify it as binary
+      // and detect the encoding without loading the whole file into memory.
+      const probe = await readEncodingProbe(filePath);
 
-      // Check for binary first
-      if (isBinaryFile(buffer)) {
+      if (isBinaryFile(probe)) {
         return {
           success: false,
           error: `Cannot read binary file: ${filePath}`,
         };
       }
 
-      // Detect and decode with proper encoding
-      const encoding = detectEncoding(buffer);
-      const content = decodeWithEncoding(buffer, encoding);
-
+      const encoding = detectEncoding(probe);
       // Cache encoding for write operations
       fileEncodings.set(filePath, encoding);
 
-      const lines = content.split('\n');
-      const totalLines = lines.length;
+      const isImplicitWholeFileRead = params.offset === undefined && params.limit === undefined;
 
+      if (isImplicitWholeFileRead) {
+        // Whole-file path keeps the existing semantics (exact totalLines,
+        // PARTIAL view hint when truncated) but is gated on file size to
+        // protect heap usage. Ranged reads bypass this limit because they
+        // are bounded by `limit`.
+        if (stat.size > MAX_FILE_SIZE_BYTES) {
+          return {
+            success: false,
+            error: 'File too large for whole-file read; pass an explicit offset/limit',
+            hint: 'Use the ranged form: read(path, offset, limit)',
+          };
+        }
+
+        const buffer = await fs.readFile(filePath);
+        const content = decodeWithEncoding(buffer, encoding);
+
+        const lines = content.split('\n');
+        const totalLines = lines.length;
+
+        const offset = 1;
+        const limit = MAX_LINES;
+        const startIdx = 0;
+        const endIdx = Math.min(startIdx + limit, lines.length);
+        const selectedLines = lines.slice(startIdx, endIdx);
+
+        const numberedLines = selectedLines.map((line, i) => `${startIdx + i + 1}: ${line}`);
+        const output = numberedLines.join('\n');
+        const { content: truncated, truncated: wasTruncated } = truncateOutput(output);
+
+        const isPartialView = wasTruncated;
+        const nextOffset = endIdx + 1;
+
+        let hint: string | undefined;
+        if (isPartialView) {
+          hint = `PARTIAL view — file has ${totalLines} lines, showing 1..${endIdx}. Call read again with offset=${nextOffset} to continue.`;
+        } else if (wasTruncated) {
+          hint = `Output truncated. Use offset=${nextOffset} to continue reading.`;
+        }
+
+        const fileResult: ToolResult<ReadResult> = {
+          success: true,
+          data: {
+            type: 'file',
+            path: filePath,
+            content: truncated,
+            totalLines,
+            shownLines: selectedLines.length,
+            offset,
+            ...(isPartialView ? { partial: true } : {}),
+          },
+          truncated: wasTruncated,
+          hint,
+        };
+        attachAgentsMdReminders(fileResult, filePath, context);
+        return fileResult;
+      }
+
+      // Ranged read: stream the file line-by-line so memory stays bounded by
+      // `limit` rather than the file size.
       const offset = Math.max(1, params.offset ?? 1);
       const limit = params.limit ?? MAX_LINES;
 
-      // Extract requested lines
-      const startIdx = offset - 1;
-      const endIdx = Math.min(startIdx + limit, lines.length);
-      const selectedLines = lines.slice(startIdx, endIdx);
+      const { lines: selectedLines, eof } = await readLinesStreaming(filePath, {
+        offset,
+        limit,
+        encoding,
+      });
 
-      // Add line numbers
+      const startIdx = offset - 1;
       const numberedLines = selectedLines.map((line, i) => `${startIdx + i + 1}: ${line}`);
 
       const output = numberedLines.join('\n');
       const { content: truncated, truncated: wasTruncated } = truncateOutput(output);
 
-      // Implicit whole-file read: caller did not specify offset or limit.
-      const isImplicitWholeFileRead = params.offset === undefined && params.limit === undefined;
-      const isPartialView = wasTruncated && isImplicitWholeFileRead;
-
-      // Compute the next offset for resumed reads. When the rendered output is
-      // truncated by line budget we may have shown fewer than `selectedLines.length`
-      // lines, but for both branches `endIdx + 1` is the next 1-indexed line that
-      // was not yet shown (capped by `Math.min` against `lines.length` above).
-      const nextOffset = endIdx + 1;
+      // Compute the next 1-indexed line that was not yet shown. If the stream
+      // reached EOF and we already got all the lines, there is no next page.
+      const nextOffset = startIdx + selectedLines.length + 1;
 
       let hint: string | undefined;
-      if (isPartialView) {
-        hint = `PARTIAL view — file has ${totalLines} lines, showing 1..${endIdx}. Call read again with offset=${nextOffset} to continue.`;
-      } else if (wasTruncated) {
+      if (wasTruncated) {
         hint = `Output truncated. Use offset=${nextOffset} to continue reading.`;
+      } else if (!eof) {
+        hint = `Continue reading with offset=${nextOffset}.`;
       }
 
       const fileResult: ToolResult<ReadResult> = {
@@ -244,10 +357,11 @@ Usage:
           type: 'file',
           path: filePath,
           content: truncated,
-          totalLines,
+          // Streamed reads do not know the file's total line count without a
+          // second pass; expose null and let callers rely on the hint.
+          totalLines: null,
           shownLines: selectedLines.length,
           offset,
-          ...(isPartialView ? { partial: true } : {}),
         },
         truncated: wasTruncated,
         hint,

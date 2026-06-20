@@ -60,6 +60,15 @@ describe('McpClientManager', () => {
     vi.clearAllMocks();
     manager = new McpClientManager();
     mockSpawn.mockReturnValue(createMockProcess());
+    // `vi.restoreAllMocks` in afterEach wipes the StdioClientTransport
+    // implementation, so reinstate it before each test. Use a regular
+    // function so it can be invoked with `new`.
+    vi.mocked(StdioClientTransport).mockImplementation(function () {
+      return {} as unknown as InstanceType<typeof StdioClientTransport>;
+    });
+    mockClientConnect.mockResolvedValue(undefined);
+    mockClientListTools.mockResolvedValue({ tools: [] });
+    mockClientClose.mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
@@ -295,6 +304,106 @@ describe('McpClientManager', () => {
       const spawnOptions = spawnArgs[2] as Record<string, unknown>;
       expect(spawnOptions).toBeDefined();
       expect('cwd' in spawnOptions).toBe(false);
+    });
+  });
+
+  describe('inputSchema normalization', () => {
+    it('should default missing properties to {} when schema type is "object"', async () => {
+      mockClientListTools.mockResolvedValueOnce({
+        tools: [
+          {
+            name: 'get_current_time',
+            description: 'Returns the current time',
+            inputSchema: { type: 'object' },
+          },
+        ],
+      });
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.status).toBe('connected');
+      expect(connection.tools).toHaveLength(1);
+      expect(connection.tools[0].inputSchema).toEqual({
+        type: 'object',
+        properties: {},
+      });
+    });
+
+    it('should default missing properties to {} when schema type array includes "object"', async () => {
+      mockClientListTools.mockResolvedValueOnce({
+        tools: [
+          {
+            name: 'maybe_object',
+            inputSchema: { type: ['object', 'null'] },
+          },
+        ],
+      });
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.tools[0].inputSchema).toEqual({
+        type: ['object', 'null'],
+        properties: {},
+      });
+    });
+
+    it('should preserve existing properties when already set', async () => {
+      mockClientListTools.mockResolvedValueOnce({
+        tools: [
+          {
+            name: 'has_props',
+            inputSchema: {
+              type: 'object',
+              properties: { foo: { type: 'string' } },
+              required: ['foo'],
+            },
+          },
+        ],
+      });
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.tools[0].inputSchema).toEqual({
+        type: 'object',
+        properties: { foo: { type: 'string' } },
+        required: ['foo'],
+      });
+    });
+
+    it('should leave non-object schemas alone (no properties injected)', async () => {
+      mockClientListTools.mockResolvedValueOnce({
+        tools: [
+          {
+            name: 'string_tool',
+            inputSchema: { type: 'string' },
+          },
+        ],
+      });
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.tools[0].inputSchema).toEqual({ type: 'string' });
+      expect(
+        (connection.tools[0].inputSchema as { properties?: unknown }).properties
+      ).toBeUndefined();
+    });
+
+    it('should fall back to permissive default for malformed (non-object) schemas', async () => {
+      mockClientListTools.mockResolvedValueOnce({
+        tools: [
+          {
+            name: 'broken',
+            inputSchema: null as unknown,
+          },
+        ],
+      });
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.tools[0].inputSchema).toEqual({
+        type: 'object',
+        properties: {},
+      });
     });
   });
 });

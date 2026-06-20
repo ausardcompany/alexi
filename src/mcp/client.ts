@@ -58,6 +58,42 @@ const CACHE_TTL_MS = 30000; // 30 seconds
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
 
+/**
+ * Format a single MCP content part into a string suitable for the model.
+ *
+ * - `text` parts pass through their text verbatim.
+ * - `image` parts render as `[image: <mime>, <bytes> bytes omitted]` so the
+ *   model knows an image was returned without flooding context with base64.
+ * - `resource` parts render as `[resource: <uri>]` so the model can reference
+ *   the file/URI that was returned.
+ * - Any other type falls back to `JSON.stringify(part)` to avoid silent loss.
+ */
+export function formatContentPart(part: unknown): string {
+  const p = part as {
+    type?: string;
+    text?: string;
+    mimeType?: string;
+    data?: string;
+    uri?: string;
+    resource?: { uri?: string };
+  };
+  switch (p.type) {
+    case 'text':
+      return typeof p.text === 'string' ? p.text : '';
+    case 'image': {
+      const mime = p.mimeType ?? 'unknown';
+      const bytes = typeof p.data === 'string' ? Math.floor((p.data.length * 3) / 4) : 0;
+      return `[image: ${mime}, ${bytes} bytes omitted]`;
+    }
+    case 'resource': {
+      const uri = p.resource?.uri ?? p.uri ?? 'unknown';
+      return `[resource: ${uri}]`;
+    }
+    default:
+      return JSON.stringify(part);
+  }
+}
+
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
@@ -85,6 +121,14 @@ export class McpClientManager {
 
   /**
    * Map a raw MCP tool to McpToolInfo, tolerating malformed schemas.
+   *
+   * Also normalizes object schemas that omit `properties` to an empty object,
+   * because OpenAI-shaped function-tool registration (used by SAP AI Core
+   * deployments) rejects the entire `tools` payload when an object schema
+   * lacks `properties`. Spec-compliant MCP servers (e.g. the official
+   * `@modelcontextprotocol/server-time`) emit `{ type: 'object' }` with no
+   * `properties` for zero-arg tools; without this fix the whole server
+   * silently disables for that session. See opencode `25cb2be6`.
    */
   private mapToolInfo(
     tool: { name: string; description?: string; inputSchema: unknown },
@@ -104,6 +148,17 @@ export class McpClientManager {
         type: 'object',
         properties: {},
       };
+    }
+
+    // Default `properties` to `{}` when the schema declares an object type but
+    // omits it. We deliberately do NOT rewrite schemas that already have
+    // `properties` set (even to a truthy non-object value) — those are the
+    // user's responsibility.
+    const schemaType = (inputSchema as { type?: unknown }).type;
+    const isObjectType =
+      schemaType === 'object' || (Array.isArray(schemaType) && schemaType.includes('object'));
+    if (isObjectType && (inputSchema as { properties?: unknown }).properties === undefined) {
+      inputSchema = { ...inputSchema, properties: {} };
     }
 
     return {
@@ -460,21 +515,19 @@ export class McpClientManager {
         return { success: true, result: text };
       }
 
-      // Extract text content from result
-      const content = (result.content || []) as Array<{ type: string; text?: string }>;
-      const textContent = content
-        .filter(
-          (c): c is { type: 'text'; text: string } =>
-            c.type === 'text' && typeof c.text === 'string'
-        )
-        .map((c) => c.text)
-        .join('\n');
+      // Extract content from result, preserving non-text parts as compact
+      // placeholders so the model can reason about structured failures
+      // (e.g. an MCP error that returns text + a `resource` link to the
+      // offending file). Spec-compliant MCP servers routinely return mixed
+      // content arrays; filtering them to text-only loses critical context.
+      const content = (result.content || []) as unknown[];
+      const flattened = content.map(formatContentPart).join('\n');
 
       if (result.isError) {
-        return { success: false, error: textContent || 'Unknown error' };
+        return { success: false, error: flattened || 'Unknown error' };
       }
 
-      return { success: true, result: textContent };
+      return { success: true, result: flattened };
     } catch (error) {
       clearTimeout(timer);
       if (error instanceof Error && error.name === 'AbortError') {

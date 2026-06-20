@@ -4,6 +4,7 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 import { z } from 'zod';
+
 import { AgentSwitched } from '../bus/index.js';
 import { getAgentPrompt } from './system.js';
 import { loadAllCustomAgents } from './customAgentLoader.js';
@@ -35,7 +36,7 @@ export const AgentSchema = z.object({
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
-// Agent definition with utilities
+// Updated agent creation logic reflecting new patterns from opencode
 export interface Agent extends AgentConfig {
   canUseTool(toolId: string): boolean;
 }

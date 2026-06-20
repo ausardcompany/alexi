@@ -91,6 +91,40 @@ export interface ReplState {
   repoMapManager?: RepoMapManager;
   rl?: readline.Interface;
   keypressHandler?: KeypressHandler;
+  /**
+   * FIFO queue of follow-up prompts that should be replayed as the next
+   * user turn(s). Populated by {@link enqueueSubmitPrompt} after a
+   * command renders a non-empty `submitPrompt`. Drained by the line
+   * handler before the user is prompted again, so a chained command
+   * follow-up arrives without requiring a copy/paste.
+   */
+  submitPromptQueue?: string[];
+}
+
+/**
+ * Enqueue a follow-up prompt to be replayed as the next user turn in the
+ * interactive REPL. Pushed onto {@link ReplState.submitPromptQueue}; the
+ * line handler drains the queue before re-displaying the prompt.
+ *
+ * Empty / whitespace-only prompts are ignored to keep the queue free of
+ * no-op turns. A truncated preview is printed to stdout so the user can
+ * see what was queued.
+ *
+ * Exported so unit tests can drive the enqueue path without booting the
+ * full REPL, and so external code (custom slash commands once they're
+ * routed through `handleCommand`) can chain follow-ups.
+ */
+export function enqueueSubmitPrompt(state: ReplState, prompt: string | undefined): boolean {
+  if (!prompt || !prompt.trim()) {
+    return false;
+  }
+  if (!state.submitPromptQueue) {
+    state.submitPromptQueue = [];
+  }
+  state.submitPromptQueue.push(prompt);
+  const preview = prompt.length > 80 ? `${prompt.slice(0, 80)}...` : prompt;
+  console.log(c('cyan', `\n  [command] queued follow-up: ${preview}\n`));
+  return true;
 }
 
 // Spinner animation frames
@@ -2378,12 +2412,32 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     keypressHandler.setCurrentLineContent(currentLine);
   });
 
-  rl.on('line', async (line) => {
-    const input = line.trim();
+  /**
+   * Pop the next queued follow-up (`submitPrompt`) when the user submits an
+   * empty line. Queued follow-ups are NOT injected automatically over a
+   * non-empty user turn — that would surprise the user mid-typing — but the
+   * common case (command renders, user hits Enter) replays the queued
+   * prompt as the next turn.
+   */
+  const drainSubmitPromptQueue = (): string | undefined => {
+    return state.submitPromptQueue?.shift();
+  };
 
+  rl.on('line', async (line) => {
+    let input = line.trim();
+
+    // If the user hits Enter on an empty prompt and a follow-up was queued
+    // (e.g. by a command's `submitPrompt`), replay it as the next turn.
     if (!input) {
-      rl.prompt();
-      return;
+      const queued = drainSubmitPromptQueue();
+      if (queued) {
+        input = queued.trim();
+        // Echo the queued prompt so the transcript shows what got submitted.
+        console.log(c('dim', `  [auto] ${input.length > 80 ? input.slice(0, 80) + '...' : input}`));
+      } else {
+        rl.prompt();
+        return;
+      }
     }
 
     // Handle slash commands

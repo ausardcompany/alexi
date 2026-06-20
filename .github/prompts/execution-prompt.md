@@ -7,123 +7,95 @@ You are an expert software developer. Your task is to execute the update plan be
 ```markdown
 # Update Plan for Alexi
 
-Generated: 2026-06-14
-Based on upstream commits: d733487..7efade2
+Generated: 2026-06-20
+Based on upstream commits: ec0dd783a, e6cdc54
 
 ## Summary
-- Total changes planned: 5
-- Critical: 0 | High: 2 | Medium: 2 | Low: 1
+- Total changes planned: 2
+- Critical: 0 | High: 2 | Medium: 0 | Low: 0
 
 ## Changes
 
-### 1. Update to Snowflake Cortex Token Handling
-**File**: `src/providers/snowflake-cortex.ts`
+### 1. Update version in package.json
+**File**: `src/core/package.json`
 **Priority**: high
 **Type**: feature
-**Reason**: To align with upstream changes for token handling, ensuring compatibility with new authentication mechanisms.
+**Reason**: To align with versioning and feature updates from upstream `packages/core/package.json`
 
 **Current code**:
-```typescript
-const pat = process.env.SNOWFLAKE_CORTEX_PAT ?? evt.options.apiKey;
+```json
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "version": "7.3.49",
+  "name": "@alexi/core",
+  "type": "module",
+  "license": "MIT",
+}
 ```
 
 **New code**:
-```typescript
-const token = process.env.SNOWFLAKE_CORTEX_TOKEN ?? process.env.SNOWFLAKE_CORTEX_PAT ?? evt.options.token ?? evt.options.apiKey;
+```json
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "version": "7.3.50",
+  "name": "@alexi/core",
+  "type": "module",
+  "license": "MIT",
+}
 ```
 
-### 2. Add Budget Management to ZenData Model
-**File**: `src/core/model.ts`
+### 2. Adjust inherited permission rules
+**File**: `src/tool/task.ts`
+**Function**: `inherited`
 **Priority**: high
-**Type**: feature
-**Reason**: To incorporate new budget management features into the existing ZenData model.
+**Type**: bugfix
+**Reason**: To ensure permissions are correctly applied in multi-hop agent chains, preserving parent-agent restrictions as ceilings.
 
 **Current code**:
 ```typescript
-export namespace ZenData {
-    // existing schema fields
+export function inherited(input: {
+  caller: Agent.Info
+  session: Session.Info
+  rules: Permission.Rule[]
+  mcp?: Record<string, any>
+}): Permission.Rule[] {
+  const prefixes = Object.keys(input.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
+  const isMcp = (p: string) => prefixes.some((prefix) => p.startsWith(prefix))
+  return rules.filter(
+    (r: Permission.Rule) => r.permission === "edit" || r.permission === "bash" || isMcp(r.permission),
+  )
 }
 ```
 
 **New code**:
 ```typescript
-export namespace ZenData {
-    // existing schema fields
-    budgetMode: z.enum(["always", "fill"]).optional(),
-    budgetContribution: z.number().optional(),
-    budget: z.number().optional(),
+export function inherited(input: {
+  caller: Agent.Info
+  session: Session.Info
+  rules: Permission.Rule[]
+  mcp?: Record<string, any>
+}): Permission.Rule[] {
+  const prefixes = Object.keys(input.mcp ?? {}).map((k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_")
+  const isMcp = (p: string) => prefixes.some((prefix) => p.startsWith(prefix))
+  return rules.filter(
+    (r: Permission.Rule) =>
+      r.action === "deny" && (r.permission === "edit" || r.permission === "bash" || isMcp(r.permission)),
+  )
 }
-```
-
-### 3. Catch Directory Unavailable Error
-**File**: `src/core/project/copy.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: To prevent crashes due to unavailable directories during project copy operations.
-
-**Current code**:
-```typescript
-Effect.forEach(strategies(), (strategy) => strategy.list(sourceDirectory))
-```
-
-**New code**:
-```typescript
-Effect.forEach(strategies(), (strategy) =>
-    strategy.list(sourceDirectory).pipe(
-        Effect.catchTag("ProjectCopy.DirectoryUnavailableError", () => Effect.succeed([]))
-    )
-)
-```
-
-### 4. MCP Protocol Version Usage in Debug
-**File**: `src/cli/mcp.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: To ensure that the correct MCP protocol version is used during debugging.
-
-**Current code**:
-```typescript
-// existing debug setup
-```
-
-**New code**:
-```typescript
-const protocolVersion = process.env.MCP_PROTOCOL_VERSION || "default";
-debugSetup(protocolVersion);
-```
-
-### 5. Update Package Versions
-**File**: `package.json`
-**Priority**: low
-**Type**: refactor
-**Reason**: To sync version numbers with upstream for consistency.
-
-**Current code**:
-```json
-"version": "1.17.4"
-```
-
-**New code**:
-```json
-"version": "1.17.6"
 ```
 
 ## Testing Recommendations
-- Validate Snowflake Cortex provider functionality with new token handling.
-- Test budget management features in ZenData thoroughly.
-- Ensure directory errors during project copy do not cause crashes.
-- Verify that MCP protocol version is correctly applied in debug sessions.
-- Confirm that all package versions are consistent and do not introduce incompatibilities.
+- Verify version update doesn't affect compatibility with SAP AI Core.
+- Test permission inheritance logic to ensure it correctly applies ceilings without overriding subagent policies.
 
 ## Potential Risks
-- Changes in authentication may affect existing integrations; ensure backward compatibility.
-- New budget management features may require UI updates; verify UI consistency.
-- Directory error handling should be tested extensively to ensure no hidden issues arise.
+- Ensure that version updates don't introduce incompatibility with dependent systems.
+- Check that permission changes don't inadvertently alter expected agent behavior.
 ```
-{"prompt_tokens":3479,"completion_tokens":746,"total_tokens":4225}
+{"prompt_tokens":8200,"completion_tokens":669,"total_tokens":8869}
 
-[Session: eef82700-fd94-4d35-9b30-1f92884426af]
-[Messages: 2, Tokens: 4225]
+[Session: 7dfe4aed-fe20-463f-a1dd-c52c620cec9b]
+[Messages: 2, Tokens: 8869]
 
 ## Execution Instructions
 
