@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import path from 'path';
 
 // Mock child_process.spawn
 const mockSpawn = vi.fn();
@@ -237,6 +238,72 @@ describe('McpClientManager', () => {
           }),
         })
       );
+    });
+  });
+
+  describe('cwd resolution for stdio servers', () => {
+    it('should pass an absolute config.cwd verbatim to spawn', async () => {
+      const absoluteCwd = path.resolve('/absolute/server/dir');
+      const configWithCwd: McpServerConfig = {
+        ...stdioConfig,
+        cwd: absoluteCwd,
+      };
+
+      await manager.connect(configWithCwd, { workdir: '/proj/dir' });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'node',
+        ['server.js'],
+        expect.objectContaining({
+          cwd: absoluteCwd,
+        })
+      );
+    });
+
+    it('should resolve a relative config.cwd against options.workdir', async () => {
+      const workdir = path.resolve('/proj/root');
+      const configWithCwd: McpServerConfig = {
+        ...stdioConfig,
+        cwd: 'packages/server',
+      };
+
+      await manager.connect(configWithCwd, { workdir });
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'node',
+        ['server.js'],
+        expect.objectContaining({
+          cwd: path.resolve(workdir, 'packages/server'),
+        })
+      );
+    });
+
+    it('should resolve a relative config.cwd against process.cwd() when workdir is omitted', async () => {
+      const cwd = process.cwd();
+      const configWithCwd: McpServerConfig = {
+        ...stdioConfig,
+        cwd: 'sub/dir',
+      };
+
+      await manager.connect(configWithCwd);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'node',
+        ['server.js'],
+        expect.objectContaining({
+          cwd: path.resolve(cwd, 'sub/dir'),
+        })
+      );
+    });
+
+    it('should omit cwd from spawn options when config.cwd is undefined', async () => {
+      await manager.connect(stdioConfig);
+
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      const spawnArgs = mockSpawn.mock.calls[0];
+      const spawnOptions = spawnArgs[2] as Record<string, unknown>;
+      expect(spawnOptions).toBeDefined();
+      expect('cwd' in spawnOptions).toBe(false);
     });
   });
 

@@ -30,6 +30,12 @@ export interface McpServerConfig {
   autoConnect?: boolean;
   /** Tool call timeout in milliseconds. Default: 60000 */
   timeout?: number;
+  /**
+   * Working directory for the spawned stdio server. Relative paths are
+   * resolved against `options.workdir` (or `process.cwd()` if no workdir
+   * is supplied to `connect()`). Ignored for non-stdio transports.
+   */
+  cwd?: string;
 }
 
 export interface McpConfig {
