@@ -64,7 +64,9 @@ Usage:
 - All edits must pass validation before any changes are made.
 - Each oldString must exist exactly once in the file.
 - Edits are applied in order, so later edits see the result of earlier ones.
-- Line endings are normalized (CRLF -> LF) before processing.`,
+- Line endings are normalized (CRLF -> LF) before processing.
+
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 
   parameters: MultiEditParamsSchema,
 
