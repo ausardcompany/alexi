@@ -94,3 +94,22 @@ export function isOpenAI(modelId: string): boolean {
 export function isGemini(modelId: string): boolean {
   return modelId.toLowerCase().includes('gemini');
 }
+
+/** Reasoning-effort capability for a given model id */
+export type ReasoningEffortMode = 'none' | 'binary' | 'levels';
+
+/**
+ * Return how a model accepts reasoning_effort:
+ * - 'levels' -> send `reasoning_effort: 'low'|'medium'|'high'` as-is.
+ * - 'binary' -> send `enable_thinking: true` (drop the level).
+ * - 'none'   -> do not forward the field.
+ */
+export function modelSupportsReasoningEffort(modelId: string): ReasoningEffortMode {
+  const lower = modelId.toLowerCase();
+  if (lower.includes('deepseek')) {
+    return 'levels';
+  }
+  // Pre-emptive carve-out for future binary-only thinking models.
+  // Add concrete model substrings here when wired into the router.
+  return 'none';
+}

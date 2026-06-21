@@ -3,6 +3,8 @@
  * Handles DeepSeek model features and API quirks
  */
 
+import { modelSupportsReasoningEffort } from './model-match.js';
+
 interface Message {
   role: string;
   content: string;
@@ -19,6 +21,7 @@ interface ProviderRequest {
 export interface DeepSeekOptions {
   maxTokens?: number | 'max';
   reasoningEffort?: 'low' | 'medium' | 'high';
+  modelId?: string;
 }
 
 /**
@@ -40,9 +43,17 @@ export function buildDeepSeekRequest(
     request.max_tokens = options.maxTokens;
   }
 
-  // Add reasoning effort if specified
+  // Dispatch reasoning_effort handling on per-model capability.
+  // When modelId is omitted, default to 'levels' to preserve existing
+  // DeepSeek behaviour bit-for-bit.
   if (options.reasoningEffort) {
-    request.reasoning_effort = options.reasoningEffort;
+    const mode = options.modelId ? modelSupportsReasoningEffort(options.modelId) : 'levels';
+    if (mode === 'levels') {
+      request.reasoning_effort = options.reasoningEffort;
+    } else if (mode === 'binary') {
+      request.enable_thinking = true;
+    }
+    // 'none' -> do nothing
   }
 
   return request;
