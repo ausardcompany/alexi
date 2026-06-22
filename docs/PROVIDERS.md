@@ -502,6 +502,42 @@ export function getDefaultModel(): string {
 
 **Solution**: Check SAP AI Core quotas or use different resource group
 
+## Streaming Error Semantics
+
+Every provider that implements `streamComplete(messages, options):
+AsyncGenerator<StreamChunk>` MUST honor the following three rules. The
+orchestrator at `src/core/streamingOrchestrator.ts` relies on them to
+persist partial state on failure.
+
+1. **Network and transport errors surface as a rejected promise on the
+   generator.** Implementations MUST `throw` (or let the underlying
+   fetch/SSE error propagate) when the upstream stream fails. Returning
+   silently from the generator masks the failure and causes the
+   orchestrator to record a successful but truncated assistant turn.
+
+2. **Providers MAY yield a final `{ usage }` chunk before throwing.**
+   If usage metadata is observed before the failure (for example, the
+   prompt tokens were billed and emitted on the first SSE event), the
+   provider SHOULD yield one last `StreamChunk` with the usage block
+   populated so the orchestrator can record partial cost via
+   `getCostTracker().recordUsage(...)`.
+
+3. **Providers MUST NOT swallow errors and return early.** Catching a
+   transport error to log and then `return`ing from the generator is
+   forbidden; it breaks the settle path in the orchestrator. Use the
+   standard JavaScript `throw` mechanism and let the orchestrator handle
+   session persistence.
+
+A shared conformance test helper is planned at
+`src/providers/__tests__/streaming-contract.ts` (TODO). Until that
+exists, each provider's test file should include at least one case
+asserting rule 1: feed a mock transport that errors mid-stream, then
+assert the generator rejects rather than returning.
+
+The orchestrator's settle behaviour that depends on these rules is in
+`src/core/streamingOrchestrator.ts` (around the for-await loop), with
+the equivalent non-stream path in `src/core/agenticChat.ts`.
+
 ## Performance Considerations
 
 ### Token Optimization
