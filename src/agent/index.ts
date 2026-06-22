@@ -3,12 +3,8 @@
  * Defines specialized agents with different capabilities and prompts
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
-import { Array, Context, Effect, Layer, Schema, Scope, Types } from 'effect';
-import { ModelV2 } from './model';
-import { PermissionV2 } from './permission';
-import { ProviderV2 } from './provider';
+import { z } from 'zod';
 
-export const ID = Schema.String.pipe(Schema.brand('AgentV2.ID'));
 import { AgentSwitched } from '../bus/index.js';
 import { getAgentPrompt } from './system.js';
 import { loadAllCustomAgents } from './customAgentLoader.js';
