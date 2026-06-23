@@ -267,6 +267,8 @@ export interface OrchestrationConfig {
   temperature?: number;
   /** Top-p sampling */
   topP?: number;
+  /** Top-k sampling (honored by Anthropic Claude; silently dropped by OpenAI-family models) */
+  topK?: number;
   /** Frequency penalty */
   frequencyPenalty?: number;
   /** Presence penalty */
@@ -302,6 +304,8 @@ export interface CompletionOptions {
   maxTokens?: number;
   temperature?: number;
   topP?: number;
+  /** Top-k sampling (honored by Anthropic Claude; silently dropped by OpenAI-family models) */
+  topK?: number;
   signal?: AbortSignal;
   /** Override tools for this call */
   tools?: ChatCompletionTool[];
@@ -610,6 +614,9 @@ export class SapOrchestrationProvider {
 
     if (options?.topP !== undefined || this.config.topP !== undefined) {
       modelParams.top_p = options?.topP ?? this.config.topP;
+    }
+    if (options?.topK !== undefined || this.config.topK !== undefined) {
+      modelParams.top_k = options?.topK ?? this.config.topK;
     }
     if (this.config.frequencyPenalty !== undefined) {
       modelParams.frequency_penalty = this.config.frequencyPenalty;
