@@ -1,2 +1,2 @@
-import * as Encoding from "../kilocode/encoding"
+import * as Encoding from '../kilocode/encoding';
 // Updated encoding logic
