@@ -342,6 +342,30 @@ await provider.sendMessageStream(
 );
 ```
 
+### Model Parameters
+
+The SAP orchestration provider plumbs the following sampling parameters
+through `OrchestrationConfig` and per-call `CompletionOptions`. Per-call
+options take precedence over config defaults.
+
+| Parameter          | `modelParams` key   | Compatibility                                                                                  |
+| ------------------ | ------------------- | ---------------------------------------------------------------------------------------------- |
+| `temperature`      | `temperature`       | Universal.                                                                                     |
+| `maxTokens`        | `max_tokens`        | Universal.                                                                                     |
+| `topP`             | `top_p`             | Universal.                                                                                     |
+| `topK`             | `top_k`             | Honored by Anthropic Claude family models; silently dropped by OpenAI-family deployments.      |
+| `frequencyPenalty` | `frequency_penalty` | OpenAI-family models. Anthropic deployments ignore the field.                                  |
+| `presencePenalty`  | `presence_penalty`  | OpenAI-family models. Anthropic deployments ignore the field.                                  |
+
+```typescript
+const provider = getProviderForModel('anthropic--claude-4.7-opus');
+
+const result = await provider.complete(
+  [{ role: 'user', content: 'Brainstorm 5 names' }],
+  { temperature: 0.9, topK: 40 }
+);
+```
+
 ### Tool Calling
 
 ```typescript
