@@ -516,6 +516,12 @@ export async function agenticChat(
   while (iterations < maxIterations) {
     iterations++;
 
+    // When the loop is about to exhaust its budget, force the final turn to
+    // be text-only: drop the tool schemas from the request and inject a
+    // system-reminder asking the model to wrap up. Mirrors the upstream
+    // fix in sst/opencode (session-runner.ts, commit 4f1a9d7a, 2026-06-20).
+    const isFinalTurn = iterations === maxIterations;
+
     options?.onProgress?.({
       type: 'iteration',
       iteration: iterations,
@@ -525,6 +531,14 @@ export async function agenticChat(
     // Check for abort
     if (options?.signal?.aborted) {
       throw new Error('Operation aborted');
+    }
+
+    if (isFinalTurn) {
+      messages.push({
+        role: 'user',
+        content:
+          '<system-reminder>Step limit reached. Summarize what you have so far and return a final answer; no further tool calls will be honored.</system-reminder>',
+      });
     }
 
     // Call LLM
@@ -554,7 +568,7 @@ export async function agenticChat(
     try {
       result = await provider.complete(messages as Array<{ role: string; content: string }>, {
         maxTokens: effortConfig.maxTokens,
-        tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+        tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
       });
     } catch (err) {
       // Detect context overflow and attempt compaction with reactive seeding
@@ -589,7 +603,7 @@ export async function agenticChat(
           // Retry the completion
           result = await provider.complete(messages as Array<{ role: string; content: string }>, {
             maxTokens: effortConfig.maxTokens,
-            tools: toolSchemas.length > 0 ? toolSchemas : undefined,
+            tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
           });
         } else {
           throw err;
@@ -618,6 +632,13 @@ export async function agenticChat(
           'Warning: LLM output was truncated (max_tokens reached). ' +
           'Tool calls in this response may have incomplete parameters.',
       });
+    }
+
+    // Final turn: ignore any tool calls the model still tried to emit and
+    // commit whatever text it produced. Guarantees finalText is non-empty.
+    if (isFinalTurn) {
+      finalText = result.text || '[Max iterations reached]';
+      break;
     }
 
     // Check if LLM wants to use tools
@@ -714,6 +735,14 @@ export async function agenticChat(
       finalText = result.text;
       break;
     }
+  }
+
+  // Defensive fallback: any code path that drops out of the loop without
+  // assigning finalText (e.g. future early breaks) still returns a
+  // non-empty response to callers in src/command/goal.ts and
+  // src/cli/commands/agent.ts that treat empty text as success.
+  if (finalText === '') {
+    finalText = '[Max iterations reached]';
   }
 
   // Record cost
