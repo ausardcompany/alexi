@@ -6,6 +6,65 @@ import { z } from 'zod';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 
+/**
+ * Maximum number of bytes we will buffer from a single webfetch response.
+ * Bounds memory so a malicious or misbehaving server cannot OOM the agent
+ * process with a multi-hundred-megabyte body before `truncateOutput` runs.
+ */
+export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Read a `fetch` Response body with a hard byte cap.
+ *
+ * 1. If `Content-Length` declares a body larger than `maxBytes`, fail
+ *    immediately without consuming the stream.
+ * 2. Otherwise stream chunks and abort as soon as the running byte total
+ *    exceeds `maxBytes`.
+ * 3. UTF-8 decode only after the bounded buffer is fully assembled.
+ */
+export async function collectBoundedResponseBody(
+  response: Response,
+  maxBytes: number
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const cl = response.headers.get('content-length');
+  if (cl !== null) {
+    const declared = Number.parseInt(cl, 10);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      return {
+        ok: false,
+        error: `Response exceeds ${maxBytes} bytes (Content-Length: ${declared})`,
+      };
+    }
+  }
+  if (!response.body) {
+    return { ok: true, text: await response.text() };
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return {
+          ok: false,
+          error: `Response exceeds ${maxBytes} bytes (streamed)`,
+        };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const buf = Buffer.concat(chunks, total);
+  return { ok: true, text: new TextDecoder('utf-8', { fatal: false }).decode(buf) };
+}
+
 const WebFetchParamsSchema = z.object({
   url: z.string().describe('The URL to fetch content from'),
   format: z
@@ -107,11 +166,24 @@ Usage:
         }
 
         const contentType = response.headers.get('content-type') ?? 'text/plain';
-        let content = await response.text();
+        const bodyResult = await collectBoundedResponseBody(response, MAX_RESPONSE_BYTES);
+        if (!bodyResult.ok) {
+          return { success: false, error: bodyResult.error };
+        }
+        let content = bodyResult.text;
 
-        // Simple HTML to markdown/text conversion
+        // Simple HTML to markdown/text conversion. Wrapped in try/catch so a
+        // pathological input (e.g. catastrophic regex backtracking surfacing as
+        // a RangeError) becomes a tool error instead of crashing the runner.
         if (params.format !== 'html' && contentType.includes('html')) {
-          content = htmlToText(content, params.format === 'markdown');
+          try {
+            content = _internals.htmlToText(content, params.format === 'markdown');
+          } catch (err) {
+            return {
+              success: false,
+              error: `HTML conversion failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
         }
 
         const { content: truncatedContent, truncated } = truncateOutput(content);
@@ -217,3 +289,12 @@ function htmlToText(html: string, markdown: boolean): string {
 
   return text;
 }
+
+/**
+ * Internal hook bag exposed for testing only. Production code routes the HTML
+ * conversion through this object so tests can substitute a throwing
+ * implementation without monkey-patching the module's exports.
+ */
+export const _internals: { htmlToText: (html: string, markdown: boolean) => string } = {
+  htmlToText,
+};
