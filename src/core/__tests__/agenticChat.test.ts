@@ -426,6 +426,110 @@ describe('agenticChat', () => {
 
       expect(result.iterations).toBe(3);
       expect(mockProvider.complete).toHaveBeenCalledTimes(3);
+      // Final turn must return non-empty text even when the model kept
+      // emitting tool_calls right up to the iteration cap.
+      expect(result.text).not.toBe('');
+    });
+
+    it('should drop tools on the final iteration when the cap is hit', async () => {
+      const mockTool = {
+        name: 'loop',
+        description: 'Loop',
+        toFunctionSchema: () => ({
+          name: 'loop',
+          description: 'Loop',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn().mockResolvedValue({ success: true }),
+      };
+
+      mockToolRegistry.list.mockReturnValue([mockTool]);
+      mockToolRegistry.get.mockReturnValue(mockTool);
+
+      // Model keeps trying to call tools every turn.
+      mockProvider.complete.mockResolvedValue({
+        text: '',
+        toolCalls: [
+          { id: 'call_1', type: 'function', function: { name: 'loop', arguments: '{}' } },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      await agenticChat('Loop forever', { maxIterations: 3 });
+
+      // First two turns should still advertise the tool list.
+      expect(mockProvider.complete.mock.calls[0][1]?.tools).toBeDefined();
+      expect(mockProvider.complete.mock.calls[1][1]?.tools).toBeDefined();
+      // Third (final) turn must drop the tools array entirely.
+      expect(mockProvider.complete.mock.calls[2][1]?.tools).toBeUndefined();
+    });
+
+    it('should return a non-empty fallback text when the model emits no text on the final turn', async () => {
+      const mockTool = {
+        name: 'loop',
+        description: 'Loop',
+        toFunctionSchema: () => ({
+          name: 'loop',
+          description: 'Loop',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn().mockResolvedValue({ success: true }),
+      };
+
+      mockToolRegistry.list.mockReturnValue([mockTool]);
+      mockToolRegistry.get.mockReturnValue(mockTool);
+
+      // Every iteration returns empty text + tool_calls — including the
+      // final tool-less call. finalText must still come back non-empty.
+      mockProvider.complete.mockResolvedValue({
+        text: '',
+        toolCalls: [
+          { id: 'call_1', type: 'function', function: { name: 'loop', arguments: '{}' } },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      const result = await agenticChat('Loop forever', { maxIterations: 2 });
+
+      expect(result.iterations).toBe(2);
+      expect(result.text).toBe('[Max iterations reached]');
+    });
+
+    it('should inject a step-limit system-reminder before the final call', async () => {
+      const mockTool = {
+        name: 'loop',
+        description: 'Loop',
+        toFunctionSchema: () => ({
+          name: 'loop',
+          description: 'Loop',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn().mockResolvedValue({ success: true }),
+      };
+
+      mockToolRegistry.list.mockReturnValue([mockTool]);
+      mockToolRegistry.get.mockReturnValue(mockTool);
+
+      mockProvider.complete.mockResolvedValue({
+        text: '',
+        toolCalls: [
+          { id: 'call_1', type: 'function', function: { name: 'loop', arguments: '{}' } },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      await agenticChat('Loop forever', { maxIterations: 2 });
+
+      // Inspect messages sent on the final (second) call.
+      const finalMessages = mockProvider.complete.mock.calls[1][0] as Array<{
+        role: string;
+        content: string;
+      }>;
+      const reminder = finalMessages.find(
+        (m) => m.role === 'user' && m.content.includes('Step limit reached')
+      );
+      expect(reminder).toBeDefined();
+      expect(reminder?.content).toContain('<system-reminder>');
     });
   });
 
