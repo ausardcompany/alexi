@@ -190,7 +190,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
 | Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents |
 | Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
-| MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration |
+| MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration (qualified `${escapedServer}::${tool}` keys — see [MCP tool key composition](#mcp-tool-key-composition)) |
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
 | Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
 | Telemetry | `src/utils/telemetry.ts` | Usage metrics tracking |
@@ -812,6 +812,101 @@ await manager.connect({
 ```
 
 Connections are managed with automatic reconnection and a 30-second tool cache TTL.
+
+See [MCP tool key composition](#mcp-tool-key-composition) below for the namespacing
+contract every consumer of `getAllTools()` must respect.
+
+### MCP tool key composition
+
+MCP tools live in the same global tool registry as built-in tools, so their names
+must be namespaced to avoid collisions between servers (and between MCP and
+built-in tools). The contract below is the single source of truth — any caller
+that dispatches, filters, or matches on tool names MUST follow it.
+
+#### Qualified key shape
+
+Every MCP tool is registered under a qualified key of the form:
+
+```text
+${escapedServer}::${tool}
+```
+
+- `escapedServer` is the MCP server name with reserved characters escaped (see
+  below).
+- `tool` is the raw tool name as advertised by the MCP server. It is NOT
+  escaped, and it MAY itself contain `::` — split rules below handle that.
+- The separator is exactly two ASCII colons (`::`). A single `:` is reserved
+  and escaped inside `escapedServer` precisely so the separator stays
+  unambiguous.
+
+#### Escape order (server name → escaped server)
+
+The escape MUST replace `%` first and `:` second. Reversing the order would
+double-escape any `%` that the user-supplied server name introduces while
+escaping `:` (e.g. `:` -> `%3A`, then `%` -> `%25` would turn the escape
+sequence itself into `%253A`).
+
+```typescript
+const escapedServer = serverName
+  .replaceAll('%', '%25') // FIRST: escape the escape character
+  .replaceAll(':', '%3A'); // THEN: escape the separator character
+```
+
+#### Reverse-escape order (escaped server → server name)
+
+The reverse path is also order-sensitive — unescape `%3A` first and `%25`
+second, the mirror image of the forward order. Reversing this order would
+incorrectly resurrect a literal `%3A` from a server name that legitimately
+contained the substring `%253A`.
+
+```typescript
+const serverName = escapedServer
+  .replaceAll('%3A', ':') // FIRST: restore the separator character
+  .replaceAll('%25', '%'); // THEN: restore the escape character
+```
+
+#### Split on the LAST `::`
+
+Because the right-hand `tool` segment may contain `::`, callers MUST split a
+qualified key on the LAST occurrence of `::`, not the first. Splitting on the
+first `::` would silently truncate tool names like `my-server::a::b::c` and
+route to the wrong tool.
+
+```typescript
+const idx = qualified.lastIndexOf('::');
+if (idx < 0) {
+  // Not an MCP-qualified key — treat as a built-in tool name.
+}
+const serverPart = qualified.slice(0, idx); // still escaped — reverse-escape before display
+const toolPart = qualified.slice(idx + 2); // raw tool name, never escaped
+```
+
+#### Display vs. routing
+
+The UI MAY strip the `${escapedServer}::` prefix when rendering a tool name for
+humans (e.g. show `read_file` instead of `filesystem::read_file` in a tool-use
+trace). However:
+
+- Routing (looking the tool up in the registry).
+- Permission rules (`tools.allow` / `tools.deny` matchers).
+- Hook matchers (`PreToolUse`, `PostToolUse` filters).
+
+MUST use the full qualified key. NEVER round-trip the display form back into
+dispatch — a stripped name is ambiguous (two servers can expose the same tool
+name) and bypasses the namespacing guarantee.
+
+#### Canonical implementation
+
+The helpers above live in `src/mcp/client.ts`:
+
+- `escapeServerName(serverName)` — forward escape (`%` then `:`).
+- `parseQualifiedName(qualified)` — split on the last `::` and return
+  `{ serverPart, toolPart }`; also reverse-escapes `serverPart`.
+- `getToolByQualifiedName(qualified)` — registry lookup using the full
+  qualified key.
+
+When adding a new consumer of `getAllTools()`, import from `src/mcp/client.ts`
+rather than re-implementing the split/escape logic.
 
 ## Directory Structure
 
