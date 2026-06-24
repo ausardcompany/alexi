@@ -1,4 +1,4 @@
-const target = yield* prepareSandbox(command, dir, env(command.options));
+const target = yield * prepareSandbox(command, dir, env(command.options));
 const sin = stdin(target.options);
-const sout = stdio(target.options, "stdout");
-const serr = stdio(target.options, "stderr");
+const sout = stdio(target.options, 'stdout');
+const serr = stdio(target.options, 'stderr');
