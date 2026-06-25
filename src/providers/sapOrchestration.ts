@@ -72,11 +72,22 @@ interface SdkToolCallChunk {
 
 /**
  * Token usage statistics
+ *
+ * Optional cache fields mirror the SAP Orchestration `prompt_tokens_details`
+ * shape (which also covers Anthropic-style `cache_read_input_tokens` /
+ * `cache_creation_input_tokens` and OpenAI-style
+ * `prompt_tokens_details.cached_tokens`). They are omitted when the upstream
+ * provider does not report cache usage; consumers MUST treat `undefined` as
+ * "unknown" rather than zero.
  */
 export interface TokenUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /** Tokens served from the provider prompt cache. */
+  cache_read_input_tokens?: number;
+  /** Tokens written to the provider prompt cache (Anthropic charges ~1.25x). */
+  cache_creation_input_tokens?: number;
 }
 
 /**
@@ -341,6 +352,61 @@ export interface EmbeddingResult {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/**
+ * Extract prompt-cache hit/miss token counts from a raw SDK TokenUsage
+ * payload. Handles BOTH provider shapes:
+ *  - Anthropic-routed responses expose `cache_read_input_tokens` and
+ *    `cache_creation_input_tokens` at the top level of `usage`.
+ *  - OpenAI-shaped responses (and current SAP Orchestration TokenUsage)
+ *    expose `prompt_tokens_details.cached_tokens` and
+ *    `prompt_tokens_details.cache_creation_tokens`.
+ *
+ * Returns `undefined` for each field when the upstream payload did not
+ * report it — we never coerce to 0, because 0 is a meaningful signal
+ * (cache was checked and missed) distinct from "provider did not report".
+ */
+export function extractCacheTokens(usage: unknown): {
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+} {
+  if (!usage || typeof usage !== 'object') {
+    return {};
+  }
+  const u = usage as Record<string, unknown>;
+
+  let cacheRead: number | undefined;
+  let cacheCreate: number | undefined;
+
+  // Anthropic-style top-level fields.
+  if (typeof u.cache_read_input_tokens === 'number') {
+    cacheRead = u.cache_read_input_tokens;
+  }
+  if (typeof u.cache_creation_input_tokens === 'number') {
+    cacheCreate = u.cache_creation_input_tokens;
+  }
+
+  // OpenAI / SAP Orchestration prompt_tokens_details fallback.
+  const details = u.prompt_tokens_details;
+  if (details && typeof details === 'object') {
+    const d = details as Record<string, unknown>;
+    if (cacheRead === undefined && typeof d.cached_tokens === 'number') {
+      cacheRead = d.cached_tokens;
+    }
+    if (cacheCreate === undefined && typeof d.cache_creation_tokens === 'number') {
+      cacheCreate = d.cache_creation_tokens;
+    }
+  }
+
+  const out: { cache_read_input_tokens?: number; cache_creation_input_tokens?: number } = {};
+  if (cacheRead !== undefined) {
+    out.cache_read_input_tokens = cacheRead;
+  }
+  if (cacheCreate !== undefined) {
+    out.cache_creation_input_tokens = cacheCreate;
+  }
+  return out;
+}
 
 /**
  * Build input filters based on configuration
@@ -751,6 +817,7 @@ export class SapOrchestrationProvider {
             prompt_tokens: tokenUsage.prompt_tokens,
             completion_tokens: tokenUsage.completion_tokens,
             total_tokens: tokenUsage.total_tokens,
+            ...extractCacheTokens(tokenUsage),
           }
         : undefined,
       allMessages: allMessages,
@@ -856,6 +923,7 @@ export class SapOrchestrationProvider {
             prompt_tokens: tokenUsage.prompt_tokens,
             completion_tokens: tokenUsage.completion_tokens,
             total_tokens: tokenUsage.total_tokens,
+            ...extractCacheTokens(tokenUsage),
           }
         : undefined,
     };

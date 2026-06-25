@@ -131,6 +131,70 @@ describe('CostTracker', () => {
       expect(summary.totalInputTokens).toBe(600);
       expect(summary.totalOutputTokens).toBe(300);
     });
+
+    it('should record cache tokens when provided', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      const record = tracker.recordUsage('anthropic--claude-4.7-opus', 1000, 200, 'session-c', {
+        read: 800,
+        write: 25,
+      });
+      expect(record.cacheReadTokens).toBe(800);
+      expect(record.cacheWriteTokens).toBe(25);
+    });
+
+    it('should leave cache fields undefined when not provided', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      const record = tracker.recordUsage('gpt-4o', 100, 50);
+      expect(record.cacheReadTokens).toBeUndefined();
+      expect(record.cacheWriteTokens).toBeUndefined();
+    });
+
+    it('should aggregate cache tokens in summary only from reporting records', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      // Two records WITHOUT cache fields (e.g. legacy or non-cache provider)
+      tracker.recordUsage('gpt-4o', 1000, 500);
+      tracker.recordUsage('gpt-4o', 2000, 1000);
+      // Two records WITH cache fields
+      tracker.recordUsage('anthropic--claude-4.7-opus', 500, 200, undefined, {
+        read: 400,
+        write: 50,
+      });
+      tracker.recordUsage('anthropic--claude-4.7-opus', 600, 250, undefined, {
+        read: 300,
+        write: 10,
+      });
+
+      const summary = tracker.getSummary();
+      expect(summary.callCount).toBe(4);
+      expect(summary.cacheReportingCallCount).toBe(2);
+      expect(summary.totalCacheReadTokens).toBe(700);
+      expect(summary.totalCacheWriteTokens).toBe(60);
+      // Cache-reporting input tokens = 500 + 600 = 1100, not 1000+2000+500+600
+      expect(summary.cacheReportingInputTokens).toBe(1100);
+    });
+
+    it('should round-trip cache fields through CSV-adjacent persistence (UsageRecord shape)', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      tracker.recordUsage('anthropic--claude-4.7-opus', 500, 100, 'sess-x', {
+        read: 300,
+        write: 20,
+      });
+      const records = tracker.getRecords();
+      expect(records).toHaveLength(1);
+      expect(records[0].cacheReadTokens).toBe(300);
+      expect(records[0].cacheWriteTokens).toBe(20);
+
+      // Import side: a record with cache fields is preserved after importRecord
+      const other = new CostTracker({ dataDir: testDir });
+      other.importRecord(records[0]);
+      const back = other.getRecords();
+      expect(back[0].cacheReadTokens).toBe(300);
+      expect(back[0].cacheWriteTokens).toBe(20);
+    });
   });
 
   describe('getSummary', () => {

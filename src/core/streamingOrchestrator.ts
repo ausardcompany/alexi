@@ -38,6 +38,8 @@ export interface StreamingResult {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
   modelUsed: string;
   routingReason?: string;
@@ -166,7 +168,11 @@ export async function* streamChat(
       modelId,
       finalUsage.prompt_tokens ?? 0,
       finalUsage.completion_tokens ?? 0,
-      sessionId
+      sessionId,
+      {
+        read: finalUsage.cache_read_input_tokens,
+        write: finalUsage.cache_creation_input_tokens,
+      }
     );
   }
 

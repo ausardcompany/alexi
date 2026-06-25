@@ -620,6 +620,18 @@ export async function agenticChat(
       totalUsage.completion_tokens =
         (totalUsage.completion_tokens ?? 0) + (result.usage.completion_tokens ?? 0);
       totalUsage.total_tokens = (totalUsage.total_tokens ?? 0) + (result.usage.total_tokens ?? 0);
+      // Accumulate cache tokens only when the provider actually reported
+      // them on this iteration. Mixed iterations (some with, some without)
+      // still produce a meaningful per-call total because we only add
+      // numbers that are present.
+      if (result.usage.cache_read_input_tokens !== undefined) {
+        totalUsage.cache_read_input_tokens =
+          (totalUsage.cache_read_input_tokens ?? 0) + result.usage.cache_read_input_tokens;
+      }
+      if (result.usage.cache_creation_input_tokens !== undefined) {
+        totalUsage.cache_creation_input_tokens =
+          (totalUsage.cache_creation_input_tokens ?? 0) + result.usage.cache_creation_input_tokens;
+      }
     }
 
     // Detect output truncation — when finishReason is 'length', the response was cut
@@ -752,7 +764,11 @@ export async function agenticChat(
       modelId,
       totalUsage.prompt_tokens ?? 0,
       totalUsage.completion_tokens ?? 0,
-      sessionId
+      sessionId,
+      {
+        read: totalUsage.cache_read_input_tokens,
+        write: totalUsage.cache_creation_input_tokens,
+      }
     );
   }
 

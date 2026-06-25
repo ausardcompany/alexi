@@ -31,6 +31,13 @@ export interface SessionStats {
   oldestSession?: number;
   /** Newest session date */
   newestSession?: number;
+  /**
+   * Prompt-cache hit rate in [0, 1], computed across cost-tracker records
+   * that carried provider-reported cache tokens. `undefined` when no
+   * records have reported cache usage yet (older history or providers
+   * without cache support).
+   */
+  cacheHitRate?: number;
 }
 
 export interface OverallStats {
@@ -47,6 +54,13 @@ export interface OverallStats {
     platform: string;
     nodeVersion: string;
   };
+  /**
+   * Overall prompt-cache hit rate in [0, 1], computed across all
+   * cost-tracker records that carried provider-reported cache tokens.
+   * `undefined` when no records have reported cache usage yet. Mirrors
+   * the same calculation as {@link SessionStats.cacheHitRate}.
+   */
+  cacheHitRate?: number;
   /** Generated timestamp */
   generatedAt: number;
 }
@@ -57,6 +71,32 @@ export interface StatsOptions {
 }
 
 // ============ Stats Manager Class ============
+
+/**
+ * Compute the prompt-cache hit rate from a {@link CostSummary}.
+ *
+ * Returns a number in [0, 1] representing the fraction of input tokens
+ * that were served from the provider prompt cache, or `undefined` when
+ * no records in the summary reported cache usage (so the metric would
+ * be meaningless). Mirrors the formula in issue #851:
+ *
+ *   cacheHitRate = totalCacheReadTokens
+ *                / (totalCacheReadTokens + cacheReportingInputTokens)
+ *
+ * `cacheReportingInputTokens` is the sum of `inputTokens` ONLY over
+ * records that carried a cache field, so legacy records (no cache
+ * support) do not dilute the rate downward.
+ */
+export function computeCacheHitRate(costs: CostSummary): number | undefined {
+  if (costs.cacheReportingCallCount === 0) {
+    return undefined;
+  }
+  const denom = costs.totalCacheReadTokens + costs.cacheReportingInputTokens;
+  if (denom === 0) {
+    return undefined;
+  }
+  return costs.totalCacheReadTokens / denom;
+}
 
 export class StatsManager {
   private dataDir: string;
@@ -131,6 +171,14 @@ export class StatsManager {
       }
     }
 
+    // Prompt-cache hit rate is sourced from cost-tracker records (which
+    // carry per-call cache token counts); session files do not currently
+    // persist cache tokens per-message.
+    const cacheHitRate = computeCacheHitRate(getCostTracker().getAllTimeSummary());
+    if (cacheHitRate !== undefined) {
+      stats.cacheHitRate = cacheHitRate;
+    }
+
     return stats;
   }
 
@@ -141,9 +189,10 @@ export class StatsManager {
     const costTracker = getCostTracker();
     const memoryManager = getMemoryManager();
 
-    return {
+    const costs = costTracker.getAllTimeSummary();
+    const overall: OverallStats = {
       sessions: this.getSessionStats(),
-      costs: costTracker.getAllTimeSummary(),
+      costs,
       memories: memoryManager.getStats(),
       system: {
         dataDir: this.dataDir,
@@ -153,6 +202,11 @@ export class StatsManager {
       },
       generatedAt: Date.now(),
     };
+    const cacheHitRate = computeCacheHitRate(costs);
+    if (cacheHitRate !== undefined) {
+      overall.cacheHitRate = cacheHitRate;
+    }
+    return overall;
   }
 
   /**
@@ -183,6 +237,27 @@ export class StatsManager {
       // Return current total on error
     }
     return totalSize;
+  }
+
+  /**
+   * Format a token count using SI-style suffixes (K, M, B) so the
+   * `alexi stats` output stays compact even at billions of tokens.
+   * Numbers below 1000 are rendered without a suffix.
+   */
+  formatTokenCount(tokens: number): string {
+    if (!Number.isFinite(tokens) || tokens < 0) {
+      return '0';
+    }
+    if (tokens < 1000) {
+      return String(Math.round(tokens));
+    }
+    if (tokens < 1_000_000) {
+      return `${(tokens / 1000).toFixed(1)}K`;
+    }
+    if (tokens < 1_000_000_000) {
+      return `${(tokens / 1_000_000).toFixed(1)}M`;
+    }
+    return `${(tokens / 1_000_000_000).toFixed(1)}B`;
   }
 
   /**
