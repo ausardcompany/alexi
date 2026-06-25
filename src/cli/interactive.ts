@@ -1727,6 +1727,14 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
       console.log(
         c('gray', `    Output Tokens:    ${stats.costs.totalOutputTokens.toLocaleString()}`)
       );
+      if (stats.cacheHitRate !== undefined) {
+        const pct = (stats.cacheHitRate * 100).toFixed(1);
+        const read = statsManager.formatTokenCount(stats.costs.totalCacheReadTokens);
+        const write = statsManager.formatTokenCount(stats.costs.totalCacheWriteTokens);
+        console.log(
+          c('gray', `    Prompt cache hit rate: ${pct}% (read ${read} / write ${write} tokens)`)
+        );
+      }
       console.log();
 
       // Memories

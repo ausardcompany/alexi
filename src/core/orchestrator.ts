@@ -91,7 +91,11 @@ export async function sendChat(
       modelId,
       usage.prompt_tokens ?? 0,
       usage.completion_tokens ?? 0,
-      sessionId
+      sessionId,
+      {
+        read: usage.cache_read_input_tokens,
+        write: usage.cache_creation_input_tokens,
+      }
     );
   }
 

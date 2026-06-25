@@ -6,13 +6,26 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { StatsManager, getStatsManager, resetStatsManager } from '../stats.js';
-import { resetCostTracker } from '../costTracker.js';
+import { StatsManager, getStatsManager, resetStatsManager, computeCacheHitRate } from '../stats.js';
+import { getCostTracker, resetCostTracker } from '../costTracker.js';
 import { resetMemoryManager } from '../memory.js';
 
 describe('StatsManager', () => {
   let testDir: string;
   let statsManager: StatsManager;
+
+  // The cost-tracker singleton always reads/writes the user's home
+  // `~/.alexi/cost-history.json`. To keep these tests isolated from any
+  // pre-existing local cost history (and from each other), we delete
+  // that file in `beforeEach` and `afterEach`.
+  const costHistoryPath = path.join(os.homedir(), '.alexi', 'cost-history.json');
+  const wipeCostHistory = () => {
+    try {
+      fs.unlinkSync(costHistoryPath);
+    } catch {
+      // file may not exist
+    }
+  };
 
   beforeEach(() => {
     // Create temp directory for tests
@@ -25,6 +38,7 @@ describe('StatsManager', () => {
     resetStatsManager();
     resetCostTracker();
     resetMemoryManager();
+    wipeCostHistory();
 
     statsManager = new StatsManager({ dataDir: testDir });
   });
@@ -35,6 +49,7 @@ describe('StatsManager', () => {
     resetStatsManager();
     resetCostTracker();
     resetMemoryManager();
+    wipeCostHistory();
   });
 
   describe('getSessionStats', () => {
@@ -265,6 +280,113 @@ describe('StatsManager', () => {
       for (const entry of trends.last30Days) {
         expect(entry.date).toMatch(dateRegex);
       }
+    });
+  });
+
+  describe('cacheHitRate', () => {
+    it('computeCacheHitRate returns undefined when no records reported cache', () => {
+      const rate = computeCacheHitRate({
+        totalCost: 0,
+        totalInputTokens: 1000,
+        totalOutputTokens: 500,
+        callCount: 1,
+        byModel: {},
+        byDate: {},
+        totalCacheReadTokens: 0,
+        totalCacheWriteTokens: 0,
+        cacheReportingCallCount: 0,
+        cacheReportingInputTokens: 0,
+      });
+      expect(rate).toBeUndefined();
+    });
+
+    it('computeCacheHitRate returns undefined when denominator is 0', () => {
+      // Edge case: cache-reporting call had 0 input tokens and 0 cache reads.
+      const rate = computeCacheHitRate({
+        totalCost: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        callCount: 1,
+        byModel: {},
+        byDate: {},
+        totalCacheReadTokens: 0,
+        totalCacheWriteTokens: 0,
+        cacheReportingCallCount: 1,
+        cacheReportingInputTokens: 0,
+      });
+      expect(rate).toBeUndefined();
+    });
+
+    it('computeCacheHitRate divides cache reads by reads + reporting input tokens', () => {
+      const rate = computeCacheHitRate({
+        totalCost: 0,
+        totalInputTokens: 1100,
+        totalOutputTokens: 500,
+        callCount: 1,
+        byModel: {},
+        byDate: {},
+        totalCacheReadTokens: 700,
+        totalCacheWriteTokens: 60,
+        cacheReportingCallCount: 2,
+        cacheReportingInputTokens: 300,
+      });
+      // 700 / (700 + 300) = 0.7
+      expect(rate).toBeCloseTo(0.7, 5);
+    });
+
+    it('OverallStats.cacheHitRate is set when records carry cache fields', () => {
+      const tracker = getCostTracker();
+      tracker.recordUsage('gpt-4o', 1000, 500); // no cache fields
+      tracker.recordUsage('anthropic--claude-4.7-opus', 500, 200, undefined, {
+        read: 400,
+        write: 50,
+      });
+      tracker.recordUsage('anthropic--claude-4.7-opus', 600, 250, undefined, {
+        read: 300,
+        write: 10,
+      });
+
+      const stats = statsManager.getOverallStats();
+      expect(stats.cacheHitRate).toBeDefined();
+      // 700 / (700 + 1100) = 0.3888...
+      expect(stats.cacheHitRate).toBeCloseTo(700 / (700 + 1100), 5);
+      expect(stats.sessions.cacheHitRate).toBeCloseTo(700 / (700 + 1100), 5);
+    });
+
+    it('OverallStats.cacheHitRate is undefined when no records carry cache fields', () => {
+      const tracker = getCostTracker();
+      tracker.recordUsage('gpt-4o', 1000, 500);
+      tracker.recordUsage('gpt-4o', 2000, 1000);
+
+      const stats = statsManager.getOverallStats();
+      expect(stats.cacheHitRate).toBeUndefined();
+      expect(stats.sessions.cacheHitRate).toBeUndefined();
+    });
+  });
+
+  describe('formatTokenCount', () => {
+    it('returns plain number for counts below 1000', () => {
+      expect(statsManager.formatTokenCount(0)).toBe('0');
+      expect(statsManager.formatTokenCount(999)).toBe('999');
+    });
+
+    it('uses K suffix for thousands', () => {
+      expect(statsManager.formatTokenCount(1500)).toBe('1.5K');
+      expect(statsManager.formatTokenCount(12_300)).toBe('12.3K');
+    });
+
+    it('uses M suffix for millions', () => {
+      expect(statsManager.formatTokenCount(1_500_000)).toBe('1.5M');
+      expect(statsManager.formatTokenCount(12_300_000)).toBe('12.3M');
+    });
+
+    it('uses B suffix for billions', () => {
+      expect(statsManager.formatTokenCount(1_500_000_000)).toBe('1.5B');
+    });
+
+    it('handles non-finite / negative gracefully', () => {
+      expect(statsManager.formatTokenCount(NaN)).toBe('0');
+      expect(statsManager.formatTokenCount(-1)).toBe('0');
     });
   });
 

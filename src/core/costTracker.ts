@@ -33,6 +33,17 @@ export interface UsageRecord {
   outputTokens: number;
   /** Calculated cost in USD */
   cost: number;
+  /**
+   * Tokens served from the provider prompt cache for this call.
+   * `undefined` means the provider did not report cache usage (older
+   * records or providers without cache support). 0 means a true miss.
+   */
+  cacheReadTokens?: number;
+  /**
+   * Tokens written to the provider prompt cache for this call.
+   * `undefined` means the provider did not report cache usage.
+   */
+  cacheWriteTokens?: number;
 }
 
 export interface CostSummary {
@@ -51,6 +62,30 @@ export interface CostSummary {
   >;
   /** Cost breakdown by date (YYYY-MM-DD) */
   byDate: Record<string, number>;
+  /**
+   * Total tokens served from provider prompt cache across all records in
+   * the summary window. Sums only records that reported a numeric value.
+   */
+  totalCacheReadTokens: number;
+  /**
+   * Total tokens written to provider prompt cache across all records in
+   * the summary window. Sums only records that reported a numeric value.
+   */
+  totalCacheWriteTokens: number;
+  /**
+   * Number of records that carried at least one cache field. Used by
+   * downstream code to decide whether `totalCacheReadTokens` /
+   * `totalCacheWriteTokens` are meaningful (>0 records) or just zeros
+   * from a fleet without cache reporting.
+   */
+  cacheReportingCallCount: number;
+  /**
+   * Sum of `inputTokens` over records that reported cache usage. Used
+   * as the non-cache portion of the denominator when computing the
+   * prompt-cache hit rate, so legacy records without cache fields do
+   * not dilute the metric.
+   */
+  cacheReportingInputTokens: number;
 }
 
 export interface TaskUsageSummary {
@@ -260,13 +295,20 @@ export class CostTracker {
   }
 
   /**
-   * Record API usage
+   * Record API usage.
+   *
+   * `cacheReadTokens` / `cacheWriteTokens` are optional. Pass them when the
+   * upstream provider reported prompt-cache usage on the response (see
+   * `extractCacheTokens` in `src/providers/sapOrchestration.ts`). Leave
+   * them `undefined` when the provider did not report cache usage — do NOT
+   * coerce to 0, because 0 is a meaningful "cache miss" signal.
    */
   recordUsage(
     modelId: string,
     inputTokens: number,
     outputTokens: number,
-    sessionId?: string
+    sessionId?: string,
+    cacheTokens?: { read?: number; write?: number }
   ): UsageRecord {
     const cost = this.calculateCost(modelId, inputTokens, outputTokens);
 
@@ -278,6 +320,12 @@ export class CostTracker {
       outputTokens,
       cost,
     };
+    if (cacheTokens?.read !== undefined) {
+      record.cacheReadTokens = cacheTokens.read;
+    }
+    if (cacheTokens?.write !== undefined) {
+      record.cacheWriteTokens = cacheTokens.write;
+    }
 
     this.records.push(record);
 
@@ -325,6 +373,10 @@ export class CostTracker {
       callCount: filtered.length,
       byModel: {},
       byDate: {},
+      totalCacheReadTokens: 0,
+      totalCacheWriteTokens: 0,
+      cacheReportingCallCount: 0,
+      cacheReportingInputTokens: 0,
     };
 
     for (const record of filtered) {
@@ -349,6 +401,22 @@ export class CostTracker {
       // By date
       const date = new Date(record.timestamp).toISOString().split('T')[0];
       summary.byDate[date] = (summary.byDate[date] || 0) + record.cost;
+
+      // Cache tokens — only count records that reported the field, so
+      // pre-existing records without cache support do not pull the
+      // denominator down.
+      const hasCacheField =
+        record.cacheReadTokens !== undefined || record.cacheWriteTokens !== undefined;
+      if (hasCacheField) {
+        summary.cacheReportingCallCount += 1;
+        summary.cacheReportingInputTokens += record.inputTokens;
+      }
+      if (record.cacheReadTokens !== undefined) {
+        summary.totalCacheReadTokens += record.cacheReadTokens;
+      }
+      if (record.cacheWriteTokens !== undefined) {
+        summary.totalCacheWriteTokens += record.cacheWriteTokens;
+      }
     }
 
     return summary;
