@@ -247,6 +247,138 @@ export function sanitizeOpenAISchema(value: unknown): unknown {
   return result;
 }
 
+// ============================================================================
+// OpenAI Responses strict-mode schema enforcement
+// ============================================================================
+//
+// SAP-routed OpenAI Responses deployments (`gpt-5.5`, `gpt-nano`,
+// `claude-haiku`) enforce a strict-mode JSON Schema contract on function-tool
+// parameters when the tool is registered with `strict: true`:
+//
+//   - Every object node MUST set `additionalProperties: false`.
+//   - Every object node's `required` array MUST list every key declared in
+//     `properties` (no optional properties).
+//
+// `enforceStrictSchema` recursively rewrites a JSON Schema fragment to
+// satisfy that contract. It is intentionally narrow: only nodes that have
+// a `properties` key are treated as object nodes; leaves, refs, arrays,
+// and composition wrappers are recursed into but otherwise pass through.
+//
+// Like `sanitizeOpenAISchema`, this function NEVER mutates its input. It
+// always returns a new object so the same source schema can still be used
+// for non-strict deployments in the same process.
+//
+// Callers MUST gate on `strict === true` from the tool definition (issue
+// #856 threads the flag through `ToolDefinition`/`Tool`). Applying this
+// transform unconditionally would over-constrain anthropic-routed tools
+// that accept loose schemas and reject `additionalProperties: false`.
+
+/**
+ * Enforce the OpenAI Responses strict-mode contract on a JSON Schema
+ * fragment. For every object node (any node with a `properties` key) the
+ * returned schema will have:
+ *
+ *   - `additionalProperties: false`
+ *   - `required` containing every key declared in `properties`, in the
+ *     order the keys appear in `properties`
+ *
+ * Recursion targets:
+ *   - `properties` (each value)
+ *   - `items` (single schema or tuple form)
+ *   - `additionalProperties` when it is a schema (booleans pass through;
+ *     boolean values are overwritten by the `false` injection above when
+ *     the enclosing node is an object node)
+ *   - `anyOf` / `oneOf` / `allOf` (each element)
+ *   - `$defs` / `definitions` (each value)
+ *
+ * Pass-through cases (returned by reference for primitives, deep-copied
+ * for arrays / records):
+ *   - Primitives (`string`, `number`, `boolean`, `null`, `undefined`)
+ *   - Arrays (mapped element-wise into a new array)
+ *   - Object nodes WITHOUT a `properties` key (`$ref`-only, leaves with
+ *     just `type: 'string'`, etc.) — recursed into so nested objects are
+ *     still enforced, but the node itself is not given
+ *     `additionalProperties: false` because it is not an object schema.
+ *
+ * @param value - The JSON Schema fragment to enforce
+ * @returns A new schema value satisfying the strict-mode contract on every
+ *   object node, with all other nodes passed through unchanged
+ */
+export function enforceStrictSchema(value: unknown): unknown {
+  // Primitives (string, number, boolean, null, undefined) pass through.
+  if (!isPlainObject(value) && !Array.isArray(value)) {
+    return value;
+  }
+
+  // Arrays: recurse element-wise into a new array.
+  if (Array.isArray(value)) {
+    return value.map((item) => enforceStrictSchema(item));
+  }
+
+  // Plain object: recurse into every recognised schema-bearing keyword,
+  // copying the node so the input is never mutated. We always return a
+  // new object even when no field changes, to give callers a deep,
+  // reference-distinct copy they can mutate freely downstream.
+  const result: JsonRecord = {};
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'properties' && isPlainObject(item)) {
+      result.properties = Object.fromEntries(
+        Object.entries(item).map(([propKey, propValue]) => [
+          propKey,
+          enforceStrictSchema(propValue),
+        ])
+      );
+      continue;
+    }
+
+    if (key === 'items') {
+      // `items` may be a single schema or a tuple-form array of schemas.
+      result.items = enforceStrictSchema(item);
+      continue;
+    }
+
+    if (key === 'additionalProperties') {
+      // Schema form recurses; boolean form passes through. If this node
+      // also has `properties`, the boolean will be overwritten to `false`
+      // below.
+      result.additionalProperties = typeof item === 'boolean' ? item : enforceStrictSchema(item);
+      continue;
+    }
+
+    if ((key === 'anyOf' || key === 'oneOf' || key === 'allOf') && Array.isArray(item)) {
+      result[key] = item.map((branch) => enforceStrictSchema(branch));
+      continue;
+    }
+
+    if ((key === '$defs' || key === 'definitions') && isPlainObject(item)) {
+      result[key] = Object.fromEntries(
+        Object.entries(item).map(([defName, defValue]) => [defName, enforceStrictSchema(defValue)])
+      );
+      continue;
+    }
+
+    // All other keys (type, description, enum, format, $ref, minimum, ...)
+    // pass through verbatim. Arrays/objects buried inside unknown keywords
+    // are not recursed — the strict contract only governs schema-bearing
+    // keywords listed above.
+    result[key] = item;
+  }
+
+  // If this node is an object schema (has a `properties` key), enforce
+  // `additionalProperties: false` and `required = keys(properties)`.
+  // The presence of `properties` is the discriminant — a node with only
+  // `$ref`, only a primitive `type`, or only composition keywords is not
+  // an object schema and must NOT be augmented (over-constraining
+  // pass-through nodes would break the upstream Codex parity contract).
+  if (isPlainObject(result.properties)) {
+    result.additionalProperties = false;
+    result.required = Object.keys(result.properties);
+  }
+
+  return result;
+}
+
 /**
  * Provider metadata hint used to detect OpenAI-shaped tool-call wire formats.
  * Mirrors opencode's `Provider.Model.api.npm` shape so the same fixtures port
