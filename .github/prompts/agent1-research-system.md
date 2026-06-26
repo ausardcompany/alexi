@@ -8,12 +8,17 @@ Write file: `.github/research/YYYY-MM-DD-spec.md`
 
 ## Process
 
-1. Fetch last 7 days of commits from reference repos:
-   - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`
+1. Fetch last 7 days of commits from reference repos. Each repo has a
+   polling cadence tagged at the end of its line. **Daily** repos run
+   every cycle. **Weekly** repos run only on Mondays (UTC). Skip a
+   weekly repo silently when the cadence does not match today. To
+   compute the day, use `$(date -u +%u)` (1 = Monday).
+
+   - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`  <!-- daily -->
+   - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`        <!-- daily -->
+   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`      <!-- daily -->
+   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`  <!-- weekly (Mon) -->
+   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`     <!-- weekly (Mon) -->
 
 2. Check what we already have: `ls src/tool/tools/ && ls src/core/`
 
