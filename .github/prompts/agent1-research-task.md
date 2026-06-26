@@ -11,12 +11,23 @@ Read it to understand what was already analyzed and focus on NEW developments.
 
 ## Instructions
 
-1. Use `gh api` to check recent commits (last 7 days) in these repos:
-   - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`
-   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`
+> Rotation policy: if a **daily** repo has a 5-cycle dryness streak
+> (zero actionable items for 5 consecutive cycles), propose demoting
+> it to **weekly** in the next brief's `Actionable Recommendations`
+> section.
+
+1. Fetch reference-repo commits. Each repo has a polling cadence
+   tagged at the end of its line. **Daily** repos run every cycle.
+   **Weekly** repos run only on Mondays (UTC). Skip a weekly repo
+   silently when the cadence does not match today.
+
+   - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`  <!-- daily -->
+   - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`        <!-- daily -->
+   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`      <!-- daily -->
+   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`  <!-- weekly (Mon) -->
+   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`     <!-- weekly (Mon) -->
+
+   To compute the day, use `$(date -u +%u)` (1 = Monday).
 
 2. Identify significant new features, patterns, or improvements
 
