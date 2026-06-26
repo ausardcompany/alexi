@@ -1,7 +1,7 @@
 /**
  * Permission System
  * Last-match-wins rule evaluation with interactive ask flow
- * Based on kilocode/opencode permission patterns
+ * Updated permission settings for notebook tools
  *
  * Enhanced with:
  * - Doom loop detection
