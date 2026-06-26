@@ -1,6 +1,6 @@
 /**
  * Tool Schema Definitions
- * Centralized type definitions for tool system with branded IDs
+ * Updated definitions to include notebook tool capabilities
  */
 
 import { z } from 'zod';
