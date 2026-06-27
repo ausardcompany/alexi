@@ -10,7 +10,7 @@
  */
 
 import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/index.js';
@@ -570,6 +570,7 @@ export async function agenticChat(
         maxTokens: effortConfig.maxTokens,
         tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
       });
+      recordRouteOutcome(modelId, { kind: 'success' });
     } catch (err) {
       // Detect context overflow and attempt compaction with reactive seeding
       const compactionMessages = messages
@@ -601,14 +602,29 @@ export async function agenticChat(
           messages.push(...compactedMessages);
 
           // Retry the completion
-          result = await provider.complete(messages as Array<{ role: string; content: string }>, {
-            maxTokens: effortConfig.maxTokens,
-            tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
-          });
+          try {
+            result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+              maxTokens: effortConfig.maxTokens,
+              tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
+            });
+            recordRouteOutcome(modelId, { kind: 'success' });
+          } catch (retryErr) {
+            const classified = classifyRouteError(retryErr);
+            if (classified.kind === 'permanent') {
+              recordRouteOutcome(modelId, classified);
+            }
+            throw retryErr;
+          }
         } else {
           throw err;
         }
       } else {
+        // Not a context-overflow error: this is the real provider failure.
+        // Record permanent failures so the route can auto-disable.
+        const classified = classifyRouteError(err);
+        if (classified.kind === 'permanent') {
+          recordRouteOutcome(modelId, classified);
+        }
         throw err;
       }
     }

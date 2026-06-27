@@ -1,5 +1,5 @@
 import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 
@@ -68,8 +68,22 @@ export async function sendChat(
     modelId = resolution.effectiveModelId;
   }
 
-  // Use SAP Orchestration complete() method
-  const result = await provider.complete(messages, { maxTokens: 4096 });
+  // Use SAP Orchestration complete() method.
+  // Record route outcome for auto-disable bookkeeping: permanent failures
+  // (401/403/404, model_not_found, deployment_not_found) tick the route's
+  // failure counter; success resets it. Transient errors are owned by
+  // ErrorBackoff and are intentionally NOT recorded here.
+  let result;
+  try {
+    result = await provider.complete(messages, { maxTokens: 4096 });
+  } catch (err) {
+    const classified = classifyRouteError(err);
+    if (classified.kind === 'permanent') {
+      recordRouteOutcome(modelId, classified);
+    }
+    throw err;
+  }
+  recordRouteOutcome(modelId, { kind: 'success' });
 
   const responseText = result.text;
   const usage = result.usage;

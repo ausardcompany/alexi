@@ -41,6 +41,8 @@ vi.mock('../../src/core/router.js', () => ({
     reason: 'test routing',
     confidence: 0.9,
   })),
+  recordRouteOutcome: vi.fn(),
+  classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
 }));
 
 // Mock the cost tracker

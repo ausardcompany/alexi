@@ -27,6 +27,12 @@ export interface RoutingPreferences {
   preferCheapWhenPossible: boolean;
   maxCostPerRequest: number | null;
   fallbackModel: string;
+  /**
+   * Number of consecutive permanent failures (401/403/404, model_not_found,
+   * deployment_not_found) on the same route before it is auto-disabled for
+   * the rest of the session. Transient failures do NOT count. Defaults to 3.
+   */
+  routeFailureThreshold?: number;
 }
 
 export interface RoutingConfig {
@@ -95,6 +101,7 @@ const DEFAULT_CONFIG: RoutingConfig = {
     preferCheapWhenPossible: false,
     maxCostPerRequest: null,
     fallbackModel: 'gpt-4o',
+    routeFailureThreshold: 3,
   },
 };
 
