@@ -1,4 +1,6 @@
-const mode: 'allow' | 'deny' =
-  cfg.experimental?.sandbox_restrict_network === false ? 'allow' : 'deny';
-const fallback = { enabled: cfg.experimental?.sandbox ?? false, mode };
-yield * SandboxPolicy.inherit(ctx.sessionID, session.id, fallback);
+// Task tool placeholder
+// Upstream sync introduced a sandbox-policy inheritance fragment that depends
+// on an Effect-based generator runtime and `SandboxPolicy.inherit(...)` which
+// are not wired into this codebase yet. The real `task` tool lives in
+// `src/tool/tools/task.ts`. Kept as a stub so the build stays green.
+export {};

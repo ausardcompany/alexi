@@ -1,5 +1,7 @@
-import { errorMessage } from '@/util/error'; // kilocode_change
-import { Cause, Effect, Exit, Schema, Scope } from 'effect';
-import { EffectBridge } from '@/effect/bridge';
-import { RuntimeFlags } from '@/effect/runtime-flags';
-import * as SandboxPolicy from '@/kilocode/sandbox/policy'; // kilocode_change
+// Application tools placeholder
+// Upstream sync introduced experimental sandbox/policy bindings that depend on
+// `effect`, `@/effect/bridge`, `@/effect/runtime-flags`, and
+// `@/kilocode/sandbox/policy` — none of which are wired into this codebase yet.
+// Tracked for future implementation; intentionally left as a stub so the build
+// stays green.
+export {};

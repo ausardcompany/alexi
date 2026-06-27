@@ -1,11 +1,9 @@
-/**
- * Enhanced Tool Registry with Prompt Tool Resolution
- * Based on opencode refactor(session): extract prompt tool resolution
- */
-import { errorMessage } from '@/util/error'; // kilocode_change
-import { Cause, Effect, Exit, Schema, Scope } from 'effect';
-import { EffectBridge } from '@/effect/bridge';
-import { RuntimeFlags } from '@/effect/runtime-flags';
+// Enhanced Tool Registry with Prompt Tool Resolution
+// Based on opencode refactor(session): extract prompt tool resolution
+import type { z } from 'zod';
+import type { Tool } from './index.js';
+
+type AnyTool = Tool<z.ZodType, unknown>;
 
 // Refactor tool registry with upstream patterns
 
@@ -21,7 +19,7 @@ export interface ToolResolutionContext {
 }
 
 export interface PromptToolResolver {
-  resolve(context: ToolResolutionContext): Promise<Tool<any, any>[]>;
+  resolve(context: ToolResolutionContext): Promise<AnyTool[]>;
 }
 
 export class ToolResolutionError extends Error {
@@ -39,10 +37,10 @@ export class ToolResolutionError extends Error {
  * Supports both static and prompt-based dynamic tool resolution
  */
 export class EnhancedToolRegistry {
-  private tools: Map<string, Tool<any, any>> = new Map();
+  private tools: Map<string, AnyTool> = new Map();
   private promptResolvers: Map<string, PromptToolResolver> = new Map();
 
-  register(tool: Tool<any, any>): void {
+  register(tool: AnyTool): void {
     this.tools.set(tool.name, tool);
   }
 
@@ -54,7 +52,7 @@ export class EnhancedToolRegistry {
     this.promptResolvers.set(name, resolver);
   }
 
-  get(name: string): Tool<any, any> | undefined {
+  get(name: string): AnyTool | undefined {
     return this.tools.get(name);
   }
 
@@ -62,8 +60,8 @@ export class EnhancedToolRegistry {
    * Resolve tools for a given prompt context
    * Handles both static and dynamic tool resolution
    */
-  async resolveForPrompt(context: ToolResolutionContext): Promise<Tool<any, any>[]> {
-    const resolvedTools: Tool<any, any>[] = [];
+  async resolveForPrompt(context: ToolResolutionContext): Promise<AnyTool[]> {
+    const resolvedTools: AnyTool[] = [];
 
     // Add static tools that match permissions
     for (const [_name, tool] of this.tools) {
@@ -86,16 +84,16 @@ export class EnhancedToolRegistry {
     return resolvedTools;
   }
 
-  private hasPermission(tool: Tool<any, any>, permissions: string[]): boolean {
+  private hasPermission(tool: AnyTool, permissions: string[]): boolean {
     // If tool doesn't specify required permissions, allow it
-    const requiredPermissions = (tool as any).requiredPermissions;
+    const requiredPermissions = (tool as { requiredPermissions?: string[] }).requiredPermissions;
     if (!requiredPermissions) {
       return true;
     }
     return requiredPermissions.every((p: string) => permissions.includes(p));
   }
 
-  list(): Tool<any, any>[] {
+  list(): AnyTool[] {
     return Array.from(this.tools.values());
   }
 
