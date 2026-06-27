@@ -80,6 +80,7 @@
     "defaultCostTier": "medium",
     "preferCheapWhenPossible": false,
     "maxCostPerRequest": null,
-    "fallbackModel": "gpt-4o"
+    "fallbackModel": "gpt-4o",
+    "routeFailureThreshold": 3
   }
 }

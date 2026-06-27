@@ -8,7 +8,7 @@ import {
   getDefaultModel,
   type StreamChunk,
 } from '../providers/index.js';
-import { routePrompt } from './router.js';
+import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
@@ -139,17 +139,29 @@ export async function* streamChat(
   let fullText = '';
   let finalUsage: StreamingResult['usage'];
 
-  // Stream using SAP Orchestration provider
-  for await (const chunk of provider.streamComplete(messages, {
-    maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
-    temperature: options?.temperature,
-    signal: options?.signal,
-    headers: extraHeaders as Record<string, string>,
-  })) {
-    fullText += chunk.text;
-    if (chunk.usage) finalUsage = chunk.usage;
-    yield chunk;
+  // Stream using SAP Orchestration provider. Wrap so permanent failures
+  // (401/403/404, model_not_found, deployment_not_found) tick the route's
+  // auto-disable counter; success resets it. Transient errors are left to
+  // ErrorBackoff.
+  try {
+    for await (const chunk of provider.streamComplete(messages, {
+      maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
+      temperature: options?.temperature,
+      signal: options?.signal,
+      headers: extraHeaders as Record<string, string>,
+    })) {
+      fullText += chunk.text;
+      if (chunk.usage) finalUsage = chunk.usage;
+      yield chunk;
+    }
+  } catch (err) {
+    const classified = classifyRouteError(err);
+    if (classified.kind === 'permanent') {
+      recordRouteOutcome(modelId, classified);
+    }
+    throw err;
   }
+  recordRouteOutcome(modelId, { kind: 'success' });
 
   // Save messages to session AFTER streaming completes (not per-chunk)
   if (options?.sessionManager) {

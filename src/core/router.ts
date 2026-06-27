@@ -8,6 +8,8 @@ import {
   findMatchingRule,
   type RoutingConfig,
 } from '../config/routingConfig.js';
+import { extractStatusCode } from './error-backoff.js';
+import { c } from '../cli/utils/colors.js';
 
 export interface ModelCapability {
   id: string;
@@ -40,6 +42,108 @@ function getModelRegistry(): ModelCapability[] {
   return getConfig().models.filter(
     (m) => (m as ModelCapability & { enabled?: boolean }).enabled !== false
   );
+}
+
+// ---------------------------------------------------------------------------
+// Route auto-disable state (in-process only; NOT persisted to ~/.alexi/).
+// A route accumulates consecutive permanent failures (401/403/404 or
+// model_not_found / deployment_not_found). When the count reaches the
+// configured threshold, the route is marked disabled for the rest of the
+// session and routePrompt() filters it out of the candidate list. A single
+// success outcome resets the counter. Transient failures (5xx, network)
+// remain owned by ErrorBackoff and must NOT call recordRouteOutcome with
+// kind === 'permanent'.
+// ---------------------------------------------------------------------------
+
+interface RouteState {
+  count: number;
+  disabled: boolean;
+}
+
+const routeFailureState = new Map<string, RouteState>();
+
+function getRouteFailureThreshold(): number {
+  return getConfig().preferences.routeFailureThreshold ?? 3;
+}
+
+/**
+ * Classify a thrown error for the purpose of route auto-disable. Returns
+ * `permanent` when the error is a 401/403/404 from the provider OR the
+ * message contains `model_not_found` / `deployment_not_found` (case
+ * insensitive, on word boundaries). All other errors -- including 5xx,
+ * network, and unknown shapes -- are NOT classified here; callers should
+ * skip recordRouteOutcome for those and let ErrorBackoff manage them.
+ */
+export function classifyRouteError(
+  err: unknown
+): { kind: 'permanent'; statusCode?: number; reason?: string } | { kind: 'unknown' } {
+  const message = err instanceof Error ? err.message : String(err);
+  const statusCode = extractStatusCode(message);
+
+  if (statusCode === 401 || statusCode === 403 || statusCode === 404) {
+    return { kind: 'permanent', statusCode, reason: `HTTP ${statusCode}` };
+  }
+
+  if (/\bmodel_not_found\b/i.test(message)) {
+    return { kind: 'permanent', reason: 'model_not_found' };
+  }
+  if (/\bdeployment_not_found\b/i.test(message)) {
+    return { kind: 'permanent', reason: 'deployment_not_found' };
+  }
+
+  return { kind: 'unknown' };
+}
+
+/**
+ * Record the outcome of a provider call for the given route. `success` resets
+ * the consecutive-failure counter. `permanent` increments it and, when the
+ * threshold is reached, disables the route and prints a one-line yellow
+ * warning. Transient failures should NOT be recorded here.
+ */
+export function recordRouteOutcome(
+  modelId: string,
+  outcome: { kind: 'success' } | { kind: 'permanent'; statusCode?: number; reason?: string }
+): void {
+  if (outcome.kind === 'success') {
+    routeFailureState.set(modelId, { count: 0, disabled: false });
+    return;
+  }
+
+  const prev = routeFailureState.get(modelId) ?? { count: 0, disabled: false };
+  // Once disabled, do not keep growing the counter or re-emit warnings.
+  if (prev.disabled) {
+    return;
+  }
+
+  const nextCount = prev.count + 1;
+  const threshold = getRouteFailureThreshold();
+  if (nextCount >= threshold) {
+    routeFailureState.set(modelId, { count: nextCount, disabled: true });
+    const why = outcome.reason ? ` (${outcome.reason})` : '';
+    console.warn(
+      c(
+        'yellow',
+        `[Router] Auto-disabling '${modelId}' after ${nextCount} permanent failures${why}`
+      )
+    );
+    return;
+  }
+
+  routeFailureState.set(modelId, { count: nextCount, disabled: false });
+}
+
+/**
+ * Returns true if the route has been auto-disabled this session.
+ */
+export function isRouteDisabled(modelId: string): boolean {
+  return routeFailureState.get(modelId)?.disabled === true;
+}
+
+/**
+ * Reset all route failure state. Called by tests and by reloadConfig().
+ */
+export function resetRouteFailures(): void {
+  routeFailureState.clear();
 }
 
 /**
@@ -212,6 +316,20 @@ export function routePrompt(
   if (options?.availableModels) {
     candidates = candidates.filter((m) => options.availableModels!.includes(m.id));
   }
+  // Drop routes that have been auto-disabled this session.
+  candidates = candidates.filter((m) => !isRouteDisabled(m.id));
+
+  // Pathological case: every candidate has been auto-disabled. Fall back to
+  // the configured fallbackModel with low confidence instead of throwing, so
+  // the caller can still attempt a request (and the user can /reload).
+  if (candidates.length === 0) {
+    return {
+      modelId: config.preferences.fallbackModel,
+      reason: 'All routes auto-disabled this session; using configured fallback',
+      confidence: 0.1,
+      ruleApplied: matchedRule?.name,
+    };
+  }
 
   // Score each model
   const preferCheap = options?.preferCheap ?? config.preferences.preferCheapWhenPossible;
@@ -308,4 +426,5 @@ export async function explainRouting(prompt: string): Promise<{
  */
 export function reloadConfig(): void {
   routingConfig = null;
+  resetRouteFailures();
 }

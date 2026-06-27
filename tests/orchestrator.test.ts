@@ -18,6 +18,8 @@ vi.mock('../src/providers/index.js', () => {
 
 vi.mock('../src/core/router.js', () => ({
   routePrompt: vi.fn(),
+  recordRouteOutcome: vi.fn(),
+  classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
 }));
 
 // Import after mocking
