@@ -2,10 +2,10 @@
  * Enhanced Tool Registry with Prompt Tool Resolution
  * Based on opencode refactor(session): extract prompt tool resolution
  */
-import { errorMessage } from "@/util/error"; // kilocode_change
-import { Cause, Effect, Exit, Schema, Scope } from "effect";
-import { EffectBridge } from "@/effect/bridge";
-import { RuntimeFlags } from "@/effect/runtime-flags";
+import { errorMessage } from '@/util/error'; // kilocode_change
+import { Cause, Effect, Exit, Schema, Scope } from 'effect';
+import { EffectBridge } from '@/effect/bridge';
+import { RuntimeFlags } from '@/effect/runtime-flags';
 
 // Refactor tool registry with upstream patterns
 
