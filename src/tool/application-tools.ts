@@ -1,1 +1,0 @@
-// Updated code based on changes in `packages/core/src/tool/application-tools.ts` from opencode
