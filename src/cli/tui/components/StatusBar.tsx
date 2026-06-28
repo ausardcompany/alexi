@@ -15,6 +15,13 @@ export interface StatusBarProps {
   tokenCount?: number;
   /** Session ID (shown abbreviated) */
   sessionId?: string;
+  /**
+   * Optional label for the highest-cost routed model today. Rendered dimmed
+   * after the cost segment so users can see which route is burning their
+   * budget when auto-routing is on. Truncated to 18 chars + ellipsis to
+   * keep the segment compact (matches the model truncation rule below).
+   */
+  topModelLabel?: string;
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -50,6 +57,7 @@ export function StatusBar({
   leaderActive,
   tokenCount = 0,
   sessionId,
+  topModelLabel,
 }: StatusBarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -72,6 +80,12 @@ export function StatusBar({
 
   const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
   const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
+  const topModelDisplay =
+    topModelLabel && topModelLabel.length > 0
+      ? topModelLabel.length > 20
+        ? topModelLabel.slice(0, 18) + '…'
+        : topModelLabel
+      : null;
 
   // Leader mode — full-width hint bar
   if (leaderActive) {
@@ -100,6 +114,12 @@ export function StatusBar({
         <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
           {costStr}
         </Text>
+        {topModelDisplay && (
+          <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+            {' · '}
+            {topModelDisplay}
+          </Text>
+        )}
         {tokenCount > 0 && (
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
             {' · '}

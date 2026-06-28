@@ -86,4 +86,26 @@ describe('StatusBar', () => {
     );
     expect(lastFrame()).toContain('$0.0123');
   });
+
+  it('renders topModelLabel when provided', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} topModelLabel="gpt-5.5" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('gpt-5.5');
+    // Still shows the cost
+    expect(frame).toContain('$0.0123');
+  });
+
+  it('omits topModelLabel segment when not provided', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('gpt-5.5');
+  });
 });
