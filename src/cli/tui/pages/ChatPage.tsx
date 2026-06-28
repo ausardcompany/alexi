@@ -11,6 +11,21 @@ import type { SlashCommand } from '../hooks/useCommands.js';
 import type { ToolCallState } from '../context/ChatContext.js';
 import type { SidebarContextValue } from '../context/SidebarContext.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { getCostTracker } from '../../../core/costTracker.js';
+
+/**
+ * Pick the highest-cost routed model from today's usage. Returns `undefined`
+ * when no calls have been recorded yet so the StatusBar omits the segment.
+ */
+function pickTopModelLabel(_costSignal: number): string | undefined {
+  const summary = getCostTracker().getTodaySummary();
+  const entries = Object.entries(summary.byModel);
+  if (entries.length === 0) {
+    return undefined;
+  }
+  entries.sort((a, b) => b[1].cost - a[1].cost);
+  return entries[0][0];
+}
 
 export interface ChatPageProps {
   messages: MessageDisplay[];
@@ -58,6 +73,10 @@ export function ChatPage({
 }: ChatPageProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
+  // Recompute on the same hook that already drives cost updates — when the
+  // total cost changes (i.e. a turn just recorded usage), the memo re-runs.
+  // We do not add a separate poll.
+  const topModelLabel = React.useMemo(() => pickTopModelLabel(cost.totalCost), [cost.totalCost]);
 
   return (
     <>
@@ -108,6 +127,7 @@ export function ChatPage({
           leaderActive={leaderActive}
           tokenCount={tokenCount}
           sessionId={sessionId}
+          topModelLabel={topModelLabel}
         />
       </Box>
     </>

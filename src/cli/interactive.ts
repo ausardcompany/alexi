@@ -1309,6 +1309,18 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
           console.log(
             c('gray', `    Output Tokens: ${summary.totalOutputTokens.toLocaleString()}`)
           );
+          if (Object.keys(summary.byModel).length > 0) {
+            console.log();
+            console.log(c('cyan', '    By Model:'));
+            for (const [model, data] of Object.entries(summary.byModel)) {
+              console.log(
+                c(
+                  'gray',
+                  `      ${model}: ${costTracker.formatCost(data.cost)} (${data.calls} calls)`
+                )
+              );
+            }
+          }
         }
         console.log();
       } else if (subCmd === 'month') {

@@ -5,6 +5,21 @@ import { useTheme } from '../context/ThemeContext.js';
 import { LogViewer } from '../components/LogViewer.js';
 import { StatusBar } from '../components/StatusBar.js';
 import type { LogEntry } from '../types/props.js';
+import { getCostTracker } from '../../../core/costTracker.js';
+
+/**
+ * Pick the highest-cost routed model from today's usage. Returns `undefined`
+ * when no calls have been recorded yet so the StatusBar omits the segment.
+ */
+function pickTopModelLabel(_costSignal: number): string | undefined {
+  const summary = getCostTracker().getTodaySummary();
+  const entries = Object.entries(summary.byModel);
+  if (entries.length === 0) {
+    return undefined;
+  }
+  entries.sort((a, b) => b[1].cost - a[1].cost);
+  return entries[0][0];
+}
 
 export interface LogsPageProps {
   entries: LogEntry[];
@@ -34,6 +49,9 @@ export function LogsPage({
   const { colors } = theme;
   const [levelFilter, setLevelFilter] = useState<LogEntry['level'] | 'all'>('all');
   const [filterQuery, setFilterQuery] = useState('');
+  // Recompute on the same hook that already drives cost updates — when the
+  // total cost changes (i.e. a turn just recorded usage), the memo re-runs.
+  const topModelLabel = React.useMemo(() => pickTopModelLabel(cost.totalCost), [cost.totalCost]);
 
   useInput((input, key) => {
     // Cycle level filter with Tab
@@ -93,6 +111,7 @@ export function LogsPage({
           cost={cost}
           isStreaming={isStreaming}
           leaderActive={leaderActive}
+          topModelLabel={topModelLabel}
         />
       </Box>
     </>
