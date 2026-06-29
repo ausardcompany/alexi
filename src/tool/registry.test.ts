@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-describe('tool registry (placeholder)', () => {
+describe('Tool Registry Tests', () => {
   it('is a placeholder pending upstream port', () => {
     expect(true).toBe(true);
   });
