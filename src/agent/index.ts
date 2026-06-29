@@ -34,23 +34,6 @@ export const AgentSchema = z.object({
   options: z.record(z.string(), z.unknown()).optional(),
 });
 
-import * as AgentRequirements from '@/kilocode/agent-requirements';
-import { MCP } from '@/mcp';
-
-export type RequirementBlockedError = InstanceType<typeof AgentRequirements.BlockedError>;
-
-export const Info = Schema.Struct({
-  name: Schema.String,
-  requirements: Schema.optional(AgentRequirements.Requirements),
-  // ... other properties
-});
-
-export interface Interface {
-  // ... other methods
-  readonly requirementStatus: (agent: string) => Effect.Effect<AgentRequirements.Result>;
-  readonly guardRequirements: (agent: Info) => Effect.Effect<void, RequirementBlockedError>;
-}
-
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
 // Updated agent creation logic reflecting new patterns from opencode
