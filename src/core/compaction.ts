@@ -19,6 +19,30 @@ export interface CompactionOptions {
   keepPruned?: boolean; // Keep pruned messages in history, default false
   maxChunkTokens?: number; // Max tokens per chunk for oversized payloads, default 80000
   overflowTokens?: number; // Tokens that triggered overflow — seeds target summary size
+  /**
+   * Number of tokens to reserve for the next provider response. When provided
+   * along with `maxContextTokens`, compaction targets ~80% of
+   * `(maxContextTokens - reserveOutputTokens)` so a freshly compacted turn
+   * does not immediately re-cross the trigger threshold. Callers should pass
+   * the provider-specific `maxTokens` (e.g. 4096 for the SAP Orchestration
+   * default in `src/core/orchestrator.ts`). Default 4096.
+   */
+  reserveOutputTokens?: number;
+  /**
+   * Total context window for the model. Required for the 80% target buffer in
+   * `compactConversation` to apply; when omitted, compaction falls back to the
+   * legacy "drop everything except last N" behaviour.
+   */
+  maxContextTokens?: number;
+}
+
+/**
+ * Options bag accepted by the (new) form of `shouldCompact`. The legacy
+ * positional `threshold?: number` argument is still supported.
+ */
+export interface ShouldCompactOptions {
+  threshold?: number;
+  reserveOutputTokens?: number;
 }
 
 export interface CompactionResult {
@@ -37,6 +61,17 @@ const DEFAULT_PRESERVE_LAST_N = 4;
 const DEFAULT_SUMMARY_MAX_TOKENS = 2000;
 const DEFAULT_TRIGGER_THRESHOLD = 90; // percent
 const DEFAULT_MAX_CHUNK_TOKENS = 80000;
+/**
+ * Default reservation for the next provider response. Mirrors the
+ * `maxTokens: 4096` used by the SAP Orchestration call in
+ * `src/core/orchestrator.ts`.
+ */
+const DEFAULT_RESERVE_OUTPUT_TOKENS = 4096;
+/**
+ * Fraction of the trigger budget that `compactConversation` aims to land at
+ * after compacting. Mirrors the upstream cline/cline three-part fix.
+ */
+const POST_COMPACT_TARGET_FRACTION = 0.8;
 const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
 const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
@@ -66,7 +101,13 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Estimate total tokens for a list of messages
+ * Estimate total tokens for a list of messages.
+ *
+ * When a message has a recorded `tokens` field (populated on the hot path by
+ * `orchestrator.ts` / `sessionManager.ts`), the recorded value is preferred
+ * over the chars/4 heuristic. Falls back to chars/4 only when neither
+ * `tokens.input` nor `tokens.output` is set. The +4 per-message structural
+ * overhead is kept either way.
  */
 export function estimateMessagesTokens(messages: Message[]): number {
   if (!messages || messages.length === 0) {
@@ -77,7 +118,18 @@ export function estimateMessagesTokens(messages: Message[]): number {
   for (const message of messages) {
     // Add overhead for role/structure (~4 tokens per message)
     total += 4;
-    total += estimateTokens(message.content);
+
+    const recordedInput = message.tokens?.input;
+    const recordedOutput = message.tokens?.output;
+    const hasRecorded =
+      (typeof recordedInput === 'number' && recordedInput > 0) ||
+      (typeof recordedOutput === 'number' && recordedOutput > 0);
+
+    if (hasRecorded) {
+      total += (recordedInput ?? 0) + (recordedOutput ?? 0);
+    } else {
+      total += estimateTokens(message.content);
+    }
   }
 
   return total;
@@ -86,20 +138,34 @@ export function estimateMessagesTokens(messages: Message[]): number {
 // ============ Core Functions ============
 
 /**
- * Check if compaction is needed based on current token usage
+ * Check if compaction is needed based on current token usage.
+ *
+ * Accepts either the legacy positional `threshold?: number` form or an
+ * options bag with `{ threshold, reserveOutputTokens }`. When
+ * `reserveOutputTokens` is supplied, it is subtracted from
+ * `maxContextTokens` BEFORE applying the percentage threshold so the
+ * reserved output budget never trips the trigger.
  */
 export function shouldCompact(
   messages: Message[],
   maxContextTokens: number,
-  threshold?: number
+  thresholdOrOptions?: number | ShouldCompactOptions
 ): boolean {
   if (!messages || messages.length === 0) {
     return false;
   }
 
-  const thresholdPercent = threshold ?? DEFAULT_TRIGGER_THRESHOLD;
+  const opts: ShouldCompactOptions =
+    typeof thresholdOrOptions === 'number'
+      ? { threshold: thresholdOrOptions }
+      : (thresholdOrOptions ?? {});
+
+  const thresholdPercent = opts.threshold ?? DEFAULT_TRIGGER_THRESHOLD;
+  const reserveOutputTokens = opts.reserveOutputTokens ?? 0;
+  const triggerTokens = Math.max(0, maxContextTokens - reserveOutputTokens);
+
   const currentTokens = estimateMessagesTokens(messages);
-  const thresholdTokens = (maxContextTokens * thresholdPercent) / 100;
+  const thresholdTokens = (triggerTokens * thresholdPercent) / 100;
 
   return currentTokens >= thresholdTokens;
 }
@@ -311,9 +377,59 @@ export async function compactConversation(
     };
   }
 
-  // Split: messages to summarize vs messages to keep
-  const messagesToSummarize = nonSystemMessages.slice(0, -preserveLastN);
-  const messagesToKeep = nonSystemMessages.slice(-preserveLastN);
+  // Default split: keep last N, summarize the rest.
+  let messagesToSummarize = nonSystemMessages.slice(0, -preserveLastN);
+  let messagesToKeep = nonSystemMessages.slice(-preserveLastN);
+
+  // When the caller passes `maxContextTokens`, target ~80% of the trigger
+  // budget (context - reserved output) so the very next turn does not
+  // immediately re-cross the compaction threshold. We grow `toKeep` BACKWARDS
+  // from the tail past `preserveLastN` while the resulting kept set + the
+  // summary budget still fits under the target. Anything that does not fit is
+  // moved into `messagesToSummarize`.
+  const maxContextTokens = options?.maxContextTokens;
+  const reserveOutputTokens = options?.reserveOutputTokens ?? DEFAULT_RESERVE_OUTPUT_TOKENS;
+  if (typeof maxContextTokens === 'number' && maxContextTokens > 0) {
+    const triggerTokens = Math.max(0, maxContextTokens - reserveOutputTokens);
+    const targetTokens = Math.floor(triggerTokens * POST_COMPACT_TARGET_FRACTION);
+
+    // Always keep at least the last `preserveLastN` non-system messages
+    // (existing invariant). Grow the kept window leftwards as long as the
+    // running total (kept + system + summary budget) stays under target.
+    const systemTokens = estimateMessagesTokens(systemMessages);
+
+    let keepStart = Math.max(0, nonSystemMessages.length - preserveLastN);
+    // Token cost of the currently-kept window.
+    let keptTokens = estimateMessagesTokens(nonSystemMessages.slice(keepStart));
+
+    while (keepStart > 0) {
+      const candidate = nonSystemMessages[keepStart - 1];
+      const candidateTokens = estimateMessagesTokens([candidate]);
+      const projected = systemTokens + summaryMaxTokens + keptTokens + candidateTokens;
+      if (projected > targetTokens) {
+        break;
+      }
+      keepStart -= 1;
+      keptTokens += candidateTokens;
+    }
+
+    messagesToSummarize = nonSystemMessages.slice(0, keepStart);
+    messagesToKeep = nonSystemMessages.slice(keepStart);
+
+    // If the target buffer is so generous that there is nothing left to
+    // summarize, return early with the original messages — no work to do.
+    if (messagesToSummarize.length === 0) {
+      return {
+        messages: [...messages],
+        result: {
+          originalMessages: messages.length,
+          compactedMessages: messages.length,
+          estimatedTokensSaved: 0,
+          summary: '',
+        },
+      };
+    }
+  }
 
   // Generate summary
   let summary: string;

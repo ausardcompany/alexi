@@ -19,6 +19,20 @@ function createMessage(role: Message['role'], content: string, timestamp?: numbe
   };
 }
 
+// Helper for messages that carry recorded token usage.
+function createMessageWithTokens(
+  role: Message['role'],
+  content: string,
+  tokens: { input?: number; output?: number }
+): Message {
+  return {
+    role,
+    content,
+    timestamp: Date.now(),
+    tokens,
+  };
+}
+
 describe('Context Compaction System', () => {
   beforeEach(() => {
     // Reset global LLM function before each test
@@ -79,6 +93,36 @@ describe('Context Compaction System', () => {
 
       expect(estimateMessagesTokens(messages)).toBe(11);
     });
+
+    it('should prefer recorded tokens over chars/4 when present', () => {
+      // Recorded tokens differ wildly from content length so we can prove the
+      // estimator is using the recorded values, not the chars/4 heuristic.
+      const messages: Message[] = [
+        createMessageWithTokens('user', 'short', { input: 1000 }), // 5 chars but 1000 recorded
+        createMessageWithTokens('assistant', 'also short', { output: 500 }), // 10 chars but 500 recorded
+      ];
+
+      // 4 (overhead) + 1000 + 4 (overhead) + 500 = 1508
+      expect(estimateMessagesTokens(messages)).toBe(1508);
+    });
+
+    it('should fall back to chars/4 when recorded tokens are missing or zero', () => {
+      const messages: Message[] = [
+        createMessage('user', '1234'), // no recorded tokens => 1 + 4 = 5
+        createMessageWithTokens('assistant', '12345678', { input: 0, output: 0 }), // zero => 2 + 4 = 6
+      ];
+
+      expect(estimateMessagesTokens(messages)).toBe(11);
+    });
+
+    it('should sum input + output when both recorded', () => {
+      const messages: Message[] = [
+        createMessageWithTokens('assistant', 'irrelevant', { input: 100, output: 200 }),
+      ];
+
+      // 4 overhead + (100 + 200) = 304
+      expect(estimateMessagesTokens(messages)).toBe(304);
+    });
   });
 
   describe('shouldCompact', () => {
@@ -119,6 +163,32 @@ describe('Context Compaction System', () => {
 
       // With 60% threshold: 54 tokens < 60% of 100 (60 tokens) = false
       expect(shouldCompact(messages, 100, 60)).toBe(false);
+    });
+
+    it('should accept an options bag with threshold and reserveOutputTokens', () => {
+      // 1500 chars = ~375 tokens + 4 overhead = 379.
+      const messages: Message[] = [createMessage('user', 'a'.repeat(1500))];
+
+      // Without reserve: 379 >= 80% of 1000 (800) => false.
+      expect(shouldCompact(messages, 1000, { threshold: 80 })).toBe(false);
+
+      // With a huge reserve, trigger budget = 100; 80% = 80; 379 >= 80 => true.
+      expect(shouldCompact(messages, 1000, { threshold: 80, reserveOutputTokens: 900 })).toBe(true);
+    });
+
+    it('should exclude reserved output budget from the trigger', () => {
+      // Conversation: 700 tokens recorded.
+      const messages: Message[] = [createMessageWithTokens('user', 'irrelevant', { input: 700 })];
+
+      // maxContextTokens=1000, threshold=80%.
+      // Without reserve: trigger budget = 1000; 80% = 800; 704 < 800 => false.
+      expect(shouldCompact(messages, 1000, { threshold: 80 })).toBe(false);
+
+      // With reserveOutputTokens=200: trigger budget = 800; 80% = 640;
+      //   704 >= 640 => true. The reserved output budget pulls the trigger
+      //   forward so we compact BEFORE the conversation collides with the
+      //   space the provider needs for its next response.
+      expect(shouldCompact(messages, 1000, { threshold: 80, reserveOutputTokens: 200 })).toBe(true);
     });
   });
 
@@ -340,6 +410,54 @@ describe('Context Compaction System', () => {
         expect(result.originalMessages).toBe(6);
         expect(result.compactedMessages).toBe(3); // summary + 2 preserved
       });
+    });
+  });
+
+  describe('post-compaction headroom (80% target)', () => {
+    it('should buy headroom so the very next turn does NOT re-trigger', async () => {
+      // Mock summarizer returns a tiny summary so we can isolate the
+      // "compact targets 80% of trigger budget" behaviour.
+      const mockLLM = vi.fn().mockResolvedValue('S'); // 1 char -> ~1 token
+      setLLMSummarizeFn(mockLLM);
+
+      const maxContextTokens = 10_000;
+      const reserveOutputTokens = 1_000;
+      const threshold = 80;
+
+      // Build a conversation that JUST crosses the trigger:
+      //   triggerTokens = 10_000 - 1_000 = 9_000
+      //   threshold     = 80% of 9_000   = 7_200
+      // Each 4-char chunk = 1 content token + 4 overhead = 5 per message.
+      // Use larger chunks so we can fit < 30 messages and compact something
+      // meaningful.
+      const head: Message[] = [];
+      for (let i = 0; i < 30; i++) {
+        // 1200 chars => 300 tokens + 4 overhead = 304 per message.
+        // 30 * 304 = 9_120 tokens > 7_200 trigger.
+        head.push(createMessage('user', 'a'.repeat(1200)));
+      }
+
+      // Sanity: pre-compaction, shouldCompact fires.
+      expect(shouldCompact(head, maxContextTokens, { threshold, reserveOutputTokens })).toBe(true);
+
+      // Compact.
+      const { messages: compacted } = await compactConversation(head, {
+        preserveLastN: 4,
+        summaryMaxTokens: 200,
+        maxContextTokens,
+        reserveOutputTokens,
+      });
+
+      expect(mockLLM).toHaveBeenCalled();
+
+      // Simulate the next turn: add one short user message after compaction.
+      const nextTurn: Message[] = [...compacted, createMessage('user', 'one short follow-up')];
+
+      // The whole point of the 80% target: shouldCompact must return false
+      // immediately after compaction. Otherwise compaction runs every turn.
+      expect(shouldCompact(nextTurn, maxContextTokens, { threshold, reserveOutputTokens })).toBe(
+        false
+      );
     });
   });
 
