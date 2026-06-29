@@ -16,8 +16,7 @@ export type ImageFormat = 'png' | 'jpeg' | 'gif' | 'webp';
 
 /** Result of image validation. */
 export type ValidationResult =
-  | { valid: true; format: ImageFormat; sizeBytes: number }
-  | { valid: false; error: string };
+  { valid: true; format: ImageFormat; sizeBytes: number } | { valid: false; error: string };
 
 // ---------------------------------------------------------------------------
 // Constants

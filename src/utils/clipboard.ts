@@ -37,8 +37,7 @@ export interface ClipboardCapability {
 
 /** Result of reading an image from the clipboard. */
 export type ClipboardImageResult =
-  | { success: true; data: Buffer; format: ImageFormat }
-  | { success: false; error: string };
+  { success: true; data: Buffer; format: ImageFormat } | { success: false; error: string };
 
 // ---------------------------------------------------------------------------
 // Constants

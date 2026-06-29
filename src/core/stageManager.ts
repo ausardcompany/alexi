@@ -4,12 +4,7 @@
  */
 
 export type ConversationStage =
-  | 'architecture'
-  | 'planning'
-  | 'implementation'
-  | 'documentation'
-  | 'devops'
-  | 'security';
+  'architecture' | 'planning' | 'implementation' | 'documentation' | 'devops' | 'security';
 
 export interface StageDefinition {
   type: ConversationStage;
