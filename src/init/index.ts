@@ -14,14 +14,7 @@ import { defineEvent } from '../bus/index.js';
 
 export type ProjectType = 'nodejs' | 'python' | 'java' | 'rust' | 'go' | 'typescript' | 'unknown';
 export type PackageManager =
-  | 'npm'
-  | 'yarn'
-  | 'pnpm'
-  | 'pip'
-  | 'poetry'
-  | 'maven'
-  | 'gradle'
-  | 'cargo';
+  'npm' | 'yarn' | 'pnpm' | 'pip' | 'poetry' | 'maven' | 'gradle' | 'cargo';
 
 export interface ProjectStructure {
   hasTests: boolean;

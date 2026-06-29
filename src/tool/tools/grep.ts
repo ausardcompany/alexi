@@ -222,11 +222,7 @@ interface RgSummaryEvent {
 }
 
 type RgEvent =
-  | RgBeginEvent
-  | RgMatchEvent
-  | RgEndEvent
-  | RgSummaryEvent
-  | { type: string; data?: unknown };
+  RgBeginEvent | RgMatchEvent | RgEndEvent | RgSummaryEvent | { type: string; data?: unknown };
 
 /**
  * Count files visible to `rg` under `searchDir` honoring the same exclusions

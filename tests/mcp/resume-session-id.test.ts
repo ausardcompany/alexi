@@ -157,8 +157,7 @@ describe('integration: resume session forwards id to MCP ALEXI_SESSION_ID', () =
     await manager.connect(stdioConfig, { sessionId });
 
     const transportCall = vi.mocked(StdioClientTransport).mock.calls[0]?.[0] as
-      | { env?: Record<string, string> }
-      | undefined;
+      { env?: Record<string, string> } | undefined;
     expect(transportCall?.env?.ALEXI_SESSION_ID).toBe(persistedId);
     expect(transportCall?.env?.ALEXI_SESSION_ID).not.toBe('');
     expect(transportCall?.env?.ALEXI_SESSION_ID).toMatch(/.+/);
