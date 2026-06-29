@@ -34,8 +34,8 @@ export const AgentSchema = z.object({
   options: z.record(z.string(), z.unknown()).optional(),
 });
 
-import * as AgentRequirements from "@/kilocode/agent-requirements";
-import { MCP } from "@/mcp";
+import * as AgentRequirements from '@/kilocode/agent-requirements';
+import { MCP } from '@/mcp';
 
 export type RequirementBlockedError = InstanceType<typeof AgentRequirements.BlockedError>;
 
