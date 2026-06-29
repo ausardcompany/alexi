@@ -1,27 +1,21 @@
 # Changes Summary
 
 ## Files Modified
+- `src/agent/index.ts`
+- `src/core/project.test.ts`
+- `src/tool/registry.test.ts`
 
-1. `src/tool/application-tools.ts`
-   - **Change Type**: Feature
-   - **Description**: Updated code based on changes in `packages/core/src/tool/application-tools.ts` from opencode.
+## Summary of Changes
 
-2. `src/tool/builtins.ts`
-   - **Change Type**: Refactor
-   - **Description**: Refactored code based on changes in `packages/core/src/tool/builtins.ts` from opencode.
+### src/agent/index.ts
+- Added new agent requirement patterns.
+- Integrated MCP mock service.
 
-3. `src/tool/read-filesystem.ts`
-   - **Change Type**: Bugfix
-   - **Description**: Fixed code based on changes in `packages/core/src/tool/read-filesystem.ts` from opencode.
+### src/core/project.test.ts
+- Updated test cases to reflect changes in repository URLs.
 
-4. `src/tool/registry.test.ts`
-   - **Change Type**: Testing
-   - **Description**: New test cases based on changes in `packages/opencode/test/tool/registry.test.ts` from opencode.
-
-5. `src/tool/registry.ts`
-   - **Change Type**: Feature
-   - **Description**: Updated code based on changes in `packages/core/src/tool/registry.ts` and `packages/opencode/src/tool/registry.ts` from opencode.
+### src/tool/registry.test.ts
+- Enhanced tool registry test cases for better reliability.
 
 ## Issues Encountered
-
-- None
+- Specific lines for MCP integration in `src/agent/index.ts` were not found, adjustments were made based on available context.
