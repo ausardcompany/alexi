@@ -149,7 +149,7 @@ Available agent types:
 
 Usage:
 - Provide a detailed prompt with exactly what information to return
-- Use task_id to resume a previous task session
+- Use task_id to resume a previous task session, OR to inspect a failed task (the failure response includes taskId)
 - Use background=true for long-running tasks (requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)`,
 
   parameters: TaskParamsSchema,
@@ -195,6 +195,11 @@ Usage:
       };
     }
 
+    // Pre-bind a taskId so any failure path AFTER this point can surface it
+    // to the parent agent. The parent can then call task_status with this id
+    // to inspect what went wrong, mirroring kilocode #11621.
+    const taskIdForFailure = params.task_id ?? nanoid();
+
     // Validate agent can be used as subagent
     try {
       TaskTool.validate(agent, agent.name);
@@ -202,15 +207,23 @@ Usage:
       return {
         success: false,
         error: err instanceof Error ? err.message : String(err),
+        data: {
+          taskId: taskIdForFailure,
+          agentId: agent.id,
+          response: '',
+          completed: false,
+          status: 'failed' as const,
+        },
       };
     }
 
-    // Resume or create task
-    let taskId = params.task_id;
-    let taskData = taskId ? taskStore.get(taskId) : undefined;
+    // Resume or create task. taskIdForFailure already equals params.task_id
+    // when provided, so reusing it for a fresh row keeps the id stable from
+    // the validate-failure path through to the live execution path.
+    let taskId: string = taskIdForFailure;
+    let taskData = params.task_id ? taskStore.get(params.task_id) : undefined;
 
     if (!taskData) {
-      taskId = nanoid();
       taskData = {
         agentId: agent.id,
         messages: [],
@@ -219,6 +232,9 @@ Usage:
         background: params.background && enableBackground,
       };
       taskStore.set(taskId, taskData);
+    } else {
+      // Existing task — keep the caller-supplied id so resumption works.
+      taskId = params.task_id as string;
     }
 
     // Add the prompt to messages
