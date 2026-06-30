@@ -75,14 +75,43 @@ jobs:
       - name: Install Kilo CLI
         run: |
           echo "Installing Kilo CLI..."
-          npm install -g @kilocode/cli
-          npm ci
+          MAX_RETRIES=3
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "=== Install attempt $ATTEMPT of $MAX_RETRIES ==="
+            if npm install -g @kilocode/cli; then
+              break
+            fi
+            if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+              echo "[WARN] npm install failed (transient network?). Retrying in 15s..."
+              sleep 15
+            else
+              echo "[ERROR] npm install -g @kilocode/cli failed after $ATTEMPT attempts"
+              exit 1
+            fi
+          done
           echo "[OK] Kilo CLI: $(kilo --version)"
 
       - name: Install project dependencies
         run: |
           echo "Installing project dependencies..."
-          npm ci
+          MAX_RETRIES=3
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "=== npm ci attempt $ATTEMPT of $MAX_RETRIES ==="
+            if npm ci; then
+              break
+            fi
+            if [ $ATTEMPT -lt $MAX_RETRIES ]; then
+              echo "[WARN] npm ci failed (transient network?). Retrying in 15s..."
+              sleep 15
+            else
+              echo "[ERROR] npm ci failed after $ATTEMPT attempts"
+              exit 1
+            fi
+          done
           echo "[OK] Project dependencies installed"
       
       - name: Verify Kilo CLI and SAP AI Core configuration
