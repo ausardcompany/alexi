@@ -17,6 +17,7 @@ export const AgentSchema = z.object({
   id: z.string(),
   name: z.string(),
   displayName: z.string().optional(), // Human-readable name for org modes
+  source: z.string().optional(), // New field for source metadata
   description: z.string(),
   mode: z.enum(['primary', 'subagent', 'all']).default('all'),
   systemPrompt: z.string(),
