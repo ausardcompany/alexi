@@ -55,7 +55,7 @@ function createMockProcess() {
   return proc;
 }
 
-describe('McpClientManager.callTool — structuredContent handling', () => {
+describe('McpClientManager.callTool — content vs structuredContent priority', () => {
   let manager: McpClientManager;
 
   const stdioConfig: McpServerConfig = {
@@ -78,46 +78,29 @@ describe('McpClientManager.callTool — structuredContent handling', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns JSON-stringified structuredContent when only structuredContent is present', async () => {
+  it('prefers image content over structuredContent (Playwright screenshot case)', async () => {
+    // When a server returns both an image and structuredContent, we MUST
+    // surface the formatted image marker — not the JSON-stringified
+    // structuredContent — so the model can reason about the screenshot.
     mockClientCallTool.mockResolvedValue({
+      content: [{ type: 'image', data: 'b64==', mimeType: 'image/png' }],
       structuredContent: { foo: 'bar' },
     });
 
     const result = await manager.callTool('test-server', 'some-tool', {});
 
     expect(result.success).toBe(true);
-    expect(result.result).toBe('{"foo":"bar"}');
-  });
-
-  it('falls back to content flattening when only content is present', async () => {
-    mockClientCallTool.mockResolvedValue({
-      content: [{ type: 'text', text: 'hello' }],
-    });
-
-    const result = await manager.callTool('test-server', 'some-tool', {});
-
-    expect(result.success).toBe(true);
-    expect(result.result).toBe('hello');
-  });
-
-  it('prefers non-empty content over structuredContent when both are present', async () => {
-    // Per MCP spec, `content` is canonical and `structuredContent` is
-    // supplementary — non-empty `content` wins.
-    mockClientCallTool.mockResolvedValue({
-      structuredContent: { foo: 'bar' },
-      content: [{ type: 'text', text: 'narrative description' }],
-    });
-
-    const result = await manager.callTool('test-server', 'some-tool', {});
-
-    expect(result.success).toBe(true);
-    expect(result.result).toBe('narrative description');
+    expect(typeof result.result).toBe('string');
+    const text = result.result as string;
+    expect(text).toContain('image/png');
+    expect(text).not.toBe('{"foo":"bar"}');
+    expect(text).not.toContain('"foo"');
   });
 
   it('falls back to structuredContent when content array is empty', async () => {
     mockClientCallTool.mockResolvedValue({
-      structuredContent: { foo: 'bar' },
       content: [],
+      structuredContent: { foo: 'bar' },
     });
 
     const result = await manager.callTool('test-server', 'some-tool', {});
@@ -126,38 +109,36 @@ describe('McpClientManager.callTool — structuredContent handling', () => {
     expect(result.result).toBe('{"foo":"bar"}');
   });
 
-  it('falls back to content path when structuredContent is null', async () => {
+  it('preserves mixed text + resource_link arrays end-to-end', async () => {
     mockClientCallTool.mockResolvedValue({
-      structuredContent: null,
-      content: [{ type: 'text', text: 'fallback text' }],
+      content: [
+        { type: 'text', text: 'hello' },
+        { type: 'resource_link', uri: 'file:///x' },
+      ],
+      structuredContent: { ignored: true },
     });
 
     const result = await manager.callTool('test-server', 'some-tool', {});
 
     expect(result.success).toBe(true);
-    expect(result.result).toBe('fallback text');
+    expect(typeof result.result).toBe('string');
+    const text = result.result as string;
+    expect(text).toContain('hello');
+    expect(text).toContain('file:///x');
+    // structuredContent must NOT bleed into the output when content is non-empty
+    expect(text).not.toContain('"ignored"');
   });
 
-  it('honors isError when structuredContent is set', async () => {
+  it('uses content (not structuredContent) on the error path when both present', async () => {
     mockClientCallTool.mockResolvedValue({
-      structuredContent: { foo: 'bar' },
       isError: true,
+      content: [{ type: 'text', text: 'boom' }],
+      structuredContent: { code: 500 },
     });
 
     const result = await manager.callTool('test-server', 'some-tool', {});
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe('{"foo":"bar"}');
-  });
-
-  it('returns raw string when structuredContent is already a string', async () => {
-    mockClientCallTool.mockResolvedValue({
-      structuredContent: 'plain string',
-    });
-
-    const result = await manager.callTool('test-server', 'some-tool', {});
-
-    expect(result.success).toBe(true);
-    expect(result.result).toBe('plain string');
+    expect(result.error).toBe('boom');
   });
 });

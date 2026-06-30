@@ -148,11 +148,26 @@ describe('McpClientManager.callTool — error content preservation', () => {
     expect(result.result).toBe('see file\n[resource: file:///path/to/file.ts]');
   });
 
-  it('still prefers structuredContent over content when both are present in error', async () => {
+  it('prefers non-empty content over structuredContent on error path', async () => {
+    // Per MCP spec, `content` is canonical even on errors. structuredContent
+    // is only used as a fallback when `content` is missing or empty.
     mockClientCallTool.mockResolvedValue({
       isError: true,
       structuredContent: { code: 'ENOENT' },
       content: [{ type: 'resource', resource: { uri: 'file:///missing' } }],
+    });
+
+    const result = await manager.callTool('test-server', 'some-tool', {});
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('[resource: file:///missing]');
+  });
+
+  it('falls back to structuredContent on error path when content is empty', async () => {
+    mockClientCallTool.mockResolvedValue({
+      isError: true,
+      structuredContent: { code: 'ENOENT' },
+      content: [],
     });
 
     const result = await manager.callTool('test-server', 'some-tool', {});
