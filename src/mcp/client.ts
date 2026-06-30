@@ -502,10 +502,30 @@ export class McpClientManager {
       );
       clearTimeout(timer);
 
-      // Per the MCP spec, `structuredContent` is the canonical machine-readable
-      // output and `content` is human-readable narration. Spec-compliant servers
-      // (Qt Creator, several Codex-pattern servers) emit ONLY `structuredContent`,
-      // so prefer it when present and fall back to `content` flattening otherwise.
+      // Per the MCP spec, `content` is the canonical narrated output and
+      // `structuredContent` is a supplementary machine-readable payload.
+      // Prefer non-empty `content` so we preserve images, resource links,
+      // and mixed text+resource arrays from servers (Playwright, Qt Creator,
+      // Codex wrappers) that emit BOTH fields. Fall back to the
+      // `structuredContent` stringify path only when `content` is missing
+      // or empty -- spec-compliant servers that emit ONLY `structuredContent`
+      // (zero-arg tools, pure data results) still work via the fallback.
+      const rawContent = (result as { content?: unknown }).content;
+      if (Array.isArray(rawContent) && rawContent.length > 0) {
+        // Extract content from result, preserving non-text parts as compact
+        // placeholders so the model can reason about structured failures
+        // (e.g. an MCP error that returns text + a `resource` link to the
+        // offending file). Spec-compliant MCP servers routinely return mixed
+        // content arrays; filtering them to text-only loses critical context.
+        const flattened = (rawContent as unknown[]).map(formatContentPart).join('\n');
+
+        if (result.isError) {
+          return { success: false, error: flattened || 'Unknown error' };
+        }
+
+        return { success: true, result: flattened };
+      }
+
       const structured = (result as { structuredContent?: unknown }).structuredContent;
       if (structured !== undefined && structured !== null) {
         const text = typeof structured === 'string' ? structured : JSON.stringify(structured);
@@ -515,19 +535,12 @@ export class McpClientManager {
         return { success: true, result: text };
       }
 
-      // Extract content from result, preserving non-text parts as compact
-      // placeholders so the model can reason about structured failures
-      // (e.g. an MCP error that returns text + a `resource` link to the
-      // offending file). Spec-compliant MCP servers routinely return mixed
-      // content arrays; filtering them to text-only loses critical context.
-      const content = (result.content || []) as unknown[];
-      const flattened = content.map(formatContentPart).join('\n');
-
+      // Neither content nor structuredContent present — return empty result
+      // (preserves prior behaviour where empty content flattened to '').
       if (result.isError) {
-        return { success: false, error: flattened || 'Unknown error' };
+        return { success: false, error: 'Unknown error' };
       }
-
-      return { success: true, result: flattened };
+      return { success: true, result: '' };
     } catch (error) {
       clearTimeout(timer);
       if (error instanceof Error && error.name === 'AbortError') {
