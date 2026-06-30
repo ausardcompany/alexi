@@ -6,7 +6,7 @@ import { getGlobalPaths } from '../utils/global.js';
  * Config directory prefixes (relative paths, forward-slash normalized).
  * Matches .kilo/, .kilocode/, .opencode/, .alexi/ at any depth within the project.
  */
-const CONFIG_DIRS = ['.kilo/', '.kilocode/']; // Updated to remove legacy paths
+const CONFIG_DIRS = ['.kilo/', '.kilocode/', '.opencode/', '.alexi/'];
 
 /**
  * Subdirectories under CONFIG_DIRS that are NOT config files (e.g. plan files).
