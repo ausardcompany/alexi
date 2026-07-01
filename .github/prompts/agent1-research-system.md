@@ -12,13 +12,15 @@ Write file: `.github/research/YYYY-MM-DD-spec.md`
    polling cadence tagged at the end of its line. **Daily** repos run
    every cycle. **Weekly** repos run only on Mondays (UTC). Skip a
    weekly repo silently when the cadence does not match today. To
-   compute the day, use `$(date -u +%u)` (1 = Monday).
+   compute the day, use `$(date -u +%u)` (1 = Monday). **Monthly (1st Mon)**
+   repos run only when today is Monday UTC AND the day-of-month is `<= 7`
+   (i.e. the first Monday of the month); use `$(date -u +%d)` to check.
 
    - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`  <!-- daily -->
    - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`        <!-- daily -->
    - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`      <!-- daily -->
-   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`  <!-- weekly (Mon) -->
-   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`     <!-- weekly (Mon) -->
+   - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`  <!-- monthly (1st Mon) -->
+   - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`     <!-- monthly (1st Mon) -->
 
 2. Check what we already have: `ls src/tool/tools/ && ls src/core/`
 
