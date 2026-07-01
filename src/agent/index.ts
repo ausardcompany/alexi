@@ -37,7 +37,13 @@ export const AgentSchema = z.object({
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
-export const INTERNAL_OPTION_KEYS = ["id", "displayName", "source", "reference", "resolved"] as const;
+export const INTERNAL_OPTION_KEYS = [
+  'id',
+  'displayName',
+  'source',
+  'reference',
+  'resolved',
+] as const;
 
 const internal: ReadonlySet<string> = new Set(INTERNAL_OPTION_KEYS);
 
