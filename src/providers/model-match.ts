@@ -109,6 +109,26 @@ export function modelSupportsReasoningEffort(modelId: string): ReasoningEffortMo
   if (lower.includes('deepseek')) {
     return 'levels';
   }
+  // Anthropic Opus 4.7+ accepts adaptive reasoning_effort levels natively.
+  // Match either "opus-<major>[.<minor>]" or "claude-<major>[.<minor>]-opus".
+  const opusMatch =
+    lower.match(/opus-(\d+)(?:\.(\d+))?/) ?? lower.match(/claude-(\d+)(?:\.(\d+))?-opus/);
+  if (opusMatch) {
+    const major = Number(opusMatch[1]);
+    const minor = opusMatch[2] !== undefined ? Number(opusMatch[2]) : 0;
+    if (major > 4 || (major === 4 && minor >= 7)) {
+      return 'levels';
+    }
+  }
+  // Anthropic Sonnet 5+ accepts adaptive reasoning_effort levels natively.
+  // Match either "sonnet-<major>" or "claude-<major>-sonnet".
+  const sonnetMatch = lower.match(/sonnet-(\d+)/) ?? lower.match(/claude-(\d+)-sonnet/);
+  if (sonnetMatch) {
+    const major = Number(sonnetMatch[1]);
+    if (major >= 5) {
+      return 'levels';
+    }
+  }
   // Pre-emptive carve-out for future binary-only thinking models.
   // Add concrete model substrings here when wired into the router.
   return 'none';
