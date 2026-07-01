@@ -37,7 +37,19 @@ export const AgentSchema = z.object({
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
-// Updated agent creation logic reflecting new patterns from opencode
+export const INTERNAL_OPTION_KEYS = ["id", "displayName", "source", "reference", "resolved"] as const;
+
+const internal: ReadonlySet<string> = new Set(INTERNAL_OPTION_KEYS);
+
+function stripInternalOptions(options: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const key in options) {
+    if (internal.has(key)) continue;
+    result[key] = options[key];
+  }
+  return result;
+}
+
 export interface Agent extends AgentConfig {
   canUseTool(toolId: string): boolean;
 }

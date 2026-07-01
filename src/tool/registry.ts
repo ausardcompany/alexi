@@ -4,7 +4,7 @@
  */
 import type { Tool } from './index.js';
 
-// Refactor tool registry with upstream patterns
+// updated registry tool logic
 
 // Updated code based on changes in `packages/core/src/tool/registry.ts` and `packages/opencode/src/tool/registry.ts` from opencode
 // Re-export the registry-name accessor used by the permission system to
