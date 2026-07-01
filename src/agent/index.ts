@@ -47,7 +47,7 @@ export const INTERNAL_OPTION_KEYS = [
 
 const internal: ReadonlySet<string> = new Set(INTERNAL_OPTION_KEYS);
 
-function stripInternalOptions(options: Record<string, any>): Record<string, any> {
+export function stripInternalOptions(options: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const key in options) {
     if (internal.has(key)) continue;
