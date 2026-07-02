@@ -8,16 +8,12 @@ export interface MaxCostMessage {
 }
 
 export class MaxCostNudge {
-  readonly #msgs = new Map<string, { sid: string; cost: number }>();
-  readonly #totals = new Map<string, number>();
-  readonly #floors = new Map<string, number>();
-  readonly #alerted = new Map<string, Set<number>>();
-  readonly #acked = new Map<string, Set<number>>();
-
   #limit: number | undefined;
 
   static normalizeLimit(value: number | undefined | null): number | undefined {
-    if (value == null || !Number.isFinite(value) || value <= 0) return undefined;
+    if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+      return undefined;
+    }
     return Math.ceil(value);
   }
 
@@ -26,6 +22,10 @@ export class MaxCostNudge {
   }
 
   setLimit(value: number | undefined | null): void {
-    // Additional logic
+    this.#limit = MaxCostNudge.normalizeLimit(value);
+  }
+
+  getLimit(): number | undefined {
+    return this.#limit;
   }
 }

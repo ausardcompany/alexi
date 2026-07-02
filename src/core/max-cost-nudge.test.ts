@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { MaxCostNudge } from './max-cost-nudge';
+import { describe, expect, test } from 'vitest';
+import { MaxCostNudge } from './max-cost-nudge.js';
 
 describe('MaxCostNudge', () => {
   test('normalizeLimit functionality', () => {
