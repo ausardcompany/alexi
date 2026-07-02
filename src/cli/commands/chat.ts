@@ -3,7 +3,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { sendChat } from '../../core/orchestrator.js';
 import { SessionManager } from '../../core/sessionManager.js';
 import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
@@ -14,6 +14,7 @@ import {
   renderSubmitPrompt,
   getCommandRegistry,
 } from '../../command/index.js';
+import { getPermissionManager } from '../../permission/index.js';
 
 /**
  * Result of running a custom command in non-interactive (chat) mode.
@@ -75,6 +76,8 @@ interface ChatOptions {
   session?: string;
   system?: string;
   agent?: string;
+  yolo?: boolean;
+  dangerouslySkipPermissions?: boolean;
 }
 
 export function registerChatCommand(program: Command): void {
@@ -91,8 +94,13 @@ export function registerChatCommand(program: Command): void {
       '--agent <name>',
       'Agent slug whose system prompt and model become defaults (overrides `agent` field in user config). Tools are not enabled in chat mode, so agent tool restrictions are ignored.'
     )
+    .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
+    .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: ChatOptions) => {
       try {
+        if (opts.yolo || opts.dangerouslySkipPermissions) {
+          getPermissionManager().setPermissionMode('auto');
+        }
         // Get message from either --message or --message-file
         let message: string;
         if (opts.messageFile) {

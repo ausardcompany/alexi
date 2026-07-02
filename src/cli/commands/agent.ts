@@ -9,7 +9,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 import { agenticChat, type AgenticProgressEvent } from '../../core/agenticChat.js';
 import { SessionManager } from '../../core/sessionManager.js';
 import { createAutoCommitManager } from '../../git/autoCommit.js';
@@ -20,6 +20,7 @@ import { parseEffortLevel, type EffortLevel } from '../../core/effortLevel.js';
 import { createWorktree } from '../../utils/gitWorktree.js';
 import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
 import { getConfigDefaultAgent } from '../../config/userConfig.js';
+import { getPermissionManager } from '../../permission/index.js';
 
 interface AgentOptions {
   message?: string;
@@ -47,6 +48,9 @@ interface AgentOptions {
   effort?: string;
   // Custom agent slug (overrides config default)
   agent?: string;
+  // --yolo / --dangerously-skip-permissions
+  yolo?: boolean;
+  dangerouslySkipPermissions?: boolean;
 }
 
 export function registerAgentCommand(program: Command): void {
@@ -80,9 +84,14 @@ export function registerAgentCommand(program: Command): void {
       '--agent <name>',
       'Custom agent slug to dispatch (overrides `agent` field in user config)'
     )
+    .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
+    .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: AgentOptions) => {
       let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
+        if (opts.yolo || opts.dangerouslySkipPermissions) {
+          getPermissionManager().setPermissionMode('auto');
+        }
         // Get message from either --message or --message-file
         let message: string;
         if (opts.messageFile) {

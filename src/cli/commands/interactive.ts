@@ -2,10 +2,11 @@
  * Interactive command - start REPL with streaming responses
  */
 
-import type { Command } from 'commander';
+import { Option, type Command } from 'commander';
 // Fallback: import { startInteractive } from '../interactive.js';
 import { startTui } from '../tui/index.js';
 import { getDefaultModel } from '../../providers/index.js';
+import { getPermissionManager } from '../../permission/index.js';
 import { createAutoCommitManager } from '../../git/autoCommit.js';
 import { loadGitConfig } from '../../git/config.js';
 import { commitDirtyFiles } from '../../git/dirtyFiles.js';
@@ -27,6 +28,9 @@ interface InteractiveOptions {
   attributeAuthor?: boolean;
   // Repo map flags
   mapTokens?: string;
+  // --yolo / --dangerously-skip-permissions
+  yolo?: boolean;
+  dangerouslySkipPermissions?: boolean;
 }
 
 export function registerInteractiveCommand(program: Command): void {
@@ -48,9 +52,14 @@ export function registerInteractiveCommand(program: Command): void {
     .option('--attribute-author', 'Override git author for AI commits')
     // Repo map flags
     .option('--map-tokens <n>', 'Repo map token budget (default: 2000; set to 0 to disable)')
+    .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
+    .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: InteractiveOptions) => {
       let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
+        if (opts.yolo || opts.dangerouslySkipPermissions) {
+          getPermissionManager().setPermissionMode('auto');
+        }
         let workdir = process.cwd();
 
         // Create an isolated git worktree if requested

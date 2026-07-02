@@ -24,6 +24,7 @@ import { ConfigProtection } from './config-paths.js';
 import { containsPath, safePathCheck } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { getAllToolNames } from '../tool/registry.js';
+import { AllowEverythingPermission } from './allow-everything.js';
 
 // Glob characters that flag a tool entry as a pattern rather than a literal name.
 const GLOB_CHARS = /[*?]/;
@@ -42,6 +43,11 @@ export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin
 
 // Permission decision
 export type PermissionDecision = 'allow' | 'deny' | 'ask';
+
+// Permission mode: 'normal' evaluates rules; 'auto' short-circuits to allow
+// (except for deny-list resources like .env, secrets, ~/.ssh) — set by
+// `--yolo` / `--dangerously-skip-permissions` CLI flags.
+export type PermissionMode = 'auto' | 'normal';
 
 // Doom loop configuration
 export interface DoomLoopConfig {
@@ -166,9 +172,62 @@ export class PermissionManager {
   private projectRoot: string = process.cwd();
   private allowExternalDirectories: boolean = false;
 
+  // Permission mode & lazy allow-everything delegate for --yolo / --dangerously-skip-permissions.
+  private permissionMode: PermissionMode = 'normal';
+  private allowEverythingDelegate: AllowEverythingPermission | null = null;
+
   constructor(rules: PermissionRule[] = []) {
     this.rules = this.sortRules(rules);
     this.warnOnUnknownDenyToolNames();
+  }
+
+  // ============ Permission Mode (yolo / dangerously-skip-permissions) ============
+
+  /**
+   * Set the global permission mode. In 'auto' mode, `check()` short-circuits
+   * to allow for every resource that does not match the built-in deny list
+   * (see `deny-secrets` rule paths). In 'normal' mode (default), rules are
+   * evaluated as usual.
+   */
+  setPermissionMode(mode: PermissionMode): void {
+    this.permissionMode = mode;
+    if (mode === 'auto') {
+      // Reset the delegate so exclude patterns are re-derived from the
+      // current rule set (defensive; supports rules changing at runtime).
+      this.allowEverythingDelegate = null;
+    }
+  }
+
+  /**
+   * Get the current permission mode.
+   */
+  getPermissionMode(): PermissionMode {
+    return this.permissionMode;
+  }
+
+  /**
+   * Build (or return cached) allow-everything delegate whose exclude patterns
+   * are the union of `paths` from the built-in `deny-secrets` rule, plus
+   * `~/.ssh` (defense-in-depth; the deny-secrets rule does not name ssh).
+   */
+  private getAllowEverythingDelegate(): AllowEverythingPermission {
+    if (this.allowEverythingDelegate) {
+      return this.allowEverythingDelegate;
+    }
+    const excludePatterns: string[] = [];
+    for (const rule of this.rules) {
+      if (rule.id === 'deny-secrets' && rule.paths) {
+        excludePatterns.push(...rule.paths);
+      }
+    }
+    // Belt-and-braces: even if the caller has stripped `deny-secrets`,
+    // never let `--yolo` reach SSH keys.
+    excludePatterns.push('**/.ssh/**', '~/.ssh/**');
+    this.allowEverythingDelegate = new AllowEverythingPermission({
+      enabled: true,
+      excludePatterns,
+    });
+    return this.allowEverythingDelegate;
   }
 
   /**
@@ -560,6 +619,24 @@ export class PermissionManager {
       // Record the attempt before returning
       this.recordOperationAttempt(ctx);
       return externalResult;
+    }
+
+    // Auto (yolo) mode: short-circuit to allow unless the resource matches
+    // the deny-list carried by the AllowEverythingPermission delegate.
+    // The delegate itself returns `granted: false` for exclude-list hits
+    // and `granted: true` otherwise; we map both cases to `PermissionResult`.
+    if (this.permissionMode === 'auto') {
+      const delegate = this.getAllowEverythingDelegate();
+      const result = await delegate.check(ctx);
+      if (result.granted) {
+        // Reset operation tracking on success (parity with the normal allow path).
+        const key = this.getOperationKey(ctx);
+        this.recentOperations.delete(key);
+      } else {
+        // Record the denied attempt (parity with the normal deny path).
+        this.recordOperationAttempt(ctx);
+      }
+      return result;
     }
 
     const { decision, rule } = this.evaluate(ctx);
