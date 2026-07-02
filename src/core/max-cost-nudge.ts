@@ -17,7 +17,9 @@ export class MaxCostNudge {
   #limit: number | undefined;
 
   static normalizeLimit(value: number | undefined | null): number | undefined {
-    if (value == null || !Number.isFinite(value) || value <= 0) return undefined;
+    if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+      return undefined;
+    }
     return Math.ceil(value);
   }
 
@@ -26,6 +28,27 @@ export class MaxCostNudge {
   }
 
   setLimit(value: number | undefined | null): void {
-    // Additional logic
+    this.#limit = MaxCostNudge.normalizeLimit(value);
+  }
+
+  getLimit(): number | undefined {
+    return this.#limit;
+  }
+
+  // Internal state accessors reserved for future logic wiring
+  _internalState(): {
+    msgs: Map<string, { sid: string; cost: number }>;
+    totals: Map<string, number>;
+    floors: Map<string, number>;
+    alerted: Map<string, Set<number>>;
+    acked: Map<string, Set<number>>;
+  } {
+    return {
+      msgs: this.#msgs,
+      totals: this.#totals,
+      floors: this.#floors,
+      alerted: this.#alerted,
+      acked: this.#acked,
+    };
   }
 }
