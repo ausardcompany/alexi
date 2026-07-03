@@ -152,7 +152,10 @@ function isFullCommandPattern(pattern: string): boolean {
  * string so that shapes like `find *-exec*` can catch exec-flag escapes.
  */
 export function matchCommand(command: string, allowedCommands: string[]): boolean {
-  const cmdName = command.split(/\s+/)[0]; // Get first word (the command)
+  // Trim leading/trailing whitespace so patterns like `find *-exec*` are not
+  // silently bypassed by a stray leading space in the command string.
+  const trimmed = command.trim();
+  const cmdName = trimmed.split(/\s+/)[0]; // Get first word (the command)
 
   return allowedCommands.some((allowed) => {
     if (allowed === '*') return true;
@@ -160,7 +163,7 @@ export function matchCommand(command: string, allowedCommands: string[]): boolea
 
     if (isFullCommandPattern(allowed)) {
       try {
-        return commandPatternToRegex(allowed).test(command);
+        return commandPatternToRegex(allowed).test(trimmed);
       } catch {
         return false;
       }
