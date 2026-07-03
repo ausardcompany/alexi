@@ -107,7 +107,49 @@ export function isUnderDirectory(path: string, directory: string): boolean {
 }
 
 /**
- * Match command against allowed commands list
+ * Convert a command allowlist pattern to a regex.
+ *
+ * Unlike {@link globToRegex}, this treats `*` as `.*` (matches anything
+ * including path separators and whitespace) because command lines carry
+ * flags and paths that would otherwise be blocked by the `[^/]*` semantics
+ * of file-path globbing.
+ */
+function commandPatternToRegex(pattern: string): RegExp {
+  const regex = pattern
+    // Escape special regex chars (except * and ?)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    // * matches anything, including spaces and slashes
+    .replace(/\*/g, '.*')
+    // ? matches single char
+    .replace(/\?/g, '.');
+  return new RegExp(`^${regex}$`);
+}
+
+/**
+ * Decide whether an allowlist pattern targets the full command line
+ * (rather than just the command name / first token).
+ *
+ * A pattern is treated as full-command when either:
+ *  - It contains whitespace (e.g. `find *-exec*`, `sort *-o *`), or
+ *  - It has a wildcard that is not at the very start (e.g. `mkfs*`, `git*`).
+ *
+ * Patterns like `*` (bare wildcard) or `find` (plain first token) still
+ * match against the first word for backwards compatibility.
+ */
+function isFullCommandPattern(pattern: string): boolean {
+  if (/\s/.test(pattern)) return true;
+  // Look for a wildcard that is not at index 0 (non-leading).
+  const idx = pattern.search(/[*?]/);
+  return idx > 0;
+}
+
+/**
+ * Match command against allowed commands list.
+ *
+ * For plain first-token patterns (`find`, `ls`, `*`) we compare against the
+ * first whitespace-delimited word for a cheap fast path. For patterns that
+ * embed whitespace or non-leading wildcards, we match the FULL command
+ * string so that shapes like `find *-exec*` can catch exec-flag escapes.
  */
 export function matchCommand(command: string, allowedCommands: string[]): boolean {
   const cmdName = command.split(/\s+/)[0]; // Get first word (the command)
@@ -115,6 +157,15 @@ export function matchCommand(command: string, allowedCommands: string[]): boolea
   return allowedCommands.some((allowed) => {
     if (allowed === '*') return true;
     if (allowed === cmdName) return true;
+
+    if (isFullCommandPattern(allowed)) {
+      try {
+        return commandPatternToRegex(allowed).test(command);
+      } catch {
+        return false;
+      }
+    }
+
     if (allowed.includes('*')) {
       return matchPattern(allowed, cmdName).matched;
     }
