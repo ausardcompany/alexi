@@ -807,6 +807,30 @@ export const defaultRules: PermissionRule[] = [
     decision: 'deny',
     priority: 100,
   },
+  // Deny exec-flag escapes: read-only-shaped commands that shell out via
+  // flags or write to arbitrary files. Ordered at the same priority as
+  // deny-dangerous so they win over allow-safe-commands (priority 50).
+  {
+    id: 'deny-exec-flag-escapes',
+    name: 'Deny exec-flag escapes',
+    description: 'Deny read-only-shaped commands that shell out via flags',
+    actions: ['execute'],
+    commands: [
+      'find *-exec*',
+      'find *-execdir*',
+      'find *-fprint*',
+      'find *-fprintf*',
+      'find *-fls*',
+      'find *-delete*',
+      'sort *-o *',
+      'sort * -o *',
+      'sort *--output*',
+      'sort *--compress-program*',
+      'sort *--files0-from*',
+    ],
+    decision: 'deny',
+    priority: 100,
+  },
 ];
 
 // Global permission manager instance
