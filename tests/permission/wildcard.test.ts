@@ -101,6 +101,14 @@ describe('matchCommand', () => {
     it('matches `rm -rf /*` glob shape', () => {
       expect(matchCommand('rm -rf /home', ['rm -rf /*'])).toBe(true);
     });
+
+    it('is not bypassed by leading or trailing whitespace', () => {
+      // Regression: a stray leading space used to make the full-command
+      // regex (`^find.*-exec.*$`) miss and silently allow the command.
+      expect(matchCommand('  find . -exec sh -c whoami ;', ['find *-exec*'])).toBe(true);
+      expect(matchCommand('find . -exec sh -c whoami ;   ', ['find *-exec*'])).toBe(true);
+      expect(matchCommand('\tfind . -exec sh -c whoami ;', ['find *-exec*'])).toBe(true);
+    });
   });
 
   describe('multiple patterns', () => {
