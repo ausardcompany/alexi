@@ -37,20 +37,77 @@ export const AgentSchema = z.object({
 
 export type AgentConfig = z.infer<typeof AgentSchema>;
 
+/**
+ * Agent-metadata keys that must NEVER be forwarded to `provider.complete()` or
+ * `provider.streamComplete()`. These fields describe the agent itself (its
+ * identity, prompt, mode, aliases, tool allowlist, source origin, reference
+ * resolution state) and have no meaning to SAP AI Core / SAP Orchestration.
+ *
+ * Some SAP orchestration paths reject unknown options; others silently pass
+ * them through to the model. Either way, leaking agent metadata into request
+ * options is a bug. This deny-list is the source of truth for `stripInternalOptions`.
+ *
+ * If you add a new field to `AgentSchema` that is NOT a legitimate
+ * `CompletionOptions` field (see `src/providers/sapOrchestration.ts`), add it
+ * here too and update the JSDoc on `stripInternalOptions`.
+ *
+ * Notable exclusions:
+ * - `preferredModel` on the agent is consumed by callers to pick the model
+ *   BEFORE dispatch (see `agenticChat.ts`), never as a provider option, so it
+ *   is included here as internal.
+ * - `tools` is intentionally NOT in this list: on the agent it means "allowed
+ *   tool names" (string[]) but on `CompletionOptions` it means "tool schemas"
+ *   (ChatCompletionTool[]). The two must never share an options bag; callers
+ *   must never spread `AgentConfig` into `CompletionOptions` directly.
+ */
 export const INTERNAL_OPTION_KEYS = [
   'id',
+  'name',
   'displayName',
+  'description',
   'source',
   'reference',
   'resolved',
+  'mode',
+  'systemPrompt',
+  'deprecated',
+  'disabledTools',
+  'aliases',
+  'preferredModel',
 ] as const;
 
 const internal: ReadonlySet<string> = new Set(INTERNAL_OPTION_KEYS);
 
+/**
+ * Strip agent-metadata keys from an options-like object before forwarding it to
+ * `provider.complete()` / `provider.streamComplete()`.
+ *
+ * ## When to use
+ *
+ * Call this whenever an options bag passed to a provider MIGHT contain agent
+ * metadata. That happens when a caller constructs `CompletionOptions` by
+ * merging in fields from an `AgentConfig` (for example carrying
+ * `source: 'user' | 'org'` provenance alongside real request options, or
+ * spreading an org-managed agent's `options` blob into the request).
+ *
+ * As of this writing (2026-07-04), the built-in dispatch sites in
+ * `src/core/agenticChat.ts`, `src/core/streamingOrchestrator.ts`, and
+ * `src/core/orchestrator.ts` construct `CompletionOptions` explicitly with only
+ * legitimate provider fields (`maxTokens`, `temperature`, `signal`, `tools`,
+ * `headers`), so they do NOT need to call this helper. If you introduce a new
+ * dispatch site that merges agent metadata into the options bag, you MUST call
+ * `stripInternalOptions` on the merged bag before passing it to the provider.
+ *
+ * The deny-list is `INTERNAL_OPTION_KEYS`; see its JSDoc for what is stripped
+ * and why. Non-listed keys (including all legitimate `CompletionOptions`
+ * fields) are preserved with their original values, including `undefined`.
+ */
 export function stripInternalOptions(options: Record<string, any>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const key in options) {
-    if (internal.has(key)) continue;
+    if (internal.has(key)) {
+      continue;
+    }
     result[key] = options[key];
   }
   return result;
