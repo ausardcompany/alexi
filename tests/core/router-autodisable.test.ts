@@ -105,6 +105,33 @@ describe('Router auto-disable', () => {
       expect(classifyRouteError(undefined).kind).toBe('unknown');
       expect(classifyRouteError({ msg: 'no' }).kind).toBe('unknown');
     });
+
+    it('classifies an Error named AbortError as aborted', () => {
+      const err = new Error('The user aborted a request.');
+      (err as Error & { name: string }).name = 'AbortError';
+      expect(classifyRouteError(err).kind).toBe('aborted');
+    });
+
+    it('classifies a DOMException named AbortError as aborted, not permanent', () => {
+      // Node's fetch surfaces aborts via DOMException; fall back to a
+      // constructed object with the same shape on older runtimes.
+      const err =
+        typeof DOMException !== 'undefined'
+          ? new DOMException('signal aborted', 'AbortError')
+          : Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const result = classifyRouteError(err);
+      expect(result.kind).toBe('aborted');
+      expect(result.kind).not.toBe('permanent');
+    });
+
+    it('short-circuits before status-code detection when the error is an AbortError', () => {
+      // Even if an AbortError incidentally carries a "401" or
+      // "model_not_found" substring in its message (defensive check), we
+      // must still classify it as aborted, never as permanent.
+      const err = new Error('Request failed with status: 401 (aborted mid-flight)');
+      (err as Error & { name: string }).name = 'AbortError';
+      expect(classifyRouteError(err).kind).toBe('aborted');
+    });
   });
 
   describe('recordRouteOutcome + isRouteDisabled', () => {

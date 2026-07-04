@@ -92,7 +92,7 @@ export const GoalProgressEvent = defineEvent(
 async function evaluateCondition(
   condition: string,
   lastResponse: string,
-  options?: { modelOverride?: string }
+  options?: { modelOverride?: string; signal?: AbortSignal }
 ): Promise<{ met: boolean; explanation: string }> {
   const evaluationPrompt =
     `Given the following work that was just performed:\n\n` +
@@ -106,6 +106,7 @@ async function evaluateCondition(
       'You are a condition evaluator. Assess whether a goal condition has been met ' +
       'based on the work performed. Be precise and conservative — only answer YES ' +
       'if the condition is clearly satisfied.',
+    signal: options?.signal,
   });
 
   const text = result.text.trim();
@@ -229,6 +230,7 @@ export async function executeGoal(options: GoalOptions): Promise<GoalResult> {
     // Evaluate the condition
     const evaluation = await evaluateCondition(condition, chatResult.text, {
       modelOverride,
+      signal,
     });
 
     finalEvaluation = evaluation.explanation;

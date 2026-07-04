@@ -957,6 +957,7 @@ export async function executeCodeReview(opts: CodeReviewOptions = {}): Promise<C
   const result = await sendChat(userMessage, {
     modelOverride: modelId,
     systemPrompt,
+    signal: opts.signal,
   });
 
   const usage = result.usage ?? {};
