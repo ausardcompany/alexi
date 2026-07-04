@@ -2407,9 +2407,12 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
   });
   state.keypressHandler = keypressHandler;
 
-  // Handle Ctrl+C during streaming
+  // Handle Ctrl+C during streaming OR any in-flight non-streaming request
+  // (goal, code-review, or a bare sendChat call) that has installed an
+  // AbortController on state. Without this, non-streaming providers keep
+  // burning tokens after the user cancels.
   process.on('SIGINT', () => {
-    if (state.isStreaming && state.abortController) {
+    if (state.abortController) {
       state.abortController.abort();
       console.log(c('yellow', '\n\n  [Cancelled]\n'));
       rl.prompt();

@@ -67,16 +67,47 @@ function getRouteFailureThreshold(): number {
 }
 
 /**
- * Classify a thrown error for the purpose of route auto-disable. Returns
- * `permanent` when the error is a 401/403/404 from the provider OR the
- * message contains `model_not_found` / `deployment_not_found` (case
- * insensitive, on word boundaries). All other errors -- including 5xx,
- * network, and unknown shapes -- are NOT classified here; callers should
- * skip recordRouteOutcome for those and let ErrorBackoff manage them.
+ * Outcome of {@link classifyRouteError}. `aborted` is short-circuited before
+ * status/message inspection so a user-initiated cancellation (Ctrl+C wired
+ * through an AbortController) is NEVER attributed to route health.
  */
-export function classifyRouteError(
-  err: unknown
-): { kind: 'permanent'; statusCode?: number; reason?: string } | { kind: 'unknown' } {
+export type RouteErrorClassification =
+  | { kind: 'aborted' }
+  | { kind: 'permanent'; statusCode?: number; reason?: string }
+  | { kind: 'unknown' };
+
+/**
+ * Detect a platform `AbortError` regardless of whether it was raised as a
+ * plain `Error`, a `DOMException`, or a subclass thereof. Node's fetch and
+ * `AbortSignal` both surface aborts via `name === 'AbortError'`.
+ */
+function isAbortErrorLike(err: unknown): boolean {
+  if (err === null || err === undefined) {
+    return false;
+  }
+  if (typeof err !== 'object') {
+    return false;
+  }
+  const name = (err as { name?: unknown }).name;
+  return typeof name === 'string' && name === 'AbortError';
+}
+
+/**
+ * Classify a thrown error for the purpose of route auto-disable. Returns
+ * `aborted` first when the error is a user-initiated cancellation (an
+ * `AbortError`), then `permanent` when the error is a 401/403/404 from the
+ * provider OR the message contains `model_not_found` /
+ * `deployment_not_found` (case insensitive, on word boundaries). All other
+ * errors -- including 5xx, network, and unknown shapes -- are NOT classified
+ * here; callers should skip recordRouteOutcome for those and let
+ * ErrorBackoff manage them. Aborts MUST NOT be recorded because they are
+ * not a route health signal.
+ */
+export function classifyRouteError(err: unknown): RouteErrorClassification {
+  if (isAbortErrorLike(err)) {
+    return { kind: 'aborted' };
+  }
+
   const message = err instanceof Error ? err.message : String(err);
   const statusCode = extractStatusCode(message);
 

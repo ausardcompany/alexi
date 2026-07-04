@@ -25,7 +25,7 @@ vi.mock('../src/core/router.js', () => ({
 // Import after mocking
 import { sendChat } from '../src/core/orchestrator.js';
 import { getProviderForModel, getDefaultModel } from '../src/providers/index.js';
-import { routePrompt } from '../src/core/router.js';
+import { routePrompt, recordRouteOutcome, classifyRouteError } from '../src/core/router.js';
 import { SessionManager } from '../src/core/sessionManager.js';
 
 // Helper to create mock provider
@@ -140,7 +140,7 @@ describe('Orchestrator', () => {
 
         expect(mockProvider.complete).toHaveBeenCalledWith(
           [{ role: 'user', content: 'Test message' }],
-          { maxTokens: 4096 }
+          { maxTokens: 4096, signal: undefined }
         );
         expect(result.text).toBe('Provider response');
         expect(result.usage).toEqual({ prompt_tokens: 15, completion_tokens: 20 });
@@ -178,7 +178,7 @@ describe('Orchestrator', () => {
             { role: 'system', content: 'You are a helpful assistant' },
             { role: 'user', content: 'Hello' },
           ],
-          { maxTokens: 4096 }
+          { maxTokens: 4096, signal: undefined }
         );
       });
     });
@@ -291,6 +291,104 @@ describe('Orchestrator', () => {
         const result = await sendChat('Test');
 
         expect(result.routingReason).toBeUndefined();
+      });
+    });
+
+    describe('AbortSignal handling', () => {
+      it('forwards options.signal to provider.complete', async () => {
+        const mockProvider = createMockProvider({
+          text: 'Response',
+          usage: {},
+        });
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        const ac = new AbortController();
+        await sendChat('Test', { signal: ac.signal });
+
+        expect(mockProvider.complete).toHaveBeenCalledWith([{ role: 'user', content: 'Test' }], {
+          maxTokens: 4096,
+          signal: ac.signal,
+        });
+      });
+
+      it('propagates AbortError when the signal is aborted mid-request', async () => {
+        const ac = new AbortController();
+
+        // Provider that resolves/rejects based on the signal being aborted.
+        const mockProvider = {
+          complete: vi.fn(async (_messages: unknown, opts: { signal?: AbortSignal }) => {
+            return await new Promise((_resolve, reject) => {
+              const s = opts.signal;
+              if (!s) {
+                reject(new Error('no signal wired'));
+                return;
+              }
+              if (s.aborted) {
+                const err = new Error('aborted');
+                (err as Error & { name: string }).name = 'AbortError';
+                reject(err);
+                return;
+              }
+              s.addEventListener('abort', () => {
+                const err = new Error('aborted');
+                (err as Error & { name: string }).name = 'AbortError';
+                reject(err);
+              });
+            });
+          }),
+        };
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        // Make the mocked classifyRouteError behave like the real one for
+        // this test so 'aborted' is detected and recordRouteOutcome is
+        // skipped.
+        vi.mocked(classifyRouteError).mockImplementation((err: unknown) => {
+          if (err && typeof err === 'object' && (err as { name?: unknown }).name === 'AbortError') {
+            return { kind: 'aborted' } as const;
+          }
+          return { kind: 'unknown' } as const;
+        });
+
+        const promise = sendChat('Test', { signal: ac.signal });
+        // Fire the abort on the next tick so the provider has hooked its
+        // 'abort' listener before we cancel.
+        setImmediate(() => ac.abort());
+
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+      });
+
+      it('does NOT record a route outcome when the request is aborted', async () => {
+        const ac = new AbortController();
+
+        const mockProvider = {
+          complete: vi.fn(async (_messages: unknown, opts: { signal?: AbortSignal }) => {
+            return await new Promise((_resolve, reject) => {
+              opts.signal?.addEventListener('abort', () => {
+                const err = new Error('aborted');
+                (err as Error & { name: string }).name = 'AbortError';
+                reject(err);
+              });
+            });
+          }),
+        };
+
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(classifyRouteError).mockImplementation((err: unknown) => {
+          if (err && typeof err === 'object' && (err as { name?: unknown }).name === 'AbortError') {
+            return { kind: 'aborted' } as const;
+          }
+          return { kind: 'unknown' } as const;
+        });
+
+        const promise = sendChat('Test', { signal: ac.signal });
+        setImmediate(() => ac.abort());
+
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+
+        // recordRouteOutcome should not have been called at all -- neither
+        // a success (never reached) nor a permanent (aborted != permanent).
+        expect(recordRouteOutcome).not.toHaveBeenCalled();
       });
     });
   });

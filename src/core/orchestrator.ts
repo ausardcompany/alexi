@@ -11,6 +11,14 @@ export async function sendChat(
     preferCheap?: boolean;
     sessionManager?: SessionManager;
     systemPrompt?: string;
+    /**
+     * Optional cancellation signal. Forwarded to `provider.complete()` so a
+     * user-initiated Ctrl+C (or any upstream abort) cancels the in-flight
+     * HTTP request instead of burning tokens until the model finishes.
+     * When the resulting error is an `AbortError`, the route health counter
+     * is deliberately not touched -- see `classifyRouteError`.
+     */
+    signal?: AbortSignal;
   }
 ) {
   let modelId: string;
@@ -75,9 +83,12 @@ export async function sendChat(
   // ErrorBackoff and are intentionally NOT recorded here.
   let result;
   try {
-    result = await provider.complete(messages, { maxTokens: 4096 });
+    result = await provider.complete(messages, { maxTokens: 4096, signal: options?.signal });
   } catch (err) {
     const classified = classifyRouteError(err);
+    // User-initiated aborts are NOT a route health signal: skip recording
+    // entirely so a healthy route is not falsely penalised or auto-disabled
+    // just because the user pressed Ctrl+C.
     if (classified.kind === 'permanent') {
       recordRouteOutcome(modelId, classified);
     }
