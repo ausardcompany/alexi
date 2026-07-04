@@ -797,7 +797,17 @@ export class SapOrchestrationProvider {
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
 
-    const requestConfig = options?.headers ? { headers: options.headers } : undefined;
+    // Forward AbortSignal to the SAP SDK so user-initiated Ctrl+C (or any
+    // upstream cancellation) tears down the in-flight HTTP request instead
+    // of burning tokens until the model finishes. `chatCompletion` calls
+    // `signal?.throwIfAborted()` and passes the signal through to fetch.
+    const requestConfig =
+      options?.headers || options?.signal
+        ? {
+            ...(options?.headers ? { headers: options.headers } : {}),
+            ...(options?.signal ? { signal: options.signal } : {}),
+          }
+        : undefined;
 
     const response = await client.chatCompletion(
       { messages: orchestrationMessages },
