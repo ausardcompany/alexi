@@ -20,7 +20,11 @@ export namespace KiloHeadless {
 
   function lookup(id: string) {
     const row = Database.use((db) =>
-      db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, id as SessionID)).get(),
+      db
+        .select({ parent: SessionTable.parent_id })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, id as SessionID))
+        .get()
     );
     return row?.parent ?? undefined;
   }
