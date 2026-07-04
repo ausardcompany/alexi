@@ -1,1 +1,0 @@
-compactSession(session, hoistedDependencies);
