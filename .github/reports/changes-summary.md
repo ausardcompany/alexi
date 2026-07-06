@@ -1,28 +1,27 @@
 # Changes Summary
 
 ## Files Modified
-- `src/permission/permission.ts`
-- `src/core/session/runner/llm.ts`
-- `src/permission/permission.test.ts`
-- `src/tool/tool-apply-patch.test.ts`
 
-## Summary of Changes
+1. `src/tool/code-mode-integration.test.ts`
+   - **Type**: Bugfix
+   - **Change**: Updated test cases to reflect updated schema descriptions and tool definitions.
 
-### 1. Update Permission System Errors
-- **File**: `src/permission/permission.ts`
-- **Change**: Replaced `RejectedError` and `DeniedError` with `DeclinedError` and `BlockedError`.
+2. `src/tool/code-mode.ts`
+   - **Type**: Feature
+   - **Change**: Modified tool description to align with upstream changes for better user understanding.
 
-### 2. Correct Error Handling in Session Runner
-- **File**: `src/core/session/runner/llm.ts`
-- **Change**: Updated error handling logic to include `PermissionV2.DeclinedError`.
+3. `src/tool/code-mode.test.ts`
+   - **Type**: Refactor
+   - **Change**: Adjusted test expectations to align with updated parameter schema.
 
-### 3. Update Test Cases for Permission Handling
-- **File**: `src/permission/permission.test.ts`
-- **Change**: Changed test case to expect `PermissionV2.DeclinedError` instead of `DeniedError`.
+4. `src/tool/registry.test.ts`
+   - **Type**: Refactor
+   - **Issue**: Failed to edit due to `oldString` not found.
 
-### 4. Align Tool Execution Permission Handling
-- **File**: `src/tool/tool-apply-patch.test.ts`
-- **Change**: Updated permissions handling to `BlockedError`.
+## Summary
+- Created missing files based on the update plan.
+- Made precise edits as specified, except one failed due to missing string.
+- Ensured all changes maintain compatibility with SAP AI Core integrations.
 
 ## Issues Encountered
-- None. All files were successfully created and updated as they were not present initially.
+- `src/tool/registry.test.ts`: Failed edit due to missing `oldString` in the file content.
