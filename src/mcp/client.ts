@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
+import { logger } from '../utils/logger.js';
 import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
 
 export interface McpToolInfo {
@@ -140,7 +141,7 @@ export class McpClientManager {
         throw new Error('Invalid schema structure');
       }
     } catch (error) {
-      console.warn(
+      logger.warn(
         `MCP tool schema parsing failed for ${tool.name} from ${serverName}, using permissive fallback:`,
         error
       );
@@ -203,13 +204,13 @@ export class McpClientManager {
       connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
 
       connection.status = 'connected';
-      console.log(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
+      logger.info(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
 
       return connection;
     } catch (error) {
       connection.status = 'error';
       connection.error = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to connect to MCP server ${config.name}:`, connection.error);
+      logger.error(`Failed to connect to MCP server ${config.name}:`, connection.error);
       return connection;
     }
   }
@@ -268,13 +269,13 @@ export class McpClientManager {
     proc.on('exit', (code) => {
       if (connection.status === 'connected') {
         connection.status = 'disconnected';
-        console.log(`MCP server ${config.name} exited with code ${code}`);
+        logger.info(`MCP server ${config.name} exited with code ${code}`);
       }
     });
 
     // Log stderr for debugging
     proc.stderr?.on('data', (data) => {
-      console.error(`[${config.name}] ${data.toString()}`);
+      logger.warn(`[${config.name}] ${data.toString()}`);
     });
 
     // Create stdio transport - filter out undefined values from env
@@ -305,7 +306,7 @@ export class McpClientManager {
     try {
       await connection.client.close();
     } catch (error) {
-      console.warn(`Error closing MCP client ${name}:`, error);
+      logger.warn(`Error closing MCP client ${name}:`, error);
     }
 
     if (connection.process) {
@@ -313,7 +314,7 @@ export class McpClientManager {
     }
 
     this.connections.delete(name);
-    console.log(`Disconnected from MCP server: ${name}`);
+    logger.info(`Disconnected from MCP server: ${name}`);
   }
 
   /**
@@ -348,7 +349,7 @@ export class McpClientManager {
             };
           }
         } catch (error) {
-          console.warn(`Failed to initialize MCP server ${server.name}:`, error);
+          logger.warn(`Failed to initialize MCP server ${server.name}:`, error);
           return {
             server: server.name,
             status: 'failed',
@@ -368,9 +369,9 @@ export class McpClientManager {
 
     if (servers.length > 0) {
       if (failed > 0) {
-        console.warn(`MCP initialization: ${successful} connected, ${failed} failed`);
+        logger.warn(`MCP initialization: ${successful} connected, ${failed} failed`);
       } else {
-        console.log(`MCP initialization: ${successful} server(s) connected`);
+        logger.info(`MCP initialization: ${successful} server(s) connected`);
       }
     }
   }
@@ -447,7 +448,7 @@ export class McpClientManager {
         timestamp: Date.now(),
       });
     } catch (error) {
-      console.error(`Failed to refresh tools from ${serverName}:`, error);
+      logger.error(`Failed to refresh tools from ${serverName}:`, error);
     }
   }
 
