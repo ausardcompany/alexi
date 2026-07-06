@@ -167,6 +167,69 @@ describe('Agent System', () => {
     });
   });
 
+  describe('pendingSwitchMarker', () => {
+    beforeEach(() => {
+      // Drain any leftover marker from prior tests so each case starts clean
+      getAgentRegistry().consumePendingSwitchMarker();
+      switchAgent('code');
+      // switchAgent('code') above stamped a fresh marker; consume it so the
+      // per-test cases below start from a null baseline.
+      getAgentRegistry().consumePendingSwitchMarker();
+    });
+
+    it('switchTo stamps a pending marker with the previous and new agent ids', () => {
+      const registry = getAgentRegistry();
+      expect(registry.peekPendingSwitchMarker()).toBeNull();
+
+      registry.switchTo('debug');
+      expect(registry.peekPendingSwitchMarker()).toEqual({ from: 'code', to: 'debug' });
+    });
+
+    it('consumePendingSwitchMarker returns the marker once then null', () => {
+      const registry = getAgentRegistry();
+      registry.switchTo('debug');
+
+      const first = registry.consumePendingSwitchMarker();
+      expect(first).toEqual({ from: 'code', to: 'debug' });
+
+      const second = registry.consumePendingSwitchMarker();
+      expect(second).toBeNull();
+    });
+
+    it('last-writer-wins: two switches before a consume surface only the second', () => {
+      const registry = getAgentRegistry();
+      registry.switchTo('debug');
+      registry.switchTo('plan');
+
+      const marker = registry.consumePendingSwitchMarker();
+      // `from` on the second switch is 'debug' (the prev current at that time),
+      // NOT 'code' (the original). This is intentional — see setter JSDoc.
+      expect(marker).toEqual({ from: 'debug', to: 'plan' });
+    });
+
+    it('peekPendingSwitchMarker is non-destructive', () => {
+      const registry = getAgentRegistry();
+      registry.switchTo('debug');
+
+      expect(registry.peekPendingSwitchMarker()).toEqual({ from: 'code', to: 'debug' });
+      expect(registry.peekPendingSwitchMarker()).toEqual({ from: 'code', to: 'debug' });
+
+      // consume clears
+      registry.consumePendingSwitchMarker();
+      expect(registry.peekPendingSwitchMarker()).toBeNull();
+    });
+
+    it('an unknown target does not clear or replace a pending marker', () => {
+      const registry = getAgentRegistry();
+      registry.switchTo('debug');
+      const result = registry.switchTo('does-not-exist');
+
+      expect(result).toBeNull();
+      // Marker from the successful switch is still there
+      expect(registry.peekPendingSwitchMarker()).toEqual({ from: 'code', to: 'debug' });
+    });
+  });
+
   describe('Agent mode filtering', () => {
     it('lists primary agents', () => {
       const registry = getAgentRegistry();

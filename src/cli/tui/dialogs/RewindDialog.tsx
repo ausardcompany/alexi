@@ -4,6 +4,7 @@ import { Box, Text, useInput } from 'ink';
 import { useDialog } from '../context/DialogContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import type { MessageDisplay } from '../components/MessageArea.js';
+import { stripInternalWrappers } from '../../../agent/stripInternalWrappers.js';
 
 export interface RewindDialogProps {
   messages: MessageDisplay[];
@@ -32,7 +33,7 @@ function extractTurnBoundaries(messages: MessageDisplay[]): TurnBoundary[] {
     const msg = messages[i];
     if (msg.role === 'user') {
       turnNumber++;
-      const firstLine = msg.content.split('\n')[0].slice(0, 60);
+      const firstLine = stripInternalWrappers(msg.content).trim().split('\n')[0].slice(0, 60);
       boundaries.push({
         index: i,
         turnNumber,

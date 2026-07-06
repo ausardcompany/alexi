@@ -116,8 +116,27 @@ export async function* streamChat(
     }
   }
 
+  // If a `switchTo(...)` happened since the last outbound user turn, stamp
+  // an `<agent_switch from="X" to="Y"/>` marker on this user message so the
+  // destination agent's model can see the handover. Only text messages get
+  // the prefix; multimodal content arrays are passed through unchanged
+  // because prepending to an array item is ambiguous.
+  let outboundContent: string | unknown[] = message;
+  let outboundTextForSession = messageText;
+  try {
+    const { getAgentRegistry } = await import('../agent/index.js');
+    const marker = getAgentRegistry().consumePendingSwitchMarker();
+    if (marker && !isMultimodal && typeof message === 'string') {
+      const prefixed = `<agent_switch from="${marker.from}" to="${marker.to}"/>\n\n${message}`;
+      outboundContent = prefixed;
+      outboundTextForSession = prefixed;
+    }
+  } catch {
+    // Agent registry not available in this environment — no-op.
+  }
+
   // Add current user message
-  messages.push({ role: 'user', content: message });
+  messages.push({ role: 'user', content: outboundContent });
 
   // Get SAP Orchestration provider for this model, falling back to
   // routingConfig.preferences.fallbackModel if the primary id is not recognized.
@@ -163,9 +182,12 @@ export async function* streamChat(
   }
   recordRouteOutcome(modelId, { kind: 'success' });
 
-  // Save messages to session AFTER streaming completes (not per-chunk)
+  // Save messages to session AFTER streaming completes (not per-chunk).
+  // Persist the raw outbound content (including any `<agent_switch/>`
+  // marker) so session replay preserves the handover context. TUI display
+  // and `sessions export` strip the wrappers.
   if (options?.sessionManager) {
-    options.sessionManager.addMessage('user', messageText, {
+    options.sessionManager.addMessage('user', outboundTextForSession, {
       input: finalUsage?.prompt_tokens,
     });
     options.sessionManager.addMessage('assistant', fullText, {

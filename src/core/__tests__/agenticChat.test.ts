@@ -909,5 +909,72 @@ describe('agenticChat', () => {
         expect(result.iterations).toBe(1);
       });
     });
+
+    describe('agent_switch marker prepend', () => {
+      it('prepends <agent_switch/> to the next user turn after switchTo, once', async () => {
+        const { getAgentRegistry, switchAgent } = await import('../../agent/index.js');
+        // Drain any pre-existing marker and reset baseline to 'code'
+        getAgentRegistry().consumePendingSwitchMarker();
+        switchAgent('code');
+        getAgentRegistry().consumePendingSwitchMarker();
+
+        // Perform a real switch so the marker is stamped
+        switchAgent('debug');
+
+        mockProvider.complete.mockResolvedValueOnce({
+          text: 'Ack.',
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        } satisfies CompletionResult);
+
+        await agenticChat('First turn after switch');
+
+        expect(mockProvider.complete).toHaveBeenCalledTimes(1);
+        const firstCallMessages = mockProvider.complete.mock.calls[0][0] as Array<{
+          role: string;
+          content: string;
+        }>;
+        const lastUser = [...firstCallMessages].reverse().find((m) => m.role === 'user')!;
+        expect(lastUser.content).toContain('<agent_switch from="code" to="debug"/>');
+        expect(lastUser.content).toContain('First turn after switch');
+
+        // Second turn (no new switch) must NOT get another marker
+        mockProvider.complete.mockClear();
+        mockProvider.complete.mockResolvedValueOnce({
+          text: 'Ack again.',
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        } satisfies CompletionResult);
+
+        await agenticChat('Second turn without switch');
+
+        const secondCallMessages = mockProvider.complete.mock.calls[0][0] as Array<{
+          role: string;
+          content: string;
+        }>;
+        const secondUser = [...secondCallMessages].reverse().find((m) => m.role === 'user')!;
+        expect(secondUser.content).not.toContain('agent_switch');
+        expect(secondUser.content).toContain('Second turn without switch');
+      });
+
+      it('does not prepend when no switchTo has happened', async () => {
+        const { getAgentRegistry } = await import('../../agent/index.js');
+        // Ensure a clean baseline
+        getAgentRegistry().consumePendingSwitchMarker();
+
+        mockProvider.complete.mockResolvedValueOnce({
+          text: 'Ack.',
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        } satisfies CompletionResult);
+
+        await agenticChat('Plain turn');
+
+        const messages = mockProvider.complete.mock.calls[0][0] as Array<{
+          role: string;
+          content: string;
+        }>;
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user')!;
+        expect(lastUser.content).not.toContain('agent_switch');
+        expect(lastUser.content).toBe('Plain turn');
+      });
+    });
   });
 });

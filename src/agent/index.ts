@@ -195,6 +195,21 @@ class AgentRegistry {
   private agents: Map<string, Agent> = new Map();
   private aliasMap: Map<string, string> = new Map();
   private currentAgentId: string = 'code';
+  /**
+   * Marker describing the most recent unconsumed `switchTo` call. On the next
+   * outbound user turn, orchestrators consume this marker and prepend a
+   * `<agent_switch from="X" to="Y"/>` tag to the user message content so the
+   * destination agent's model can see that a handover happened.
+   *
+   * Semantics:
+   * - `switchTo(...)` REPLACES the pending marker (last-writer-wins). If two
+   *   switches happen back-to-back with no consume in between, only the
+   *   second switch's `from`/`to` are surfaced. This intentionally collapses
+   *   rapid ping-pong into a single marker on the first upcoming user turn.
+   * - `consumePendingSwitchMarker()` atomically returns and clears the value.
+   * - In-memory only. A process restart clears the pending state naturally.
+   */
+  private pendingSwitchMarker: { from: string; to: string } | null = null;
 
   constructor() {
     // Register built-in agents
@@ -258,6 +273,11 @@ class AgentRegistry {
     const fromId = this.currentAgentId;
     this.currentAgentId = agent.id;
 
+    // Stamp a pending marker so the next outbound user turn can inform the
+    // destination model that a handover happened. Last-writer-wins: if a
+    // previous marker is unconsumed, it is overwritten (see field JSDoc).
+    this.pendingSwitchMarker = { from: fromId, to: agent.id };
+
     // Publish event
     AgentSwitched.publish({
       from: fromId,
@@ -267,6 +287,28 @@ class AgentRegistry {
     });
 
     return agent;
+  }
+
+  /**
+   * Atomically return the pending switch marker and clear it. Callers
+   * (agenticChat, streamingOrchestrator) invoke this immediately before
+   * appending the outbound user message, and if the return value is
+   * non-null they prepend `<agent_switch from="X" to="Y"/>\n\n` to the
+   * user content.
+   */
+  consumePendingSwitchMarker(): { from: string; to: string } | null {
+    const marker = this.pendingSwitchMarker;
+    this.pendingSwitchMarker = null;
+    return marker;
+  }
+
+  /**
+   * Non-destructive peek at the pending switch marker. Intended for tests
+   * and diagnostics; production callers should use `consumePendingSwitchMarker`
+   * to guarantee the marker is emitted only once per switch.
+   */
+  peekPendingSwitchMarker(): { from: string; to: string } | null {
+    return this.pendingSwitchMarker;
   }
 
   /**
