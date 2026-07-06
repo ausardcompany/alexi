@@ -480,7 +480,22 @@ export async function agenticChat(
     }
   }
 
-  messages.push({ role: 'user', content: message });
+  // If a `switchTo(...)` happened since the last outbound user turn, stamp
+  // an `<agent_switch from="X" to="Y"/>` marker on this user message so the
+  // destination agent's model can see the handover. Prepend to the same
+  // content string (not a separate message) to keep message count stable.
+  let outboundUserContent = message;
+  try {
+    const { getAgentRegistry } = await import('../agent/index.js');
+    const marker = getAgentRegistry().consumePendingSwitchMarker();
+    if (marker) {
+      outboundUserContent = `<agent_switch from="${marker.from}" to="${marker.to}"/>\n\n${message}`;
+    }
+  } catch {
+    // Agent registry not available in this environment — no-op.
+  }
+
+  messages.push({ role: 'user', content: outboundUserContent });
 
   // Tracking
   let iterations = 0;
@@ -788,9 +803,13 @@ export async function agenticChat(
     );
   }
 
-  // Save to session if provided
+  // Save to session if provided.
+  // Persist the raw outbound user content (including any `<agent_switch/>`
+  // marker) so session replay preserves the handover context. The TUI and
+  // `sessions export` strip wrappers on the display path via
+  // `stripInternalWrappers`.
   if (options?.sessionManager) {
-    options.sessionManager.addMessage('user', message, {
+    options.sessionManager.addMessage('user', outboundUserContent, {
       input: totalUsage.prompt_tokens,
     });
     options.sessionManager.addMessage('assistant', finalText, {

@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { shouldCompact, compactConversation, estimateMessagesTokens } from './compaction.js';
 import { closeSession } from './sessionClose.js';
 import { clearRuleCommandCache } from '../plugin/index.js';
+import { stripInternalWrappers } from '../agent/stripInternalWrappers.js';
 
 /**
  * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
@@ -324,7 +325,11 @@ export class SessionManager {
     for (const message of session.messages) {
       const timestamp = new Date(message.timestamp).toLocaleString();
       markdown += `## ${message.role.toUpperCase()} (${timestamp})\n\n`;
-      markdown += `${message.content}\n\n`;
+      // Strip Alexi-internal wrappers (`<agent_switch/>`,
+      // `<system-reminder>...</system-reminder>`) from the exported view.
+      // The on-disk session store keeps the raw markers so replay still
+      // sees the handover context.
+      markdown += `${stripInternalWrappers(message.content)}\n\n`;
 
       if (message.tokens) {
         markdown += `*Tokens: ${message.tokens.input || 0} in / ${message.tokens.output || 0} out*\n\n`;

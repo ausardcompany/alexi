@@ -5,6 +5,7 @@ import type { MessageBubbleProps } from '../types/props.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { formatSize } from '../../../utils/imageValidation.js';
+import { stripInternalWrappers } from '../../../agent/stripInternalWrappers.js';
 
 export type { MessageBubbleProps };
 
@@ -78,7 +79,7 @@ export function MessageBubble({
           <Text color={colors.dimText}> {timeStr}</Text>
         </Box>
         <Box paddingLeft={2}>
-          <Text wrap="wrap">{content}</Text>
+          <Text wrap="wrap">{stripInternalWrappers(content)}</Text>
         </Box>
       </Box>
     );
