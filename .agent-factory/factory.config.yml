@@ -1,0 +1,74 @@
+# .agent-factory/factory.config.yml - per-project contract for the reusable
+# agent factory engine (ausardcompany/agent-factory@v1).
+#
+# This example shows the alexi (SAP AI Core, Node/TypeScript) configuration.
+# Everything a consumer needs to change lives here; the engine stays generic.
+
+# -- Schema / engine pin ----------------------------------------------------
+version: 1                    # config schema version
+engine: ausardcompany/agent-factory@v1
+
+# -- Model tiering ----------------------------------------------------------
+# Tier -> concrete provider/model id. The engine picks a tier per role.
+models:
+  nano:  sap-ai-core/anthropic--claude-4.5-haiku    # mechanical: format, classify
+  small: sap-ai-core/anthropic--claude-4.5-sonnet   # reasoning: plan, review, data
+  big:   sap-ai-core/anthropic--claude-4.7-opus     # hard reasoning: impl, arch, sec
+
+# -- Stack (commands the engine runs; NOT hardcoded in the engine) ----------
+# type: node | python | go | rust | none | custom
+# For type: none (docs/research-only projects) build/test/lint gates are skipped.
+stack:
+  type: node
+  install: npm ci
+  build:   npm run build
+  test:    npm run test:coverage
+  lint:    npm run lint
+  # optional extra gates run in order after lint:
+  extra:
+    - npm run typecheck
+    - npm run format:check
+
+# -- Git / commit conventions -----------------------------------------------
+git:
+  author_name:  "alexi-bot[bot]"
+  author_email: "alexi-bot[bot]@users.noreply.github.com"
+  default_branch: master
+  # commitlint scope-enum enforced on agent self-commits:
+  commit_scopes: [cli, core, providers, config, server, agent, tools, ci, deps, tests]
+
+# -- Secrets (names only; values live in GitHub repo/org secrets) -----------
+# The engine references these by name; callers pass them via `secrets:`.
+secrets:
+  llm_service_key:    AICORE_SERVICE_KEY
+  llm_resource_group: AICORE_RESOURCE_GROUP
+  git_pat:            GH_PAT            # optional, for cross-repo ops
+
+# -- Roles (enable/disable, tier, watchdog per role) ------------------------
+# tier: nano | small | big   |   timeout_minutes: watchdog cap
+roles:
+  consulting:     { enabled: true,  tier: small, timeout_minutes: 20 }  # research
+  product:        { enabled: true,  tier: small, timeout_minutes: 18 }  # planning
+  engineering:    { enabled: true,  tier: big,   timeout_minutes: 45 }  # implement
+  quality:        { enabled: true,  tier: small, timeout_minutes: 15 }  # review
+  architecture:   { enabled: true,  tier: big,   timeout_minutes: 25 }
+  security:       { enabled: true,  tier: big,   timeout_minutes: 25 }
+  infrastructure: { enabled: true,  tier: small, timeout_minutes: 12 }  # release
+  management:     { enabled: true,  tier: small, timeout_minutes: 15 }  # prompt-opt
+  data:           { enabled: true,  tier: small, timeout_minutes: 20 }
+  design:         { enabled: true,  tier: small, timeout_minutes: 20 }
+
+# -- Reliability (engine defaults; override only if needed) -----------------
+reliability:
+  retries: 2                  # transient-only retry budget
+  escalation_label: factory-escalation
+  # regex of transient errors that consume a retry (engine default shown):
+  transient_pattern: "socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit"
+
+# -- Upstream sync (optional; only for projects that track upstreams) -------
+sync:
+  enabled: true
+  sources:
+    - { repo: Kilo-Org/kilocode,       branch: main }
+    - { repo: anomalyco/opencode,      branch: dev  }
+    - { repo: anthropics/claude-code,  branch: main }

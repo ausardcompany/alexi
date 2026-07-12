@@ -1,0 +1,55 @@
+name: Engine CI
+
+# Guards the reusable engine: no consumer-specific leakage, valid YAML/JSON,
+# and a working config resolver. Runs in the ausardcompany/agent-factory repo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: No project-specific leakage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Grep-guard engine prompts
+        run: |
+          # The engine's PROMPTS must stay project-agnostic. These tokens must
+          # never appear in the baseline or role scaffolds. (Workflows/scripts
+          # are exempt: engine-ci.yml itself names these tokens to detect them,
+          # and the example config intentionally shows a sample consumer.)
+          set -e
+          PATTERN='sap-ai-core|alexi|~/\.alexi|routing-config|commitlint\.config|vitest\.config'
+          HITS=$(grep -rIlnE "$PATTERN" prompts/ 2>/dev/null || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::Project-specific tokens found in engine prompts:"
+            grep -rInE "$PATTERN" prompts/ || true
+            exit 1
+          fi
+          echo "[OK] engine prompts are free of consumer-specific tokens"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate schema + example config
+        run: |
+          npm install js-yaml ajv --no-save --silent
+          node scripts/resolve-config.mjs schema/factory.config.example.yml \
+            --schema schema/factory.config.schema.json > /tmp/resolved.json
+          echo "[OK] example config resolves against schema"
+          node -e 'const c=require("/tmp/resolved.json");if(!c.models||!c.roles)throw new Error("resolver output missing keys");console.log("[OK] resolver output well-formed")'
+
+      - name: Actionlint reusable workflow
+        uses: rhysd/actionlint@main
+        with:
+          files: .github/workflows/agent-factory.yml

@@ -1,0 +1,385 @@
+name: "Agent Factory (Reusable Engine)"
+
+# Config-driven, stack-agnostic reusable workflow. Consumers call it via
+# `uses: ausardcompany/agent-factory/.github/workflows/agent-factory.yml@v1`
+# and provide a `.agent-factory/factory.config.yml` in their own repo.
+#
+# The engine reads that config for models, stack commands, git author, and
+# per-role tier/timeout. It composes the prompt as:
+#   engine baseline + consumer project-facts + engine role scaffold
+#   + consumer role overlay (optional) + task
+# and runs the agent CLI with bounded transient-only retry, model tiering,
+# a watchdog timeout, deduplicated failure escalation, and rebase-retry push.
+#
+# NOTE ON PROMPTS: the engine's generic baseline + role scaffolds live in THIS
+# repo under prompts/. The engine checks itself out into ./.engine to read them,
+# and checks out the consumer repo into the workspace root.
+
+on:
+  workflow_call:
+    inputs:
+      role:
+        description: "Role vertical (consulting|product|design|architecture|engineering|quality|data|infrastructure|security|management)"
+        required: true
+        type: string
+      task_prompt:
+        description: "Inline task prompt OR 'file:<path>' relative to the consumer repo"
+        required: true
+        type: string
+      title:
+        description: "Human-readable run title"
+        required: true
+        type: string
+      config_path:
+        description: "Path to the consumer's factory config"
+        required: false
+        type: string
+        default: .agent-factory/factory.config.yml
+      engine_ref:
+        description: "Git ref of the engine repo to use for prompts/scripts (should match the @ref the caller pins)"
+        required: false
+        type: string
+        default: v1
+      commit_changes:
+        description: "Whether to git add/commit/push after the agent runs"
+        required: false
+        type: boolean
+        default: true
+      branch:
+        description: "Branch of the consumer repo to checkout and push to"
+        required: false
+        type: string
+        default: ""
+      model_tier_override:
+        description: "Force a tier (nano|small|big), bypassing the config's per-role tier"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      LLM_SERVICE_KEY:
+        required: true
+      LLM_RESOURCE_GROUP:
+        required: false
+      GH_PAT:
+        required: false
+    outputs:
+      success:
+        description: "Whether the agent run succeeded"
+        value: ${{ jobs.run.outputs.success }}
+      commit_sha:
+        description: "SHA of the commit produced by this run (if any)"
+        value: ${{ jobs.run.outputs.commit_sha }}
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  run:
+    name: "Factory: ${{ inputs.role }}"
+    runs-on: ubuntu-latest
+    outputs:
+      success: ${{ steps.agent.outputs.success }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Checkout engine (prompts + scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: ausardcompany/agent-factory
+          ref: ${{ inputs.engine_ref }}
+          path: .engine
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install engine tooling + agent CLI
+        run: |
+          npm install -g @kilocode/cli
+          # Local, minimal deps for config resolution (do not pollute consumer).
+          npm --prefix .engine install js-yaml ajv --no-save --silent || npm --prefix .engine install js-yaml ajv --silent
+          echo "[OK] agent CLI: $(kilo --version || echo 'unknown')"
+
+      - name: Resolve and validate config
+        id: cfg
+        run: |
+          node .engine/scripts/resolve-config.mjs \
+            "${{ inputs.config_path }}" \
+            --schema .engine/schema/factory.config.schema.json \
+            --github-output
+
+      - name: Extract config values
+        id: vals
+        env:
+          CONFIG_JSON: ${{ steps.cfg.outputs.config }}
+          ROLE: ${{ inputs.role }}
+          TIER_OVERRIDE: ${{ inputs.model_tier_override }}
+          BRANCH_INPUT: ${{ inputs.branch }}
+        run: |
+          # Pull values out of the resolved config JSON with node (jq may be absent).
+          node -e '
+            const c = JSON.parse(process.env.CONFIG_JSON);
+            const role = process.env.ROLE;
+            const r = (c.roles && c.roles[role]) || {};
+            if (r.enabled === false) { console.log("enabled=false"); }
+            const tier = process.env.TIER_OVERRIDE || r.tier || "small";
+            const model = c.models[tier] || c.models.big || c.models.small;
+            const branch = process.env.BRANCH_INPUT || (c.git && c.git.default_branch) || "main";
+            const out = [
+              "enabled=" + (r.enabled === false ? "false" : "true"),
+              "tier=" + tier,
+              "model=" + model,
+              "timeout=" + (r.timeout_minutes || 15),
+              "branch=" + branch,
+              "author_name=" + (c.git.author_name || "agent-factory[bot]"),
+              "author_email=" + (c.git.author_email || "agent-factory[bot]@users.noreply.github.com"),
+              "retries=" + ((c.reliability && c.reliability.retries) ?? 2),
+              "escalation_label=" + ((c.reliability && c.reliability.escalation_label) || "factory-escalation"),
+              "stack_type=" + (c.stack && c.stack.type || "none"),
+              "install=" + ((c.stack && c.stack.install) || ""),
+            ];
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, out.join("\n") + "\n");
+            const tp = (c.reliability && c.reliability.transient_pattern) ||
+              "socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit";
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
+              "transient<<TP_EOF\n" + tp + "\nTP_EOF\n");
+          '
+          echo "[OK] role=$ROLE resolved"
+
+      - name: Skip if role disabled
+        if: steps.vals.outputs.enabled == 'false'
+        run: |
+          echo "[INFO] Role '${{ inputs.role }}' is disabled in config; skipping."
+
+      - name: Run project install (stack)
+        if: steps.vals.outputs.enabled != 'false' && steps.vals.outputs.install != ''
+        run: |
+          echo "[INFO] stack.install: ${{ steps.vals.outputs.install }}"
+          ${{ steps.vals.outputs.install }}
+
+      - name: Verify prompt sources exist
+        if: steps.vals.outputs.enabled != 'false'
+        env:
+          ROLE: ${{ inputs.role }}
+        run: |
+          BASELINE=".engine/prompts/baseline-system.md"
+          SCAFFOLD=".engine/prompts/roles/role-${ROLE}.md"
+          FACTS=".agent-factory/project-facts.md"
+          for f in "$BASELINE" "$SCAFFOLD"; do
+            if [ ! -f "$f" ]; then echo "::error::Missing engine prompt: $f"; exit 1; fi
+          done
+          if [ ! -f "$FACTS" ]; then
+            echo "::warning::No consumer project-facts at $FACTS; proceeding baseline-only."
+          fi
+          echo "[OK] prompts present"
+
+      - name: Compose combined prompt
+        if: steps.vals.outputs.enabled != 'false'
+        env:
+          ROLE: ${{ inputs.role }}
+          RAW_TASK_PROMPT: ${{ inputs.task_prompt }}
+        run: |
+          ROLE_OVERLAY=".agent-factory/roles/${ROLE}.overlay.md"
+          FACTS=".agent-factory/project-facts.md"
+
+          # Resolve task prompt (file:<path> or inline via env to avoid shell expansion)
+          case "$RAW_TASK_PROMPT" in
+            file:*)
+              TASK_PATH="${RAW_TASK_PROMPT#file:}"
+              if [ ! -f "$TASK_PATH" ]; then echo "::error::task file not found: $TASK_PATH"; exit 1; fi
+              cp "$TASK_PATH" /tmp/task-prompt.md
+              ;;
+            *)
+              printenv RAW_TASK_PROMPT > /tmp/task-prompt.md
+              ;;
+          esac
+
+          {
+            echo "# SYSTEM INSTRUCTIONS"
+            echo ""
+            cat ".engine/prompts/baseline-system.md"
+            echo ""
+            echo "---"
+            echo ""
+            echo "# PROJECT FACTS"
+            echo ""
+            [ -f "$FACTS" ] && cat "$FACTS" || echo "(no project-facts provided)"
+            echo ""
+            echo "---"
+            echo ""
+            echo "# ROLE"
+            echo ""
+            cat ".engine/prompts/roles/role-${ROLE}.md"
+            echo ""
+            [ -f "$ROLE_OVERLAY" ] && { echo ""; echo "## Project overlay"; echo ""; cat "$ROLE_OVERLAY"; }
+            echo ""
+            echo "---"
+            echo ""
+            echo "# TASK"
+            echo ""
+            cat /tmp/task-prompt.md
+          } > /tmp/combined-prompt.md
+          echo "[OK] combined prompt: $(wc -l < /tmp/combined-prompt.md) lines"
+
+      - name: Run agent
+        id: agent
+        if: steps.vals.outputs.enabled != 'false'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.vals.outputs.timeout) }}
+        env:
+          AICORE_RESOURCE_GROUP: ${{ secrets.LLM_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.LLM_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TITLE: ${{ inputs.title }}
+          AGENT_MODEL: ${{ steps.vals.outputs.model }}
+          RETRIES: ${{ steps.vals.outputs.retries }}
+          TRANSIENT: ${{ steps.vals.outputs.transient }}
+        run: |
+          PROMPT="$(cat /tmp/combined-prompt.md)"
+          attempt=0
+          EXIT_CODE=1
+          while : ; do
+            echo "Running factory agent (role=${{ inputs.role }}, model=$AGENT_MODEL), attempt $((attempt + 1)) ..."
+            if kilo run "$PROMPT" --auto --variant max -m "$AGENT_MODEL" --title "$TITLE" > kilo-output.log 2>&1; then
+              EXIT_CODE=0
+              break
+            fi
+            EXIT_CODE=$?
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "${RETRIES:-2}" ]; then break; fi
+            if grep -qiE "$TRANSIENT" kilo-output.log 2>/dev/null; then
+              backoff=$((attempt * 30))
+              echo "[WARN] Transient error (exit $EXIT_CODE) - retrying in ${backoff}s ..."
+              sleep "$backoff"
+            else
+              echo "[WARN] Non-transient failure (exit $EXIT_CODE) - not retrying, escalating."
+              break
+            fi
+          done
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "attempts=$attempt" >> "$GITHUB_OUTPUT"
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "=== Output (last 80 lines) ==="
+          tail -80 kilo-output.log || true
+
+      - name: Commit and push changes
+        id: commit
+        if: steps.vals.outputs.enabled != 'false' && inputs.commit_changes && steps.agent.outputs.success == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          ROLE: ${{ inputs.role }}
+          BRANCH: ${{ steps.vals.outputs.branch }}
+          AUTHOR_NAME: ${{ steps.vals.outputs.author_name }}
+          AUTHOR_EMAIL: ${{ steps.vals.outputs.author_email }}
+        run: |
+          git config user.name "$AUTHOR_NAME"
+          git config user.email "$AUTHOR_EMAIL"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "[INFO] No changes to commit"
+            echo "commit_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "chore(agent): factory ${ROLE} run [agent]" --no-verify
+          SHA=$(git rev-parse HEAD)
+          echo "commit_sha=$SHA" >> "$GITHUB_OUTPUT"
+          PUSHED=0
+          for i in 1 2 3 4 5; do
+            if git push origin "HEAD:$BRANCH"; then PUSHED=1; break; fi
+            echo "[WARN] push rejected (attempt $i) - rebasing onto origin/$BRANCH ..."
+            git fetch origin "$BRANCH" || true
+            if ! git rebase "origin/$BRANCH"; then
+              git rebase --abort 2>/dev/null || true
+              git reset --hard "$SHA" 2>/dev/null || true
+              git fetch origin "$BRANCH" || true
+              git merge --no-edit -X ours "origin/$BRANCH" 2>/dev/null || true
+            fi
+            sleep $((i * 5))
+          done
+          if [ "$PUSHED" = "1" ]; then
+            echo "[OK] pushed $SHA to $BRANCH"
+          else
+            echo "::warning::Could not push after retries (non-fatal); artefacts uploaded."
+          fi
+
+      - name: Upload artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-${{ inputs.role }}-${{ github.run_id }}
+          path: |
+            /tmp/combined-prompt.md
+            /tmp/task-prompt.md
+            kilo-output.log
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Escalate failure to a tracked issue
+        if: always() && steps.vals.outputs.enabled != 'false' && steps.agent.outputs.success != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          ROLE: ${{ inputs.role }}
+          TITLE: ${{ inputs.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ steps.vals.outputs.branch }}
+          EXIT_CODE: ${{ steps.agent.outputs.exit_code }}
+          ATTEMPTS: ${{ steps.agent.outputs.attempts }}
+          LABEL: ${{ steps.vals.outputs.escalation_label }}
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE="[factory] ${ROLE} agent failed: ${TITLE}"
+          export ISSUE_TITLE
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label "$LABEL" --state open \
+            --search "in:title ${ROLE} agent failed" \
+            --json number,title 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=process.env.ISSUE_TITLE;const a=JSON.parse(s||"[]");const m=a.find(x=>x.title===t);process.stdout.write(m?String(m.number):"")})' \
+            || echo "")
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" \
+            --color "B60205" --description "Factory agent run needs manual attention" 2>/dev/null || true
+          TAIL="$(tail -40 kilo-output.log 2>/dev/null || echo '(no output captured)')"
+          BODY_FILE="$(mktemp)"
+          {
+            echo "## Factory agent failure"
+            echo ""
+            echo "- Role: \`${ROLE}\`"
+            echo "- Title: ${TITLE}"
+            echo "- Branch: \`${BRANCH}\`"
+            echo "- Exit code: \`${EXIT_CODE}\` after \`${ATTEMPTS}\` attempt(s)"
+            echo "- Run: ${RUN_URL}"
+            echo ""
+            echo "<details><summary>Last 40 lines</summary>"
+            echo ""
+            echo '```'
+            echo "$TAIL"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "_Auto-escalated by Agent Factory._"
+          } > "$BODY_FILE"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE" || true
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" \
+              --label "$LABEL" --body-file "$BODY_FILE" || true
+          fi
+
+      - name: Fail if agent failed
+        if: steps.vals.outputs.enabled != 'false' && steps.agent.outputs.success != 'true'
+        run: |
+          echo "::error::Factory agent run failed. See artefacts and the escalation issue."
+          exit 1

@@ -1,0 +1,37 @@
+# Caller template -- copy into a consumer repo's .github/workflows/ and adapt.
+#
+# This is the minimal wrapper a consuming project needs to run one role via the
+# reusable engine. Duplicate per role (research, planning, review, ...), change
+# the `role`, `title`, trigger, and task_prompt. All models/stack/timeouts come
+# from .agent-factory/factory.config.yml in the consumer repo, NOT here.
+#
+# Replace ROLE_NAME, WORKFLOW_NAME, and the trigger to taste.
+
+name: "Agent: WORKFLOW_NAME"
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 6 * * *"
+  # pull_request:
+  #   branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write # REQUIRED: the engine opens a factory-escalation issue on failure
+
+jobs:
+  run:
+    uses: ausardcompany/agent-factory/.github/workflows/agent-factory.yml@v1
+    secrets:
+      LLM_SERVICE_KEY: ${{ secrets.LLM_SERVICE_KEY }}
+      LLM_RESOURCE_GROUP: ${{ secrets.LLM_RESOURCE_GROUP }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+    with:
+      role: ROLE_NAME
+      title: "Agent: WORKFLOW_NAME"
+      # Inline task, or 'file:.agent-factory/tasks/<task>.md' relative to consumer repo:
+      task_prompt: "file:.agent-factory/tasks/ROLE_NAME.md"
+      engine_ref: v1
+      # commit_changes: false   # set false for review-only roles (quality/security/architecture on PRs)
