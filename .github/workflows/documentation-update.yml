@@ -27,7 +27,8 @@ env:
 jobs:
   generate-documentation:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
+
     steps:
       - name: Determine PR number
         id: pr_number

@@ -172,7 +172,7 @@ jobs:
             sed "s|{{BUMP_TYPE}}|$BUMP_TYPE|g" | \
             sed "s|{{DRY_RUN}}|$DRY_RUN|g")
 
-          echo "$PROMPT" | awk -v log="$COMMIT_LOG" '{gsub(/\{\{COMMIT_LOG\}\}/, log); print}' > /tmp/release-prompt-raw.txt
+          echo "$PROMPT" | awk -v commitlog="$COMMIT_LOG" '{gsub(/\{\{COMMIT_LOG\}\}/, commitlog); print}' > /tmp/release-prompt-raw.txt
 
           if [ "$DRY_RUN" = "true" ]; then
             cat /tmp/release-prompt-raw.txt | sed '/{{^DRY_RUN}}/,/{{\/DRY_RUN}}/d' | \
