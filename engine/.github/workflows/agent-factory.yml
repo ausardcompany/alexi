@@ -249,14 +249,14 @@ jobs:
           EXIT_CODE=1
           while : ; do
             echo "Running factory agent (role=${{ inputs.role }}, model=$AGENT_MODEL), attempt $((attempt + 1)) ..."
-            if kilo run "$PROMPT" --auto --variant max -m "$AGENT_MODEL" --title "$TITLE" > kilo-output.log 2>&1; then
+            if kilo run "$PROMPT" --auto --variant max -m "$AGENT_MODEL" --title "$TITLE" > /tmp/kilo-output.log 2>&1; then
               EXIT_CODE=0
               break
             fi
             EXIT_CODE=$?
             attempt=$((attempt + 1))
             if [ "$attempt" -gt "${RETRIES:-2}" ]; then break; fi
-            if grep -qiE "$TRANSIENT" kilo-output.log 2>/dev/null; then
+            if grep -qiE "$TRANSIENT" /tmp/kilo-output.log 2>/dev/null; then
               backoff=$((attempt * 30))
               echo "[WARN] Transient error (exit $EXIT_CODE) - retrying in ${backoff}s ..."
               sleep "$backoff"
@@ -273,7 +273,7 @@ jobs:
             echo "success=false" >> "$GITHUB_OUTPUT"
           fi
           echo "=== Output (last 80 lines) ==="
-          tail -80 kilo-output.log || true
+          tail -80 /tmp/kilo-output.log || true
 
       - name: Commit and push changes
         id: commit
@@ -287,6 +287,18 @@ jobs:
         run: |
           git config user.name "$AUTHOR_NAME"
           git config user.email "$AUTHOR_EMAIL"
+          # Never commit engine-internal artefacts that the engine checked out
+          # or produced in the consumer workspace. Use a local exclude so they
+          # are ignored by `git add -A` without touching the consumer's tree.
+          mkdir -p .git/info
+          {
+            echo "/.engine/"
+            echo "/node_modules/"
+            echo "/.agent-factory/**/node_modules/"
+          } >> .git/info/exclude
+          # Defensively remove the engine checkout from the workspace too, so it
+          # can never be staged by `git add -A`.
+          rm -rf .engine 2>/dev/null || true
           git add -A
           if git diff --cached --quiet; then
             echo "[INFO] No changes to commit"
@@ -323,7 +335,7 @@ jobs:
           path: |
             /tmp/combined-prompt.md
             /tmp/task-prompt.md
-            kilo-output.log
+            /tmp/kilo-output.log
           retention-days: 30
           if-no-files-found: ignore
 
@@ -350,7 +362,7 @@ jobs:
             || echo "")
           gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" \
             --color "B60205" --description "Factory agent run needs manual attention" 2>/dev/null || true
-          TAIL="$(tail -40 kilo-output.log 2>/dev/null || echo '(no output captured)')"
+          TAIL="$(tail -40 /tmp/kilo-output.log 2>/dev/null || echo '(no output captured)')"
           BODY_FILE="$(mktemp)"
           {
             echo "## Factory agent failure"
