@@ -29,6 +29,12 @@ baseline + project-facts + role-scaffold + role-overlay + task
 
 ## Quickstart for a new consumer project
 
+0. Add these lines to your `.gitignore` (defence in depth; the engine also
+   excludes them itself before committing):
+   ```
+   /.engine/
+   /kilo-output.log
+   ```
 1. Add `.agent-factory/factory.config.yml` (see `schema/factory.config.example.yml`).
    Declare your `models`, `stack` (or `type: none` for docs/research projects),
    `git` author, `secrets` names, and per-role `tier`/`timeout`.
