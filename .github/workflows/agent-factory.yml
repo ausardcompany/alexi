@@ -201,8 +201,8 @@ jobs:
       - name: Resolve model from tier
         id: model
         env:
-          TIER: ${​{ inputs.model_tier }}
-          OVERRIDE: ${​{ inputs.model_override }}
+          TIER: ${{ inputs.model_tier }}
+          OVERRIDE: ${{ inputs.model_override }}
         run: |
           if [ -n "$OVERRIDE" ]; then
             RESOLVED="$OVERRIDE"
@@ -223,20 +223,20 @@ jobs:
       - name: Run agent (kilo run)
         id: agent
         continue-on-error: true
-        timeout-minutes: ${​{ inputs.timeout_minutes }}
+        timeout-minutes: ${{ inputs.timeout_minutes }}
         env:
-          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          TITLE: ${​{ inputs.title }}
-          AGENT_MODEL: ${​{ steps.model.outputs.resolved }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TITLE: ${{ inputs.title }}
+          AGENT_MODEL: ${{ steps.model.outputs.resolved }}
         run: |
           PROMPT="$(cat /tmp/combined-prompt.md)"
 
           attempt=0
           EXIT_CODE=1
           while : ; do
-            echo "Running factory agent (role=${​{ inputs.role }}), attempt $((attempt + 1)) ..."
+            echo "Running factory agent (role=${{ inputs.role }}), attempt $((attempt + 1)) ..."
             if kilo run "$PROMPT" \
                 $KILO_FLAGS \
                 -m "$AGENT_MODEL" \
@@ -325,13 +325,13 @@ jobs:
         # human handoff instead of just a red run nobody notices.
         if: always() && steps.agent.outputs.success != 'true'
         env:
-          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          ROLE: ${​{ inputs.role }}
-          TITLE: ${​{ inputs.title }}
-          RUN_URL: ${​{ github.server_url }}/${​{ github.repository }}/actions/runs/${​{ github.run_id }}
-          BRANCH: ${​{ inputs.branch }}
-          EXIT_CODE: ${​{ steps.agent.outputs.exit_code }}
-          ATTEMPTS: ${​{ steps.agent.outputs.attempts }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          ROLE: ${{ inputs.role }}
+          TITLE: ${{ inputs.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ inputs.branch }}
+          EXIT_CODE: ${{ steps.agent.outputs.exit_code }}
+          ATTEMPTS: ${{ steps.agent.outputs.attempts }}
         run: |
           set -euo pipefail
           ISSUE_TITLE="[factory] ${ROLE} agent failed: ${TITLE}"

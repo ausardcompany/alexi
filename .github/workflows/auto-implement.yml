@@ -38,8 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      matrix: ${​{ steps.matrix.outputs.matrix }}
-      has_issues: ${​{ steps.matrix.outputs.has_issues }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_issues: ${{ steps.matrix.outputs.has_issues }}
     steps:
       - name: Build issue matrix
         id: matrix
