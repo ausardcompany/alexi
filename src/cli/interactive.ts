@@ -39,6 +39,7 @@ import {
 } from '../permission/index.js';
 import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp/index.js';
 import { getDoctor } from '../doctor/index.js';
+import { killAllTracked } from '../tool/tools/background-process.js';
 import { getCostTracker } from '../core/costTracker.js';
 import { getMemoryManager } from '../core/memory.js';
 import { getDataExporter } from '../core/dataExporter.js';
@@ -2411,20 +2412,29 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
   // (goal, code-review, or a bare sendChat call) that has installed an
   // AbortController on state. Without this, non-streaming providers keep
   // burning tokens after the user cancels.
-  process.on('SIGINT', () => {
-    if (state.abortController) {
+  const shutdown = (signal: 'SIGINT' | 'SIGTERM') => {
+    if (signal === 'SIGINT' && state.abortController) {
       state.abortController.abort();
       console.log(c('yellow', '\n\n  [Cancelled]\n'));
       rl.prompt();
-    } else {
-      keypressHandler.dispose();
-      if (permissionPromptCleanup) {
-        permissionPromptCleanup();
-      }
-      console.log(c('gray', '\n\n  Goodbye!\n'));
-      process.exit(0);
+      return;
     }
-  });
+    keypressHandler.dispose();
+    if (permissionPromptCleanup) {
+      permissionPromptCleanup();
+    }
+    console.log(c('gray', '\n\n  Goodbye!\n'));
+    killAllTracked()
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+  };
+
+  // Remove the one-shot handlers installed by program.ts so the REPL owns
+  // Ctrl+C behaviour (first press aborts in-flight requests, second exits).
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   rl.prompt();
 
