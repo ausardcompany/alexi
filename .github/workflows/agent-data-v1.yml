@@ -1,0 +1,33 @@
+name: "Agent: Data Review (engine v1 pilot)"
+
+# PILOT: consumes the external reusable engine (ausardcompany/agent-factory@v1)
+# instead of the in-repo .github/workflows/agent-factory.yml. Proves the
+# cross-repo, config-driven path (spec 034, phase 3). Once parity is confirmed
+# across roles, the in-repo factory + per-role model_tier callers are retired.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: agent-data-v1-${​{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  data:
+    uses: ausardcompany/agent-factory/.github/workflows/agent-factory.yml@v1
+    secrets:
+      LLM_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+      LLM_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+      GH_PAT: ${​{ secrets.GH_PAT }}
+    with:
+      role: data
+      title: "Agent: Data Review (engine v1)"
+      task_prompt: "file:.github/prompts/tasks/data-review.md"
+      engine_ref: v1
+      commit_changes: false
+      branch: master
