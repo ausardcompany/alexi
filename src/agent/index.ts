@@ -4,7 +4,6 @@
  * Based on kilocode/opencode agent patterns with @syntax for switching
  */
 import { z } from 'zod';
-import { newAgentPattern } from '@kilocode/tool/agent-manager-models';
 
 import { AgentSwitched } from '../bus/index.js';
 import { getAgentPrompt } from './system.js';
