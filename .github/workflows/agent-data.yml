@@ -26,7 +26,6 @@ jobs:
     secrets: inherit
     with:
       role: data
-      model_tier: small
       task_prompt: 'file:.github/prompts/tasks/data-review.md'
       title: 'Agent: Data Review'
       commit_scope: agent
