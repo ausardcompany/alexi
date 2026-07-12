@@ -146,6 +146,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Restored the `truthy()` helper in the core flag module (`src/core/flag.ts`) that the `KILO_DISABLE_EXTERNAL_SKILLS` export depends on. The helper had been removed in an earlier change, leaving an unreferenced symbol that broke compilation and prevented the flag from being evaluated. The exported flag now correctly resolves to `true` when the environment variable is set to `"true"` or `"1"` (case-insensitive) and `false` otherwise.
 
+## [1.17.31] - 2026-07-12
+
+### Fixed
+
+- **CI: avoid gawk reserved word in agent5 workflow, add doc-update timeout** (`cbaf7abc`): Renamed a shell variable in `.github/workflows/agent5-release.yml` that collided with a `gawk` reserved word (causing intermittent parse errors on runners where `awk` resolves to `gawk`), and added an explicit `timeout-minutes` to the documentation-update job in `.github/workflows/documentation-update.yml` so the workflow no longer hangs on the runner's default 6-hour ceiling when the model is slow to respond.
+
+### Maintenance
+
+- **Weekly metrics report refreshed for 2026-07-12** (`18008f2c`, `docs(ci): weekly metrics 2026-07-12 [alexi-bot]`): Regenerated `.github/reports/weekly-metrics-*.md` via the scheduled reporting workflow. Documentation-only, no source or build impact.
+- **Factory consulting run committed** (`0c15a478`, `chore(ci): factory consulting run [agent]`): Routine agent-factory consulting-role dry run committed by the T-shape factory scheduler; no runtime, API, or CLI surface change.
+
 ## [0.5.2] - 2026-05-25
 
 ### Changed
