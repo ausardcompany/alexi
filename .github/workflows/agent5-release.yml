@@ -204,6 +204,7 @@ jobs:
     secrets: inherit
     with:
       role: infrastructure
+      model_tier: small
       task_prompt: ${{ needs.prepare.outputs.task_prompt }}
       title: 'Agent 5: Release'
       commit_scope: ci
@@ -216,6 +217,7 @@ jobs:
     needs: [prepare, release]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Print summary
         run: |

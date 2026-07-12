@@ -172,6 +172,7 @@ jobs:
     secrets: inherit
     with:
       role: quality
+      model_tier: small
       task_prompt: ${{ needs.prepare.outputs.task_prompt }}
       title: 'Agent 4: Code Review'
       commit_scope: agent

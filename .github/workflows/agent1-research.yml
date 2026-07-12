@@ -37,6 +37,7 @@ jobs:
   prepare:
     name: Prepare research context
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       task_prompt: ${{ steps.build.outputs.task_prompt }}
     steps:
@@ -83,6 +84,7 @@ jobs:
     secrets: inherit
     with:
       role: consulting
+      model_tier: small
       task_prompt: ${{ needs.prepare.outputs.task_prompt }}
       title: 'Agent 1: Research & Trends'
       commit_scope: ci

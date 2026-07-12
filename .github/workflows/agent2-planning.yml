@@ -156,6 +156,7 @@ jobs:
     secrets: inherit
     with:
       role: product
+      model_tier: small
       task_prompt: ${{ needs.prepare.outputs.task_prompt }}
       title: 'Agent 2: Planning & Issues'
       commit_scope: ci
@@ -168,6 +169,7 @@ jobs:
     needs: [prepare, plan]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Summary
         run: |

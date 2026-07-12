@@ -24,6 +24,7 @@ permissions:
 jobs:
   create-release-pr:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}

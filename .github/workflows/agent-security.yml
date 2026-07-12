@@ -30,6 +30,7 @@ jobs:
     secrets: inherit
     with:
       role: security
+      model_tier: big
       task_prompt: 'file:.github/prompts/tasks/security-scan.md'
       title: 'Agent: Security Scan (PR)'
       commit_scope: agent
@@ -44,6 +45,7 @@ jobs:
     secrets: inherit
     with:
       role: security
+      model_tier: big
       task_prompt: 'file:.github/prompts/tasks/security-scan.md'
       title: 'Agent: Security Scan (Weekly)'
       commit_scope: agent

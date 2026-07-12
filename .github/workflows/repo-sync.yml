@@ -24,6 +24,7 @@ jobs:
   sync:
     name: Sync Reference Repositories
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -129,6 +130,7 @@ jobs:
   analyze:
     name: Analyze Feature Gaps
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: sync
     if: github.event.inputs.create_issues == 'true'
 
@@ -209,6 +211,7 @@ jobs:
   notify:
     name: Send Notification
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: sync
     if: always()
 

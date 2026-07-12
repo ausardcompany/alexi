@@ -25,6 +25,7 @@ jobs:
     secrets: inherit
     with:
       role: design
+      model_tier: small
       task_prompt: 'file:.github/prompts/tasks/design-review.md'
       title: 'Agent: Design Review'
       commit_scope: agent

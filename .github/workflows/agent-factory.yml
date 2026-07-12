@@ -28,6 +28,16 @@ on:
         required: false
         type: number
         default: 15
+      model_tier:
+        description: "Model tier: nano (haiku, cheap/mechanical) | small (sonnet, reasoning) | big (opus, hard reasoning). Overridden by model_override."
+        required: false
+        type: string
+        default: big
+      model_override:
+        description: "Exact model id to use, bypassing model_tier (e.g. sap-ai-core/anthropic--claude-4.7-opus)"
+        required: false
+        type: string
+        default: ""
       commit_changes:
         description: "Whether to git add/commit/push after the agent runs"
         required: false
@@ -61,11 +71,21 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 env:
-  AGENT_MODEL: sap-ai-core/anthropic--claude-4.7-opus
+  # Model tiering (vault: Exoskeleton pattern — cheap models at the edges,
+  # expensive reasoning only in the center). Callers pick a tier via the
+  # model_tier input; these env vars map tier -> concrete SAP model id.
+  # A caller can still pin an exact model with model_override.
+  MODEL_NANO: sap-ai-core/anthropic--claude-4.5-haiku
+  MODEL_SMALL: sap-ai-core/anthropic--claude-4.5-sonnet
+  MODEL_BIG: sap-ai-core/anthropic--claude-4.7-opus
   KILO_FLAGS: --auto --variant max
-  KILO_RETRIES: '1'
+  # Bounded retry budget. Retries are only spent on *transient* failures
+  # (network blips); a genuine agent failure is not retried to avoid
+  # burning an expensive model run on a broken prompt. See run step.
+  KILO_RETRIES: '2'
 
 jobs:
   run:
@@ -178,22 +198,45 @@ jobs:
           } > /tmp/combined-prompt.md
           echo "[OK] combined prompt: $(wc -l < /tmp/combined-prompt.md) lines, $(wc -c < /tmp/combined-prompt.md) bytes"
 
+      - name: Resolve model from tier
+        id: model
+        env:
+          TIER: ${​{ inputs.model_tier }}
+          OVERRIDE: ${​{ inputs.model_override }}
+        run: |
+          if [ -n "$OVERRIDE" ]; then
+            RESOLVED="$OVERRIDE"
+          else
+            case "$TIER" in
+              nano)  RESOLVED="$MODEL_NANO" ;;
+              small) RESOLVED="$MODEL_SMALL" ;;
+              big)   RESOLVED="$MODEL_BIG" ;;
+              *)
+                echo "[WARN] Unknown model_tier '$TIER' - falling back to big."
+                RESOLVED="$MODEL_BIG"
+                ;;
+            esac
+          fi
+          echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
+          echo "[OK] model_tier='$TIER' override='$OVERRIDE' -> model='$RESOLVED'"
+
       - name: Run agent (kilo run)
         id: agent
         continue-on-error: true
-        timeout-minutes: ${{ inputs.timeout_minutes }}
+        timeout-minutes: ${​{ inputs.timeout_minutes }}
         env:
-          AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
-          AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-          TITLE: ${{ inputs.title }}
+          AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
+          AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TITLE: ${​{ inputs.title }}
+          AGENT_MODEL: ${​{ steps.model.outputs.resolved }}
         run: |
           PROMPT="$(cat /tmp/combined-prompt.md)"
 
           attempt=0
           EXIT_CODE=1
           while : ; do
-            echo "Running factory agent (role=${{ inputs.role }}), attempt $((attempt + 1)) ..."
+            echo "Running factory agent (role=${​{ inputs.role }}), attempt $((attempt + 1)) ..."
             if kilo run "$PROMPT" \
                 $KILO_FLAGS \
                 -m "$AGENT_MODEL" \
@@ -207,12 +250,22 @@ jobs:
             if [ "$attempt" -gt "${KILO_RETRIES:-0}" ]; then
               break
             fi
-            backoff=$((attempt * 30))
-            echo "[WARN] Kilo CLI exit $EXIT_CODE - retrying in ${backoff}s ..."
-            sleep "$backoff"
+            # Only spend a retry on TRANSIENT failures (network/API blips).
+            # A deterministic agent/prompt failure is not retried — retrying an
+            # expensive model on the same broken input just wastes budget and
+            # time. Non-transient failures fall through to escalation.
+            if grep -qiE "socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502 Bad Gateway|503 Service|429 Too Many|rate limit" kilo-output.log 2>/dev/null; then
+              backoff=$((attempt * 30))
+              echo "[WARN] Transient error detected (exit $EXIT_CODE) - retrying in ${backoff}s ..."
+              sleep "$backoff"
+            else
+              echo "[WARN] Non-transient failure (exit $EXIT_CODE) - not retrying, escalating."
+              break
+            fi
           done
 
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "attempts=$attempt" >> $GITHUB_OUTPUT
 
           if [ $EXIT_CODE -eq 0 ]; then
             echo "success=true" >> $GITHUB_OUTPUT
@@ -266,8 +319,75 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+      - name: Escalate failure to a tracked issue
+        # Graceful degradation: on a non-recoverable agent failure, open a
+        # deduplicated GitHub issue so a silent failure becomes a tracked
+        # human handoff instead of just a red run nobody notices.
+        if: always() && steps.agent.outputs.success != 'true'
+        env:
+          GH_TOKEN: ${​{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          ROLE: ${​{ inputs.role }}
+          TITLE: ${​{ inputs.title }}
+          RUN_URL: ${​{ github.server_url }}/${​{ github.repository }}/actions/runs/${​{ github.run_id }}
+          BRANCH: ${​{ inputs.branch }}
+          EXIT_CODE: ${​{ steps.agent.outputs.exit_code }}
+          ATTEMPTS: ${​{ steps.agent.outputs.attempts }}
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE="[factory] ${ROLE} agent failed: ${TITLE}"
+          export ISSUE_TITLE
+
+          # Deduplicate: reuse an open escalation issue for the same role+title.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label "factory-escalation" --state open \
+            --search "in:title ${ROLE} agent failed" \
+            --json number,title 2>/dev/null \
+            | jq -r --arg t "$ISSUE_TITLE" '.[] | select(.title == $t) | .number' \
+            | head -1 || echo "")
+
+          # Ensure label exists (idempotent).
+          gh label create "factory-escalation" --repo "$GITHUB_REPOSITORY" \
+            --color "B60205" --description "Factory agent run needs manual attention" 2>/dev/null || true
+
+          TAIL="$(tail -40 kilo-output.log 2>/dev/null || echo '(no output captured)')"
+          BODY_FILE="$(mktemp)"
+          {
+            echo "## Factory agent failure"
+            echo ""
+            echo "- **Role**: \`${ROLE}\`"
+            echo "- **Title**: ${TITLE}"
+            echo "- **Branch**: \`${BRANCH}\`"
+            echo "- **Exit code**: \`${EXIT_CODE}\` after \`${ATTEMPTS}\` attempt(s)"
+            echo "- **Run**: ${RUN_URL}"
+            echo ""
+            echo "The retry budget was exhausted (or the failure was non-transient)."
+            echo "This issue is auto-deduplicated; if the same role/title fails again"
+            echo "a comment is added instead of a new issue."
+            echo ""
+            echo "<details><summary>Last 40 lines of agent output</summary>"
+            echo ""
+            echo '```'
+            echo "$TAIL"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "_Auto-escalated by Agent Factory._"
+          } > "$BODY_FILE"
+
+          if [ -n "$EXISTING" ]; then
+            echo "[INFO] Escalation issue #$EXISTING already open - adding comment."
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE" || true
+          else
+            echo "[INFO] Opening new escalation issue."
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$ISSUE_TITLE" \
+              --label "factory-escalation" \
+              --body-file "$BODY_FILE" || true
+          fi
+
       - name: Fail if agent failed
         if: steps.agent.outputs.success != 'true'
         run: |
-          echo "::error::Factory agent run failed. See artefacts for details."
+          echo "::error::Factory agent run failed. See artefacts and the factory-escalation issue for details."
           exit 1

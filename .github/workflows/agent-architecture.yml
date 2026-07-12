@@ -28,6 +28,7 @@ jobs:
     secrets: inherit
     with:
       role: architecture
+      model_tier: big
       task_prompt: 'file:.github/prompts/tasks/architecture-review.md'
       title: 'Agent: Architecture Review (PR)'
       commit_scope: agent
@@ -42,6 +43,7 @@ jobs:
     secrets: inherit
     with:
       role: architecture
+      model_tier: big
       task_prompt: 'file:.github/prompts/tasks/architecture-review.md'
       title: 'Agent: Architecture Review (Weekly)'
       commit_scope: agent

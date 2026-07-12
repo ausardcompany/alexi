@@ -36,9 +36,10 @@ jobs:
   pick-issues:
     name: Pick Issues
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      has_issues: ${{ steps.matrix.outputs.has_issues }}
+      matrix: ${​{ steps.matrix.outputs.matrix }}
+      has_issues: ${​{ steps.matrix.outputs.has_issues }}
     steps:
       - name: Build issue matrix
         id: matrix
@@ -201,6 +202,7 @@ jobs:
     secrets: inherit
     with:
       role: engineering
+      model_tier: big
       task_prompt: ${{ needs.prepare.outputs.task_prompt }}
       title: "Agent 3: Implement #${{ needs.prepare.outputs.issue_number }}"
       commit_scope: agent

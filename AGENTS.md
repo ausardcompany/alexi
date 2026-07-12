@@ -102,7 +102,15 @@ Caller workflows that need per-run context (today's date, an issue body, a PR nu
 
 - Every change to `.github/prompts/baseline-system.md` affects ALL 10+ agents simultaneously. Treat it like a constitution amendment.
 - The factory hardcodes `--no-verify` on its commit because lint-staged + commitlint can race with auto-pushed branches. The shared scope-enum (`cli, core, providers, config, server, agent, tools, ci, deps, tests`) still applies to anything an agent commits *itself* via tools.
-- Model is set in ONE place: `env.AGENT_MODEL` inside `agent-factory.yml`. Do not re-pin it in caller workflows.
+
+### Autonomy hardening (factory reliability contract)
+
+These three mechanisms live in `agent-factory.yml` and apply to every role that uses it. Do not reinvent them per caller.
+
+- **Model tiering.** The factory no longer pins a single model. Tier→model mapping is in `env` (`MODEL_NANO` = haiku, `MODEL_SMALL` = sonnet, `MODEL_BIG` = opus). Callers pick a tier with `model_tier: nano|small|big` (default `big`) or pin an exact id with `model_override`. Current assignments: `engineering`, `architecture`, `security` → `big`; everything else → `small`. Change a role's cost/quality tradeoff by editing its caller's `model_tier`, and change the tier→model map in ONE place (`agent-factory.yml env`).
+- **Bounded retry.** `KILO_RETRIES` (default `2`) is a budget spent **only on transient failures** (network/API blips matched by a regex on the run log: `socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`). A non-transient/agent failure is NOT retried — retrying an expensive model on the same broken input just wastes budget. Do not re-add unconditional retries.
+- **Escalation (graceful degradation).** When an agent run ultimately fails, the factory opens a deduplicated `factory-escalation`-labelled issue (`[factory] <role> agent failed: <title>`) with the last 40 log lines and the run URL, so a silent failure becomes a tracked human handoff. Re-runs of the same role/title comment on the existing issue instead of spawning duplicates.
+- **Watchdog.** Every job has a `timeout-minutes` (the factory job uses `inputs.timeout_minutes`, default 15; direct-runner jobs across all workflows now carry explicit caps). A stuck LLM run can no longer hang for the 6h GitHub default. When adding a job, always set `timeout-minutes`.
 
 ## Existing instruction sources to respect
 
