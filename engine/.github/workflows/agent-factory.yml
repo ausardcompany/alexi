@@ -152,6 +152,20 @@ jobs:
               "socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit";
             require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
               "transient<<TP_EOF\n" + tp + "\nTP_EOF\n");
+            // I1: verify-gate commands (lint/test/extra), one per line, run after the agent.
+            const s = c.stack || {};
+            const gates = [];
+            if (s.lint) gates.push(s.lint);
+            if (s.test) gates.push(s.test);
+            if (Array.isArray(s.extra)) for (const e of s.extra) gates.push(e);
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
+              "gates<<GATES_EOF\n" + gates.join("\n") + "\nGATES_EOF\n");
+            // I3: blast-radius limits from per-role config (optional).
+            const br = (r.blast_radius) || (c.blast_radius) || {};
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
+              "max_diff_lines=" + (br.max_diff_lines || 0) + "\n");
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
+              "path_denylist<<PD_EOF\n" + ((br.path_denylist || []).join("\n")) + "\nPD_EOF\n");
           '
           echo "[OK] role=$ROLE resolved"
 
@@ -275,15 +289,45 @@ jobs:
           echo "=== Output (last 80 lines) ==="
           tail -80 /tmp/kilo-output.log || true
 
+      - name: Verify gate (deterministic checks reject a false success)
+        # I1: after the agent claims success, run the project's own gates
+        # (lint/test/extra from stack config). If any fail, the agent's success
+        # is overturned: we do NOT commit and the run escalates. A failing gate
+        # costs cents; committing broken code costs a downstream review + revert.
+        id: verify
+        if: steps.vals.outputs.enabled != 'false' && steps.agent.outputs.success == 'true' && steps.vals.outputs.gates != ''
+        continue-on-error: true
+        env:
+          GATES: ${{ steps.vals.outputs.gates }}
+        run: |
+          FAILED=0
+          while IFS= read -r cmd; do
+            [ -z "$cmd" ] && continue
+            echo "::group::verify: $cmd"
+            if ! bash -lc "$cmd"; then
+              echo "::error::verify gate failed: $cmd"
+              FAILED=1
+            fi
+            echo "::endgroup::"
+          done <<< "$GATES"
+          if [ "$FAILED" = "1" ]; then
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "[OK] all verify gates passed"
+          fi
+
       - name: Commit and push changes
         id: commit
-        if: steps.vals.outputs.enabled != 'false' && inputs.commit_changes && steps.agent.outputs.success == 'true'
+        if: steps.vals.outputs.enabled != 'false' && inputs.commit_changes && steps.agent.outputs.success == 'true' && steps.verify.outputs.passed != 'false'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           ROLE: ${{ inputs.role }}
           BRANCH: ${{ steps.vals.outputs.branch }}
           AUTHOR_NAME: ${{ steps.vals.outputs.author_name }}
           AUTHOR_EMAIL: ${{ steps.vals.outputs.author_email }}
+          MAX_DIFF_LINES: ${{ steps.vals.outputs.max_diff_lines }}
+          PATH_DENYLIST: ${{ steps.vals.outputs.path_denylist }}
         run: |
           git config user.name "$AUTHOR_NAME"
           git config user.email "$AUTHOR_EMAIL"
@@ -300,6 +344,29 @@ jobs:
           # can never be staged by `git add -A`.
           rm -rf .engine 2>/dev/null || true
           git add -A
+
+          # I3: blast-radius guardrails. Reject overly-large or forbidden-path
+          # changes before committing; a runaway agent cannot rewrite half the
+          # repo or touch protected paths (baseline prompt, workflows, secrets).
+          if [ -n "$PATH_DENYLIST" ]; then
+            while IFS= read -r deny; do
+              [ -z "$deny" ] && continue
+              HIT=$(git diff --cached --name-only | grep -E "$deny" || true)
+              if [ -n "$HIT" ]; then
+                echo "::error::blast-radius: role touched denied path(s) matching '$deny':"
+                echo "$HIT"
+                exit 1
+              fi
+            done <<< "$PATH_DENYLIST"
+          fi
+          if [ "${MAX_DIFF_LINES:-0}" -gt 0 ]; then
+            CHANGED=$(git diff --cached --numstat | awk '{a+=$1; d+=$2} END {print a+d+0}')
+            if [ "${CHANGED:-0}" -gt "$MAX_DIFF_LINES" ]; then
+              echo "::error::blast-radius: diff of $CHANGED lines exceeds max_diff_lines=$MAX_DIFF_LINES."
+              exit 1
+            fi
+            echo "[OK] blast-radius: $CHANGED changed lines <= $MAX_DIFF_LINES"
+          fi
           if git diff --cached --quiet; then
             echo "[INFO] No changes to commit"
             echo "commit_sha=" >> "$GITHUB_OUTPUT"
@@ -340,7 +407,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Escalate failure to a tracked issue
-        if: always() && steps.vals.outputs.enabled != 'false' && steps.agent.outputs.success != 'true'
+        if: always() && steps.vals.outputs.enabled != 'false' && (steps.agent.outputs.success != 'true' || steps.verify.outputs.passed == 'false')
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           ROLE: ${{ inputs.role }}
@@ -390,8 +457,12 @@ jobs:
               --label "$LABEL" --body-file "$BODY_FILE" || true
           fi
 
-      - name: Fail if agent failed
-        if: steps.vals.outputs.enabled != 'false' && steps.agent.outputs.success != 'true'
+      - name: Fail if agent failed or verify gate failed
+        if: steps.vals.outputs.enabled != 'false' && (steps.agent.outputs.success != 'true' || steps.verify.outputs.passed == 'false')
         run: |
-          echo "::error::Factory agent run failed. See artefacts and the escalation issue."
+          if [ "${{ steps.verify.outputs.passed }}" = "false" ]; then
+            echo "::error::Agent claimed success but deterministic verify gates failed (I1). Not committed; escalated."
+          else
+            echo "::error::Factory agent run failed. See artefacts and the escalation issue."
+          fi
           exit 1

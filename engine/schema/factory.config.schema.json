@@ -74,6 +74,19 @@
       "description": "Logical secret name -> GitHub secret name. Values never live here.",
       "additionalProperties": { "type": "string" }
     },
+    "blast_radius": {
+      "type": "object",
+      "description": "Global blast-radius limits applied to agent commits (I3). Overridable per role.",
+      "additionalProperties": false,
+      "properties": {
+        "max_diff_lines": { "type": "integer", "minimum": 0, "description": "Max added+deleted lines an agent may commit. 0 = unlimited." },
+        "path_denylist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns of paths an agent must never modify (e.g. workflow YAML, baseline prompt, secrets)."
+        }
+      }
+    },
     "roles": {
       "type": "object",
       "description": "Per-role enablement, model tier, and watchdog timeout.",
@@ -84,7 +97,15 @@
         "properties": {
           "enabled": { "type": "boolean", "default": true },
           "tier": { "type": "string", "enum": ["nano", "small", "big"] },
-          "timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 360 }
+          "timeout_minutes": { "type": "integer", "minimum": 1, "maximum": 360 },
+          "blast_radius": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_diff_lines": { "type": "integer", "minimum": 0 },
+              "path_denylist": { "type": "array", "items": { "type": "string" } }
+            }
+          }
         }
       }
     },

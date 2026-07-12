@@ -58,6 +58,15 @@ roles:
   data:           { enabled: true,  tier: small, timeout_minutes: 20 }
   design:         { enabled: true,  tier: small, timeout_minutes: 20 }
 
+# -- Blast-radius guardrails (I3): reject runaway/forbidden agent commits --
+blast_radius:
+  max_diff_lines: 2000 # reject a single agent commit larger than this
+  path_denylist: # regex patterns an agent must never modify
+    - "^\\.github/workflows/"
+    - "^\\.github/prompts/baseline-system\\.md$"
+    - "^\\.agent-factory/"
+    - "package-lock\\.json$"
+
 # -- Reliability (engine defaults; override only if needed) -----------------
 reliability:
   retries: 2                  # transient-only retry budget
