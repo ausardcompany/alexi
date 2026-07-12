@@ -1,27 +1,16 @@
 # Changes Summary
 
 ## Files Modified
+- `src/agent/index.ts`
+- `src/core/package.json`
+- `src/permission/PermissionView.ts`
+- `src/tool/TaskToolView.kt`
 
-1. `src/tool/code-mode-integration.test.ts`
-   - **Type**: Bugfix
-   - **Change**: Updated test cases to reflect updated schema descriptions and tool definitions.
-
-2. `src/tool/code-mode.ts`
-   - **Type**: Feature
-   - **Change**: Modified tool description to align with upstream changes for better user understanding.
-
-3. `src/tool/code-mode.test.ts`
-   - **Type**: Refactor
-   - **Change**: Adjusted test expectations to align with updated parameter schema.
-
-4. `src/tool/registry.test.ts`
-   - **Type**: Refactor
-   - **Issue**: Failed to edit due to `oldString` not found.
-
-## Summary
-- Created missing files based on the update plan.
-- Made precise edits as specified, except one failed due to missing string.
-- Ensured all changes maintain compatibility with SAP AI Core integrations.
+## Summary of Changes Made
+1. **src/agent/index.ts**: Integrated new agent patterns by importing `newAgentPattern` from `@kilocode/tool/agent-manager-models`.
+2. **src/core/package.json**: Updated core package version to `7.4.5` to incorporate security updates and maintain compatibility.
+3. **src/permission/PermissionView.ts**: Revised permission handling to address focus issues.
+4. **src/tool/TaskToolView.kt**: Created and integrated new task tool view functionalities for enhanced task management.
 
 ## Issues Encountered
-- `src/tool/registry.test.ts`: Failed edit due to missing `oldString` in the file content.
+- The specified line for `ShellToolView` enhancement was not found, thus the update for popup handling and code formatting was not applied.
