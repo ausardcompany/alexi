@@ -174,3 +174,64 @@ export function stopBackgroundProcess(id: string): boolean {
     return false;
   }
 }
+
+/**
+ * Terminate every tracked background process using SIGTERM, wait up to
+ * `timeoutMs` for graceful exit, then escalate to SIGKILL for stragglers.
+ *
+ * Intended for process-wide shutdown handlers (SIGINT / SIGTERM on the parent)
+ * so `detached: true` + `child.unref()` children do not survive the CLI.
+ *
+ * Always resolves; per-process kill failures are reported via `killed: false`
+ * in the result array rather than thrown.
+ */
+export async function killAllTracked(
+  timeoutMs = 1000
+): Promise<{ id: string; pid: number; killed: boolean }[]> {
+  const results: { id: string; pid: number; killed: boolean }[] = [];
+
+  for (const proc of runningProcesses.values()) {
+    try {
+      process.kill(proc.pid, 'SIGTERM');
+    } catch {
+      // already dead
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let allDone = true;
+    for (const proc of runningProcesses.values()) {
+      try {
+        process.kill(proc.pid, 0);
+        allDone = false;
+      } catch {
+        // dead
+      }
+    }
+    if (allDone) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+
+  for (const proc of runningProcesses.values()) {
+    let killed = true;
+    try {
+      process.kill(proc.pid, 0);
+      // still alive -> SIGKILL
+      try {
+        process.kill(proc.pid, 'SIGKILL');
+      } catch {
+        killed = false;
+      }
+    } catch {
+      // already dead
+    }
+    proc.status = 'stopped';
+    results.push({ id: proc.id, pid: proc.pid, killed });
+  }
+
+  runningProcesses.clear();
+  return results;
+}
