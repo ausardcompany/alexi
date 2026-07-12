@@ -303,8 +303,32 @@ jobs:
           SHA=$(git rev-parse HEAD)
           echo "commit_sha=$SHA" >> $GITHUB_OUTPUT
 
-          git push origin "$BRANCH"
-          echo "[OK] Committed $SHA and pushed to $BRANCH"
+          # Push with rebase-and-retry: master moves fast (multiple agents +
+          # auto-merge), so a plain push often loses the race. Rebase onto the
+          # latest remote and retry a few times before giving up.
+          PUSHED=0
+          for i in 1 2 3 4 5; do
+            if git push origin "HEAD:$BRANCH"; then
+              PUSHED=1
+              break
+            fi
+            echo "[WARN] push rejected (attempt $i) - rebasing onto origin/$BRANCH and retrying ..."
+            git fetch origin "$BRANCH" || true
+            if ! git rebase "origin/$BRANCH"; then
+              git rebase --abort 2>/dev/null || true
+              echo "[WARN] rebase conflict - retrying with merge -X ours on our single commit"
+              git reset --hard "$SHA" 2>/dev/null || true
+              git fetch origin "$BRANCH" || true
+              git merge --no-edit -X ours "origin/$BRANCH" 2>/dev/null || true
+            fi
+            sleep $((i * 5))
+          done
+
+          if [ "$PUSHED" = "1" ]; then
+            echo "[OK] Committed $SHA and pushed to $BRANCH"
+          else
+            echo "::warning::Could not push factory changes to $BRANCH after retries (non-fatal); artefacts still uploaded."
+          fi
 
       - name: Upload artefacts
         if: always()
