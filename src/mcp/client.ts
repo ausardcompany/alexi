@@ -33,7 +33,7 @@ export interface McpToolInfo {
    * double-escaped on the way back.
    *
    * `toolName` is passed through verbatim; a tool name that itself
-   * contains `::` still round-trips because parsing splits on the LAST
+   * contains `::` still round-trips because parsing splits on the FIRST
    * `::` occurrence.
    */
   qualifiedName: string;
