@@ -13,6 +13,9 @@ import { getProviderForModelWithFallback, getDefaultModel } from '../providers/i
 import { routePrompt } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
+import { getCheckpointManager } from './checkpoints.js';
+import { recordSnapshot } from './snapshot.js';
+import { logger } from '../utils/logger.js';
 import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/index.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
 import { getPermissionManager } from '../permission/index.js';
@@ -652,6 +655,12 @@ export async function agenticChat(
         tool_calls: result.toolCalls as ToolCall[],
       });
 
+      // Capture the pre-iteration checkpoint stack length so that after all
+      // tools in this iteration settle we can extract just the checkpoints
+      // this step produced and persist them as a session-level snapshot.
+      const preIterationCheckpointCount = getCheckpointManager().getHistory().length;
+      const iterationToolNames: string[] = [];
+
       // Execute each tool call
       for (const toolCall of result.toolCalls) {
         const { id, result: toolResult } = await executeToolCall(
@@ -661,6 +670,7 @@ export async function agenticChat(
         );
 
         toolCallsExecuted++;
+        iterationToolNames.push(toolCall.function.name);
         toolCallSummary.push({
           name: toolCall.function.name,
           success: toolResult.success,
@@ -711,6 +721,30 @@ export async function agenticChat(
                 hookResult.error || hookResult.output || 'Hook rejected tool execution';
               throw new Error(`PostToolUse hook blocked execution: ${reason}`);
             }
+          }
+        }
+      }
+
+      // Persist a session-level snapshot for this agent step. Best-effort:
+      // a snapshot write failure must NOT abort the agent loop.
+      const sessionIdForSnapshot = options?.sessionManager?.getCurrentSession()?.metadata.id;
+      if (sessionIdForSnapshot) {
+        const fullHistory = getCheckpointManager().getHistory();
+        const iterationCheckpoints = fullHistory.slice(preIterationCheckpointCount);
+        if (iterationCheckpoints.length > 0) {
+          try {
+            await recordSnapshot(
+              sessionIdForSnapshot,
+              String(iterations),
+              iterationCheckpoints,
+              iterationToolNames
+            );
+          } catch (err) {
+            logger.warn(
+              `Failed to record session snapshot for step ${iterations}: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            );
           }
         }
       }
