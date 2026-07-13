@@ -1,0 +1,38 @@
+name: "Agent Factory Eval (v1 gate)"
+
+# I5 regression gate + I6 cross-family judge. Runs on PRs that change fleet-wide
+# prompts or the consumer overlays/goldens, blocking a change that regresses
+# role quality beyond the threshold. Judges are pinned to a DIFFERENT model than
+# the candidate (I6 self-preference mitigation).
+
+on:
+  pull_request:
+    paths:
+      - ".agent-factory/project-facts.md"
+      - ".agent-factory/roles/**"
+  workflow_dispatch:
+    inputs:
+      roles:
+        description: "Roles to eval (comma-separated)"
+        required: false
+        default: "consulting"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  eval:
+    uses: ausardcompany/agent-factory/.github/workflows/agent-eval.yml@v1
+    secrets:
+      LLM_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
+      LLM_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+    with:
+      roles: ${{ github.event.inputs.roles || 'consulting' }}
+      # Candidate = the small tier (what most roles run on). Judges are a
+      # DIFFERENT model than the candidate to avoid self-preference bias (I6):
+      # candidate = sonnet, judges = haiku + opus (different points in the family).
+      candidate_model: "sap-ai-core/anthropic--claude-4.5-sonnet"
+      judges: "sap-ai-core/anthropic--claude-4.5-haiku,sap-ai-core/anthropic--claude-4.7-opus"
+      engine_ref: v1
+      max_drop: "0.05"

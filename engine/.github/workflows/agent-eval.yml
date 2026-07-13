@@ -1,0 +1,116 @@
+name: "Agent Factory Eval (Reusable)"
+
+# Reusable eval + regression gate (I5) + cross-family judge (I6). A consumer
+# calls this on PRs that touch prompt files (baseline/roles/overlays/goldens) to
+# block a change that regresses role quality beyond a threshold.
+#
+# uses: ausardcompany/agent-factory/.github/workflows/agent-eval.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      roles:
+        description: "Comma-separated roles to eval (must have goldens in the engine)."
+        required: true
+        type: string
+      candidate_model:
+        description: "Model that produces candidate output (the one under test)."
+        required: true
+        type: string
+      judges:
+        description: "Comma-separated judge model ids. MUST be a different family than candidate_model (I6)."
+        required: true
+        type: string
+      engine_ref:
+        description: "Engine ref for prompts/goldens/scripts."
+        required: false
+        type: string
+        default: v1
+      max_drop:
+        description: "Max allowed mean-score drop vs baseline before blocking."
+        required: false
+        type: string
+        default: "0.05"
+      update_baseline:
+        description: "Update baseline-scores.json on success (only on push to default branch)."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      LLM_SERVICE_KEY:
+        required: true
+      LLM_RESOURCE_GROUP:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  eval:
+    name: "Eval gate"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+
+      - name: Checkout engine (prompts + goldens + scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: ausardcompany/agent-factory
+          ref: ${{ inputs.engine_ref }}
+          path: .engine
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install agent CLI
+        run: |
+          npm install -g @kilocode/cli
+          echo "[OK] agent CLI: $(kilo --version || echo unknown)"
+
+      - name: Run eval gate per role
+        id: eval
+        env:
+          AICORE_SERVICE_KEY: ${{ secrets.LLM_SERVICE_KEY }}
+          AICORE_RESOURCE_GROUP: ${{ secrets.LLM_RESOURCE_GROUP }}
+          CANDIDATE: ${{ inputs.candidate_model }}
+          JUDGES: ${{ inputs.judges }}
+          MAX_DROP: ${{ inputs.max_drop }}
+          UPDATE: ${{ inputs.update_baseline }}
+        run: |
+          set -e
+          FAILED=0
+          UB=""
+          [ "$UPDATE" = "true" ] && UB="--update-baseline"
+          IFS=',' read -ra ROLES <<< "${{ inputs.roles }}"
+          for role in "${ROLES[@]}"; do
+            role="$(echo "$role" | xargs)"
+            [ -z "$role" ] && continue
+            echo "::group::eval role=$role"
+            if ! node .engine/evals/run-eval.mjs \
+                --role "$role" \
+                --engine-dir .engine \
+                --consumer-dir . \
+                --candidate-model "$CANDIDATE" \
+                --judges "$JUDGES" \
+                --max-drop "$MAX_DROP" \
+                $UB; then
+              echo "::error::eval regression in role=$role"
+              FAILED=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $FAILED
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-scores-${{ github.run_id }}
+          path: /tmp/eval-*.json
+          retention-days: 30
+          if-no-files-found: ignore
