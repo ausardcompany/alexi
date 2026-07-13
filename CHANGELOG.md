@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Correct MCP `qualifiedName` parsing direction in JSDoc** (commit `887c694a`, `fix(core): correct doc comment about :: split direction [alexi-bot]`): Updated the JSDoc for `McpToolInfo.qualifiedName` in `src/mcp/client.ts` (line 36) to state that parsing splits on the **FIRST** `::` occurrence, matching the actual implementation of `parseQualifiedName` (`src/mcp/client.ts:79`), which uses `qualified.indexOf('::')`. The prior comment incorrectly said "LAST", contradicting the code and the accompanying rationale that server-name escaping (`escapeServerName` at `src/mcp/client.ts:48`, which turns literal `:` into `%3A`) guarantees the server segment never contains `::`, so a first-occurrence split preserves tool names that themselves contain `::`. Pure documentation change with no behavioural, API, runtime, or type-shape impact; the round-trip guarantee described in the JSDoc block was already correct in code.
+
 ## [1.18.0] - 2026-07-13
 
 ### Added
