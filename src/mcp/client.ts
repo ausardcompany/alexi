@@ -11,7 +11,7 @@ import { logger } from '../utils/logger.js';
 import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
 
 export interface McpToolInfo {
-  /** Tool name */
+  /** Tool name (raw short name as advertised by the server) */
   name: string;
   /** Tool description */
   description?: string;
@@ -24,6 +24,68 @@ export interface McpToolInfo {
   };
   /** Source server name */
   serverName: string;
+  /**
+   * Fully qualified name in the form `<escapedServerName>::<toolName>`.
+   *
+   * `serverName` is escaped so that literal `:` and `%` characters in a
+   * server name do not collide with the `::` separator. `%` is escaped
+   * first (as `%25`) so the `%3A` introduced by escaping `:` is not
+   * double-escaped on the way back.
+   *
+   * `toolName` is passed through verbatim; a tool name that itself
+   * contains `::` still round-trips because parsing splits on the LAST
+   * `::` occurrence.
+   */
+  qualifiedName: string;
+}
+
+/**
+ * Escape a server name for use in the `qualifiedName` prefix.
+ *
+ * `%` is escaped first as `%25` so that the `%3A` introduced by escaping
+ * `:` cannot be misinterpreted on the reverse pass.
+ */
+export function escapeServerName(name: string): string {
+  return name.replaceAll('%', '%25').replaceAll(':', '%3A');
+}
+
+/**
+ * Reverse of {@link escapeServerName}. `%3A` -> `:` first, then `%25` -> `%`.
+ */
+export function unescapeServerName(escaped: string): string {
+  return escaped.replaceAll('%3A', ':').replaceAll('%25', '%');
+}
+
+/**
+ * Build a qualified tool name from a raw server name and tool name.
+ */
+export function buildQualifiedName(serverName: string, toolName: string): string {
+  return `${escapeServerName(serverName)}::${toolName}`;
+}
+
+/**
+ * Parse a qualified tool name into its (unescaped) server and tool components.
+ *
+ * Splits on the FIRST `::` occurrence. Because {@link escapeServerName}
+ * turns any literal `:` in the server segment into `%3A`, the server
+ * segment never contains `::`; splitting on the first separator therefore
+ * preserves tool names that themselves contain `::`. Throws when no `::`
+ * separator is present.
+ */
+export function parseQualifiedName(qualified: string): {
+  serverName: string;
+  toolName: string;
+} {
+  const idx = qualified.indexOf('::');
+  if (idx === -1) {
+    throw new Error(`Invalid qualified tool name (missing '::'): ${qualified}`);
+  }
+  const escapedServer = qualified.slice(0, idx);
+  const toolName = qualified.slice(idx + 2);
+  return {
+    serverName: unescapeServerName(escapedServer),
+    toolName,
+  };
 }
 
 export interface McpConnection {
@@ -167,6 +229,7 @@ export class McpClientManager {
       description: tool.description,
       inputSchema,
       serverName,
+      qualifiedName: buildQualifiedName(serverName, tool.name),
     };
   }
 
@@ -552,6 +615,50 @@ export class McpClientManager {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  /**
+   * Look up a connected tool by its qualified name.
+   *
+   * Returns the owning connection and the {@link McpToolInfo} entry, or
+   * `undefined` if no connected server currently exposes that tool.
+   */
+  getToolByQualifiedName(
+    qualified: string
+  ): { connection: McpConnection; tool: McpToolInfo } | undefined {
+    let parsed: { serverName: string; toolName: string };
+    try {
+      parsed = parseQualifiedName(qualified);
+    } catch {
+      return undefined;
+    }
+    const connection = this.connections.get(parsed.serverName);
+    if (!connection || connection.status !== 'connected') {
+      return undefined;
+    }
+    const tool = connection.tools.find((t) => t.name === parsed.toolName);
+    if (!tool) {
+      return undefined;
+    }
+    return { connection, tool };
+  }
+
+  /**
+   * Call a tool identified by its qualified name (`serverName::toolName`).
+   *
+   * Delegates to {@link callTool} once the qualified name has been resolved.
+   * Existing callers using `callTool(serverName, toolName, args)` are
+   * unaffected.
+   */
+  async callToolByQualified(
+    qualified: string,
+    args: Record<string, unknown>
+  ): Promise<{ success: boolean; result?: unknown; error?: string }> {
+    const entry = this.getToolByQualifiedName(qualified);
+    if (!entry) {
+      return { success: false, error: `Tool not found: ${qualified}` };
+    }
+    return this.callTool(entry.connection.config.name, entry.tool.name, args);
   }
 
   /**
