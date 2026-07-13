@@ -271,12 +271,12 @@ describe('MCP Tool Call Timeout', () => {
       );
     });
 
-    it('should use default timeout for connect when no config timeout', async () => {
+    it('should use default startup timeout for connect when no config timeout', async () => {
       await manager.connect(stdioConfig);
 
       expect(mockClientConnect).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ timeout: 60000 })
+        expect.objectContaining({ timeout: 30000 })
       );
     });
 

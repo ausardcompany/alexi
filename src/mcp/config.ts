@@ -28,8 +28,23 @@ export interface McpServerConfig {
   enabled: boolean;
   /** Auto-connect on startup */
   autoConnect?: boolean;
-  /** Tool call timeout in milliseconds. Default: 60000 */
-  timeout?: number;
+  /**
+   * Timeout budget(s) in milliseconds.
+   *
+   * Accepts either:
+   * - A single number applied to BOTH the stdio handshake / cold-spawn
+   *   phase (`client.connect`) and per-tool `callTool` deadlines.
+   *   This is the legacy shape and remains supported for
+   *   backwards-compatibility.
+   * - An object `{ startup?: number; request?: number }` that lets the
+   *   slow spawn phase and the fast tool-call phase have independent
+   *   budgets. Missing keys fall back to the defaults below.
+   *
+   * Defaults when unspecified:
+   * - `startup`: 30000 ms (cold `npx -y` installs routinely take 5-15s)
+   * - `request`: 60000 ms (per-tool call deadline)
+   */
+  timeout?: number | { startup?: number; request?: number };
   /**
    * Working directory for the spawned stdio server. Relative paths are
    * resolved against `options.workdir` (or `process.cwd()` if no workdir

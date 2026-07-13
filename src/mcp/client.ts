@@ -118,7 +118,8 @@ interface ToolCache {
 }
 
 const CACHE_TTL_MS = 30000; // 30 seconds
-const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds
+const DEFAULT_STARTUP_TIMEOUT_MS = 30000; // 30 seconds for cold `npx -y` spawn
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds for per-tool call
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
 
 /**
@@ -355,8 +356,8 @@ export class McpClientManager {
       env: cleanEnv,
     });
 
-    const timeoutMs = this.getTimeoutForServer(config.name);
-    await connection.client.connect(transport, { timeout: timeoutMs });
+    const { startup } = this.getTimeoutsForServer(config.name);
+    await connection.client.connect(transport, { timeout: startup });
   }
 
   /**
@@ -516,24 +517,40 @@ export class McpClientManager {
   }
 
   /**
-   * Get the timeout for a specific server.
-   * Priority: per-server config > MCP_TOOL_TIMEOUT env var > default
+   * Get the startup and per-request timeouts for a specific server.
+   *
+   * Resolution order:
+   * 1. If `connection.config.timeout` is a number, use it for BOTH phases
+   *    (legacy behaviour, preserves backwards-compat).
+   * 2. If it is an object, use `startup ?? DEFAULT_STARTUP_TIMEOUT_MS`
+   *    and `request ?? DEFAULT_TOOL_CALL_TIMEOUT_MS`.
+   * 3. Otherwise fall back to `MCP_TOOL_TIMEOUT` env (applied to BOTH
+   *    phases for backwards-compat) or the two defaults.
    */
-  private getTimeoutForServer(serverName: string): number {
+  private getTimeoutsForServer(serverName: string): { startup: number; request: number } {
     const connection = this.connections.get(serverName);
-    if (connection?.config.timeout !== undefined) {
-      return connection.config.timeout;
+    const configured = connection?.config.timeout;
+
+    if (typeof configured === 'number') {
+      return { startup: configured, request: configured };
+    }
+
+    if (configured !== undefined && configured !== null && typeof configured === 'object') {
+      return {
+        startup: configured.startup ?? DEFAULT_STARTUP_TIMEOUT_MS,
+        request: configured.request ?? DEFAULT_TOOL_CALL_TIMEOUT_MS,
+      };
     }
 
     const envTimeout = process.env.MCP_TOOL_TIMEOUT;
     if (envTimeout !== undefined) {
       const parsed = Number(envTimeout);
       if (!isNaN(parsed) && parsed > 0) {
-        return parsed;
+        return { startup: parsed, request: parsed };
       }
     }
 
-    return DEFAULT_TOOL_CALL_TIMEOUT_MS;
+    return { startup: DEFAULT_STARTUP_TIMEOUT_MS, request: DEFAULT_TOOL_CALL_TIMEOUT_MS };
   }
 
   /**
@@ -554,7 +571,7 @@ export class McpClientManager {
       return { success: false, error: `Server not ready: ${serverName} (${connection.status})` };
     }
 
-    const timeoutMs = this.getTimeoutForServer(serverName);
+    const { request: timeoutMs } = this.getTimeoutsForServer(serverName);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
