@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-07-13
+
+### Added
+
+- **Factory Wave 2B - golden eval regression gate + cross-family judge (I5/I6/I7)** (commit `2184c725`, `feat(ci): factory Wave 2B - golden eval regression gate + cross-family judge (I5/I6/I7)`): Added comprehensive evaluation infrastructure including golden baseline regression testing and cross-family judging capabilities for evaluating agent outputs across different model families.
+- **ONBOARDING guide for attaching the engine to a new repo** (commit `165185e1`, `docs(ci): add ONBOARDING guide for attaching the engine to a new repo`): New documentation for bootstrapping the Alexi agent factory and CI orchestration in external repositories.
+
+### Changed
+
+- **Planning brief 2026-07-13** (commit `dd27145c`, `docs(ci): planning brief 2026-07-13 [alexi-bot]`): Updated planning documentation for the current cycle.
+- **Factory consulting run** (commit `05d26952`, `chore(ci): factory consulting run [agent]`): Automated consulting agent execution.
+- **Sync seeded consulting baseline (0.66) from live eval run** (commit `5e593e80`, `chore(evals): sync seeded consulting baseline (0.66) from live eval run`): Updated evaluation baseline reference data from production runs.
+
+### Dependencies
+
+#### Development Dependencies
+
+- **@commitlint/cli**: `21.2.0` → `21.2.1` (#964)
+- **@typescript-eslint/eslint-plugin**: patch update (#969)
+- **@typescript-eslint/parser**: `8.62.1` → `8.63.0` (#970)
+- **prettier**: `3.9.4` → `3.9.5` (#972)
+- **tsx**: `4.23.0` → `4.23.1` (#968)
+
+#### Runtime Dependencies
+
+- **hono**: `4.12.27` → `4.12.30` (#966)
+- **nanoid**: `5.1.16` → `6.0.0` (#965) - major version bump
+- **terminal-image**: `4.3.0` → `5.0.1` (#971) - major version bump
+
+## [Unreleased]
+
 ### Removed
 
 - **Seven broken upstream-sync orphan stub files** (autohealing cleanup, commit `441b4c14`, 2026-07-04, `fix(ci): remove invalid upstream-sync stub files [autohealing]`): The CI autohealer removed seven scaffold files emitted by the daily upstream sync at commit `6944bf73` (`feat(sync): apply upstream changes (2026-07-04)`) after the follow-on auto-fix pass at commit `f65f2dc1` (`style(ci): auto-fix lint/format issues [alexi-bot]`) applied Prettier/ESLint to what it could reach. All seven files broke `npm run typecheck` (45+ TypeScript errors from undefined identifiers such as `proc`, `NodeStream`, `Stream`, `yield`, `fs`, `Database`, `SessionTable`, `eq`, `SessionID`, `Tool`, `PlanFile`, `Session`, `Effect`), broke `npm run format:check`, and were never imported by any module in `src/` or `tests/` — the only references outside their own file bodies live under `.github/reports/` documentation artefacts. This removal is a no-behavior, no-API, no-CLI-surface, no-runtime-shape change that restores a green CI pipeline; diff statistics: `7 files changed, 49 deletions(-)`. The remediation follows the exact pattern established in commit `7e4ebc1b` for the prior sync run and extends the stub-removal invariant documented in the earlier `### Removed` entries below. Individual file impact:
