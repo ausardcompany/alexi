@@ -4,10 +4,6 @@
  */
 import type { Tool } from './index.js';
 
-export const ToolRegistry = {
-  // New enhancements
-};
-
 // Updated code based on changes in `packages/core/src/tool/registry.ts` and `packages/opencode/src/tool/registry.ts` from opencode
 // Re-export the registry-name accessor used by the permission system to
 // cross-check deny-rule tool entries against the actual registered tools.
