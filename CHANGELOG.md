@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI auto-fix pass on two placeholder stub files** (commit `19cad7ca`, `style(ci): auto-fix lint/format issues [alexi-bot]`, 2026-07-14): The CI auto-fix workflow ran Prettier across the working tree and appended a trailing LF newline to `src/core/git.ts` and `src/core/session-runner.ts` to satisfy the repository's Prettier configuration (`endOfLine: lf`, final-newline required). Diff statistics: `2 files changed, 2 insertions(+), 2 deletions(-)`. Both files remain 4-line placeholder stubs that are not imported by any module in `src/` or `tests/` and contribute nothing to runtime behavior — the canonical git operations surface lives under `src/git/` (auto-commit, attribution, dirty-file detection) and the canonical session runtime lives in `src/core/sessionManager.ts`, `src/core/orchestrator.ts`, `src/core/streamingOrchestrator.ts`, and `src/core/agenticChat.ts`. This is a pure formatting change with no behavioral, API, CLI-surface, runtime, or type-shape impact; CI verifies it via the `format:check` and `lint` jobs. The stub-removal invariant documented in earlier `### Removed` entries applies: orphan scaffold files at `src/core/*.ts` that are not part of the canonical module set are upstream-sync noise and are candidates for autohealing cleanup.
+
 ## [1.18.0] - 2026-07-13
 
 ### Added
