@@ -706,11 +706,30 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
         return true;
       }
       const forkName = args[0] || `fork-${Date.now()}`;
-      // Create a new session with the same history
+      // Snapshot the source transcript BEFORE creating a new session — creating
+      // one flips the active session on the manager, so we must capture the
+      // originals up front.
+      const sourceMessages = session.messages.map((m) => ({
+        ...m,
+        tokens: m.tokens ? { ...m.tokens } : undefined,
+      }));
+      const sourceWorkdir = session.metadata.workdir;
+      const sourceTotalTokens = sourceMessages.reduce(
+        (sum, m) => sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0),
+        0
+      );
+      // Create a new session and copy the conversation state so users can
+      // continue exploring alternate branches from the forked point.
       state.sessionManager.createSession(state.currentModel);
       const newSession = state.sessionManager.getCurrentSession();
       if (newSession) {
+        newSession.messages = sourceMessages;
         newSession.metadata.title = forkName;
+        newSession.metadata.messageCount = sourceMessages.length;
+        newSession.metadata.totalTokens = sourceTotalTokens;
+        if (sourceWorkdir !== undefined) {
+          newSession.metadata.workdir = sourceWorkdir;
+        }
         console.log(
           c('green', `\n  Forked session: ${forkName} (${newSession.metadata.id.slice(0, 8)})\n`)
         );
