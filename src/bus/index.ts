@@ -6,10 +6,6 @@
 
 import { z } from 'zod';
 
-class EventBus {
-  // New methods
-}
-
 // Event handler types
 type EventHandler<T> = (payload: T) => void | Promise<void>;
 type UnsubscribeFn = () => void;
