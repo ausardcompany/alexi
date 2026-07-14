@@ -8,6 +8,7 @@ import {
   formatPathRelativeToSession,
   formatPathForDisplay,
   abbreviateHomePath,
+  formatCwdShort,
 } from './pathFormat.js';
 
 describe('formatPathRelativeToSession', () => {
@@ -82,5 +83,44 @@ describe('formatPathForDisplay', () => {
 
     const result = formatPathForDisplay(filePath, sessionDir);
     expect(result).toBe('~/other/file.ts');
+  });
+});
+
+describe('formatCwdShort', () => {
+  it('returns empty string for empty input', () => {
+    expect(formatCwdShort('')).toBe('');
+  });
+
+  it('abbreviates $HOME prefix to ~', () => {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (!home) {
+      return;
+    }
+    const cwd = path.join(home, 'projects', 'alexi');
+    expect(formatCwdShort(cwd)).toBe('~/projects/alexi');
+  });
+
+  it('returns ~ for the home directory itself', () => {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (!home) {
+      return;
+    }
+    expect(formatCwdShort(home)).toBe('~');
+  });
+
+  it('falls back to basename for paths outside $HOME', () => {
+    expect(formatCwdShort('/var/lib/foo')).toBe('foo');
+    expect(formatCwdShort('/opt/app/bar')).toBe('bar');
+  });
+
+  it('does not abbreviate paths that only share a prefix with $HOME', () => {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (!home) {
+      return;
+    }
+    // e.g. HOME=/home/user, but cwd=/home/userland/other
+    const sibling = `${home}land/other`;
+    // Should NOT be treated as inside $HOME -> falls back to basename
+    expect(formatCwdShort(sibling)).toBe('other');
   });
 });

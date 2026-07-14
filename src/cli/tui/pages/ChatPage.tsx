@@ -128,6 +128,7 @@ export function ChatPage({
           tokenCount={tokenCount}
           sessionId={sessionId}
           topModelLabel={topModelLabel}
+          cwd={process.cwd()}
         />
       </Box>
     </>
