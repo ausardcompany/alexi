@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 
 import { ProviderModelFellBack } from '../../../bus/index.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { formatCwdShort } from '../utils/pathFormat.js';
 import { Spinner } from './Spinner.js';
 
 export interface StatusBarProps {
@@ -22,6 +23,14 @@ export interface StatusBarProps {
    * keep the segment compact (matches the model truncation rule below).
    */
   topModelLabel?: string;
+  /**
+   * Absolute path of the current working directory. When provided AND the
+   * session is idle (not streaming and not in leader mode), the StatusBar
+   * appends a short cwd segment (home-abbreviated to `~/...` or basename)
+   * so users can see which worktree they are writing to. Skipped while
+   * streaming to avoid segment jitter next to the spinner.
+   */
+  cwd?: string;
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -58,6 +67,7 @@ export function StatusBar({
   tokenCount = 0,
   sessionId,
   topModelLabel,
+  cwd,
 }: StatusBarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -130,6 +140,12 @@ export function StatusBar({
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
             {' · '}
             {sessionId.slice(0, 8)}
+          </Text>
+        )}
+        {!isStreaming && !leaderActive && cwd && (
+          <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+            {' · '}
+            {formatCwdShort(cwd)}
           </Text>
         )}
       </Box>

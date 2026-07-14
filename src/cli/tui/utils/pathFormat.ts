@@ -63,3 +63,24 @@ export function formatPathForDisplay(absolutePath: string, sessionDirectory: str
   // Otherwise abbreviate home directory
   return abbreviateHomePath(absolutePath);
 }
+
+/**
+ * Format a cwd for display in the StatusBar.
+ *
+ * - If the path is inside `$HOME`, replace the home prefix with `~`
+ *   (e.g. `/home/alice/projects/alexi` -> `~/projects/alexi`).
+ * - Otherwise fall back to the basename of the path so the segment stays
+ *   short (e.g. `/var/lib/foo` -> `foo`).
+ * - Empty/falsy input returns an empty string.
+ */
+export function formatCwdShort(cwd: string): string {
+  if (!cwd) {
+    return '';
+  }
+  const home = process.env.HOME || process.env.USERPROFILE;
+  if (home && (cwd === home || cwd.startsWith(home + path.sep))) {
+    const rest = cwd.slice(home.length);
+    return rest.length === 0 ? '~' : `~${rest}`;
+  }
+  return path.basename(cwd) || cwd;
+}

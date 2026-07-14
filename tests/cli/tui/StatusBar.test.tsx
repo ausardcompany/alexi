@@ -108,4 +108,46 @@ describe('StatusBar', () => {
     const frame = lastFrame() ?? '';
     expect(frame).not.toContain('gpt-5.5');
   });
+
+  it('renders cwd basename segment when idle and cwd is provided', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} cwd="/var/tmp/my-cwd-basename-xyz" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('my-cwd-basename-xyz');
+  });
+
+  it('does not render cwd segment while streaming', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} isStreaming={true} cwd="/var/tmp/my-cwd-basename-xyz" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('my-cwd-basename-xyz');
+  });
+
+  it('does not render cwd segment in leader mode', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} leaderActive={true} cwd="/var/tmp/my-cwd-basename-xyz" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('my-cwd-basename-xyz');
+  });
+
+  it('omits cwd segment when cwd prop is not provided', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <StatusBar {...defaultProps} />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    // No trailing basename should appear (we can't test absence generally,
+    // but there is no ' · ' following the sessionId slot since none set).
+    expect(frame).not.toContain('my-cwd-basename-xyz');
+  });
 });

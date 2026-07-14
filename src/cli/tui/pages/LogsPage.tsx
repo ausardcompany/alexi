@@ -112,6 +112,7 @@ export function LogsPage({
           isStreaming={isStreaming}
           leaderActive={leaderActive}
           topModelLabel={topModelLabel}
+          cwd={process.cwd()}
         />
       </Box>
     </>
