@@ -4,7 +4,9 @@
  */
 import type { Tool } from './index.js';
 
-// updated registry tool logic
+export const ToolRegistry = {
+  // New enhancements
+};
 
 // Updated code based on changes in `packages/core/src/tool/registry.ts` and `packages/opencode/src/tool/registry.ts` from opencode
 // Re-export the registry-name accessor used by the permission system to
