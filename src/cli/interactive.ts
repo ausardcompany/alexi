@@ -720,6 +720,10 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
       );
       // Create a new session and copy the conversation state so users can
       // continue exploring alternate branches from the forked point.
+      // `createSession` sets the new session as the manager's active session
+      // (see SessionManager.createSession), so the fork becomes the current
+      // session automatically — subsequent user messages land in the fork,
+      // matching the `git checkout -b` mental model users expect.
       state.sessionManager.createSession(state.currentModel);
       const newSession = state.sessionManager.getCurrentSession();
       if (newSession) {
@@ -731,7 +735,10 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
           newSession.metadata.workdir = sourceWorkdir;
         }
         console.log(
-          c('green', `\n  Forked session: ${forkName} (${newSession.metadata.id.slice(0, 8)})\n`)
+          c(
+            'green',
+            `\n  Forked session: ${forkName} (${newSession.metadata.id.slice(0, 8)}) - now active\n`
+          )
         );
       }
       return true;

@@ -124,6 +124,41 @@ describe('/fork copies session transcript', () => {
     expect(forked?.metadata.title).toMatch(/^fork-\d+$/);
   });
 
+  it('switches the active session to the fork (issue #993)', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+    original.messages.push({
+      role: 'user',
+      content: 'original message',
+      timestamp: Date.now(),
+    });
+    const originalId = original.metadata.id;
+
+    await handleCommand('/fork test-fork', state);
+
+    const active = state.sessionManager.getCurrentSession();
+    expect(active).not.toBeNull();
+    expect(active?.metadata.id).not.toBe(originalId);
+    expect(active?.metadata.title).toBe('test-fork');
+  });
+
+  it('logs "now active" in the confirmation message', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+
+    await handleCommand('/fork switched', state);
+
+    const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('now active');
+    expect(logged).toContain('switched');
+  });
+
   it('does not fork when there is no active session', async () => {
     const sessionManager = new SessionManager({ sessionsDir: tmpDir });
     const state: ReplState = {
