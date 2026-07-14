@@ -13,7 +13,9 @@ import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
 import { buildAssembledSystemPromptAsync } from '../agent/system.js';
+import { stripInternalOptions } from '../agent/index.js';
 import { buildSessionHeaders } from '../providers/sessionHeaders.js';
+import type { CompletionOptions } from '../providers/sapOrchestration.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -144,12 +146,19 @@ export async function* streamChat(
   // auto-disable counter; success resets it. Transient errors are left to
   // ErrorBackoff.
   try {
-    for await (const chunk of provider.streamComplete(messages, {
+    // Build the completion-options bag and strip any agent-metadata keys
+    // before dispatch. Keys defined in `INTERNAL_OPTION_KEYS` (agent id,
+    // displayName, source, reference, resolved, mode, aliases, ...) must
+    // never reach SAP AI Core / SAP Orchestration; see
+    // `stripInternalOptions` in `src/agent/index.ts`.
+    const merged: CompletionOptions = {
       maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
       temperature: options?.temperature,
       signal: options?.signal,
       headers: extraHeaders as Record<string, string>,
-    })) {
+    };
+    const providerOpts = stripInternalOptions(merged) as CompletionOptions;
+    for await (const chunk of provider.streamComplete(messages, providerOpts)) {
       fullText += chunk.text;
       if (chunk.usage) finalUsage = chunk.usage;
       yield chunk;

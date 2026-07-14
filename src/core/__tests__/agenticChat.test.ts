@@ -62,6 +62,7 @@ import { agenticChat } from '../agenticChat.js';
 import { getProviderForModel, getProviderForModelWithFallback } from '../../providers/index.js';
 import { getMemoryManager } from '../memory.js';
 import { getSessionContextString } from '../sessionContext.js';
+import { INTERNAL_OPTION_KEYS } from '../../agent/index.js';
 
 describe('agenticChat', () => {
   let mockProvider: {
@@ -908,6 +909,50 @@ describe('agenticChat', () => {
         expect(result.text).toBe('Response');
         expect(result.iterations).toBe(1);
       });
+    });
+  });
+
+  describe('provider dispatch strips internal agent-metadata options', () => {
+    it('never forwards INTERNAL_OPTION_KEYS to provider.complete', async () => {
+      mockProvider.complete.mockResolvedValue({
+        text: 'ok',
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        toolCalls: undefined,
+      } satisfies CompletionResult);
+
+      await agenticChat('hi');
+
+      // provider.complete is called with (messages, options)
+      expect(mockProvider.complete).toHaveBeenCalledTimes(1);
+      const [, opts] = mockProvider.complete.mock.calls[0];
+      const optsObj = opts as Record<string, unknown>;
+
+      // Legitimate CompletionOptions fields must be preserved
+      expect(optsObj).toHaveProperty('maxTokens');
+
+      // No agent-metadata key from the deny-list may leak through
+      for (const key of INTERNAL_OPTION_KEYS) {
+        expect(
+          optsObj,
+          `internal key '${key}' leaked into provider.complete opts`
+        ).not.toHaveProperty(key);
+      }
+    });
+
+    it('preserves legitimate keys even if the options bag is a plain object without internal keys', async () => {
+      // Sanity: with no upstream contamination the strip is a no-op on
+      // legitimate keys. The primary guarantee is the assertion above.
+      mockProvider.complete.mockResolvedValue({
+        text: 'ok',
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        toolCalls: undefined,
+      } satisfies CompletionResult);
+
+      await agenticChat('hi');
+
+      const [, opts] = mockProvider.complete.mock.calls[0];
+      const optsObj = opts as Record<string, unknown>;
+      expect(typeof optsObj['maxTokens']).toBe('number');
     });
   });
 });

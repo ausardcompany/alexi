@@ -90,13 +90,17 @@ const internal: ReadonlySet<string> = new Set(INTERNAL_OPTION_KEYS);
  * `source: 'user' | 'org'` provenance alongside real request options, or
  * spreading an org-managed agent's `options` blob into the request).
  *
- * As of this writing (2026-07-04), the built-in dispatch sites in
- * `src/core/agenticChat.ts`, `src/core/streamingOrchestrator.ts`, and
- * `src/core/orchestrator.ts` construct `CompletionOptions` explicitly with only
+ * As of 2026-07-14, the runtime dispatch paths in `src/core/agenticChat.ts`
+ * and `src/core/streamingOrchestrator.ts` call this helper defense-in-depth
+ * on every `provider.complete(...)` / `provider.streamComplete(...)`
+ * invocation. Even though those sites currently construct options with only
  * legitimate provider fields (`maxTokens`, `temperature`, `signal`, `tools`,
- * `headers`), so they do NOT need to call this helper. If you introduce a new
- * dispatch site that merges agent metadata into the options bag, you MUST call
- * `stripInternalOptions` on the merged bag before passing it to the provider.
+ * `headers`), the strip guarantees that any future merge accidentally pulling
+ * in agent metadata will not leak through to SAP AI Core / SAP Orchestration.
+ *
+ * If you introduce a new dispatch site, you MUST call `stripInternalOptions`
+ * on the merged options bag before passing it to the provider — the JSDoc on
+ * `INTERNAL_OPTION_KEYS` describes what is stripped and why.
  *
  * The deny-list is `INTERNAL_OPTION_KEYS`; see its JSDoc for what is stripped
  * and why. Non-listed keys (including all legitimate `CompletionOptions`

@@ -15,6 +15,7 @@ vi.mock('../../src/core/router.js', () => ({
 // Import after mocking
 import { streamChat } from '../../src/core/streamingOrchestrator.js';
 import { getProviderForModelWithFallback, getDefaultModel } from '../../src/providers/index.js';
+import { INTERNAL_OPTION_KEYS } from '../../src/agent/index.js';
 
 // Helper to create a mock provider that yields a single chunk
 function createMockStreamProvider(chunks: Array<{ text: string; usage?: Record<string, number> }>) {
@@ -86,5 +87,58 @@ describe('streamChat fallback model resolution', () => {
     expect(result.modelUsed).toBe('anthropic--claude-4-sonnet');
     expect(getProviderForModelWithFallback).toHaveBeenCalledWith('anthropic--claude-4-sonnet');
     expect(mockProvider.streamComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('streamChat provider dispatch strips internal agent-metadata options', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getDefaultModel).mockReturnValue('gpt-4o');
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('never forwards INTERNAL_OPTION_KEYS to provider.streamComplete', async () => {
+    const mockProvider = createMockStreamProvider([
+      { text: 'hi', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ]);
+
+    vi.mocked(getProviderForModelWithFallback).mockImplementation((modelId: string) => ({
+      provider: mockProvider as never,
+      effectiveModelId: modelId,
+      usedFallback: false,
+    }));
+
+    const gen = streamChat('hi', {
+      modelOverride: 'anthropic--claude-4-sonnet',
+      maxTokens: 512,
+      temperature: 0.4,
+      agentId: 'code',
+    });
+
+    let next = await gen.next();
+    while (!next.done) {
+      next = await gen.next();
+    }
+
+    // provider.streamComplete is called with (messages, options)
+    expect(mockProvider.streamComplete).toHaveBeenCalledTimes(1);
+    const [, opts] = mockProvider.streamComplete.mock.calls[0];
+    const optsObj = opts as Record<string, unknown>;
+
+    // Legitimate CompletionOptions fields must be preserved
+    expect(optsObj).toHaveProperty('maxTokens', 512);
+    expect(optsObj).toHaveProperty('temperature', 0.4);
+    expect(optsObj).toHaveProperty('headers');
+
+    // No agent-metadata key from the deny-list may leak through
+    for (const key of INTERNAL_OPTION_KEYS) {
+      expect(
+        optsObj,
+        `internal key '${key}' leaked into provider.streamComplete opts`
+      ).not.toHaveProperty(key);
+    }
   });
 });
