@@ -6,8 +6,6 @@
 
 import { z } from 'zod';
 
-// Refactor event bus handlers based on upstream
-
 // Event handler types
 type EventHandler<T> = (payload: T) => void | Promise<void>;
 type UnsubscribeFn = () => void;
