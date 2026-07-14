@@ -8,6 +8,7 @@ import {
   getDefaultModel,
   type StreamChunk,
 } from '../providers/index.js';
+import { formatProviderError } from '../providers/format.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -158,6 +159,10 @@ export async function* streamChat(
     const classified = classifyRouteError(err);
     if (classified.kind === 'permanent') {
       recordRouteOutcome(modelId, classified);
+    }
+    const formatted = formatProviderError(err);
+    if (err instanceof Error && formatted !== err.message) {
+      err.message = formatted;
     }
     throw err;
   }
