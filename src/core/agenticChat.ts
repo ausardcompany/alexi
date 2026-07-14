@@ -24,6 +24,7 @@ import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
 import { buildAssembledSystemPromptAsync } from '../agent/system.js';
+import { stripInternalOptions } from '../agent/index.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
@@ -584,10 +585,20 @@ export async function agenticChat(
 
     let result: CompletionResult;
     try {
-      result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+      // Build the completion-options bag and strip any agent-metadata keys
+      // before dispatch. Keys defined in `INTERNAL_OPTION_KEYS` (agent id,
+      // displayName, source, reference, resolved, mode, aliases, ...) must
+      // never reach SAP AI Core / SAP Orchestration; see
+      // `stripInternalOptions` in `src/agent/index.ts`.
+      const merged = {
         maxTokens: effortConfig.maxTokens,
         tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
-      });
+      };
+      const providerOpts = stripInternalOptions(merged);
+      result = await provider.complete(
+        messages as Array<{ role: string; content: string }>,
+        providerOpts
+      );
       recordRouteOutcome(modelId, { kind: 'success' });
     } catch (err) {
       // Detect context overflow and attempt compaction with reactive seeding
@@ -621,10 +632,16 @@ export async function agenticChat(
 
           // Retry the completion
           try {
-            result = await provider.complete(messages as Array<{ role: string; content: string }>, {
+            // Same defense-in-depth strip as the primary dispatch above.
+            const mergedRetry = {
               maxTokens: effortConfig.maxTokens,
               tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
-            });
+            };
+            const retryOpts = stripInternalOptions(mergedRetry);
+            result = await provider.complete(
+              messages as Array<{ role: string; content: string }>,
+              retryOpts
+            );
             recordRouteOutcome(modelId, { kind: 'success' });
           } catch (retryErr) {
             const classified = classifyRouteError(retryErr);
