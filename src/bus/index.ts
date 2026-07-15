@@ -283,6 +283,32 @@ export const ProviderModelFellBack = defineEvent(
   })
 );
 
+// Compaction events
+export const CompactionStarted = defineEvent(
+  'compaction.started',
+  z.object({
+    sessionId: z.string().optional(),
+    messageCount: z.number(),
+    estimatedTokens: z.number().optional(),
+    trigger: z.enum(['auto', 'manual', 'partial']).optional(),
+    timestamp: z.number(),
+  })
+);
+
+export const CompactionComplete = defineEvent(
+  'compaction.complete',
+  z.object({
+    sessionId: z.string().optional(),
+    originalMessages: z.number(),
+    compactedMessages: z.number(),
+    estimatedTokensSaved: z.number(),
+    durationMs: z.number(),
+    trigger: z.enum(['auto', 'manual', 'partial']).optional(),
+    error: z.string().optional(),
+    timestamp: z.number(),
+  })
+);
+
 // Error events
 export const ErrorOccurred = defineEvent(
   'error.occurred',

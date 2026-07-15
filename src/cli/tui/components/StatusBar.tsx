@@ -1,7 +1,11 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 
-import { ProviderModelFellBack } from '../../../bus/index.js';
+import {
+  CompactionComplete,
+  CompactionStarted,
+  ProviderModelFellBack,
+} from '../../../bus/index.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { formatCwdShort } from '../utils/pathFormat.js';
 import { Spinner } from './Spinner.js';
@@ -88,6 +92,25 @@ export function StatusBar({
     return unsub;
   }, []);
 
+  // Subscribe to compaction lifecycle events so we can show a "Compacting…"
+  // spinner segment. Compaction can take multiple seconds on large sessions
+  // and previously looked like a hang. Matches the existing streaming
+  // spinner pattern.
+  const [isCompacting, setIsCompacting] = React.useState(false);
+
+  React.useEffect(() => {
+    const unsubStart = CompactionStarted.subscribe(() => {
+      setIsCompacting(true);
+    });
+    const unsubComplete = CompactionComplete.subscribe(() => {
+      setIsCompacting(false);
+    });
+    return () => {
+      unsubStart();
+      unsubComplete();
+    };
+  }, []);
+
   const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
   const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
   const topModelDisplay =
@@ -159,7 +182,18 @@ export function StatusBar({
         </Box>
       )}
 
-      {/* Segment 3: Streaming indicator or agent */}
+      {/* Segment 3a: Compaction progress (only while compacting) */}
+      {isCompacting && (
+        <Box backgroundColor={colors.backgroundSecondary} paddingX={1}>
+          <Spinner />
+          <Text color={colors.warning} backgroundColor={colors.backgroundSecondary}>
+            {' '}
+            Compacting context...
+          </Text>
+        </Box>
+      )}
+
+      {/* Segment 3b: Streaming indicator or agent */}
       <Box backgroundColor={colors.backgroundSecondary} paddingX={1}>
         {isStreaming ? (
           <Box>

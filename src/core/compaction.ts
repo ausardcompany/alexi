@@ -8,6 +8,7 @@
  * - Auto-compact can be disabled via config
  */
 
+import { CompactionStarted, CompactionComplete } from '../bus/index.js';
 import type { Message } from './sessionManager.js';
 
 // ============ Types ============
@@ -358,67 +359,66 @@ export async function compactConversation(
     };
   }
 
+  // From here on we may perform real work (summary generation, potentially
+  // over the network). Publish a `CompactionStarted` event so the TUI can
+  // render a progress indicator, and always publish `CompactionComplete`
+  // via a try/finally guard — even on failure — so the UI never gets stuck
+  // showing "Compacting…" forever.
+  const compactionStartTime = Date.now();
   const originalTokens = estimateMessagesTokens(messages);
+  let compactionEmittedStart = false;
+  let compactionErrorMessage: string | undefined;
+  let compactionResultForEvent: CompactionResult | null = null;
 
-  // Separate system messages from others
-  const systemMessages = messages.filter((m) => m.role === 'system');
-  const nonSystemMessages = messages.filter((m) => m.role !== 'system');
+  const emitCompactionStart = (): void => {
+    if (compactionEmittedStart) {
+      return;
+    }
+    compactionEmittedStart = true;
+    try {
+      CompactionStarted.publish({
+        messageCount: messages.length,
+        estimatedTokens: originalTokens,
+        trigger: 'auto',
+        timestamp: compactionStartTime,
+      });
+    } catch {
+      // Never let bus errors break compaction itself.
+    }
+  };
 
-  // If non-system messages are fewer than preserveLastN, return unchanged
-  if (nonSystemMessages.length <= preserveLastN) {
-    return {
-      messages: [...messages],
-      result: {
+  const emitCompactionComplete = (): void => {
+    if (!compactionEmittedStart) {
+      return;
+    }
+    try {
+      const result = compactionResultForEvent ?? {
         originalMessages: messages.length,
         compactedMessages: messages.length,
         estimatedTokensSaved: 0,
         summary: '',
-      },
-    };
-  }
-
-  // Default split: keep last N, summarize the rest.
-  let messagesToSummarize = nonSystemMessages.slice(0, -preserveLastN);
-  let messagesToKeep = nonSystemMessages.slice(-preserveLastN);
-
-  // When the caller passes `maxContextTokens`, target ~80% of the trigger
-  // budget (context - reserved output) so the very next turn does not
-  // immediately re-cross the compaction threshold. We grow `toKeep` BACKWARDS
-  // from the tail past `preserveLastN` while the resulting kept set + the
-  // summary budget still fits under the target. Anything that does not fit is
-  // moved into `messagesToSummarize`.
-  const maxContextTokens = options?.maxContextTokens;
-  const reserveOutputTokens = options?.reserveOutputTokens ?? DEFAULT_RESERVE_OUTPUT_TOKENS;
-  if (typeof maxContextTokens === 'number' && maxContextTokens > 0) {
-    const triggerTokens = Math.max(0, maxContextTokens - reserveOutputTokens);
-    const targetTokens = Math.floor(triggerTokens * POST_COMPACT_TARGET_FRACTION);
-
-    // Always keep at least the last `preserveLastN` non-system messages
-    // (existing invariant). Grow the kept window leftwards as long as the
-    // running total (kept + system + summary budget) stays under target.
-    const systemTokens = estimateMessagesTokens(systemMessages);
-
-    let keepStart = Math.max(0, nonSystemMessages.length - preserveLastN);
-    // Token cost of the currently-kept window.
-    let keptTokens = estimateMessagesTokens(nonSystemMessages.slice(keepStart));
-
-    while (keepStart > 0) {
-      const candidate = nonSystemMessages[keepStart - 1];
-      const candidateTokens = estimateMessagesTokens([candidate]);
-      const projected = systemTokens + summaryMaxTokens + keptTokens + candidateTokens;
-      if (projected > targetTokens) {
-        break;
-      }
-      keepStart -= 1;
-      keptTokens += candidateTokens;
+      };
+      CompactionComplete.publish({
+        originalMessages: result.originalMessages,
+        compactedMessages: result.compactedMessages,
+        estimatedTokensSaved: result.estimatedTokensSaved,
+        durationMs: Date.now() - compactionStartTime,
+        trigger: 'auto',
+        error: compactionErrorMessage,
+        timestamp: Date.now(),
+      });
+    } catch {
+      // Never let bus errors break compaction itself.
     }
+  };
 
-    messagesToSummarize = nonSystemMessages.slice(0, keepStart);
-    messagesToKeep = nonSystemMessages.slice(keepStart);
+  try {
+    // Separate system messages from others
+    const systemMessages = messages.filter((m) => m.role === 'system');
+    const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
-    // If the target buffer is so generous that there is nothing left to
-    // summarize, return early with the original messages — no work to do.
-    if (messagesToSummarize.length === 0) {
+    // If non-system messages are fewer than preserveLastN, return unchanged
+    if (nonSystemMessages.length <= preserveLastN) {
       return {
         messages: [...messages],
         result: {
@@ -429,78 +429,144 @@ export async function compactConversation(
         },
       };
     }
-  }
 
-  // Generate summary
-  let summary: string;
-  const maxChunkTokens = options?.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
+    // Default split: keep last N, summarize the rest.
+    let messagesToSummarize = nonSystemMessages.slice(0, -preserveLastN);
+    let messagesToKeep = nonSystemMessages.slice(-preserveLastN);
 
-  if (globalLLMSummarizeFn) {
-    // Check if messages exceed chunk size limit
-    const messagesToSummarizeTokens = estimateMessagesTokens(messagesToSummarize);
+    // When the caller passes `maxContextTokens`, target ~80% of the trigger
+    // budget (context - reserved output) so the very next turn does not
+    // immediately re-cross the compaction threshold. We grow `toKeep` BACKWARDS
+    // from the tail past `preserveLastN` while the resulting kept set + the
+    // summary budget still fits under the target. Anything that does not fit is
+    // moved into `messagesToSummarize`.
+    const maxContextTokens = options?.maxContextTokens;
+    const reserveOutputTokens = options?.reserveOutputTokens ?? DEFAULT_RESERVE_OUTPUT_TOKENS;
+    if (typeof maxContextTokens === 'number' && maxContextTokens > 0) {
+      const triggerTokens = Math.max(0, maxContextTokens - reserveOutputTokens);
+      const targetTokens = Math.floor(triggerTokens * POST_COMPACT_TARGET_FRACTION);
 
-    // Build target size instruction if overflowTokens is provided
-    let targetInstruction: string | undefined;
-    if (options?.overflowTokens && options.overflowTokens > 0) {
-      const targetSummaryTokens = Math.max(
-        500,
-        messagesToSummarizeTokens - Math.ceil(options.overflowTokens * 1.5)
-      );
-      targetInstruction = `Keep your summary under approximately ${targetSummaryTokens} tokens.`;
+      // Always keep at least the last `preserveLastN` non-system messages
+      // (existing invariant). Grow the kept window leftwards as long as the
+      // running total (kept + system + summary budget) stays under target.
+      const systemTokens = estimateMessagesTokens(systemMessages);
+
+      let keepStart = Math.max(0, nonSystemMessages.length - preserveLastN);
+      // Token cost of the currently-kept window.
+      let keptTokens = estimateMessagesTokens(nonSystemMessages.slice(keepStart));
+
+      while (keepStart > 0) {
+        const candidate = nonSystemMessages[keepStart - 1];
+        const candidateTokens = estimateMessagesTokens([candidate]);
+        const projected = systemTokens + summaryMaxTokens + keptTokens + candidateTokens;
+        if (projected > targetTokens) {
+          break;
+        }
+        keepStart -= 1;
+        keptTokens += candidateTokens;
+      }
+
+      messagesToSummarize = nonSystemMessages.slice(0, keepStart);
+      messagesToKeep = nonSystemMessages.slice(keepStart);
+
+      // If the target buffer is so generous that there is nothing left to
+      // summarize, return early with the original messages — no work to do.
+      if (messagesToSummarize.length === 0) {
+        return {
+          messages: [...messages],
+          result: {
+            originalMessages: messages.length,
+            compactedMessages: messages.length,
+            estimatedTokensSaved: 0,
+            summary: '',
+          },
+        };
+      }
     }
 
-    if (messagesToSummarizeTokens > maxChunkTokens) {
-      // Oversized: use chunked summarization
-      const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
-      summary = await summarizeChunks(chunks, globalLLMSummarizeFn);
-      if (targetInstruction) {
-        // For chunked summaries, append the instruction as a refinement pass
-        const refinementPrompt = `${summary}\n\n${targetInstruction}`;
-        summary = await globalLLMSummarizeFn(refinementPrompt);
+    // Real work starts here (summary generation, potentially LLM calls).
+    // This is the point where the UI should show a "Compacting…" indicator.
+    emitCompactionStart();
+
+    // Generate summary
+    let summary: string;
+    const maxChunkTokens = options?.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
+
+    if (globalLLMSummarizeFn) {
+      // Check if messages exceed chunk size limit
+      const messagesToSummarizeTokens = estimateMessagesTokens(messagesToSummarize);
+
+      // Build target size instruction if overflowTokens is provided
+      let targetInstruction: string | undefined;
+      if (options?.overflowTokens && options.overflowTokens > 0) {
+        const targetSummaryTokens = Math.max(
+          500,
+          messagesToSummarizeTokens - Math.ceil(options.overflowTokens * 1.5)
+        );
+        targetInstruction = `Keep your summary under approximately ${targetSummaryTokens} tokens.`;
+      }
+
+      if (messagesToSummarizeTokens > maxChunkTokens) {
+        // Oversized: use chunked summarization
+        const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
+        summary = await summarizeChunks(chunks, globalLLMSummarizeFn);
+        if (targetInstruction) {
+          // For chunked summaries, append the instruction as a refinement pass
+          const refinementPrompt = `${summary}\n\n${targetInstruction}`;
+          summary = await globalLLMSummarizeFn(refinementPrompt);
+        }
+      } else {
+        // Within limit: use existing single-call path
+        let prompt = createSummaryPrompt(messagesToSummarize);
+        if (targetInstruction) {
+          prompt += `\n\n${targetInstruction}`;
+        }
+        summary = await globalLLMSummarizeFn(prompt);
+      }
+
+      // Truncate if summary exceeds max tokens
+      const summaryTokens = estimateTokens(summary);
+      if (summaryTokens > summaryMaxTokens) {
+        // Truncate to approximately summaryMaxTokens
+        const maxChars = summaryMaxTokens * 4;
+        summary = summary.slice(0, maxChars) + '...';
       }
     } else {
-      // Within limit: use existing single-call path
-      let prompt = createSummaryPrompt(messagesToSummarize);
-      if (targetInstruction) {
-        prompt += `\n\n${targetInstruction}`;
-      }
-      summary = await globalLLMSummarizeFn(prompt);
+      // Fallback: create a basic summary without LLM
+      summary = createFallbackSummary(messagesToSummarize);
     }
 
-    // Truncate if summary exceeds max tokens
-    const summaryTokens = estimateTokens(summary);
-    if (summaryTokens > summaryMaxTokens) {
-      // Truncate to approximately summaryMaxTokens
-      const maxChars = summaryMaxTokens * 4;
-      summary = summary.slice(0, maxChars) + '...';
-    }
-  } else {
-    // Fallback: create a basic summary without LLM
-    summary = createFallbackSummary(messagesToSummarize);
-  }
+    // Create summary message
+    const summaryMessage: Message = {
+      role: 'system',
+      content: `[CONVERSATION SUMMARY]\n${summary}`,
+      timestamp: Date.now(),
+    };
 
-  // Create summary message
-  const summaryMessage: Message = {
-    role: 'system',
-    content: `[CONVERSATION SUMMARY]\n${summary}`,
-    timestamp: Date.now(),
-  };
+    // Build compacted messages: system messages + summary + last N messages
+    const compactedMessages: Message[] = [...systemMessages, summaryMessage, ...messagesToKeep];
 
-  // Build compacted messages: system messages + summary + last N messages
-  const compactedMessages: Message[] = [...systemMessages, summaryMessage, ...messagesToKeep];
+    const compactedTokens = estimateMessagesTokens(compactedMessages);
+    const tokensSaved = Math.max(0, originalTokens - compactedTokens);
 
-  const compactedTokens = estimateMessagesTokens(compactedMessages);
-  const tokensSaved = Math.max(0, originalTokens - compactedTokens);
-
-  return {
-    messages: compactedMessages,
-    result: {
+    const finalResult: CompactionResult = {
       originalMessages: messages.length,
       compactedMessages: compactedMessages.length,
       estimatedTokensSaved: tokensSaved,
       summary,
-    },
-  };
+    };
+    compactionResultForEvent = finalResult;
+
+    return {
+      messages: compactedMessages,
+      result: finalResult,
+    };
+  } catch (err) {
+    compactionErrorMessage = err instanceof Error ? err.message : String(err);
+    throw err;
+  } finally {
+    emitCompactionComplete();
+  }
 }
 
 /**
@@ -533,32 +599,73 @@ export async function partialCompact(
     return [...systemMessages, ...messagesToKeep];
   }
 
-  // Generate summary
-  let summary: string;
-  const fn = summarizeFn ?? globalLLMSummarizeFn;
-
-  if (fn) {
-    const maxChunkTokens = DEFAULT_MAX_CHUNK_TOKENS;
-    const tokensToSummarize = estimateMessagesTokens(messagesToSummarize);
-
-    if (tokensToSummarize > maxChunkTokens) {
-      const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
-      summary = await summarizeChunks(chunks, fn);
-    } else {
-      const prompt = createSummaryPrompt(messagesToSummarize);
-      summary = await fn(prompt);
-    }
-  } else {
-    summary = createFallbackSummary(messagesToSummarize);
+  // Announce that a (partial) compaction is underway so the UI can show
+  // feedback. Errors from the bus must never break compaction itself.
+  const startTime = Date.now();
+  let errorMessage: string | undefined;
+  let finalCount = messages.length;
+  try {
+    CompactionStarted.publish({
+      messageCount: messages.length,
+      estimatedTokens: estimateMessagesTokens(messagesToSummarize),
+      trigger: 'partial',
+      timestamp: startTime,
+    });
+  } catch {
+    // ignore bus errors
   }
 
-  const summaryMessage: Message = {
-    role: 'system',
-    content: `[CONVERSATION SUMMARY]\n${summary}`,
-    timestamp: Date.now(),
-  };
+  try {
+    // Generate summary
+    let summary: string;
+    const fn = summarizeFn ?? globalLLMSummarizeFn;
 
-  return [...systemMessages, summaryMessage, ...messagesToKeep];
+    if (fn) {
+      const maxChunkTokens = DEFAULT_MAX_CHUNK_TOKENS;
+      const tokensToSummarize = estimateMessagesTokens(messagesToSummarize);
+
+      if (tokensToSummarize > maxChunkTokens) {
+        const chunks = chunkMessages(messagesToSummarize, maxChunkTokens);
+        summary = await summarizeChunks(chunks, fn);
+      } else {
+        const prompt = createSummaryPrompt(messagesToSummarize);
+        summary = await fn(prompt);
+      }
+    } else {
+      summary = createFallbackSummary(messagesToSummarize);
+    }
+
+    const summaryMessage: Message = {
+      role: 'system',
+      content: `[CONVERSATION SUMMARY]\n${summary}`,
+      timestamp: Date.now(),
+    };
+
+    const result = [...systemMessages, summaryMessage, ...messagesToKeep];
+    finalCount = result.length;
+    return result;
+  } catch (err) {
+    errorMessage = err instanceof Error ? err.message : String(err);
+    throw err;
+  } finally {
+    try {
+      CompactionComplete.publish({
+        originalMessages: messages.length,
+        compactedMessages: finalCount,
+        estimatedTokensSaved: Math.max(
+          0,
+          estimateMessagesTokens(messages.slice(0, boundaryIndex)) -
+            estimateMessagesTokens(systemMessages)
+        ),
+        durationMs: Date.now() - startTime,
+        trigger: 'partial',
+        error: errorMessage,
+        timestamp: Date.now(),
+      });
+    } catch {
+      // ignore bus errors
+    }
+  }
 }
 
 /**
