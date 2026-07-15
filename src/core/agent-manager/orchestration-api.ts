@@ -1,3 +1,3 @@
-export function orchestrateAgentManagerSessions() {
+export function orchestrateAgentManagerSessions(): void {
   // Orchestration logic
 }
