@@ -483,7 +483,7 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/rewind` | Rewind conversation to a specific turn or summarize up to a point |
 | `/context` | Show context usage |
 | `/status` | Show current status |
-| `/fork` | Fork current session |
+| `/fork [name]` | Fork current session; the fork becomes the active session (subsequent messages land in the fork, matching `git checkout -b`). Optional `name` sets the fork title (defaults to `fork-<timestamp>`). |
 | `/rename` | Rename current session |
 | `/clear-history` | Clear conversation history |
 | `/cost` | Show cost summary |
