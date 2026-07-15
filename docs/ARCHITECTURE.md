@@ -355,6 +355,9 @@ graph LR
         AgentSwitch[AgentSwitched]
         MsgRecv[MessageReceived]
         SessCreate[SessionCreated]
+        ProviderFB[ProviderModelFellBack]
+        CompStart[CompactionStarted]
+        CompDone[CompactionComplete]
         ErrOccur[ErrorOccurred]
     end
 
@@ -534,6 +537,98 @@ import { compactInChunks } from './compaction-chunks.js';
 const result = await compactInChunks(content, async (chunk) => {
   return await summarize(chunk);
 }, 100000); // max tokens per chunk
+```
+
+### Compaction Lifecycle Events
+
+Compaction can take several seconds on large sessions — long enough that the
+UI needs to distinguish "still working" from "hung". `src/core/compaction.ts`
+publishes two typed events through the event bus (`src/bus/index.ts`) so any
+subscriber (TUI, telemetry, plugins) can observe start/finish transitions:
+
+```typescript
+// src/bus/index.ts
+export const CompactionStarted = defineEvent(
+  'compaction.started',
+  z.object({
+    sessionId: z.string().optional(),
+    messageCount: z.number(),
+    estimatedTokens: z.number().optional(),
+    trigger: z.enum(['auto', 'manual', 'partial']).optional(),
+    timestamp: z.number(),
+  })
+);
+
+export const CompactionComplete = defineEvent(
+  'compaction.complete',
+  z.object({
+    sessionId: z.string().optional(),
+    originalMessages: z.number(),
+    compactedMessages: z.number(),
+    estimatedTokensSaved: z.number(),
+    durationMs: z.number(),
+    trigger: z.enum(['auto', 'manual', 'partial']).optional(),
+    error: z.string().optional(),
+    timestamp: z.number(),
+  })
+);
+```
+
+Key invariants enforced by `compactConversation()` and `partialCompact()`:
+
+- `CompactionStarted` is only published once real work begins — the
+  early-return branches (empty input, messages below `preserveLastN`, generous
+  target buffer) never emit lifecycle events, so consumers do not see spurious
+  "Compacting…" flashes for no-op calls.
+- `CompactionComplete` is emitted from a `try/finally` guard so it fires even
+  when summary generation throws. The `error` field carries the message. This
+  prevents the TUI from getting stuck on the spinner if the summarizer errors.
+- Bus publish failures are swallowed inside the emit helpers so a broken
+  subscriber cannot break compaction itself.
+- The `trigger` discriminator lets subscribers separate normal auto-compaction
+  (`'auto'`), user-invoked compaction (`'manual'`), and rewind/summarize
+  partial compaction (`'partial'`).
+
+The Ink TUI `StatusBar` (`src/cli/tui/components/StatusBar.tsx`) subscribes to
+both events to show a "Compacting context..." spinner segment while
+compaction is running, matching the existing streaming-spinner pattern:
+
+```tsx
+const [isCompacting, setIsCompacting] = React.useState(false);
+
+React.useEffect(() => {
+  const unsubStart = CompactionStarted.subscribe(() => setIsCompacting(true));
+  const unsubComplete = CompactionComplete.subscribe(() => setIsCompacting(false));
+  return () => {
+    unsubStart();
+    unsubComplete();
+  };
+}, []);
+```
+
+```mermaid
+sequenceDiagram
+    participant Caller as Agentic Chat / Rewind
+    participant Compact as compactConversation()
+    participant Bus as Event Bus
+    participant TUI as StatusBar (Ink)
+
+    Caller->>Compact: messages, options
+    alt No work required (early return)
+        Compact-->>Caller: unchanged messages
+    else Real compaction
+        Compact->>Bus: publish CompactionStarted<br/>{trigger, messageCount, estimatedTokens}
+        Bus-->>TUI: setIsCompacting(true)
+        Note over Compact: Summarize (LLM or fallback),<br/>chunk if oversized
+        alt Success
+            Compact->>Bus: publish CompactionComplete<br/>{compactedMessages, tokensSaved, durationMs}
+        else Error thrown
+            Compact->>Bus: publish CompactionComplete<br/>{error, durationMs} (finally block)
+            Compact-->>Caller: re-throw
+        end
+        Bus-->>TUI: setIsCompacting(false)
+        Compact-->>Caller: CompactionResult
+    end
 ```
 
 ## Rewind Command
