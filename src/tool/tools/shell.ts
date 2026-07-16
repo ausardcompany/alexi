@@ -5,12 +5,26 @@
 
 import { z } from 'zod';
 import { spawn } from 'child_process';
+import { nanoid } from 'nanoid';
 import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 import * as ShellId from './shell/id.js';
 import { auditCommand } from '../../permission/next.js';
+import {
+  BashDetachAvailable,
+  BashDetachedExited,
+  DETACH_OUTPUT_LINE_CAP,
+  DETACH_PROMPT_MS,
+  awaitDetachDecision,
+  cancelDetachDecision,
+  capOutputLines,
+  getDetachedProcesses,
+  isBashInteractive,
+  registerDetachedProcess,
+  waitForDetachedExit,
+} from './bash-detach.js';
 
 const ShellParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -33,6 +47,17 @@ interface ShellResult {
   exitCode: number;
   timedOut: boolean;
   shellType?: string;
+  /**
+   * True when the command was still running at result time because the
+   * user picked "Proceed While Running". `exitCode` is `-1` in that case
+   * and the output snapshots are capped at `DETACH_OUTPUT_LINE_CAP` lines.
+   */
+  detached?: boolean;
+  /**
+   * Correlation id for a detached invocation. Matches the id used in
+   * `BashDetachAvailable` / `BashDetachedExited` events.
+   */
+  detachId?: string;
 }
 
 /**
@@ -124,6 +149,21 @@ When independent reads, searches, or edits are also needed, emit those tool call
       };
     }
 
+    // Re-attach: if a previous invocation on this session detached, wait
+    // for it to exit before spawning a new shell so the model does not
+    // observe interleaved output from two shells racing on the same
+    // tty / cwd. No-op when nothing is pending.
+    if (getDetachedProcesses(context.sessionId).length > 0) {
+      const done = await waitForDetachedExit(context.sessionId);
+      if (!done) {
+        return {
+          success: false,
+          error: 'Timed out waiting for a previously detached shell command to exit',
+          data: { stdout: '', stderr: '', exitCode: -1, timedOut: true },
+        };
+      }
+    }
+
     const timeout = params.timeout ?? DEFAULT_TIMEOUT;
 
     // Detect shell type
@@ -134,6 +174,8 @@ When independent reads, searches, or edits are also needed, emit those tool call
       let stderr = '';
       let timedOut = false;
       let killed = false;
+      let detached = false;
+      const detachId = nanoid();
 
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
@@ -191,11 +233,90 @@ When independent reads, searches, or edits are also needed, emit those tool call
         stderr += stderrDecoder.write(data);
       });
 
+      let notifyExit: (() => void) | undefined;
+      const exitPromise = new Promise<void>((res) => {
+        notifyExit = res;
+      });
+
+      // "Proceed While Running" support (issue #1017). Mirrors bash.ts.
+      let detachTimer: ReturnType<typeof setTimeout> | undefined;
+      if (isBashInteractive()) {
+        detachTimer = setTimeout(() => {
+          if (killed || detached) {
+            return;
+          }
+          BashDetachAvailable.publish({
+            id: detachId,
+            toolName: 'shell',
+            command: params.command,
+            pid: proc.pid,
+            startedAt: Date.now() - DETACH_PROMPT_MS,
+            timestamp: Date.now(),
+          });
+          void awaitDetachDecision(detachId).then((decision) => {
+            if (decision !== 'proceed' || killed || detached) {
+              return;
+            }
+            detached = true;
+            clearTimeout(timer);
+            clearTimeout(sigkillTimer);
+
+            const stdoutSnap = capOutputLines(processCarriageReturns(stdout));
+            const stderrSnap = capOutputLines(processCarriageReturns(stderr));
+
+            registerDetachedProcess({
+              id: detachId,
+              pid: proc.pid,
+              command: params.command,
+              sessionId: context.sessionId,
+              startedAt: Date.now() - DETACH_PROMPT_MS,
+              detachedAt: Date.now(),
+              stdoutSnapshot: stdoutSnap,
+              stderrSnapshot: stderrSnap,
+              pending: exitPromise,
+            });
+
+            const partial: ShellResult = {
+              stdout: stdoutSnap,
+              stderr: stderrSnap,
+              exitCode: -1,
+              timedOut: false,
+              shellType: shellInfo.type,
+              detached: true,
+              detachId,
+            };
+
+            assertNoCommandEcho(partial, params.command);
+
+            resolve({
+              success: true,
+              data: partial,
+              hint: `Command detached and continues running in the background (id: ${detachId}). Output frozen at ${DETACH_OUTPUT_LINE_CAP} lines. The next shell call will wait for it to finish.`,
+            });
+          });
+        }, DETACH_PROMPT_MS);
+      }
+
       proc.on('close', async (code) => {
         clearTimeout(timer);
         clearTimeout(sigkillTimer);
+        clearTimeout(detachTimer);
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
+
+        if (detached) {
+          notifyExit?.();
+          BashDetachedExited.publish({
+            id: detachId,
+            toolName: 'shell',
+            command: params.command,
+            pid: proc.pid,
+            exitCode: code,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+        cancelDetachDecision(detachId);
 
         // Flush any remaining bytes in the decoders
         stdout += stdoutDecoder.end();
@@ -257,13 +378,29 @@ When independent reads, searches, or edits are also needed, emit those tool call
           hint,
           error: code !== 0 ? `Command exited with code ${code}` : undefined,
         });
+        notifyExit?.();
       });
 
       proc.on('error', (err) => {
         clearTimeout(timer);
         clearTimeout(sigkillTimer);
+        clearTimeout(detachTimer);
+        cancelDetachDecision(detachId);
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
+        notifyExit?.();
+
+        if (detached) {
+          BashDetachedExited.publish({
+            id: detachId,
+            toolName: 'shell',
+            command: params.command,
+            pid: proc.pid,
+            exitCode: null,
+            timestamp: Date.now(),
+          });
+          return;
+        }
 
         const errorResult: ShellResult = {
           stdout,
