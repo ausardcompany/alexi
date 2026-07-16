@@ -103,10 +103,13 @@ describe('Background Tasks', () => {
       expect(result.data?.status).toBe('completed');
     });
 
-    it('should reject subagent spawning subagents', async () => {
+    it('should reject subagent spawning subagents past the depth limit', async () => {
+      // Simulate a subagent already at the maximum nesting depth (3) that
+      // tries to spawn a further subagent — the `task` tool must refuse.
       const subagentContext = {
         ...context,
         sessionId: 'subagent-session',
+        subagentDepth: 3,
       };
 
       const result = await taskTool.execute(
@@ -118,7 +121,8 @@ describe('Background Tasks', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('recursive delegation');
+      expect(result.error).toContain('Maximum subagent nesting depth');
+      expect(result.error).toContain('depth 4');
     });
 
     it('should reject primary agent type', async () => {
