@@ -8,7 +8,7 @@ const WireParams = Schema.Struct({
   mode: Schema.optional(StartParams.fields.mode),
   versions: Schema.optional(StartParams.fields.versions),
   tasks: Schema.optional(StartParams.fields.tasks),
-  action: Schema.optional(Schema.Literals(["list", "prompt"])),
+  action: Schema.optional(Schema.Literals(['list', 'prompt'])),
   filter: Schema.optional(ListParams.fields.filter),
   sessionID: Schema.optional(PromptParams.fields.sessionID),
   prompt: Schema.optional(PromptParams.fields.prompt),
