@@ -45,6 +45,14 @@ export interface SessionMetadata {
    * field was introduced have no recorded workdir.
    */
   workdir?: string;
+  /**
+   * ID of the parent session that spawned this one as a subagent. Absent
+   * for top-level user sessions and for legacy sessions created before
+   * this field was introduced. Used by `getSessionParentChain` to compute
+   * the current subagent nesting depth for the `task` tool's
+   * `MAX_SUBAGENT_DEPTH` guard.
+   */
+  parentSessionId?: string;
 }
 
 export interface Session {
@@ -79,9 +87,13 @@ export class SessionManager {
   }
 
   /**
-   * Create a new session
+   * Create a new session.
+   *
+   * When `parentSessionId` is provided the new session is recorded as a
+   * subagent child of that parent, which allows `getSessionParentChain`
+   * to walk the ancestry and compute the current subagent nesting depth.
    */
-  createSession(modelId?: string): Session {
+  createSession(modelId?: string, parentSessionId?: string): Session {
     const session: Session = {
       metadata: {
         id: randomUUID(),
@@ -91,6 +103,7 @@ export class SessionManager {
         totalTokens: 0,
         messageCount: 0,
         workdir: process.cwd(),
+        parentSessionId,
       },
       messages: [],
     };
@@ -99,6 +112,50 @@ export class SessionManager {
     this.saveSession(session);
 
     return session;
+  }
+
+  /**
+   * Walk the `parentSessionId` chain starting at `sessionId` and return the
+   * ordered list of ancestor session IDs (nearest ancestor first, root
+   * ancestor last). The returned array does NOT include `sessionId`
+   * itself, so its `.length` is the subagent nesting depth of
+   * `sessionId` (0 for a top-level session, N for a session spawned by
+   * one already at depth N-1).
+   *
+   * Missing sessions or broken parent links terminate the walk gracefully
+   * — the chain returned reflects however far the walk got before the
+   * next parent could not be resolved. A safety cap prevents an infinite
+   * loop if a corrupted session store contains a cycle.
+   */
+  getSessionParentChain(sessionId: string): string[] {
+    const chain: string[] = [];
+    const visited = new Set<string>([sessionId]);
+    const MAX_HOPS = 64;
+
+    let currentId: string | undefined = sessionId;
+    let hops = 0;
+    while (currentId && hops < MAX_HOPS) {
+      const sessionPath = path.join(this.sessionsDir, `${currentId}.json`);
+      if (!fs.existsSync(sessionPath)) {
+        break;
+      }
+      let parsed: Session;
+      try {
+        parsed = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as Session;
+      } catch {
+        break;
+      }
+      const parentId = parsed.metadata.parentSessionId;
+      if (!parentId || visited.has(parentId)) {
+        break;
+      }
+      chain.push(parentId);
+      visited.add(parentId);
+      currentId = parentId;
+      hops++;
+    }
+
+    return chain;
   }
 
   /**

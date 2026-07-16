@@ -3,9 +3,34 @@
  */
 
 import { z } from 'zod';
-import { defineTool, type ToolResult } from '../index.js';
+import { defineTool, type ToolResult, type ToolContext } from '../index.js';
 import { getAgentRegistry, type Agent } from '../../agent/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
+
+/**
+ * Default maximum subagent nesting depth. A top-level user session is
+ * depth 0, and each spawned subagent increments the depth by one. Depth
+ * greater than this value is rejected. Overridable via the
+ * `MAX_SUBAGENT_DEPTH` environment variable (must be a positive integer).
+ */
+export const DEFAULT_MAX_SUBAGENT_DEPTH = 3;
+
+/**
+ * Read the configured subagent depth limit from `MAX_SUBAGENT_DEPTH`. Falls
+ * back to `DEFAULT_MAX_SUBAGENT_DEPTH` when the env var is unset, empty, or
+ * cannot be parsed as a positive integer.
+ */
+export function getMaxSubagentDepth(): number {
+  const raw = process.env.MAX_SUBAGENT_DEPTH;
+  if (raw === undefined || raw === '') {
+    return DEFAULT_MAX_SUBAGENT_DEPTH;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return DEFAULT_MAX_SUBAGENT_DEPTH;
+  }
+  return parsed;
+}
 
 const TaskParamsSchema = z.object({
   prompt: z.string().describe('The task for the agent to perform'),
@@ -34,9 +59,14 @@ export interface SubagentConfig {
 
 // Task tool utilities
 export const TaskTool = {
-  /** Alexi keeps delegation one level deep to avoid recursive subagent chains. */
-  nestedTask(): false {
-    return false;
+  /**
+   * Whether a session at `currentDepth` may spawn another subagent without
+   * exceeding `maxDepth`. A top-level session is depth 0; each spawned
+   * subagent is one level deeper. Returns `false` when spawning would
+   * produce depth > maxDepth, and `true` otherwise.
+   */
+  nestedTask(currentDepth = 0, maxDepth: number = getMaxSubagentDepth()): boolean {
+    return currentDepth + 1 <= maxDepth;
   },
 
   validate(agent: Agent, name: string): void {
@@ -54,18 +84,10 @@ export const TaskTool = {
     // For now, we prepare the structure for future integration
     return {
       autoMode: options.autoMode ?? false, // Would be: parentCtx.flags?.auto ?? false
-      maxDepth: 1, // Enforce single-level nesting
+      maxDepth: options.maxDepth ?? getMaxSubagentDepth(),
     };
   },
 };
-
-interface ToolContext {
-  workdir: string;
-  signal?: AbortSignal;
-  sessionId?: string;
-  gitManager?: unknown;
-  // Future: flags?: { auto?: boolean }
-}
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -161,12 +183,18 @@ Usage:
     // Check if background tasks are enabled
     const enableBackground = process.env.ALEXI_EXPERIMENTAL_BACKGROUND_TASKS === 'true';
 
-    // Security: Alexi disallows subagents spawning subagents
-    const canTask = TaskTool.nestedTask();
-    if (!canTask && context.sessionId && context.sessionId.includes('subagent')) {
+    // Enforce bounded subagent nesting. A top-level session has depth 0;
+    // each `task` invocation would spawn a subagent one level deeper. If
+    // spawning would produce a subagent at depth > MAX_SUBAGENT_DEPTH,
+    // reject the invocation with a clear error so a buggy or recursive
+    // prompt cannot exhaust memory, file descriptors, or API rate limits.
+    const maxDepth = getMaxSubagentDepth();
+    const currentDepth = context.subagentDepth ?? 0;
+    const spawnDepth = currentDepth + 1;
+    if (spawnDepth > maxDepth) {
       return {
         success: false,
-        error: 'Task tool is not available for subagent sessions to prevent recursive delegation',
+        error: `Maximum subagent nesting depth (${maxDepth}) exceeded. Cannot spawn subagent at depth ${spawnDepth}.`,
       };
     }
 

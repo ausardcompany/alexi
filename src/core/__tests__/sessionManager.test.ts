@@ -827,4 +827,60 @@ describe('SessionManager', () => {
       expect(md).toContain('# Conversation');
     });
   });
+
+  // ========== Subagent parent chain ==========
+  describe('subagent parent chain', () => {
+    it('records parentSessionId when createSession is called with a parent', () => {
+      const manager = new SessionManager(tempDir);
+      const parent = manager.createSession();
+      const child = manager.createSession(undefined, parent.metadata.id);
+
+      expect(child.metadata.parentSessionId).toBe(parent.metadata.id);
+    });
+
+    it('leaves parentSessionId undefined for top-level sessions', () => {
+      const manager = new SessionManager(tempDir);
+      const s = manager.createSession();
+
+      expect(s.metadata.parentSessionId).toBeUndefined();
+    });
+
+    it('walks the parent chain in nearest-first order', () => {
+      const manager = new SessionManager(tempDir);
+      const root = manager.createSession();
+      const mid = manager.createSession(undefined, root.metadata.id);
+      const leaf = manager.createSession(undefined, mid.metadata.id);
+
+      const chain = manager.getSessionParentChain(leaf.metadata.id);
+      expect(chain).toEqual([mid.metadata.id, root.metadata.id]);
+    });
+
+    it('returns an empty array for a top-level session', () => {
+      const manager = new SessionManager(tempDir);
+      const s = manager.createSession();
+
+      expect(manager.getSessionParentChain(s.metadata.id)).toEqual([]);
+    });
+
+    it('returns an empty array when the session file does not exist', () => {
+      const manager = new SessionManager(tempDir);
+
+      expect(manager.getSessionParentChain('does-not-exist')).toEqual([]);
+    });
+
+    it('terminates gracefully on a cyclic parent link', () => {
+      const manager = new SessionManager(tempDir);
+      const a = manager.createSession();
+      const b = manager.createSession(undefined, a.metadata.id);
+      // Corrupt: point a's parent at b to form a cycle a -> b -> a.
+      const aPath = path.join(tempDir, `${a.metadata.id}.json`);
+      const aSession = JSON.parse(fs.readFileSync(aPath, 'utf-8')) as Session;
+      aSession.metadata.parentSessionId = b.metadata.id;
+      fs.writeFileSync(aPath, JSON.stringify(aSession), 'utf-8');
+
+      const chain = manager.getSessionParentChain(b.metadata.id);
+      // Walk visits a once, then refuses to re-enter b — chain is [a].
+      expect(chain).toEqual([a.metadata.id]);
+    });
+  });
 });

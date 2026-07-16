@@ -27,6 +27,14 @@ export interface ToolContext {
    * orchestrator execution.
    */
   agentsMdSeen?: Set<string>;
+  /**
+   * Current subagent nesting depth. 0 for a top-level user session, N for a
+   * subagent spawned by a session already at depth N-1. The `task` tool
+   * uses this to enforce `MAX_SUBAGENT_DEPTH` (default 3) so a recursive
+   * or buggy agent chain cannot exhaust memory, file descriptors, or API
+   * rate limits by spawning subagents without bound.
+   */
+  subagentDepth?: number;
 }
 
 /**
