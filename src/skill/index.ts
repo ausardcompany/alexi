@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 import { getGlobalPaths } from '../utils/global.js';
+import { readUtf8FileSyncStripBom } from '../utils/frontmatter.js';
 import { defineEvent } from '../bus/index.js';
 
 // ============ Events ============
@@ -109,7 +110,10 @@ export function defineSkill(definition: SkillDefinition): Skill {
  */
 export function loadSkillFromFile(filePath: string): Skill | null {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
+    // sees `---` at byte offset 0. Otherwise the frontmatter is silently
+    // ignored — see src/utils/frontmatter.ts.
+    const content = readUtf8FileSyncStripBom(filePath);
     const { data, content: promptContent } = matter(content);
 
     const skill: Skill = {

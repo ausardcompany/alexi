@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { stripUtf8Bom } from '../utils/frontmatter.js';
 import {
   getEnabledPluginRules,
   resolvePluginRulesForPrompt,
@@ -149,10 +150,16 @@ function buildEnvBlock(info: EnvInfo): string {
 // Instruction file loading (AGENTS.md, ALEXI.md, .alexi/rules/)
 // ---------------------------------------------------------------------------
 
-/** Load a single text file, returning empty string on failure. */
+/**
+ * Load a single text file, returning empty string on failure.
+ *
+ * Strips a leading UTF-8 BOM (U+FEFF) so files saved with Windows Notepad's
+ * default "UTF-8 with BOM" encoding do not inject an invisible marker into
+ * the assembled system prompt.
+ */
 function loadTextFile(filePath: string): string {
   try {
-    return fs.readFileSync(filePath, 'utf-8').trim();
+    return stripUtf8Bom(fs.readFileSync(filePath, 'utf-8')).trim();
   } catch {
     return '';
   }

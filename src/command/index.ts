@@ -10,6 +10,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 import os from 'os';
 import matter from 'gray-matter';
+import { readUtf8FileSyncStripBom } from '../utils/frontmatter.js';
 
 // ============ Schema Definitions ============
 
@@ -312,7 +313,9 @@ function applyDefaults(command: Command, args: string[]): string[] {
  */
 export function loadCommandFromFile(filePath: string): Command | null {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
+    // sees `---` at byte offset 0. See src/utils/frontmatter.ts.
+    const content = readUtf8FileSyncStripBom(filePath);
     const { data, content: templateContent } = matter(content);
 
     // Parse and validate arguments if present
