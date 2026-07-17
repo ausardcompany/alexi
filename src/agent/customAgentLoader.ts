@@ -28,6 +28,7 @@ import fsPromises from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import matter from 'gray-matter';
+import { readUtf8FileSyncStripBom } from '../utils/frontmatter.js';
 import { AgentSchema, type AgentConfig } from './index.js';
 
 export type AgentSource = 'built-in' | 'user-global' | 'project-local' | 'config';
@@ -96,7 +97,9 @@ export async function loadAgentFromFile(
   source: AgentSource
 ): Promise<CustomAgentConfig | null> {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
+    // sees `---` at byte offset 0. See src/utils/frontmatter.ts.
+    const content = readUtf8FileSyncStripBom(filePath);
     const { data, content: promptContent } = matter(content);
 
     const id = data.slug || data.id || path.basename(filePath, path.extname(filePath));
