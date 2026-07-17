@@ -1,5 +1,28 @@
 /**
- * Task Tool - Launch subagent for complex tasks
+ * Task Tool - Launch subagent for complex tasks.
+ *
+ * ## Subagent nesting depth guard
+ *
+ * The `task` tool can be invoked from within a subagent, which means a
+ * chain of `task` calls can spawn subagents of subagents indefinitely. To
+ * prevent runaway recursion (a buggy prompt that delegates everything to
+ * another subagent), resource exhaustion (each subagent holds its own
+ * message history, tool state, and network connections), and cost blowup
+ * (each subagent costs at least one provider round-trip), the `execute`
+ * handler enforces a bounded nesting depth:
+ *
+ * - A top-level user session has `subagentDepth === 0`.
+ * - Each `task` invocation would spawn a subagent one level deeper.
+ * - Spawning at depth greater than `MAX_SUBAGENT_DEPTH` is rejected with
+ *   `Maximum subagent nesting depth (N) exceeded. Cannot spawn subagent at
+ *   depth N+1.` before any provider request is made.
+ *
+ * The default cap is `DEFAULT_MAX_SUBAGENT_DEPTH` (3), configurable via
+ * the `MAX_SUBAGENT_DEPTH` environment variable. See
+ * [`docs/TOOLS.md`](../../../docs/TOOLS.md#subagent-nesting-depth) for
+ * the user-facing explanation and rationale, and OpenCode PR #37124
+ * (https://github.com/sst/opencode/pull/37124) for the upstream
+ * reference implementation.
  */
 
 import { z } from 'zod';
@@ -12,13 +35,18 @@ import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js
  * depth 0, and each spawned subagent increments the depth by one. Depth
  * greater than this value is rejected. Overridable via the
  * `MAX_SUBAGENT_DEPTH` environment variable (must be a positive integer).
+ *
+ * See {@link getMaxSubagentDepth} for the runtime lookup and
+ * `docs/TOOLS.md#subagent-nesting-depth` for the user-facing rationale.
  */
 export const DEFAULT_MAX_SUBAGENT_DEPTH = 3;
 
 /**
  * Read the configured subagent depth limit from `MAX_SUBAGENT_DEPTH`. Falls
  * back to `DEFAULT_MAX_SUBAGENT_DEPTH` when the env var is unset, empty, or
- * cannot be parsed as a positive integer.
+ * cannot be parsed as a positive integer (zero and negative values are
+ * treated as invalid; there is no hard upper bound, but values above ~10
+ * are strongly discouraged because latency and cost multiply per level).
  */
 export function getMaxSubagentDepth(): number {
   const raw = process.env.MAX_SUBAGENT_DEPTH;
@@ -187,13 +215,19 @@ Usage:
     // each `task` invocation would spawn a subagent one level deeper. If
     // spawning would produce a subagent at depth > MAX_SUBAGENT_DEPTH,
     // reject the invocation with a clear error so a buggy or recursive
-    // prompt cannot exhaust memory, file descriptors, or API rate limits.
+    // prompt cannot exhaust memory, file descriptors, or API rate limits,
+    // and so a delegate-everything prompt cannot blow the provider budget.
+    // Default cap is 3; override with `MAX_SUBAGENT_DEPTH` env var. Full
+    // rationale in `docs/TOOLS.md#subagent-nesting-depth`.
     const maxDepth = getMaxSubagentDepth();
     const currentDepth = context.subagentDepth ?? 0;
     const spawnDepth = currentDepth + 1;
     if (spawnDepth > maxDepth) {
       return {
         success: false,
+        // Error format is part of the tool's public contract; tests in
+        // tests/tool/tools/task-depth-limit.test.ts assert on this exact
+        // shape. Change here requires updating those tests and the docs.
         error: `Maximum subagent nesting depth (${maxDepth}) exceeded. Cannot spawn subagent at depth ${spawnDepth}.`,
       };
     }
