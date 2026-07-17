@@ -155,7 +155,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
 | `bash` | `bash.ts` | execute | Execute shell commands with timeout |
-| `read` | `read.ts` | read | Read files and directories (auto-extracts text from `.docx` via mammoth and `.xlsx`/`.xlsm` via xlsx) |
+| `read` | `read.ts` | read | Read files and directories (auto-extracts text from `.docx` via mammoth and `.xlsx`/`.xlsm` via xlsx; symlink-escape safeguard when caller sets `ctx.extra.denyDirectory === true` — see [Read tool: `denyDirectory` symlink safeguard](#read-tool-denydirectory-symlink-safeguard)) |
 | `write` | `write.ts` | write | Write/create files |
 | `edit` | `edit.ts` | write | Exact string replacement in files |
 | `glob` | `glob.ts` | read | Find files by pattern |
@@ -197,6 +197,37 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | Reference | `src/reference/index.ts` | External repository references with typed cache |
 | Plugin Tools | `src/tool/plugin-tools.ts` | Plugin tool compatibility wrappers |
 | Tool Registry | `src/tool/registry.ts` | Enhanced registry with prompt-based tool resolution |
+
+#### Read tool: `denyDirectory` symlink safeguard
+
+The `read` tool (`src/tool/read.ts`) supports an opt-in symlink-escape check driven by the tool-call context. When a caller sets `ctx.extra.denyDirectory === true`, the tool performs a second `realPath` resolution on the incoming `requested` path *after* the initial permission and existence checks and compares the normalized result against the pre-resolved `target`. When the two differ, the call is rejected with `Directory attachments cannot be expanded: <requested>` before any file contents are streamed back to the model.
+
+```mermaid
+flowchart TB
+    Call([read tool invocation]) --> P{ctx.extra.denyDirectory === true?}
+    P -- no --> Normal[Proceed with normal read]
+    P -- yes --> R1[resolved = fs.realPath requested]
+    R1 --> N{platform === win32?}
+    N -- yes --> Norm[FSUtil.normalizePath resolved]
+    N -- no --> AsIs[use resolved as-is]
+    Norm --> Cmp{target2 === target?}
+    AsIs --> Cmp
+    Cmp -- yes --> Normal
+    Cmp -- no --> Fail[Effect.fail: Directory attachments cannot be expanded]
+
+    Normal --> Read[Stream file contents]
+    Fail --> Reject([Tool call rejected])
+```
+
+Semantics and scope:
+
+- The safeguard is a defence-in-depth addition on top of the existing rule-based permission model (`src/permission/`, see [Permission System](#permission-system)) and the sandbox root enforced by the tool registry. It does not replace either.
+- The check fires **only** when the caller explicitly opts in via `ctx.extra.denyDirectory`. When the flag is unset or `false`, `read` behaves exactly as before (no extra `realPath` call, no comparison, no rejection).
+- The compared `target` and `target2` are both `realPath`-resolved values. On POSIX, they are compared byte-for-byte; on Windows, both sides are normalized via `FSUtil.normalizePath` first, so drive-letter case, backslash-vs-forward-slash, and trailing-separator variance do not produce false positives.
+- The rejection is an `Effect.fail(new Error(...))` — it flows through the standard tool-call error path, is surfaced to the agent loop as a tool error, and does not throw synchronously.
+- The intended threat model is a symlink that lives under an otherwise-permitted parent directory but whose `realPath` target escapes the sandbox. Callers that expand directory attachments (`context`, `session-export`, and any consumer that recursively walks user-supplied paths) should set `denyDirectory: true` when the underlying operation must not follow such symlinks.
+
+The permission-system entry point (`src/permission/next.ts`) is not modified by this change — callers set `ctx.extra.denyDirectory` themselves at the invocation site.
 
 ## Data Flow
 

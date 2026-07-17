@@ -505,6 +505,12 @@ When CI fails on auto/* branches:
 
 A common autohealing pattern is removing **broken upstream-sync stub files**: the daily upstream sync occasionally produces TypeScript scaffolds at non-canonical paths (for example, single-line placeholders directly under `src/tool/` instead of registered tools under `src/tool/tools/`, or stray `package.json` fragments inside source subdirectories). These fail `npm run build` and `npm run lint` because they reference packages that are not installed or contain JavaScript-style comments inside JSON. The autohealer detects the build/lint failure and deletes the offending stubs in a `fix(ci): remove broken stub files from upstream sync [autohealing]` commit. When reviewing such commits, verify that none of the deletions touch a registered tool in `src/tool/tools/` (those are the canonical tool implementations) — only stray paths under `src/tool/` itself or non-root `package.json` files should be removed.
 
+Recent concrete examples of this pattern (see `CHANGELOG.md` `[Unreleased]` for the current cycle):
+
+- `src/core/model.ts` (2026-07-17 sync, commit `a14eeca6`): 8-line orphan Zod schema referencing `z` and `ModelCostSchema` without any `import` statements and describing a BYOK provider surface (`byokProvider: 'openai' | 'anthropic' | 'google'`) that does not exist in Alexi — the sole provider is SAP AI Core Orchestration (`src/providers/`). Not imported by any module in `src/` or `tests/`.
+- `src/core/package.json` (2026-07-17 sync, commit `a14eeca6`): 3-line nested `{"version": "1.18.3"}` inside the source tree that creates a package boundary conflicting with the top-level `"type": "module"` declaration. The value is also already stale (repo is at `1.18.4`). No consumers.
+- The autohealer treats both files as candidates for removal in the next `fix(ci): remove broken stub files from upstream sync [autohealing]` pass. The canonical model metadata surface in Alexi is the runtime deployment list returned by the SAP AI Core Orchestration API and surfaced via `alexi models`, not a static Zod schema under `src/core/`.
+
 ### Pre-Commit Hooks
 
 The project uses **Husky** with **lint-staged** to enforce style at commit time. On every commit, the following runs automatically against staged `.ts` files:
