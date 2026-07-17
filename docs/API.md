@@ -788,6 +788,18 @@ interface ToolContext {
   signal?: AbortSignal;
   sessionId?: string;
   gitManager?: AutoCommitManager;
+  /**
+   * Free-form per-invocation options that a caller can attach to a tool call.
+   * Consumed by individual tools; unknown keys are ignored by tools that do
+   * not recognize them. See tool-specific docs for supported keys.
+   *
+   * Currently recognized keys:
+   *   - `denyDirectory` (boolean, read tool): when true, the `read` tool
+   *     performs a symlink-escape check after resolving the requested path
+   *     and rejects the call if the second `realPath` pass yields a
+   *     different target. See "Built-in Tools" below for the exact contract.
+   */
+  extra?: Record<string, unknown>;
 }
 ```
 
@@ -849,7 +861,7 @@ cleanupToolOutputs(): void
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `read` | `filePath`, `offset?`, `limit?` | Read file/directory contents |
+| `read` | `filePath`, `offset?`, `limit?` | Read file/directory contents (respects `ctx.extra.denyDirectory` — see below) |
 | `write` | `filePath`, `content` | Write/create files |
 | `edit` | `filePath`, `oldString`, `newString`, `replaceAll?` | Exact string replacement |
 | `glob` | `pattern`, `path?` | Find files by glob pattern |
@@ -861,6 +873,45 @@ cleanupToolOutputs(): void
 | `question` | `question`, `options?` | Ask user a question |
 | `todowrite` | `todos` | Manage task list |
 | `codebase_search` | `query` | AI-powered semantic code search (WarpGrep) |
+
+#### `read` tool: `denyDirectory` symlink safeguard
+
+The `read` tool implementation (`src/tool/read.ts`) supports an opt-in symlink-escape check. When a tool call is invoked with `ctx.extra.denyDirectory === true`, the tool re-resolves the incoming `requested` path via `fs.realPath` after the initial permission and existence checks and compares the normalized result against the pre-resolved `target`. When the two differ, the call is rejected before any file contents are streamed back to the model:
+
+```
+Directory attachments cannot be expanded: <requested>
+```
+
+Semantics:
+
+- The check runs only when `ctx.extra.denyDirectory === true`. When the flag is `undefined`, `false`, or the `extra` bag is absent, `read` behaves exactly as before — no additional `realPath` call, no rejection.
+- On Windows the second-pass path is normalized via `FSUtil.normalizePath` before comparison so drive-letter case, separator direction, and trailing-separator variance do not produce false positives. On POSIX the two `realPath` values are compared byte-for-byte.
+- The failure surfaces as an `Effect.fail(new Error(...))` in the tool result — the agent loop receives it as a normal tool error, not a synchronous exception.
+- The safeguard is a defence-in-depth addition on top of the rule-based permission model. Callers that expand user-supplied directory paths (`context`, `session-export`, and any programmatic consumer that walks attachments) should set `denyDirectory: true` when the underlying operation must not follow symlinks that escape the sandbox.
+
+Programmatic example (Node/TypeScript):
+
+```typescript
+import { getTool } from './tool/index.js';
+
+const read = getTool('read');
+if (!read) {
+  throw new Error('read tool not registered');
+}
+
+const result = await read.execute(
+  { filePath: '/path/to/user-supplied/entry' },
+  {
+    workdir: process.cwd(),
+    extra: { denyDirectory: true },
+  }
+);
+
+if (!result.success) {
+  // On symlink escape: result.error === 'Directory attachments cannot be expanded: <requested>'
+  console.error(result.error);
+}
+```
 
 ## Permission System
 
