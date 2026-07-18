@@ -12,6 +12,8 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
+import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
+import { mergeExtensionSet, mergeIncludePattern } from './includePattern.js';
 
 // Hard cap on matches/symbols returned per query, to prevent context-window
 // blow-ups on broad queries over large repos. Aligns with grep.ts (1000) but
@@ -162,13 +164,17 @@ const CODE_EXTENSIONS = new Set([
   '.php',
 ]);
 
-function isCodeFile(filename: string): boolean {
+function isCodeFile(filename: string, extensions: ReadonlySet<string>): boolean {
   const ext = path.extname(filename).toLowerCase();
-  return CODE_EXTENSIONS.has(ext);
+  return extensions.has(ext);
 }
 
-function matchesInclude(filename: string, include?: string): boolean {
-  if (!include) return isCodeFile(filename);
+function matchesInclude(
+  filename: string,
+  include: string | undefined,
+  extensions: ReadonlySet<string>
+): boolean {
+  if (!include) return isCodeFile(filename, extensions);
 
   // Handle {a,b} alternatives
   const patterns = include.replace(/\{([^}]+)\}/g, (_, group) => {
@@ -189,7 +195,12 @@ function matchesInclude(filename: string, include?: string): boolean {
   return regex.test(filename);
 }
 
-async function findCodeFiles(dir: string, include?: string, maxFiles = 5000): Promise<string[]> {
+async function findCodeFiles(
+  dir: string,
+  include: string | undefined,
+  extensions: ReadonlySet<string>,
+  maxFiles = 5000
+): Promise<string[]> {
   const files: string[] = [];
 
   async function walk(currentDir: string): Promise<void> {
@@ -208,7 +219,7 @@ async function findCodeFiles(dir: string, include?: string, maxFiles = 5000): Pr
             continue;
           }
           await walk(fullPath);
-        } else if (matchesInclude(entry.name, include)) {
+        } else if (matchesInclude(entry.name, include, extensions)) {
           files.push(fullPath);
         }
       }
@@ -367,7 +378,16 @@ When independent reads, searches, or edits are also needed, emit those tool call
       : context.workdir;
 
     try {
-      const files = await findCodeFiles(searchPath, include);
+      // Merge configured `indexing.additionalExtensions` into both the
+      // built-in CODE_EXTENSIONS whitelist and the caller's include
+      // filter. Additional extensions are ADDITIVE: they extend the
+      // pool of files considered "code" but never narrow an existing
+      // include.
+      const additionalExtensions = getConfigAdditionalExtensions();
+      const effectiveExtensions = mergeExtensionSet(CODE_EXTENSIONS, additionalExtensions);
+      const effectiveInclude = mergeIncludePattern(include, additionalExtensions);
+
+      const files = await findCodeFiles(searchPath, effectiveInclude, effectiveExtensions);
       const allMatches: CodeMatch[] = [];
       const allSymbols: CodeSymbol[] = [];
 

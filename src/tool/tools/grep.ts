@@ -17,6 +17,8 @@ import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
 import { logger } from '../../utils/logger.js';
 import { attachAgentsMdRemindersForPaths } from '../../agent/agentsMdReminders.js';
+import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
+import { mergeIncludePattern } from './includePattern.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -567,13 +569,20 @@ When independent reads, searches, or edits are also needed, emit those tool call
         throw err;
       }
 
+      // Merge the caller's include filter with any additional extensions
+      // configured via `indexing.additionalExtensions` in the user config.
+      // When no include was passed, the pattern remains undefined and the
+      // tool retains its historical "search all files" behavior.
+      const additionalExtensions = getConfigAdditionalExtensions();
+      const effectiveInclude = mergeIncludePattern(params.include, additionalExtensions);
+
       // Fast path: ripgrep when available.
       if (await detectRg()) {
         try {
           const value = await executeWithRg(
             params.pattern,
             searchPath,
-            params.include,
+            effectiveInclude,
             context.signal
           );
           // Apply the same 1000-match cap as the JS path.
@@ -617,7 +626,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
 
       // JS fallback path
       const regex = validatedRegex;
-      const files = await findFiles(searchPath, params.include, 10000, context.signal);
+      const files = await findFiles(searchPath, effectiveInclude, 10000, context.signal);
       const matches: GrepMatch[] = [];
 
       for (const file of files) {

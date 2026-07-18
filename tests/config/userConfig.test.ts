@@ -17,6 +17,9 @@ import {
   getConfigDefaultAgent,
   setConfigDefaultAgent,
   clearConfigDefaultAgent,
+  getConfigAdditionalExtensions,
+  setConfigAdditionalExtensions,
+  validateAdditionalExtension,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -232,6 +235,118 @@ describe('userConfig', () => {
       expect(() => clearConfigDefaultAgent()).not.toThrow();
       expect(getConfigDefaultAgent()).toBeUndefined();
       expect(loadFullConfig().defaultModel).toBe('gpt-4.1');
+    });
+  });
+
+  describe('validateAdditionalExtension', () => {
+    it('should accept a well-formed extension with leading dot', () => {
+      expect(validateAdditionalExtension('.proto')).toBe('.proto');
+      expect(validateAdditionalExtension('.graphql')).toBe('.graphql');
+      expect(validateAdditionalExtension('.tf')).toBe('.tf');
+      expect(validateAdditionalExtension('.mdx')).toBe('.mdx');
+    });
+
+    it('should trim whitespace and lower-case the extension', () => {
+      expect(validateAdditionalExtension('  .PROTO  ')).toBe('.proto');
+    });
+
+    it('should reject extensions without a leading dot', () => {
+      expect(() => validateAdditionalExtension('proto')).toThrow(/must start with/);
+      expect(() => validateAdditionalExtension('graphql')).toThrow(/must start with/);
+    });
+
+    it('should reject empty and dot-only values', () => {
+      expect(() => validateAdditionalExtension('')).toThrow(/must start with/);
+      expect(() => validateAdditionalExtension('.')).toThrow(/must start with/);
+      expect(() => validateAdditionalExtension('..')).toThrow(/must start with/);
+    });
+
+    it('should reject extensions containing path separators or special chars', () => {
+      expect(() => validateAdditionalExtension('.foo/bar')).toThrow(/must start with/);
+      expect(() => validateAdditionalExtension('.foo bar')).toThrow(/must start with/);
+      expect(() => validateAdditionalExtension('.foo.bar')).toThrow(/must start with/);
+    });
+
+    it('should reject non-string entries', () => {
+      expect(() => validateAdditionalExtension(42 as unknown)).toThrow(/must be strings/);
+      expect(() => validateAdditionalExtension(null as unknown)).toThrow(/must be strings/);
+      expect(() => validateAdditionalExtension(undefined as unknown)).toThrow(/must be strings/);
+    });
+  });
+
+  describe('getConfigAdditionalExtensions / setConfigAdditionalExtensions', () => {
+    it('should return an empty array when unset', () => {
+      saveFullConfig({});
+      expect(getConfigAdditionalExtensions()).toEqual([]);
+    });
+
+    it('should return an empty array when indexing is not an object', () => {
+      saveFullConfig({ indexing: 'nope' });
+      expect(getConfigAdditionalExtensions()).toEqual([]);
+    });
+
+    it('should return an empty array when additionalExtensions is not an array', () => {
+      saveFullConfig({ indexing: { additionalExtensions: 'proto' } });
+      expect(getConfigAdditionalExtensions()).toEqual([]);
+    });
+
+    it('should silently drop invalid entries on read', () => {
+      saveFullConfig({
+        indexing: { additionalExtensions: ['.proto', 'graphql', 42, null, '.tf'] },
+      });
+      expect(getConfigAdditionalExtensions()).toEqual(['.proto', '.tf']);
+    });
+
+    it('should dedupe entries case-insensitively on read', () => {
+      saveFullConfig({
+        indexing: { additionalExtensions: ['.proto', '.PROTO', '.Proto', '.graphql'] },
+      });
+      expect(getConfigAdditionalExtensions()).toEqual(['.proto', '.graphql']);
+    });
+
+    it('should persist a list of valid extensions', () => {
+      saveFullConfig({});
+      setConfigAdditionalExtensions(['.proto', '.graphql', '.tf']);
+      expect(getConfigAdditionalExtensions()).toEqual(['.proto', '.graphql', '.tf']);
+    });
+
+    it('should normalize extensions to lower-case on write', () => {
+      saveFullConfig({});
+      setConfigAdditionalExtensions(['.PROTO', '.GraphQL']);
+      expect(getConfigAdditionalExtensions()).toEqual(['.proto', '.graphql']);
+    });
+
+    it('should throw when writing an invalid extension', () => {
+      saveFullConfig({});
+      expect(() => setConfigAdditionalExtensions(['proto'])).toThrow(/must start with/);
+      // Config should not have been mutated
+      const cfg = loadFullConfig();
+      expect(cfg.indexing).toBeUndefined();
+    });
+
+    it('should preserve unrelated top-level keys when writing extensions', () => {
+      saveFullConfig({ defaultModel: 'gpt-4.1', theme: 'dark' });
+      setConfigAdditionalExtensions(['.proto']);
+      const cfg = loadFullConfig();
+      expect(cfg.defaultModel).toBe('gpt-4.1');
+      expect(cfg.theme).toBe('dark');
+      expect(cfg.indexing).toEqual({ additionalExtensions: ['.proto'] });
+    });
+
+    it('should preserve unrelated indexing.* keys when writing extensions', () => {
+      saveFullConfig({ indexing: { somethingElse: true } });
+      setConfigAdditionalExtensions(['.proto']);
+      const cfg = loadFullConfig();
+      expect(cfg.indexing).toEqual({
+        somethingElse: true,
+        additionalExtensions: ['.proto'],
+      });
+    });
+
+    it('should throw on non-array input', () => {
+      expect(() => setConfigAdditionalExtensions('proto' as unknown as string[])).toThrow(
+        /must be an array/
+      );
     });
   });
 });
