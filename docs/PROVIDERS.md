@@ -597,6 +597,61 @@ the equivalent non-stream path in `src/core/agenticChat.ts`.
 - OAuth2 authentication with client credentials
 - Support for corporate proxy configurations
 
+### Auto-CA Harvesting
+
+Corporate environments frequently front SAP AI Core (or any provider proxy) with an
+internal TLS-terminating proxy that presents a certificate signed by an internal CA.
+Without additional configuration, Node.js will reject those connections with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` because the corporate CA is not part of the
+Mozilla root store baked into Node.
+
+Alexi automatically discovers OS trust anchors at CLI startup and merges them into
+the Node.js HTTPS agent, so those internal CAs are trusted without any per-user
+setup. The mechanism lives in `src/providers/ca.ts` and runs as a side effect of
+loading `src/providers/index.ts`.
+
+**Discovery per platform**:
+
+- **macOS** — runs
+  `security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain`
+  and the same command against `/Library/Keychains/System.keychain`, then parses
+  every PEM `CERTIFICATE` block from the combined output.
+- **Linux** — reads the first existing file from this ordered list:
+  1. `/etc/ssl/certs/ca-certificates.crt` (Debian / Ubuntu)
+  2. `/etc/pki/tls/certs/ca-bundle.crt` (RHEL / CentOS / Fedora)
+  3. `/etc/ssl/ca-bundle.pem` (openSUSE)
+  4. `/etc/ssl/cert.pem` (Alpine / BSD-style)
+- **Windows** — currently a TODO. Windows users should either set
+  `NODE_EXTRA_CA_CERTS` manually or install the optional `win-ca` package into
+  their local Node runtime. Contributions to add native Windows cert-store
+  extraction are welcome — see `harvestCAs` in `src/providers/ca.ts`.
+
+Harvested certificates are merged with:
+
+- Node's built-in trust store (`tls.rootCertificates`) — public HTTPS endpoints
+  keep working exactly as before.
+- Anything already referenced by `NODE_EXTRA_CA_CERTS` — user-configured extras
+  are preserved, not replaced.
+- Any `ca` list already installed on `https.globalAgent` by earlier code.
+
+The merged list is installed on `https.globalAgent.options.ca`, so all provider
+HTTPS requests inherit it. The harvest runs at most once per process (the result
+is cached in memory), so reading the macOS Keychain does not slow down every
+request.
+
+**Disabling the feature**:
+
+Set `ALEXI_DISABLE_CA_HARVEST=1` (or `true`, `yes`) to skip the harvest entirely.
+This is useful when:
+
+- You want a strictly minimal trust store (only Node's built-in roots).
+- The macOS `security` command is slow or blocked on your machine.
+- You are debugging TLS validation issues and want to isolate the harvest from
+  the equation.
+
+`NODE_EXTRA_CA_CERTS` continues to work as it always has when the harvest is
+disabled — Node applies it natively.
+
 ### Data Privacy
 
 - All data processed through SAP AI Core
@@ -625,6 +680,21 @@ the equivalent non-stream path in `src/core/agenticChat.ts`.
 2. Consider using faster models (Flash variants)
 3. Reduce context window size
 4. Enable streaming for better UX
+
+### `UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `SELF_SIGNED_CERT_IN_CHAIN`
+
+Alexi auto-harvests OS trust anchors on macOS and Linux — see
+[Auto-CA Harvesting](#auto-ca-harvesting). If you still see cert validation
+errors:
+
+1. Confirm the harvest is not disabled: check `env | grep ALEXI_DISABLE_CA_HARVEST`.
+2. Verify the CA is installed in the OS trust store your platform reads from
+   (the paths listed under Auto-CA Harvesting).
+3. As a fallback, export `NODE_EXTRA_CA_CERTS=/path/to/corporate-bundle.pem` and
+   re-run. Alexi will merge that bundle into its HTTPS agent alongside the
+   harvested anchors.
+4. On Windows, either install the optional `win-ca` package or set
+   `NODE_EXTRA_CA_CERTS` — native Windows harvest is not yet implemented.
 
 ## Related Documentation
 
