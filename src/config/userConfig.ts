@@ -212,6 +212,89 @@ export function clearConfigDefaultAgent(): void {
   deleteConfigValue('agent');
 }
 
+// ============ Indexing (custom file extensions) ============
+
+/**
+ * Regex describing a valid additional-extension value: must begin with `.`
+ * followed by one or more alphanumerics / `-` / `_`. Rejects `proto`,
+ * `.`, `..foo`, `.foo/bar`, whitespace, etc.
+ */
+const EXTENSION_PATTERN = /^\.[A-Za-z0-9_-]+$/;
+
+/**
+ * Validate a single additional-extension entry.
+ * Returns the trimmed extension when valid, or throws when invalid.
+ */
+export function validateAdditionalExtension(ext: unknown): string {
+  if (typeof ext !== 'string') {
+    throw new Error(`indexing.additionalExtensions entries must be strings (got ${typeof ext})`);
+  }
+  const trimmed = ext.trim();
+  if (!EXTENSION_PATTERN.test(trimmed)) {
+    throw new Error(
+      `indexing.additionalExtensions entry '${ext}' is invalid: must start with '.' and contain only [A-Za-z0-9_-] (e.g. '.proto')`
+    );
+  }
+  return trimmed.toLowerCase();
+}
+
+/**
+ * Load the configured additional file extensions for indexing.
+ *
+ * Returns an array of normalized extensions (each starting with `.` and
+ * lower-cased). Invalid entries are silently dropped so that a corrupt
+ * config never crashes tool execution — callers wanting strict validation
+ * should use {@link setConfigAdditionalExtensions} instead.
+ */
+export function getConfigAdditionalExtensions(): string[] {
+  const config = loadFullConfig();
+  const indexing = config.indexing;
+  if (!indexing || typeof indexing !== 'object' || Array.isArray(indexing)) {
+    return [];
+  }
+  const raw = (indexing as Record<string, unknown>).additionalExtensions;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+    const trimmed = entry.trim();
+    if (!EXTENSION_PATTERN.test(trimmed)) {
+      continue;
+    }
+    const normalized = trimmed.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+/**
+ * Persist the list of additional file extensions for indexing.
+ * Validates every entry; throws on the first invalid one so callers
+ * (e.g. a `config set` CLI command) can surface the error to the user.
+ */
+export function setConfigAdditionalExtensions(extensions: string[]): void {
+  if (!Array.isArray(extensions)) {
+    throw new Error('indexing.additionalExtensions must be an array of strings');
+  }
+  const normalized = extensions.map(validateAdditionalExtension);
+  const config = loadFullConfig();
+  const existingIndexing =
+    config.indexing && typeof config.indexing === 'object' && !Array.isArray(config.indexing)
+      ? (config.indexing as Record<string, unknown>)
+      : {};
+  config.indexing = { ...existingIndexing, additionalExtensions: normalized };
+  saveFullConfig(config);
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {

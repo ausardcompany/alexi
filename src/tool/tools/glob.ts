@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
+import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -16,6 +17,61 @@ const GlobParamsSchema = z.object({
 interface GlobResult {
   matches: string[];
   count: number;
+}
+
+/**
+ * Extend a glob pattern's last segment to include additional file
+ * extensions from the user config. Only the final path segment is
+ * touched so directory portions (`src/**`) are preserved.
+ *
+ * Recognized last-segment shapes (matching the grep include merger):
+ *   - `*.ts`         -> `*.{ts,proto}`
+ *   - `*.{ts,tsx}`   -> `*.{ts,tsx,proto}`
+ *   - anything else  -> returned unchanged (no safe way to inject
+ *                       alternates without changing semantics).
+ *
+ * When `additionalExtensions` is empty, the pattern is returned as-is.
+ */
+export function extendGlobPattern(pattern: string, additionalExtensions: string[]): string {
+  if (additionalExtensions.length === 0) {
+    return pattern;
+  }
+  const idx = pattern.lastIndexOf('/');
+  const prefix = idx === -1 ? '' : pattern.slice(0, idx + 1);
+  const last = idx === -1 ? pattern : pattern.slice(idx + 1);
+  const bare = additionalExtensions.map((e) => (e.startsWith('.') ? e.slice(1) : e).toLowerCase());
+
+  const singleExt = /^\*\.([A-Za-z0-9_-]+)$/.exec(last);
+  if (singleExt) {
+    const merged = uniqueLower([singleExt[1], ...bare]);
+    return `${prefix}${merged.length === 1 ? `*.${merged[0]}` : `*.{${merged.join(',')}}`}`;
+  }
+
+  const groupExt = /^\*\.\{([^{}]+)\}$/.exec(last);
+  if (groupExt) {
+    const parts = groupExt[1]
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    const merged = uniqueLower([...parts, ...bare]);
+    return `${prefix}*.{${merged.join(',')}}`;
+  }
+
+  return pattern;
+}
+
+function uniqueLower(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of values) {
+    const lower = v.toLowerCase();
+    if (seen.has(lower)) {
+      continue;
+    }
+    seen.add(lower);
+    out.push(lower);
+  }
+  return out;
 }
 
 /**
@@ -90,11 +146,20 @@ async function globMatch(
   function matchPart(name: string, pattern: string): boolean {
     if (pattern === '*') return true;
 
-    // Convert glob pattern to regex
+    // Expand `{a,b,c}` alternates first so that patterns like
+    // `*.{ts,proto}` (used by indexing.additionalExtensions) match. We
+    // capture the group with a non-greedy inner class before escaping.
+    const expanded = pattern.replace(/\{([^{}]+)\}/g, (_, group: string) => {
+      const opts = group.split(',').map((s) => s.trim());
+      return `(${opts.join('|')})`;
+    });
+
+    // Convert glob pattern to regex. Escape regex specials, then
+    // restore the `(a|b)` groups we produced above.
     const regex = new RegExp(
       '^' +
-        pattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        expanded
+          .replace(/[.+^${}[\]\\]/g, '\\$&')
           .replace(/\*/g, '.*')
           .replace(/\?/g, '.') +
         '$'
@@ -163,7 +228,16 @@ When independent reads, searches, or edits are also needed, emit those tool call
         };
       }
 
-      let matches = await globMatch(searchPath, params.pattern, context.signal);
+      // Extend the caller's pattern with any additional extensions
+      // configured via `indexing.additionalExtensions`. Only the last
+      // segment is touched (e.g. `**/*.ts` -> `**/*.{ts,proto}`), so
+      // directory scoping is preserved. Patterns whose last segment is
+      // not a recognized extension shape (e.g. exact filenames) pass
+      // through unchanged.
+      const additionalExtensions = getConfigAdditionalExtensions();
+      const effectivePattern = extendGlobPattern(params.pattern, additionalExtensions);
+
+      let matches = await globMatch(searchPath, effectivePattern, context.signal);
 
       // Sort by modification time (most recent first)
       const withStats = await Promise.all(
