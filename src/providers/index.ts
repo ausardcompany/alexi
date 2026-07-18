@@ -11,10 +11,37 @@ import { ProviderModelFellBack } from '../bus/index.js';
 import { env } from '../config/env.js';
 import { loadRoutingConfig } from '../config/routingConfig.js';
 import { getConfigDefaultModel } from '../config/userConfig.js';
+import { installHarvestedCAs } from './ca.js';
 import { isOrchestrationModel, SapOrchestrationProvider } from './sapOrchestration.js';
+
+// Auto-harvest CAs from the OS trust store and merge them into the HTTPS
+// global agent so provider requests transparently trust internal corporate
+// CAs. Safe to call at module load: fast on Linux (single file read),
+// cached on macOS, and no-op when `ALEXI_DISABLE_CA_HARVEST=1`. See
+// docs/PROVIDERS.md#auto-ca-harvesting.
+installHarvestedCAs();
 
 // Re-export connectivity check
 export { checkConnectivity, type ConnectivityResult } from './connectivity.js';
+
+// Re-export CA harvesting API for advanced consumers / diagnostics.
+export {
+  detectPlatform,
+  isDisabled as isCaHarvestDisabled,
+  extractPemBlocks,
+  harvestLinuxCAs,
+  harvestMacosCAs,
+  harvestCAs,
+  getHarvestedCAs,
+  readNodeExtraCACerts,
+  installHarvestedCAs,
+  LINUX_CA_BUNDLE_PATHS,
+  MACOS_KEYCHAINS,
+  type CaPlatform,
+  type HarvestOptions,
+  type InstallOptions,
+  type InstallResult,
+} from './ca.js';
 
 // Re-export auth errors
 export { StartupTimeoutError } from './auth.js';
