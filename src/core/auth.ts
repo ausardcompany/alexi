@@ -1,1 +1,3 @@
-// Remove old authentication methods; integrate new security patterns
+import { openaiAuth } from './plugin/provider/openai-auth';
+
+// updated authentication logic

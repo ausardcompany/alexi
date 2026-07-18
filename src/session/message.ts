@@ -1,0 +1,3 @@
+function legacyMessageCompat() {
+  // compatibility logic
+}
