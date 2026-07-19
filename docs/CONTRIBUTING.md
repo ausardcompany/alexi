@@ -342,6 +342,18 @@ vi.mock('../src/providers/index.js', () => ({
 import { sendChat } from '../src/core/orchestrator.js';
 ```
 
+### Injectable I/O boundaries (preferred over module mocks)
+
+When code touches platform-specific I/O — filesystem, subprocess, `https`
+agent state — prefer accepting the I/O boundary as a function parameter over
+mocking `node:fs` / `node:child_process` globally. This keeps tests hermetic,
+parallel-safe, and reviewable. The auto-CA harvester in `src/providers/ca.ts`
+is the canonical example: `harvestLinuxCAs` accepts `reader` and `exists`
+callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
+`installHarvestedCAs` accepts an `agent` override. Follow the same pattern for
+new providers, tools, or hooks that touch external I/O. See
+`docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:
