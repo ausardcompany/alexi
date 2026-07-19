@@ -12,6 +12,7 @@ import type { ToolCallState } from '../context/ChatContext.js';
 import type { SidebarContextValue } from '../context/SidebarContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { getCostTracker } from '../../../core/costTracker.js';
+import type { UsageEntry } from '../utils/formatUsage.js';
 
 /**
  * Pick the highest-cost routed model from today's usage. Returns `undefined`
@@ -25,6 +26,23 @@ function pickTopModelLabel(_costSignal: number): string | undefined {
   }
   entries.sort((a, b) => b[1].cost - a[1].cost);
   return entries[0][0];
+}
+
+/**
+ * Build the per-model usage breakdown for the sidebar Usage panel. Uses
+ * the current session's records when a sessionId is provided so the
+ * numbers match what the user sees in the status bar, and maps model
+ * ids to their display names so the rows render as
+ * `Claude 4.5 Sonnet: 12.3K tokens, $0.45` rather than the raw provider id.
+ */
+function buildSessionUsage(sessionId: string, _costSignal: number): UsageEntry[] {
+  const tracker = getCostTracker();
+  const raw = tracker.getModelUsage({ sessionId });
+  return raw.map((entry) => ({
+    model: tracker.getModelDisplayName(entry.model),
+    tokens: entry.tokens,
+    cost: entry.cost,
+  }));
 }
 
 export interface ChatPageProps {
@@ -77,6 +95,10 @@ export function ChatPage({
   // total cost changes (i.e. a turn just recorded usage), the memo re-runs.
   // We do not add a separate poll.
   const topModelLabel = React.useMemo(() => pickTopModelLabel(cost.totalCost), [cost.totalCost]);
+  const sidebarUsage = React.useMemo(
+    () => buildSessionUsage(sessionId, cost.totalCost),
+    [sessionId, cost.totalCost]
+  );
 
   return (
     <>
@@ -100,6 +122,7 @@ export function ChatPage({
               /* TODO */
             }}
             isFocused={sidebar.visible && !leaderActive && !dialogIsOpen}
+            usage={sidebarUsage}
           />
         }
         sideVisible={sidebar.visible}

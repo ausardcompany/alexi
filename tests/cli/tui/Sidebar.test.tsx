@@ -1,7 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
-import { Text } from 'ink';
 
 import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
 import { Sidebar } from '../../../src/cli/tui/components/Sidebar.js';
@@ -77,5 +76,75 @@ describe('Sidebar', () => {
       />
     );
     expect(lastFrame()).toBeDefined();
+  });
+
+  it('renders compact per-model usage section when usage entries are provided', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        usage={[
+          { model: 'Claude 3.5 Sonnet', tokens: 12_345, cost: 0.45 },
+          { model: 'Claude 4.5 Haiku', tokens: 3_200, cost: 0.02 },
+        ]}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Usage');
+    expect(frame).toContain('Claude 3.5 Sonnet');
+    expect(frame).toContain('12.3K tokens');
+    expect(frame).toContain('$0.45');
+    expect(frame).toContain('Total');
+  });
+
+  it('omits usage section when usage prop is undefined', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('Usage');
+    expect(frame).not.toContain('Total');
+  });
+
+  it('omits usage section when usage array is empty', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        usage={[]}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('Usage');
+  });
+
+  it('renders usage section even when there are no file changes', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={[]}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        usage={[{ model: 'GPT-4o', tokens: 1_000_000, cost: 2.5 }]}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('No changes yet');
+    expect(frame).toContain('GPT-4o');
+    expect(frame).toContain('1M tokens');
+    expect(frame).toContain('$2.50');
   });
 });
