@@ -99,6 +99,37 @@ Override the project directory for configuration resolution.
 export ALEXI_PROJECT_DIR=/path/to/project
 ```
 
+#### ALEXI_DISABLE_CA_HARVEST
+
+Disable the automatic OS trust-store CA harvest performed by
+`src/providers/ca.ts` at CLI startup. When set to a truthy value (`1`, `true`,
+or `yes`, case-insensitive), Alexi skips reading the macOS Keychain or Linux
+CA bundle and installs nothing onto `https.globalAgent.options.ca`. Node's
+built-in root store plus any `NODE_EXTRA_CA_CERTS` continue to apply natively.
+
+```bash
+# Skip the auto-harvest entirely (Node built-in + NODE_EXTRA_CA_CERTS only)
+export ALEXI_DISABLE_CA_HARVEST=1
+```
+
+Use this when you want a strictly minimal trust store, when the macOS
+`security` command is slow or blocked, or when isolating the harvest during
+TLS troubleshooting. See
+[docs/PROVIDERS.md#auto-ca-harvesting](PROVIDERS.md#auto-ca-harvesting) for the
+full mechanism, per-platform discovery order, and programmatic API.
+
+#### NODE_EXTRA_CA_CERTS
+
+Standard Node.js environment variable pointing at a PEM bundle of additional
+trust anchors. Alexi reads this file (via `readNodeExtraCACerts` in
+`src/providers/ca.ts`) and merges its `CERTIFICATE` blocks into the same
+`https.globalAgent.options.ca` list as the harvested OS trust anchors — the
+file is not replaced, so user extras and OS-discovered CAs coexist.
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/corporate-bundle.pem
+```
+
 ## User Configuration
 
 User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.

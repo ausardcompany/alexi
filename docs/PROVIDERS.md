@@ -652,6 +652,47 @@ This is useful when:
 `NODE_EXTRA_CA_CERTS` continues to work as it always has when the harvest is
 disabled — Node applies it natively.
 
+**Programmatic API (advanced consumers / diagnostics)**:
+
+The re-exports from `src/providers/index.ts` expose the harvest surface for
+diagnostics, custom trust-store composition, and tests:
+
+```typescript
+import {
+  detectPlatform,
+  isCaHarvestDisabled,
+  harvestCAs,
+  getHarvestedCAs,
+  readNodeExtraCACerts,
+  installHarvestedCAs,
+  LINUX_CA_BUNDLE_PATHS,
+  MACOS_KEYCHAINS,
+  type CaPlatform,
+  type InstallResult,
+} from 'alexi/providers';
+
+// Inspect what the harvester would trust on this machine.
+const platform: CaPlatform = detectPlatform();
+const pems: string[] = getHarvestedCAs();
+console.log(`platform=${platform} harvested=${pems.length}`);
+
+// Re-run the merge with an explicit agent (e.g. per-request https.Agent).
+const result: InstallResult = installHarvestedCAs({ agent: myAgent });
+// { disabled: false, harvestedCount: 174, extraCount: 0, totalCount: 288 }
+```
+
+Key contract points from `src/providers/ca.ts`:
+
+- `installHarvestedCAs` is idempotent — subsequent calls dedupe against the
+  agent's existing `options.ca` list and re-merge in the same order
+  (Node defaults → existing → `NODE_EXTRA_CA_CERTS` → harvested).
+- `getHarvestedCAs` caches the harvest for the process lifetime; the internal
+  `_resetHarvestedCAsCache()` hook exists solely for unit tests and is not part
+  of the public surface.
+- `harvestLinuxCAs` accepts injectable `reader` / `exists` functions and
+  `harvestMacosCAs` accepts an injectable `SecurityRunner`, so tests can
+  exercise the harvester without touching real filesystem or subprocess I/O.
+
 ### Data Privacy
 
 - All data processed through SAP AI Core

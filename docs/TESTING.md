@@ -888,10 +888,118 @@ GitHub Actions uses repository secrets:
 ```yaml
 - name: Run Tests
   env:
-    AICORE_SERVICE_KEY: ${{ secrets.AICORE_SERVICE_KEY }}
-    AICORE_RESOURCE_GROUP: ${{ secrets.AICORE_RESOURCE_GROUP }}
+    AICORE_SERVICE_KEY: ${​{ secrets.AICORE_SERVICE_KEY }}
+    AICORE_RESOURCE_GROUP: ${​{ secrets.AICORE_RESOURCE_GROUP }}
   run: npm test
 ```
+
+## Testing the Auto-CA Harvester
+
+The `src/providers/ca.ts` harvester touches platform-specific I/O
+(macOS `security` subprocess, Linux CA bundle files, `https.globalAgent`
+mutation). Tests must never touch real system state, so every entry point
+accepts injectable overrides. The canonical suite is
+`tests/providers/ca.test.ts` — mirror its patterns when extending coverage.
+
+### Test file
+
+- `tests/providers/ca.test.ts` — Covers platform detection, PEM extraction,
+  Linux / macOS harvesters, `NODE_EXTRA_CA_CERTS` reader, cache lifecycle, and
+  the `installHarvestedCAs` merge contract.
+
+### Injecting the fake filesystem and subprocess runner
+
+Every harvester function has a matching parameter for its I/O boundary. Wire
+the fakes explicitly instead of relying on `vi.mock` of `node:fs` /
+`node:child_process`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  harvestLinuxCAs,
+  harvestMacosCAs,
+  installHarvestedCAs,
+  _resetHarvestedCAsCache,
+} from '../../src/providers/ca.js';
+
+beforeEach(() => {
+  _resetHarvestedCAsCache();
+});
+
+it('reads the first existing Linux bundle path', () => {
+  const files = new Map<string, string>([
+    ['/etc/ssl/certs/ca-certificates.crt', CERT_A_PEM + '\n' + CERT_B_PEM],
+  ]);
+  const blocks = harvestLinuxCAs(
+    ['/etc/ssl/certs/ca-certificates.crt', '/etc/ssl/cert.pem'],
+    (p) => files.get(p) ?? '',
+    (p) => files.has(p)
+  );
+  expect(blocks).toEqual([CERT_A_PEM, CERT_B_PEM]);
+});
+
+it('dedupes across macOS keychains', () => {
+  const runner = (keychain: string): string =>
+    keychain.endsWith('SystemRootCertificates.keychain') ? CERT_A_PEM : CERT_A_PEM;
+  const blocks = harvestMacosCAs(
+    ['/System/Library/Keychains/SystemRootCertificates.keychain', '/Library/Keychains/System.keychain'],
+    runner
+  );
+  expect(blocks).toEqual([CERT_A_PEM]);
+});
+```
+
+### Testing `installHarvestedCAs` without mutating `https.globalAgent`
+
+Pass a throw-away `https.Agent` and inspect its `options.ca` list after the
+call. The install merges Node defaults (`tls.rootCertificates`), any existing
+`agent.options.ca`, extras from `NODE_EXTRA_CA_CERTS`, and harvested PEMs — in
+that order, deduplicated by string identity:
+
+```typescript
+import * as https from 'node:https';
+import * as tls from 'node:tls';
+
+it('merges (rather than replaces) an existing ca list', () => {
+  const agent = new https.Agent({ ca: [EXISTING_PEM] });
+  const result = installHarvestedCAs({
+    agent,
+    platform: 'linux',
+    linuxPaths: ['/fake/bundle.pem'],
+    reader: () => HARVESTED_PEM,
+    exists: () => true,
+    env: {}, // no NODE_EXTRA_CA_CERTS
+  });
+  expect(result.disabled).toBe(false);
+  expect(result.harvestedCount).toBe(1);
+  const ca = (agent.options.ca as string[]) ?? [];
+  expect(ca).toContain(EXISTING_PEM);
+  expect(ca).toContain(HARVESTED_PEM);
+  expect(ca.length).toBeGreaterThanOrEqual(tls.rootCertificates.length + 2);
+});
+
+it('is a no-op when ALEXI_DISABLE_CA_HARVEST is set', () => {
+  const agent = new https.Agent();
+  const result = installHarvestedCAs({
+    agent,
+    env: { ALEXI_DISABLE_CA_HARVEST: '1' },
+  });
+  expect(result).toEqual({
+    disabled: true,
+    harvestedCount: 0,
+    extraCount: 0,
+    totalCount: 0,
+  });
+});
+```
+
+### Cache-lifecycle pitfalls
+
+`getHarvestedCAs` caches its result for the process lifetime. Any test that
+mutates the harvest inputs mid-run must call `_resetHarvestedCAsCache()` in
+`beforeEach` — otherwise the second test observes the first test's harvest
+regardless of the injected overrides. The reset hook is `@internal` and only
+exists to unblock unit tests; do not use it in production code.
 
 ## Testing Agent Custom Loader
 
