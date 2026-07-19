@@ -463,6 +463,40 @@ export class CostTracker {
   }
 
   /**
+   * Get a compact per-model usage breakdown for the compact TUI sidebar
+   * display (Kilocode PR #12303). Each entry combines input + output tokens
+   * so the caller can render `<model>: <tokens> tokens, <cost>` rows
+   * without re-summing.
+   *
+   * When `options.sessionId` is provided, only records for that session
+   * are considered; otherwise every record is included (matches
+   * `getAllTimeSummary`).
+   *
+   * The returned array is unsorted; callers should decide their own
+   * ordering (typically cost-descending — see
+   * `src/cli/tui/utils/formatUsage.ts::formatUsageBlock`).
+   */
+  getModelUsage(
+    options: { since?: number; sessionId?: string } = {}
+  ): Array<{ model: string; tokens: number; cost: number }> {
+    const summary = this.getSummary(options);
+    return Object.entries(summary.byModel).map(([model, data]) => ({
+      model,
+      tokens: data.inputTokens + data.outputTokens,
+      cost: data.cost,
+    }));
+  }
+
+  /**
+   * Look up a human-friendly display name for a model id. Falls back to
+   * the raw id when no pricing entry declares a display name (unknown or
+   * custom models).
+   */
+  getModelDisplayName(modelId: string): string {
+    return this.getPricing(modelId)?.displayName ?? modelId;
+  }
+
+  /**
    * Format cost as currency string
    */
   formatCost(cost: number): string {
