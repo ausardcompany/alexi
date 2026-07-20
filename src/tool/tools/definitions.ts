@@ -1,6 +1,6 @@
 /**
  * Definitions Tool - Extract code definitions from source files
- * Supports TypeScript, JavaScript, and Python
+ * Supports TypeScript, JavaScript, Python, and Bash
  */
 
 import { z } from 'zod';
@@ -41,7 +41,7 @@ interface DefinitionsResult {
   language: string;
 }
 
-type SupportedLanguage = 'typescript' | 'javascript' | 'python' | 'unknown';
+type SupportedLanguage = 'typescript' | 'javascript' | 'python' | 'bash' | 'unknown';
 
 // TypeScript/JavaScript regex patterns
 // Note: Use [ \t]* instead of \s* for indentation to avoid matching newlines
@@ -66,6 +66,14 @@ const pythonPatterns = {
   function: /^(async\s+)?def\s+(\w+)\s*(\([^)]*\))(\s*->\s*[^:]+)?:/gm,
 };
 
+// Bash regex patterns
+const bashPatterns = {
+  // POSIX function: name() { ... }
+  posixFunction: /^([ \t]*)([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*\)\s*\{/gm,
+  // Bash keyword: function name { ... } or function name() { ... }
+  bashFunction: /^([ \t]*)function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\(\s*\))?\s*\{/gm,
+};
+
 /**
  * Detect language from file extension
  */
@@ -82,6 +90,9 @@ function detectLanguage(filePath: string): SupportedLanguage {
       return 'javascript';
     case '.py':
       return 'python';
+    case '.sh':
+    case '.bash':
+      return 'bash';
     default:
       return 'unknown';
   }
@@ -404,6 +415,62 @@ function extractPythonDefinitions(
   return definitions;
 }
 
+/**
+ * Extract Bash definitions
+ */
+function extractBashDefinitions(
+  content: string,
+  types: DefinitionType[] | undefined
+): Definition[] {
+  const definitions: Definition[] = [];
+  const shouldExtract = (type: DefinitionType) => !types || types.includes(type);
+
+  // Bash has no classes/interfaces/types — only functions
+  if (!shouldExtract('function')) {
+    return definitions;
+  }
+
+  // POSIX syntax: name() { ... }
+  const posixRegex = new RegExp(bashPatterns.posixFunction.source, 'gm');
+  let match;
+  while ((match = posixRegex.exec(content)) !== null) {
+    const line = getLineNumber(content, match.index);
+    const name = match[2];
+    const signature = `${name}()`;
+
+    definitions.push({
+      name,
+      type: 'function',
+      line,
+      signature,
+      exported: true, // Bash functions are globally scoped when sourced
+    });
+  }
+
+  // Bash keyword syntax: function name { ... } or function name() { ... }
+  const bashRegex = new RegExp(bashPatterns.bashFunction.source, 'gm');
+  while ((match = bashRegex.exec(content)) !== null) {
+    const line = getLineNumber(content, match.index);
+    const name = match[2];
+    const signature = `function ${name}`;
+
+    // Skip if already captured by POSIX pattern (dedup name() { ... } style)
+    if (definitions.some((d) => d.name === name)) {
+      continue;
+    }
+
+    definitions.push({
+      name,
+      type: 'function',
+      line,
+      signature,
+      exported: true,
+    });
+  }
+
+  return definitions;
+}
+
 export const definitionsTool = defineTool<typeof DefinitionsParamsSchema, DefinitionsResult>({
   name: 'definitions',
   description: `Extract code definitions (classes, functions, interfaces, etc.) from source files.
@@ -412,6 +479,7 @@ Supports:
 - TypeScript (.ts, .tsx): class, function, interface, type, const, enum, method
 - JavaScript (.js, .jsx): class, function, const, method
 - Python (.py): class, function/def
+- Bash (.sh, .bash): function
 
 Returns definition name, type, line number, signature, and export status.`,
 
@@ -445,7 +513,7 @@ Returns definition name, type, line number, signature, and export status.`,
       if (language === 'unknown') {
         return {
           success: false,
-          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py`,
+          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .sh, .bash`,
         };
       }
 
@@ -453,6 +521,8 @@ Returns definition name, type, line number, signature, and export status.`,
       let definitions: Definition[];
       if (language === 'python') {
         definitions = extractPythonDefinitions(content, params.types);
+      } else if (language === 'bash') {
+        definitions = extractBashDefinitions(content, params.types);
       } else {
         const isTypeScript = language === 'typescript';
         definitions = extractTsDefinitions(content, params.types, isTypeScript);
