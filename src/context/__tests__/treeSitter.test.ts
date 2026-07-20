@@ -36,6 +36,14 @@ describe('isSupportedFile', () => {
     expect(isSupportedFile('component.jsx')).toBe(true);
   });
 
+  it('returns true for .sh files', () => {
+    expect(isSupportedFile('deploy.sh')).toBe(true);
+  });
+
+  it('returns true for .bash files', () => {
+    expect(isSupportedFile('helpers.bash')).toBe(true);
+  });
+
   it('returns false for .py files', () => {
     expect(isSupportedFile('script.py')).toBe(false);
   });
@@ -100,6 +108,20 @@ describe('parseSource', () => {
     const source = 'const el = <span>Hello</span>;';
     const root = parseSource(source, 'component.jsx');
     expect(root).not.toBeNull();
+  });
+
+  it('parses .sh files as bash', () => {
+    const source = 'foo() { echo hi; }';
+    const root = parseSource(source, 'script.sh');
+    expect(root).not.toBeNull();
+    expect(root?.type).toBe('program');
+  });
+
+  it('parses .bash files as bash', () => {
+    const source = 'function bar() { echo hi; }';
+    const root = parseSource(source, 'helpers.bash');
+    expect(root).not.toBeNull();
+    expect(root?.type).toBe('program');
   });
 
   it('returns null for unsupported file extensions', () => {

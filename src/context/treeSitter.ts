@@ -1,18 +1,20 @@
 /**
  * Tree-sitter AST parsing helpers
  *
- * Provides lazy-initialised parsers for TypeScript and JavaScript.
+ * Provides lazy-initialised parsers for TypeScript, JavaScript, and Bash.
  * The parsers are created on first use to avoid startup overhead.
  */
 
 import Parser from 'tree-sitter';
 import TypeScript from 'tree-sitter-typescript';
 import JavaScript from 'tree-sitter-javascript';
+import Bash from 'tree-sitter-bash';
 
 // Lazily initialised parsers (one per language to avoid setLanguage races)
 let tsParser: Parser | null = null;
 let jsParser: Parser | null = null;
 let tsxParser: Parser | null = null;
+let bashParser: Parser | null = null;
 
 /**
  * Get (or lazily create) the TypeScript parser
@@ -56,7 +58,21 @@ function getJsParser(): Parser | null {
   return jsParser;
 }
 
-export type SupportedExtension = 'ts' | 'tsx' | 'js' | 'mjs' | 'cjs' | 'jsx';
+/**
+ * Get (or lazily create) the Bash parser
+ */
+function getBashParser(): Parser | null {
+  if (!Parser) {
+    return null;
+  }
+  if (!bashParser) {
+    bashParser = new Parser();
+    bashParser.setLanguage(Bash);
+  }
+  return bashParser;
+}
+
+export type SupportedExtension = 'ts' | 'tsx' | 'js' | 'mjs' | 'cjs' | 'jsx' | 'sh' | 'bash';
 
 /**
  * Returns true if the file extension is supported by tree-sitter parsers
@@ -64,7 +80,14 @@ export type SupportedExtension = 'ts' | 'tsx' | 'js' | 'mjs' | 'cjs' | 'jsx';
 export function isSupportedFile(filePath: string): boolean {
   const ext = filePath.split('.').pop()?.toLowerCase();
   return (
-    ext === 'ts' || ext === 'tsx' || ext === 'js' || ext === 'mjs' || ext === 'cjs' || ext === 'jsx'
+    ext === 'ts' ||
+    ext === 'tsx' ||
+    ext === 'js' ||
+    ext === 'mjs' ||
+    ext === 'cjs' ||
+    ext === 'jsx' ||
+    ext === 'sh' ||
+    ext === 'bash'
   );
 }
 
@@ -88,6 +111,10 @@ export function parseSource(source: string, filePath: string): Parser.SyntaxNode
     case 'mjs':
     case 'cjs':
       parser = getJsParser();
+      break;
+    case 'sh':
+    case 'bash':
+      parser = getBashParser();
       break;
     default:
       return null;

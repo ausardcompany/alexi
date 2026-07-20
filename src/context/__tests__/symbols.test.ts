@@ -198,6 +198,65 @@ class Greeter {
     });
   });
 
+  describe('bash support', () => {
+    it('extracts a POSIX-style function from a .sh file', () => {
+      const src = 'greet() {\n  echo "hi $1"\n}';
+      const symbols = extractSymbols(src, 'script.sh');
+      expect(symbolNames(symbols)).toContain('greet');
+      const sym = symbols.find((s) => s.name === 'greet')!;
+      expect(sym.kind).toBe('function');
+      expect(sym.line).toBe(1);
+      expect(sym.signature).toBe('greet()');
+    });
+
+    it('extracts a Bash keyword-style function without parens', () => {
+      const src = 'function farewell {\n  echo bye\n}';
+      const symbols = extractSymbols(src, 'script.sh');
+      expect(symbolNames(symbols)).toContain('farewell');
+      const sym = symbols.find((s) => s.name === 'farewell')!;
+      expect(sym.kind).toBe('function');
+      expect(sym.signature).toBe('function farewell');
+    });
+
+    it('extracts a Bash keyword-style function with parens', () => {
+      const src = 'function ping() {\n  echo pong\n}';
+      const symbols = extractSymbols(src, 'script.bash');
+      expect(symbolNames(symbols)).toContain('ping');
+      const sym = symbols.find((s) => s.name === 'ping')!;
+      expect(sym.signature).toBe('function ping()');
+    });
+
+    it('extracts multiple bash functions in order', () => {
+      const src = [
+        'alpha() { echo a; }',
+        'function beta { echo b; }',
+        'function gamma() { echo g; }',
+      ].join('\n');
+      const symbols = extractSymbols(src, 'utils.sh');
+      expect(symbolNames(symbols)).toEqual(['alpha', 'beta', 'gamma']);
+    });
+
+    it('ignores nested helper functions defined inside another function', () => {
+      const src = ['outer() {', '  inner() { echo nested; }', '  inner', '}'].join('\n');
+      const symbols = extractSymbols(src, 'script.sh');
+      expect(symbolNames(symbols)).toEqual(['outer']);
+    });
+
+    it('returns empty array for a bash file with no functions', () => {
+      const src = 'echo hello\nls -la\n';
+      const symbols = extractSymbols(src, 'script.sh');
+      expect(symbols).toEqual([]);
+    });
+
+    it('sets filePath and references correctly on bash symbols', () => {
+      const src = 'foo() { echo hi; }';
+      const symbols = extractSymbols(src, 'scripts/deploy.sh');
+      const sym = symbols[0];
+      expect(sym.filePath).toBe('scripts/deploy.sh');
+      expect(sym.references).toBe(0);
+    });
+  });
+
   describe('multiple symbols', () => {
     it('extracts multiple top-level symbols in order', () => {
       const src = `
