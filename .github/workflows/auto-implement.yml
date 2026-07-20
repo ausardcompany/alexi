@@ -44,10 +44,44 @@ jobs:
       - name: Build issue matrix
         id: matrix
         run: |
+          # Small retry wrapper for `gh api` — GitHub's REST API occasionally
+          # returns transient 5xx / "No server is currently available" during
+          # incident windows. We only retry on transient signals; non-transient
+          # errors (404, auth, etc.) fail fast.
+          gh_api_retry() {
+            local endpoint="$1"
+            shift
+            local max_attempts=4
+            local attempt=1
+            local out
+            local ec
+            while :; do
+              out=$(gh api "$endpoint" "$@" 2>&1)
+              ec=$?
+              if [ "$ec" -eq 0 ]; then
+                printf '%s' "$out"
+                return 0
+              fi
+              if echo "$out" | grep -qiE 'No server is currently available|502|503|504|rate limit|timeout|timed out|connection reset|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|socket hang up'; then
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "[ERROR] gh api $endpoint failed after $attempt attempts (transient): $out" >&2
+                  return "$ec"
+                fi
+                local backoff=$((attempt * 10))
+                echo "[WARN] gh api transient error (attempt $attempt/$max_attempts) — retrying in ${backoff}s: $out" >&2
+                sleep "$backoff"
+                attempt=$((attempt + 1))
+                continue
+              fi
+              echo "[ERROR] gh api $endpoint failed (non-transient): $out" >&2
+              return "$ec"
+            done
+          }
+
           if [ -n "${{ inputs.issue_number }}" ]; then
             ISSUES="[{\"number\":${{ inputs.issue_number }}}]"
           else
-            ISSUES=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=auto-implement&state=open&sort=created&direction=asc&per_page=3" \
+            ISSUES=$(gh_api_retry "repos/$GITHUB_REPOSITORY/issues?labels=auto-implement&state=open&sort=created&direction=asc&per_page=3" \
               --jq '[.[] | {number: .number, title: .title}]')
           fi
 
@@ -60,7 +94,7 @@ jobs:
             exit 0
           fi
 
-          OPEN_PRS=$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '[.[].title]')
+          OPEN_PRS=$(gh_api_retry "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '[.[].title]')
           FILTERED="[]"
 
           while IFS= read -r row; do
