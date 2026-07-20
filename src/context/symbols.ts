@@ -6,7 +6,7 @@
  * the tree-sitter AST produced by treeSitter.ts.
  */
 
-import { parseSource, walkNode, getNameNode } from './treeSitter.js';
+import { parseSource, walkNode, getNameNode, findChildOfType } from './treeSitter.js';
 
 // ─── Public interfaces ────────────────────────────────────────────────────────
 
@@ -109,6 +109,75 @@ function extractDeclaration(
   };
 }
 
+// ─── Bash symbol extraction ───────────────────────────────────────────────────
+
+/**
+ * Returns true if the file path points to a bash script.
+ */
+function isBashFile(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  return ext === 'sh' || ext === 'bash';
+}
+
+/**
+ * Build a compact single-line signature for a bash function declaration.
+ * Produces either `name()` or `function name` / `function name()` to match
+ * the two supported syntaxes.
+ */
+function extractBashSignature(node: import('tree-sitter').SyntaxNode, name: string): string {
+  const raw = node.text ?? '';
+  const firstLine = raw.split('\n')[0].trim();
+  // Detect Bash-style `function name [()] { ... }`
+  const startsWithFunction = /^function\b/.test(firstLine);
+  // Detect POSIX `name() { ... }` style — parens present in the head
+  const headBeforeBody = firstLine.replace(/\{.*$/, '').trim();
+  const hasParens = /\(\s*\)/.test(headBeforeBody);
+  if (startsWithFunction) {
+    return hasParens ? `function ${name}()` : `function ${name}`;
+  }
+  return `${name}()`;
+}
+
+/**
+ * Extract top-level function definitions from a bash source file.
+ *
+ * Handles both POSIX-style `name() { ... }` and Bash keyword-style
+ * `function name [()] { ... }`. Only direct children of the program root
+ * are considered so that helpers defined inside other functions do not
+ * leak into the top-level symbol list.
+ */
+function extractBashSymbols(
+  root: import('tree-sitter').SyntaxNode,
+  filePath: string
+): CodeSymbol[] {
+  const symbols: CodeSymbol[] = [];
+
+  for (let i = 0; i < root.childCount; i++) {
+    const child = root.child(i);
+    if (!child || child.type !== 'function_definition') continue;
+
+    // tree-sitter-bash exposes the function name as the `name` field.
+    // Fall back to the first `word` child if the field lookup returns null
+    // (older grammar versions and defensive coding for future churn).
+    const nameNode = child.childForFieldName?.('name') ?? findChildOfType(child, 'word');
+    if (!nameNode) continue;
+
+    const name = nameNode.text;
+    if (!name) continue;
+
+    symbols.push({
+      name,
+      kind: 'function',
+      filePath,
+      line: child.startPosition.row + 1,
+      signature: extractBashSignature(child, name),
+      references: 0,
+    });
+  }
+
+  return symbols;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -120,6 +189,11 @@ function extractDeclaration(
 export function extractSymbols(source: string, filePath: string): CodeSymbol[] {
   const root = parseSource(source, filePath);
   if (!root) return [];
+
+  // Bash uses a different AST shape (no classes / interfaces / etc.)
+  if (isBashFile(filePath)) {
+    return extractBashSymbols(root, filePath);
+  }
 
   const symbols: CodeSymbol[] = [];
 

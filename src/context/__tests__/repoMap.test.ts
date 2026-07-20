@@ -104,6 +104,31 @@ describe('buildRepoMap', () => {
     const names = allSymbols.map((s) => s.name);
     expect(names).toContain('compute');
   });
+
+  it('discovers bash source files (.sh)', async () => {
+    writeFile(tmpDir, 'deploy.sh', 'deploy() { echo deploying; }\n');
+    const map = await buildRepoMap(tmpDir);
+    const keys = [...map.files.keys()];
+    expect(keys.some((k) => k.endsWith('deploy.sh'))).toBe(true);
+  });
+
+  it('extracts bash function symbols into the files map', async () => {
+    writeFile(
+      tmpDir,
+      'utils.sh',
+      [
+        'compile() { echo compile; }',
+        'function bundle { echo bundle; }',
+        'function ship() { echo ship; }',
+      ].join('\n')
+    );
+    const map = await buildRepoMap(tmpDir);
+    const allSymbols = [...map.files.values()].flat();
+    const names = allSymbols.map((s) => s.name);
+    expect(names).toContain('compile');
+    expect(names).toContain('bundle');
+    expect(names).toContain('ship');
+  });
 });
 
 // ─── generateRepoMap ──────────────────────────────────────────────────────────
@@ -173,6 +198,22 @@ describe('generateRepoMap', () => {
     writeFile(tmpDir, 'api.ts', 'export function doWork(input: string): boolean { return true; }');
     const result = await generateRepoMap(tmpDir);
     expect(result).toContain('doWork');
+  });
+
+  it('includes bash scripts with function signatures in the output', async () => {
+    writeFile(
+      tmpDir,
+      'scripts/release.sh',
+      [
+        '#!/usr/bin/env bash',
+        'tag_release() { git tag "v$1"; }',
+        'function push_tags { git push --tags; }',
+      ].join('\n')
+    );
+    const result = await generateRepoMap(tmpDir);
+    expect(result).toContain('scripts/release.sh');
+    expect(result).toContain('tag_release');
+    expect(result).toContain('push_tags');
   });
 });
 
