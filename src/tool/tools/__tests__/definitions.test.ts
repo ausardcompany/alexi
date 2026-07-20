@@ -365,6 +365,142 @@ async def fetch_data(url: str) -> dict:
     });
   });
 
+  describe('Bash definitions', () => {
+    it('should extract POSIX function syntax', async () => {
+      const filePath = path.join(tempDir, 'deploy.sh');
+      fs.writeFileSync(
+        filePath,
+        `#!/bin/bash
+deploy_app() {
+  echo "Deploying..."
+}
+
+cleanup() {
+  rm -rf tmp
+}`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('bash');
+      expect(result.data?.definitions).toHaveLength(2);
+
+      const deploy = result.data?.definitions.find((d) => d.name === 'deploy_app');
+      expect(deploy).toMatchObject({
+        name: 'deploy_app',
+        type: 'function',
+        line: 2,
+        signature: 'deploy_app()',
+        exported: true,
+      });
+
+      const cleanup = result.data?.definitions.find((d) => d.name === 'cleanup');
+      expect(cleanup).toMatchObject({
+        name: 'cleanup',
+        type: 'function',
+        line: 6,
+        signature: 'cleanup()',
+      });
+    });
+
+    it('should extract Bash keyword function syntax', async () => {
+      const filePath = path.join(tempDir, 'utils.bash');
+      fs.writeFileSync(
+        filePath,
+        `#!/bin/bash
+function build_project {
+  npm run build
+}
+
+function run_tests {
+  npm test
+}`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('bash');
+      expect(result.data?.definitions).toHaveLength(2);
+
+      const build = result.data?.definitions.find((d) => d.name === 'build_project');
+      expect(build).toMatchObject({
+        name: 'build_project',
+        type: 'function',
+        line: 2,
+        signature: 'function build_project',
+        exported: true,
+      });
+
+      const tests = result.data?.definitions.find((d) => d.name === 'run_tests');
+      expect(tests).toMatchObject({
+        name: 'run_tests',
+        type: 'function',
+        line: 6,
+      });
+    });
+
+    it('should deduplicate functions with both syntaxes', async () => {
+      const filePath = path.join(tempDir, 'mixed.sh');
+      fs.writeFileSync(
+        filePath,
+        `#!/bin/bash
+function my_func() {
+  echo "hi"
+}`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.definitions).toHaveLength(1);
+      expect(result.data?.definitions[0]).toMatchObject({
+        name: 'my_func',
+        type: 'function',
+      });
+    });
+
+    it('should extract mixed POSIX and Bash keyword functions', async () => {
+      const filePath = path.join(tempDir, 'mixed2.sh');
+      fs.writeFileSync(
+        filePath,
+        `#!/bin/bash
+posix_fn() {
+  echo "posix"
+}
+
+function keyword_fn {
+  echo "keyword"
+}`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.definitions).toHaveLength(2);
+      const names = result.data?.definitions.map((d) => d.name);
+      expect(names).toContain('posix_fn');
+      expect(names).toContain('keyword_fn');
+    });
+
+    it('should respect type filter for bash', async () => {
+      const filePath = path.join(tempDir, 'filter.sh');
+      fs.writeFileSync(
+        filePath,
+        `#!/bin/bash
+my_fn() {
+  echo "hi"
+}`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath, types: ['class'] }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.definitions).toHaveLength(0);
+    });
+  });
+
   describe('Export detection', () => {
     it('should correctly identify exported vs non-exported definitions', async () => {
       const filePath = path.join(tempDir, 'test.ts');
