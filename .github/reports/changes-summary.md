@@ -1,22 +1,18 @@
 # Changes Summary
 
-## Date: 2026-07-20
+## Files Modified
+- `src/core/session.ts`
+- `src/core/pty.node.ts`
 
-### Files Modified
-- `src/tool/shell-heredoc.ts`
-- `src/tool/shell.ts`
+## Summary of Changes Made
 
-### Summary of Changes
-1. **src/tool/shell-heredoc.ts**:
-   - Created new file to integrate heredoc handling in the shell tool.
-   - Added function `heredocs` to detect heredoc syntax in bash shell scripts.
+### Session Revert Schema Update
+- **File**: `src/core/session.ts`
+- **Change**: Added a `workspace` field to the `SessionRevert` schema to handle workspace restoration states, aligning with upstream changes.
 
-2. **src/tool/shell.ts**:
-   - Updated shell tool to utilize heredoc metadata.
-   - Modified the `ask` function to include heredoc metadata in command execution context.
-   - Ensured that heredoc information is correctly processed and incorporated into shell command metadata.
+### PTY Node Spawn Update
+- **File**: `src/core/pty.node.ts`
+- **Change**: Integrated `useConptyDll` option for Windows platform compatibility when spawning processes.
 
-### Issues Encountered
-- The specified files did not exist and were created as part of the update process.
-
----
+## Issues Encountered
+- Both `session.ts` and `pty.node.ts` did not exist initially, hence they were created anew.
