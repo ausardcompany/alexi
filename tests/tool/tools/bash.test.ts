@@ -38,6 +38,44 @@ async function flushPromises(): Promise<void> {
   }
 }
 
+describe.skipIf(isWindows)('bash tool - shell type reporting', () => {
+  const context: ToolContext = {
+    workdir: process.cwd(),
+    sessionId: 'shell-type-test-session',
+  };
+
+  const originalShell = process.env.SHELL;
+
+  afterEach(() => {
+    if (originalShell === undefined) {
+      delete process.env.SHELL;
+    } else {
+      process.env.SHELL = originalShell;
+    }
+  });
+
+  it('reports the detected shell type in the result', async () => {
+    process.env.SHELL = '/bin/bash';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.success).toBe(true);
+    expect(result.data?.shellType).toBe('bash');
+  });
+
+  it('detects zsh when SHELL points at zsh', async () => {
+    process.env.SHELL = '/bin/zsh';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.success).toBe(true);
+    expect(result.data?.shellType).toBe('zsh');
+  });
+
+  it('falls back to unknown for unrecognised shells', async () => {
+    process.env.SHELL = '/opt/weird/mystery';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.success).toBe(true);
+    expect(result.data?.shellType).toBe('unknown');
+  });
+});
+
 describe('bash-detach helpers', () => {
   afterEach(() => {
     _resetDetachStateForTests();

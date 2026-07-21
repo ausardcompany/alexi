@@ -9,6 +9,7 @@ import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
+import * as ShellId from './shell/id.js';
 import { auditCommand } from '../../permission/next.js';
 import {
   BashDetachAvailable,
@@ -44,6 +45,13 @@ interface BashResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  /**
+   * The detected shell type used to execute the command (e.g. `bash`,
+   * `zsh`, `fish`, `powershell`, `cmd`). Populated from `process.env.SHELL`
+   * on POSIX and `process.env.COMSPEC` on Windows. Useful for debugging
+   * shell-specific syntax errors and for multi-platform environments.
+   */
+  shellType?: string;
   /**
    * True when the command was still running at result time because the
    * user picked "Proceed While Running". `exitCode` is `-1` in that case
@@ -162,6 +170,10 @@ When independent reads, searches, or edits are also needed, emit those tool call
     }
 
     const timeout = params.timeout ?? DEFAULT_TIMEOUT;
+
+    // Detect shell type so the result reports which shell executed the
+    // command (helpful for debugging shell-specific syntax across platforms).
+    const shellInfo = await ShellId.detect();
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -283,6 +295,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
               stderr: stderrSnap,
               exitCode: -1,
               timedOut: false,
+              shellType: shellInfo.type,
               detached: true,
               detachId,
             };
@@ -351,6 +364,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
           stderr: truncatedStderr,
           exitCode: code ?? -1,
           timedOut,
+          shellType: shellInfo.type,
         };
 
         assertNoCommandEcho(result, params.command);
@@ -419,6 +433,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
           stderr,
           exitCode: -1,
           timedOut: false,
+          shellType: shellInfo.type,
         };
 
         assertNoCommandEcho(errorResult, params.command);
