@@ -354,6 +354,33 @@ callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
 new providers, tools, or hooks that touch external I/O. See
 `docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
 
+### Environment-driven detection (snapshot-and-restore)
+
+Some detection modules read process-level environment variables directly and
+cannot practically be refactored to inject the whole `process.env` — for
+example, `src/tool/tools/shell/id.ts` reads `process.env.SHELL` and
+`process.env.COMSPEC` to classify the active shell. For tests against such
+modules, snapshot the variable at `describe` scope, mutate it inside each
+`it`, and restore it in `afterEach` (deleting it when previously unset):
+
+```typescript
+const originalShell = process.env.SHELL;
+
+afterEach(() => {
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
+  }
+});
+```
+
+Gate the suite with `describe.skipIf(isWindows)` (or the equivalent
+`describe.skipIf(isPosix)`) when the variable being mutated is
+platform-specific. The bash-tool shell-type suite in
+`tests/tool/tools/bash.test.ts:41` is the canonical worked example; see
+`docs/TESTING.md#testing-bash-tool-shell-type-reporting`.
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:
