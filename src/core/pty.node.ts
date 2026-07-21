@@ -8,12 +8,12 @@ export interface Proc {
 export function spawn(file: string, args: string[], opts: Opts): Proc {
   const proc = pty.spawn(file, args, {
     ...opts,
-    ...(process.platform === "win32" ? { useConptyDll: true } : {}),
+    ...(process.platform === 'win32' ? { useConptyDll: true } : {}),
   });
   return {
     pid: proc.pid,
     onData(listener) {
       proc.on('data', listener);
-    }
+    },
   };
 }
