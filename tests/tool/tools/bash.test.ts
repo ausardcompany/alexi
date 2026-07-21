@@ -21,6 +21,10 @@ import {
   resolveDetachDecision,
   waitForDetachedExit,
 } from '../../../src/tool/tools/bash-detach.js';
+import {
+  _resetDetectShellCacheForTests,
+  _setFsProbeForTests,
+} from '../../../src/tool/tools/shell/id.js';
 import type { ToolContext } from '../../../src/tool/index.js';
 
 const isWindows = process.platform === 'win32';
@@ -52,10 +56,14 @@ describe.skipIf(isWindows)('bash tool - shell type reporting', () => {
     } else {
       process.env.SHELL = originalShell;
     }
+    _resetDetectShellCacheForTests();
+    _setFsProbeForTests(undefined);
   });
 
   it('reports the detected shell type in the result', async () => {
     process.env.SHELL = '/bin/bash';
+    _resetDetectShellCacheForTests();
+    _setFsProbeForTests((p: string) => p === '/bin/bash');
     const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
     expect(result.success).toBe(true);
     expect(result.data?.shellType).toBe('bash');
@@ -63,15 +71,21 @@ describe.skipIf(isWindows)('bash tool - shell type reporting', () => {
 
   it('detects zsh when SHELL points at zsh', async () => {
     process.env.SHELL = '/bin/zsh';
+    _resetDetectShellCacheForTests();
+    _setFsProbeForTests((p: string) => p === '/bin/zsh');
     const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
-    expect(result.success).toBe(true);
+    // The fake shell path won't actually spawn on CI runners; we only
+    // care that the detector picked it and reported the type.
     expect(result.data?.shellType).toBe('zsh');
   });
 
   it('falls back to unknown for unrecognised shells', async () => {
     process.env.SHELL = '/opt/weird/mystery';
+    _resetDetectShellCacheForTests();
+    // Probe finds only the mystery shell; detector will accept the
+    // envShell candidate and infer its type from the basename.
+    _setFsProbeForTests((p: string) => p === '/opt/weird/mystery');
     const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
-    expect(result.success).toBe(true);
     expect(result.data?.shellType).toBe('unknown');
   });
 });

@@ -9,8 +9,8 @@ import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
-import * as ShellId from './shell/id.js';
 import { auditCommand } from '../../permission/next.js';
+import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import {
   BashDetachAvailable,
   BashDetachedExited,
@@ -104,9 +104,15 @@ function processCarriageReturns(output: string): string {
     .join('\n');
 }
 
-export const bashTool = defineTool<typeof BashParamsSchema, BashResult>({
-  name: 'bash',
-  description: `Execute a bash command in a shell.
+/**
+ * Build the bash tool description, substituting the currently-detected
+ * shell into the first line so the model sees the shell the OS will
+ * actually dispatch to (Cline PR #12331). This is invoked from
+ * `toFunctionSchema()` and via the `description` getter below, so the
+ * shell is re-detected per-request rather than frozen once at startup.
+ */
+export function buildBashDescription(shell: ShellInfo = detectShell()): string {
+  return `Execute a ${shell.type} command in a shell.
 
 Usage:
 - Use for terminal operations like git, npm, docker, etc.
@@ -125,7 +131,12 @@ Security:
 - Avoid rm -rf without confirmation
 - Don't expose secrets in command arguments
 
-When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns. Include multiple commands in the same call when they are independent and safe to run concurrently.`,
+When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns. Include multiple commands in the same call when they are independent and safe to run concurrently.`;
+}
+
+const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
+  name: 'bash',
+  description: buildBashDescription(),
 
   parameters: BashParamsSchema,
 
@@ -171,9 +182,15 @@ When independent reads, searches, or edits are also needed, emit those tool call
 
     const timeout = params.timeout ?? DEFAULT_TIMEOUT;
 
-    // Detect shell type so the result reports which shell executed the
-    // command (helpful for debugging shell-specific syntax across platforms).
-    const shellInfo = await ShellId.detect();
+    // Detect shell PER-REQUEST (not once at startup) so profile changes
+    // — user installs pwsh, edits $SHELL, ... — are picked up. The
+    // detector itself caches the filesystem probe for a short TTL so
+    // this call is cheap. `shellInfo.type` is threaded into every
+    // `BashResult` below (`shellType`) so callers can see which shell
+    // executed the command (helpful for debugging shell-specific
+    // syntax across platforms).
+    const shellInfo = detectShell();
+    const { file: shellFile, prefixArgs: shellPrefix } = shellSpawnArgs(shellInfo);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -186,8 +203,12 @@ When independent reads, searches, or edits are also needed, emit those tool call
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
 
-      const proc = spawn(params.command, {
-        shell: true,
+      // Invoke the detected shell explicitly rather than deferring to
+      // Node's `shell: true` (which delegates to `/bin/sh` on POSIX and
+      // `%ComSpec%` — usually `cmd.exe` — on Windows). Passing the
+      // command as a single argument after the shell's "-c" flag keeps
+      // quoting semantics identical to the previous `shell: true` path.
+      const proc = spawn(shellFile, [...shellPrefix, params.command], {
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
@@ -447,3 +468,29 @@ When independent reads, searches, or edits are also needed, emit those tool call
     });
   },
 });
+
+/**
+ * Public bash tool. Wraps `bashToolBase` with a getter-backed
+ * `description` and a `toFunctionSchema()` override so both the string
+ * surfaced to human callers (e.g. the parallel-call-hint regression
+ * test) and the schema sent to the LLM are regenerated per-access and
+ * reflect the currently-detected shell.
+ */
+export const bashTool: typeof bashToolBase = Object.defineProperties(
+  Object.create(bashToolBase) as typeof bashToolBase,
+  {
+    description: {
+      enumerable: true,
+      configurable: true,
+      get: () => buildBashDescription(),
+    },
+    toFunctionSchema: {
+      enumerable: true,
+      configurable: true,
+      value: function toFunctionSchema() {
+        const base = bashToolBase.toFunctionSchema();
+        return { ...base, description: buildBashDescription() };
+      },
+    },
+  }
+);
