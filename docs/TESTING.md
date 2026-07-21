@@ -259,10 +259,89 @@ describe('Write Tool', () => {
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
 | `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
-| `bash` | `tests/tool/tools/bash.test.ts` | 10+ cases |
+| `bash` | `tests/tool/tools/bash.test.ts` | 13+ cases (includes shell-type reporting) |
 | `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
 | `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
 | `skill` (description guard) | `src/tool/skill.test.ts` | 1 case |
+
+### Testing Bash Tool Shell-Type Reporting
+
+The `bash` tool records the detected shell type on every result via
+`ShellInfo.type` produced by `src/tool/tools/shell/id.ts`. Detection reads
+`process.env.SHELL` on POSIX and `process.env.COMSPEC` on Windows, mapping the
+resolved binary name to one of `'bash' | 'zsh' | 'fish' | 'powershell' | 'cmd' | 'unknown'`.
+The result field is optional (`shellType?: string` on `BashResult` in
+`src/tool/tools/bash.ts:54`) and is emitted from the success path, the
+detach-timeout path, and the spawn-error path so debuggers always know which
+shell interpreted the command.
+
+The suite in `tests/tool/tools/bash.test.ts:41` is gated with
+`describe.skipIf(isWindows)` because `process.env.SHELL` is a POSIX convention;
+Windows detection is exercised indirectly through the shared `inferType`
+matcher. Each test mutates `process.env.SHELL`, executes a trivial `echo hi`
+command through `bashTool.executeUnsafe`, and asserts on
+`result.data?.shellType`. The `afterEach` hook restores the original `SHELL`
+value (deleting it when it was previously unset) so tests remain parallel-safe
+and do not leak process state.
+
+```typescript
+import { describe, it, expect, afterEach } from 'vitest';
+import { bashTool } from '../../../src/tool/tools/bash.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+const isWindows = process.platform === 'win32';
+
+describe.skipIf(isWindows)('bash tool - shell type reporting', () => {
+  const context: ToolContext = {
+    workdir: process.cwd(),
+    sessionId: 'shell-type-test-session',
+  };
+
+  const originalShell = process.env.SHELL;
+
+  afterEach(() => {
+    if (originalShell === undefined) {
+      delete process.env.SHELL;
+    } else {
+      process.env.SHELL = originalShell;
+    }
+  });
+
+  it('reports the detected shell type in the result', async () => {
+    process.env.SHELL = '/bin/bash';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.success).toBe(true);
+    expect(result.data?.shellType).toBe('bash');
+  });
+
+  it('detects zsh when SHELL points at zsh', async () => {
+    process.env.SHELL = '/bin/zsh';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.data?.shellType).toBe('zsh');
+  });
+
+  it('falls back to unknown for unrecognised shells', async () => {
+    process.env.SHELL = '/opt/weird/mystery';
+    const result = await bashTool.executeUnsafe({ command: 'echo hi' }, context);
+    expect(result.data?.shellType).toBe('unknown');
+  });
+});
+```
+
+Key patterns:
+
+1. **Use `executeUnsafe`** rather than `execute` — the shell-type field is
+   populated regardless of permission gating, and `executeUnsafe` bypasses the
+   permission audit so tests do not need to stub the permission layer.
+2. **Snapshot `process.env.SHELL` in the closure**, not in `beforeEach`. The
+   value is captured once at `describe` scope so a test that reassigns it
+   mid-run still sees the original in `afterEach`.
+3. **Assert on `result.data?.shellType`, not `result.data.shellType`**. The
+   field is declared optional on `BashResult` and TypeScript will require the
+   optional-chain form under strict mode.
+4. **Do not assert the exact resolved path**. The `path` field on `ShellInfo`
+   reflects the raw environment value and is stable across platforms, but the
+   `type` classification is the invariant the tool guarantees to callers.
 
 ### Skill Tool Description Guard
 

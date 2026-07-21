@@ -46,6 +46,13 @@ interface BashResult {
   exitCode: number;
   timedOut: boolean;
   /**
+   * The detected shell type used to execute the command (e.g. `bash`,
+   * `zsh`, `fish`, `powershell`, `cmd`). Populated from `process.env.SHELL`
+   * on POSIX and `process.env.COMSPEC` on Windows. Useful for debugging
+   * shell-specific syntax errors and for multi-platform environments.
+   */
+  shellType?: string;
+  /**
    * True when the command was still running at result time because the
    * user picked "Proceed While Running". `exitCode` is `-1` in that case
    * and the output snapshots are capped at `DETACH_OUTPUT_LINE_CAP` lines.
@@ -178,7 +185,10 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
     // Detect shell PER-REQUEST (not once at startup) so profile changes
     // — user installs pwsh, edits $SHELL, ... — are picked up. The
     // detector itself caches the filesystem probe for a short TTL so
-    // this call is cheap.
+    // this call is cheap. `shellInfo.type` is threaded into every
+    // `BashResult` below (`shellType`) so callers can see which shell
+    // executed the command (helpful for debugging shell-specific
+    // syntax across platforms).
     const shellInfo = detectShell();
     const { file: shellFile, prefixArgs: shellPrefix } = shellSpawnArgs(shellInfo);
 
@@ -306,6 +316,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
               stderr: stderrSnap,
               exitCode: -1,
               timedOut: false,
+              shellType: shellInfo.type,
               detached: true,
               detachId,
             };
@@ -374,6 +385,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
           stderr: truncatedStderr,
           exitCode: code ?? -1,
           timedOut,
+          shellType: shellInfo.type,
         };
 
         assertNoCommandEcho(result, params.command);
@@ -442,6 +454,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
           stderr,
           exitCode: -1,
           timedOut: false,
+          shellType: shellInfo.type,
         };
 
         assertNoCommandEcho(errorResult, params.command);
