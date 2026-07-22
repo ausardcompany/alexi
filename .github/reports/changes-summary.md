@@ -1,18 +1,21 @@
 # Changes Summary
 
+**Date**: 2026-07-22
+
 ## Files Modified
-- `src/core/session.ts`
-- `src/core/pty.node.ts`
 
-## Summary of Changes Made
+1. `src/core/package.json`
+   - Updated `@ai-sdk/xai` dependency to version `3.0.102`.
 
-### Session Revert Schema Update
-- **File**: `src/core/session.ts`
-- **Change**: Added a `workspace` field to the `SessionRevert` schema to handle workspace restoration states, aligning with upstream changes.
+2. `src/core/config/provider.ts`
+   - Modified `chunkTimeout` configuration to allow disabling the timeout by setting it to `false`.
 
-### PTY Node Spawn Update
-- **File**: `src/core/pty.node.ts`
-- **Change**: Integrated `useConptyDll` option for Windows platform compatibility when spawning processes.
+3. `src/permission/PermissionDiffView.kt`
+   - Replaced `FlowLayout` with `Stack.horizontal` for improved UI consistency.
+
+4. `src/permission/PermissionView.kt`
+   - Added imports for `PermissionRuleCandidate` and `PermissionRuleDecision` to enhance usability.
 
 ## Issues Encountered
-- Both `session.ts` and `pty.node.ts` did not exist initially, hence they were created anew.
+
+- Could not find the specified line in `src/tool/ShellToolView.kt` to change the markdown language tag from `shell-command` to `bash`. Ensure the correct file path and content before attempting the edit.
