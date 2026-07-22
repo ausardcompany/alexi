@@ -1,6 +1,6 @@
 {
   "name": "alexi",
-  "version": "1.18.8",
+  "version": "1.18.9",
   "type": "module",
   "description": "Alexi - Intelligent LLM orchestrator with multi-provider support and auto-routing",
   "main": "dist/index.js",
