@@ -562,6 +562,53 @@ The orchestrator's settle behaviour that depends on these rules is in
 `src/core/streamingOrchestrator.ts` (around the for-await loop), with
 the equivalent non-stream path in `src/core/agenticChat.ts`.
 
+## Streaming Abort Semantics
+
+User-initiated cancellation of an in-flight streaming turn (Ctrl+C in the
+CLI, `abort()` in the TUI's `useStreamChat` hook) travels through the
+pipeline as follows:
+
+1. The caller supplies an `AbortSignal` in `StreamingOptions.signal`
+   (`src/core/streamingOrchestrator.ts` line 27).
+2. `streamChat` (line 174-181) merges the signal into the
+   `CompletionOptions` bag it hands to
+   `provider.streamComplete(messages, providerOpts)`.
+3. `SapOrchestrationProvider.streamComplete`
+   (`src/providers/sapOrchestration.ts` line 876-940) forwards the signal
+   to the SDK as the *second* argument of `client.stream(request, signal,
+   options, requestConfig)` (line 887-892).
+4. The SAP SDK's `OrchestrationClient.stream()` creates its own
+   `AbortController`, registers `signal.addEventListener('abort', () =>
+   controller.abort())`, and hands the controller to the underlying
+   `SseStream`. On abort, the SDK aborts the in-flight HTTP request and
+   the `SseStream` `finally` block calls `controller.abort()` for
+   defense-in-depth (see `node_modules/@sap-ai-sdk/core/dist/stream/`).
+
+**Abort contract**: callers cancelling a stream MUST fire the
+`AbortSignal`. Merely `break`-ing out of the outer `for await` loop is
+*not* sufficient when the server has stopped sending SSE frames but has
+not closed the connection: the underlying `for await (const chunk of
+response.stream)` inside the provider is parked on
+`await response.data.next()`, and Node's async generator semantics
+cannot preempt a pending `await` via `return()` (this is the failure
+mode captured by Cline PR #12249). In that state, aborting the signal
+causes the HTTP request to reject, unwinding both the SDK's finally
+block and the provider generator.
+
+**Trap to avoid**: never write consumer code that relies on
+`generator.return()` alone (or a bare `for await ... break`) to unstick
+a stalled stream. Always couple it with `signal.abort()`. The tests in
+`tests/providers/sapOrchestration-streamAbort.test.ts` document this
+contract, including a minimal reproducer of the preemption trap.
+
+**Current state (2026-07)**: All in-tree consumers of `streamChat`
+(`useStreamChat`, `interactive.ts`, `server/index.ts`) already abort via
+signal on cancellation, so no watchdog wrapper is needed today. If a
+future consumer is added that cannot obtain an `AbortSignal` at the
+edge, wrap `provider.streamComplete` in a hand-rolled AsyncIterator
+whose `return()` fires the abort synchronously (the Cline #12249
+pattern).
+
 ## Performance Considerations
 
 ### Token Optimization

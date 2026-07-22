@@ -882,7 +882,16 @@ export class SapOrchestrationProvider {
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
 
-    // Use SAP SDK streaming with AbortSignal support
+    // Use SAP SDK streaming with AbortSignal support.
+    //
+    // The signal is passed as the SECOND positional argument to
+    // `client.stream(request, signal, options, requestConfig)`. The SDK
+    // wires it to an internal AbortController that aborts the underlying
+    // HTTP request when the caller signals cancellation. Callers MUST fire
+    // this signal to unstick a stalled response -- `for await ... break`
+    // alone cannot preempt a pending SSE chunk `await` (Cline PR #12249).
+    // See "Streaming Abort Semantics" in docs/PROVIDERS.md and the test
+    // suite tests/providers/sapOrchestration-streamAbort.test.ts.
     const requestConfig = options?.headers ? { headers: options.headers } : undefined;
     const response = await client.stream(
       { messages: orchestrationMessages },
