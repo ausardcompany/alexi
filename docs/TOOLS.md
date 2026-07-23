@@ -6,6 +6,92 @@ For the full catalogue of tools and their parameters see
 [`src/tool/tools/definitions.ts`](../src/tool/tools/definitions.ts) and the
 individual implementations under `src/tool/tools/`.
 
+## Definitions Tool
+
+The `definitions` tool extracts code definitions (classes, functions,
+interfaces, types, constants, enums, methods) from a single source file. It
+supports TypeScript, JavaScript, Python, and Bash out of the box and is
+implemented in
+[`src/tool/tools/definitions.ts`](../src/tool/tools/definitions.ts).
+
+### Two extraction modes
+
+Alexi supports two symbol extraction strategies. Which one runs depends on
+whether the optional tree-sitter grammars (`tree-sitter`,
+`tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-bash`) are
+installed in the current `node_modules`.
+
+- **Regex-based extraction (always available).** The default path. A curated
+  set of regular expressions matches top-level and class-scoped declarations
+  in the source text. Zero native dependencies, zero build toolchain, works
+  on every platform. Implemented directly inside
+  [`src/tool/tools/definitions.ts`](../src/tool/tools/definitions.ts).
+- **AST-based extraction (requires tree-sitter grammars).** The upgraded
+  path used by the repo-map and code-context features under
+  [`src/context/`](../src/context/). Each source file is parsed into a real
+  syntax tree via `tree-sitter` and the corresponding grammar package, then
+  symbols are walked with proper scoping rules. Implemented in
+  [`src/context/treeSitter.ts`](../src/context/treeSitter.ts) and
+  [`src/context/symbols.ts`](../src/context/symbols.ts).
+
+When the tree-sitter grammars are missing, the tool automatically falls back
+to the regex path — there is no configuration flag, no error message to the
+user, and no need to gate calls in a client.
+
+### Side-by-side comparison
+
+| Aspect                       | Regex-based (default)                    | AST-based (tree-sitter)                        |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------- |
+| Requires native deps         | No                                       | Yes (`tree-sitter*` packages, ~67 MB)          |
+| Requires C++ toolchain       | No                                       | Yes on platforms without prebuilt binaries     |
+| Startup cost                 | Negligible                               | Small (lazy per-language parser initialisation) |
+| Handles nested classes       | Partial (class bodies scanned linearly)  | Full (real scope tree)                         |
+| Handles complex generics     | Best-effort                              | Accurate                                       |
+| Handles computed names       | No                                       | Yes                                            |
+| Handles TSX/JSX              | Yes (regex covers `.tsx`/`.jsx`)         | Yes (dedicated TSX parser)                     |
+| Bash function extraction     | POSIX + `function` keyword               | AST-driven, matches Aider's tag query          |
+| Python support               | Yes (class/def)                          | Not currently wired                            |
+| Failure mode when unsupported| Returns `Unsupported file type` error    | Falls back to regex path                       |
+
+For most day-to-day usage the regex path is sufficient and its output is
+identical to the AST path on well-formatted, idiomatic source files. Prefer
+AST-based extraction when working with large or unusually structured
+codebases where symbol names must be resolved exactly (for example, repo-map
+generation for a monorepo with heavy use of decorators, mixins, or
+metaprogramming).
+
+### Installing the grammars
+
+To enable AST-based extraction, install the optional grammar packages:
+
+```bash
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+```
+
+See the [Optional Dependencies](../README.md#optional-dependencies) section of
+the README for the rationale, install size (~67 MB), and platform caveats.
+
+### Parameters
+
+```ts
+{
+  filePath: string;                // absolute path or path relative to workdir
+  types?: Array<
+    | 'class'
+    | 'function'
+    | 'interface'
+    | 'type'
+    | 'const'
+    | 'enum'
+    | 'method'
+  >;                               // optional filter; defaults to all
+}
+```
+
+The tool returns `{ filePath, definitions, language }` where each definition
+carries `name`, `type`, `line`, `signature`, and `exported`. Results are
+sorted by line number.
+
 ## Subagent Nesting Depth
 
 Alexi's `task` tool spawns a subagent to handle a self-contained piece of

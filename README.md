@@ -53,6 +53,58 @@ npm install
 npm run build
 ```
 
+## Optional Dependencies
+
+Alexi ships with a small set of native tree-sitter grammars that power **AST-based
+symbol extraction** for the code-context and definitions tooling:
+
+- `tree-sitter`
+- `tree-sitter-typescript`
+- `tree-sitter-javascript`
+- `tree-sitter-bash`
+
+These grammars are **optional**. The `definitions` tool ships with a built-in
+regex-based extractor for TypeScript, JavaScript, Python, and Bash and will
+continue to work when the grammars are not installed. AST-based extraction is
+strictly an upgrade path (see [`docs/TOOLS.md`](docs/TOOLS.md#definitions-tool)
+for the comparison).
+
+### When to install the grammars
+
+Install the grammar packages if any of the following applies:
+
+- You want the most accurate symbol extraction for large TypeScript/JavaScript
+  codebases (nested classes, complex generics, computed method names).
+- You use the repo-map / context features under `src/context/` (these depend on
+  the AST parsers today).
+- You are contributing to Alexi and need the full test suite (the tree-sitter
+  tests are skipped when the grammars are missing).
+
+### When you can skip them
+
+Skip the grammars if you only need:
+
+- Chat, routing, and session management.
+- The `definitions` tool's regex-based extraction (works out of the box).
+- A slimmer install. The four native packages add roughly **~67 MB** to
+  `node_modules` and require a C++ toolchain on non-prebuilt platforms.
+
+### Installation
+
+```bash
+# Install grammars alongside Alexi
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+```
+
+When the grammars are absent, tree-sitter-backed features fall back to the
+regex path automatically — no configuration required.
+
+> **Note:** In the current release these packages are still declared as
+> `dependencies` in `package.json` and are therefore installed by default.
+> The move to `optionalDependencies` / `peerDependencies` is tracked in a
+> follow-up issue; the fallback path described above is already implemented
+> in the `definitions` tool and safe to rely on going forward.
+
 ## Quick Start
 
 ### 1. Install Dependencies
