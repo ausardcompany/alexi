@@ -49,6 +49,33 @@ Please be respectful and professional in all interactions. We welcome contributi
    npm test
    ```
 
+### Optional: tree-sitter grammars
+
+Alexi's AST-based symbol extraction (used by the repo-map / context features
+and the AST path of the `definitions` tool) relies on native tree-sitter
+grammars. These are **optional** — the tool falls back to regex-based
+extraction when they are missing — but contributors are encouraged to install
+them locally so the full test suite runs:
+
+```bash
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+```
+
+Notes for contributors:
+
+- CI always has the grammars installed — they are currently declared as
+  regular `dependencies` in `package.json` (with a planned migration to
+  optional dependencies tracked in a separate issue), so
+  `npm run test:coverage` runs the full matrix on every PR. Skipping them
+  locally is fine for docs-only or non-context changes, but any PR touching
+  `src/context/**`, `src/tool/tools/definitions.ts`, or their tests should
+  be validated against a local install.
+- The grammars require a C++ toolchain on platforms that don't ship prebuilt
+  binaries. If `npm install` fails on your machine, either install a
+  toolchain or omit the grammars locally and rely on CI.
+- See [`docs/TOOLS.md`](docs/TOOLS.md#definitions-tool) for the difference
+  between AST-based and regex-based extraction.
+
 ## Development Workflow
 
 ### Running in Development Mode

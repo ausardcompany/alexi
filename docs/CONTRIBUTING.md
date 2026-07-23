@@ -48,6 +48,26 @@ This document provides guidelines and instructions for contributing to the proje
    node dist/cli/program.js --help
    ```
 
+### Optional: tree-sitter grammars
+
+The AST-based symbol extraction path used by `src/context/**` and the AST
+mode of the `definitions` tool relies on native tree-sitter grammars. These
+grammars are optional; the `definitions` tool falls back to a built-in
+regex-based extractor when they are missing. Contributors are encouraged to
+install them so the tree-sitter test files run locally:
+
+```bash
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+```
+
+CI always has the grammars installed (they are currently declared as regular
+`dependencies` in `package.json`, with a planned migration to optional
+dependencies tracked in a follow-up issue), so `npm run test:coverage`
+exercises both paths on every PR. See
+[`docs/TOOLS.md`](TOOLS.md#definitions-tool) for the AST-vs-regex comparison
+and the [Optional Dependencies](../README.md#optional-dependencies) section
+of the README for install size and platform caveats.
+
 ### Environment Configuration
 
 Create a `.env` file (never commit this file) with:
