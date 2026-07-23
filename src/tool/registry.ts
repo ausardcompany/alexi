@@ -34,6 +34,13 @@ export class ToolResolutionError extends Error {
  * Supports both static and prompt-based dynamic tool resolution
  */
 export class EnhancedToolRegistry {
+    registerNotifyUser(): void {
+        this.register({
+            name: 'notifyUser',
+            execute: notifyUser,
+        });
+    }
+
   private tools: Map<string, Tool<any, any>> = new Map();
   private promptResolvers: Map<string, PromptToolResolver> = new Map();
 
