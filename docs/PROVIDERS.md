@@ -15,6 +15,8 @@ This document describes the provider system in Alexi, focusing on the SAP AI Cor
 
 Alexi uses a provider abstraction layer to communicate with LLM backends. Unlike multi-provider AI orchestrators, **Alexi exclusively uses SAP AI Core Orchestration API** as its LLM backend. This design decision ensures enterprise-grade security, compliance, and integration with SAP ecosystems.
 
+> **On `src/providers/openai.ts` (2026-07-24 sync noise, not a provider):** the 2026-07-24 upstream sync (commit `530351f4`) emitted a 3-line stub at `src/providers/openai.ts` that imports from a nonexistent `packages/core/src/plugin/provider/openai` path. This file is **not** a provider — Alexi has no OpenAI-direct backend, no BYOK surface, and no OpenAI-compatible ingress. OpenAI-family models (`gpt-4.1`, `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`) are routed via SAP AI Core Orchestration through `src/providers/sapOrchestration.ts` as documented in the [Supported Models](#supported-models) section. The `SAP_PROXY_BASE_URL` / `SAP_PROXY_API_KEY` variables route requests to a **local proxy fronting SAP AI Core**, not to `api.openai.com`. The orphan stub is pending autohealing deletion; see the CHANGELOG `### Removed` entry for 2026-07-24.
+
 ### Provider Architecture
 
 ```mermaid
