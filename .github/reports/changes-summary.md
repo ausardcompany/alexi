@@ -1,21 +1,38 @@
 # Changes Summary
 
-**Date**: 2026-07-22
-
 ## Files Modified
+- `src/agent/index.ts`
+- `src/tool/notify-user.ts`
+- `src/core/migration.ts`
+- `src/core/session.ts`
+- `src/providers/openai.ts`
+- `src/core/project.ts`
 
-1. `src/core/package.json`
-   - Updated `@ai-sdk/xai` dependency to version `3.0.102`.
+## Summary of Changes
 
-2. `src/core/config/provider.ts`
-   - Modified `chunkTimeout` configuration to allow disabling the timeout by setting it to `false`.
+### 1. Refactor Agent System
+- **File**: `src/agent/index.ts`
+- **Change**: Refactored to incorporate new agent patterns from upstream.
 
-3. `src/permission/PermissionDiffView.kt`
-   - Replaced `FlowLayout` with `Stack.horizontal` for improved UI consistency.
+### 2. Update Tool System - Notify User
+- **File**: `src/tool/notify-user.ts`
+- **Change**: Added push notification functionality using `notifyUser`.
 
-4. `src/permission/PermissionView.kt`
-   - Added imports for `PermissionRuleCandidate` and `PermissionRuleDecision` to enhance usability.
+### 3. Core System Migration Updates
+- **File**: `src/core/migration.ts`
+- **Change**: Integrated secure migration scripts for enhanced security.
+
+### 4. Session Path Addition
+- **File**: `src/core/session.ts`
+- **Change**: Implemented session path tracking for better session management.
+
+### 5. Integration with OpenAI
+- **File**: `src/providers/openai.ts`
+- **Change**: Updated OpenAI integration to ensure compatibility.
+
+### 6. Enhance Project Directory Management
+- **File**: `src/core/project.ts`
+- **Change**: Enhanced project directory management with new strategies.
 
 ## Issues Encountered
-
-- Could not find the specified line in `src/tool/ShellToolView.kt` to change the markdown language tag from `shell-command` to `bash`. Ensure the correct file path and content before attempting the edit.
+- No issues encountered during execution.

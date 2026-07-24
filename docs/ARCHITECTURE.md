@@ -188,7 +188,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Typed pub/sub event system with Zod validation |
 | Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
-| Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents |
+| Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents (**pending autohealing revert as of 2026-07-24 — see [Agent System](#agent-system)**) |
 | Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
 | MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration (qualified `${escapedServer}::${tool}` keys — see [MCP tool key composition](#mcp-tool-key-composition)) |
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
@@ -450,6 +450,8 @@ const result = await waitForEvent(MyEvent, (p) => p.toolName === 'bash', 5000);
 Subscriptions are acquired eagerly to prevent race conditions where events could be missed between the `subscribe()` call and the first `listen`. The handler is immediately added to the event handler set before the unsubscribe function is returned.
 
 ## Agent System
+
+> **Build status (2026-07-24):** the 2026-07-24 upstream sync (commit `530351f4`) destructively replaced `src/agent/index.ts` with a 3-line broken import stub (`import { newAgentPatterns } from 'packages/opencode/src/agent/agent';`). The agent-registry surface documented in this section — `AgentRegistry`, the five built-in agents, `stripInternalOptions`, `INTERNAL_OPTION_KEYS`, `getAgentRegistry` / `switchAgent` / `parseAgentMention`, and the `AgentSwitched` bus event — is currently unresolvable and breaks the build. Seven downstream modules import from `src/agent/index.js` and are all failing to type-check: `src/core/agenticChat.ts`, `src/core/streamingOrchestrator.ts`, `src/cli/commands/chat.ts`, `src/config/modes-migrator.ts`, `src/server/index.ts`, `src/tool/tools/task.ts`, and the tests in `src/agent/index.test.ts` / `src/core/__tests__/agenticChat.test.ts`. Autohealing must revert the file to its pre-sync content (parent commit `9f9fad90`); see the corresponding CHANGELOG `### Removed` entry for the full recovery specification. The rest of this section describes the intended runtime shape once the file is restored.
 
 ```mermaid
 classDiagram

@@ -375,6 +375,8 @@ export interface CodeReviewResult {
 
 ## Agent Mode
 
+> **Build status (2026-07-24):** the `--agent <id>` option and the agent-registry surface it depends on are currently unbuildable because the 2026-07-24 upstream sync (commit `530351f4`) overwrote `src/agent/index.ts` with a 3-line broken import stub. The `alexi agent` command itself still exists in `src/cli/commands/agent.ts`, but the `agentId` option cannot be resolved to a system prompt or tool allowlist until autohealing reverts `src/agent/index.ts` to its pre-sync content (parent commit `9f9fad90`). See [CHANGELOG](../CHANGELOG.md) `### Removed` and [docs/ARCHITECTURE.md#agent-system](ARCHITECTURE.md#agent-system) for the full recovery specification.
+
 The `alexi agent` command provides fully autonomous task execution with tool access.
 
 ### Architecture
