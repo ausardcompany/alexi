@@ -88,4 +88,61 @@ describe('sendChat error formatting', () => {
     expect(caught).toBe(plain);
     expect((caught as Error).message).toBe('plain provider failure');
   });
+
+  // Context-window overflow rewrite — verifies that expanded pattern
+  // matching in `src/core/contextOverflow.ts` is wired through the
+  // orchestrator so users see an actionable message.
+  const overflowFixtures: Array<[string, string]> = [
+    ['context_length_exceeded', 'context_length_exceeded: too many input tokens'],
+    ['context window', "This model's context window is 200000 tokens"],
+    ['maximum context length', 'The maximum context length is 128000 tokens'],
+    ['too_many_tokens', 'error: too_many_tokens returned by provider'],
+    ['context limit', 'You have exceeded the context limit for this model'],
+    ['exceeds the context', 'Request exceeds the context of this deployment'],
+  ];
+
+  it.each(overflowFixtures)(
+    'rewrites overflow error (%s) into the user-facing message',
+    async (_label, providerMessage) => {
+      const providerErr = new Error(providerMessage);
+      const mockProvider = {
+        complete: vi.fn().mockRejectedValue(providerErr),
+      };
+      vi.mocked(getProviderForModel).mockReturnValue(mockProvider as never);
+
+      let caught: unknown;
+      try {
+        await sendChat('hi');
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBe(providerErr);
+      const msg = (caught as Error).message;
+      // The user-facing prefix is prepended.
+      expect(msg).toContain('Context window exceeded');
+      expect(msg).toContain('Reduce context size');
+      expect(msg).toContain('larger window');
+      // The raw provider message is preserved (in parentheses) for
+      // operator debugging.
+      expect(msg).toContain(providerMessage);
+    }
+  );
+
+  it('does NOT rewrite non-overflow provider errors', async () => {
+    const providerErr = new Error('some unrelated 500 from provider');
+    const mockProvider = {
+      complete: vi.fn().mockRejectedValue(providerErr),
+    };
+    vi.mocked(getProviderForModel).mockReturnValue(mockProvider as never);
+
+    let caught: unknown;
+    try {
+      await sendChat('hi');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect((caught as Error).message).toBe('some unrelated 500 from provider');
+  });
 });
