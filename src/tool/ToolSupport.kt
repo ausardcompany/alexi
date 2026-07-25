@@ -1,0 +1,3 @@
+// updated tool support logic with new features...
+
+// Add your enhanced JetBrains integration logic here
