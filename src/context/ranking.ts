@@ -54,6 +54,8 @@ const RESOLVE_EXTENSIONS = [
   '', // exact match (e.g. already has extension)
   '.ts',
   '.tsx',
+  '.mts',
+  '.cts',
   '.js',
   '.mjs',
   '.cjs',

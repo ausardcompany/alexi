@@ -9,6 +9,7 @@ import Parser from 'tree-sitter';
 import TypeScript from 'tree-sitter-typescript';
 import JavaScript from 'tree-sitter-javascript';
 import Bash from 'tree-sitter-bash';
+import { getExtension } from './extensions.js';
 
 // Lazily initialised parsers (one per language to avoid setLanguage races)
 let tsParser: Parser | null = null;
@@ -72,23 +73,34 @@ function getBashParser(): Parser | null {
   return bashParser;
 }
 
-export type SupportedExtension = 'ts' | 'tsx' | 'js' | 'mjs' | 'cjs' | 'jsx' | 'sh' | 'bash';
+/**
+ * Extensions that tree-sitter can parse.
+ * `.d.ts` is included because declaration files are valid TypeScript;
+ * `.mts` / `.cts` are TypeScript module variants;
+ * `.mjs` / `.cjs` / `.jsx` are JavaScript module variants.
+ */
+export type SupportedExtension =
+  '.ts' | '.tsx' | '.mts' | '.cts' | '.d.ts' | '.js' | '.mjs' | '.cjs' | '.jsx' | '.sh' | '.bash';
+
+const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set<SupportedExtension>([
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.d.ts',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.jsx',
+  '.sh',
+  '.bash',
+]);
 
 /**
  * Returns true if the file extension is supported by tree-sitter parsers
  */
 export function isSupportedFile(filePath: string): boolean {
-  const ext = filePath.split('.').pop()?.toLowerCase();
-  return (
-    ext === 'ts' ||
-    ext === 'tsx' ||
-    ext === 'js' ||
-    ext === 'mjs' ||
-    ext === 'cjs' ||
-    ext === 'jsx' ||
-    ext === 'sh' ||
-    ext === 'bash'
-  );
+  return SUPPORTED_EXTENSIONS.has(getExtension(filePath));
 }
 
 /**
@@ -96,24 +108,27 @@ export function isSupportedFile(filePath: string): boolean {
  * Returns the root node of the AST, or null if the file is not supported.
  */
 export function parseSource(source: string, filePath: string): Parser.SyntaxNode | null {
-  const ext = filePath.split('.').pop()?.toLowerCase() as SupportedExtension | undefined;
+  const ext = getExtension(filePath);
 
   let parser: Parser | null;
   switch (ext) {
-    case 'ts':
+    case '.ts':
+    case '.mts':
+    case '.cts':
+    case '.d.ts':
       parser = getTsParser();
       break;
-    case 'tsx':
-    case 'jsx':
+    case '.tsx':
+    case '.jsx':
       parser = getTsxParser();
       break;
-    case 'js':
-    case 'mjs':
-    case 'cjs':
+    case '.js':
+    case '.mjs':
+    case '.cjs':
       parser = getJsParser();
       break;
-    case 'sh':
-    case 'bash':
+    case '.sh':
+    case '.bash':
       parser = getBashParser();
       break;
     default:
