@@ -32,6 +32,7 @@ import {
   estimateConversationTokens,
   type Message as CompactionMessage,
 } from '../compaction/index.js';
+import { detectContextOverflow } from './contextOverflow.js';
 import {
   executeHooks,
   createHookContext,
@@ -123,55 +124,9 @@ export interface AgenticChatResult {
 }
 
 // ============ Context Overflow Detection ============
-
-/**
- * Common patterns in context overflow error messages from LLM providers.
- */
-const CONTEXT_OVERFLOW_PATTERNS = [
-  /context.length/i,
-  /context.*exceeded/i,
-  /maximum.*context/i,
-  /token.*limit.*exceeded/i,
-  /too.many.tokens/i,
-  /input.*too.long/i,
-  /context_length_exceeded/i,
-  /max_tokens_exceeded/i,
-  /request.*too.*large/i,
-];
-
-/**
- * Detect if an error is a context overflow error and extract the overflow amount.
- * Returns the estimated overflow tokens, or undefined if not a context overflow error.
- */
-function detectContextOverflow(
-  error: unknown,
-  currentTokenEstimate: number,
-  maxTokens: number
-): number | undefined {
-  const message = error instanceof Error ? error.message : String(error);
-  const isOverflow = CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
-
-  if (!isOverflow) {
-    return undefined;
-  }
-
-  // Try to extract token count from error message (common format: "...N tokens...")
-  const tokenMatch = message.match(/(\d{4,})\s*tokens/);
-  if (tokenMatch) {
-    const reportedTokens = parseInt(tokenMatch[1], 10);
-    if (reportedTokens > maxTokens) {
-      return reportedTokens - maxTokens;
-    }
-  }
-
-  // Fallback: estimate overflow as amount over the max
-  if (currentTokenEstimate > maxTokens) {
-    return currentTokenEstimate - maxTokens;
-  }
-
-  // If we can't determine exact overflow, use 20% of current as a conservative estimate
-  return Math.ceil(currentTokenEstimate * 0.2);
-}
+// The detection helper lives in `src/core/contextOverflow.ts` so that
+// `src/core/orchestrator.ts` (non-agentic path) can share the same
+// pattern set and user-facing message.
 
 /**
  * Format a tool schema for the OpenAI/SAP Orchestration tools format

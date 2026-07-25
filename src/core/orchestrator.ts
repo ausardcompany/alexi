@@ -3,6 +3,7 @@ import { formatProviderError } from '../providers/format.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
+import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './contextOverflow.js';
 
 export async function sendChat(
   message: string,
@@ -92,6 +93,14 @@ export async function sendChat(
     // just because the user pressed Ctrl+C.
     if (classified.kind === 'permanent') {
       recordRouteOutcome(modelId, classified);
+    }
+    // Context-window overflow: rewrite the message so the CLI presents an
+    // actionable line instead of the raw provider payload. The original
+    // provider text is preserved after `:` so it remains debuggable and
+    // any operator with logs can still see the vendor-specific string.
+    if (err instanceof Error && isContextOverflowError(err)) {
+      err.message = `${CONTEXT_OVERFLOW_USER_MESSAGE} (${err.message})`;
+      throw err;
     }
     const formatted = formatProviderError(err);
     if (err instanceof Error && formatted !== err.message) {
