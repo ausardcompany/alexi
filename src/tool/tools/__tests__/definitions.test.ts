@@ -760,4 +760,79 @@ interface Fourth {}`
       expect(methods?.length).toBeGreaterThanOrEqual(1);
     });
   });
+
+  describe('Custom file extensions', () => {
+    it('detects .mjs as JavaScript', async () => {
+      const filePath = path.join(tempDir, 'module.mjs');
+      fs.writeFileSync(filePath, `export function esmFn(x) { return x; }`);
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('javascript');
+      const names = result.data?.definitions.map((d) => d.name) ?? [];
+      expect(names).toContain('esmFn');
+    });
+
+    it('detects .cjs as JavaScript', async () => {
+      const filePath = path.join(tempDir, 'module.cjs');
+      fs.writeFileSync(filePath, `function cjsFn(x) { return x; }\nmodule.exports = { cjsFn };`);
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('javascript');
+      const names = result.data?.definitions.map((d) => d.name) ?? [];
+      expect(names).toContain('cjsFn');
+    });
+
+    it('detects .mts as TypeScript', async () => {
+      const filePath = path.join(tempDir, 'module.mts');
+      fs.writeFileSync(filePath, `export function mtsFn(x: number): number { return x; }`);
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('typescript');
+      const names = result.data?.definitions.map((d) => d.name) ?? [];
+      expect(names).toContain('mtsFn');
+    });
+
+    it('detects .cts as TypeScript', async () => {
+      const filePath = path.join(tempDir, 'module.cts');
+      fs.writeFileSync(filePath, `export function ctsFn(x: number): number { return x; }`);
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('typescript');
+      const names = result.data?.definitions.map((d) => d.name) ?? [];
+      expect(names).toContain('ctsFn');
+    });
+
+    it('detects .d.ts declaration files as TypeScript', async () => {
+      const filePath = path.join(tempDir, 'types.d.ts');
+      fs.writeFileSync(
+        filePath,
+        `export interface PublicApi {\n  version: string;\n}\nexport declare function greet(name: string): void;`
+      );
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.language).toBe('typescript');
+      const names = result.data?.definitions.map((d) => d.name) ?? [];
+      expect(names).toContain('PublicApi');
+    });
+
+    it('reports .jsonc as unsupported (no code definitions in JSON)', async () => {
+      const filePath = path.join(tempDir, 'config.jsonc');
+      fs.writeFileSync(filePath, `{ /* comment */ "key": "value" }`);
+
+      const result = await definitionsTool.executeUnsafe({ filePath }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Unsupported file type');
+    });
+  });
 });

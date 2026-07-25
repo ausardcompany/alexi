@@ -172,7 +172,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | `multiedit` | `multiedit.ts` | write | Multiple edits in one call |
 | `ls` | `ls.ts` | read | List directory contents |
 | `skill` | `skill.ts` | -- | Load specialized skills |
-| `definitions` | `definitions.ts` | read | Get code definitions |
+| `definitions` | `definitions.ts` | read | Get code definitions (TS `.ts`/`.tsx`/`.mts`/`.cts`/`.d.ts`, JS `.js`/`.jsx`/`.mjs`/`.cjs`, `.py`, `.sh`/`.bash`) |
 | `browser` | `browser.ts` | network | Browser automation |
 | `diagnostics` | `diagnostics.ts` | read | Code diagnostics |
 | `batch` | `batch.ts` | -- | Batch tool execution |

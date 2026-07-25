@@ -44,12 +44,23 @@ describe('isSupportedFile', () => {
     expect(isSupportedFile('helpers.bash')).toBe(true);
   });
 
+  it('returns true for .d.ts declaration files', () => {
+    expect(isSupportedFile('types.d.ts')).toBe(true);
+    expect(isSupportedFile('src/foo.d.ts')).toBe(true);
+  });
+
+  it('returns true for .mts / .cts TypeScript module variants', () => {
+    expect(isSupportedFile('module.mts')).toBe(true);
+    expect(isSupportedFile('module.cts')).toBe(true);
+  });
+
   it('returns false for .py files', () => {
     expect(isSupportedFile('script.py')).toBe(false);
   });
 
-  it('returns false for .json files', () => {
+  it('returns false for .json / .jsonc files', () => {
     expect(isSupportedFile('package.json')).toBe(false);
+    expect(isSupportedFile('tsconfig.jsonc')).toBe(false);
   });
 
   it('returns false for .md files', () => {
@@ -107,6 +118,25 @@ describe('parseSource', () => {
   it('parses .jsx files', () => {
     const source = 'const el = <span>Hello</span>;';
     const root = parseSource(source, 'component.jsx');
+    expect(root).not.toBeNull();
+  });
+
+  it('parses .d.ts declaration files as TypeScript', () => {
+    const source = 'export declare function greet(name: string): void;';
+    const root = parseSource(source, 'types.d.ts');
+    expect(root).not.toBeNull();
+    expect(root?.type).toBe('program');
+  });
+
+  it('parses .mts files as TypeScript', () => {
+    const source = 'export const x: number = 1;';
+    const root = parseSource(source, 'module.mts');
+    expect(root).not.toBeNull();
+  });
+
+  it('parses .cts files as TypeScript', () => {
+    const source = 'const x: number = 1; export = x;';
+    const root = parseSource(source, 'module.cts');
     expect(root).not.toBeNull();
   });
 

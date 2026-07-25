@@ -608,8 +608,12 @@ async function countFiles(projectPath: string): Promise<ProjectStats> {
   const codeExtensions = new Set([
     '.ts',
     '.tsx',
+    '.mts',
+    '.cts',
     '.js',
     '.jsx',
+    '.mjs',
+    '.cjs',
     '.py',
     '.rs',
     '.go',

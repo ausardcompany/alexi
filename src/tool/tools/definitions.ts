@@ -7,6 +7,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { getLanguageForFile } from '../../context/extensions.js';
 
 const DefinitionTypes = [
   'class',
@@ -75,23 +76,24 @@ const bashPatterns = {
 };
 
 /**
- * Detect language from file extension
+ * Detect language from file extension.
+ * Custom extensions (`.mts`, `.cts`, `.d.ts`, `.mjs`, `.cjs`, `.jsonc`)
+ * are resolved via the shared `getLanguageForFile` helper so tool selection
+ * stays consistent with the rest of the codebase.
+ *
+ * JSON files (`.json`, `.jsonc`) have no code definitions and are reported
+ * as `unknown` here so the caller returns the standard unsupported error.
  */
 function detectLanguage(filePath: string): SupportedLanguage {
-  const ext = path.extname(filePath).toLowerCase();
-  switch (ext) {
-    case '.ts':
-    case '.tsx':
+  const lang = getLanguageForFile(filePath);
+  switch (lang) {
+    case 'typescript':
       return 'typescript';
-    case '.js':
-    case '.jsx':
-    case '.mjs':
-    case '.cjs':
+    case 'javascript':
       return 'javascript';
-    case '.py':
+    case 'python':
       return 'python';
-    case '.sh':
-    case '.bash':
+    case 'bash':
       return 'bash';
     default:
       return 'unknown';
@@ -476,8 +478,8 @@ export const definitionsTool = defineTool<typeof DefinitionsParamsSchema, Defini
   description: `Extract code definitions (classes, functions, interfaces, etc.) from source files.
 
 Supports:
-- TypeScript (.ts, .tsx): class, function, interface, type, const, enum, method
-- JavaScript (.js, .jsx): class, function, const, method
+- TypeScript (.ts, .tsx, .mts, .cts, .d.ts): class, function, interface, type, const, enum, method
+- JavaScript (.js, .jsx, .mjs, .cjs): class, function, const, method
 - Python (.py): class, function/def
 - Bash (.sh, .bash): function
 
@@ -513,7 +515,7 @@ Returns definition name, type, line number, signature, and export status.`,
       if (language === 'unknown') {
         return {
           success: false,
-          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .sh, .bash`,
+          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .mts, .cts, .d.ts, .js, .jsx, .mjs, .cjs, .py, .sh, .bash`,
         };
       }
 
