@@ -11,6 +11,7 @@ import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
+import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import { auditCommand } from '../../permission/next.js';
 import {
   BashDetachAvailable,
@@ -106,7 +107,15 @@ function processCarriageReturns(output: string): string {
  * and via the `description` getter below.
  */
 export function buildShellDescription(shell: ShellInfo = detectShell()): string {
+  // Probe version + PATH + available tools per description build so a
+  // fresh install of `gh` or `docker` mid-session shows up on the next
+  // tool-schema flush (Cline PR #12331; issue #1123). The probe caches
+  // internally for a short TTL, so calling this on every description
+  // render is still cheap.
+  const envSummary = formatShellEnvSummary(detectShellEnv(shell));
   return `Execute a ${shell.type} command in the user's environment.
+
+${envSummary}
 
 Usage:
 - Use for terminal operations like git, npm, docker, etc.
