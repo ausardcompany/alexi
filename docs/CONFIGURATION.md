@@ -572,6 +572,8 @@ interface Session {
 
 Session titles are auto-generated from the first user message. Sessions support auto-compaction when configurable `maxContextTokens` (default: 128K) is reached.
 
+> **Not a session-config surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`, version bump `1.18.11` → `1.18.12`) added a 4-line orphan file at `src/context/server-session-reducer.ts` declaring a non-exported `reduceSession(session: Session): Session` function that references two undeclared free identifiers (`Session` and `optimizeSessionData`) and has no `return` statement. It is **not** part of the session-persistence pipeline documented in this section — canonical session state is managed by the `SessionManager` class in `src/core/sessionManager.ts`, with checkpoint / undo semantics in `src/core/checkpoints.ts` and `src/undo/`. There is no reducer-shaped session pipeline in Alexi, and setting any environment variable or configuration key cannot activate this file because nothing imports it. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26. A companion 2026-07-26 orphan under `src/context/global-sync/bootstrap.ts` similarly declares a `bootstrapGlobalSync()` function against an undeclared `initializeContext()` identifier and is unrelated to Alexi's real upstream-sync entrypoint (the `.github/workflows/sync-upstream.yml` GitHub Actions workflow plus the tracked commits at `.github/last-sync-commits.json`).
+
 ## Configuration Examples
 
 ### Cost Optimization

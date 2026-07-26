@@ -376,6 +376,8 @@ export interface CodeReviewResult {
 ## Agent Mode
 
 > **Build status (2026-07-24):** the `--agent <id>` option and the agent-registry surface it depends on are currently unbuildable because the 2026-07-24 upstream sync (commit `530351f4`) overwrote `src/agent/index.ts` with a 3-line broken import stub. The `alexi agent` command itself still exists in `src/cli/commands/agent.ts`, but the `agentId` option cannot be resolved to a system prompt or tool allowlist until autohealing reverts `src/agent/index.ts` to its pre-sync content (parent commit `9f9fad90`). See [CHANGELOG](../CHANGELOG.md) `### Removed` and [docs/ARCHITECTURE.md#agent-system](ARCHITECTURE.md#agent-system) for the full recovery specification.
+>
+> **Build status (2026-07-26 addendum):** the 2026-07-26 sync (commit `0985297e`, version bump `1.18.11` → `1.18.12`) did not touch `src/agent/index.ts` and did not add or remove any user-facing CLI subcommand. Four orphan stubs were added (`src/agent/instance-advertisement.ts`, `src/cli/remote.ts`, `src/context/global-sync/bootstrap.ts`, `src/context/server-session-reducer.ts`) and none of them appear on the [CLI Commands](#cli-commands) reference. In particular, `alexi remote` is **not** a real subcommand — the presence of `src/cli/remote.ts` on disk is upstream noise, not a hidden or experimental API. The complete, canonical CLI surface is the set of commands documented in this file plus the interactive slash commands in [Interactive Mode Commands](#interactive-mode-commands); nothing added by the 2026-07-26 sync is reachable from `alexi --help` because none of the stubs is registered with the Commander.js program in `src/cli/program.ts`.
 
 The `alexi agent` command provides fully autonomous task execution with tool access.
 
