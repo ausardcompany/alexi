@@ -6,7 +6,13 @@
  * the tree-sitter AST produced by treeSitter.ts.
  */
 
-import { parseSource, walkNode, getNameNode, findChildOfType } from './treeSitter.js';
+import {
+  parseSource,
+  walkNode,
+  getNameNode,
+  findChildOfType,
+  type TreeSitterSyntaxNode,
+} from './treeSitter.js';
 
 // ─── Public interfaces ────────────────────────────────────────────────────────
 
@@ -54,7 +60,7 @@ const TRANSPARENT_WRAPPERS = new Set([
  * Extract a condensed single-line signature from a node.
  * We take only the first non-trivial line of the node's text and truncate.
  */
-function extractSignature(node: import('tree-sitter').SyntaxNode): string {
+function extractSignature(node: TreeSitterSyntaxNode): string {
   const raw = node.text ?? '';
   // Take just the first line and strip the body (everything after '{' or '=>')
   const firstLine = raw.split('\n')[0].replace(/\{.*/, '').replace(/=>.*/, '').trim();
@@ -66,7 +72,7 @@ function extractSignature(node: import('tree-sitter').SyntaxNode): string {
  * Returns null if the node is not a recognisable top-level declaration.
  */
 function extractDeclaration(
-  node: import('tree-sitter').SyntaxNode
+  node: TreeSitterSyntaxNode
 ): { name: string; kind: CodeSymbol['kind']; signature: string } | null {
   let target = node;
 
@@ -86,7 +92,7 @@ function extractDeclaration(
   if (!kind) return null;
 
   // For variable declarations, look at the first declarator
-  let nameNode: import('tree-sitter').SyntaxNode | null = null;
+  let nameNode: TreeSitterSyntaxNode | null = null;
   if (kind === 'variable') {
     // lexical_declaration → variable_declarator → identifier
     for (let i = 0; i < target.childCount; i++) {
@@ -124,7 +130,7 @@ function isBashFile(filePath: string): boolean {
  * Produces either `name()` or `function name` / `function name()` to match
  * the two supported syntaxes.
  */
-function extractBashSignature(node: import('tree-sitter').SyntaxNode, name: string): string {
+function extractBashSignature(node: TreeSitterSyntaxNode, name: string): string {
   const raw = node.text ?? '';
   const firstLine = raw.split('\n')[0].trim();
   // Detect Bash-style `function name [()] { ... }`
@@ -146,10 +152,7 @@ function extractBashSignature(node: import('tree-sitter').SyntaxNode, name: stri
  * are considered so that helpers defined inside other functions do not
  * leak into the top-level symbol list.
  */
-function extractBashSymbols(
-  root: import('tree-sitter').SyntaxNode,
-  filePath: string
-): CodeSymbol[] {
+function extractBashSymbols(root: TreeSitterSyntaxNode, filePath: string): CodeSymbol[] {
   const symbols: CodeSymbol[] = [];
 
   for (let i = 0; i < root.childCount; i++) {
