@@ -1,28 +1,16 @@
 # Changes Summary
 
 ## Files Modified
-1. `src/agent/instance-advertisement.ts`
-2. `src/cli/remote.ts`
-3. `src/context/global-sync/bootstrap.ts`
-4. `src/context/server-session-reducer.ts`
+- `src/cli/worker-shutdown.ts`
+- `src/providers/adaptiveThinking.ts`
+- `src/cli/promptController.ts`
+- `src/core/package.json`
 
-## Summary of Changes Made
-
-### 1. Implement Instance Advertisement
-- **File**: `src/agent/instance-advertisement.ts`
-- **Change**: Added new feature to advertise AI instances.
-
-### 2. Update Remote Command Handling
-- **File**: `src/cli/remote.ts`
-- **Change**: Refactored remote command execution logic for simplicity and performance.
-
-### 3. Synchronize Global Context Bootstrap
-- **File**: `src/context/global-sync/bootstrap.ts`
-- **Change**: Enhanced bootstrap logic for global context initialization.
-
-### 4. Update Server Session Reducer
-- **File**: `src/context/server-session-reducer.ts`
-- **Change**: Refactored session reducer for efficiency.
+## Summary of Changes
+1. **Session Ingest Tail Flush**: Implemented logic to flush session data before shutdown to prevent data loss.
+2. **Adaptive Thinking for Opus v5**: Added support for Opus version 5 in adaptive thinking functionalities.
+3. **Prompt Effects Centralization**: Refactored prompt effects handling into a centralized controller.
+4. **Package Version Update**: Updated package version from 1.18.5 to 1.18.7 for synchronization.
 
 ## Issues Encountered
-- None. All files were created successfully as they did not exist initially.
+- Files did not exist initially; all necessary files were created with the specified content.
