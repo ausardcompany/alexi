@@ -1,9 +1,10 @@
 /**
- * Integration tests for `indexing.additionalExtensions`.
+ * Integration tests for `indexing.additionalExtensions` /
+ * `indexing.extensions`.
  *
  * Verifies that grep, glob, and codesearch honor the config-driven list
  * of extra file extensions when locating files. We mock
- * `getConfigAdditionalExtensions` rather than writing to the real
+ * `getIndexingExtensions` rather than writing to the real
  * ~/.alexi/config.json so the tests are hermetic.
  */
 
@@ -43,6 +44,7 @@ vi.mock('../../../src/config/userConfig.js', async () => {
   return {
     ...actual,
     getConfigAdditionalExtensions: (): string[] => [...additionalExtensions],
+    getIndexingExtensions: (): string[] => [...additionalExtensions],
   };
 });
 

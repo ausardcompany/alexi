@@ -222,6 +222,14 @@ export function clearConfigDefaultAgent(): void {
 const EXTENSION_PATTERN = /^\.[A-Za-z0-9_-]+$/;
 
 /**
+ * Regex describing a bare extension (no leading dot). Used when parsing
+ * the `indexing.extensions` field of `.alexi/config.json` and the flat
+ * `.alexi/extensions` file, where the user may write `mdx` or `.mdx`
+ * interchangeably.
+ */
+const BARE_EXTENSION_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
  * Validate a single additional-extension entry.
  * Returns the trimmed extension when valid, or throws when invalid.
  */
@@ -239,39 +247,191 @@ export function validateAdditionalExtension(ext: unknown): string {
 }
 
 /**
- * Load the configured additional file extensions for indexing.
- *
- * Returns an array of normalized extensions (each starting with `.` and
- * lower-cased). Invalid entries are silently dropped so that a corrupt
- * config never crashes tool execution — callers wanting strict validation
- * should use {@link setConfigAdditionalExtensions} instead.
+ * Normalize an extension entry to dotted lower-case form.
+ * Accepts both `.mdx` and `mdx` shapes; returns `null` for anything
+ * else (including empty strings, non-strings, path-like values).
  */
-export function getConfigAdditionalExtensions(): string[] {
-  const config = loadFullConfig();
-  const indexing = config.indexing;
+function normalizeExtension(raw: unknown): string | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  if (EXTENSION_PATTERN.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  if (BARE_EXTENSION_PATTERN.test(trimmed)) {
+    return `.${trimmed.toLowerCase()}`;
+  }
+  return null;
+}
+
+/**
+ * Extract dotted, lower-cased, deduped extensions from an `indexing`
+ * section of a parsed config object. Reads both `additionalExtensions`
+ * (canonical, strictly dotted) and `extensions` (alias, accepts bare
+ * or dotted names). Invalid entries are silently dropped.
+ */
+function extractIndexingExtensions(indexing: unknown): string[] {
   if (!indexing || typeof indexing !== 'object' || Array.isArray(indexing)) {
     return [];
   }
-  const raw = (indexing as Record<string, unknown>).additionalExtensions;
-  if (!Array.isArray(raw)) {
+  const rec = indexing as Record<string, unknown>;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (normalized: string | null): void => {
+    if (normalized === null) {
+      return;
+    }
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  // `additionalExtensions`: strict dotted form (backward compatible).
+  if (Array.isArray(rec.additionalExtensions)) {
+    for (const entry of rec.additionalExtensions) {
+      if (typeof entry !== 'string') {
+        continue;
+      }
+      const trimmed = entry.trim();
+      if (!EXTENSION_PATTERN.test(trimmed)) {
+        continue;
+      }
+      push(trimmed.toLowerCase());
+    }
+  }
+  // `extensions`: lax alias, accepts `mdx` or `.mdx`.
+  if (Array.isArray(rec.extensions)) {
+    for (const entry of rec.extensions) {
+      push(normalizeExtension(entry));
+    }
+  }
+  return out;
+}
+
+/**
+ * Load the configured additional file extensions for indexing from the
+ * user's global config at `~/.alexi/config.json`.
+ *
+ * Returns an array of normalized extensions (each starting with `.` and
+ * lower-cased). Reads both `indexing.additionalExtensions` (canonical,
+ * dotted) and `indexing.extensions` (alias, accepts bare names).
+ * Invalid entries are silently dropped so that a corrupt config never
+ * crashes tool execution.
+ */
+export function getConfigAdditionalExtensions(): string[] {
+  const config = loadFullConfig();
+  return extractIndexingExtensions(config.indexing);
+}
+
+/**
+ * Read extensions from a project-local `.alexi/config.json` file at the
+ * given directory. Returns an empty array when the file is missing,
+ * unreadable, or does not declare any indexing extensions. Never throws.
+ */
+export function readProjectConfigExtensions(cwd: string): string[] {
+  const projectConfigPath = path.join(cwd, '.alexi', 'config.json');
+  let content: string;
+  try {
+    content = fs.readFileSync(projectConfigPath, 'utf-8');
+  } catch {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return [];
+  }
+  return extractIndexingExtensions((parsed as Record<string, unknown>).indexing);
+}
+
+/**
+ * Read extensions from a flat `.alexi/extensions` file at the given
+ * directory. Format: one extension per line, blank lines are ignored,
+ * lines starting with `#` (after optional leading whitespace) are
+ * treated as comments. Extensions may be written with or without a
+ * leading dot (`mdx`, `.mdx`). Returns an empty array when the file is
+ * missing or unreadable. Never throws.
+ */
+export function readProjectExtensionsFile(cwd: string): string[] {
+  const extensionsFilePath = path.join(cwd, '.alexi', 'extensions');
+  let content: string;
+  try {
+    content = fs.readFileSync(extensionsFilePath, 'utf-8');
+  } catch {
     return [];
   }
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const entry of raw) {
-    if (typeof entry !== 'string') {
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
       continue;
     }
-    const trimmed = entry.trim();
-    if (!EXTENSION_PATTERN.test(trimmed)) {
+    if (line.startsWith('#')) {
       continue;
     }
-    const normalized = trimmed.toLowerCase();
+    // Support inline comments: `mdx  # markdown extended`
+    const withoutComment = line.split('#', 1)[0].trim();
+    if (withoutComment.length === 0) {
+      continue;
+    }
+    const normalized = normalizeExtension(withoutComment);
+    if (normalized === null) {
+      continue;
+    }
     if (seen.has(normalized)) {
       continue;
     }
     seen.add(normalized);
     out.push(normalized);
+  }
+  return out;
+}
+
+/**
+ * Return the effective set of indexing extensions for a given working
+ * directory. Merges (in this precedence order, later sources add to
+ * earlier ones):
+ *
+ *   1. Global user config (`~/.alexi/config.json`, `indexing.extensions`
+ *      or `indexing.additionalExtensions`)
+ *   2. Project config (`<cwd>/.alexi/config.json`, same fields)
+ *   3. Project extensions file (`<cwd>/.alexi/extensions`)
+ *
+ * Result is deduplicated case-insensitively and normalized to dotted
+ * lower-case form (e.g. `.mdx`, `.astro`). Never throws.
+ */
+export function getIndexingExtensions(cwd?: string): string[] {
+  const globalExts = getConfigAdditionalExtensions();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (ext: string): void => {
+    if (seen.has(ext)) {
+      return;
+    }
+    seen.add(ext);
+    out.push(ext);
+  };
+  for (const ext of globalExts) {
+    push(ext);
+  }
+  if (cwd) {
+    for (const ext of readProjectConfigExtensions(cwd)) {
+      push(ext);
+    }
+    for (const ext of readProjectExtensionsFile(cwd)) {
+      push(ext);
+    }
   }
   return out;
 }

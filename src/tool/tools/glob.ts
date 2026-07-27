@@ -7,7 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
-import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
+import { getIndexingExtensions } from '../../config/userConfig.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -229,12 +229,13 @@ When independent reads, searches, or edits are also needed, emit those tool call
       }
 
       // Extend the caller's pattern with any additional extensions
-      // configured via `indexing.additionalExtensions`. Only the last
-      // segment is touched (e.g. `**/*.ts` -> `**/*.{ts,proto}`), so
-      // directory scoping is preserved. Patterns whose last segment is
-      // not a recognized extension shape (e.g. exact filenames) pass
-      // through unchanged.
-      const additionalExtensions = getConfigAdditionalExtensions();
+      // configured via `indexing.additionalExtensions` (global) or
+      // `indexing.extensions` in a project-local `.alexi/config.json` /
+      // `.alexi/extensions` file. Only the last segment is touched
+      // (e.g. `**/*.ts` -> `**/*.{ts,mdx}`), so directory scoping is
+      // preserved. Patterns whose last segment is not a recognized
+      // extension shape (e.g. exact filenames) pass through unchanged.
+      const additionalExtensions = getIndexingExtensions(context.workdir);
       const effectivePattern = extendGlobPattern(params.pattern, additionalExtensions);
 
       let matches = await globMatch(searchPath, effectivePattern, context.signal);
