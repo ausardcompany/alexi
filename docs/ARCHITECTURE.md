@@ -1144,6 +1144,68 @@ Custom agents support:
 - Tool allowlists and denylists
 - Model and temperature preferences
 
+## Optional Peer Dependencies
+
+Some features rely on native or heavy libraries whose install cost is not
+justified for users who never invoke them. These are declared as
+`peerDependencies` with `peerDependenciesMeta.<pkg>.optional = true` in
+`package.json`, so `npm install` succeeds without them and prints an
+informational message rather than a hard failure.
+
+### Tree-sitter grammars (~67MB combined install size)
+
+The repo-map (`src/context/repoMap.ts`) and symbol extractor
+(`src/context/symbols.ts`) parse TypeScript, JavaScript, and Bash source
+files with tree-sitter to produce a ranked list of top-level definitions
+for the LLM system prompt. The parser runtime and the three grammars are
+optional peer dependencies:
+
+- `tree-sitter`
+- `tree-sitter-typescript`
+- `tree-sitter-javascript`
+- `tree-sitter-bash`
+
+`src/context/treeSitter.ts` lazy-loads every grammar the first time a file
+of the matching extension is parsed. Loading is done via a
+`createRequire(import.meta.url)`-backed shim wrapped in `try / catch`, and
+each successful or failed load is memoised so subsequent parses are cheap.
+When a grammar cannot be loaded, `parseSource()` returns `null`, which
+`extractSymbols()` and `generateRepoMap()` treat as "no symbols for this
+file" — the map is still produced, just without symbol detail for the
+missing language.
+
+If a user wants full repo-map support (or a downstream tool needs
+tree-sitter parsing), they should install the optional peers:
+
+```bash
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+```
+
+For diagnostics, `treeSitter.ts` also exports:
+
+- `getMissingGrammars(): Grammar[]` — returns the list of optional packages
+  that failed to load.
+- `formatMissingGrammarError(): string | null` — returns a copy-paste-ready
+  install hint (`Install optional dependencies to enable definitions
+  tool: \`npm install ...\``), or `null` when every optional grammar is
+  available.
+- `preloadGrammars(): Promise<void>` — eager async warm-up for
+  long-running processes (e.g. the embedded server) that want to detect
+  missing grammars at boot rather than on first parse.
+
+The `definitions` tool (`src/tool/tools/definitions.ts`) uses regex-based
+extraction and does NOT depend on the tree-sitter grammars, so it
+continues to work even when the optional peers are absent. The install
+hint above is however the recommended remediation any time a caller
+observes the repo-map / symbol pipeline degrading to "no symbols".
+
+### Puppeteer (headless browser screenshots)
+
+`puppeteer` remains a regular `optionalDependencies` entry (not a peer)
+because its install failure mode is more subtle — Chromium download can
+fail behind corporate proxies but the JS package still lands. Consumers
+that need browser automation should install it explicitly.
+
 ## Security Considerations
 
 1. **Secrets Management**: AICORE_SERVICE_KEY stored in environment, never in config files

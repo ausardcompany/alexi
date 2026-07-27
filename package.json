@@ -54,12 +54,28 @@
     "simple-git": "^3.36.0",
     "terminal-image": "^5.0.1",
     "terminal-link": "^5.0.0",
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
     "tree-sitter": "^0.21.1",
     "tree-sitter-bash": "^0.21.0",
     "tree-sitter-javascript": "^0.21.4",
-    "tree-sitter-typescript": "^0.23.2",
-    "xlsx": "^0.18.5",
-    "zod": "^4.4.3"
+    "tree-sitter-typescript": "^0.23.2"
+  },
+  "peerDependenciesMeta": {
+    "tree-sitter": {
+      "optional": true
+    },
+    "tree-sitter-bash": {
+      "optional": true
+    },
+    "tree-sitter-javascript": {
+      "optional": true
+    },
+    "tree-sitter-typescript": {
+      "optional": true
+    }
   },
   "optionalDependencies": {
     "puppeteer": "^25.3.0"
