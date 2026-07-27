@@ -184,6 +184,60 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | `apply-patch` | `apply-patch.ts` | write | Apply code patches |
 | `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
 
+#### Indexing config: custom file extensions
+
+`glob`, `grep`, and `codesearch` extend their default extension whitelist
+with a user-configurable list, so modern stacks (`.mdx`, `.astro`,
+`.svelte`, `.vue`, `.proto`, `.graphql`, `.tf`, ...) are indexed without
+the caller having to spell them out in every `include` pattern.
+
+Extensions are collected from three sources and merged additively (later
+sources add to earlier ones; duplicates are de-duped case-insensitively):
+
+1. **Global user config** – `~/.alexi/config.json`
+2. **Project config** – `<repo>/.alexi/config.json`
+3. **Project extensions file** – `<repo>/.alexi/extensions`
+
+Both config files use the same `indexing` section and accept two fields:
+
+```jsonc
+{
+  "indexing": {
+    // Canonical form: leading dot required, strictly validated.
+    "additionalExtensions": [".proto", ".graphql"],
+    // Alias: accepts bare names (mdx) OR dotted names (.mdx).
+    "extensions": ["mdx", "astro", "svelte", "vue"]
+  }
+}
+```
+
+The `.alexi/extensions` file is a flat text file with one extension per
+line. Blank lines and lines starting with `#` are ignored; inline
+comments after `#` are stripped. Names may be written with or without a
+leading dot.
+
+```text
+# Custom extensions for indexing
+mdx
+astro
+svelte    # Svelte components
+.vue
+```
+
+**Semantics.** Additional extensions are always ADDITIVE — they extend
+the set of files a tool considers, they never restrict a caller-provided
+`include`. When a caller passes `--include '*.ts'` and the config
+declares `mdx`, the effective pattern becomes `*.{ts,mdx}`. When no
+`include` is passed, extensions do not narrow the search (`grep` still
+searches all files, matching historical behavior).
+
+**Validation.** `additionalExtensions` requires the strict dotted form
+(`.proto`); invalid entries throw when written via
+`setConfigAdditionalExtensions` and are silently dropped when read
+(so a corrupt config never crashes tools). The `extensions` alias is
+more permissive (accepts `mdx`, `.mdx`, `MDX`) and normalizes to lower
+case dotted form. See `src/config/userConfig.ts` for details.
+
 ### Support Systems
 
 | Module | File | Description |

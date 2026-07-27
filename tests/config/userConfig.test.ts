@@ -20,6 +20,9 @@ import {
   getConfigAdditionalExtensions,
   setConfigAdditionalExtensions,
   validateAdditionalExtension,
+  getIndexingExtensions,
+  readProjectConfigExtensions,
+  readProjectExtensionsFile,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -347,6 +350,218 @@ describe('userConfig', () => {
       expect(() => setConfigAdditionalExtensions('proto' as unknown as string[])).toThrow(
         /must be an array/
       );
+    });
+
+    it('should accept the `indexing.extensions` alias with bare names', () => {
+      saveFullConfig({ indexing: { extensions: ['mdx', 'astro', 'svelte'] } });
+      expect(getConfigAdditionalExtensions()).toEqual(['.mdx', '.astro', '.svelte']);
+    });
+
+    it('should accept the `indexing.extensions` alias with dotted names', () => {
+      saveFullConfig({ indexing: { extensions: ['.mdx', '.vue'] } });
+      expect(getConfigAdditionalExtensions()).toEqual(['.mdx', '.vue']);
+    });
+
+    it('should merge `indexing.extensions` and `indexing.additionalExtensions`', () => {
+      saveFullConfig({
+        indexing: {
+          additionalExtensions: ['.proto'],
+          extensions: ['mdx', 'astro'],
+        },
+      });
+      expect(getConfigAdditionalExtensions()).toEqual(['.proto', '.mdx', '.astro']);
+    });
+
+    it('should dedupe across the two field names', () => {
+      saveFullConfig({
+        indexing: {
+          additionalExtensions: ['.mdx'],
+          extensions: ['mdx', '.MDX'],
+        },
+      });
+      expect(getConfigAdditionalExtensions()).toEqual(['.mdx']);
+    });
+  });
+
+  describe('readProjectConfigExtensions', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-project-config-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('returns [] when .alexi/config.json is missing', () => {
+      expect(readProjectConfigExtensions(tempDir)).toEqual([]);
+    });
+
+    it('returns [] when .alexi/config.json is not valid JSON', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(path.join(tempDir, '.alexi', 'config.json'), 'not json', 'utf-8');
+      expect(readProjectConfigExtensions(tempDir)).toEqual([]);
+    });
+
+    it('reads indexing.extensions with bare names', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({ indexing: { extensions: ['mdx', 'astro', 'svelte'] } }),
+        'utf-8'
+      );
+      expect(readProjectConfigExtensions(tempDir)).toEqual(['.mdx', '.astro', '.svelte']);
+    });
+
+    it('reads indexing.additionalExtensions with dotted names', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({ indexing: { additionalExtensions: ['.proto'] } }),
+        'utf-8'
+      );
+      expect(readProjectConfigExtensions(tempDir)).toEqual(['.proto']);
+    });
+
+    it('silently drops invalid entries', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({
+          indexing: { extensions: ['mdx', 'has space', 'foo/bar', 42, null, '.vue'] },
+        }),
+        'utf-8'
+      );
+      expect(readProjectConfigExtensions(tempDir)).toEqual(['.mdx', '.vue']);
+    });
+  });
+
+  describe('readProjectExtensionsFile', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-project-ext-file-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('returns [] when .alexi/extensions is missing', () => {
+      expect(readProjectExtensionsFile(tempDir)).toEqual([]);
+    });
+
+    it('parses one extension per line, ignoring blanks and comments', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'extensions'),
+        [
+          '# markdown extended',
+          'mdx',
+          '',
+          '   ',
+          '# comment',
+          '.astro',
+          'svelte # inline comment',
+          '  vue  ',
+        ].join('\n'),
+        'utf-8'
+      );
+      expect(readProjectExtensionsFile(tempDir)).toEqual(['.mdx', '.astro', '.svelte', '.vue']);
+    });
+
+    it('dedupes case-insensitively', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'extensions'),
+        ['mdx', 'MDX', '.Mdx'].join('\n'),
+        'utf-8'
+      );
+      expect(readProjectExtensionsFile(tempDir)).toEqual(['.mdx']);
+    });
+
+    it('silently drops invalid entries', () => {
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'extensions'),
+        ['mdx', 'has space', 'foo/bar', '.astro'].join('\n'),
+        'utf-8'
+      );
+      // 'has space' -> becomes 'has' after inline-comment strip? No, no '#'.
+      // 'has space' matches BARE_EXTENSION_PATTERN? No, contains space. Dropped.
+      // 'foo/bar' -> dropped.
+      expect(readProjectExtensionsFile(tempDir)).toEqual(['.mdx', '.astro']);
+    });
+  });
+
+  describe('getIndexingExtensions', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-get-idx-ext-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('returns global extensions when no project config exists', () => {
+      saveFullConfig({ indexing: { additionalExtensions: ['.proto'] } });
+      expect(getIndexingExtensions(tempDir)).toEqual(['.proto']);
+    });
+
+    it('merges global and project config additively', () => {
+      saveFullConfig({ indexing: { additionalExtensions: ['.proto'] } });
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({ indexing: { extensions: ['mdx', 'astro'] } }),
+        'utf-8'
+      );
+      expect(getIndexingExtensions(tempDir)).toEqual(['.proto', '.mdx', '.astro']);
+    });
+
+    it('merges .alexi/extensions file on top of both configs', () => {
+      saveFullConfig({ indexing: { additionalExtensions: ['.proto'] } });
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({ indexing: { extensions: ['mdx'] } }),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'extensions'),
+        ['# custom', 'svelte', 'vue'].join('\n'),
+        'utf-8'
+      );
+      expect(getIndexingExtensions(tempDir)).toEqual(['.proto', '.mdx', '.svelte', '.vue']);
+    });
+
+    it('dedupes across all three sources', () => {
+      saveFullConfig({ indexing: { additionalExtensions: ['.mdx'] } });
+      fs.mkdirSync(path.join(tempDir, '.alexi'));
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'config.json'),
+        JSON.stringify({ indexing: { extensions: ['mdx', 'astro'] } }),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(tempDir, '.alexi', 'extensions'),
+        ['MDX', 'ASTRO', 'svelte'].join('\n'),
+        'utf-8'
+      );
+      expect(getIndexingExtensions(tempDir)).toEqual(['.mdx', '.astro', '.svelte']);
+    });
+
+    it('returns only global extensions when cwd is not provided', () => {
+      saveFullConfig({ indexing: { additionalExtensions: ['.proto'] } });
+      expect(getIndexingExtensions()).toEqual(['.proto']);
+    });
+
+    it('returns [] when no config exists anywhere', () => {
+      saveFullConfig({});
+      expect(getIndexingExtensions(tempDir)).toEqual([]);
     });
   });
 });

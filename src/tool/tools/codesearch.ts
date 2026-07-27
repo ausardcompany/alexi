@@ -12,7 +12,7 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
-import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
+import { getIndexingExtensions } from '../../config/userConfig.js';
 import { mergeExtensionSet, mergeIncludePattern } from './includePattern.js';
 
 // Hard cap on matches/symbols returned per query, to prevent context-window
@@ -382,12 +382,13 @@ When independent reads, searches, or edits are also needed, emit those tool call
       : context.workdir;
 
     try {
-      // Merge configured `indexing.additionalExtensions` into both the
-      // built-in CODE_EXTENSIONS whitelist and the caller's include
-      // filter. Additional extensions are ADDITIVE: they extend the
-      // pool of files considered "code" but never narrow an existing
-      // include.
-      const additionalExtensions = getConfigAdditionalExtensions();
+      // Merge configured indexing extensions (global user config plus
+      // project-local `.alexi/config.json` and `.alexi/extensions`) into
+      // both the built-in CODE_EXTENSIONS whitelist and the caller's
+      // include filter. Additional extensions are ADDITIVE: they extend
+      // the pool of files considered "code" but never narrow an
+      // existing include.
+      const additionalExtensions = getIndexingExtensions(context.workdir);
       const effectiveExtensions = mergeExtensionSet(CODE_EXTENSIONS, additionalExtensions);
       const effectiveInclude = mergeIncludePattern(include, additionalExtensions);
 

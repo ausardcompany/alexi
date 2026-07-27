@@ -17,7 +17,7 @@ import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
 import { logger } from '../../utils/logger.js';
 import { attachAgentsMdRemindersForPaths } from '../../agent/agentsMdReminders.js';
-import { getConfigAdditionalExtensions } from '../../config/userConfig.js';
+import { getIndexingExtensions } from '../../config/userConfig.js';
 import { mergeIncludePattern } from './includePattern.js';
 
 const GrepParamsSchema = z.object({
@@ -570,10 +570,12 @@ When independent reads, searches, or edits are also needed, emit those tool call
       }
 
       // Merge the caller's include filter with any additional extensions
-      // configured via `indexing.additionalExtensions` in the user config.
-      // When no include was passed, the pattern remains undefined and the
-      // tool retains its historical "search all files" behavior.
-      const additionalExtensions = getConfigAdditionalExtensions();
+      // configured via `indexing.additionalExtensions` (global) or
+      // `indexing.extensions` in a project-local `.alexi/config.json` /
+      // `.alexi/extensions` file. When no include was passed, the pattern
+      // remains undefined and the tool retains its historical "search
+      // all files" behavior.
+      const additionalExtensions = getIndexingExtensions(context.workdir);
       const effectiveInclude = mergeIncludePattern(params.include, additionalExtensions);
 
       // Fast path: ripgrep when available.
