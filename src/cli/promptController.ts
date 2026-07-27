@@ -2,7 +2,7 @@ function centralizePromptEffects() {
   // Unified logic for prompt effects
 }
 
-function handlePrompt() {
+export function handlePrompt() {
   centralizePromptEffects();
   // Other prompt handling logic
 }
