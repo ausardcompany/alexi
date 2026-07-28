@@ -10,7 +10,7 @@ const mockClientConnect = vi.fn().mockResolvedValue(undefined);
 const mockClientListTools = vi.fn();
 const mockClientClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
+vi.mock('@modelcontextprotocol/client', () => ({
   Client: class MockClient {
     connect = mockClientConnect;
     listTools = mockClientListTools;
@@ -18,7 +18,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   },
 }));
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(function () {
     return {};
   }),

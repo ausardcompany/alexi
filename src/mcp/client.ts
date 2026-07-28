@@ -3,8 +3,8 @@
  * Connects to external MCP servers and aggregates their tools
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
 import { logger } from '../utils/logger.js';
@@ -164,7 +164,13 @@ export class McpClientManager {
 
   /**
    * Fetch all tools from an MCP client, handling paginated responses.
-   * Loops until no nextCursor is returned or MAX_PAGES is reached.
+   *
+   * Loops manually with explicit `{ cursor }` params so the per-page contract
+   * of the v2 SDK is used (the no-`cursor` call would trigger the SDK's
+   * built-in auto-aggregate walk instead — capped by `ClientOptions.listMaxPages`,
+   * which we do not configure). Stops when no `nextCursor` is returned or
+   * `MAX_PAGES` is reached; a `nextCursor` that repeats also stops the walk
+   * as a defence against a non-converging server.
    */
   private async listAllTools(
     client: Client
@@ -172,12 +178,18 @@ export class McpClientManager {
     const allTools: Array<{ name: string; description?: string; inputSchema: unknown }> = [];
     let cursor: string | undefined;
     let pages = 0;
+    let previousCursor: string | undefined;
 
     do {
-      const result = await client.listTools(cursor ? { cursor } : undefined);
+      const result = await client.listTools({ cursor });
       allTools.push(...(result.tools || []));
+      previousCursor = cursor;
       cursor = result.nextCursor;
       pages++;
+      // Guard against a server whose `nextCursor` never advances.
+      if (cursor && cursor === previousCursor) {
+        break;
+      }
     } while (cursor && pages < MAX_PAGES);
 
     return allTools;
@@ -578,7 +590,6 @@ export class McpClientManager {
     try {
       const result = await connection.client.callTool(
         { name: toolName, arguments: args },
-        undefined,
         { signal: controller.signal }
       );
       clearTimeout(timer);

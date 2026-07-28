@@ -3,13 +3,8 @@
  * Exposes existing tools as an MCP server
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  type Tool as McpTool,
-} from '@modelcontextprotocol/sdk/types.js';
+import { Server, type Tool as McpTool } from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 import { getToolRegistry, type ToolContext } from '../tool/index.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
@@ -60,18 +55,26 @@ export class McpServerAdapter {
     const registry = getToolRegistry();
 
     // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    this.server.setRequestHandler('tools/list', async () => {
       const tools = registry.list();
 
       const mcpTools: McpTool[] = tools.map((tool) => {
         const schema = tool.toFunctionSchema();
+        // `toFunctionSchema()` returns the OpenAI-shaped function parameters
+        // object. It is untyped from the JSONValue perspective the v2 MCP
+        // `Tool.inputSchema` requires, so we route through `unknown` on the
+        // narrow slot rather than restating the whole recursive JSON type.
+        const parameters = schema.parameters as {
+          properties?: unknown;
+          required?: string[];
+        };
         return {
           name: schema.name,
           description: schema.description,
           inputSchema: {
             type: 'object' as const,
-            properties: (schema.parameters as any).properties || {},
-            required: (schema.parameters as any).required || [],
+            properties: (parameters.properties ?? {}) as McpTool['inputSchema']['properties'],
+            required: parameters.required || [],
           },
         };
       });
@@ -80,7 +83,7 @@ export class McpServerAdapter {
     });
 
     // Execute a tool
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler('tools/call', async (request) => {
       const { name, arguments: args } = request.params;
 
       const tool = registry.get(name);

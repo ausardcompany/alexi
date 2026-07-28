@@ -31,7 +31,7 @@ const mockClientConnect = vi.fn().mockResolvedValue(undefined);
 const mockClientListTools = vi.fn().mockResolvedValue({ tools: [] });
 const mockClientClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
+vi.mock('@modelcontextprotocol/client', () => ({
   Client: class MockClient {
     connect = mockClientConnect;
     listTools = mockClientListTools;
@@ -39,7 +39,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   },
 }));
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(() => ({})),
 }));
 
@@ -50,7 +50,7 @@ vi.mock('../../src/mcp/config.js', () => ({
 }));
 
 import { McpClientManager } from '../../src/mcp/client.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { SessionManager } from '../../src/core/sessionManager.js';
 import type { McpServerConfig } from '../../src/mcp/config.js';
 
