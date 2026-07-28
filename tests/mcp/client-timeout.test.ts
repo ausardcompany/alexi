@@ -7,13 +7,13 @@ vi.mock('child_process', () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-// Mock @modelcontextprotocol/sdk
+// Mock @modelcontextprotocol/client
 const mockClientConnect = vi.fn().mockResolvedValue(undefined);
 const mockClientListTools = vi.fn().mockResolvedValue({ tools: [] });
 const mockClientCallTool = vi.fn();
 const mockClientClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+vi.mock('@modelcontextprotocol/client', () => {
   return {
     Client: class MockClient {
       connect = mockClientConnect;
@@ -24,7 +24,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(function () {
     return {};
   }),
@@ -90,7 +90,7 @@ describe('MCP Tool Call Timeout', () => {
 
       // Make callTool hang indefinitely
       mockClientCallTool.mockImplementation(
-        (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
           return new Promise((_resolve, reject) => {
             if (options?.signal) {
               options.signal.addEventListener('abort', () => {
@@ -123,7 +123,7 @@ describe('MCP Tool Call Timeout', () => {
       await manager.connect(configWithTimeout);
 
       mockClientCallTool.mockImplementation(
-        (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
           return new Promise((_resolve, reject) => {
             if (options?.signal) {
               options.signal.addEventListener('abort', () => {
@@ -152,7 +152,7 @@ describe('MCP Tool Call Timeout', () => {
       await manager.connect(stdioConfig);
 
       mockClientCallTool.mockImplementation(
-        (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
           return new Promise((_resolve, reject) => {
             if (options?.signal) {
               options.signal.addEventListener('abort', () => {
@@ -187,7 +187,7 @@ describe('MCP Tool Call Timeout', () => {
       await manager.connect(configWithTimeout);
 
       mockClientCallTool.mockImplementation(
-        (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
           return new Promise((_resolve, reject) => {
             if (options?.signal) {
               options.signal.addEventListener('abort', () => {
@@ -233,7 +233,7 @@ describe('MCP Tool Call Timeout', () => {
       await manager.connect(configWithTimeout);
 
       mockClientCallTool.mockImplementation(
-        (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
           return new Promise((_resolve, reject) => {
             if (options?.signal) {
               options.signal.addEventListener('abort', () => {

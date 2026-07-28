@@ -7,13 +7,13 @@ vi.mock('child_process', () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-// Mock @modelcontextprotocol/sdk
+// Mock @modelcontextprotocol/client
 const mockClientConnect = vi.fn().mockResolvedValue(undefined);
 const mockClientListTools = vi.fn().mockResolvedValue({ tools: [] });
 const mockClientCallTool = vi.fn();
 const mockClientClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+vi.mock('@modelcontextprotocol/client', () => {
   return {
     Client: class MockClient {
       connect = mockClientConnect;
@@ -24,7 +24,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(function () {
     return {};
   }),
@@ -66,19 +66,17 @@ async function runTimingCall(
   serverName: string,
   advanceMs: number
 ): Promise<{ success: boolean; result?: unknown; error?: string }> {
-  mockClientCallTool.mockImplementation(
-    (_params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) => {
-      return new Promise((_resolve, reject) => {
-        if (options?.signal) {
-          options.signal.addEventListener('abort', () => {
-            const error = new Error('The operation was aborted');
-            error.name = 'AbortError';
-            reject(error);
-          });
-        }
-      });
-    }
-  );
+  mockClientCallTool.mockImplementation((_params: unknown, options?: { signal?: AbortSignal }) => {
+    return new Promise((_resolve, reject) => {
+      if (options?.signal) {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('The operation was aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      }
+    });
+  });
 
   const promise = manager.callTool(serverName, 'some-tool', {});
   await vi.advanceTimersByTimeAsync(advanceMs);

@@ -7,12 +7,12 @@ vi.mock('child_process', () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-// Mock @modelcontextprotocol/sdk
+// Mock @modelcontextprotocol/client
 const mockClientConnect = vi.fn().mockResolvedValue(undefined);
 const mockClientListTools = vi.fn();
 const mockClientClose = vi.fn().mockResolvedValue(undefined);
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+vi.mock('@modelcontextprotocol/client', () => {
   return {
     Client: class MockClient {
       connect = mockClientConnect;
@@ -22,7 +22,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(function () {
     return {};
   }),
@@ -99,7 +99,9 @@ describe('McpClientManager - Paginated tools/list', () => {
       expect(connection.tools[0].name).toBe('tool-a');
       expect(connection.tools[1].name).toBe('tool-b');
       expect(mockClientListTools).toHaveBeenCalledTimes(1);
-      expect(mockClientListTools).toHaveBeenCalledWith(undefined);
+      // v2 SDK: pass explicit `{ cursor }` params so the per-page contract is
+      // used instead of the SDK's auto-aggregate walk.
+      expect(mockClientListTools).toHaveBeenCalledWith({ cursor: undefined });
     });
 
     it('should handle empty tools list', async () => {
@@ -156,9 +158,9 @@ describe('McpClientManager - Paginated tools/list', () => {
       expect(connection.tools[1].name).toBe('tool-2');
       expect(connection.tools[2].name).toBe('tool-3');
       expect(mockClientListTools).toHaveBeenCalledTimes(3);
-      // First call has no cursor
-      expect(mockClientListTools).toHaveBeenNthCalledWith(1, undefined);
-      // Subsequent calls pass the cursor
+      // v2 SDK: every call passes an explicit `{ cursor }` params object so
+      // the per-page contract is used (auto-aggregate is bypassed).
+      expect(mockClientListTools).toHaveBeenNthCalledWith(1, { cursor: undefined });
       expect(mockClientListTools).toHaveBeenNthCalledWith(2, { cursor: 'cursor-page-2' });
       expect(mockClientListTools).toHaveBeenNthCalledWith(3, { cursor: 'cursor-page-3' });
     });
@@ -207,7 +209,10 @@ describe('McpClientManager - Paginated tools/list', () => {
 
   describe('safety cap (MAX_PAGES)', () => {
     it('should stop paginating after 100 pages to prevent infinite loops', async () => {
-      // Set up mock to always return a cursor (infinite pagination)
+      // Set up mock to always return a distinct advancing cursor so it exercises
+      // the count-based MAX_PAGES cap (the repeated-cursor guard is a separate
+      // defence tested below).
+      let counter = 0;
       mockClientListTools.mockImplementation(() =>
         Promise.resolve({
           tools: [
@@ -216,7 +221,7 @@ describe('McpClientManager - Paginated tools/list', () => {
               inputSchema: { type: 'object', properties: {} },
             },
           ],
-          nextCursor: 'next',
+          nextCursor: `next-${++counter}`,
         })
       );
 
@@ -226,6 +231,30 @@ describe('McpClientManager - Paginated tools/list', () => {
       // Should have fetched exactly 100 pages (MAX_PAGES)
       expect(mockClientListTools).toHaveBeenCalledTimes(100);
       expect(connection.tools).toHaveLength(100);
+    });
+
+    it('should stop paginating when a non-converging server repeats the same cursor', async () => {
+      // A broken server that returns the same `nextCursor` forever must not
+      // loop until MAX_PAGES; the repeated-cursor guard should stop after the
+      // second identical value.
+      mockClientListTools.mockImplementation(() =>
+        Promise.resolve({
+          tools: [
+            {
+              name: 'tool',
+              inputSchema: { type: 'object', properties: {} },
+            },
+          ],
+          nextCursor: 'stuck',
+        })
+      );
+
+      const connection = await manager.connect(stdioConfig);
+
+      expect(connection.status).toBe('connected');
+      // First call: cursor=undefined -> nextCursor='stuck'
+      // Second call: cursor='stuck' -> nextCursor='stuck' (same), stop.
+      expect(mockClientListTools).toHaveBeenCalledTimes(2);
     });
   });
 

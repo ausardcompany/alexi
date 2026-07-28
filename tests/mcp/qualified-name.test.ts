@@ -14,7 +14,7 @@ const listToolsQueue: Array<Array<{ name: string; description?: string; inputSch
   [];
 const callToolByServer: Record<string, (name: string, args: unknown) => Promise<unknown>> = {};
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+vi.mock('@modelcontextprotocol/client', () => {
   return {
     Client: class MockClient {
       private toolList: Array<{ name: string; description?: string; inputSchema: unknown }>;
@@ -40,7 +40,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn().mockImplementation(function MockStdio() {
     return {};
   }),
