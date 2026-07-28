@@ -1,0 +1,1 @@
+const result: CallToolResult = yield* Effect.promise(() => McpCatalog.callTool(input.entry.tool, input.args, input.ctx.abort))
