@@ -4,6 +4,7 @@ import { useChat } from '../context/ChatContext.js';
 import { useSession } from '../context/SessionContext.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { buildUserMessage, type MultimodalContentItem } from '../../../utils/multimodal.js';
+import { isStreamStalledError } from '../../../core/streamWatchdog.js';
 
 export interface UseStreamChatReturn {
   sendMessage: (text: string) => Promise<void>;
@@ -78,6 +79,10 @@ export function useStreamChat(): UseStreamChatReturn {
         // Handle abort gracefully — not an error
         if (err instanceof Error && err.name === 'AbortError') {
           // Aborted by user; no error to display
+        } else if (isStreamStalledError(err)) {
+          // Stalled provider stream (issue #1164). Surface a friendly,
+          // retry-oriented message instead of the raw watchdog text.
+          chat.setError(`${err.message} You can retry the request or switch models.`);
         } else {
           const message = err instanceof Error ? err.message : String(err);
           chat.setError(message);

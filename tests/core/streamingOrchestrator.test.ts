@@ -25,7 +25,11 @@ vi.mock('../../src/core/router.js', () => ({
   classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
 }));
 
-import { streamChat } from '../../src/core/streamingOrchestrator.js';
+import {
+  streamChat,
+  StreamStalledError,
+  isStreamStalledError,
+} from '../../src/core/streamingOrchestrator.js';
 import { getProviderForModelWithFallback, getDefaultModel } from '../../src/providers/index.js';
 import type { StreamChunk } from '../../src/providers/index.js';
 
@@ -338,6 +342,72 @@ describe('streamChat hand-rolled iterator preemption (issue #1115)', () => {
     expect(chunks.join('')).toBe('ab');
     expect(finalResult.modelUsed).toBe('gpt-4o');
     expect(finalResult.usage?.total_tokens).toBe(5);
+  });
+
+  it('surfaces a StreamStalledError (not a generic AbortError) when the stream stalls (#1164)', async () => {
+    const { provider } = makeStalledProvider();
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: provider as never,
+      effectiveModelId: 'gpt-4o',
+      usedFallback: false,
+    });
+
+    const iter = streamChat('hi', {
+      modelOverride: 'gpt-4o',
+      streamIdleTimeoutMs: 80,
+    });
+
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+
+    let caught: unknown;
+    try {
+      await iter.next();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(StreamStalledError);
+    expect(isStreamStalledError(caught)).toBe(true);
+    expect((caught as Error).message).toMatch(/Stream stalled\. No response for /i);
+    // The error must NOT collapse into a generic AbortError so CLI/TUI
+    // can render a distinct, retry-oriented message.
+    expect((caught as Error).name).toBe('StreamStalledError');
+  });
+
+  it('picks up STREAM_STALL_TIMEOUT_MS env var when streamIdleTimeoutMs is not provided (#1164)', async () => {
+    const originalEnv = process.env.STREAM_STALL_TIMEOUT_MS;
+    process.env.STREAM_STALL_TIMEOUT_MS = '75';
+    try {
+      const { provider } = makeStalledProvider();
+      vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+        provider: provider as never,
+        effectiveModelId: 'gpt-4o',
+        usedFallback: false,
+      });
+
+      // NOTE: no streamIdleTimeoutMs — the orchestrator should resolve
+      // the timeout from the env var on each stream.
+      const iter = streamChat('hi', { modelOverride: 'gpt-4o' });
+      await iter.next(); // first chunk
+
+      const start = Date.now();
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      const elapsed = Date.now() - start;
+      expect(caught).toBeInstanceOf(StreamStalledError);
+      // The 75ms window should fire well under the pre-#1164 30s default.
+      expect(elapsed).toBeLessThan(2_000);
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.STREAM_STALL_TIMEOUT_MS;
+      } else {
+        process.env.STREAM_STALL_TIMEOUT_MS = originalEnv;
+      }
+    }
   });
 
   it('is drivable via `for await` (Symbol.asyncIterator)', async () => {

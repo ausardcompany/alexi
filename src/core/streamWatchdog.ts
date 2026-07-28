@@ -33,6 +33,51 @@
 import type { StreamChunk } from '../providers/index.js';
 
 /**
+ * Error raised when the streaming watchdog detects a stalled provider
+ * stream — i.e. no chunk arrived within the configured idle window.
+ *
+ * The error is thrown from the pending `next()` call on the watchdog
+ * iterator and propagates up through `streamChat`. Callers can
+ * distinguish a stall from a user-initiated abort via
+ * `err instanceof StreamStalledError`. For legacy call sites that
+ * key off `err.name === 'AbortError'`, the name is set to
+ * `'StreamStalledError'` but a companion boolean flag `isStreamStalled`
+ * and `code: 'STREAM_STALLED'` are attached so the router can classify
+ * it as transient without a string-compare.
+ *
+ * See issue #1164.
+ */
+export class StreamStalledError extends Error {
+  /** Discriminator for `router.classifyRouteError` and TUI/CLI branches. */
+  readonly isStreamStalled = true;
+  /** Machine-readable code kept stable across message revisions. */
+  readonly code = 'STREAM_STALLED';
+  /** Idle window (ms) that had elapsed with no chunk when the timer fired. */
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number, message?: string) {
+    super(message ?? `Stream stalled. No response for ${Math.round(timeoutMs / 1000)}s.`);
+    this.name = 'StreamStalledError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Type-guard for {@link StreamStalledError} that also matches plain
+ * objects wearing the `isStreamStalled` marker (defensive against error
+ * instances re-created across module boundaries).
+ */
+export function isStreamStalledError(err: unknown): err is StreamStalledError {
+  if (err instanceof StreamStalledError) {
+    return true;
+  }
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { isStreamStalled?: unknown }).isStreamStalled === true
+  );
+}
+
+/**
  * Names of tools whose in-flight tool-call chunks should extend the idle
  * timeout window. These are tools that legitimately produce long silent
  * periods (e.g. shell commands, background processes, sub-agents). The
@@ -49,8 +94,34 @@ export const DEFAULT_LONG_RUNNING_TOOL_NAMES: ReadonlySet<string> = new Set([
   'agent_manager',
 ]);
 
-/** Default idle-timeout window before a stalled stream is aborted. */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 30_000;
+/**
+ * Resolve the effective default idle timeout, honouring the
+ * `STREAM_STALL_TIMEOUT_MS` environment variable when set to a positive
+ * integer. Falls back to 30_000 ms otherwise.
+ *
+ * The env var is read on each call (not cached at import time) so tests
+ * and long-running processes can adjust the value at runtime.
+ */
+export function resolveDefaultStreamIdleTimeoutMs(): number {
+  const raw = process.env.STREAM_STALL_TIMEOUT_MS;
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parsed = parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return 30_000;
+}
+
+/**
+ * Default idle-timeout window before a stalled stream is aborted.
+ *
+ * NOTE: Read at import time. For env-var-aware resolution use
+ * {@link resolveDefaultStreamIdleTimeoutMs} — the streaming orchestrator
+ * calls the function on every stream so a mid-session `STREAM_STALL_TIMEOUT_MS`
+ * change takes effect on the next request.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = resolveDefaultStreamIdleTimeoutMs();
 
 /** Default extended idle window when a long-running tool is in-flight. */
 export const DEFAULT_STREAM_TOOL_EXTENSION_MS = 10 * 60 * 1000;
@@ -185,12 +256,11 @@ export function createStreamWatchdog(
     if (currentWindowMs <= 0 || !Number.isFinite(currentWindowMs)) {
       return;
     }
+    const armedWindowMs = currentWindowMs;
     idleTimer = setTimeout(() => {
       idleTimer = null;
       if (!finished && !controller.signal.aborted) {
-        controller.abort(
-          new DOMException(`stream idle timeout after ${currentWindowMs}ms`, 'AbortError')
-        );
+        controller.abort(new StreamStalledError(armedWindowMs));
       }
     }, currentWindowMs);
     // Do not keep the Node event loop alive solely for a watchdog timer.

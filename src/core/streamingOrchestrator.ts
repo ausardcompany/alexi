@@ -19,8 +19,8 @@ import { buildSessionHeaders } from '../providers/sessionHeaders.js';
 import type { CompletionOptions } from '../providers/sapOrchestration.js';
 import {
   createStreamWatchdog,
-  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_TOOL_EXTENSION_MS,
+  resolveDefaultStreamIdleTimeoutMs,
 } from './streamWatchdog.js';
 
 export interface StreamingOptions {
@@ -67,6 +67,11 @@ export interface StreamingResult {
 
 // Re-export StreamChunk for consumers
 export type { StreamChunk };
+
+// Re-export the stall-error surface so CLI/TUI can `import { ... } from
+// '../core/streamingOrchestrator.js'` without reaching into the watchdog
+// module.
+export { StreamStalledError, isStreamStalledError } from './streamWatchdog.js';
 
 /**
  * The hand-rolled iterator returned by {@link streamChat}. Mirrors the
@@ -228,7 +233,9 @@ export function streamChat(
         provider.streamComplete(messages, { ...providerOpts, signal: effectiveSignal }),
       {
         signal: options?.signal,
-        idleTimeoutMs: options?.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        // Resolve the idle timeout on every stream so a mid-session
+        // `STREAM_STALL_TIMEOUT_MS` env change takes effect immediately.
+        idleTimeoutMs: options?.streamIdleTimeoutMs ?? resolveDefaultStreamIdleTimeoutMs(),
         toolExtensionMs: options?.streamToolExtensionMs ?? DEFAULT_STREAM_TOOL_EXTENSION_MS,
       }
     );
