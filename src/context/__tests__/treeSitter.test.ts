@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createRequire } from 'module';
 import {
   isSupportedFile,
   parseSource,
@@ -10,6 +11,27 @@ import {
   findChildOfType,
   getNameNode,
 } from '../treeSitter.js';
+
+// Tree-sitter grammars are optional peer dependencies. Skip the parsing
+// suites when they are not installed on the current runner so tests remain
+// green in the minimal-install path (see #1154).
+const nodeRequire = createRequire(import.meta.url);
+function hasGrammars(): boolean {
+  for (const pkg of [
+    'tree-sitter',
+    'tree-sitter-typescript',
+    'tree-sitter-javascript',
+    'tree-sitter-bash',
+  ]) {
+    try {
+      nodeRequire.resolve(pkg);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+const grammarsInstalled = hasGrammars();
 
 describe('isSupportedFile', () => {
   it('returns true for .ts files', () => {
@@ -82,7 +104,7 @@ describe('isSupportedFile', () => {
   });
 });
 
-describe('parseSource', () => {
+describe.skipIf(!grammarsInstalled)('parseSource', () => {
   it('parses valid TypeScript and returns a SyntaxNode', () => {
     const source = 'const x: number = 42;';
     const root = parseSource(source, 'file.ts');
@@ -177,7 +199,7 @@ describe('parseSource', () => {
   });
 });
 
-describe('walkNode', () => {
+describe.skipIf(!grammarsInstalled)('walkNode', () => {
   it('visits all descendant nodes', () => {
     const source = 'const a = 1; const b = 2;';
     const root = parseSource(source, 'file.ts')!;
@@ -222,7 +244,7 @@ describe('walkNode', () => {
   });
 });
 
-describe('findChildOfType', () => {
+describe.skipIf(!grammarsInstalled)('findChildOfType', () => {
   it('returns the first matching child', () => {
     const source = 'function foo(a: string): void {}';
     const root = parseSource(source, 'file.ts')!;
@@ -252,7 +274,7 @@ describe('findChildOfType', () => {
   });
 });
 
-describe('getNameNode', () => {
+describe.skipIf(!grammarsInstalled)('getNameNode', () => {
   it('returns the identifier child of a function declaration', () => {
     const source = 'function myFunc() {}';
     const root = parseSource(source, 'file.ts')!;
