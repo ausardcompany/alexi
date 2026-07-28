@@ -8,7 +8,12 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import { streamChat, resolveModelId, isAbortError } from '../core/streamingOrchestrator.js';
+import {
+  streamChat,
+  resolveModelId,
+  isAbortError,
+  isStreamStalledError,
+} from '../core/streamingOrchestrator.js';
 import { isOrchestrationModel } from '../providers/sapOrchestration.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { colors, c } from './utils/colors.js';
@@ -2617,6 +2622,14 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
       if (isAbortError(err)) {
         // Already handled in SIGINT
+      } else if (isStreamStalledError(err)) {
+        // Stalled provider stream (issue #1164). Show a retry-oriented
+        // hint so users know the process is not frozen — they can just
+        // re-issue the prompt or switch models.
+        console.log();
+        console.log(
+          c('red', `\n  ${err.message} You can retry the request or switch models with /model.\n`)
+        );
       } else {
         console.log();
         console.log(c('red', `\n  Error: ${err instanceof Error ? err.message : String(err)}\n`));

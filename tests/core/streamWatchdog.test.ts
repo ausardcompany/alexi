@@ -13,12 +13,15 @@
  * `createStreamWatchdog` directly with hand-written sources to keep the
  * cause/effect link tight when a regression appears.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   createStreamWatchdog,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_TOOL_EXTENSION_MS,
   DEFAULT_LONG_RUNNING_TOOL_NAMES,
+  StreamStalledError,
+  isStreamStalledError,
+  resolveDefaultStreamIdleTimeoutMs,
 } from '../../src/core/streamWatchdog.js';
 import type { StreamChunk } from '../../src/providers/index.js';
 
@@ -193,7 +196,7 @@ describe('createStreamWatchdog', () => {
       await expect(pull).rejects.toBeInstanceOf(Error);
     });
 
-    it('carries a descriptive abort reason on idle timeout', async () => {
+    it('throws a StreamStalledError with a friendly message on idle timeout', async () => {
       const { factory } = stalledAsyncSource();
       const iter = createStreamWatchdog(factory, { idleTimeoutMs: 50 });
       await iter.next();
@@ -205,8 +208,15 @@ describe('createStreamWatchdog', () => {
         caught = err;
       }
       expect(caught).toBeInstanceOf(Error);
-      expect((caught as Error).name).toBe('AbortError');
-      expect((caught as Error).message).toMatch(/stream idle timeout/i);
+      // Post-#1164: idle-timeout aborts surface as StreamStalledError
+      // (not the generic AbortError DOMException) so the CLI/TUI can
+      // distinguish a stall from a user-initiated cancel.
+      expect(caught).toBeInstanceOf(StreamStalledError);
+      expect(isStreamStalledError(caught)).toBe(true);
+      expect((caught as Error).name).toBe('StreamStalledError');
+      expect((caught as Error).message).toMatch(/Stream stalled\. No response for /i);
+      expect((caught as StreamStalledError).timeoutMs).toBe(50);
+      expect((caught as StreamStalledError).code).toBe('STREAM_STALLED');
     });
   });
 
@@ -435,5 +445,95 @@ describe('createStreamWatchdog', () => {
         ({ notAnIterator: true }) as unknown as AsyncIterable<StreamChunk>;
       expect(() => createStreamWatchdog(factory, { idleTimeoutMs: 0 })).toThrow(TypeError);
     });
+  });
+});
+
+/**
+ * Dedicated coverage for the {@link StreamStalledError} surface and the
+ * env-var-driven default timeout resolver introduced in issue #1164.
+ * These do not touch the watchdog loop — they lock the error shape and
+ * env-var contract so consumers (TUI/CLI, router) can rely on them.
+ */
+describe('StreamStalledError', () => {
+  it('is an Error subclass with a stable name and machine-readable code', () => {
+    const err = new StreamStalledError(30_000);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(StreamStalledError);
+    expect(err.name).toBe('StreamStalledError');
+    expect(err.code).toBe('STREAM_STALLED');
+    expect(err.isStreamStalled).toBe(true);
+    expect(err.timeoutMs).toBe(30_000);
+  });
+
+  it('renders a human-friendly default message that includes the timeout in seconds', () => {
+    expect(new StreamStalledError(30_000).message).toBe('Stream stalled. No response for 30s.');
+    expect(new StreamStalledError(60_000).message).toBe('Stream stalled. No response for 60s.');
+    // Rounds sub-second timeouts to the nearest whole second (still
+    // useful for the user; sub-second stalls are effectively "no wait").
+    expect(new StreamStalledError(500).message).toMatch(/^Stream stalled\. No response for /);
+  });
+
+  it('accepts an explicit override message', () => {
+    const err = new StreamStalledError(1000, 'custom stall text');
+    expect(err.message).toBe('custom stall text');
+    expect(err.timeoutMs).toBe(1000);
+  });
+});
+
+describe('isStreamStalledError', () => {
+  it('returns true for a real StreamStalledError instance', () => {
+    expect(isStreamStalledError(new StreamStalledError(1000))).toBe(true);
+  });
+
+  it('returns true for a duck-typed error carrying isStreamStalled=true', () => {
+    // Guards against realm/module-boundary issues where `instanceof` fails
+    // but the marker survives (e.g. errors serialized across a worker).
+    const duck = { isStreamStalled: true, message: 'stalled' };
+    expect(isStreamStalledError(duck)).toBe(true);
+  });
+
+  it('returns false for unrelated errors and non-error values', () => {
+    expect(isStreamStalledError(new Error('boom'))).toBe(false);
+    expect(isStreamStalledError(new DOMException('nope', 'AbortError'))).toBe(false);
+    expect(isStreamStalledError(null)).toBe(false);
+    expect(isStreamStalledError(undefined)).toBe(false);
+    expect(isStreamStalledError('stalled')).toBe(false);
+    expect(isStreamStalledError({ isStreamStalled: false })).toBe(false);
+  });
+});
+
+describe('resolveDefaultStreamIdleTimeoutMs', () => {
+  const ORIGINAL = process.env.STREAM_STALL_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) {
+      delete process.env.STREAM_STALL_TIMEOUT_MS;
+    } else {
+      process.env.STREAM_STALL_TIMEOUT_MS = ORIGINAL;
+    }
+  });
+
+  it('defaults to 30_000 ms when the env var is unset', () => {
+    delete process.env.STREAM_STALL_TIMEOUT_MS;
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(30_000);
+  });
+
+  it('honours a positive integer STREAM_STALL_TIMEOUT_MS override', () => {
+    process.env.STREAM_STALL_TIMEOUT_MS = '60000';
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(60_000);
+  });
+
+  it('accepts 0 (watchdog effectively disabled) as a valid override', () => {
+    process.env.STREAM_STALL_TIMEOUT_MS = '0';
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(0);
+  });
+
+  it('falls back to the default for garbage / negative / empty values', () => {
+    process.env.STREAM_STALL_TIMEOUT_MS = 'not-a-number';
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(30_000);
+    process.env.STREAM_STALL_TIMEOUT_MS = '-42';
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(30_000);
+    process.env.STREAM_STALL_TIMEOUT_MS = '   ';
+    expect(resolveDefaultStreamIdleTimeoutMs()).toBe(30_000);
   });
 });
