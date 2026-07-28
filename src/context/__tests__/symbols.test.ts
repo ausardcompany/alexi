@@ -3,8 +3,31 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createRequire } from 'module';
 import { extractSymbols } from '../symbols.js';
 import type { CodeSymbol } from '../symbols.js';
+
+// Symbol extraction depends on tree-sitter grammars (optional peer deps).
+// Skip grammar-dependent suites when the packages are not installed on the
+// current runner (see #1154).
+const nodeRequire = createRequire(import.meta.url);
+function hasGrammars(): boolean {
+  for (const pkg of [
+    'tree-sitter',
+    'tree-sitter-typescript',
+    'tree-sitter-javascript',
+    'tree-sitter-bash',
+  ]) {
+    try {
+      nodeRequire.resolve(pkg);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+const grammarsInstalled = hasGrammars();
+const describeIfGrammars = grammarsInstalled ? describe : describe.skip;
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
@@ -29,7 +52,7 @@ describe('extractSymbols', () => {
     });
   });
 
-  describe('function declarations', () => {
+  describeIfGrammars('function declarations', () => {
     it('extracts a top-level function', () => {
       const src = 'function greet(name: string): string { return "hi"; }';
       const symbols = extractSymbols(src, 'file.ts');
@@ -54,7 +77,7 @@ describe('extractSymbols', () => {
     });
   });
 
-  describe('class declarations', () => {
+  describeIfGrammars('class declarations', () => {
     it('extracts a class', () => {
       const src = 'class Animal {}';
       const symbols = extractSymbols(src, 'file.ts');
@@ -91,7 +114,7 @@ class Greeter {
     });
   });
 
-  describe('interface declarations', () => {
+  describeIfGrammars('interface declarations', () => {
     it('extracts a TypeScript interface', () => {
       const src = 'interface Shape { area(): number; }';
       const symbols = extractSymbols(src, 'file.ts');
@@ -106,7 +129,7 @@ class Greeter {
     });
   });
 
-  describe('type alias declarations', () => {
+  describeIfGrammars('type alias declarations', () => {
     it('extracts a TypeScript type alias', () => {
       const src = 'type StringOrNumber = string | number;';
       const symbols = extractSymbols(src, 'file.ts');
@@ -121,7 +144,7 @@ class Greeter {
     });
   });
 
-  describe('variable declarations', () => {
+  describeIfGrammars('variable declarations', () => {
     it('extracts a const declaration', () => {
       const src = 'const MAX_RETRIES = 3;';
       const symbols = extractSymbols(src, 'file.ts');
@@ -142,7 +165,7 @@ class Greeter {
     });
   });
 
-  describe('symbol metadata', () => {
+  describeIfGrammars('symbol metadata', () => {
     it('sets filePath on every symbol', () => {
       const src = 'function foo() {} class Bar {}';
       const symbols = extractSymbols(src, 'src/utils.ts');
@@ -184,7 +207,7 @@ class Greeter {
     });
   });
 
-  describe('JavaScript support', () => {
+  describeIfGrammars('JavaScript support', () => {
     it('extracts function from a .js file', () => {
       const src = 'function jsFunc() {}';
       const symbols = extractSymbols(src, 'file.js');
@@ -198,7 +221,7 @@ class Greeter {
     });
   });
 
-  describe('bash support', () => {
+  describeIfGrammars('bash support', () => {
     it('extracts a POSIX-style function from a .sh file', () => {
       const src = 'greet() {\n  echo "hi $1"\n}';
       const symbols = extractSymbols(src, 'script.sh');
@@ -257,7 +280,7 @@ class Greeter {
     });
   });
 
-  describe('multiple symbols', () => {
+  describeIfGrammars('multiple symbols', () => {
     it('extracts multiple top-level symbols in order', () => {
       const src = `
 function alpha() {}

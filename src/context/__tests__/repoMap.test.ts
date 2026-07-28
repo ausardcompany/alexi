@@ -3,10 +3,33 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createRequire } from 'module';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { buildRepoMap, generateRepoMap, RepoMapManager } from '../repoMap.js';
+
+// Symbol extraction relies on optional tree-sitter grammars. Tests that
+// depend on extracted symbols are skipped when grammars are not installed
+// (see #1154).
+const nodeRequire = createRequire(import.meta.url);
+function hasGrammars(): boolean {
+  for (const pkg of [
+    'tree-sitter',
+    'tree-sitter-typescript',
+    'tree-sitter-javascript',
+    'tree-sitter-bash',
+  ]) {
+    try {
+      nodeRequire.resolve(pkg);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+const grammarsInstalled = hasGrammars();
+const itIfGrammars = grammarsInstalled ? it : it.skip;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -97,7 +120,7 @@ describe('buildRepoMap', () => {
     expect(keys.some((k) => k.endsWith('visible.ts'))).toBe(true);
   });
 
-  it('extracts symbols into the files map', async () => {
+  itIfGrammars('extracts symbols into the files map', async () => {
     writeFile(tmpDir, 'lib.ts', 'export function compute(x: number): number { return x * 2; }');
     const map = await buildRepoMap(tmpDir);
     const allSymbols = [...map.files.values()].flat();
@@ -112,7 +135,7 @@ describe('buildRepoMap', () => {
     expect(keys.some((k) => k.endsWith('deploy.sh'))).toBe(true);
   });
 
-  it('extracts bash function symbols into the files map', async () => {
+  itIfGrammars('extracts bash function symbols into the files map', async () => {
     writeFile(
       tmpDir,
       'utils.sh',
@@ -194,13 +217,13 @@ describe('generateRepoMap', () => {
     }
   });
 
-  it('includes symbol signatures in the output', async () => {
+  itIfGrammars('includes symbol signatures in the output', async () => {
     writeFile(tmpDir, 'api.ts', 'export function doWork(input: string): boolean { return true; }');
     const result = await generateRepoMap(tmpDir);
     expect(result).toContain('doWork');
   });
 
-  it('includes bash scripts with function signatures in the output', async () => {
+  itIfGrammars('includes bash scripts with function signatures in the output', async () => {
     writeFile(
       tmpDir,
       'scripts/release.sh',
