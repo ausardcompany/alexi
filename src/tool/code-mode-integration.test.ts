@@ -1,1 +1,1 @@
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFS }))
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFS }));

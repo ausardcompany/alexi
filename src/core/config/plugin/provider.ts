@@ -1,1 +1,1 @@
-const integrationTransform = yield* integrations.transform()
+const integrationTransform = yield * integrations.transform();
