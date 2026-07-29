@@ -119,7 +119,14 @@ export function buildBashDescription(shell: ShellInfo = detectShell()): string {
   // internally for a short TTL, so calling this on every description
   // render is still cheap.
   const envSummary = formatShellEnvSummary(detectShellEnv(shell));
+  // The explicit `Shell: <name>` line (issue #1181) lets the LLM pick
+  // the right syntax family (bash vs zsh vs fish vs powershell vs cmd)
+  // when composing commands. It duplicates the `Execute a <type>...`
+  // opener on purpose — models that skim the description still see the
+  // shell name in a clearly labelled field.
   return `Execute a ${shell.type} command in a shell.
+
+Shell: ${shell.type}
 
 ${envSummary}
 
