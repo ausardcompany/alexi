@@ -1,0 +1,1 @@
+readonly get: (id: ID) => Effect.Effect<Stored | undefined>

@@ -1,0 +1,1 @@
+export const TextPrompt = Schema.Struct({
