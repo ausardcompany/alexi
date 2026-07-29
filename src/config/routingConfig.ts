@@ -106,6 +106,28 @@ const DEFAULT_CONFIG: RoutingConfig = {
 };
 
 /**
+ * Resolve the default routing-config.json path used by
+ * {@link saveRoutingConfig} when no explicit path is given. Mirrors the
+ * primary search location used by {@link loadRoutingConfig}.
+ */
+export function getDefaultRoutingConfigPath(): string {
+  return path.join(process.cwd(), 'routing-config.json');
+}
+
+/**
+ * Persist routing configuration to disk. Writes JSON with 2-space
+ * indentation and a trailing newline (matches project prettier defaults).
+ *
+ * Throws if the target directory is missing or the write fails; callers are
+ * responsible for surfacing errors to the user.
+ */
+export function saveRoutingConfig(config: RoutingConfig, configPath?: string): void {
+  const target = configPath ?? getDefaultRoutingConfigPath();
+  const serialised = JSON.stringify(config, null, 2) + '\n';
+  fs.writeFileSync(target, serialised, 'utf-8');
+}
+
+/**
  * Load routing configuration from file or use defaults
  */
 export function loadRoutingConfig(configPath?: string): RoutingConfig {

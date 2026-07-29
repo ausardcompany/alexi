@@ -18,6 +18,17 @@ export interface ModelCapability {
   strengths: string[];
   maxTokens: number;
   reasoning: boolean;
+  /**
+   * Optional custom-model metadata preserved across model-id changes.
+   * These fields mirror the fields upstream (Cline PR #12628) preserves when
+   * the primary key (model id) changes so a paid custom model does not
+   * silently fall back to safe defaults (0 pricing, no prompt cache).
+   *
+   * They are OPTIONAL; the catalog-derived defaults still apply when unset.
+   */
+  inputPrice?: number;
+  outputPrice?: number;
+  supportsPromptCache?: boolean;
 }
 
 export interface RoutingDecision {
