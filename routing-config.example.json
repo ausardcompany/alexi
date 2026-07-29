@@ -44,6 +44,15 @@
       "maxTokens": 200000,
       "reasoning": true,
       "enabled": true
+    },
+    {
+      "id": "claude-opus-4",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research", "advanced-coding"],
+      "maxTokens": 200000,
+      "reasoning": true,
+      "enabled": true
     }
   ],
   "rules": [

@@ -81,6 +81,59 @@ export function isClaude(modelId: string): boolean {
 }
 
 /**
+ * Known Anthropic model ids that Alexi's router recognizes explicitly.
+ *
+ * This catalog is used by `isAnthropicModel` for fast, unambiguous matching
+ * of well-known ids (including provider-prefixed forms such as
+ * `sap-ai-core/anthropic--claude-...`). Unlisted ids still fall through to
+ * substring detection via `isClaude`, so this constant does not gate
+ * routing — it just documents the supported set.
+ *
+ * Added claude-opus-4, sonnet-4.5, sonnet-4.7 + -1221-v1 variants
+ * (Cline #12620, 2026-07-20).
+ */
+export const ANTHROPIC_MODELS: readonly string[] = [
+  // Claude 3 family
+  'claude-3-opus',
+  'claude-3-sonnet',
+  'claude-3-haiku',
+  'claude-3.5-sonnet',
+  'claude-3.5-haiku',
+  'claude-3.7-sonnet',
+  // Claude 4 family
+  'claude-4-opus',
+  'claude-4-sonnet',
+  'claude-opus-4',
+  'claude-opus-4-1221-v1',
+  'claude-sonnet-4',
+  'claude-sonnet-4.5',
+  'claude-sonnet-4.5-1221-v1',
+  'claude-sonnet-4.7',
+  'claude-sonnet-4.7-1221-v1',
+  // Alexi-pinned agent model (SAP AI Core provider-prefixed form)
+  'claude-4.7-opus',
+];
+
+/**
+ * Check if a model id refers to an Anthropic model.
+ *
+ * Returns true when either:
+ * - the id matches (case-insensitive) a known entry in `ANTHROPIC_MODELS`
+ *   (also matched as a substring, so provider-prefixed ids such as
+ *   `sap-ai-core/anthropic--claude-opus-4` are recognized), or
+ * - the id contains `claude` as a fallback for unlisted variants.
+ */
+export function isAnthropicModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  for (const known of ANTHROPIC_MODELS) {
+    if (lower.includes(known.toLowerCase())) {
+      return true;
+    }
+  }
+  return isClaude(modelId);
+}
+
+/**
  * Check if model is OpenAI variant
  */
 export function isOpenAI(modelId: string): boolean {
