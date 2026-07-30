@@ -6,7 +6,7 @@ import { useTheme } from '../context/ThemeContext.js';
 export interface McpServerInfo {
   name: string;
   url: string;
-  status: 'connected' | 'disconnected' | 'error';
+  status: 'connected' | 'disconnected' | 'error' | 'failed' | 'connecting' | 'retrying';
   toolCount: number;
 }
 

@@ -97,11 +97,13 @@ describe('McpClientManager - logger integration', () => {
 
     const connection = await manager.connect(stdioConfig);
 
-    expect(connection.status).toBe('error');
-    expect(errorSpy).toHaveBeenCalledWith(
-      'Failed to connect to MCP server logger-test-server:',
-      'boom'
-    );
+    expect(connection.status).toBe('failed');
+    expect(errorSpy).toHaveBeenCalledOnce();
+    const call = errorSpy.mock.calls[0];
+    // The retry-aware format packs attempt info + the classified failure
+    // reason + the actionable error message into a single log string.
+    expect(call[0]).toContain('Failed to connect to MCP server logger-test-server');
+    expect(call[0]).toContain('boom');
   });
 
   it('disconnect() on a missing server is a silent no-op', async () => {
