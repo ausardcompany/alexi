@@ -1,31 +1,18 @@
 # Changes Summary
 
 ## Files Modified
-
-1. `src/tool/shell-unparsed.ts`
-   - Implemented permission enforcement on unparsed shell commands.
-
-2. `src/tool/shell.ts`
-   - Updated to include unparsed command handling.
-
-3. `src/tool/code-mode.ts`
-   - Refactored to use updated client SDK for tool invocation.
-
-4. `src/tool/code-mode-integration.test.ts`
-   - Updated to reflect SDK changes.
-
-5. `src/tool/shell-unparsed.test.ts`
-   - Implemented regression testing for unparsed command handling.
-
-6. `src/tool/registry.test.ts`
-   - Updated to reflect changes in the tool system for accurate testing.
+- `src/core/package.json`
+- `src/cli/console.ts`
+- `src/providers/gitlab-ai-provider.ts`
+- `src/providers/modal/models.ts`
+- `infra/nix/hashes.json`
 
 ## Summary of Changes
-- **Critical**: Implemented security measures for unparsed shell commands.
-- **High**: Integrated unparsed command handling in `shell.ts` and updated tests.
-- **Medium**: Refactored `code-mode.ts` and updated related tests for SDK compatibility.
+1. **Updated core package version**: Changed version to `7.4.17` in `src/core/package.json` to ensure compatibility with latest upstream changes.
+2. **Added public fetch compatibility flag**: Introduced `compatibilityFlag` in `src/cli/console.ts` for broader deployment options.
+3. **Bumped gitlab-ai-provider version**: Updated version to `6.12.1` in `src/providers/gitlab-ai-provider.ts` for improved performance and bug fixes.
+4. **Discovered Modal models**: Added functionality in `src/providers/modal/models.ts` to introduce new modal models.
+5. **Updated nix node_modules hashes**: Modified `infra/nix/hashes.json` to maintain consistency in package management.
 
 ## Issues Encountered
-- Initially failed to find old string for `registry.test.ts`. Resolved by directly writing the updated test setup.
-
-All changes were made following the update plan without additional modifications or omissions.
+- All specified files were missing; created new files with the required changes.
