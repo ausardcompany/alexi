@@ -129,7 +129,7 @@ describe('MCP timeout lifecycle', () => {
       await vi.advanceTimersByTimeAsync(4000);
       const connection = await connectPromise;
 
-      expect(connection.status).toBe('error');
+      expect(connection.status).toBe('failed');
       expect(connection.error).toMatch(/^MCP connect timed out after 4000ms /);
       expect(connection.error).toContain("(startup timeout for server 'startup-slow')");
       expect(connection.error).toContain("increase 'timeout.startup' in mcp-servers.json");
@@ -150,7 +150,7 @@ describe('MCP timeout lifecycle', () => {
       await vi.advanceTimersByTimeAsync(1500);
       const connection = await connectPromise;
 
-      expect(connection.status).toBe('error');
+      expect(connection.status).toBe('failed');
       // The failing phase is a metadata request, not the handshake, so the
       // message must call out `request` / `timeout.request` — not `startup`.
       expect(connection.error).toMatch(/^MCP tools\/list timed out after 1500ms /);
@@ -195,7 +195,7 @@ describe('MCP timeout lifecycle', () => {
       await vi.advanceTimersByTimeAsync(2000);
       const connection = await connectPromise;
 
-      expect(connection.status).toBe('error');
+      expect(connection.status).toBe('failed');
       expect(callCount).toBe(2);
       expect(connection.error).toMatch(/^MCP tools\/list timed out after 2000ms /);
       expect(connection.error).toContain("(request timeout for server 'paginated')");

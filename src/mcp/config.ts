@@ -51,6 +51,32 @@ export interface McpServerConfig {
    * is supplied to `connect()`). Ignored for non-stdio transports.
    */
   cwd?: string;
+  /**
+   * Connection retry policy for transient failures.
+   *
+   * When `enabled` is true, `McpClientManager.connect` retries a failed
+   * initial connection with exponential backoff. Only transient errors
+   * are retried (`ECONNREFUSED`, `ETIMEDOUT`, `ECONNRESET`, `EPIPE`,
+   * `spawn` failures with recoverable codes, and startup-timeout errors
+   * emitted by the manager). Configuration errors (`ENOENT` — command
+   * not found — and missing required environment variables detected at
+   * config-load time) are NEVER retried; they will only get worse with
+   * more attempts.
+   *
+   * Defaults when the object is present but a field is omitted:
+   * - `maxAttempts`: 3 (initial attempt + 2 retries)
+   * - `initialDelayMs`: 1000
+   * - `maxDelayMs`: 4000
+   *
+   * Backoff sequence: initialDelay, initialDelay*2, initialDelay*4, ...
+   * capped at `maxDelayMs`.
+   */
+  retry?: {
+    enabled: boolean;
+    maxAttempts?: number;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+  };
 }
 
 export interface McpConfig {

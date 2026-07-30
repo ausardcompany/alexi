@@ -88,6 +88,26 @@ export function parseQualifiedName(qualified: string): {
   };
 }
 
+/**
+ * Connection lifecycle states.
+ *
+ * - `connecting`: initial handshake in progress (first attempt or single-shot).
+ * - `retrying`: previous attempt failed with a transient error, backoff
+ *   delay running, next attempt pending. See `attemptCount` for progress.
+ * - `connected`: handshake succeeded and initial metadata fetch completed.
+ * - `disconnected`: previously connected server exited cleanly (or was
+ *   closed by the manager).
+ * - `failed`: terminal failure. Either the retry budget was exhausted or
+ *   the error was classified as non-transient (bad config). The
+ *   connection remains registered so operators can see the failure in
+ *   `getStatus()` and act on the actionable hint in `error`.
+ * - `error`: retained for backwards compatibility. New code should treat
+ *   `error` as an alias for `failed`; existing callers/UIs that only
+ *   knew about `error` continue to work unchanged.
+ */
+export type McpConnectionStatus =
+  'connecting' | 'retrying' | 'connected' | 'disconnected' | 'failed' | 'error';
+
 export interface McpConnection {
   /** Server configuration */
   config: McpServerConfig;
@@ -98,9 +118,17 @@ export interface McpConnection {
   /** Available tools from this server */
   tools: McpToolInfo[];
   /** Connection status */
-  status: 'connecting' | 'connected' | 'disconnected' | 'error';
-  /** Error message if any */
+  status: McpConnectionStatus;
+  /** Error message if any (actionable hint whenever possible) */
   error?: string;
+  /** Timestamp (ms since epoch) of the last recorded error, if any */
+  lastErrorAt?: number;
+  /**
+   * Number of connect attempts that have been made against this server
+   * during the CURRENT `connect()` invocation. Reset to 0 at the start
+   * of every top-level `connect()` call.
+   */
+  attemptCount: number;
   /** Last time tools were fetched */
   toolsCachedAt?: number;
 }
@@ -121,6 +149,204 @@ const CACHE_TTL_MS = 30000; // 30 seconds
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000; // 30 seconds for cold `npx -y` spawn
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds for per-tool call
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
+
+// Retry defaults when `config.retry.enabled` is true but individual fields
+// are omitted. Kept intentionally conservative: 3 attempts across ~7s worst
+// case (1s + 2s + 4s cap) so a transient blip is smoothed without letting
+// startup latency balloon for genuinely broken configs.
+const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_INITIAL_DELAY_MS = 1000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 4000;
+
+/**
+ * Node system-call error codes we treat as transient network / startup
+ * failures. Anything on this list is safe to retry with backoff — the
+ * underlying cause is typically a race between our connect attempt and a
+ * slow-booting server, a temporarily unavailable socket, or a spawned
+ * child that hadn't quite grabbed stdio yet.
+ */
+const TRANSIENT_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EAGAIN',
+  'EBUSY',
+]);
+
+/**
+ * Node system-call error codes we KNOW are non-transient configuration
+ * errors. `ENOENT` from `spawn` means the command binary does not exist
+ * on PATH — retrying will not resurrect it. `EACCES` means the command
+ * is not executable. Both need operator intervention, not more attempts.
+ */
+const CONFIG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'ENOTDIR', 'EPERM']);
+
+/**
+ * Classify a raw error thrown during a connect attempt as either a
+ * transient failure (worth retrying) or a configuration/terminal failure
+ * (must NOT be retried). Retrying an ENOENT with the same command will
+ * always fail; retrying an ECONNREFUSED while the peer finishes booting
+ * often succeeds.
+ *
+ * Rules (checked in order):
+ * 1. Explicit config codes (`ENOENT`, `EACCES`, ...) -> non-transient.
+ * 2. Explicit transient codes (`ECONNREFUSED`, `ETIMEDOUT`, ...) -> transient.
+ * 3. Messages from `formatTimeoutError` with kind `startup` -> transient
+ *    (the server just took longer than the budget; another attempt with
+ *    a warm cache often clears in seconds).
+ * 4. Messages that clearly point at a missing `${VAR}` env resolution
+ *    (empty expansion) -> non-transient. The manager surfaces these with
+ *    an actionable hint before attempting the connect, but we defensively
+ *    catch them here too.
+ * 5. Anything else defaults to non-transient. Retrying an unknown error
+ *    class wastes the budget on the same broken input.
+ */
+function classifyConnectError(error: unknown): 'transient' | 'config' {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') {
+    if (CONFIG_ERROR_CODES.has(code)) {
+      return 'config';
+    }
+    if (TRANSIENT_ERROR_CODES.has(code)) {
+      return 'transient';
+    }
+  }
+
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  // Startup-timeout errors emitted by this module are transient by
+  // definition — the peer was slow, not misconfigured.
+  if (/startup timeout for server/.test(message) && /timed out after/.test(message)) {
+    return 'transient';
+  }
+  // Missing env variable hint emitted by `checkMissingEnvVars`.
+  if (/missing environment variable/i.test(message)) {
+    return 'config';
+  }
+  // "command not found" style messages from various shells / SDK wrappers.
+  if (/command not found|no such file or directory|ENOENT/i.test(message)) {
+    return 'config';
+  }
+  return 'config';
+}
+
+/**
+ * Build an actionable error message for a connect failure. The message
+ * always names the server, the error class, and the exact config field
+ * or environment variable an operator needs to change.
+ */
+function formatConnectError(serverName: string, error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  const code = (error as { code?: unknown } | null)?.code;
+
+  if (typeof code === 'string' && CONFIG_ERROR_CODES.has(code)) {
+    return (
+      `Failed to start MCP server '${serverName}': ${raw} (${code}). ` +
+      `Check the 'command' field in mcp-servers.json — the binary must exist ` +
+      `on PATH and be executable.`
+    );
+  }
+
+  // Timeout errors emitted by `formatTimeoutError` (startup OR request)
+  // already contain an actionable hint pointing at the exact
+  // `timeout.startup` / `timeout.request` field to raise. Pass them
+  // through verbatim so log grepping and downstream error routing stay
+  // stable.
+  if (/^MCP .* timed out after \d+ms /.test(raw) && /timeout for server/.test(raw)) {
+    return raw;
+  }
+
+  // Missing env var hint emitted by `checkMissingEnvVars` is already
+  // actionable — do not double-wrap it.
+  if (/missing environment variable/i.test(raw)) {
+    return raw;
+  }
+
+  if (typeof code === 'string' && TRANSIENT_ERROR_CODES.has(code)) {
+    return (
+      `Failed to connect to MCP server '${serverName}': ${raw} (${code}). ` +
+      `This looks like a transient network/startup error; retry will be attempted ` +
+      `if 'retry.enabled' is true in mcp-servers.json.`
+    );
+  }
+
+  return `Failed to connect to MCP server '${serverName}': ${raw}`;
+}
+
+/**
+ * Resolve the retry policy for a server, applying documented defaults
+ * for missing fields. When `config.retry` is absent OR
+ * `config.retry.enabled === false`, retry is disabled and
+ * `maxAttempts` is 1 (single attempt, existing behaviour).
+ */
+export function resolveRetryPolicy(config: McpServerConfig): {
+  maxAttempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+} {
+  const r = config.retry;
+  if (!r || r.enabled !== true) {
+    return { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
+  }
+  const maxAttempts =
+    typeof r.maxAttempts === 'number' && r.maxAttempts > 0
+      ? Math.floor(r.maxAttempts)
+      : DEFAULT_RETRY_MAX_ATTEMPTS;
+  const initialDelayMs =
+    typeof r.initialDelayMs === 'number' && r.initialDelayMs >= 0
+      ? Math.floor(r.initialDelayMs)
+      : DEFAULT_RETRY_INITIAL_DELAY_MS;
+  const maxDelayMs =
+    typeof r.maxDelayMs === 'number' && r.maxDelayMs >= 0
+      ? Math.floor(r.maxDelayMs)
+      : DEFAULT_RETRY_MAX_DELAY_MS;
+  return { maxAttempts, initialDelayMs, maxDelayMs };
+}
+
+/**
+ * Compute the backoff delay for the Nth retry (1-indexed). Grows
+ * geometrically (2^n) from `initialDelayMs` and clamps at `maxDelayMs`.
+ */
+export function computeBackoffDelayMs(
+  retryIndex: number,
+  initialDelayMs: number,
+  maxDelayMs: number
+): number {
+  const raw = initialDelayMs * Math.pow(2, Math.max(0, retryIndex - 1));
+  return Math.min(raw, maxDelayMs);
+}
+
+/**
+ * Detect missing environment variables in the resolved env map. Returns
+ * the list of KEYS whose value expanded to empty (typically because the
+ * referenced `${VAR}` was undefined in `process.env`). Empty-by-design
+ * values that never referenced a `${...}` template are ignored — the
+ * check only fires when the *raw* config value contained `${...}` but
+ * the resolved value is empty.
+ */
+function findMissingEnvVars(
+  rawEnv: Record<string, string> | undefined,
+  resolvedEnv: Record<string, string>
+): string[] {
+  if (!rawEnv) {
+    return [];
+  }
+  const missing: string[] = [];
+  for (const [key, rawValue] of Object.entries(rawEnv)) {
+    if (typeof rawValue !== 'string') {
+      continue;
+    }
+    const match = rawValue.match(/\$\{([^}]+)\}/);
+    if (!match) {
+      continue;
+    }
+    const resolved = resolvedEnv[key];
+    if (!resolved) {
+      missing.push(match[1]);
+    }
+  }
+  return missing;
+}
 
 /**
  * Which timeout budget was exceeded when an MCP request aborts.
@@ -319,7 +545,123 @@ export class McpClientManager {
   }
 
   /**
-   * Connect to an MCP server
+   * Sleep for `ms` milliseconds. Extracted as a protected method so tests
+   * using fake timers can advance the clock without depending on wall time.
+   */
+  protected async delay(ms: number): Promise<void> {
+    if (ms <= 0) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Perform ONE connect + initial-metadata-fetch attempt for a
+   * connection. Throws on any failure so the caller can classify the
+   * error and decide whether to retry.
+   */
+  private async attemptConnect(
+    connection: McpConnection,
+    options?: McpConnectOptions
+  ): Promise<void> {
+    const { config } = connection;
+
+    // Fail fast on obvious config errors so we don't burn the retry
+    // budget on a request that can never succeed.
+    if (config.transport === 'stdio') {
+      const rawEnv = config.env;
+      const resolvedEnv = resolveEnvVars(rawEnv);
+      const missing = findMissingEnvVars(rawEnv, resolvedEnv);
+      if (missing.length > 0) {
+        throw new Error(
+          `MCP server '${config.name}' is missing environment variable(s): ` +
+            `${missing.join(', ')}. Set them in the process environment or in the ` +
+            `'env' block of mcp-servers.json.`
+        );
+      }
+    }
+
+    if (config.transport === 'stdio') {
+      await this.connectStdio(connection, options);
+    } else {
+      throw new Error(`Transport ${config.transport} not yet implemented`);
+    }
+
+    // Fetch available tools (with pagination support). Each page is
+    // bound by the per-server `request` timeout so a slow server can't
+    // stall startup indefinitely — the `startup` budget covered the
+    // handshake above; metadata fetches use the `request` budget going
+    // forward. Additional metadata endpoints (resources, prompts) are
+    // fetched in parallel with tools where the client supports them,
+    // so a slow endpoint on one axis does not block the others.
+    const rawTools = await this.fetchInitialMetadata(config.name, connection.client);
+    connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
+  }
+
+  /**
+   * Fetch initial metadata for a freshly connected server. Currently
+   * only tools are exposed to the rest of the codebase, but we
+   * parallelize probes for `resources` and `prompts` where the SDK
+   * exposes them so future callers get the data without adding round
+   * trips. Failures on optional endpoints are logged and swallowed —
+   * a server without `resources` support must not fail to connect
+   * because of an unsupported method.
+   */
+  private async fetchInitialMetadata(
+    serverName: string,
+    client: Client
+  ): Promise<Array<{ name: string; description?: string; inputSchema: unknown }>> {
+    const toolsPromise = this.listAllTools(serverName, client);
+
+    // `listResources` / `listPrompts` are optional in the MCP spec. Not
+    // every client build exposes them, and even when exposed a server
+    // may respond with `method not found`. We fire them in parallel
+    // with tools, catch and ignore all errors — they're informational
+    // only and MUST NOT block a successful connection.
+    const optionalMetadata: Promise<unknown>[] = [];
+    const c = client as unknown as {
+      listResources?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
+      listPrompts?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
+    };
+    const listResources = c.listResources;
+    if (typeof listResources === 'function') {
+      optionalMetadata.push(
+        this.withRequestTimeout(serverName, 'resources/list', (opts) =>
+          listResources({}, opts)
+        ).catch((error: unknown) => {
+          logger.debug(`MCP resources/list unavailable for ${serverName}:`, error);
+        })
+      );
+    }
+    const listPrompts = c.listPrompts;
+    if (typeof listPrompts === 'function') {
+      optionalMetadata.push(
+        this.withRequestTimeout(serverName, 'prompts/list', (opts) => listPrompts({}, opts)).catch(
+          (error: unknown) => {
+            logger.debug(`MCP prompts/list unavailable for ${serverName}:`, error);
+          }
+        )
+      );
+    }
+
+    // Wait for tools (the required axis) AND the optional probes to
+    // settle so that slow-listing resources cannot silently linger and
+    // leak timers past the connect call.
+    const [tools] = await Promise.all([toolsPromise, ...optionalMetadata]);
+    return tools;
+  }
+
+  /**
+   * Connect to an MCP server, applying the configured retry policy on
+   * transient failures. Non-transient (config) errors terminate the
+   * loop immediately.
+   *
+   * The returned {@link McpConnection} is ALWAYS registered in the
+   * manager's connection map (closes #1189: failed servers remain
+   * visible with an actionable `error` message and a `failed` status),
+   * regardless of outcome. Operators can inspect it via `getStatus()`
+   * / `getConnection()` and reconnect after fixing the underlying
+   * cause.
    */
   async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
     if (this.connections.has(config.name)) {
@@ -327,7 +669,8 @@ export class McpClientManager {
       if (existing.status === 'connected') {
         return existing;
       }
-      // Disconnect existing failed connection
+      // Disconnect existing failed connection so the retry loop starts
+      // from a clean transport/process pair.
       await this.disconnect(config.name);
     }
 
@@ -336,34 +679,71 @@ export class McpClientManager {
       client: new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} }),
       tools: [],
       status: 'connecting',
+      attemptCount: 0,
     };
 
     this.connections.set(config.name, connection);
 
-    try {
-      if (config.transport === 'stdio') {
-        await this.connectStdio(connection, options);
-      } else {
-        throw new Error(`Transport ${config.transport} not yet implemented`);
+    const policy = resolveRetryPolicy(config);
+    let lastError: unknown = undefined;
+
+    for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
+      connection.attemptCount = attempt;
+
+      // Every attempt beyond the first needs a fresh Client + transport
+      // pair — an aborted handshake leaves the SDK internals in an
+      // undefined state and re-using the same instance produces
+      // confusing double-connect errors.
+      if (attempt > 1) {
+        connection.client = new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} });
+        connection.process = undefined;
       }
 
-      // Fetch available tools (with pagination support). Each page is bound
-      // by the per-server `request` timeout so a slow server can't stall
-      // startup indefinitely — the `startup` budget covered the handshake
-      // above; metadata fetches use the `request` budget going forward.
-      const rawTools = await this.listAllTools(config.name, connection.client);
-      connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
+      try {
+        await this.attemptConnect(connection, options);
+        connection.status = 'connected';
+        connection.error = undefined;
+        logger.info(
+          `Connected to MCP server: ${config.name} (${connection.tools.length} tools)` +
+            (attempt > 1 ? ` [after ${attempt} attempts]` : '')
+        );
+        return connection;
+      } catch (error) {
+        lastError = error;
+        connection.lastErrorAt = Date.now();
+        connection.error = formatConnectError(config.name, error);
 
-      connection.status = 'connected';
-      logger.info(`Connected to MCP server: ${config.name} (${connection.tools.length} tools)`);
+        const classification = classifyConnectError(error);
+        const attemptsRemaining = policy.maxAttempts - attempt;
 
-      return connection;
-    } catch (error) {
-      connection.status = 'error';
-      connection.error = error instanceof Error ? error.message : String(error);
-      logger.error(`Failed to connect to MCP server ${config.name}:`, connection.error);
-      return connection;
+        if (classification === 'config' || attemptsRemaining <= 0) {
+          connection.status = 'failed';
+          logger.error(
+            `Failed to connect to MCP server ${config.name} ` +
+              `[attempt ${attempt}/${policy.maxAttempts}, ${classification}]: ${connection.error}`
+          );
+          return connection;
+        }
+
+        // Transient + at least one attempt remaining: schedule backoff
+        // and try again. Emit a `retrying` state so consumers of
+        // `getStatus()` can render a spinner rather than a red X.
+        const delayMs = computeBackoffDelayMs(attempt, policy.initialDelayMs, policy.maxDelayMs);
+        connection.status = 'retrying';
+        logger.warn(
+          `MCP server ${config.name} connect attempt ${attempt}/${policy.maxAttempts} failed ` +
+            `(transient): ${connection.error} — retrying in ${delayMs}ms`
+        );
+        await this.delay(delayMs);
+      }
     }
+
+    // Unreachable in practice — the loop always returns on the final
+    // attempt — but keep a defensive fallback that mirrors the failure
+    // path so `connection.status` is never left as `retrying`.
+    connection.status = 'failed';
+    connection.error = formatConnectError(config.name, lastError);
+    return connection;
   }
 
   private async connectStdio(
@@ -411,10 +791,17 @@ export class McpClientManager {
 
     connection.process = proc;
 
-    // Handle process errors
+    // Handle process errors AFTER the connection has stabilised. During
+    // an in-flight connect attempt the SDK's `client.connect` call is
+    // the source of truth for failure — letting the async `proc.on`
+    // handler race with the retry loop would flip `status` back to
+    // 'error' between attempts and hide the retry state from operators.
     proc.on('error', (error) => {
-      connection.status = 'error';
-      connection.error = error.message;
+      if (connection.status === 'connected') {
+        connection.status = 'failed';
+        connection.error = formatConnectError(config.name, error);
+        connection.lastErrorAt = Date.now();
+      }
     });
 
     proc.on('exit', (code) => {
