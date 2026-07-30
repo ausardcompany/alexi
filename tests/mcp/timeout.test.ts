@@ -123,7 +123,8 @@ describe('MCP split startup / request timeouts', () => {
 
     const result = await runTimingCall(manager, 'legacy', 5000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 5000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 5000ms /);
+    expect(result.error).toContain("(request timeout for server 'legacy')");
   });
 
   it('object form: both startup and request set independently', async () => {
@@ -142,7 +143,7 @@ describe('MCP split startup / request timeouts', () => {
 
     const result = await runTimingCall(manager, 'both', 2000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 2000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 2000ms /);
   });
 
   it('object form: partial (startup only) uses default request', async () => {
@@ -162,7 +163,7 @@ describe('MCP split startup / request timeouts', () => {
     // Default request timeout is 60000ms
     const result = await runTimingCall(manager, 'startup-only', 60000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 60000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 60000ms /);
   });
 
   it('object form: partial (request only) uses default startup', async () => {
@@ -182,7 +183,7 @@ describe('MCP split startup / request timeouts', () => {
 
     const result = await runTimingCall(manager, 'request-only', 2000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 2000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 2000ms /);
   });
 
   it('no timeout config: both phases use their respective defaults', async () => {
@@ -199,7 +200,7 @@ describe('MCP split startup / request timeouts', () => {
     // Default request: 60000ms
     const result = await runTimingCall(manager, 'defaults', 60000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 60000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 60000ms /);
   });
 
   it('MCP_TOOL_TIMEOUT env var applies to BOTH phases (backwards-compat)', async () => {
@@ -215,6 +216,6 @@ describe('MCP split startup / request timeouts', () => {
 
     const result = await runTimingCall(manager, 'env-both', 7000);
     expect(result.success).toBe(false);
-    expect(result.error).toBe('MCP tool call timed out after 7000ms');
+    expect(result.error).toMatch(/^MCP callTool timed out after 7000ms /);
   });
 });

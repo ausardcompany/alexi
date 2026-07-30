@@ -100,8 +100,12 @@ describe('McpClientManager - Paginated tools/list', () => {
       expect(connection.tools[1].name).toBe('tool-b');
       expect(mockClientListTools).toHaveBeenCalledTimes(1);
       // v2 SDK: pass explicit `{ cursor }` params so the per-page contract is
-      // used instead of the SDK's auto-aggregate walk.
-      expect(mockClientListTools).toHaveBeenCalledWith({ cursor: undefined });
+      // used instead of the SDK's auto-aggregate walk. Second arg carries
+      // the per-page AbortSignal enforcing the `request` timeout budget.
+      expect(mockClientListTools).toHaveBeenCalledWith(
+        { cursor: undefined },
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
     });
 
     it('should handle empty tools list', async () => {
@@ -159,10 +163,24 @@ describe('McpClientManager - Paginated tools/list', () => {
       expect(connection.tools[2].name).toBe('tool-3');
       expect(mockClientListTools).toHaveBeenCalledTimes(3);
       // v2 SDK: every call passes an explicit `{ cursor }` params object so
-      // the per-page contract is used (auto-aggregate is bypassed).
-      expect(mockClientListTools).toHaveBeenNthCalledWith(1, { cursor: undefined });
-      expect(mockClientListTools).toHaveBeenNthCalledWith(2, { cursor: 'cursor-page-2' });
-      expect(mockClientListTools).toHaveBeenNthCalledWith(3, { cursor: 'cursor-page-3' });
+      // the per-page contract is used (auto-aggregate is bypassed). Each
+      // call also receives its own `AbortSignal` — the `request` timeout is
+      // enforced per page so a slow server can't stall the whole walk.
+      expect(mockClientListTools).toHaveBeenNthCalledWith(
+        1,
+        { cursor: undefined },
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      expect(mockClientListTools).toHaveBeenNthCalledWith(
+        2,
+        { cursor: 'cursor-page-2' },
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      expect(mockClientListTools).toHaveBeenNthCalledWith(
+        3,
+        { cursor: 'cursor-page-3' },
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
     });
 
     it('should aggregate tools across pages in refreshTools()', async () => {

@@ -123,6 +123,35 @@ const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds for per-tool call
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
 
 /**
+ * Which timeout budget was exceeded when an MCP request aborts.
+ *
+ * `startup` covers the stdio handshake / cold-spawn phase (`client.connect`).
+ * `request` covers every metadata or tool call made after the handshake
+ * (`callTool`, `listTools`, `listResources`, `listPrompts`, `readResource`,
+ * `getPrompt`, ...). Naming the bound in error messages lets operators
+ * pick the correct config field to raise.
+ */
+type TimeoutKind = 'startup' | 'request';
+
+/**
+ * Produce a human-readable timeout error message that names the exceeded
+ * bound and points at the exact `mcp-servers.json` field to change.
+ */
+function formatTimeoutError(
+  serverName: string,
+  operation: string,
+  kind: TimeoutKind,
+  timeoutMs: number
+): string {
+  const field = kind === 'startup' ? 'timeout.startup' : 'timeout.request';
+  return (
+    `MCP ${operation} timed out after ${timeoutMs}ms ` +
+    `(${kind} timeout for server '${serverName}'); ` +
+    `increase '${field}' in mcp-servers.json to raise this bound.`
+  );
+}
+
+/**
  * Format a single MCP content part into a string suitable for the model.
  *
  * - `text` parts pass through their text verbatim.
@@ -163,6 +192,41 @@ export class McpClientManager {
   private toolCache: Map<string, ToolCache> = new Map();
 
   /**
+   * Run an MCP request under a per-server `request` timeout budget.
+   *
+   * Creates an `AbortController` bound to `timeoutMs`, hands its signal to
+   * the SDK method through the shared `RequestOptions` shape, and on abort
+   * throws an error whose message names the exceeded bound and the exact
+   * config field to raise. Non-timeout errors are rethrown unchanged so
+   * caller-side categorisation (retry, cache invalidation, etc.) still
+   * works.
+   *
+   * `operation` is a short human label (`'tools/list'`, `'callTool'`, ...)
+   * used only in the error message.
+   */
+  private async withRequestTimeout<T>(
+    serverName: string,
+    operation: string,
+    run: (options: { signal: AbortSignal }) => Promise<T>
+  ): Promise<T> {
+    const { request: timeoutMs } = this.getTimeoutsForServer(serverName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await run({ signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        throw new Error(formatTimeoutError(serverName, operation, 'request', timeoutMs), {
+          cause: error,
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Fetch all tools from an MCP client, handling paginated responses.
    *
    * Loops manually with explicit `{ cursor }` params so the per-page contract
@@ -171,8 +235,14 @@ export class McpClientManager {
    * which we do not configure). Stops when no `nextCursor` is returned or
    * `MAX_PAGES` is reached; a `nextCursor` that repeats also stops the walk
    * as a defence against a non-converging server.
+   *
+   * Each page is guarded by an independent `request`-timeout budget so a
+   * slow server cannot burn through the caller's overall deadline silently
+   * — the `AbortController` is reset per page and named in the error so
+   * operators know which `mcp-servers.json` field to raise.
    */
   private async listAllTools(
+    serverName: string,
     client: Client
   ): Promise<Array<{ name: string; description?: string; inputSchema: unknown }>> {
     const allTools: Array<{ name: string; description?: string; inputSchema: unknown }> = [];
@@ -181,7 +251,9 @@ export class McpClientManager {
     let previousCursor: string | undefined;
 
     do {
-      const result = await client.listTools({ cursor });
+      const result = await this.withRequestTimeout(serverName, 'tools/list', (opts) =>
+        client.listTools({ cursor }, opts)
+      );
       allTools.push(...(result.tools || []));
       previousCursor = cursor;
       cursor = result.nextCursor;
@@ -275,8 +347,11 @@ export class McpClientManager {
         throw new Error(`Transport ${config.transport} not yet implemented`);
       }
 
-      // Fetch available tools (with pagination support)
-      const rawTools = await this.listAllTools(connection.client);
+      // Fetch available tools (with pagination support). Each page is bound
+      // by the per-server `request` timeout so a slow server can't stall
+      // startup indefinitely — the `startup` budget covered the handshake
+      // above; metadata fetches use the `request` budget going forward.
+      const rawTools = await this.listAllTools(config.name, connection.client);
       connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
 
       connection.status = 'connected';
@@ -368,8 +443,29 @@ export class McpClientManager {
       env: cleanEnv,
     });
 
+    // Bind the handshake to the per-server `startup` budget. The SDK also
+    // honours `timeout` internally, but we additionally guard with an
+    // `AbortController` so a slow spawn produces a named, actionable error
+    // that points at `timeout.startup` in `mcp-servers.json` instead of a
+    // generic SDK message.
     const { startup } = this.getTimeoutsForServer(config.name);
-    await connection.client.connect(transport, { timeout: startup });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), startup);
+    try {
+      await connection.client.connect(transport, {
+        timeout: startup,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        throw new Error(formatTimeoutError(config.name, 'connect', 'startup', startup), {
+          cause: error,
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -514,7 +610,7 @@ export class McpClientManager {
     }
 
     try {
-      const rawTools = await this.listAllTools(connection.client);
+      const rawTools = await this.listAllTools(connection.config.name, connection.client);
       connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, connection.config.name));
       connection.toolsCachedAt = Date.now();
 
@@ -583,16 +679,10 @@ export class McpClientManager {
       return { success: false, error: `Server not ready: ${serverName} (${connection.status})` };
     }
 
-    const { request: timeoutMs } = this.getTimeoutsForServer(serverName);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
     try {
-      const result = await connection.client.callTool(
-        { name: toolName, arguments: args },
-        { signal: controller.signal }
+      const result = await this.withRequestTimeout(serverName, 'callTool', (opts) =>
+        connection.client.callTool({ name: toolName, arguments: args }, opts)
       );
-      clearTimeout(timer);
 
       // Per the MCP spec, `content` is the canonical narrated output and
       // `structuredContent` is a supplementary machine-readable payload.
@@ -634,10 +724,8 @@ export class McpClientManager {
       }
       return { success: true, result: '' };
     } catch (error) {
-      clearTimeout(timer);
-      if (error instanceof Error && error.name === 'AbortError') {
-        return { success: false, error: `MCP tool call timed out after ${timeoutMs}ms` };
-      }
+      // `withRequestTimeout` translates AbortError into a rich, named
+      // timeout message. Any other error propagates its message verbatim.
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
