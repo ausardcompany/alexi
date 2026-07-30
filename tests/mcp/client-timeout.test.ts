@@ -110,7 +110,9 @@ describe('MCP Tool Call Timeout', () => {
 
       const result = await resultPromise;
       expect(result.success).toBe(false);
-      expect(result.error).toBe('MCP tool call timed out after 60000ms');
+      expect(result.error).toMatch(/^MCP callTool timed out after 60000ms /);
+      expect(result.error).toContain("(request timeout for server 'test-server')");
+      expect(result.error).toContain("increase 'timeout.request' in mcp-servers.json");
     });
 
     it('should use per-server config timeout', async () => {
@@ -143,7 +145,8 @@ describe('MCP Tool Call Timeout', () => {
 
       const result = await resultPromise;
       expect(result.success).toBe(false);
-      expect(result.error).toBe('MCP tool call timed out after 5000ms');
+      expect(result.error).toMatch(/^MCP callTool timed out after 5000ms /);
+      expect(result.error).toContain("(request timeout for server 'timeout-server')");
     });
 
     it('should use MCP_TOOL_TIMEOUT env var when no per-server config', async () => {
@@ -172,7 +175,7 @@ describe('MCP Tool Call Timeout', () => {
 
       const result = await resultPromise;
       expect(result.success).toBe(false);
-      expect(result.error).toBe('MCP tool call timed out after 10000ms');
+      expect(result.error).toMatch(/^MCP callTool timed out after 10000ms /);
     });
 
     it('should prefer per-server config over MCP_TOOL_TIMEOUT env var', async () => {
@@ -207,7 +210,8 @@ describe('MCP Tool Call Timeout', () => {
 
       const result = await resultPromise;
       expect(result.success).toBe(false);
-      expect(result.error).toBe('MCP tool call timed out after 3000ms');
+      expect(result.error).toMatch(/^MCP callTool timed out after 3000ms /);
+      expect(result.error).toContain("(request timeout for server 'priority-server')");
     });
 
     it('should succeed when call completes within timeout', async () => {
@@ -251,7 +255,9 @@ describe('MCP Tool Call Timeout', () => {
 
       const result = await resultPromise;
       expect(result.success).toBe(false);
-      expect(result.error).toMatch(/^MCP tool call timed out after \d+ms$/);
+      expect(result.error).toMatch(/^MCP callTool timed out after 15000ms /);
+      expect(result.error).toContain("(request timeout for server 'format-server')");
+      expect(result.error).toContain("increase 'timeout.request' in mcp-servers.json");
     });
   });
 
