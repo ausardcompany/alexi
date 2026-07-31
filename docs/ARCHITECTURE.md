@@ -865,6 +865,184 @@ class NetworkManager extends EventEmitter {
 
 Events emitted: `reconnect:attempt`, `reconnect:success`, `reconnect:failed`.
 
+## Error Handling
+
+Alexi classifies runtime errors into two categories and applies different
+policies to each:
+
+- **Transient errors** are network- or timing-driven failures that a retry
+  with backoff can plausibly resolve. Retry is bounded by an explicit
+  attempt budget; each attempt waits an exponentially growing delay.
+- **Permanent errors** are configuration, authentication, or shape errors
+  that will not improve with more attempts. Retry is skipped so the
+  attempt budget is not wasted on inputs that cannot succeed, and the
+  underlying cause is surfaced with an actionable hint.
+
+The rule of thumb across the codebase: **transient -> retry with backoff;
+permanent -> fail fast with an actionable message**. Agent workflows and
+human operators can rely on this contract to diagnose why a connection
+attempt failed after 1 try (permanent) versus 3 tries (transient budget
+exhausted).
+
+### Error classification tables
+
+The following patterns are treated as transient (safe to retry) throughout
+Alexi and its CI wrappers:
+
+| Pattern                                | Where classified                      |
+| -------------------------------------- | ------------------------------------- |
+| `socket hang up`                       | `.github/workflows/*.yml` retry loops |
+| `ECONNRESET`                           | `TRANSIENT_ERROR_CODES` in `src/mcp/client.ts`, CI retry loops |
+| `ECONNREFUSED`                         | `TRANSIENT_ERROR_CODES` in `src/mcp/client.ts` |
+| `ETIMEDOUT`                            | `TRANSIENT_ERROR_CODES` in `src/mcp/client.ts`, CI retry loops |
+| `ENOTFOUND`                            | CI retry loops (`ci-auto-fix.yml`, `documentation-update.yml`) |
+| `EPIPE`, `EAGAIN`, `EBUSY`             | `TRANSIENT_ERROR_CODES` in `src/mcp/client.ts` |
+| `fetch failed`                         | CI retry loops                        |
+| HTTP `502`, `503`, `429` / `rate limit`| Agent factory retry regex, kilo run wrappers |
+| MCP `startup timeout for server ...`   | `classifyConnectError` in `src/mcp/client.ts` |
+
+The following patterns are treated as permanent (must NOT be retried) and
+require operator intervention:
+
+| Pattern                                | Where classified                      |
+| -------------------------------------- | ------------------------------------- |
+| HTTP `401`, `403` (auth)               | `classifyRouteError` in `src/core/router.ts` |
+| HTTP `404` / `model_not_found` / `deployment_not_found` | `classifyRouteError` (route auto-disable) |
+| HTTP `400`, `422` (validation)         | Provider layer; not retried           |
+| `ENOENT` (command not found)           | `CONFIG_ERROR_CODES` in `src/mcp/client.ts` |
+| `EACCES`, `ENOTDIR`, `EPERM`           | `CONFIG_ERROR_CODES` in `src/mcp/client.ts` |
+| `missing environment variable ...`     | `findMissingEnvVars` in `src/mcp/client.ts` |
+| `command not found` / `no such file or directory` | `classifyConnectError` in `src/mcp/client.ts` |
+
+Note the split between routing errors and MCP errors. `src/core/router.ts`
+owns provider-side HTTP status classification for route auto-disable; MCP
+owns local child-process and system-call error classification. Transient
+5xx / network failures at the provider layer are NOT recorded via
+`recordRouteOutcome` -- they remain owned by `ErrorBackoff`.
+
+### Exponential backoff formula
+
+Every retry site in Alexi uses the same formula:
+
+```text
+delay = min(initialDelay * 2^(attempt - 1), maxDelay)
+```
+
+`attempt` is 1-indexed, so the first retry waits exactly `initialDelay`,
+the second waits `initialDelay * 2`, and so on until `maxDelay` clamps
+further growth. The canonical implementation is
+`computeBackoffDelayMs(retryIndex, initialDelayMs, maxDelayMs)` in
+`src/mcp/client.ts` (also mirrored inline in `NetworkManager` and
+`ErrorBackoff`).
+
+Concrete backoff sequences for the defaults each site ships with:
+
+| Site                          | `initialDelay` | `maxDelay` | `maxAttempts` | Delay sequence (ms)                |
+| ----------------------------- | -------------- | ---------- | ------------- | ---------------------------------- |
+| MCP connect retry             | 1000           | 4000       | 3             | 1000, 2000                         |
+| `NetworkManager` reconnect    | 1000           | 30000      | 5             | 1000, 2000, 4000, 8000             |
+| `ErrorBackoff` (provider API) | 1000           | 60000      | 5             | 1000, 2000, 4000, 8000, 16000      |
+
+`NetworkManager` and `ErrorBackoff` allow the caller to override every
+field via the constructor options block; MCP retry defaults are documented
+inline in `src/mcp/config.ts` and can be overridden per-server in
+`mcp-servers.json`.
+
+### Stream / provider error retry policy
+
+Provider-layer failures during a chat completion or streaming call flow
+through two independent mechanisms:
+
+- **`ErrorBackoff` (`src/core/error-backoff.ts`)** — a circuit-breaker
+  primitive. `recordError(statusCode?)` increments the consecutive-error
+  counter, computes an exponential-backoff delay
+  (`initialDelayMs * multiplier^(n-1)`, clamped at `maxDelayMs`), and
+  arms `shouldBackoff()` for the length of that delay. A `4xx` status
+  additionally flips `isFatal()` so the caller can distinguish "wait and
+  retry" from "stop, this will not recover". `recordSuccess()` resets the
+  counter on any successful call. Status codes are extracted from raw
+  error messages with `extractStatusCode(errorMessage)`, which matches
+  `status: NNN` for 4xx/5xx values only.
+- **`classifyRouteError` in `src/core/router.ts`** — a permanent-failure
+  classifier. Returns `{ kind: 'aborted' }` for user-initiated Ctrl+C
+  (short-circuits so aborts never poison route health), `{ kind:
+  'permanent' }` for HTTP 401/403/404 and `model_not_found` /
+  `deployment_not_found` messages, and `{ kind: 'unknown' }` otherwise.
+  Only `permanent` outcomes are fed to `recordRouteOutcome`, which
+  disables a route after `routeFailureThreshold` (default 3) consecutive
+  permanent failures. A single success resets the counter.
+
+Example error messages and their classification:
+
+- `Error: fetch failed: socket hang up` -> transient. Retried by the CI
+  retry-with-backoff wrappers and by `ErrorBackoff` at the provider layer.
+- `HTTP 429 Too Many Requests` -> transient. Retried; the CI regex
+  matches `429` and `rate limit`.
+- `status: 503 Service Unavailable` -> transient. `ErrorBackoff.recordError(503)`
+  arms a backoff but does not mark the route fatal.
+- `status: 401 Unauthorized` -> permanent. `classifyRouteError` returns
+  `permanent`; the caller must not retry, and `ErrorBackoff.isFatal()`
+  becomes true so the loop exits.
+- `Error: model_not_found` -> permanent. `classifyRouteError` records a
+  permanent outcome and, after `routeFailureThreshold` matches, disables
+  the route for the rest of the session.
+
+### MCP connection retry policy
+
+MCP has TWO independent timeout budgets and a separate retry policy on top:
+
+- **Startup timeout** (`config.timeout.startup`, default 30000 ms) —
+  bounds the stdio handshake / cold-spawn phase (`client.connect`). A
+  cold `npx -y` install routinely takes 5-15 s; the budget is intentionally
+  generous. Exceeding it raises a named error pointing at
+  `timeout.startup` in `mcp-servers.json`.
+- **Request timeout** (`config.timeout.request`, default 60000 ms) —
+  bounds every metadata or tool call made after the handshake
+  (`callTool`, `listTools`, `listResources`, `listPrompts`, `readResource`,
+  `getPrompt`). Exceeding it raises a named error pointing at
+  `timeout.request`. Legacy `timeout: number` applies to BOTH phases for
+  backwards compatibility.
+
+Retry is layered on top of the startup budget only. When
+`config.retry.enabled === true` in `mcp-servers.json`, `McpClientManager.connect`
+retries a failed initial connection with the backoff formula above.
+Defaults: `maxAttempts: 3`, `initialDelayMs: 1000`, `maxDelayMs: 4000`
+(so the worst-case attempt sequence is `attempt1, wait 1000ms, attempt2,
+wait 2000ms, attempt3`, roughly 3 attempts across ~7 s).
+
+Only transient errors consume attempts:
+
+- Transient (`ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EPIPE`, `EAGAIN`,
+  `EBUSY`, startup-timeout messages) -> retry with backoff. The connection
+  moves to `retrying` status between attempts so `getStatus()` can render
+  a spinner rather than a red X.
+- Permanent (`ENOENT`, `EACCES`, `ENOTDIR`, `EPERM`, `missing environment
+  variable`, `command not found`) -> fail immediately with `status: 'failed'`
+  and an actionable `error` message naming the exact config field to fix.
+
+Request-phase failures (`callTool`, `listTools`, ...) are NOT retried by
+the MCP client. They surface directly to the caller as `{ success: false,
+error: <message> }`; retry policy for those is owned by the agent loop
+that invoked the tool, not by the transport.
+
+### Agent workflow retry (CI)
+
+Agent workflows (`.github/workflows/agent*.yml`, `auto-implement.yml`,
+`ci-auto-fix.yml`, `documentation-update.yml`, `agent-autohealing.yml`)
+wrap every `kilo run` invocation in a bash retry-with-backoff loop driven
+by the `KILO_RETRIES` env var (default `2`). The loop consumes retry
+budget ONLY when the run log matches the transient regex:
+
+```text
+socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit
+```
+
+Non-matching failures (agent errors, lint failures, test failures) exit
+immediately -- retrying an expensive model on the same broken input just
+wastes budget. When the budget is exhausted, the factory opens a
+deduplicated `factory-escalation`-labelled issue so silent failures become
+tracked human handoffs.
+
 ## Reference System
 
 The reference module (`src/reference/`) manages external repository references with typed cache failures:
