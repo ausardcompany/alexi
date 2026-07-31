@@ -67,6 +67,7 @@ describe('getLanguageForFile', () => {
     expect(getLanguageForFile('script.py')).toBe('python');
     expect(getLanguageForFile('run.sh')).toBe('bash');
     expect(getLanguageForFile('helpers.bash')).toBe('bash');
+    expect(getLanguageForFile('setup.zsh')).toBe('bash');
   });
 
   it('returns unknown for unrecognised or extensionless files', () => {
