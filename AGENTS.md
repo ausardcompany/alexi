@@ -62,6 +62,30 @@ Routing is JSON-driven: `routing-config.json` (and `routing-config.example.json`
 - `ci-auto-fix.yml` and `documentation-update.yml` have their own pre-existing retry logic that detects transient network errors (`socket hang up`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `fetch failed`) — keep that intact when refactoring.
 - Watch for the `npm install -g @kilocode/cli` mid-pipe trap: in older versions of these workflows it was accidentally embedded into `run_check "build"` / `run_check "test"` definitions, silently turning the build verification into a CLI reinstall. Use `npm run build` / `npm run test:coverage` directly.
 
+## Error classification (retry vs config fix)
+
+Alexi splits runtime failures into two buckets. Agent workflows and human operators can rely on this contract to diagnose why a call failed after 1 try (permanent) vs 3 tries (transient budget exhausted). Full tables and the backoff formula live in `docs/ARCHITECTURE.md#error-handling`; the summary below is the reminder for agent workflows.
+
+- **Transient (auto-retried with exponential backoff, `delay = min(initialDelay * 2^(attempt-1), maxDelay)`):**
+  - Network: `socket hang up`, `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EPIPE`, `EAGAIN`, `EBUSY`, `fetch failed`.
+  - HTTP: `502`, `503`, `429`, `rate limit`.
+  - MCP: startup-timeout messages (`startup timeout for server ...`).
+  - Do NOT open an escalation issue for these — the CI retry loop and `ErrorBackoff` (`src/core/error-backoff.ts`) will handle them.
+
+- **Permanent (NOT retried, require operator/config fix):**
+  - Auth: HTTP `401`, `403`.
+  - Validation / shape: HTTP `400`, `422`, `model_not_found`, `deployment_not_found`, HTTP `404`.
+  - System: `ENOENT` (command not found), `EACCES`, `ENOTDIR`, `EPERM`.
+  - Config: `missing environment variable ...`, `command not found`.
+  - These require human intervention (fix `mcp-servers.json`, `AICORE_SERVICE_KEY`, `routing-config.json`, PATH, etc.) — do not paper over with more retries.
+
+- **Retry budgets in force:**
+  - `KILO_RETRIES` (default `2`) in agent workflows — spent only on matches to the transient regex `socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`.
+  - MCP connect retry (opt-in via `retry.enabled` in `mcp-servers.json`): default `maxAttempts: 3`, `initialDelayMs: 1000`, `maxDelayMs: 4000`.
+  - `NetworkManager` reconnect: `maxRetries: 5`, `baseDelayMs: 1000`, `maxDelayMs: 30000`.
+  - `ErrorBackoff` (provider layer): `maxRetries: 5`, `initialDelayMs: 1000`, `maxDelayMs: 60000`, multiplier `2`. A `4xx` status flips `isFatal()` so the caller stops retrying.
+  - Route auto-disable (`src/core/router.ts`): a route is disabled for the session after `routeFailureThreshold` (default `3`) consecutive **permanent** failures; transient failures are NOT recorded against route health.
+
 ## Agent factory architecture
 
 The agent fleet has been refactored into a T-shape model. There is one shared baseline + 10 role verticals + one reusable workflow that runs them. Stop copy-pasting the `kilo run` + retry-with-backoff block into every new workflow — it lives in the factory now.
