@@ -73,7 +73,25 @@ const bashPatterns = {
   posixFunction: /^([ \t]*)([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*\)\s*\{/gm,
   // Bash keyword: function name { ... } or function name() { ... }
   bashFunction: /^([ \t]*)function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\(\s*\))?\s*\{/gm,
+  // Top-level variable assignment: NAME=value (excludes: leading whitespace only
+  // allowed as indentation for `readonly` / `export` / `declare` / `local`, not
+  // arbitrary indentation which would match every `foo=bar` inside a function).
+  // Captures: [1] prefix (export/readonly/declare/local, optional), [2] name.
+  variableAssignment: /^(?:(export|readonly|declare|local)[ \t]+)?([A-Z_][A-Z0-9_]*)=(?!=)/gm,
 };
+
+// Shebang patterns matching common bash / sh / zsh interpreters. Used to
+// detect shell scripts when a file has no recognised extension (e.g.
+// `scripts/deploy`, `bin/release`).
+//
+// Matches:
+//   #!/bin/bash            #!/bin/sh            #!/bin/zsh
+//   #!/usr/bin/bash        #!/usr/local/bin/sh
+//   #!/usr/bin/env bash    #!/usr/bin/env -S zsh
+//
+// The final component of the interpreter path must be one of the known
+// shells so that `#!/usr/bin/env python` is NOT classified as bash.
+const SHEBANG_BASH_RE = /^#![ \t]*(?:\S*\/)?(?:env[ \t]+(?:-S[ \t]+)?)?(bash|sh|zsh|dash|ksh)\b/;
 
 /**
  * Detect language from file extension.
@@ -81,10 +99,14 @@ const bashPatterns = {
  * are resolved via the shared `getLanguageForFile` helper so tool selection
  * stays consistent with the rest of the codebase.
  *
+ * When the extension is unknown, the file's shebang line is inspected as a
+ * fallback so extensionless shell scripts (e.g. `scripts/deploy`,
+ * `bin/release`) are still parsed as bash.
+ *
  * JSON files (`.json`, `.jsonc`) have no code definitions and are reported
  * as `unknown` here so the caller returns the standard unsupported error.
  */
-function detectLanguage(filePath: string): SupportedLanguage {
+function detectLanguage(filePath: string, content?: string): SupportedLanguage {
   const lang = getLanguageForFile(filePath);
   switch (lang) {
     case 'typescript':
@@ -96,6 +118,13 @@ function detectLanguage(filePath: string): SupportedLanguage {
     case 'bash':
       return 'bash';
     default:
+      // Fallback: shebang sniffing for extensionless shell scripts.
+      if (content && content.startsWith('#!')) {
+        const firstLine = content.split('\n', 1)[0] ?? '';
+        if (SHEBANG_BASH_RE.test(firstLine)) {
+          return 'bash';
+        }
+      }
       return 'unknown';
   }
 }
@@ -418,7 +447,15 @@ function extractPythonDefinitions(
 }
 
 /**
- * Extract Bash definitions
+ * Extract Bash definitions.
+ *
+ * Covers:
+ *  - Functions (POSIX `name() { }` and bash `function name { }` syntaxes).
+ *  - Top-level constant/variable assignments (`FOO=bar`,
+ *    `export FOO=bar`, `readonly FOO=bar`, `declare -r FOO=bar`,
+ *    `local FOO=bar`). Only UPPER_SNAKE_CASE identifiers are treated as
+ *    definition-worthy constants so noisy in-function `tmp=...` locals do
+ *    not overwhelm the output.
  */
 function extractBashDefinitions(
   content: string,
@@ -427,47 +464,65 @@ function extractBashDefinitions(
   const definitions: Definition[] = [];
   const shouldExtract = (type: DefinitionType) => !types || types.includes(type);
 
-  // Bash has no classes/interfaces/types — only functions
-  if (!shouldExtract('function')) {
-    return definitions;
-  }
-
   // POSIX syntax: name() { ... }
-  const posixRegex = new RegExp(bashPatterns.posixFunction.source, 'gm');
-  let match;
-  while ((match = posixRegex.exec(content)) !== null) {
-    const line = getLineNumber(content, match.index);
-    const name = match[2];
-    const signature = `${name}()`;
+  if (shouldExtract('function')) {
+    const posixRegex = new RegExp(bashPatterns.posixFunction.source, 'gm');
+    let match;
+    while ((match = posixRegex.exec(content)) !== null) {
+      const line = getLineNumber(content, match.index);
+      const name = match[2];
+      const signature = `${name}()`;
 
-    definitions.push({
-      name,
-      type: 'function',
-      line,
-      signature,
-      exported: true, // Bash functions are globally scoped when sourced
-    });
-  }
-
-  // Bash keyword syntax: function name { ... } or function name() { ... }
-  const bashRegex = new RegExp(bashPatterns.bashFunction.source, 'gm');
-  while ((match = bashRegex.exec(content)) !== null) {
-    const line = getLineNumber(content, match.index);
-    const name = match[2];
-    const signature = `function ${name}`;
-
-    // Skip if already captured by POSIX pattern (dedup name() { ... } style)
-    if (definitions.some((d) => d.name === name)) {
-      continue;
+      definitions.push({
+        name,
+        type: 'function',
+        line,
+        signature,
+        exported: true, // Bash functions are globally scoped when sourced
+      });
     }
 
-    definitions.push({
-      name,
-      type: 'function',
-      line,
-      signature,
-      exported: true,
-    });
+    // Bash keyword syntax: function name { ... } or function name() { ... }
+    const bashRegex = new RegExp(bashPatterns.bashFunction.source, 'gm');
+    while ((match = bashRegex.exec(content)) !== null) {
+      const line = getLineNumber(content, match.index);
+      const name = match[2];
+      const signature = `function ${name}`;
+
+      // Skip if already captured by POSIX pattern (dedup name() { ... } style)
+      if (definitions.some((d) => d.name === name && d.type === 'function')) {
+        continue;
+      }
+
+      definitions.push({
+        name,
+        type: 'function',
+        line,
+        signature,
+        exported: true,
+      });
+    }
+  }
+
+  // Variable / constant assignments (surfaced as `const` for the schema).
+  if (shouldExtract('const')) {
+    const varRegex = new RegExp(bashPatterns.variableAssignment.source, 'gm');
+    let match;
+    while ((match = varRegex.exec(content)) !== null) {
+      const line = getLineNumber(content, match.index);
+      const prefix = match[1];
+      const name = match[2];
+      const isExported = prefix === 'export';
+      const signature = prefix ? `${prefix} ${name}` : name;
+
+      definitions.push({
+        name,
+        type: 'const',
+        line,
+        signature,
+        exported: isExported,
+      });
+    }
   }
 
   return definitions;
@@ -481,7 +536,7 @@ Supports:
 - TypeScript (.ts, .tsx, .mts, .cts, .d.ts): class, function, interface, type, const, enum, method
 - JavaScript (.js, .jsx, .mjs, .cjs): class, function, const, method
 - Python (.py): class, function/def
-- Bash (.sh, .bash): function
+- Bash / shell (.sh, .bash, .zsh, or extensionless files with a bash/sh/zsh shebang): function, top-level constant (UPPER_SNAKE)
 
 Returns definition name, type, line number, signature, and export status.`,
 
@@ -510,12 +565,13 @@ Returns definition name, type, line number, signature, and export status.`,
       // Read file content
       const content = await fs.readFile(filePath, 'utf-8');
 
-      // Detect language
-      const language = detectLanguage(filePath);
+      // Detect language (falls back to shebang sniffing for extensionless
+      // shell scripts like `scripts/deploy` with `#!/bin/bash`).
+      const language = detectLanguage(filePath, content);
       if (language === 'unknown') {
         return {
           success: false,
-          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .mts, .cts, .d.ts, .js, .jsx, .mjs, .cjs, .py, .sh, .bash`,
+          error: `Unsupported file type: ${path.extname(filePath)}. Supported: .ts, .tsx, .mts, .cts, .d.ts, .js, .jsx, .mjs, .cjs, .py, .sh, .bash, .zsh`,
         };
       }
 

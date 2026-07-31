@@ -63,8 +63,15 @@ export const JSON_EXTENSIONS: ReadonlySet<string> = new Set(['.json', '.jsonc'])
 /** Python extensions. */
 export const PYTHON_EXTENSIONS: ReadonlySet<string> = new Set(['.py']);
 
-/** Bash / shell extensions. */
-export const BASH_EXTENSIONS: ReadonlySet<string> = new Set(['.sh', '.bash']);
+/**
+ * Bash / shell extensions.
+ *
+ * `.zsh` is included because zsh is largely bash-compatible for the
+ * purposes of definition extraction (function syntax, variable
+ * assignments, control structures). If zsh divergence becomes
+ * problematic, a dedicated `zsh` bucket can be split out later.
+ */
+export const BASH_EXTENSIONS: ReadonlySet<string> = new Set(['.sh', '.bash', '.zsh']);
 
 /**
  * All source-code extensions understood by the tool suite. Useful as a
