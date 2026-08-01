@@ -25,6 +25,21 @@ export type { InputBoxProps };
  */
 const MAX_SUGGESTIONS = 6;
 
+/**
+ * Mount-time debounce window (ms).
+ *
+ * When the InputBox mounts, submissions that fire within this window are
+ * suppressed. This guards against duplicate submissions that can occur when
+ * the component unmounts and remounts rapidly — for example when a dialog
+ * opens, closes, then reopens during a state transition. Without this guard,
+ * a stale keypress event delivered to the freshly mounted TextInput can
+ * re-fire `onSubmit` with the previous value.
+ *
+ * 500ms is short enough to be imperceptible to a human typing and long enough
+ * to absorb the typical React commit + Ink render cycle on modern terminals.
+ */
+export const MOUNT_DEBOUNCE_MS = 500;
+
 export function InputBox({
   agent,
   agentColor,
@@ -45,6 +60,11 @@ export function InputBox({
   const savedInputRef = useRef('');
   // Autocomplete selection index (-1 = none selected)
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
+
+  // Mount-time debounce: track when this instance mounted so we can suppress
+  // submissions that fire within MOUNT_DEBOUNCE_MS of mount (e.g. stray keys
+  // delivered to a freshly remounted TextInput after a dialog transition).
+  const mountTimeRef = useRef<number>(Date.now());
 
   // Clipboard image paste (Ctrl+V interception)
   useClipboardImage({ enabled: isFocused && !disabled });
@@ -217,6 +237,18 @@ export function InputBox({
 
       const trimmed = text.trim();
       if (!trimmed || disabled) {
+        return;
+      }
+      // Mount-time debounce: swallow submits that arrive within
+      // MOUNT_DEBOUNCE_MS of mount. These are almost always duplicate
+      // events surviving a rapid unmount/remount cycle (dialog transitions,
+      // tab switches, focus flips) rather than legitimate user input, since
+      // a real user cannot both mount the component and hit Enter with
+      // non-empty content in less than half a second.
+      if (Date.now() - mountTimeRef.current < MOUNT_DEBOUNCE_MS) {
+        // Clear the stray value so the next real submit starts clean.
+        setValue('');
+        setSelectedSuggestion(-1);
         return;
       }
       // Push to history (skip consecutive identical entries)
