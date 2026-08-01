@@ -1,43 +1,47 @@
-# Changes Summary for Update Plan
+# Changes Summary
 
-## Files Modified
-- `src/core/cross-spawn-spawner.ts`: Updated exit code handling for terminated processes.
-- `src/core/kilocode/exit-code.ts`: Added settle function for signal termination.
-- `src/core/kilocode/pty/termination.ts`: Implemented PTY termination handling.
-- `src/core/models-dev.ts`: Prevented duplicate fetches by re-reading cache under lock.
-- `src/permission/drain.ts`: Refactored permission draining logic.
-- `src/tool/registry.ts`: Adjusted tool registry to accommodate new shell signal handling.
-- `src/tool/shell-signal.test.ts`: Updated tool shell signal tests.
-- `src/tool/shell.ts`: Modified tool shell logic with new signal handling.
-- `src/tool/skill.ts`: Refactored skill handling in tool system.
-- `src/permission/index.ts`: Updated permission index with new logic.
-- `src/permission/PermissionView.kt`: Modified permission view logic.
-- `src/core/test/pty/pty-session.test.ts`: Updated pty session tests with new termination handling.
+## Date: 2026-08-01
 
-## Summary of Changes
-1. **src/core/cross-spawn-spawner.ts**: Improved robustness of error handling by using the new `settle` function.
-2. **src/core/kilocode/exit-code.ts**: Introduced a function to calculate exit codes for signal-terminated processes.
-3. **src/core/kilocode/pty/termination.ts**: Added logic for managing graceful termination of PTY processes.
-4. **src/core/models-dev.ts**: Enhanced caching logic to avoid redundant network calls.
-5. **src/permission/drain.ts**: Simplified permission draining mechanism for efficiency.
-6. **src/tool/registry.ts**: Integrated improved shell signal handling.
-7. **src/tool/shell-signal.test.ts**: Expanded tests to ensure comprehensive coverage of tool shell signal handling.
-8. **src/tool/shell.ts**: Updated shell logic to support nuanced signal handling.
-9. **src/tool/skill.ts**: Enhanced skill management within the tool system.
-10. **src/permission/index.ts**: Strengthened security checks in permission index logic.
-11. **src/permission/PermissionView.kt**: Added new permission handling features in Kotlin-based view logic.
-12. **src/core/test/pty/pty-session.test.ts**: Expanded tests to validate new PTY termination logic.
+### Files Modified
+1. `src/permission/PermissionView.ts`
+   - **Change Type**: feature
+   - **Summary**: Updated permission view logic to handle skill-shell functionality and improve security by escaping control characters.
 
-## Issues Encountered
-- Files `src/core/cross-spawn-spawner.ts`, `src/permission/PermissionView.kt`, `src/core/models-dev.ts`, `src/core/test/pty/pty-session.test.ts` were missing and had to be created.
-- Code changes were made based on the update plan without any additional context.
+2. `src/tool/BaseSearchToolView.ts`
+   - **Change Type**: refactor
+   - **Summary**: Adjusted header binding and component references based on upstream changes.
 
-## Testing Recommendations
-- Run all unit tests, especially for the `src/core` and `src/tool` directories.
-- Verify integration tests focusing on permission handling and tool signal processing.
-- Perform manual testing for critical updates to ensure no regressions in SAP AI Core integration.
+3. `src/tool/EditToolView.ts`
+   - **Change Type**: feature
+   - **Summary**: Enhanced to integrate new diff line numbers and handle large edits efficiently.
 
-## Potential Risks
-- Changes in signal handling could affect process management and error reporting.
-- Permission refactoring could inadvertently alter access control checks.
-- Tool system updates may require adjustments to dependent modules to maintain compatibility.
+4. `src/tool/DiffOverflow.ts`
+   - **Change Type**: feature
+   - **Summary**: Added new panel to handle large diffs efficiently by deferring to platform diff tab.
+
+5. `src/tool/PatchBody.ts`
+   - **Change Type**: feature
+   - **Summary**: Added logic to support larger inline diff previews with new overflow handling.
+
+6. `src/tool/ReadToolView.ts`
+   - **Change Type**: refactor
+   - **Summary**: Minor updates to align with new tool view logic.
+
+7. `src/tool/ShellToolView.ts`
+   - **Change Type**: refactor
+   - **Summary**: Minor updates to align with new tool view logic.
+
+8. `src/tool/TaskToolView.ts`
+   - **Change Type**: feature
+   - **Summary**: Enhanced to utilize new header components from upstream changes.
+
+9. `src/tool/ToolMarkdownBody.ts`
+   - **Change Type**: refactor
+   - **Summary**: Improved rendering of markdown bodies with new style integrations.
+
+10. `src/tool/notify-user.test.ts`
+   - **Change Type**: bugfix
+   - **Summary**: Fixed issues with test coverage based on upstream changes.
+
+### Issues Encountered
+- None; all files were created as they did not exist previously.
