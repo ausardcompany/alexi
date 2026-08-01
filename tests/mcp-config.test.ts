@@ -129,5 +129,79 @@ describe('MCP Config', () => {
       expect(config.servers).toHaveLength(1);
       expect(config.servers[0].name).toBe('test');
     });
+
+    it('should accept optional global timeout as a bare number', () => {
+      const config: McpConfig = {
+        version: '1.0',
+        timeout: 45000,
+        servers: [],
+      };
+      expect(config.timeout).toBe(45000);
+    });
+
+    it('should accept optional global timeout as an object', () => {
+      const config: McpConfig = {
+        version: '1.0',
+        timeout: { startup: 60000, request: 30000 },
+        servers: [],
+      };
+      expect(typeof config.timeout).toBe('object');
+      expect((config.timeout as { startup: number }).startup).toBe(60000);
+      expect((config.timeout as { request: number }).request).toBe(30000);
+    });
+
+    it('should accept per-server timeout as a bare number', () => {
+      const server: McpServerConfig = {
+        name: 'slow-server',
+        transport: 'stdio',
+        command: 'sleep',
+        enabled: true,
+        timeout: 90000,
+      };
+      expect(server.timeout).toBe(90000);
+    });
+
+    it('should accept per-server timeout as split startup / request object', () => {
+      const server: McpServerConfig = {
+        name: 'split-server',
+        transport: 'stdio',
+        command: 'sleep',
+        enabled: true,
+        timeout: { startup: 60000, request: 30000 },
+      };
+      expect(typeof server.timeout).toBe('object');
+      expect((server.timeout as { startup: number }).startup).toBe(60000);
+    });
+
+    it('preserves per-server timeout field after JSON round-trip', () => {
+      // The config file is JSON on disk — verify that both shapes of
+      // the per-server `timeout` field survive stringify/parse without
+      // schema stripping.
+      const original: McpConfig = {
+        version: '1.0',
+        timeout: { startup: 15000 },
+        servers: [
+          {
+            name: 'a',
+            transport: 'stdio',
+            command: 'a',
+            enabled: true,
+            timeout: 12345,
+          },
+          {
+            name: 'b',
+            transport: 'stdio',
+            command: 'b',
+            enabled: true,
+            timeout: { startup: 5000, request: 25000 },
+          },
+        ],
+      };
+
+      const roundTripped = JSON.parse(JSON.stringify(original)) as McpConfig;
+      expect(roundTripped.timeout).toEqual({ startup: 15000 });
+      expect(roundTripped.servers[0].timeout).toBe(12345);
+      expect(roundTripped.servers[1].timeout).toEqual({ startup: 5000, request: 25000 });
+    });
   });
 });

@@ -43,6 +43,11 @@ export interface McpServerConfig {
    * Defaults when unspecified:
    * - `startup`: 30000 ms (cold `npx -y` installs routinely take 5-15s)
    * - `request`: 60000 ms (per-tool call deadline)
+   *
+   * When this field is absent, the client falls back to the config-file
+   * global {@link McpConfig.timeout}, then to the `MCP_TOOL_TIMEOUT` env
+   * variable, and finally to the defaults above. See
+   * `McpClientManager.getTimeoutsForServer` for the full precedence chain.
    */
   timeout?: number | { startup?: number; request?: number };
   /**
@@ -84,6 +89,23 @@ export interface McpConfig {
   version: string;
   /** List of MCP servers */
   servers: McpServerConfig[];
+  /**
+   * Global default timeout budget(s) in milliseconds applied to every
+   * server that does NOT declare its own {@link McpServerConfig.timeout}.
+   *
+   * Accepts the same shapes as the per-server field:
+   * - A single number applied to BOTH startup and request phases.
+   * - An object `{ startup?: number; request?: number }` for independent
+   *   budgets; missing keys fall back to the built-in defaults
+   *   (30000ms startup, 60000ms request).
+   *
+   * Resolution order at call time (per server):
+   * 1. Per-server `McpServerConfig.timeout` (if set)
+   * 2. Global `McpConfig.timeout` (this field)
+   * 3. `MCP_TOOL_TIMEOUT` environment variable (applied to both phases)
+   * 4. Built-in defaults (30000ms startup, 60000ms request)
+   */
+  timeout?: number | { startup?: number; request?: number };
 }
 
 const CONFIG_DIR = path.join(os.homedir(), '.alexi');
@@ -95,6 +117,13 @@ const CONFIG_FILE = path.join(CONFIG_DIR, 'mcp-servers.json');
 function getDefaultConfig(): McpConfig {
   return {
     version: '1.0',
+    // Optional config-file global timeout. Applied to every server that
+    // does NOT declare its own `timeout` field. Accepts a bare number
+    // (both phases) or `{ startup?, request? }`. Omitted from the default
+    // config so built-in defaults (30s startup, 60s request) apply until
+    // an operator explicitly opts in.
+    // Example:
+    //   "timeout": { "startup": 45000, "request": 90000 }
     servers: [
       // Example: filesystem MCP server
       {
@@ -118,8 +147,12 @@ function getDefaultConfig(): McpConfig {
         },
         enabled: false,
         autoConnect: false,
+        // Per-server timeout overrides the global default. Bare number
+        // applies to both startup and request phases.
+        // timeout: 45000,
       },
-      // Example: Brave Search MCP server
+      // Example: Brave Search MCP server with an explicit per-server
+      // timeout that a slow-starting server may need.
       {
         name: 'brave-search',
         description: 'Web search via Brave Search API',
@@ -131,6 +164,9 @@ function getDefaultConfig(): McpConfig {
         },
         enabled: false,
         autoConnect: false,
+        // Object form lets startup and per-tool call have independent
+        // budgets. Omitted keys fall back through the precedence chain.
+        // timeout: { startup: 60000, request: 30000 },
       },
     ],
   };
