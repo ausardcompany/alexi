@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 
 // Mock useClipboardImage so InputBox doesn't need a real AttachmentProvider
@@ -21,7 +21,7 @@ vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
   }),
 }));
 
-import { InputBox } from '../../../src/cli/tui/components/InputBox.js';
+import { InputBox, MOUNT_DEBOUNCE_MS } from '../../../src/cli/tui/components/InputBox.js';
 import type { SlashCommand } from '../../../src/cli/tui/hooks/useCommands.js';
 import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
 
@@ -175,6 +175,121 @@ describe('InputBox', () => {
           </Wrapper>
         );
       }).not.toThrow();
+    });
+  });
+
+  describe('mount-time debounce', () => {
+    let nowSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let currentTime = 0;
+
+    beforeEach(() => {
+      currentTime = 1_000_000;
+      nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    });
+
+    afterEach(() => {
+      nowSpy?.mockRestore();
+    });
+
+    it('exposes MOUNT_DEBOUNCE_MS as 500', () => {
+      expect(MOUNT_DEBOUNCE_MS).toBe(500);
+    });
+
+    it('suppresses submissions that fire immediately after mount', () => {
+      const onSubmit = vi.fn();
+      const { stdin } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      // Type and submit within 0ms of mount — this simulates a stale
+      // Enter keypress delivered to a freshly mounted TextInput.
+      stdin.write('hello');
+      stdin.write('\r');
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('suppresses submissions inside the debounce window', () => {
+      const onSubmit = vi.fn();
+      const { stdin } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      // Advance the clock but stay inside the 500ms window.
+      currentTime += MOUNT_DEBOUNCE_MS - 1;
+      stdin.write('hi');
+      stdin.write('\r');
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('allows submissions after the debounce window elapses', async () => {
+      const onSubmit = vi.fn();
+      const { stdin } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      // Advance past the debounce window before submitting.
+      currentTime += MOUNT_DEBOUNCE_MS + 1;
+      stdin.write('hello');
+      // Allow React to flush the onChange update before Enter is processed.
+      await new Promise((r) => setImmediate(r));
+      stdin.write('\r');
+      await new Promise((r) => setImmediate(r));
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      expect(onSubmit).toHaveBeenCalledWith('hello');
+    });
+
+    it('debounce window is scoped to each mount instance', async () => {
+      const onSubmit = vi.fn();
+      // First instance: unmount before the window elapses (rapid remount).
+      const first = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      currentTime += 100;
+      first.unmount();
+
+      // Second instance mounts "now" — its own mountTime becomes the new
+      // reference, so a submit shortly after this remount is still inside
+      // the fresh window and gets suppressed.
+      const second = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      currentTime += 100;
+      second.stdin.write('x');
+      await new Promise((r) => setImmediate(r));
+      second.stdin.write('\r');
+      await new Promise((r) => setImmediate(r));
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      // After the window fully elapses on the second instance, submits work.
+      currentTime += MOUNT_DEBOUNCE_MS;
+      second.stdin.write('y');
+      await new Promise((r) => setImmediate(r));
+      second.stdin.write('\r');
+      await new Promise((r) => setImmediate(r));
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      expect(onSubmit).toHaveBeenCalledWith('y');
+    });
+
+    it('does not submit empty or whitespace after debounce window', async () => {
+      const onSubmit = vi.fn();
+      const { stdin } = render(
+        <Wrapper>
+          <InputBox {...defaultProps} onSubmit={onSubmit} />
+        </Wrapper>
+      );
+      currentTime += MOUNT_DEBOUNCE_MS + 1;
+      stdin.write('   ');
+      await new Promise((r) => setImmediate(r));
+      stdin.write('\r');
+      await new Promise((r) => setImmediate(r));
+      expect(onSubmit).not.toHaveBeenCalled();
     });
   });
 });
