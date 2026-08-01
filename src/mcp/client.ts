@@ -416,6 +416,29 @@ export function formatContentPart(part: unknown): string {
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * Cached global timeout from {@link McpConfig.timeout}, used as the
+   * fallback layer between per-server config and the `MCP_TOOL_TIMEOUT`
+   * environment variable. Populated on first `connectFromConfig` and can
+   * be overridden explicitly via {@link setGlobalTimeout} (for tests and
+   * callers that connect servers without going through the config file).
+   *
+   * `undefined` means "unset" (fall through to env / defaults);
+   * `null` means "explicitly no global override" (same effect, distinct
+   * marker so we can tell "never resolved" from "resolved to nothing").
+   */
+  private globalTimeout: number | { startup?: number; request?: number } | undefined | null =
+    undefined;
+
+  /**
+   * Explicitly set the global timeout override that will be used as the
+   * second-precedence layer (after per-server config, before
+   * `MCP_TOOL_TIMEOUT` env / built-in defaults). Passing `undefined`
+   * clears the override.
+   */
+  setGlobalTimeout(timeout: number | { startup?: number; request?: number } | undefined): void {
+    this.globalTimeout = timeout === undefined ? null : timeout;
+  }
 
   /**
    * Run an MCP request under a per-server `request` timeout budget.
@@ -892,6 +915,11 @@ export class McpClientManager {
   async connectFromConfig(options?: McpConnectOptions): Promise<void> {
     const config = loadMcpConfig();
 
+    // Cache the config-file-level global timeout so `getTimeoutsForServer`
+    // can use it as the fallback layer (per-server > global > env > default).
+    // A missing field clears any previously-set global override.
+    this.setGlobalTimeout(config.timeout);
+
     // Add graceful handling for server initialization failures
     const servers = config.servers.filter((s) => s.enabled && s.autoConnect);
     const results = await Promise.allSettled(
@@ -1012,40 +1040,67 @@ export class McpClientManager {
   }
 
   /**
+   * Normalize a raw `timeout` config value into a `{startup, request}`
+   * pair. Returns `undefined` if the value is absent so the caller can
+   * fall through to the next precedence layer. Zero and negative numbers
+   * are treated as unset (they would disable the timeout, which is never
+   * what an operator wants).
+   */
+  private normalizeTimeout(
+    raw: number | { startup?: number; request?: number } | undefined | null
+  ): { startup?: number; request?: number } | undefined {
+    if (typeof raw === 'number') {
+      if (!isFinite(raw) || raw <= 0) {
+        return undefined;
+      }
+      return { startup: raw, request: raw };
+    }
+    if (raw !== undefined && raw !== null && typeof raw === 'object') {
+      return { startup: raw.startup, request: raw.request };
+    }
+    return undefined;
+  }
+
+  /**
    * Get the startup and per-request timeouts for a specific server.
    *
-   * Resolution order:
-   * 1. If `connection.config.timeout` is a number, use it for BOTH phases
-   *    (legacy behaviour, preserves backwards-compat).
-   * 2. If it is an object, use `startup ?? DEFAULT_STARTUP_TIMEOUT_MS`
-   *    and `request ?? DEFAULT_TOOL_CALL_TIMEOUT_MS`.
-   * 3. Otherwise fall back to `MCP_TOOL_TIMEOUT` env (applied to BOTH
-   *    phases for backwards-compat) or the two defaults.
+   * Resolution order (per-phase, checked independently so a partial
+   * override at any layer falls through for the missing phase):
+   * 1. Per-server `McpServerConfig.timeout` (bare number applies to both
+   *    phases; object form contributes only the fields it sets).
+   * 2. Global `McpConfig.timeout` (this manager instance's cached global
+   *    timeout, set via {@link setGlobalTimeout} or auto-populated by
+   *    {@link connectFromConfig}).
+   * 3. `MCP_TOOL_TIMEOUT` environment variable (applied to both phases
+   *    for backwards-compat).
+   * 4. Built-in defaults (30000ms startup, 60000ms request).
    */
   private getTimeoutsForServer(serverName: string): { startup: number; request: number } {
     const connection = this.connections.get(serverName);
-    const configured = connection?.config.timeout;
+    const serverLayer = this.normalizeTimeout(connection?.config.timeout);
+    const globalLayer = this.normalizeTimeout(this.globalTimeout);
 
-    if (typeof configured === 'number') {
-      return { startup: configured, request: configured };
-    }
-
-    if (configured !== undefined && configured !== null && typeof configured === 'object') {
-      return {
-        startup: configured.startup ?? DEFAULT_STARTUP_TIMEOUT_MS,
-        request: configured.request ?? DEFAULT_TOOL_CALL_TIMEOUT_MS,
-      };
-    }
-
+    let envLayer: { startup?: number; request?: number } | undefined;
     const envTimeout = process.env.MCP_TOOL_TIMEOUT;
     if (envTimeout !== undefined) {
       const parsed = Number(envTimeout);
       if (!isNaN(parsed) && parsed > 0) {
-        return { startup: parsed, request: parsed };
+        envLayer = { startup: parsed, request: parsed };
       }
     }
 
-    return { startup: DEFAULT_STARTUP_TIMEOUT_MS, request: DEFAULT_TOOL_CALL_TIMEOUT_MS };
+    const startup =
+      serverLayer?.startup ??
+      globalLayer?.startup ??
+      envLayer?.startup ??
+      DEFAULT_STARTUP_TIMEOUT_MS;
+    const request =
+      serverLayer?.request ??
+      globalLayer?.request ??
+      envLayer?.request ??
+      DEFAULT_TOOL_CALL_TIMEOUT_MS;
+
+    return { startup, request };
   }
 
   /**
