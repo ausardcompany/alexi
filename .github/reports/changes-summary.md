@@ -1,47 +1,24 @@
 # Changes Summary
 
-## Date: 2026-08-01
+## Files Modified
+- `src/agent/config.ts`
+- `src/core/package.json`
+- `src/cli/reasoning.ts`
 
-### Files Modified
-1. `src/permission/PermissionView.ts`
-   - **Change Type**: feature
-   - **Summary**: Updated permission view logic to handle skill-shell functionality and improve security by escaping control characters.
+## Summary of Changes
 
-2. `src/tool/BaseSearchToolView.ts`
-   - **Change Type**: refactor
-   - **Summary**: Adjusted header binding and component references based on upstream changes.
+### 1. Preserve Configured Subagent Routing
+- **File**: `src/agent/config.ts`
+- **Change**: Added new routing function `routeSubagent` to preserve user configuration.
 
-3. `src/tool/EditToolView.ts`
-   - **Change Type**: feature
-   - **Summary**: Enhanced to integrate new diff line numbers and handle large edits efficiently.
+### 2. Update Package Versions
+- **File**: `src/core/package.json`
+- **Change**: Updated version from `7.4.17` to `7.4.18`.
 
-4. `src/tool/DiffOverflow.ts`
-   - **Change Type**: feature
-   - **Summary**: Added new panel to handle large diffs efficiently by deferring to platform diff tab.
+### 3. Fix Reasoning Token Count
+- **File**: `src/cli/reasoning.ts`
+- **Change**: Created new file with corrected token counting logic using `tokenize(input).length`.
 
-5. `src/tool/PatchBody.ts`
-   - **Change Type**: feature
-   - **Summary**: Added logic to support larger inline diff previews with new overflow handling.
-
-6. `src/tool/ReadToolView.ts`
-   - **Change Type**: refactor
-   - **Summary**: Minor updates to align with new tool view logic.
-
-7. `src/tool/ShellToolView.ts`
-   - **Change Type**: refactor
-   - **Summary**: Minor updates to align with new tool view logic.
-
-8. `src/tool/TaskToolView.ts`
-   - **Change Type**: feature
-   - **Summary**: Enhanced to utilize new header components from upstream changes.
-
-9. `src/tool/ToolMarkdownBody.ts`
-   - **Change Type**: refactor
-   - **Summary**: Improved rendering of markdown bodies with new style integrations.
-
-10. `src/tool/notify-user.test.ts`
-   - **Change Type**: bugfix
-   - **Summary**: Fixed issues with test coverage based on upstream changes.
-
-### Issues Encountered
-- None; all files were created as they did not exist previously.
+## Issues Encountered
+- The old routing logic string was not found in `src/agent/config.ts`. I added the new function directly.
+- `src/cli/reasoning.ts` did not exist, so it was created with the new logic.
