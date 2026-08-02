@@ -613,6 +613,15 @@ export class SapOrchestrationProvider {
   private _connectivityChecked = false;
 
   constructor(config: OrchestrationConfig) {
+    // Validate model id against the SAP AI Core orchestration catalog so an
+    // unknown id fails fast with an actionable message instead of leaking
+    // through to the SAP API as a generic 400/404. `deploymentId` is an
+    // escape hatch for callers that have pinned a concrete deployment
+    // out-of-band — the deployment binds the model, so the catalog check is
+    // not authoritative there. See `InvalidModelError` for rationale.
+    if (!config.deploymentId && !isOrchestrationModel(config.modelName)) {
+      throw new InvalidModelError(config.modelName);
+    }
     this.config = config;
   }
 
@@ -1200,12 +1209,16 @@ export function createToolResponse(toolCallId: string, content: string | object)
 export const ORCHESTRATION_MODELS = [
   // OpenAI models
   'gpt-4o',
+  'gpt-4o-mini',
   'gpt-4.1',
   'gpt-5',
   'gpt-5-mini',
   // Anthropic models
   'anthropic--claude-3.7-sonnet',
+  'anthropic--claude-4.5-haiku',
   'anthropic--claude-4.5-sonnet',
+  'anthropic--claude-4.5-opus',
+  'anthropic--claude-4.7-opus',
   // Google models
   'gemini-2.5-flash',
   'gemini-2.5-pro',
@@ -1230,6 +1243,44 @@ export type OrchestrationModel = (typeof ORCHESTRATION_MODELS)[number];
  */
 export function isOrchestrationModel(modelId: string): boolean {
   return ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel);
+}
+
+/**
+ * Error thrown when `SapOrchestrationProvider` is constructed with a model id
+ * that is not in the `ORCHESTRATION_MODELS` catalog and no `deploymentId`
+ * escape hatch is provided.
+ *
+ * The message is actionable: it echoes the invalid id, lists the first five
+ * catalog entries as concrete examples, and points the user at the three
+ * places a bad id typically originates (env var, routing-config.json, CLI
+ * flag). This is a *permanent* failure per the error-classification contract
+ * in `AGENTS.md` — the SAP AI Core API would eventually return
+ * `model_not_found`/`deployment_not_found`, but by then the caller has
+ * already spent budget on retries. Catching it at construction time lets the
+ * router / TUI show one crisp diagnostic instead.
+ *
+ * `deploymentId` acts as an escape hatch because a caller who has pinned a
+ * concrete SAP deployment id has bound the model out-of-band and does not
+ * need the catalog check — the deployment itself is the authoritative
+ * binding.
+ */
+export class InvalidModelError extends Error {
+  readonly modelName: string;
+  readonly validExamples: readonly string[];
+
+  constructor(modelName: string) {
+    const validExamples = ORCHESTRATION_MODELS.slice(0, 5);
+    const message =
+      `Model '${modelName}' not found in SAP AI Core catalog. Check:\n` +
+      `  1. AICORE_MODEL environment variable\n` +
+      `  2. routing-config.json model ids\n` +
+      `  3. CLI --model flag spelling\n` +
+      `Valid models: ${validExamples.join(', ')}`;
+    super(message);
+    this.name = 'InvalidModelError';
+    this.modelName = modelName;
+    this.validExamples = validExamples;
+  }
 }
 
 // ============================================================================

@@ -55,6 +55,7 @@ export {
   createTool,
   createToolResponse,
   isOrchestrationModel,
+  InvalidModelError,
   ORCHESTRATION_MODELS,
   type OrchestrationModel,
   type OrchestrationConfig,
