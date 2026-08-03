@@ -35,6 +35,35 @@ export interface CompactionOptions {
    * legacy "drop everything except last N" behaviour.
    */
   maxContextTokens?: number;
+  /**
+   * Reactive overflow-recovery mode. When `true`:
+   *   - Bypasses the token-estimate trigger (compaction runs unconditionally).
+   *   - Forces the deterministic basic-summary strategy (no LLM call), so
+   *     recovery cannot itself be blocked by another provider failure.
+   *   - Targets `(maxContextTokens - reserveOutputTokens) * 0.8` as the
+   *     post-compact token budget (when `maxContextTokens` is set).
+   *   - Throws when `messages.length <= preserveLastN` (nothing to compact) so
+   *     callers can surface an actionable "no history to compact" error rather
+   *     than silently retry the same overflowing prompt.
+   *
+   * Mirrors the Kilo PR #12804 recovery pattern: classify BEFORE flatten,
+   * force basic strategy for guaranteed forward progress, retry once per run.
+   */
+  overflowRecovery?: boolean;
+}
+
+/**
+ * Thrown by {@link compactConversation} when invoked with
+ * `overflowRecovery: true` on a message array with no compactable history.
+ * Callers (e.g. the streaming orchestrator) surface this as an actionable
+ * terminal error ("context window exceeded on first prompt, no history to
+ * compact") instead of retrying the same overflowing request.
+ */
+export class NothingToCompactError extends Error {
+  constructor(message = 'Nothing to compact: message history is at or below preserveLastN') {
+    super(message);
+    this.name = 'NothingToCompactError';
+  }
 }
 
 /**
@@ -332,9 +361,15 @@ export async function compactConversation(
 ): Promise<{ messages: Message[]; result: CompactionResult }> {
   const preserveLastN = options?.preserveLastN ?? DEFAULT_PRESERVE_LAST_N;
   const summaryMaxTokens = options?.summaryMaxTokens ?? DEFAULT_SUMMARY_MAX_TOKENS;
+  const overflowRecovery = options?.overflowRecovery === true;
 
   // Handle empty or small message arrays
   if (!messages || messages.length === 0) {
+    if (overflowRecovery) {
+      throw new NothingToCompactError(
+        'Nothing to compact: message array is empty (context overflow on first prompt)'
+      );
+    }
     return {
       messages: [],
       result: {
@@ -346,8 +381,14 @@ export async function compactConversation(
     };
   }
 
-  // If we have fewer messages than preserveLastN, return unchanged
+  // If we have fewer messages than preserveLastN, return unchanged. Under
+  // reactive `overflowRecovery`, however, there is nothing we can salvage —
+  // signal it explicitly so the caller can surface an actionable error
+  // instead of silently retrying the same overflowing request.
   if (messages.length <= preserveLastN) {
+    if (overflowRecovery) {
+      throw new NothingToCompactError();
+    }
     return {
       messages: [...messages],
       result: {
@@ -471,7 +512,14 @@ export async function compactConversation(
 
       // If the target buffer is so generous that there is nothing left to
       // summarize, return early with the original messages — no work to do.
+      // Under `overflowRecovery` this is still a failure state: nothing
+      // was actually reduced, so the retried request would overflow again.
       if (messagesToSummarize.length === 0) {
+        if (overflowRecovery) {
+          throw new NothingToCompactError(
+            'Nothing to compact: kept window already fits target budget but overflow was reported'
+          );
+        }
         return {
           messages: [...messages],
           result: {
@@ -488,11 +536,15 @@ export async function compactConversation(
     // This is the point where the UI should show a "Compacting…" indicator.
     emitCompactionStart();
 
-    // Generate summary
+    // Generate summary. Under `overflowRecovery` we force the
+    // deterministic basic strategy: an LLM call at this point could itself
+    // fail (that is exactly the state we are recovering from) and would
+    // burn latency/tokens we do not have. Basic summary is guaranteed to
+    // make progress.
     let summary: string;
     const maxChunkTokens = options?.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
 
-    if (globalLLMSummarizeFn) {
+    if (globalLLMSummarizeFn && !overflowRecovery) {
       // Check if messages exceed chunk size limit
       const messagesToSummarizeTokens = estimateMessagesTokens(messagesToSummarize);
 

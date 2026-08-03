@@ -601,7 +601,10 @@ describe('SessionManager', () => {
       await manager.compact();
 
       expect(compactConversation).toHaveBeenCalledTimes(1);
-      expect(compactConversation).toHaveBeenCalledWith(currentMessages);
+      // `compact()` now forwards its options bag (undefined when the caller
+      // did not pass one) so the streaming orchestrator can request
+      // overflow-recovery mode. See issue #1247.
+      expect(compactConversation).toHaveBeenCalledWith(currentMessages, undefined);
     });
 
     it('should update messages and metadata after compaction', async () => {
