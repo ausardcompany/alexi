@@ -6,7 +6,12 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { shouldCompact, compactConversation, estimateMessagesTokens } from './compaction.js';
+import {
+  shouldCompact,
+  compactConversation,
+  estimateMessagesTokens,
+  type CompactionOptions,
+} from './compaction.js';
 import { closeSession } from './sessionClose.js';
 import { clearRuleCommandCache } from '../plugin/index.js';
 import { stripInternalWrappers } from '../agent/stripInternalWrappers.js';
@@ -397,15 +402,32 @@ export class SessionManager {
   }
 
   /**
-   * Manually trigger compaction on the active session
+   * Configured maximum context window (tokens) for the active session's
+   * model. Used by the streaming orchestrator's overflow-recovery path to
+   * seed `compact({ overflowRecovery: true, maxContextTokens, ... })`.
    */
-  async compact(): Promise<{ saved: number; before: number; after: number } | null> {
+  getMaxContextTokens(): number {
+    return this.maxContextTokens;
+  }
+
+  /**
+   * Manually trigger compaction on the active session.
+   *
+   * Accepts the same `CompactionOptions` bag as {@link compactConversation}.
+   * The streaming orchestrator's context-overflow recovery path passes
+   * `{ overflowRecovery: true, maxContextTokens, reserveOutputTokens }`
+   * here so a `NothingToCompactError` bubbles up unchanged for the caller
+   * to surface as an actionable terminal error.
+   */
+  async compact(
+    options?: CompactionOptions
+  ): Promise<{ saved: number; before: number; after: number } | null> {
     if (!this.activeSession) {
       return null;
     }
 
     const before = estimateMessagesTokens(this.activeSession.messages);
-    const { messages } = await compactConversation(this.activeSession.messages);
+    const { messages } = await compactConversation(this.activeSession.messages, options);
 
     this.activeSession.messages = messages;
     this.activeSession.metadata.messageCount = messages.length;

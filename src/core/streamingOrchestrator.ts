@@ -8,7 +8,8 @@ import {
   getDefaultModel,
   type StreamChunk,
 } from '../providers/index.js';
-import { formatProviderError } from '../providers/format.js';
+import { formatProviderError, classifyProviderError } from '../providers/format.js';
+import { NothingToCompactError } from './compaction.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -140,12 +141,21 @@ export function streamChat(
   // return the same value without re-persisting the session/cost record.
   let cachedResult: StreamingResult | null = null;
   let outboundTextForSession = messageText;
+  // Context-overflow recovery is one-shot per streamChat() invocation.
+  // Once we have compacted-and-retried, a second overflow is a terminal
+  // state — the model still cannot fit the compacted transcript, so
+  // retrying again would just waste tokens.
+  let overflowRetried = false;
+  // When true, the next tick of the iterator loop reruns setup after a
+  // successful compaction. Cleared once setup completes.
+  let pendingOverflowRetry = false;
 
   async function setup(): Promise<void> {
-    if (setupDone) {
+    if (setupDone && !pendingOverflowRetry) {
       return;
     }
     setupDone = true;
+    pendingOverflowRetry = false;
 
     // Assemble the effective system prompt using the pipeline.
     // buildAssembledSystemPrompt handles soul -> model -> env -> agent ->
@@ -284,13 +294,71 @@ export function streamChat(
     return cachedResult;
   }
 
+  /**
+   * Attempt to recover from a context-window overflow by compacting the
+   * session and rearming setup for a single retry. Returns true when the
+   * caller should re-drive the loop (retry), false when the error is
+   * unrecoverable and must be rethrown.
+   *
+   * Emits an assistant-role status chunk on `fullText` so the caller sees
+   * the actionable message inline with the stream:
+   *   - Compaction started (info)
+   *   - Nothing to compact (terminal)
+   *   - Retry still overflows (terminal)
+   */
+  async function tryOverflowRecovery(err: unknown): Promise<boolean> {
+    if (overflowRetried) {
+      return false;
+    }
+    if (classifyProviderError(err) !== 'context_overflow') {
+      return false;
+    }
+    const sm = options?.sessionManager;
+    if (!sm) {
+      return false;
+    }
+    overflowRetried = true;
+
+    // Emit a visible status notice into the stream so the CLI/TUI can
+    // surface it inline. This is not persisted to session history.
+    fullText += '\n\n[status] Context window exceeded, compacting conversation...\n\n';
+
+    try {
+      await sm.compact({
+        overflowRecovery: true,
+        maxContextTokens: sm.getMaxContextTokens(),
+        reserveOutputTokens: options?.maxTokens ?? effortConfig.maxTokens,
+      });
+    } catch (compactErr) {
+      if (compactErr instanceof NothingToCompactError) {
+        // Terminal: no history to compact (overflow on first prompt).
+        const term = new Error(
+          'Context window exceeded on first prompt (no history to compact). ' +
+            'Reduce the size of your input or switch to a model with a larger context window.'
+        );
+        term.name = 'ContextOverflowError';
+        throw term;
+      }
+      throw compactErr;
+    }
+
+    // Rearm setup on the next tick so the compacted session is reloaded.
+    setupDone = false;
+    pendingOverflowRetry = true;
+    if (watchdog) {
+      void watchdog.return();
+      watchdog = null;
+    }
+    return true;
+  }
+
   const iterator: StreamChatIterator = {
     async next(): Promise<IteratorResult<StreamChunk, StreamingResult>> {
       if (finished) {
         return { value: persistAndRecord(), done: true };
       }
       try {
-        if (!setupDone) {
+        if (!setupDone || pendingOverflowRetry) {
           await setup();
         }
         // watchdog is guaranteed non-null after setup().
@@ -307,6 +375,27 @@ export function streamChat(
         }
         return { value: chunk, done: false };
       } catch (err) {
+        // Context-overflow recovery: one-shot compaction + retry per run.
+        // Only attempt when we have a sessionManager to compact.
+        try {
+          const recovered = await tryOverflowRecovery(err);
+          if (recovered) {
+            // Signal the caller to re-drive `.next()` — we return an empty
+            // chunk so the streaming loop naturally advances into the
+            // reloaded watchdog on the next tick. This keeps overflow
+            // recovery invisible to `for await` consumers.
+            return { value: { text: '' }, done: false };
+          }
+        } catch (recoveryErr) {
+          // Compaction itself failed with a terminal error (nothing to
+          // compact). Fall through with the wrapped error.
+          finished = true;
+          if (watchdog) {
+            void watchdog.return();
+          }
+          throw recoveryErr;
+        }
+
         finished = true;
         // Best-effort tear down the source without awaiting.
         if (watchdog) {
@@ -315,6 +404,16 @@ export function streamChat(
         const classified = classifyRouteError(err);
         if (classified.kind === 'permanent') {
           recordRouteOutcome(modelId, classified);
+        }
+        // If we already retried once and still overflow, surface an
+        // actionable terminal message instead of the raw provider error.
+        if (overflowRetried && classifyProviderError(err) === 'context_overflow') {
+          const term = new Error(
+            'Context window still exceeded after compaction. ' +
+              'Reduce input size or use a model with a larger context window.'
+          );
+          term.name = 'ContextOverflowError';
+          throw term;
         }
         const formatted = formatProviderError(err);
         if (err instanceof Error && formatted !== err.message) {
