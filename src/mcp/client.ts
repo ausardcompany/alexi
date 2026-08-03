@@ -117,6 +117,10 @@ export interface McpConnection {
   process?: ChildProcess;
   /** Available tools from this server */
   tools: McpToolInfo[];
+  /** Cached resources from this server (populated on demand via refreshResources) */
+  resources?: unknown[];
+  /** Cached prompts from this server (populated on demand via refreshPrompts) */
+  prompts?: unknown[];
   /** Connection status */
   status: McpConnectionStatus;
   /** Error message if any (actionable hint whenever possible) */
@@ -131,6 +135,33 @@ export interface McpConnection {
   attemptCount: number;
   /** Last time tools were fetched */
   toolsCachedAt?: number;
+  /** Last time resources were fetched */
+  resourcesCachedAt?: number;
+  /** Last time prompts were fetched */
+  promptsCachedAt?: number;
+}
+
+/**
+ * Kind of MCP list that a `list_changed` notification refers to. Used as
+ * part of the debounce key so bursts on independent axes (tools vs
+ * resources vs prompts) do not block each other.
+ */
+export type McpListKind = 'tools' | 'resources' | 'prompts';
+
+/**
+ * Debounced-refresh bookkeeping for a single (serverName, listKind) pair.
+ *
+ * A single timer holds the trailing edge of the debounce window; the
+ * `deadline` (absolute epoch ms) caps how far a run of continuous
+ * notifications can defer the refresh. When the timer fires OR the
+ * deadline is exceeded, the associated list is re-fetched and the entry
+ * is removed from the map so the next notification restarts the cycle.
+ */
+interface RefreshDebounceEntry {
+  /** Trailing-edge timer handle. */
+  timer: NodeJS.Timeout;
+  /** Absolute deadline (ms since epoch) — refresh MUST fire by this time. */
+  deadline: number;
 }
 
 export interface McpConnectOptions {
@@ -149,6 +180,33 @@ const CACHE_TTL_MS = 30000; // 30 seconds
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000; // 30 seconds for cold `npx -y` spawn
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds for per-tool call
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
+
+/**
+ * Trailing-edge debounce window for `list_changed` refreshes. Bursts of
+ * notifications arriving within this window coalesce into a single fetch.
+ * Sized to smooth over the ~dozen-notification bursts servers emit on
+ * toolset changes / shutdown without noticeably lagging genuine updates.
+ */
+const LIST_CHANGED_DEBOUNCE_MS = 300;
+
+/**
+ * Absolute maximum time a refresh can be deferred by a continuous stream
+ * of notifications. Even if new notifications keep resetting the trailing
+ * timer, the refresh fires once `Date.now()` exceeds the deadline, so the
+ * UI never falls further behind than this cap.
+ */
+const LIST_CHANGED_MAX_DEFERRAL_MS = 2000;
+
+/**
+ * Map from spec notification method to the list kind it refreshes. Any
+ * method not in this map is treated as an unknown notification and
+ * downgraded to a debug log by the fallback handler.
+ */
+const LIST_CHANGED_METHODS: Record<string, McpListKind> = {
+  'notifications/tools/list_changed': 'tools',
+  'notifications/resources/list_changed': 'resources',
+  'notifications/prompts/list_changed': 'prompts',
+};
 
 // Retry defaults when `config.retry.enabled` is true but individual fields
 // are omitted. Kept intentionally conservative: 3 attempts across ~7s worst
@@ -416,6 +474,13 @@ export function formatContentPart(part: unknown): string {
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * Per-(server, listKind) debounce state for `list_changed` notifications.
+   * The key format is `${serverName}::${listKind}` and mirrors the shape
+   * used elsewhere for qualified-tool naming, but only serves as an
+   * internal map key — it is never surfaced to callers.
+   */
+  private refreshDebounces: Map<string, RefreshDebounceEntry> = new Map();
   /**
    * Cached global timeout from {@link McpConfig.timeout}, used as the
    * fallback layer between per-server config and the `MCP_TOOL_TIMEOUT`
@@ -704,6 +769,7 @@ export class McpClientManager {
       status: 'connecting',
       attemptCount: 0,
     };
+    this.registerNotificationHandlers(connection);
 
     this.connections.set(config.name, connection);
 
@@ -720,6 +786,7 @@ export class McpClientManager {
       if (attempt > 1) {
         connection.client = new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} });
         connection.process = undefined;
+        this.registerNotificationHandlers(connection);
       }
 
       try {
@@ -885,6 +952,17 @@ export class McpClientManager {
     const connection = this.connections.get(name);
     if (!connection) return;
 
+    // Cancel any pending debounced list refreshes for this server so a
+    // trailing timer cannot fire after disconnect and hit a closed client.
+    for (const kind of ['tools', 'resources', 'prompts'] as McpListKind[]) {
+      const key = `${name}::${kind}`;
+      const entry = this.refreshDebounces.get(key);
+      if (entry) {
+        clearTimeout(entry.timer);
+        this.refreshDebounces.delete(key);
+      }
+    }
+
     try {
       await connection.client.close();
     } catch (error) {
@@ -1037,6 +1115,171 @@ export class McpClientManager {
     } catch (error) {
       logger.error(`Failed to refresh tools from ${serverName}:`, error);
     }
+  }
+
+  /**
+   * Refresh the cached resources list from a specific server.
+   *
+   * Silently no-ops when the server is not connected or when the SDK
+   * client does not expose `listResources` (older transports / minimal
+   * servers). Errors are logged and swallowed — a failed refresh must
+   * not flip the connection to `failed`, because the cached list is a
+   * convenience surface, not a required capability.
+   */
+  async refreshResources(serverName: string): Promise<void> {
+    const connection = this.connections.get(serverName);
+    if (!connection || connection.status !== 'connected') {
+      return;
+    }
+    const c = connection.client as unknown as {
+      listResources?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
+    };
+    if (typeof c.listResources !== 'function') {
+      return;
+    }
+    try {
+      const result = (await this.withRequestTimeout(serverName, 'resources/list', (opts) =>
+        c.listResources!({}, opts)
+      )) as { resources?: unknown[] };
+      connection.resources = Array.isArray(result?.resources) ? result.resources : [];
+      connection.resourcesCachedAt = Date.now();
+    } catch (error) {
+      logger.error(`Failed to refresh resources from ${serverName}:`, error);
+    }
+  }
+
+  /**
+   * Refresh the cached prompts list from a specific server.
+   *
+   * Same contract as {@link refreshResources}: no-op when unavailable,
+   * errors are logged and swallowed.
+   */
+  async refreshPrompts(serverName: string): Promise<void> {
+    const connection = this.connections.get(serverName);
+    if (!connection || connection.status !== 'connected') {
+      return;
+    }
+    const c = connection.client as unknown as {
+      listPrompts?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
+    };
+    if (typeof c.listPrompts !== 'function') {
+      return;
+    }
+    try {
+      const result = (await this.withRequestTimeout(serverName, 'prompts/list', (opts) =>
+        c.listPrompts!({}, opts)
+      )) as { prompts?: unknown[] };
+      connection.prompts = Array.isArray(result?.prompts) ? result.prompts : [];
+      connection.promptsCachedAt = Date.now();
+    } catch (error) {
+      logger.error(`Failed to refresh prompts from ${serverName}:`, error);
+    }
+  }
+
+  /**
+   * Perform the fetch for a given list kind. Kept as a single dispatch
+   * point so {@link scheduleListRefresh} does not need to know which
+   * method to call for each kind.
+   */
+  private async performListRefresh(serverName: string, kind: McpListKind): Promise<void> {
+    switch (kind) {
+      case 'tools':
+        await this.refreshTools(serverName);
+        return;
+      case 'resources':
+        await this.refreshResources(serverName);
+        return;
+      case 'prompts':
+        await this.refreshPrompts(serverName);
+        return;
+    }
+  }
+
+  /**
+   * Schedule a debounced refresh of the given list for a connected server.
+   *
+   * Coalesces bursts of MCP `list_changed` notifications by resetting the
+   * trailing timer on every call, but caps the total deferral so the UI
+   * cannot fall arbitrarily far behind. When the timer fires (or the
+   * deadline is hit), the corresponding list is re-fetched and the
+   * debounce state for that (server, kind) pair is cleared so the next
+   * notification restarts a fresh cycle.
+   *
+   * Exposed as an internal helper on the manager so both the SDK
+   * notification path and tests can drive it.
+   */
+  scheduleListRefresh(serverName: string, kind: McpListKind): void {
+    const key = `${serverName}::${kind}`;
+    const now = Date.now();
+    const existing = this.refreshDebounces.get(key);
+
+    // Preserve the ORIGINAL deadline across resets so a continuous burst
+    // cannot indefinitely push the refresh out. The first notification
+    // arms both timer and deadline; subsequent notifications only reset
+    // the trailing timer, always clamped to the pre-existing deadline.
+    const deadline = existing?.deadline ?? now + LIST_CHANGED_MAX_DEFERRAL_MS;
+    const trailingFireAt = now + LIST_CHANGED_DEBOUNCE_MS;
+    const fireAt = Math.min(trailingFireAt, deadline);
+    const delay = Math.max(0, fireAt - now);
+
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+
+    const timer = setTimeout(() => {
+      // Clear before firing so a refresh that itself triggers a
+      // notification (rare, but the spec allows it) starts a fresh
+      // debounce cycle instead of resetting the just-fired one.
+      this.refreshDebounces.delete(key);
+      void this.performListRefresh(serverName, kind).catch((error) => {
+        logger.error(`MCP list refresh failed for ${serverName} (${kind}):`, error);
+      });
+    }, delay);
+
+    // Node's Timeout carries a reference by default; `unref` so a lone
+    // pending refresh cannot block process exit. Guarded because fake
+    // timer implementations (vitest) do not expose `unref`.
+    if (typeof (timer as { unref?: () => unknown }).unref === 'function') {
+      (timer as { unref: () => unknown }).unref();
+    }
+
+    this.refreshDebounces.set(key, { timer, deadline });
+  }
+
+  /**
+   * Register MCP notification handlers on a freshly-created client. Sets
+   * per-method handlers for the three `list_changed` notifications and a
+   * fallback handler that downgrades everything else to a debug log
+   * (matches the Kilo #12619 pattern: prevents notification-spam toasts
+   * while still preserving diagnostic signal).
+   *
+   * Idempotent per client: `setNotificationHandler` replaces any prior
+   * registration for the same method.
+   */
+  private registerNotificationHandlers(connection: McpConnection): void {
+    const client = connection.client as unknown as {
+      setNotificationHandler?: (method: string, handler: (n: unknown) => void) => void;
+      fallbackNotificationHandler?: (n: unknown) => Promise<void>;
+    };
+
+    if (typeof client.setNotificationHandler === 'function') {
+      for (const [method, kind] of Object.entries(LIST_CHANGED_METHODS)) {
+        client.setNotificationHandler(method, () => {
+          this.scheduleListRefresh(connection.config.name, kind);
+        });
+      }
+    }
+
+    // Fallback handler: any notification method NOT in LIST_CHANGED_METHODS
+    // lands here. Log at debug level so operators can still surface the
+    // traffic if they crank the log level up, but never toast the user.
+    client.fallbackNotificationHandler = async (notification: unknown) => {
+      const method = (notification as { method?: unknown } | null)?.method;
+      logger.debug(
+        `MCP notification (unhandled) from ${connection.config.name}: ` +
+          `${typeof method === 'string' ? method : '<unknown>'}`
+      );
+    };
   }
 
   /**
