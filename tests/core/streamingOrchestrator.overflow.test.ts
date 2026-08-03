@@ -27,11 +27,23 @@ vi.mock('../../src/core/router.js', () => ({
   classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
 }));
 
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    setLevel: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    print: vi.fn(),
+  },
+}));
+
 import { streamChat } from '../../src/core/streamingOrchestrator.js';
 import { getProviderForModelWithFallback, getDefaultModel } from '../../src/providers/index.js';
 import type { StreamChunk } from '../../src/providers/index.js';
 import type { SessionManager } from '../../src/core/sessionManager.js';
 import { NothingToCompactError } from '../../src/core/compaction.js';
+import { logger } from '../../src/utils/logger.js';
 
 interface FakeCall {
   index: number;
@@ -223,6 +235,7 @@ describe('streamChat context-overflow recovery (issue #1247)', () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).name).toBe('ContextOverflowError');
     expect((caught as Error).message).toMatch(/no history to compact/i);
+    expect((caught as Error).message).toMatch(/shorten your message|larger context window/i);
   });
 
   it('surfaces "still exceeded after compaction" when retry also overflows', async () => {
@@ -268,7 +281,8 @@ describe('streamChat context-overflow recovery (issue #1247)', () => {
     expect(compactCalls).toHaveLength(1);
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).name).toBe('ContextOverflowError');
-    expect((caught as Error).message).toMatch(/still exceeded after compaction/i);
+    expect((caught as Error).message).toMatch(/still exceeded after compacting/i);
+    expect((caught as Error).message).toMatch(/start a new session|larger context window/i);
   });
 
   it('does NOT compact for non-overflow errors (e.g. rate limit)', async () => {
@@ -301,6 +315,75 @@ describe('streamChat context-overflow recovery (issue #1247)', () => {
     // No retry, no compaction — the rate-limit error is not overflow.
     expect(getCalls()).toHaveLength(1);
     expect(compactCalls).toHaveLength(0);
+  });
+
+  it('emits a logger.info status notice before compaction (issue #1258)', async () => {
+    const overflow = new Error("This model's maximum context length is 8192 tokens");
+    const { provider } = makeRecoverableProvider(overflow, 1, [
+      { text: 'ok', usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ]);
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: provider as never,
+      effectiveModelId: 'gpt-4o',
+      usedFallback: false,
+    });
+
+    const { sessionManager } = makeFakeSession({
+      history: [
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'a1' },
+      ],
+    });
+
+    const iter = streamChat('hello', {
+      modelOverride: 'gpt-4o',
+      sessionManager,
+      streamIdleTimeoutMs: 0,
+    });
+
+    for (;;) {
+      const step = await iter.next();
+      if (step.done) {
+        break;
+      }
+    }
+
+    // logger.info must have been called BEFORE the compact() call with the
+    // actionable status notice. We assert on the argument text so a future
+    // wording tweak that drops the actionable substring is caught.
+    const infoCalls = vi.mocked(logger.info).mock.calls.map((c) => String(c[0]));
+    expect(infoCalls.some((msg) => /compacting conversation history and retrying/i.test(msg))).toBe(
+      true
+    );
+  });
+
+  it('does NOT emit the compaction notice for non-overflow errors', async () => {
+    const rate = new Error('rate limit exceeded');
+    (rate as Error & { statusCode?: number }).statusCode = 429;
+    const { provider } = makeRecoverableProvider(rate, 5, []);
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: provider as never,
+      effectiveModelId: 'gpt-4o',
+      usedFallback: false,
+    });
+
+    const { sessionManager } = makeFakeSession({
+      history: [
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'a1' },
+      ],
+    });
+
+    const iter = streamChat('hi', {
+      modelOverride: 'gpt-4o',
+      sessionManager,
+      streamIdleTimeoutMs: 0,
+    });
+
+    await expect(iter.next()).rejects.toBeInstanceOf(Error);
+
+    const infoCalls = vi.mocked(logger.info).mock.calls.map((c) => String(c[0]));
+    expect(infoCalls.some((msg) => /compacting conversation history/i.test(msg))).toBe(false);
   });
 
   it('does NOT compact when no sessionManager is attached', async () => {

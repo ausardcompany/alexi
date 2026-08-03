@@ -10,6 +10,7 @@ import {
 } from '../providers/index.js';
 import { formatProviderError, classifyProviderError } from '../providers/format.js';
 import { NothingToCompactError } from './compaction.js';
+import { logger } from '../utils/logger.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -323,6 +324,10 @@ export function streamChat(
     // surface it inline. This is not persisted to session history.
     fullText += '\n\n[status] Context window exceeded, compacting conversation...\n\n';
 
+    // Also log an actionable info line so non-TUI callers (plain CLI,
+    // agent workflows, CI logs) see that recovery was triggered.
+    logger.info('Context window exceeded, compacting conversation history and retrying...');
+
     try {
       await sm.compact({
         overflowRecovery: true,
@@ -333,8 +338,8 @@ export function streamChat(
       if (compactErr instanceof NothingToCompactError) {
         // Terminal: no history to compact (overflow on first prompt).
         const term = new Error(
-          'Context window exceeded on first prompt (no history to compact). ' +
-            'Reduce the size of your input or switch to a model with a larger context window.'
+          'Context window exceeded on first prompt with no history to compact. ' +
+            'Please shorten your message or switch to a model with a larger context window.'
         );
         term.name = 'ContextOverflowError';
         throw term;
@@ -409,8 +414,8 @@ export function streamChat(
         // actionable terminal message instead of the raw provider error.
         if (overflowRetried && classifyProviderError(err) === 'context_overflow') {
           const term = new Error(
-            'Context window still exceeded after compaction. ' +
-              'Reduce input size or use a model with a larger context window.'
+            'Context window still exceeded after compacting history. ' +
+              'Please start a new session or switch to a model with a larger context window.'
           );
           term.name = 'ContextOverflowError';
           throw term;
