@@ -1,5 +1,67 @@
 import { describe, it, expect } from 'vitest';
-import { formatProviderError, classifyProviderError } from '../../src/providers/format.js';
+import {
+  formatProviderError,
+  classifyProviderError,
+  verdictFromSignals,
+} from '../../src/providers/format.js';
+
+// Minimal AI SDK error stand-ins. The `ai` package is not a direct
+// dependency of this project, but its error classes are identified by
+// stable `name` tags (`AI_APICallError`, `AI_RetryError`, ...) and a
+// static `isInstance` guard. We reproduce that contract here so the
+// pre-pass can be exercised without pulling in the real dependency.
+class FakeAPICallError extends Error {
+  statusCode?: number;
+  responseBody?: unknown;
+  static isInstance(v: unknown): boolean {
+    return v instanceof Error && v.name === 'AI_APICallError';
+  }
+  constructor(message: string, opts: { statusCode?: number; responseBody?: unknown } = {}) {
+    super(message);
+    this.name = 'AI_APICallError';
+    this.statusCode = opts.statusCode;
+    this.responseBody = opts.responseBody;
+  }
+}
+
+class FakeRetryError extends Error {
+  lastError?: unknown;
+  errors?: unknown[];
+  static isInstance(v: unknown): boolean {
+    return v instanceof Error && v.name === 'AI_RetryError';
+  }
+  constructor(message: string, opts: { lastError?: unknown; errors?: unknown[] } = {}) {
+    super(message);
+    this.name = 'AI_RetryError';
+    this.lastError = opts.lastError;
+    this.errors = opts.errors;
+  }
+}
+
+class FakeTypeValidationError extends Error {
+  value?: unknown;
+  static isInstance(v: unknown): boolean {
+    return v instanceof Error && v.name === 'AI_TypeValidationError';
+  }
+  constructor(message: string, opts: { value?: unknown } = {}) {
+    super(message);
+    this.name = 'AI_TypeValidationError';
+    this.value = opts.value;
+  }
+}
+
+class FakeAISDKError extends Error {
+  static isInstance(v: unknown): boolean {
+    return v instanceof Error && v.name === 'AI_AISDKError';
+  }
+  constructor(message: string, opts: { cause?: unknown } = {}) {
+    super(message);
+    this.name = 'AI_AISDKError';
+    if (opts.cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = opts.cause;
+    }
+  }
+}
 
 describe('formatProviderError', () => {
   it('formats the undici fetch failed / SocketError reference case', () => {
@@ -176,5 +238,203 @@ describe('classifyProviderError', () => {
     const err = new Error('loop');
     (err as Error & { cause?: unknown }).cause = err;
     expect(classifyProviderError(err)).toBeUndefined();
+  });
+});
+
+describe('verdictFromSignals', () => {
+  it('returns rate_limit for statusCode 429', () => {
+    expect(verdictFromSignals({ message: 'throttled', statusCode: 429 })).toBe('rate_limit');
+  });
+
+  it('returns rate_limit when message mentions rate limit', () => {
+    expect(verdictFromSignals({ message: 'rate limit hit' })).toBe('rate_limit');
+  });
+
+  it('vetoes context_overflow when statusCode is 429 even if body mentions context', () => {
+    expect(
+      verdictFromSignals({
+        message: 'context window exceeded',
+        statusCode: 429,
+      })
+    ).toBe('rate_limit');
+  });
+
+  it('returns auth for 401 and 403', () => {
+    expect(verdictFromSignals({ message: 'nope', statusCode: 401 })).toBe('auth');
+    expect(verdictFromSignals({ message: 'nope', statusCode: 403 })).toBe('auth');
+  });
+
+  it('returns validation for 400/422 with no overflow markers', () => {
+    expect(verdictFromSignals({ message: 'bad request', statusCode: 400 })).toBe('validation');
+    expect(verdictFromSignals({ message: 'unprocessable', statusCode: 422 })).toBe('validation');
+  });
+
+  it('prefers context_overflow over validation on 400 with overflow marker in message', () => {
+    expect(
+      verdictFromSignals({
+        message: 'context window exceeded',
+        statusCode: 400,
+      })
+    ).toBe('context_overflow');
+  });
+
+  it('finds overflow markers inside a string responseBody on 400', () => {
+    expect(
+      verdictFromSignals({
+        message: 'bad request',
+        statusCode: 400,
+        responseBody: '{"error":"context_length_exceeded"}',
+      })
+    ).toBe('context_overflow');
+  });
+
+  it('finds overflow markers inside an object responseBody on 400', () => {
+    expect(
+      verdictFromSignals({
+        message: 'bad request',
+        statusCode: 400,
+        responseBody: { error: 'context window exceeded' },
+      })
+    ).toBe('context_overflow');
+  });
+
+  it('finds overflow markers inside a data payload', () => {
+    expect(
+      verdictFromSignals({
+        message: 'validation failed',
+        data: { detail: 'prompt too long for model' },
+      })
+    ).toBe('context_overflow');
+  });
+
+  it('returns context_overflow purely from message when no status is set', () => {
+    expect(verdictFromSignals({ message: 'context_length_exceeded' })).toBe('context_overflow');
+  });
+
+  it('returns undefined for unclassifiable signals', () => {
+    expect(verdictFromSignals({ message: 'random failure' })).toBeUndefined();
+    expect(verdictFromSignals({ message: '' })).toBeUndefined();
+  });
+
+  it('does not blow up on a non-serializable responseBody', () => {
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    // Should not throw even though JSON.stringify(circular) throws.
+    expect(() =>
+      verdictFromSignals({
+        message: 'bad request',
+        statusCode: 400,
+        responseBody: circular,
+      })
+    ).not.toThrow();
+  });
+});
+
+describe('classifyProviderError - typed AI SDK pre-pass', () => {
+  it('APICallError.statusCode 429 yields rate_limit', () => {
+    const err = new FakeAPICallError('too many requests', { statusCode: 429 });
+    expect(classifyProviderError(err)).toBe('rate_limit');
+  });
+
+  it('APICallError.statusCode 401 yields auth', () => {
+    const err = new FakeAPICallError('unauthorized', { statusCode: 401 });
+    expect(classifyProviderError(err)).toBe('auth');
+  });
+
+  it('APICallError.statusCode 400 with overflow marker in responseBody yields context_overflow', () => {
+    const err = new FakeAPICallError('bad request', {
+      statusCode: 400,
+      responseBody: { error: 'context window exceeded' },
+    });
+    expect(classifyProviderError(err)).toBe('context_overflow');
+  });
+
+  it('APICallError.statusCode 400 without overflow marker yields validation', () => {
+    const err = new FakeAPICallError('bad request', { statusCode: 400 });
+    expect(classifyProviderError(err)).toBe('validation');
+  });
+
+  it('APICallError.statusCode is authoritative over surrounding shape', () => {
+    // Even if a stale response.status hangs off the error, we must use
+    // the typed statusCode (401), not the structural fallback (500).
+    const err = new FakeAPICallError('unauthorized', { statusCode: 401 });
+    (err as unknown as { response?: { status?: number } }).response = { status: 500 };
+    expect(classifyProviderError(err)).toBe('auth');
+  });
+
+  it('RetryError unwraps to lastError and classifies from it', () => {
+    const inner = new FakeAPICallError('rate limited', { statusCode: 429 });
+    const retry = new FakeRetryError('retries exhausted', { lastError: inner });
+    expect(classifyProviderError(retry)).toBe('rate_limit');
+  });
+
+  it('RetryError falls back to lastAttempt when lastError is missing', () => {
+    const inner = new FakeAPICallError('unauth', { statusCode: 401 });
+    const retry = new FakeRetryError('retries exhausted');
+    (retry as unknown as { lastAttempt?: unknown }).lastAttempt = inner;
+    expect(classifyProviderError(retry)).toBe('auth');
+  });
+
+  it('RetryError falls back to last entry of errors[] when neither lastError nor lastAttempt is set', () => {
+    const first = new Error('transient blip');
+    const last = new FakeAPICallError('server error', { statusCode: 400 });
+    const retry = new FakeRetryError('retries exhausted', { errors: [first, last] });
+    expect(classifyProviderError(retry)).toBe('validation');
+  });
+
+  it('TypeValidationError extracts value into overflow detection', () => {
+    const err = new FakeTypeValidationError('type mismatch', {
+      value: { error: 'context window exceeded' },
+    });
+    expect(classifyProviderError(err)).toBe('context_overflow');
+  });
+
+  it('TypeValidationError defaults to validation when payload does not indicate overflow', () => {
+    const err = new FakeTypeValidationError('type mismatch', { value: { field: 'foo' } });
+    expect(classifyProviderError(err)).toBe('validation');
+  });
+
+  it('AISDKError recurses into cause', () => {
+    const inner = new FakeAPICallError('rate limited', { statusCode: 429 });
+    const wrapper = new FakeAISDKError('wrapped', { cause: inner });
+    expect(classifyProviderError(wrapper)).toBe('rate_limit');
+  });
+
+  it('AISDKError with plain-Error cause carrying overflow marker classifies as context_overflow', () => {
+    const inner = new Error('context_length_exceeded');
+    const wrapper = new FakeAISDKError('wrapped', { cause: inner });
+    expect(classifyProviderError(wrapper)).toBe('context_overflow');
+  });
+
+  it('Nested RetryError->APICallError chain still resolves', () => {
+    const call = new FakeAPICallError('unauth', { statusCode: 403 });
+    const retry = new FakeRetryError('retries exhausted', { lastError: call });
+    const outer = new FakeAISDKError('outer', { cause: retry });
+    expect(classifyProviderError(outer)).toBe('auth');
+  });
+
+  it('Falls back to structural walk when RetryError has no inner failure', () => {
+    // No lastError / lastAttempt / errors[] — must not crash and should
+    // consult the outer message via the structural path.
+    const retry = new FakeRetryError('rate limit exceeded');
+    expect(classifyProviderError(retry)).toBe('rate_limit');
+  });
+
+  it('Recognises AI SDK errors by name tag even without isInstance on constructor', () => {
+    // Plain object with only the AI SDK name tag (e.g. serialised over
+    // an IPC boundary that dropped the class).
+    const obj = { name: 'AI_APICallError', message: 'unauth', statusCode: 401 };
+    expect(classifyProviderError(obj)).toBe('auth');
+  });
+
+  it('Depth-caps deeply nested AISDKError->AISDKError chains without infinite loop', () => {
+    // Build a 5-deep AISDKError chain. Should not blow the stack; the
+    // internal depth cap (3) means the innermost overflow marker is not
+    // required to be detected — we only assert termination.
+    let inner: unknown = new Error('deep bottom');
+    for (let i = 0; i < 5; i += 1) {
+      inner = new FakeAISDKError(`wrap-${i}`, { cause: inner });
+    }
+    expect(() => classifyProviderError(inner)).not.toThrow();
   });
 });
