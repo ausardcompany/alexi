@@ -438,3 +438,228 @@ describe('classifyProviderError - typed AI SDK pre-pass', () => {
     expect(() => classifyProviderError(inner)).not.toThrow();
   });
 });
+
+describe('classifyProviderError - edge cases (issue #1272)', () => {
+  // Case 1: Plain Error (no AI SDK tag) must fall back to the structural
+  // walk — the typed pre-pass is skipped entirely and the message + status
+  // are consulted directly.
+  it('plain Error (no AI SDK tag) falls back to the structural walk', () => {
+    // Overflow marker present → structural walk detects it.
+    const overflow = new Error('context_length_exceeded');
+    expect(classifyProviderError(overflow)).toBe('context_overflow');
+
+    // Auth status → structural walk detects via statusCode.
+    const auth = new Error('nope');
+    (auth as Error & { statusCode?: number }).statusCode = 401;
+    expect(classifyProviderError(auth)).toBe('auth');
+
+    // No overflow marker, no status → unclassified.
+    const noise = new Error('some completely unrelated failure');
+    expect(classifyProviderError(noise)).toBeUndefined();
+  });
+
+  // Case 2: Depth cap. Beyond depth 3, recursion terminates and returns
+  // undefined for the wrapper — but the wrapper's own signals may still
+  // classify via the structural fallback. We assert BOTH that a deeper
+  // chain is safely capped AND that the outer classification is
+  // deterministic (never blows up).
+  it('depth limit (>3) prevents infinite recursion in pathological chains', () => {
+    // Build a 10-deep RetryError-of-RetryError chain terminating in an
+    // APICallError with an auth status. Depth 3 is exceeded before we
+    // reach the terminal APICallError, so the auth verdict is NOT
+    // propagated. The classification returns undefined via the structural
+    // walk of the outermost wrapper (which has no message match).
+    const bottom = new FakeAPICallError('unauth', { statusCode: 401 });
+    let chain: unknown = bottom;
+    for (let i = 0; i < 10; i += 1) {
+      chain = new FakeRetryError(`retry-${i}`, { lastError: chain });
+    }
+    // Whatever the exact verdict, the call must terminate deterministically
+    // and not throw or hang.
+    expect(() => classifyProviderError(chain)).not.toThrow();
+    // The outer message contains no rate-limit / overflow markers, so the
+    // structural walk of what the depth cap surfaces returns undefined.
+    // We do NOT assert 'auth' — the cap is intentional: pathological
+    // chains should not be able to force deep classification work.
+    expect(classifyProviderError(chain)).toBeUndefined();
+  });
+
+  // Case 3: Mixed scenario. A RetryError wraps an APICallError; the typed
+  // statusCode on the APICallError must win, even if the RetryError's
+  // message text hints at a different classification.
+  it('RetryError wrapping APICallError uses inner statusCode as authoritative', () => {
+    // RetryError message says "rate limit" but the terminal APICallError
+    // has statusCode 401 — the terminal attempt is what actually failed
+    // the retry loop, so auth must win.
+    const call = new FakeAPICallError('unauthorized', { statusCode: 401 });
+    const retry = new FakeRetryError('rate limit exceeded after retries', {
+      lastError: call,
+    });
+    expect(classifyProviderError(retry)).toBe('auth');
+
+    // Same shape, inverted: RetryError message is generic, terminal has
+    // 429 — the typed statusCode must be used.
+    const call429 = new FakeAPICallError('unhelpful', { statusCode: 429 });
+    const retry2 = new FakeRetryError('retries exhausted', { lastError: call429 });
+    expect(classifyProviderError(retry2)).toBe('rate_limit');
+  });
+
+  // Case 4: AI SDK error whose constructor lacks isInstance() (e.g.
+  // hand-serialized over IPC that dropped the class prototype). The
+  // classifier must still match on the name tag alone.
+  it('AI SDK error without isInstance() method still matches via name tag', () => {
+    // A plain object literal with only the AI SDK name tag. No prototype,
+    // no isInstance, no Error class — just structural shape.
+    const bare = {
+      name: 'AI_APICallError',
+      message: 'unauthorized',
+      statusCode: 403,
+    };
+    expect(classifyProviderError(bare)).toBe('auth');
+
+    // Same for RetryError shape — must unwrap lastError even without the
+    // class guard.
+    const bareRetry = {
+      name: 'AI_RetryError',
+      message: 'retries exhausted',
+      lastError: {
+        name: 'AI_APICallError',
+        message: 'context window exceeded',
+        statusCode: 400,
+      },
+    };
+    expect(classifyProviderError(bareRetry)).toBe('context_overflow');
+  });
+
+  // Case 5: Gateway-forwarded plain JSON error (no AI SDK shape). Some
+  // proxies flatten the AI SDK error into a plain object with only the
+  // provider's JSON body. The structural walk must handle this.
+  it('gateway-forwarded plain JSON error (no AI SDK shape) uses structural walk', () => {
+    // Simulate a gateway that received an AI SDK error, unwrapped it, and
+    // forwarded the provider's JSON body without preserving the name tag.
+    const gatewayForwarded = {
+      // No `name: 'AI_APICallError'` — the AI SDK shape was dropped.
+      message: 'Bad Request',
+      status: 400,
+      responseBody: {
+        error: {
+          code: 'context_length_exceeded',
+          message: 'This model has a maximum context length of 8192 tokens',
+        },
+      },
+    };
+    // The typed pre-pass is skipped (no AI SDK tag). The structural walk
+    // examines statusCode + responseBody and detects the overflow marker.
+    expect(classifyProviderError(gatewayForwarded)).toBe('context_overflow');
+
+    // Gateway-forwarded auth error: only status + generic message.
+    const authGateway = {
+      message: 'Authentication failed',
+      status: 401,
+    };
+    expect(classifyProviderError(authGateway)).toBe('auth');
+
+    // Gateway-forwarded 429 with a message that mentions context: still
+    // rate_limit (veto rule applies in structural path too).
+    const rateGateway = {
+      message: 'rate limit exceeded due to context length',
+      status: 429,
+    };
+    expect(classifyProviderError(rateGateway)).toBe('rate_limit');
+  });
+
+  // Case 6: Error with both typed statusCode AND response.status. The
+  // typed field must win — response.status may be stale from an earlier
+  // attempt or synthesized by a wrapper.
+  it('error with both typed statusCode and response.status uses typed field', () => {
+    // APICallError with typed statusCode=401 and a stale response.status=500.
+    const err = new FakeAPICallError('unauthorized', { statusCode: 401 });
+    (err as unknown as { response?: { status?: number } }).response = { status: 500 };
+    // Typed path wins — auth, not undefined-from-500.
+    expect(classifyProviderError(err)).toBe('auth');
+
+    // Reverse: typed statusCode=429 (rate limit) vs stale response.status=200.
+    const err2 = new FakeAPICallError('throttled', { statusCode: 429 });
+    (err2 as unknown as { response?: { status?: number } }).response = { status: 200 };
+    expect(classifyProviderError(err2)).toBe('rate_limit');
+
+    // Typed error with no statusCode and a response.status: falls back
+    // to structural, which reads response.status (this is the ONLY case
+    // where response.status is authoritative — when the typed path
+    // yielded no status).
+    const err3 = new FakeAPICallError('bad request');
+    (err3 as unknown as { response?: { status?: number } }).response = { status: 400 };
+    // Typed pre-pass hits APICallError but statusCode is undefined, so
+    // verdictFromSignals sees no status and no overflow → undefined.
+    // NOTE: this documents the current contract — APICallError with no
+    // statusCode does NOT fall through to the structural extractor. If
+    // that changes, this test will need to be updated.
+    expect(classifyProviderError(err3)).toBeUndefined();
+  });
+
+  // Case 7: Unclassified error with no matching patterns returns
+  // undefined — the classifier is conservative and does NOT default to
+  // any bucket.
+  it('unclassified error (no matching patterns) returns undefined', () => {
+    // Empty error object.
+    expect(classifyProviderError({})).toBeUndefined();
+
+    // Non-standard status codes not in any bucket.
+    const err418 = new Error("I'm a teapot");
+    (err418 as Error & { statusCode?: number }).statusCode = 418;
+    expect(classifyProviderError(err418)).toBeUndefined();
+
+    // AI SDK error with an unknown status and no overflow markers.
+    const err = new FakeAPICallError('mystery failure', { statusCode: 504 });
+    expect(classifyProviderError(err)).toBeUndefined();
+
+    // Non-error primitives.
+    expect(classifyProviderError('a string')).toBeUndefined();
+    expect(classifyProviderError(42)).toBeUndefined();
+    expect(classifyProviderError(false)).toBeUndefined();
+    expect(classifyProviderError([])).toBeUndefined();
+  });
+
+  // Bonus edge case: an AI SDK error whose only signal lives on the
+  // `data` field (some SDK versions use `data` instead of `value` for
+  // typed payloads). The signalsFromAiSdkError helper prefers `value`
+  // but falls back to `data`.
+  it('AI SDK error with data (not value) payload still routes through overflow detection', () => {
+    const err = new FakeAPICallError('bad payload', {
+      statusCode: 400,
+    });
+    (err as unknown as { data?: unknown }).data = {
+      code: 'context_length_exceeded',
+    };
+    expect(classifyProviderError(err)).toBe('context_overflow');
+  });
+
+  // Bonus edge case: verify verdictFromSignals precedence when multiple
+  // signals compete (documents the priority order explicitly).
+  it('verdictFromSignals priority: rate_limit > auth > validation > context_overflow', () => {
+    // 429 + auth message → rate_limit wins.
+    expect(
+      verdictFromSignals({
+        message: 'unauthorized rate limited',
+        statusCode: 429,
+      })
+    ).toBe('rate_limit');
+
+    // 401 + overflow message → auth wins (no overflow override on 401).
+    expect(
+      verdictFromSignals({
+        message: 'context window exceeded but also unauthorized',
+        statusCode: 401,
+      })
+    ).toBe('auth');
+
+    // 400 + overflow message → context_overflow wins (the ONE case
+    // where validation defers to overflow).
+    expect(
+      verdictFromSignals({
+        message: 'context window exceeded',
+        statusCode: 400,
+      })
+    ).toBe('context_overflow');
+  });
+});

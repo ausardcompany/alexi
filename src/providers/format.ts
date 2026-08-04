@@ -362,19 +362,41 @@ function signalsFromAiSdkError(err: unknown): ErrorSignals {
  *      class (`APICallError`, `RetryError`, `TypeValidationError`, or the
  *      `AISDKError` base), we read its typed fields authoritatively:
  *        - `APICallError.statusCode` is the sole HTTP status source.
+ *          A stale `response.status` hanging off the same object is
+ *          ignored — the typed field wins.
  *        - `RetryError.lastError` (a.k.a. `lastAttempt`) is unwrapped and
- *          re-classified so the terminal failure drives the verdict.
+ *          re-classified so the terminal failure drives the verdict, not
+ *          the RetryError's own message. Falls back to the last entry of
+ *          `errors[]` when neither `lastError` nor `lastAttempt` is set.
  *        - `TypeValidationError.value` is treated as the response body
- *          for overflow detection.
+ *          for overflow detection; defaults to `validation` otherwise.
  *        - `AISDKError.cause` is recursed into for wrapping errors.
  *
  *   2. **Structural fallback.** For anything else (plain `Error`, undici
- *      throwables, JSON error objects), we walk the shape and collect
- *      messages/statuses just as before. Behaviour for non-typed errors
- *      is unchanged.
+ *      throwables, gateway-forwarded plain JSON error objects that
+ *      dropped the AI SDK class tag), we walk the shape and collect
+ *      messages/statuses across up to two levels of `cause` chain. This
+ *      is also the path taken for AI SDK errors that were serialised
+ *      over an IPC boundary and lost their constructor's `isInstance()`
+ *      static method — we then match on the `name` tag alone.
+ *
+ * **When each path is used:**
+ * - Typed pre-pass: `error` is a live `Error` instance (or object
+ *   literal) whose `name` matches an AI SDK tag (`AI_APICallError`,
+ *   `AI_RetryError`, `AI_TypeValidationError`, `AI_AISDKError`).
+ * - Structural fallback: everything else, including
+ *   `TypeError('fetch failed')` with an undici `cause`, gateway
+ *   proxies that flatten the AI SDK error into raw provider JSON, and
+ *   plain `Error` throwables from bespoke provider adapters.
+ *
+ * Recursion is depth-capped at 3 to survive pathological chains
+ * (RetryError wrapping AISDKError wrapping RetryError) without
+ * unbounded stack growth. Beyond depth 3, classification returns
+ * `undefined` for that branch rather than throwing.
  *
  * The final verdict comes from the shared `verdictFromSignals` helper so
- * priority rules stay in one place regardless of entry path.
+ * priority rules stay in one place regardless of entry path:
+ *   `rate_limit > auth > (validation | context_overflow) > undefined`.
  */
 export function classifyProviderError(error: unknown): ProviderErrorClass {
   return classifyProviderErrorInternal(error, 0);

@@ -386,6 +386,68 @@ describe('streamChat context-overflow recovery (issue #1247)', () => {
     expect(infoCalls.some((msg) => /compacting conversation history/i.test(msg))).toBe(false);
   });
 
+  it('recovers when a typed AI SDK APICallError signals context_overflow (issue #1272)', async () => {
+    // Smoke test: a typed AI SDK error (recognised by name tag) with
+    // statusCode 400 and an overflow marker in responseBody must be
+    // classified as `context_overflow` and drive the compaction+retry
+    // recovery path through streamingOrchestrator.
+    class FakeAPICallError extends Error {
+      statusCode?: number;
+      responseBody?: unknown;
+      constructor(msg: string, opts: { statusCode: number; responseBody: unknown }) {
+        super(msg);
+        this.name = 'AI_APICallError';
+        this.statusCode = opts.statusCode;
+        this.responseBody = opts.responseBody;
+      }
+    }
+
+    const typedOverflow = new FakeAPICallError('Bad Request', {
+      statusCode: 400,
+      responseBody: { error: { code: 'context_length_exceeded' } },
+    });
+
+    const { provider, getCalls } = makeRecoverableProvider(typedOverflow, 1, [
+      { text: 'recovered', usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } },
+    ]);
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: provider as never,
+      effectiveModelId: 'gpt-4o',
+      usedFallback: false,
+    });
+
+    const { sessionManager, compactCalls } = makeFakeSession({
+      history: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'reply' },
+        { role: 'user', content: 'second' },
+      ],
+    });
+
+    const iter = streamChat('please summarize', {
+      modelOverride: 'gpt-4o',
+      sessionManager,
+      streamIdleTimeoutMs: 0,
+    });
+
+    const chunks: string[] = [];
+    for (;;) {
+      const step = await iter.next();
+      if (step.done) {
+        break;
+      }
+      chunks.push(step.value.text);
+    }
+
+    // Provider called twice: initial (typed overflow) + retry (success).
+    expect(getCalls()).toHaveLength(2);
+    // compact() was called with overflowRecovery: true.
+    expect(compactCalls).toHaveLength(1);
+    expect(compactCalls[0]).toMatchObject({ overflowRecovery: true });
+    // Recovery successfully streamed the retry response.
+    expect(chunks.join('')).toContain('recovered');
+  });
+
   it('does NOT compact when no sessionManager is attached', async () => {
     const overflow = new Error('context window exceeded');
     const { provider, getCalls } = makeRecoverableProvider(overflow, 5, []);
