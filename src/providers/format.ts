@@ -178,39 +178,79 @@ function collectMessages(err: unknown, depth = 0): string[] {
 }
 
 /**
- * Classify a thrown provider error into one of a small set of coarse
- * buckets used by the streaming orchestrator's recovery path.
+ * Signals that drive verdict resolution. Extracted so both the typed
+ * AI SDK pre-pass (which knows the fields authoritatively) and the
+ * structural fallback (which walks arbitrary shapes) can share the same
+ * priority rules.
+ */
+interface ErrorSignals {
+  /** Human-readable messages harvested from the error tree. */
+  message: string;
+  /** HTTP status code, when known and authoritative. */
+  statusCode?: number;
+  /** Serialized response body, used for context-overflow markers on 4xx. */
+  responseBody?: unknown;
+  /** Additional structured payload (e.g. TypeValidationError.value). */
+  data?: unknown;
+}
+
+/**
+ * Resolve a set of `ErrorSignals` to a verdict using the fixed priority
+ * order:
  *
- * Priority order (higher wins):
  *   1. `rate_limit` — status 429 or messages matching `rate limit`. Vetoes
  *      `context_overflow` so a 429 never accidentally triggers compaction.
  *   2. `auth` — status 401 or 403.
- *   3. `validation` — status 400 or 422.
- *   4. `context_overflow` — matches a message pattern from the curated
- *      list above.
+ *   3. `validation` — status 400 or 422, BUT `context_overflow` wins if a
+ *      known overflow marker is present in the body (some SAP AI Core
+ *      deployments map overflow to HTTP 400).
+ *   4. `context_overflow` — matches a message pattern from the curated list.
  *   5. `undefined` — unclassified.
+ *
+ * Exported for unit testing. Not part of the public provider surface.
  */
-export function classifyProviderError(error: unknown): ProviderErrorClass {
-  if (error === null || error === undefined) {
-    return undefined;
-  }
+export function verdictFromSignals(signals: ErrorSignals): ProviderErrorClass {
+  const { statusCode } = signals;
 
-  const status = extractStatus(error);
-  const messages = collectMessages(error);
-  const haystack = messages.join('\n');
+  // Fold responseBody and data into the searchable haystack. We do this
+  // here (rather than at the call site) so both entry paths reuse the
+  // exact same overflow-detection surface.
+  const haystackParts: string[] = [];
+  if (signals.message.length > 0) {
+    haystackParts.push(signals.message);
+  }
+  if (typeof signals.responseBody === 'string' && signals.responseBody.length > 0) {
+    haystackParts.push(signals.responseBody);
+  } else if (signals.responseBody && typeof signals.responseBody === 'object') {
+    try {
+      haystackParts.push(JSON.stringify(signals.responseBody));
+    } catch {
+      // ignore non-serializable bodies
+    }
+  }
+  if (typeof signals.data === 'string' && signals.data.length > 0) {
+    haystackParts.push(signals.data);
+  } else if (signals.data && typeof signals.data === 'object') {
+    try {
+      haystackParts.push(JSON.stringify(signals.data));
+    } catch {
+      // ignore non-serializable payloads
+    }
+  }
+  const haystack = haystackParts.join('\n');
 
   // Rate limit takes precedence over context_overflow: the two can
   // co-occur textually ("rate limit exceeded due to context length"),
   // and the correct recovery for 429 is backoff, not compaction.
-  if (status === 429 || /rate[\s_-]?limit/i.test(haystack)) {
+  if (statusCode === 429 || /rate[\s_-]?limit/i.test(haystack)) {
     return 'rate_limit';
   }
 
-  if (status === 401 || status === 403) {
+  if (statusCode === 401 || statusCode === 403) {
     return 'auth';
   }
 
-  if (status === 400 || status === 422) {
+  if (statusCode === 400 || statusCode === 422) {
     // Validation errors sometimes carry a context-overflow message body
     // from providers that map overflow to HTTP 400 (e.g. some SAP AI
     // Core deployments). Prefer `context_overflow` when the message
@@ -226,4 +266,197 @@ export function classifyProviderError(error: unknown): ProviderErrorClass {
   }
 
   return undefined;
+}
+
+/**
+ * AI SDK error tags. The `ai` package (and the SDK error types re-exported
+ * by SAP AI SDK wrappers) assigns each error class a stable `name`
+ * property, e.g. `AI_APICallError`, `AI_RetryError`, `AI_TypeValidationError`,
+ * `AI_AISDKError`. The classes also expose a static `isInstance()` method
+ * that matches on the same tag, which makes cross-realm / re-imported
+ * instances safe to detect without an `instanceof` check.
+ *
+ * We recognise these tags structurally rather than importing the classes,
+ * so the classification remains correct whether the caller is running
+ * against the raw `ai` package, a SAP AI SDK re-export, or a duck-typed
+ * mock in tests. When the class is available on `error.constructor`, we
+ * prefer its own `isInstance()` guard; otherwise we fall back to the name
+ * tag, which is what `isInstance()` itself compares.
+ */
+const AI_SDK_TAGS = {
+  APICallError: 'AI_APICallError',
+  RetryError: 'AI_RetryError',
+  TypeValidationError: 'AI_TypeValidationError',
+  AISDKError: 'AI_AISDKError',
+} as const;
+
+/**
+ * Test whether `err` is a specific AI SDK error class by tag. Uses the
+ * class's own `isInstance()` static guard when available; otherwise
+ * compares the tag on `err.name`. This mirrors how `isInstance()` itself
+ * is implemented in the `ai` package (a name-tag comparison), so the two
+ * paths are behaviourally identical for AI SDK errors.
+ */
+function isAiSdkError(err: unknown, tag: string): boolean {
+  if (err === null || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { name?: unknown; constructor?: unknown };
+  // Prefer the class's own guard if it was imported. `isInstance` is a
+  // static method on each AI SDK error class.
+  const ctor = candidate.constructor as { isInstance?: (v: unknown) => boolean } | undefined;
+  if (ctor && typeof ctor.isInstance === 'function') {
+    try {
+      if (ctor.isInstance(err)) {
+        // Confirm the tag matches. `AISDKError.isInstance` returns true
+        // for ALL AI SDK subclasses, so a tag check is still required to
+        // route between APICallError vs RetryError vs the base class.
+        if (typeof candidate.name === 'string' && candidate.name === tag) {
+          return true;
+        }
+      }
+    } catch {
+      // isInstance is defensive; ignore errors and fall through.
+    }
+  }
+  return typeof candidate.name === 'string' && candidate.name === tag;
+}
+
+/**
+ * Convert an AI SDK error to `ErrorSignals` for the shared verdict
+ * function. Individual fields (`statusCode`, `responseBody`, `value`,
+ * `data`) are read directly from the typed properties documented by the
+ * `ai` package.
+ */
+function signalsFromAiSdkError(err: unknown): ErrorSignals {
+  const candidate = err as {
+    message?: unknown;
+    statusCode?: unknown;
+    responseBody?: unknown;
+    data?: unknown;
+    value?: unknown;
+  };
+  const message = typeof candidate.message === 'string' ? candidate.message : '';
+  const statusCode =
+    typeof candidate.statusCode === 'number' && Number.isFinite(candidate.statusCode)
+      ? candidate.statusCode
+      : undefined;
+  return {
+    message,
+    statusCode,
+    responseBody: candidate.responseBody,
+    // TypeValidationError carries the offending payload on `value`; other
+    // typed errors may use `data`. Prefer `value` when present so we
+    // capture validation payloads.
+    data: candidate.value ?? candidate.data,
+  };
+}
+
+/**
+ * Classify a thrown provider error into one of a small set of coarse
+ * buckets used by the streaming orchestrator's recovery path.
+ *
+ * The classification runs in two stages:
+ *
+ *   1. **Typed AI SDK pre-pass.** If `error` is a recognised AI SDK error
+ *      class (`APICallError`, `RetryError`, `TypeValidationError`, or the
+ *      `AISDKError` base), we read its typed fields authoritatively:
+ *        - `APICallError.statusCode` is the sole HTTP status source.
+ *        - `RetryError.lastError` (a.k.a. `lastAttempt`) is unwrapped and
+ *          re-classified so the terminal failure drives the verdict.
+ *        - `TypeValidationError.value` is treated as the response body
+ *          for overflow detection.
+ *        - `AISDKError.cause` is recursed into for wrapping errors.
+ *
+ *   2. **Structural fallback.** For anything else (plain `Error`, undici
+ *      throwables, JSON error objects), we walk the shape and collect
+ *      messages/statuses just as before. Behaviour for non-typed errors
+ *      is unchanged.
+ *
+ * The final verdict comes from the shared `verdictFromSignals` helper so
+ * priority rules stay in one place regardless of entry path.
+ */
+export function classifyProviderError(error: unknown): ProviderErrorClass {
+  return classifyProviderErrorInternal(error, 0);
+}
+
+/**
+ * Bounded-depth internal recursion. Depth is capped at 3 to survive
+ * pathological chains where a RetryError wraps an AISDKError wraps
+ * another RetryError, without introducing an unbounded loop through
+ * self-referential `cause` fields.
+ */
+function classifyProviderErrorInternal(error: unknown, depth: number): ProviderErrorClass {
+  if (error === null || error === undefined || depth > 3) {
+    return undefined;
+  }
+
+  // ── Typed AI SDK pre-pass ────────────────────────────────────────────
+  // Order matters: check RetryError first so we unwrap to the terminal
+  // attempt before considering it as an APICallError candidate. Check
+  // the base AISDKError last so subclasses match their specific handler.
+
+  if (isAiSdkError(error, AI_SDK_TAGS.RetryError)) {
+    // RetryError.lastError is the terminal underlying failure that
+    // caused retries to give up. The `ai` package used `lastError` in
+    // recent versions; older wrappers use `lastAttempt`. Fall back to
+    // the last entry of `errors[]` if neither is present.
+    const retry = error as {
+      lastError?: unknown;
+      lastAttempt?: unknown;
+      errors?: unknown;
+    };
+    const inner =
+      retry.lastError ??
+      retry.lastAttempt ??
+      (Array.isArray(retry.errors) && retry.errors.length > 0
+        ? retry.errors[retry.errors.length - 1]
+        : undefined);
+    if (inner !== undefined && inner !== error) {
+      const nested = classifyProviderErrorInternal(inner, depth + 1);
+      if (nested !== undefined) {
+        return nested;
+      }
+    }
+    // Fall through to structural walk if unwrap yielded nothing.
+  }
+
+  if (isAiSdkError(error, AI_SDK_TAGS.APICallError)) {
+    // APICallError.statusCode is authoritative — do NOT fall back to the
+    // structural extractor, because a mixed shape could carry a stale
+    // status on `response.status` from a previous attempt.
+    return verdictFromSignals(signalsFromAiSdkError(error));
+  }
+
+  if (isAiSdkError(error, AI_SDK_TAGS.TypeValidationError)) {
+    // TypeValidationError has no statusCode of its own; the offending
+    // payload is on `.value`. Treat it as validation unless the payload
+    // clearly indicates a context overflow.
+    const signals = signalsFromAiSdkError(error);
+    const verdict = verdictFromSignals(signals);
+    return verdict ?? 'validation';
+  }
+
+  if (isAiSdkError(error, AI_SDK_TAGS.AISDKError)) {
+    // Base class: recurse into `cause` if present, then fall through to
+    // the structural walk if the cause did not classify.
+    const wrapped = (error as { cause?: unknown }).cause;
+    if (wrapped !== undefined && wrapped !== error) {
+      const nested = classifyProviderErrorInternal(wrapped, depth + 1);
+      if (nested !== undefined) {
+        return nested;
+      }
+    }
+    // Fall through.
+  }
+
+  // ── Structural fallback ──────────────────────────────────────────────
+  // For non-typed errors (plain Error, undici, JSON error objects) we
+  // walk arbitrary shapes and collect signals across the cause chain.
+  const statusCode = extractStatus(error);
+  const messages = collectMessages(error);
+  return verdictFromSignals({
+    message: messages.join('\n'),
+    statusCode,
+  });
 }
