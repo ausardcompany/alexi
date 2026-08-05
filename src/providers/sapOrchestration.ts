@@ -408,6 +408,232 @@ export function extractCacheTokens(usage: unknown): {
   return out;
 }
 
+// ============================================================================
+// Empty-Response Retry (issue #1279)
+// ============================================================================
+
+/**
+ * Classification of a single {@link StreamChunk} for the empty-response
+ * retry wrapper.
+ *
+ * - `output`   : chunk carries model-visible content (text, tool call, file,
+ *                reasoning) — the turn is NOT empty.
+ * - `structural`: metadata-only chunk (finish reason, usage, stream-start).
+ *                Not output on its own; used to detect end-of-turn.
+ * - `error`    : chunk represents an error signal from the provider.
+ *                Currently the SAP SDK throws for errors so this branch is
+ *                reserved for future providers that emit error frames.
+ */
+export type StreamPartKind = 'output' | 'structural' | 'error';
+
+/**
+ * Classify a {@link StreamChunk} for retry decisions.
+ *
+ * A chunk is considered `output` when it produced anything the user or a
+ * downstream tool loop can act on:
+ *   - non-empty `text`
+ *   - one or more `toolCalls`
+ *
+ * A chunk with only a `finishReason` or `usage` is `structural`. Purely
+ * empty chunks (no text, no tool calls, no finish reason, no usage) are
+ * treated as `structural` too — they cannot rescue an otherwise empty turn.
+ *
+ * The `output` category deliberately covers tool-call-only turns per the
+ * task contract ("tool-call-only turns are never retried"): a tool call is
+ * a valid, non-empty response even when the assistant produced no text.
+ */
+export function classifyStreamPart(chunk: StreamChunk): StreamPartKind {
+  const hasText = typeof chunk.text === 'string' && chunk.text.length > 0;
+  const hasToolCalls = Array.isArray(chunk.toolCalls) && chunk.toolCalls.length > 0;
+  if (hasText || hasToolCalls) {
+    return 'output';
+  }
+  return 'structural';
+}
+
+/**
+ * Configuration for {@link retryEmptyResponse}.
+ */
+export interface EmptyResponseRetryOptions {
+  /**
+   * Maximum number of attempts (including the initial one).
+   * Default: 3. Any value < 1 is treated as 1 (no retry).
+   */
+  maxAttempts?: number;
+  /**
+   * Optional callback invoked when an attempt is discarded as empty.
+   * Receives the 1-indexed attempt number that just failed and the
+   * (possibly undefined) aggregated usage-so-far. Errors thrown from the
+   * callback are swallowed to avoid masking retry progress.
+   */
+  onEmptyAttempt?: (attempt: number, usageSoFar: TokenUsage | undefined) => void;
+}
+
+/**
+ * Aggregate two {@link TokenUsage} records field-by-field.
+ *
+ * Undefined fields are treated as "unknown" and do NOT contribute to the
+ * sum (they are only kept if present on one side). When BOTH sides report
+ * a numeric value, they are summed. This matches the semantics needed for
+ * charging discarded-attempt cost against the eventual successful turn
+ * — the API billed us for the empty attempts, so the caller must see the
+ * total.
+ */
+export function mergeUsage(
+  a: TokenUsage | undefined,
+  b: TokenUsage | undefined
+): TokenUsage | undefined {
+  if (!a) {
+    return b;
+  }
+  if (!b) {
+    return a;
+  }
+  const addField = (x: number | undefined, y: number | undefined): number | undefined => {
+    if (x === undefined && y === undefined) {
+      return undefined;
+    }
+    return (x ?? 0) + (y ?? 0);
+  };
+  const out: TokenUsage = {};
+  const pt = addField(a.prompt_tokens, b.prompt_tokens);
+  if (pt !== undefined) {
+    out.prompt_tokens = pt;
+  }
+  const ct = addField(a.completion_tokens, b.completion_tokens);
+  if (ct !== undefined) {
+    out.completion_tokens = ct;
+  }
+  const tt = addField(a.total_tokens, b.total_tokens);
+  if (tt !== undefined) {
+    out.total_tokens = tt;
+  }
+  const cr = addField(a.cache_read_input_tokens, b.cache_read_input_tokens);
+  if (cr !== undefined) {
+    out.cache_read_input_tokens = cr;
+  }
+  const cc = addField(a.cache_creation_input_tokens, b.cache_creation_input_tokens);
+  if (cc !== undefined) {
+    out.cache_creation_input_tokens = cc;
+  }
+  return out;
+}
+
+/**
+ * Wrap a stream factory with empty-response retry.
+ *
+ * Semantics (see issue #1279 and Kilo PR #12927):
+ *  - Consume chunks from the factory-produced stream one at a time.
+ *  - As soon as we see an `output` chunk we "commit" the attempt: buffered
+ *    structural chunks (if any) are flushed, and everything from this
+ *    attempt is streamed through to the caller unchanged. No further
+ *    retries can happen for this turn.
+ *  - If the stream ends without producing any `output` chunk, the attempt
+ *    is discarded. Its usage is aggregated into a running total, and the
+ *    factory is called again to open a fresh stream.
+ *  - After {@link EmptyResponseRetryOptions.maxAttempts} attempts, the
+ *    accumulated structural chunks (with aggregated usage) are yielded to
+ *    the caller as a best-effort final metadata chunk. The turn ends
+ *    empty — the caller decides whether that is an error.
+ *  - Errors thrown by the underlying stream are propagated immediately.
+ *    They are NOT retried here; higher-level layers (`ErrorBackoff`, the
+ *    workflow `KILO_RETRIES` loop, or the route retry policy) handle
+ *    error retries with their own backoff and classification.
+ *
+ * The factory MUST be safe to invoke multiple times and MUST produce a
+ * fresh stream on each call (the previous stream is fully drained before
+ * a retry).
+ *
+ * Usage aggregation is field-by-field, using {@link mergeUsage}. When the
+ * committed attempt itself reports usage, that usage is summed with the
+ * aggregated total of the discarded attempts so downstream cost trackers
+ * bill the whole turn.
+ */
+export async function* retryEmptyResponse(
+  streamFactory: () => AsyncIterable<StreamChunk> | Promise<AsyncIterable<StreamChunk>>,
+  options: EmptyResponseRetryOptions = {}
+): AsyncGenerator<StreamChunk> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+  let aggregatedUsage: TokenUsage | undefined;
+  let lastStructural: StreamChunk | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const stream = await streamFactory();
+    const bufferedStructural: StreamChunk[] = [];
+    let committed = false;
+
+    for await (const chunk of stream) {
+      if (committed) {
+        // Post-commit passthrough: everything flows to the caller as-is.
+        // No further retry decisions and no aggregation are needed.
+        yield chunk;
+        continue;
+      }
+
+      const kind = classifyStreamPart(chunk);
+      if (kind === 'output') {
+        // Commit: flush buffered structural chunks first, then this one.
+        // Aggregate any usage seen so far into this chunk's usage so the
+        // caller sees the full billed cost of the turn.
+        committed = true;
+        for (const s of bufferedStructural) {
+          yield s;
+        }
+        if (aggregatedUsage) {
+          const merged = mergeUsage(aggregatedUsage, chunk.usage);
+          const rewritten: StreamChunk = { ...chunk };
+          if (merged) {
+            rewritten.usage = merged;
+          }
+          yield rewritten;
+          aggregatedUsage = undefined;
+        } else {
+          yield chunk;
+        }
+        continue;
+      }
+      // structural: buffer for potential replay of usage.
+      bufferedStructural.push(chunk);
+      if (chunk.usage) {
+        lastStructural = chunk;
+      }
+    }
+
+    if (committed) {
+      return;
+    }
+
+    // Attempt produced no output. Aggregate usage from the discarded
+    // stream's structural chunks into the running total.
+    for (const s of bufferedStructural) {
+      if (s.usage) {
+        aggregatedUsage = mergeUsage(aggregatedUsage, s.usage);
+      }
+    }
+    if (options.onEmptyAttempt) {
+      try {
+        options.onEmptyAttempt(attempt, aggregatedUsage);
+      } catch {
+        // Swallow to avoid masking retry progress.
+      }
+    }
+  }
+
+  // All attempts empty. Yield a final metadata chunk so the caller can
+  // still see the aggregated usage of the discarded attempts and the last
+  // finishReason. This keeps cost tracking honest.
+  const finalChunk: StreamChunk = {
+    text: '',
+  };
+  if (lastStructural?.finishReason) {
+    finalChunk.finishReason = lastStructural.finishReason;
+  }
+  if (aggregatedUsage) {
+    finalChunk.usage = aggregatedUsage;
+  }
+  yield finalChunk;
+}
+
 /**
  * Build input filters based on configuration
  */
