@@ -19,6 +19,7 @@ import { buildAssembledSystemPromptAsync } from '../agent/system.js';
 import { stripInternalOptions } from '../agent/index.js';
 import { buildSessionHeaders } from '../providers/sessionHeaders.js';
 import type { CompletionOptions } from '../providers/sapOrchestration.js';
+import { retryEmptyResponse } from '../providers/sapOrchestration.js';
 import {
   createStreamWatchdog,
   DEFAULT_STREAM_TOOL_EXTENSION_MS,
@@ -52,6 +53,18 @@ export interface StreamingOptions {
    * Default: 600_000 ms (10 minutes).
    */
   streamToolExtensionMs?: number;
+  /**
+   * Maximum number of attempts the empty-response retry wrapper will make
+   * per turn. Default: 3. Set to 1 to disable retry.
+   *
+   * A turn is retried ONLY when it produces genuinely nothing — no text,
+   * no tool call. Tool-call-only turns are never retried. Errors are NOT
+   * retried here (higher layers own that policy).
+   *
+   * See `retryEmptyResponse` in `providers/sapOrchestration.ts` for the
+   * full contract (issue #1279, Kilo PR #12927).
+   */
+  emptyResponseMaxAttempts?: number;
 }
 
 export interface StreamingResult {
@@ -239,9 +252,18 @@ export function streamChat(
     };
     const providerOpts = stripInternalOptions(merged) as CompletionOptions;
 
+    // Wrap the provider stream with the empty-response retry wrapper so a
+    // transient empty turn (no text, no tool call — Kilo telemetry showed
+    // ~46 tasks / 120 events / 24h) can be recovered before it surfaces as
+    // a hard failure. See `retryEmptyResponse` in
+    // `providers/sapOrchestration.ts` (issue #1279, Kilo PR #12927).
+    const emptyRetryMax = options?.emptyResponseMaxAttempts ?? 3;
     watchdog = createStreamWatchdog(
       (effectiveSignal) =>
-        provider.streamComplete(messages, { ...providerOpts, signal: effectiveSignal }),
+        retryEmptyResponse(
+          () => provider.streamComplete(messages, { ...providerOpts, signal: effectiveSignal }),
+          { maxAttempts: emptyRetryMax }
+        ),
       {
         signal: options?.signal,
         // Resolve the idle timeout on every stream so a mid-session
