@@ -6,6 +6,7 @@
 
 import { z } from 'zod';
 import { defineEvent } from '../bus/index.js';
+import { isCommandReadOnly } from '../tool/tools/bash-command-parser.js';
 
 // ============ Types ============
 
@@ -231,13 +232,36 @@ export class PlanModeManager {
   }
 
   /**
-   * Attempt to execute a tool and emit blocked event if not allowed
+   * Attempt to execute a tool and emit blocked event if not allowed.
+   *
+   * When plan mode is active and `allowReadOnlyBash` is enabled in
+   * config, a `bash` invocation is inspected via
+   * `isCommandReadOnly` — read-only investigation commands (ls, cat,
+   * grep, git status, ...) are permitted while any command that
+   * modifies the filesystem, VCS state, or installs packages is
+   * blocked.
+   *
    * @param toolName - Name of the tool being executed
+   * @param command  - For `bash`, the raw shell command string. Ignored
+   *                   for other tools.
    * @returns true if tool execution should proceed, false if blocked
    */
-  checkToolExecution(toolName: string): boolean {
+  checkToolExecution(toolName: string, command?: string): boolean {
     if (this.isToolAllowed(toolName)) {
       return true;
+    }
+
+    // Special case: bash in plan mode with read-only allowlist enabled.
+    if (
+      this.mode === 'plan' &&
+      toolName === 'bash' &&
+      currentConfig.allowReadOnlyBash &&
+      typeof command === 'string' &&
+      command.length > 0
+    ) {
+      if (isCommandReadOnly(command)) {
+        return true;
+      }
     }
 
     // Determine operation type from tool name
@@ -383,11 +407,12 @@ export function withPlanModeCheckSync<T>(
  */
 export async function withToolCheck<T>(
   toolName: string,
-  handler: () => Promise<T>
+  handler: () => Promise<T>,
+  command?: string
 ): Promise<T | { success: false; error: string }> {
   const manager = getPlanModeManager();
 
-  if (!manager.checkToolExecution(toolName)) {
+  if (!manager.checkToolExecution(toolName, command)) {
     return {
       success: false,
       error: `Tool '${toolName}' is blocked in plan mode. Use /mode build to switch to build mode.`,
