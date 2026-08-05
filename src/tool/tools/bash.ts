@@ -10,6 +10,7 @@ import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
 import { auditCommand } from '../../permission/next.js';
+import { getPlanModeManager } from '../../plan/index.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import {
@@ -167,6 +168,19 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         ? params.workdir
         : path.join(context.workdir, params.workdir)
       : context.workdir;
+
+    // Pre-flight plan-mode check: in plan mode, bash is only permitted
+    // when the command is a read-only investigation command (ls, cat,
+    // grep, git status, ...) and `allowReadOnlyBash` is enabled. See
+    // `src/plan/index.ts` and `src/tool/tools/bash-command-parser.ts`.
+    const planManager = getPlanModeManager();
+    if (!planManager.checkToolExecution('bash', params.command)) {
+      return {
+        success: false,
+        error: `Tool 'bash' is blocked in plan mode. Use /mode build to switch to build mode.`,
+        data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
+      };
+    }
 
     // Pre-flight audit: detect directory-mutating builtins (`cd`, `pushd`,
     // `popd`, `chdir`, parenthesised subshells, `OLDPWD=…; cd -`) that
