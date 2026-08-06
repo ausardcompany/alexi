@@ -368,6 +368,97 @@ export class SessionManager {
   }
 
   /**
+   * Export session to JSON.
+   *
+   * Returns a pretty-printed JSON string with the following top-level shape:
+   *   {
+   *     version: '1.0',
+   *     exported: <unix-ms>,
+   *     metadata: { id, created, updated, modelId?, title?, workdir?,
+   *                 parentSessionId?, totalTokens, messageCount },
+   *     messages: Array<{ role, content, timestamp, tokens?,
+   *                       reasoning?, toolCalls?, toolResults? }>,
+   *   }
+   *
+   * Unlike {@link exportToMarkdown}, this format is intended for
+   * machine-readable / round-trip use: `JSON.parse(exported)` always
+   * yields an object matching the shape above. Content is preserved
+   * as-is (no internal-wrapper stripping) so a future re-import can
+   * faithfully reconstruct the session.
+   *
+   * When `sessionId` is provided the session is loaded from disk;
+   * otherwise the active session is used. If no session is available,
+   * a minimal envelope with `metadata: null` and `messages: []` is
+   * returned (still valid JSON).
+   */
+  exportToJSON(sessionId?: string): string {
+    const session = sessionId ? this.loadSession(sessionId) : this.activeSession;
+
+    if (!session) {
+      return JSON.stringify(
+        {
+          version: '1.0',
+          exported: Date.now(),
+          metadata: null,
+          messages: [],
+        },
+        null,
+        2
+      );
+    }
+
+    const messages = session.messages.map((m) => {
+      const entry: Record<string, unknown> = {
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp,
+      };
+      if (m.tokens) {
+        entry.tokens = m.tokens;
+      }
+      // Structured extras (reasoning traces, tool calls/results) are
+      // preserved when present on the on-disk message. They are not
+      // part of the base `Message` interface, but sessions written by
+      // richer producers may include them; we surface them verbatim.
+      const extra = m as unknown as {
+        reasoning?: unknown;
+        toolCalls?: unknown;
+        toolResults?: unknown;
+      };
+      if (extra.reasoning !== undefined) {
+        entry.reasoning = extra.reasoning;
+      }
+      if (extra.toolCalls !== undefined) {
+        entry.toolCalls = extra.toolCalls;
+      }
+      if (extra.toolResults !== undefined) {
+        entry.toolResults = extra.toolResults;
+      }
+      return entry;
+    });
+
+    const meta = session.metadata;
+    const exportObject = {
+      version: '1.0',
+      exported: Date.now(),
+      metadata: {
+        id: meta.id,
+        created: meta.created,
+        updated: meta.updated,
+        modelId: meta.modelId,
+        title: meta.title,
+        workdir: meta.workdir,
+        parentSessionId: meta.parentSessionId,
+        totalTokens: meta.totalTokens,
+        messageCount: meta.messageCount,
+      },
+      messages,
+    };
+
+    return JSON.stringify(exportObject, null, 2);
+  }
+
+  /**
    * Export session to markdown
    */
   exportToMarkdown(sessionId?: string): string {

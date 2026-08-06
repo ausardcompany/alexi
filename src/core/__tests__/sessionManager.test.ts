@@ -831,6 +831,125 @@ describe('SessionManager', () => {
     });
   });
 
+  // ========== 15. exportToJSON ==========
+  describe('exportToJSON', () => {
+    it('returns a parseable JSON envelope with version, metadata, and messages', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession('gpt-4');
+      manager.addMessage('user', 'Hello world');
+      manager.addMessage('assistant', 'Hi there', { input: 5, output: 10 });
+
+      const json = manager.exportToJSON();
+      const parsed = JSON.parse(json) as {
+        version: string;
+        exported: number;
+        metadata: {
+          id: string;
+          modelId?: string;
+          totalTokens: number;
+          messageCount: number;
+          workdir?: string;
+        } | null;
+        messages: Array<{
+          role: string;
+          content: string;
+          timestamp: number;
+          tokens?: { input?: number; output?: number };
+        }>;
+      };
+
+      expect(parsed.version).toBe('1.0');
+      expect(typeof parsed.exported).toBe('number');
+      expect(parsed.metadata).not.toBeNull();
+      expect(parsed.metadata?.id).toBe(session.metadata.id);
+      expect(parsed.metadata?.modelId).toBe('gpt-4');
+      expect(parsed.metadata?.messageCount).toBe(2);
+      expect(parsed.messages).toHaveLength(2);
+      expect(parsed.messages[0].role).toBe('user');
+      expect(parsed.messages[0].content).toBe('Hello world');
+      expect(parsed.messages[1].role).toBe('assistant');
+      expect(parsed.messages[1].tokens).toEqual({ input: 5, output: 10 });
+    });
+
+    it('returns a valid empty envelope when no session is active', () => {
+      const manager = new SessionManager(tempDir);
+
+      const json = manager.exportToJSON();
+      const parsed = JSON.parse(json) as {
+        version: string;
+        metadata: unknown;
+        messages: unknown[];
+      };
+
+      expect(parsed.version).toBe('1.0');
+      expect(parsed.metadata).toBeNull();
+      expect(parsed.messages).toEqual([]);
+    });
+
+    it('loads a session by ID when sessionId is provided', () => {
+      const manager = new SessionManager(tempDir);
+      const s1 = manager.createSession();
+      manager.addMessage('user', 'First session content');
+      const s1Id = s1.metadata.id;
+
+      manager.createSession();
+      manager.addMessage('user', 'Second session content');
+
+      const json = manager.exportToJSON(s1Id);
+      const parsed = JSON.parse(json) as {
+        metadata: { id: string } | null;
+        messages: Array<{ content: string }>;
+      };
+
+      expect(parsed.metadata?.id).toBe(s1Id);
+      expect(parsed.messages).toHaveLength(1);
+      expect(parsed.messages[0].content).toBe('First session content');
+    });
+
+    it('preserves structured extras (reasoning, toolCalls, toolResults) on messages', () => {
+      const manager = new SessionManager(tempDir);
+      const session = manager.createSession();
+      manager.addMessage('user', 'What is 2+2?');
+      manager.addMessage('assistant', 'The answer is 4', { input: 3, output: 5 });
+
+      // Inject structured extras directly on the on-disk session, matching
+      // how richer producers may write messages.
+      const sessionPath = path.join(tempDir, `${session.metadata.id}.json`);
+      const raw = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as Session;
+      (raw.messages[1] as unknown as Record<string, unknown>).reasoning = 'chain-of-thought';
+      (raw.messages[1] as unknown as Record<string, unknown>).toolCalls = [
+        { name: 'calculator', args: { a: 2, b: 2 } },
+      ];
+      (raw.messages[1] as unknown as Record<string, unknown>).toolResults = [{ result: 4 }];
+      fs.writeFileSync(sessionPath, JSON.stringify(raw), 'utf-8');
+
+      const json = manager.exportToJSON(session.metadata.id);
+      const parsed = JSON.parse(json) as {
+        messages: Array<{
+          reasoning?: string;
+          toolCalls?: Array<{ name: string }>;
+          toolResults?: Array<{ result: number }>;
+        }>;
+      };
+
+      expect(parsed.messages[1].reasoning).toBe('chain-of-thought');
+      expect(parsed.messages[1].toolCalls).toEqual([{ name: 'calculator', args: { a: 2, b: 2 } }]);
+      expect(parsed.messages[1].toolResults).toEqual([{ result: 4 }]);
+    });
+
+    it('produces pretty-printed JSON (2-space indent)', () => {
+      const manager = new SessionManager(tempDir);
+      manager.createSession('gpt-4');
+      manager.addMessage('user', 'test');
+
+      const json = manager.exportToJSON();
+
+      // Pretty-printed output contains newlines and 2-space indentation.
+      expect(json).toContain('\n');
+      expect(json).toMatch(/\n {2}"version"/);
+    });
+  });
+
   // ========== Subagent parent chain ==========
   describe('subagent parent chain', () => {
     it('records parentSessionId when createSession is called with a parent', () => {

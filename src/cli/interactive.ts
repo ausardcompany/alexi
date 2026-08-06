@@ -187,7 +187,10 @@ export function printHelp(): void {
   console.log(c('yellow', '  /sessions') + c('gray', '          - List all sessions'));
   console.log(c('yellow', '  /session load <id>') + c('gray', ' - Load a previous session'));
   console.log(c('yellow', '  /session new') + c('gray', '       - Start a new session'));
-  console.log(c('yellow', '  /session export') + c('gray', '    - Export session to markdown'));
+  console.log(
+    c('yellow', '  /session export [markdown|json]') +
+      c('gray', ' - Export session to file (default markdown)')
+  );
   console.log(c('yellow', '  /clear') + c('gray', '             - Clear screen'));
   console.log(c('yellow', '  /history') + c('gray', '           - Show conversation history'));
   console.log(c('yellow', '  /autoroute') + c('gray', '         - Toggle auto model routing'));
@@ -454,12 +457,29 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
         }
       } else if (args[0] === 'export') {
         const session = state.sessionManager.getCurrentSession();
-        if (session) {
-          const markdown = state.sessionManager.exportToMarkdown();
-          console.log(c('cyan', '\n  Session Export:\n'));
-          console.log(markdown);
-        } else {
+        if (!session) {
           console.log(c('yellow', '\n  No active session to export\n'));
+          return true;
+        }
+        // Format is the optional second arg: `/session export [markdown|json]`.
+        // Empty or invalid values fall back to markdown to preserve the
+        // pre-existing behavior of `/session export`.
+        const rawFormat = (args[1] || 'markdown').toLowerCase();
+        const format = rawFormat === 'json' ? 'json' : 'markdown';
+        const content =
+          format === 'json'
+            ? state.sessionManager.exportToJSON()
+            : state.sessionManager.exportToMarkdown();
+        const filename = path.join(
+          process.cwd(),
+          `session-${session.metadata.id}-${Date.now()}.${format === 'json' ? 'json' : 'md'}`
+        );
+        try {
+          fs.writeFileSync(filename, content, 'utf-8');
+          console.log(c('green', `\n  Session exported to ${filename}\n`));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(c('red', `\n  Export failed: ${msg}\n`));
         }
       }
       return true;

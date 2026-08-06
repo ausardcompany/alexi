@@ -11,12 +11,15 @@ import { Command } from 'commander';
 import type { SessionMetadata } from '../../../core/sessionManager.js';
 
 const listSessionsMock: ReturnType<typeof vi.fn> = vi.fn();
+const exportToMarkdownMock: ReturnType<typeof vi.fn> = vi.fn();
+const exportToJSONMock: ReturnType<typeof vi.fn> = vi.fn();
 
 vi.mock('../../../core/sessionManager.js', () => {
   // Use a real class so `new SessionManager()` works at runtime.
   class SessionManager {
     listSessions = listSessionsMock;
-    exportToMarkdown = vi.fn();
+    exportToMarkdown = exportToMarkdownMock;
+    exportToJSON = exportToJSONMock;
     deleteSession = vi.fn();
   }
   return { SessionManager };
@@ -62,6 +65,8 @@ describe('alexi sessions command', () => {
 
   beforeEach(() => {
     listSessionsMock.mockReset();
+    exportToMarkdownMock.mockReset();
+    exportToJSONMock.mockReset();
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
@@ -221,5 +226,105 @@ describe('alexi sessions command', () => {
       errSpy.mockRestore();
       exitSpy.mockRestore();
     });
+  });
+});
+
+describe('alexi session-export command', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exportToMarkdownMock.mockReset();
+    exportToJSONMock.mockReset();
+    exportToMarkdownMock.mockReturnValue('# markdown output\n');
+    exportToJSONMock.mockReturnValue('{"version":"1.0"}');
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('defaults to markdown when no --format is provided', async () => {
+    const program = buildProgram();
+    await program.parseAsync(['node', 'alexi', 'session-export', '-s', 'sess-001']);
+
+    expect(exportToMarkdownMock).toHaveBeenCalledWith('sess-001');
+    expect(exportToJSONMock).not.toHaveBeenCalled();
+
+    const output = (logSpy.mock.calls as unknown[][]).map((c) => c.join(' ')).join('\n');
+    expect(output).toContain('# markdown output');
+  });
+
+  it('routes to exportToMarkdown when --format markdown is provided', async () => {
+    const program = buildProgram();
+    await program.parseAsync([
+      'node',
+      'alexi',
+      'session-export',
+      '-s',
+      'sess-001',
+      '--format',
+      'markdown',
+    ]);
+
+    expect(exportToMarkdownMock).toHaveBeenCalledWith('sess-001');
+    expect(exportToJSONMock).not.toHaveBeenCalled();
+  });
+
+  it('routes to exportToJSON when --format json is provided', async () => {
+    const program = buildProgram();
+    await program.parseAsync([
+      'node',
+      'alexi',
+      'session-export',
+      '-s',
+      'sess-001',
+      '--format',
+      'json',
+    ]);
+
+    expect(exportToJSONMock).toHaveBeenCalledWith('sess-001');
+    expect(exportToMarkdownMock).not.toHaveBeenCalled();
+
+    const output = (logSpy.mock.calls as unknown[][]).map((c) => c.join(' ')).join('\n');
+    expect(output).toContain('"version":"1.0"');
+  });
+
+  it('is case-insensitive on the format value', async () => {
+    const program = buildProgram();
+    await program.parseAsync([
+      'node',
+      'alexi',
+      'session-export',
+      '-s',
+      'sess-001',
+      '--format',
+      'JSON',
+    ]);
+
+    expect(exportToJSONMock).toHaveBeenCalledWith('sess-001');
+  });
+
+  it('errors out and exits with 1 when --format is invalid', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((_code?: number) => {
+      throw new Error('process.exit called');
+    }) as never);
+
+    const program = buildProgram();
+
+    await expect(
+      program.parseAsync(['node', 'alexi', 'session-export', '-s', 'sess-001', '--format', 'yaml'])
+    ).rejects.toThrow('process.exit called');
+
+    expect(exportToMarkdownMock).not.toHaveBeenCalled();
+    expect(exportToJSONMock).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalledWith(
+      "Error: invalid --format 'yaml'. Use 'markdown' or 'json'."
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+
+    errSpy.mockRestore();
+    exitSpy.mockRestore();
   });
 });
