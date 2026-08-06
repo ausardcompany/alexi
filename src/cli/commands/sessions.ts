@@ -86,23 +86,41 @@ export function registerSessionCommands(program: Command): void {
       }
     });
 
-  // Export session to markdown
+  // Export session to markdown or JSON
   program
     .command('session-export')
     .requiredOption('-s, --session <id>', 'Session ID to export')
     .option('-o, --output <file>', 'Output file (defaults to stdout)')
-    .description('Export session to markdown')
-    .action(async (opts: { session: string; output?: string }) => {
+    .option(
+      '-f, --format <format>',
+      'Export format: "markdown" (default) or "json" (preserves full metadata)',
+      'markdown'
+    )
+    .description(
+      'Export a session. Default format is markdown (human-readable); ' +
+        'use --format json to emit machine-readable JSON preserving all ' +
+        'message metadata (timestamps, tokens, reasoning, tool calls/results).'
+    )
+    .action(async (opts: { session: string; output?: string; format?: string }) => {
       try {
+        const format = (opts.format || 'markdown').toLowerCase();
+        if (format !== 'markdown' && format !== 'json') {
+          console.error(`Error: invalid --format '${opts.format}'. Use 'markdown' or 'json'.`);
+          process.exit(1);
+        }
+
         const sessionManager = new SessionManager();
-        const markdown = sessionManager.exportToMarkdown(opts.session);
+        const content =
+          format === 'json'
+            ? sessionManager.exportToJSON(opts.session)
+            : sessionManager.exportToMarkdown(opts.session);
 
         if (opts.output) {
           const fs = await import('fs');
-          fs.writeFileSync(opts.output, markdown, 'utf-8');
+          fs.writeFileSync(opts.output, content, 'utf-8');
           console.log(`Session exported to ${opts.output}`);
         } else {
-          console.log(markdown);
+          console.log(content);
         }
       } catch (e) {
         console.error(String(e));
