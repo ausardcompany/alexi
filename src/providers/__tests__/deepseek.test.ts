@@ -63,6 +63,50 @@ describe('buildDeepSeekRequest', () => {
     });
   });
 
+  describe('portable reasoning integration', () => {
+    it("collapses portable 'max' (xhigh) to 'high' on levels-mode models", () => {
+      // DeepSeek's reasoning_effort field caps at 'high'; the portable
+      // resolver normalizes 'max' -> 'xhigh', which we down-cast to 'high'
+      // here because DeepSeek has no higher tier.
+      const request = buildDeepSeekRequest(messages, {
+        reasoningEffort: 'max',
+        modelId: 'deepseek-r1',
+      });
+      expect(request.reasoning_effort).toBe('high');
+      expect(request.enable_thinking).toBeUndefined();
+    });
+
+    it("treats enabled=true (no explicit level) as 'medium' default", () => {
+      const request = buildDeepSeekRequest(messages, {
+        reasoningEnabled: true,
+        modelId: 'deepseek-r1',
+      });
+      expect(request.reasoning_effort).toBe('medium');
+      expect(request.enable_thinking).toBeUndefined();
+    });
+
+    it('honors explicit disable (enabled=false) by dropping reasoning fields', () => {
+      // Even with a level supplied, explicit disable wins — providers must
+      // be able to turn native reasoning off deterministically.
+      const request = buildDeepSeekRequest(messages, {
+        reasoningEffort: 'high',
+        reasoningEnabled: false,
+        modelId: 'deepseek-r1',
+      });
+      expect(request.reasoning_effort).toBeUndefined();
+      expect(request.enable_thinking).toBeUndefined();
+    });
+
+    it("still routes to enable_thinking on 'binary' mode when max is requested", () => {
+      const request = buildDeepSeekRequest(messages, {
+        reasoningEffort: 'max',
+        modelId: 'binary-thinker-v1',
+      });
+      expect(request.enable_thinking).toBe(true);
+      expect(request.reasoning_effort).toBeUndefined();
+    });
+  });
+
   describe('max_tokens handling (unchanged)', () => {
     it('forwards numeric max_tokens', () => {
       const request = buildDeepSeekRequest(messages, { maxTokens: 256 });
