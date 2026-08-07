@@ -1107,10 +1107,12 @@ export class SapOrchestrationProvider {
           }
         : undefined;
 
-    const response = await client.chatCompletion(
-      { messages: orchestrationMessages },
-      requestConfig
-    );
+    let response;
+    try {
+      response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
+    } catch (err) {
+      throw classifyRateLimitError(err, this.config.modelName);
+    }
 
     const tokenUsage = response.getTokenUsage();
     const toolCalls = response.getToolCalls();
@@ -1191,40 +1193,53 @@ export class SapOrchestrationProvider {
     // See "Streaming Abort Semantics" in docs/PROVIDERS.md and the test
     // suite tests/providers/sapOrchestration-streamAbort.test.ts.
     const requestConfig = options?.headers ? { headers: options.headers } : undefined;
-    const response = await client.stream(
-      { messages: orchestrationMessages },
-      options?.signal,
-      undefined,
-      requestConfig
-    );
+    let response;
+    try {
+      response = await client.stream(
+        { messages: orchestrationMessages },
+        options?.signal,
+        undefined,
+        requestConfig
+      );
+    } catch (err) {
+      throw classifyRateLimitError(err, this.config.modelName);
+    }
 
-    // Stream chunks using the iterator
-    for await (const chunk of response.stream) {
-      const deltaContent = chunk.getDeltaContent();
-      const deltaToolCalls = chunk.getDeltaToolCalls();
+    // Stream chunks using the iterator. Errors surfaced mid-stream are
+    // also candidates for free-tier rate-limit classification — some
+    // deployments accept the initial request and only surface a 429 on
+    // the first data frame. Guarding just the initial `client.stream()`
+    // call is therefore not sufficient.
+    try {
+      for await (const chunk of response.stream) {
+        const deltaContent = chunk.getDeltaContent();
+        const deltaToolCalls = chunk.getDeltaToolCalls();
 
-      // Only yield if there's content or tool calls
-      if (deltaContent || (deltaToolCalls && deltaToolCalls.length > 0)) {
-        const streamChunk: StreamChunk = {
-          text: deltaContent ?? '',
-        };
+        // Only yield if there's content or tool calls
+        if (deltaContent || (deltaToolCalls && deltaToolCalls.length > 0)) {
+          const streamChunk: StreamChunk = {
+            text: deltaContent ?? '',
+          };
 
-        if (deltaToolCalls && deltaToolCalls.length > 0) {
-          streamChunk.toolCalls = deltaToolCalls.map((tc: SdkToolCallChunk) => ({
-            index: tc.index,
-            id: tc.id,
-            type: tc.type,
-            function: tc.function
-              ? {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                }
-              : undefined,
-          }));
+          if (deltaToolCalls && deltaToolCalls.length > 0) {
+            streamChunk.toolCalls = deltaToolCalls.map((tc: SdkToolCallChunk) => ({
+              index: tc.index,
+              id: tc.id,
+              type: tc.type,
+              function: tc.function
+                ? {
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                  }
+                : undefined,
+            }));
+          }
+
+          yield streamChunk;
         }
-
-        yield streamChunk;
       }
+    } catch (err) {
+      throw classifyRateLimitError(err, this.config.modelName);
     }
 
     // After streaming completes, get final metadata
@@ -1570,6 +1585,165 @@ export class InvalidModelError extends Error {
     this.modelName = modelName;
     this.validExamples = validExamples;
   }
+}
+
+// ============================================================================
+// Free-tier rate limiting
+// ============================================================================
+
+/**
+ * Machine-readable error code carried by {@link FreeTierRateLimitError} and
+ * recognised by `ErrorBackoff.isFatal()` in `src/core/error-backoff.ts`.
+ *
+ * A free-tier 429 is *permanent* per the AGENTS.md error contract: retrying
+ * the same call at the same rate simply burns budget and produces the same
+ * cryptic "max retries exceeded" trailer. The user must either wait for the
+ * quota window to reset or upgrade to a paid SAP AI Core deployment.
+ */
+export const FREE_TIER_RATE_LIMIT_CODE = 'free_tier_rate_limit';
+
+/**
+ * Public URL that operators land on when we tell them "your free tier quota
+ * is exhausted". Kept as a constant so the same link is used by the error
+ * message and by unit tests, and so future documentation moves only need to
+ * be updated in one place.
+ */
+export const SAP_AI_CORE_RATE_LIMIT_DOCS_URL =
+  'https://help.sap.com/docs/ai-core/generative-ai-hub/rate-limits';
+
+/**
+ * Error thrown when the SAP AI Core API rejects a request with HTTP 429 AND
+ * the model id targets a free-tier deployment (heuristic: `-free` suffix,
+ * see {@link isFreeModel}).
+ *
+ * The message explains what happened, why generic retry will not help, and
+ * points at the SAP AI Core rate-limit documentation for the upgrade path.
+ * The `code` field (`free_tier_rate_limit`) is the machine-readable signal
+ * consumed by `ErrorBackoff.isFatal()` — treat any error with that code as
+ * permanent and stop retrying immediately.
+ *
+ * Generic (non-free) 429 responses remain transient; they surface as normal
+ * `Error` instances so the existing backoff/retry path in `ErrorBackoff`
+ * and the workflow-level `KILO_RETRIES` loop handle them.
+ */
+export class FreeTierRateLimitError extends Error {
+  readonly code: typeof FREE_TIER_RATE_LIMIT_CODE = FREE_TIER_RATE_LIMIT_CODE;
+  readonly modelName: string;
+  readonly statusCode = 429;
+  readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
+
+  constructor(modelName: string, cause?: unknown) {
+    const message =
+      `Free-tier model rate limit exceeded for '${modelName}'. ` +
+      `SAP AI Core free-tier deployments enforce strict per-minute request quotas; ` +
+      `retrying now will hit the same limit. Wait for the quota window to reset ` +
+      `or upgrade to a paid SAP AI Core deployment. ` +
+      `See: ${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
+    super(message);
+    this.name = 'FreeTierRateLimitError';
+    this.modelName = modelName;
+    if (cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = cause;
+    }
+  }
+}
+
+/**
+ * Heuristic: a model id targets a free-tier SAP AI Core deployment if its
+ * last hyphen-delimited segment is `free` (case-insensitive). Examples:
+ *   - `sap-ai-core/anthropic--claude-4.7-haiku-free` → true
+ *   - `anthropic--claude-4.5-sonnet-free` → true
+ *   - `anthropic--claude-4.5-sonnet` → false
+ *   - `gpt-4o` → false
+ *
+ * The heuristic is deliberately narrow: we only match the trailing `-free`
+ * segment (or the whole id) so that hypothetical model names containing
+ * `free` in the middle (e.g. `some-freerider-model`) do NOT trigger the
+ * free-tier code path and its non-retry behaviour.
+ */
+export function isFreeModel(modelId: string): boolean {
+  if (typeof modelId !== 'string' || modelId.length === 0) {
+    return false;
+  }
+  return /(^|-)free$/i.test(modelId);
+}
+
+/**
+ * Extract an HTTP status code from a variety of error shapes that SAP AI
+ * Core, the SAP SDK, undici, and Node/fetch throwables use.
+ *
+ * Tries, in order:
+ *   1. `err.status` / `err.statusCode` (SDK style)
+ *   2. `err.response.status` / `err.response.statusCode` (fetch wrappers)
+ *   3. A textual `status: NNN` marker in `err.message` (mirrors the regex
+ *      used by `extractStatusCode` in `src/core/error-backoff.ts`)
+ *
+ * Returns `undefined` when no status can be extracted. The message-based
+ * fallback intentionally restricts to 4xx/5xx to avoid false positives on
+ * arbitrary three-digit numbers in error text.
+ */
+function extractHttpStatus(err: unknown): number | undefined {
+  if (err === null || err === undefined) {
+    return undefined;
+  }
+  if (typeof err === 'object') {
+    const candidate = err as {
+      status?: unknown;
+      statusCode?: unknown;
+      response?: { status?: unknown; statusCode?: unknown };
+      message?: unknown;
+    };
+    const direct = candidate.status ?? candidate.statusCode;
+    if (typeof direct === 'number' && Number.isFinite(direct)) {
+      return direct;
+    }
+    const resp = candidate.response;
+    if (resp && typeof resp === 'object') {
+      const respStatus = resp.status ?? resp.statusCode;
+      if (typeof respStatus === 'number' && Number.isFinite(respStatus)) {
+        return respStatus;
+      }
+    }
+    if (typeof candidate.message === 'string') {
+      const match = candidate.message.match(/status:\s*([45]\d{2})\b/);
+      if (match) {
+        return parseInt(match[1], 10);
+      }
+      // Fallback for bare "429" or "HTTP 429" in the message without a
+      // "status:" prefix — common in SDK error strings.
+      const bare = candidate.message.match(/\b(429|502|503|504)\b/);
+      if (bare) {
+        return parseInt(bare[1], 10);
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * If `err` represents a 429 response AND `modelName` looks like a free-tier
+ * deployment (see {@link isFreeModel}), wrap the underlying error in a
+ * {@link FreeTierRateLimitError} with actionable upgrade guidance.
+ *
+ * Otherwise return the original error unchanged so the existing transient
+ * retry path in `ErrorBackoff` and the workflow retry loop keeps handling
+ * generic 429s the same way it does today.
+ *
+ * Exported for direct unit testing; production callers use it via the
+ * `complete`/`streamComplete` catch blocks.
+ */
+export function classifyRateLimitError(err: unknown, modelName: string): unknown {
+  if (err instanceof FreeTierRateLimitError) {
+    return err;
+  }
+  const status = extractHttpStatus(err);
+  if (status !== 429) {
+    return err;
+  }
+  if (!isFreeModel(modelName)) {
+    return err;
+  }
+  return new FreeTierRateLimitError(modelName, err);
 }
 
 // ============================================================================
