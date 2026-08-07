@@ -415,6 +415,7 @@ export function isTokenExpiredError(err: unknown): boolean {
     obj.response && typeof obj.response === 'object'
       ? ((obj.response as { status?: unknown }).status as unknown)
       : undefined;
-  const s = status ?? statusCode ?? (typeof responseStatus === 'number' ? responseStatus : undefined);
+  const s =
+    status ?? statusCode ?? (typeof responseStatus === 'number' ? responseStatus : undefined);
   return s === 401 || s === 403;
 }
