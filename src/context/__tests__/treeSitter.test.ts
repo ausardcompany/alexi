@@ -76,8 +76,15 @@ describe('isSupportedFile', () => {
     expect(isSupportedFile('module.cts')).toBe(true);
   });
 
-  it('returns false for .py files', () => {
-    expect(isSupportedFile('script.py')).toBe(false);
+  it('returns true for .py / .rs / .go files (issue #1296)', () => {
+    // Python, Rust, and Go were added as optional-peer grammars in
+    // issue #1296. The extension-level `isSupportedFile` check is
+    // capability-agnostic — it reports "we know how to parse this ext",
+    // not "the grammar is installed". Callers must use
+    // `checkGrammarAvailable(language)` for the runtime probe.
+    expect(isSupportedFile('script.py')).toBe(true);
+    expect(isSupportedFile('src/lib.rs')).toBe(true);
+    expect(isSupportedFile('cmd/main.go')).toBe(true);
   });
 
   it('returns false for .json / .jsonc files', () => {
@@ -100,7 +107,10 @@ describe('isSupportedFile', () => {
 
   it('handles nested paths correctly', () => {
     expect(isSupportedFile('src/core/utils.ts')).toBe(true);
-    expect(isSupportedFile('src/core/utils.go')).toBe(false);
+    // `.go` was added as a supported extension in issue #1296.
+    expect(isSupportedFile('src/core/utils.go')).toBe(true);
+    // Something we still do not parse:
+    expect(isSupportedFile('src/core/README.md')).toBe(false);
   });
 });
 

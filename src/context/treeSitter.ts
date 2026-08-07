@@ -1,16 +1,20 @@
 /**
  * Tree-sitter AST parsing helpers
  *
- * Provides lazy-initialised parsers for TypeScript, JavaScript, and Bash.
+ * Provides lazy-initialised parsers for TypeScript, JavaScript, Bash,
+ * Python, Rust, and Go.
  *
- * Grammars (`tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-bash`)
- * and the `tree-sitter` runtime itself are declared as optional peer
- * dependencies so users who never touch code-analysis features do not pay
- * their ~67MB install cost. They are loaded on first parser use via a
- * `createRequire` shim wrapped in try/catch; if the load fails we cache the
- * failure and every subsequent parse for that language returns null. Callers
- * that need to surface an actionable error to the end user can consult
- * `getMissingGrammars()` / `formatMissingGrammarError()`.
+ * Grammars (`tree-sitter-typescript`, `tree-sitter-javascript`,
+ * `tree-sitter-bash`, `tree-sitter-python`, `tree-sitter-rust`,
+ * `tree-sitter-go`) and the `tree-sitter` runtime itself are declared as
+ * optional peer dependencies so users who never touch code-analysis
+ * features do not pay their combined install cost (~200MB+). They are
+ * loaded on first parser use via a `createRequire` shim wrapped in
+ * try/catch; if the load fails we cache the failure and every subsequent
+ * parse for that language returns null. Callers that need to surface an
+ * actionable error to the end user can consult `getMissingGrammars()`,
+ * `formatMissingGrammarError()`, or the per-language
+ * `checkGrammarAvailable()` helper.
  */
 
 import { createRequire } from 'module';
@@ -40,14 +44,44 @@ const requireOptional = createRequire(import.meta.url);
 
 /** Grammar identifiers we support. */
 export type Grammar =
-  'tree-sitter' | 'tree-sitter-typescript' | 'tree-sitter-javascript' | 'tree-sitter-bash';
+  | 'tree-sitter'
+  | 'tree-sitter-typescript'
+  | 'tree-sitter-javascript'
+  | 'tree-sitter-bash'
+  | 'tree-sitter-python'
+  | 'tree-sitter-rust'
+  | 'tree-sitter-go';
 
 const OPTIONAL_GRAMMAR_PACKAGES: readonly Grammar[] = [
   'tree-sitter',
   'tree-sitter-typescript',
   'tree-sitter-javascript',
   'tree-sitter-bash',
+  'tree-sitter-python',
+  'tree-sitter-rust',
+  'tree-sitter-go',
 ];
+
+/**
+ * Canonical language identifiers supported by the tree-sitter layer.
+ * These map 1:1 onto the grammar packages consumed by
+ * `checkGrammarAvailable` / `formatMissingLanguageError`.
+ */
+export type SupportedLanguage = 'typescript' | 'javascript' | 'bash' | 'python' | 'rust' | 'go';
+
+/**
+ * Language -> required grammar package(s) map. Every language additionally
+ * requires the `tree-sitter` runtime itself; that dependency is checked
+ * inside `checkGrammarAvailable` rather than duplicated here.
+ */
+const LANGUAGE_TO_GRAMMAR: Readonly<Record<SupportedLanguage, Grammar>> = {
+  typescript: 'tree-sitter-typescript',
+  javascript: 'tree-sitter-javascript',
+  bash: 'tree-sitter-bash',
+  python: 'tree-sitter-python',
+  rust: 'tree-sitter-rust',
+  go: 'tree-sitter-go',
+};
 
 /**
  * Human-readable install hint listing the optional peer dependencies.
@@ -55,7 +89,7 @@ const OPTIONAL_GRAMMAR_PACKAGES: readonly Grammar[] = [
  * exact wording.
  */
 export const MISSING_GRAMMAR_INSTALL_HINT =
-  'Install optional dependencies to enable definitions tool: `npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash`';
+  'Install optional dependencies to enable definitions tool: `npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash tree-sitter-python tree-sitter-rust tree-sitter-go`';
 
 // Cached module loads. `undefined` means "not attempted yet".
 // `null` means "attempted and failed" (memoised so we do not retry on every call).
@@ -108,6 +142,47 @@ export function formatMissingGrammarError(): string | null {
 }
 
 /**
+ * Return true when the given language's grammar package (and the
+ * `tree-sitter` runtime it depends on) can be loaded. False otherwise.
+ *
+ * This is the primary capability check callers should use before invoking
+ * AST-dependent code paths. Repeated calls are cheap because the underlying
+ * module load result is memoised.
+ *
+ * @example
+ *   if (!checkGrammarAvailable('python')) {
+ *     return formatMissingLanguageError('python');
+ *   }
+ */
+export function checkGrammarAvailable(language: SupportedLanguage): boolean {
+  if (loadOptionalModule('tree-sitter') === null) {
+    return false;
+  }
+  const grammar = LANGUAGE_TO_GRAMMAR[language];
+  return loadOptionalModule(grammar) !== null;
+}
+
+/**
+ * Build a per-language, copy-paste-ready install command for callers that
+ * detected a missing grammar for a specific language. Returns null when
+ * the grammar is already available.
+ *
+ * The returned message follows the shape:
+ *   `Code analysis for <Language> requires <package>.
+ *    Install: npm install <package>`
+ */
+export function formatMissingLanguageError(language: SupportedLanguage): string | null {
+  if (checkGrammarAvailable(language)) {
+    return null;
+  }
+  const grammar = LANGUAGE_TO_GRAMMAR[language];
+  const runtimeMissing = loadOptionalModule('tree-sitter') === null;
+  const display = language.charAt(0).toUpperCase() + language.slice(1);
+  const installList = runtimeMissing ? `tree-sitter ${grammar}` : grammar;
+  return `Code analysis for ${display} requires ${grammar}.\nInstall: npm install ${installList}`;
+}
+
+/**
  * Eagerly load all optional grammars via dynamic import. Intended for
  * ahead-of-time warm-up (e.g. from a long-running server). All failures are
  * swallowed; use `getMissingGrammars()` afterwards to check the result.
@@ -133,6 +208,9 @@ let tsParser: AnyParser | null = null;
 let jsParser: AnyParser | null = null;
 let tsxParser: AnyParser | null = null;
 let bashParser: AnyParser | null = null;
+let pythonParser: AnyParser | null = null;
+let rustParser: AnyParser | null = null;
+let goParser: AnyParser | null = null;
 
 /**
  * Instantiate a parser with the given language, returning null when either
@@ -198,14 +276,49 @@ function getBashParser(): AnyParser | null {
   return bashParser;
 }
 
+function getPythonParser(): AnyParser | null {
+  if (!pythonParser) {
+    pythonParser = makeParser((g) => g, 'tree-sitter-python');
+  }
+  return pythonParser;
+}
+
+function getRustParser(): AnyParser | null {
+  if (!rustParser) {
+    rustParser = makeParser((g) => g, 'tree-sitter-rust');
+  }
+  return rustParser;
+}
+
+function getGoParser(): AnyParser | null {
+  if (!goParser) {
+    goParser = makeParser((g) => g, 'tree-sitter-go');
+  }
+  return goParser;
+}
+
 /**
  * Extensions that tree-sitter can parse.
  * `.d.ts` is included because declaration files are valid TypeScript;
  * `.mts` / `.cts` are TypeScript module variants;
- * `.mjs` / `.cjs` / `.jsx` are JavaScript module variants.
+ * `.mjs` / `.cjs` / `.jsx` are JavaScript module variants;
+ * `.py` is Python; `.rs` is Rust; `.go` is Go.
  */
 export type SupportedExtension =
-  '.ts' | '.tsx' | '.mts' | '.cts' | '.d.ts' | '.js' | '.mjs' | '.cjs' | '.jsx' | '.sh' | '.bash';
+  | '.ts'
+  | '.tsx'
+  | '.mts'
+  | '.cts'
+  | '.d.ts'
+  | '.js'
+  | '.mjs'
+  | '.cjs'
+  | '.jsx'
+  | '.sh'
+  | '.bash'
+  | '.py'
+  | '.rs'
+  | '.go';
 
 const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set<SupportedExtension>([
   '.ts',
@@ -219,6 +332,9 @@ const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set<SupportedExtension>([
   '.jsx',
   '.sh',
   '.bash',
+  '.py',
+  '.rs',
+  '.go',
 ]);
 
 /**
@@ -259,6 +375,15 @@ export function parseSource(source: string, filePath: string): TreeSitterSyntaxN
     case '.sh':
     case '.bash':
       parser = getBashParser();
+      break;
+    case '.py':
+      parser = getPythonParser();
+      break;
+    case '.rs':
+      parser = getRustParser();
+      break;
+    case '.go':
+      parser = getGoParser();
       break;
     default:
       return null;
@@ -336,4 +461,7 @@ export function __resetGrammarCache(): void {
   jsParser = null;
   tsxParser = null;
   bashParser = null;
+  pythonParser = null;
+  rustParser = null;
+  goParser = null;
 }

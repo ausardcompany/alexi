@@ -1384,18 +1384,25 @@ justified for users who never invoke them. These are declared as
 `package.json`, so `npm install` succeeds without them and prints an
 informational message rather than a hard failure.
 
-### Tree-sitter grammars (~67MB combined install size)
+### Tree-sitter grammars (~200MB+ combined install size)
 
 The repo-map (`src/context/repoMap.ts`) and symbol extractor
-(`src/context/symbols.ts`) parse TypeScript, JavaScript, and Bash source
-files with tree-sitter to produce a ranked list of top-level definitions
-for the LLM system prompt. The parser runtime and the three grammars are
-optional peer dependencies:
+(`src/context/symbols.ts`) parse source files with tree-sitter to produce
+a ranked list of top-level definitions for the LLM system prompt. The
+parser runtime and every language grammar are optional peer dependencies
+so `npm install` for the base package stays fast (~30-50% faster on a
+fresh `node_modules`) and only users who exercise code-analysis features
+pay the native-build cost:
 
-- `tree-sitter`
-- `tree-sitter-typescript`
-- `tree-sitter-javascript`
-- `tree-sitter-bash`
+| Package                   | Language                    | Extensions             |
+| ------------------------- | --------------------------- | ---------------------- |
+| `tree-sitter`             | Runtime (required by every grammar) | -              |
+| `tree-sitter-typescript`  | TypeScript / TSX            | `.ts`, `.tsx`, `.mts`, `.cts`, `.d.ts` |
+| `tree-sitter-javascript`  | JavaScript                  | `.js`, `.jsx`, `.mjs`, `.cjs` |
+| `tree-sitter-bash`        | Bash / shell                | `.sh`, `.bash` |
+| `tree-sitter-python`      | Python                      | `.py` |
+| `tree-sitter-rust`        | Rust                        | `.rs` |
+| `tree-sitter-go`          | Go                          | `.go` |
 
 `src/context/treeSitter.ts` lazy-loads every grammar the first time a file
 of the matching extension is parsed. Loading is done via a
@@ -1407,10 +1414,19 @@ file" — the map is still produced, just without symbol detail for the
 missing language.
 
 If a user wants full repo-map support (or a downstream tool needs
-tree-sitter parsing), they should install the optional peers:
+tree-sitter parsing for a specific language), they should install the
+runtime plus the corresponding grammar. Examples:
 
 ```bash
-npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
+# Everything
+npm install tree-sitter tree-sitter-typescript tree-sitter-javascript \
+  tree-sitter-bash tree-sitter-python tree-sitter-rust tree-sitter-go
+
+# Just Python
+npm install tree-sitter tree-sitter-python
+
+# Just Rust and Go
+npm install tree-sitter tree-sitter-rust tree-sitter-go
 ```
 
 For diagnostics, `treeSitter.ts` also exports:
@@ -1418,9 +1434,16 @@ For diagnostics, `treeSitter.ts` also exports:
 - `getMissingGrammars(): Grammar[]` — returns the list of optional packages
   that failed to load.
 - `formatMissingGrammarError(): string | null` — returns a copy-paste-ready
-  install hint (`Install optional dependencies to enable definitions
-  tool: \`npm install ...\``), or `null` when every optional grammar is
-  available.
+  install hint listing every missing package, or `null` when every
+  optional grammar is available.
+- `checkGrammarAvailable(language): boolean` — per-language capability
+  probe. Returns `true` iff both the `tree-sitter` runtime AND the
+  grammar for `language` (`'typescript' | 'javascript' | 'bash' |
+  'python' | 'rust' | 'go'`) load successfully.
+- `formatMissingLanguageError(language): string | null` — per-language,
+  copy-paste-ready install hint of the form
+  `Code analysis for <Language> requires <package>. Install: npm install
+  <package>`. Returns `null` when the grammar is already loadable.
 - `preloadGrammars(): Promise<void>` — eager async warm-up for
   long-running processes (e.g. the embedded server) that want to detect
   missing grammars at boot rather than on first parse.
