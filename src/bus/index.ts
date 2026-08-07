@@ -283,6 +283,22 @@ export const ProviderModelFellBack = defineEvent(
   })
 );
 
+/**
+ * Emitted when a provider access token was refreshed successfully via
+ * the OAuth refresh-token flow. Consumers use it for telemetry and to
+ * log a single "token refreshed" line in the CLI. The event carries the
+ * new expiry as a Unix epoch millisecond timestamp so consumers can
+ * derive the token TTL without re-reading the connector store.
+ */
+export const TokenRefreshed = defineEvent(
+  'provider.tokenRefreshed',
+  z.object({
+    providerId: z.string(),
+    expiry: z.number(),
+    timestamp: z.number(),
+  })
+);
+
 // Compaction events
 export const CompactionStarted = defineEvent(
   'compaction.started',

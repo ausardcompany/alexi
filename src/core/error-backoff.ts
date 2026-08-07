@@ -79,3 +79,22 @@ export function extractStatusCode(errorMessage: string): number | undefined {
   const match = errorMessage.match(/status:\s*([45]\d{2})\b/);
   return match ? parseInt(match[1], 10) : undefined;
 }
+
+/**
+ * Structural check for the two permanent auth errors introduced by the
+ * OAuth refresh flow. We test by `name` instead of `instanceof` because
+ * errors may cross module boundaries in tests (multiple copies of the
+ * `auth.ts` module) and would otherwise fail the identity check.
+ *
+ * Callers use this to decide whether to skip the retry loop entirely
+ * — a `NoRefreshTokenError` or `ReauthenticationRequiredError` is
+ * classified as *permanent* per the error contract in `AGENTS.md`, and
+ * further retries only waste budget and confuse the user.
+ */
+export function isPermanentAuthFailure(err: unknown): boolean {
+  if (err === null || err === undefined) {
+    return false;
+  }
+  const name = (err as { name?: unknown }).name;
+  return name === 'NoRefreshTokenError' || name === 'ReauthenticationRequiredError';
+}

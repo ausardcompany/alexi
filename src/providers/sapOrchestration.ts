@@ -35,7 +35,13 @@ import {
 } from '@sap-ai-sdk/orchestration';
 
 import { checkConnectivity } from './connectivity.js';
-import { StartupTimeoutError } from './auth.js';
+import {
+  StartupTimeoutError,
+  refreshAccessToken,
+  isTokenExpiredError,
+  ReauthenticationRequiredError,
+  NoRefreshTokenError,
+} from './auth.js';
 import { env } from '../config/env.js';
 
 // Types are exported from the main package
@@ -796,6 +802,63 @@ function toOrchestrationMessages(
       content: m.content as string,
     } as ChatMessage;
   });
+}
+
+// ============================================================================
+// OAuth token refresh wrapper (issue #1299)
+// ============================================================================
+
+/**
+ * Wrap an operation so a single 401/403 failure triggers an OAuth
+ * refresh followed by exactly one retry.
+ *
+ * Contract:
+ *  - The first attempt runs `operation()`. If it succeeds, return.
+ *  - If it throws and the error is NOT a 401/403 (per
+ *    `isTokenExpiredError`), rethrow immediately. No refresh, no retry.
+ *  - Otherwise call `refreshAccessToken(providerId)`. If the refresh
+ *    itself throws `NoRefreshTokenError` or `ReauthenticationRequiredError`,
+ *    that permanent error is rethrown as-is — the caller (and the CLI)
+ *    surface the "run `alexi login`" message.
+ *  - After a successful refresh, run `operation()` exactly one more
+ *    time. Any error from this second attempt is propagated verbatim,
+ *    even if it is another 401 — we do NOT loop, to avoid burning
+ *    budget on a broken credential.
+ *
+ * This mirrors the pattern in the issue description ("max 1 retry to
+ * avoid loops") and keeps the retry policy legible: exactly two
+ * attempts, one refresh between them, no exponential backoff.
+ */
+export async function withTokenRefresh<T>(
+  providerId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (err) {
+    if (!isTokenExpiredError(err)) {
+      throw err;
+    }
+    // Attempt refresh. `NoRefreshTokenError` and
+    // `ReauthenticationRequiredError` are permanent — propagate them so
+    // the CLI can surface the "re-authenticate" message.
+    try {
+      await refreshAccessToken(providerId);
+    } catch (refreshErr) {
+      if (
+        refreshErr instanceof NoRefreshTokenError ||
+        refreshErr instanceof ReauthenticationRequiredError
+      ) {
+        throw refreshErr;
+      }
+      // Non-permanent refresh failure (5xx from token endpoint,
+      // network blip). Surface a `ReauthenticationRequiredError` so
+      // higher layers do not misclassify it as a chat error worth
+      // retrying with the same expired bearer.
+      throw new ReauthenticationRequiredError(providerId, refreshErr);
+    }
+    return operation();
+  }
 }
 
 // ============================================================================
