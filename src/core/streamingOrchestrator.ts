@@ -495,8 +495,32 @@ export function resolveModelId(options?: StreamingOptions): string {
 }
 
 /**
- * Check if abort was requested
+ * Detect an abort-family error, regardless of how the runtime surfaced it.
+ *
+ * Aborts show up in three shapes depending on the source:
+ *
+ * 1. `DOMException` with `name === 'AbortError'` — the standard shape emitted
+ *    by `AbortController`/`AbortSignal` and by fetch/streams that speak the
+ *    Web Streams API. `DOMException` is `instanceof Error` in modern Node.
+ * 2. Plain `Error` whose `name` was manually set to `'AbortError'` — used by
+ *    older provider SDKs and the stream watchdog before it was tagged.
+ * 3. Node native abort: `Error` with `code === 'ABORT_ERR'`. This is what
+ *    `AbortSignal.throwIfAborted()` and some Node core APIs (undici, timers,
+ *    fs) emit and it does NOT always carry `name === 'AbortError'`.
+ *
+ * All three should be treated identically by the CLI/TUI: log a cancellation
+ * message and return to the prompt without exiting the process.
  */
 export function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+  if (!(error instanceof Error) && !(typeof error === 'object' && error !== null)) {
+    return false;
+  }
+  const err = error as { name?: unknown; code?: unknown };
+  if (typeof err.name === 'string' && err.name === 'AbortError') {
+    return true;
+  }
+  if (typeof err.code === 'string' && err.code === 'ABORT_ERR') {
+    return true;
+  }
+  return false;
 }
