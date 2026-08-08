@@ -5,6 +5,7 @@ import { useSession } from '../context/SessionContext.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { buildUserMessage, type MultimodalContentItem } from '../../../utils/multimodal.js';
 import { isStreamStalledError } from '../../../core/streamWatchdog.js';
+import { isAbortError } from '../../../core/streamingOrchestrator.js';
 
 export interface UseStreamChatReturn {
   sendMessage: (text: string) => Promise<void>;
@@ -76,8 +77,12 @@ export function useStreamChat(): UseStreamChatReturn {
 
         chat.setResponseModel(result.modelUsed);
       } catch (err: unknown) {
-        // Handle abort gracefully — not an error
-        if (err instanceof Error && err.name === 'AbortError') {
+        // Handle abort gracefully — not an error. Use the shared
+        // `isAbortError` classifier so the TUI catches the same shapes
+        // the streaming REPL does: DOMException AbortError, plain Error
+        // with name === 'AbortError', AND Node native aborts that reach
+        // the catch as `code === 'ABORT_ERR'` (issue #1319).
+        if (isAbortError(err)) {
           // Aborted by user; no error to display
         } else if (isStreamStalledError(err)) {
           // Stalled provider stream (issue #1164). Surface a friendly,

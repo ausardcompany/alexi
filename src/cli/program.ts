@@ -11,9 +11,18 @@ import { createRequire } from 'module';
 import { ProviderModelFellBack } from '../bus/index.js';
 import { registerAllCommands } from './commands/index.js';
 import { killAllTracked } from '../tool/tools/background-process.js';
+import { installAbortGuard } from './utils/abortGuard.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
+
+// Install a process-wide guard that swallows abort-family unhandled
+// rejections (DOMException `AbortError`, Node `code === 'ABORT_ERR'`).
+// Cancelled provider streams occasionally reject their underlying fetch
+// promise after the async generator has already returned; without this
+// guard those rejections would kill the process (and any resident session
+// daemon) via Node's default unhandled-rejection behaviour. See #1319.
+installAbortGuard();
 
 // Install SIGINT/SIGTERM handlers once so any background_process children
 // spawned during one-shot commands (e.g. `alexi chat -m "..."`) are reaped

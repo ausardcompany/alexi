@@ -16,6 +16,24 @@ const mockStreamChat = vi.fn();
 
 vi.mock('../../../src/core/streamingOrchestrator.js', () => ({
   streamChat: (...args: unknown[]) => mockStreamChat(...args),
+  // Re-export the real classifier so the TUI hook can detect all three
+  // abort-family shapes (DOMException AbortError, plain Error with
+  // name === 'AbortError', Node code === 'ABORT_ERR'). Duplicated inline
+  // to keep this mock synchronous — the logic mirrors
+  // `src/core/streamingOrchestrator.ts:isAbortError`.
+  isAbortError: (error: unknown): boolean => {
+    if (!(error instanceof Error) && !(typeof error === 'object' && error !== null)) {
+      return false;
+    }
+    const err = error as { name?: unknown; code?: unknown };
+    if (typeof err.name === 'string' && err.name === 'AbortError') {
+      return true;
+    }
+    if (typeof err.code === 'string' && err.code === 'ABORT_ERR') {
+      return true;
+    }
+    return false;
+  },
 }));
 
 const mockChat: ChatContextValue = {
