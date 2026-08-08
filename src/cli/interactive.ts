@@ -137,6 +137,46 @@ export function enqueueSubmitPrompt(state: ReplState, prompt: string | undefined
 const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /**
+ * Handle an error thrown while consuming the streaming chat generator.
+ *
+ * Extracted from the REPL line handler so unit tests can drive each of the
+ * three abort shapes (DOMException `AbortError`, plain `Error` with
+ * `name === 'AbortError'`, Node `code === 'ABORT_ERR'`) plus the stall path
+ * without booting a full readline REPL (issue #1312).
+ *
+ * Contract:
+ * - Abort-family errors log `"Request cancelled"` in yellow and return.
+ *   Never calls `process.exit()`; the caller is expected to re-prompt.
+ * - Stream-stall errors surface a retry-oriented hint.
+ * - Anything else is printed as a generic `Error: <message>`.
+ *
+ * The function is intentionally side-effect-only (writes to `console`) so it
+ * mirrors the inline branch it replaced.
+ */
+export function handleStreamingError(err: unknown): void {
+  if (isAbortError(err)) {
+    // Abort-family errors reach this catch when the request was cancelled
+    // (Ctrl+C via the SIGINT handler, provider watchdog, or an in-flight
+    // fetch rejecting with `code === 'ABORT_ERR'`). Log a user-friendly
+    // message. Never `process.exit()` — the REPL owns re-prompting.
+    console.log(c('yellow', '\n  Request cancelled\n'));
+    return;
+  }
+  if (isStreamStalledError(err)) {
+    // Stalled provider stream (issue #1164). Show a retry-oriented hint so
+    // users know the process is not frozen — they can just re-issue the
+    // prompt or switch models.
+    console.log();
+    console.log(
+      c('red', `\n  ${err.message} You can retry the request or switch models with /model.\n`)
+    );
+    return;
+  }
+  console.log();
+  console.log(c('red', `\n  Error: ${err instanceof Error ? err.message : String(err)}\n`));
+}
+
+/**
  * Print colored header
  */
 function printHeader(state: ReplState): void {
@@ -2465,9 +2505,12 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
   // burning tokens after the user cancels.
   const shutdown = (signal: 'SIGINT' | 'SIGTERM') => {
     if (signal === 'SIGINT' && state.abortController) {
+      // Fire the abort and let the streaming try/catch surface the
+      // "Request cancelled" message via `isAbortError`. Owning the log in
+      // exactly one place keeps SIGINT and mid-stream fetch aborts (which
+      // reach the catch as `code === 'ABORT_ERR'` without ever hitting this
+      // handler) from producing different output.
       state.abortController.abort();
-      console.log(c('yellow', '\n\n  [Cancelled]\n'));
-      rl.prompt();
       return;
     }
     keypressHandler.dispose();
@@ -2640,20 +2683,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
         clearInterval(spinnerInterval);
       }
 
-      if (isAbortError(err)) {
-        // Already handled in SIGINT
-      } else if (isStreamStalledError(err)) {
-        // Stalled provider stream (issue #1164). Show a retry-oriented
-        // hint so users know the process is not frozen — they can just
-        // re-issue the prompt or switch models.
-        console.log();
-        console.log(
-          c('red', `\n  ${err.message} You can retry the request or switch models with /model.\n`)
-        );
-      } else {
-        console.log();
-        console.log(c('red', `\n  Error: ${err instanceof Error ? err.message : String(err)}\n`));
-      }
+      handleStreamingError(err);
     } finally {
       state.isStreaming = false;
       state.abortController = undefined;
