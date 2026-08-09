@@ -428,6 +428,28 @@ export function streamChat(
         if (watchdog) {
           void watchdog.return();
         }
+        // Flush partial transcript on abort so context is not silently
+        // lost when the user cancels a long-running request (issue
+        // #1330). We persist the outbound user prompt and whatever
+        // assistant text was already streamed. This is best-effort — a
+        // save failure is swallowed by SessionManager.saveSession to
+        // avoid masking the original abort error the caller is about
+        // to see.
+        if (options?.sessionManager && SessionManager.detectAbort(err)) {
+          try {
+            options.sessionManager.addMessage('user', outboundTextForSession, {
+              input: finalUsage?.prompt_tokens,
+            });
+            if (fullText.length > 0) {
+              options.sessionManager.addMessage('assistant', fullText, {
+                output: finalUsage?.completion_tokens,
+              });
+            }
+            options.sessionManager.flush();
+          } catch {
+            // Best-effort; do not shadow the original abort.
+          }
+        }
         const classified = classifyRouteError(err);
         if (classified.kind === 'permanent') {
           recordRouteOutcome(modelId, classified);
