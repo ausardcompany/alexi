@@ -78,6 +78,7 @@ export default [
       'dist/',
       'node_modules/',
       '*.js',
+      '**/*.js',
       '*.d.ts',
       'coverage/',
       'eslint.config.js',
