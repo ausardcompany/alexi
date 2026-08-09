@@ -97,26 +97,128 @@ export class SessionManager {
    * When `parentSessionId` is provided the new session is recorded as a
    * subagent child of that parent, which allows `getSessionParentChain`
    * to walk the ancestry and compute the current subagent nesting depth.
+   *
+   * When `options.initialMessages` is provided the transcript is seeded
+   * with those messages and the session is persisted to disk immediately
+   * (before returning). This is what forked/recovered sessions rely on to
+   * survive a hub restart: without immediate persistence, the seeded
+   * history would live only in memory until the first completed turn
+   * (see issue #1330). Brand-new empty sessions are still persisted
+   * eagerly for backwards compatibility, so external callers that inspect
+   * the sessions directory right after `createSession` continue to see
+   * the session file.
    */
-  createSession(modelId?: string, parentSessionId?: string): Session {
+  createSession(
+    modelId?: string,
+    parentSessionId?: string,
+    options?: { initialMessages?: Message[] }
+  ): Session {
+    const initialMessages = options?.initialMessages ?? [];
+    const totalTokens = initialMessages.reduce(
+      (sum, m) => sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0),
+      0
+    );
+    // Auto-generate a title from the first seeded user message so
+    // forked/recovered sessions surface a sensible name in listSessions.
+    const firstUser = initialMessages.find((m) => m.role === 'user');
+    const title = firstUser
+      ? firstUser.content.slice(0, 50) + (firstUser.content.length > 50 ? '...' : '')
+      : undefined;
     const session: Session = {
       metadata: {
         id: randomUUID(),
         created: Date.now(),
         updated: Date.now(),
         modelId,
-        totalTokens: 0,
-        messageCount: 0,
+        totalTokens,
+        messageCount: initialMessages.length,
         workdir: process.cwd(),
         parentSessionId,
+        title,
       },
-      messages: [],
+      messages: [...initialMessages],
     };
 
     this.activeSession = session;
+    // Persist immediately. When `initialMessages` is provided this is what
+    // guarantees seeded history is durable across hub restarts (issue
+    // #1330). For empty sessions this preserves the historical
+    // eager-persistence contract that existing callers rely on.
     this.saveSession(session);
 
     return session;
+  }
+
+  /**
+   * Detect whether a caught error is an abort-family error (issue #1330).
+   *
+   * Aborts surface in three shapes:
+   *   1. `DOMException` with `name === 'AbortError'`
+   *   2. Plain `Error` with `name === 'AbortError'`
+   *   3. Node native abort: `Error` with `code === 'ABORT_ERR'`
+   *
+   * This helper lets orchestrators and REPLs decide, in a `catch` block,
+   * whether to flush the partial transcript to disk before re-throwing or
+   * returning to the prompt. It mirrors {@link isAbortError} from the
+   * streaming orchestrator but lives on `SessionManager` so consumers do
+   * not need a cross-module import to check the classification.
+   */
+  static detectAbort(err: unknown): boolean {
+    if (!(err instanceof Error) && !(typeof err === 'object' && err !== null)) {
+      return false;
+    }
+    const e = err as { name?: unknown; code?: unknown };
+    if (typeof e.name === 'string' && e.name === 'AbortError') {
+      return true;
+    }
+    if (typeof e.code === 'string' && e.code === 'ABORT_ERR') {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Instance forwarder for {@link SessionManager.detectAbort}. Provided so
+   * mock-friendly test doubles do not need to import the class statically.
+   */
+  detectAbort(err: unknown): boolean {
+    return SessionManager.detectAbort(err);
+  }
+
+  /**
+   * Flush the active session's transcript to disk immediately.
+   *
+   * Called by the streaming orchestrator / REPL when a request is
+   * aborted, to guarantee that partial history (messages received before
+   * the abort) is not silently dropped when the process crashes or the
+   * hub daemon exits (issue #1330). No-op when there is no active
+   * session, so callers can invoke it unconditionally in a `finally`
+   * block.
+   */
+  flush(): void {
+    if (!this.activeSession) {
+      return;
+    }
+    this.saveSession(this.activeSession);
+  }
+
+  /**
+   * Flush the active transcript if `err` is an abort-family error.
+   *
+   * Returns `true` when a flush was performed (i.e. the error was
+   * classified as abort-family AND an active session existed), otherwise
+   * `false`. Non-abort errors are ignored so callers can use this in a
+   * generic `catch (err)` without pre-filtering.
+   */
+  flushOnAbort(err: unknown): boolean {
+    if (!SessionManager.detectAbort(err)) {
+      return false;
+    }
+    if (!this.activeSession) {
+      return false;
+    }
+    this.saveSession(this.activeSession);
+    return true;
   }
 
   /**
