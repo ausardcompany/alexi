@@ -177,7 +177,13 @@ interface ToolCache {
 }
 
 const CACHE_TTL_MS = 30000; // 30 seconds
-const DEFAULT_STARTUP_TIMEOUT_MS = 30000; // 30 seconds for cold `npx -y` spawn
+// Aggressive default: cover ~2s cold `npx -y` warm-cache starters while
+// keeping worst-case per-server connect near ~6s (initialize + newline /
+// content-length framing double-round-trip). JVM-based servers such as
+// Oracle SQLcl OR any first-time `npx -y` cold install can exceed this;
+// operators must raise `timeout.startup` in `mcp-servers.json` for those.
+// Aligned with Cline #13086 (30s -> 3s) and issue #1339.
+const DEFAULT_STARTUP_TIMEOUT_MS = 3000; // 3 seconds; hung servers no longer stall session creation
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000; // 60 seconds for per-tool call
 const MAX_PAGES = 100; // Safety cap for paginated tools/list
 
@@ -1316,7 +1322,13 @@ export class McpClientManager {
    *    {@link connectFromConfig}).
    * 3. `MCP_TOOL_TIMEOUT` environment variable (applied to both phases
    *    for backwards-compat).
-   * 4. Built-in defaults (30000ms startup, 60000ms request).
+   * 4. Built-in defaults (3000ms startup, 60000ms request).
+   *
+   * The 3s startup default (see {@link DEFAULT_STARTUP_TIMEOUT_MS}) is
+   * intentionally aggressive so a hung MCP server cannot stall session
+   * creation. JVM-based servers (e.g. Oracle SQLcl) and cold `npx -y`
+   * downloads on a fresh machine WILL need an explicit `timeout.startup`
+   * override in `mcp-servers.json`.
    */
   private getTimeoutsForServer(serverName: string): { startup: number; request: number } {
     const connection = this.connections.get(serverName);
