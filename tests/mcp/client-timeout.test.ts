@@ -277,12 +277,13 @@ describe('MCP Tool Call Timeout', () => {
       );
     });
 
-    it('should use default startup timeout for connect when no config timeout', async () => {
+    it('should use default startup timeout (3s) for connect when no config timeout', async () => {
       await manager.connect(stdioConfig);
 
+      // Issue #1339: hung-server guard — default startup shrunk 30s -> 3s.
       expect(mockClientConnect).toHaveBeenCalledWith(
         expect.anything(),
-        expect.objectContaining({ timeout: 30000 })
+        expect.objectContaining({ timeout: 3000 })
       );
     });
 

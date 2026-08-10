@@ -41,7 +41,12 @@ export interface McpServerConfig {
    *   budgets. Missing keys fall back to the defaults below.
    *
    * Defaults when unspecified:
-   * - `startup`: 30000 ms (cold `npx -y` installs routinely take 5-15s)
+   * - `startup`: 3000 ms — aggressive cap so a hung MCP server cannot
+   *   stall session creation on the critical path. Covers ~2s cold
+   *   `npx -y` warm-cache starters while keeping worst-case per-server
+   *   connect near ~6s. JVM-based servers (e.g. Oracle SQLcl) OR a
+   *   first-time `npx -y` cold install WILL exceed this and MUST set an
+   *   explicit `timeout.startup` override here (typical values 15000-45000).
    * - `request`: 60000 ms (per-tool call deadline)
    *
    * When this field is absent, the client falls back to the config-file
@@ -97,13 +102,13 @@ export interface McpConfig {
    * - A single number applied to BOTH startup and request phases.
    * - An object `{ startup?: number; request?: number }` for independent
    *   budgets; missing keys fall back to the built-in defaults
-   *   (30000ms startup, 60000ms request).
+   *   (3000ms startup, 60000ms request).
    *
    * Resolution order at call time (per server):
    * 1. Per-server `McpServerConfig.timeout` (if set)
    * 2. Global `McpConfig.timeout` (this field)
    * 3. `MCP_TOOL_TIMEOUT` environment variable (applied to both phases)
-   * 4. Built-in defaults (30000ms startup, 60000ms request)
+   * 4. Built-in defaults (3000ms startup, 60000ms request)
    */
   timeout?: number | { startup?: number; request?: number };
 }
@@ -120,8 +125,10 @@ function getDefaultConfig(): McpConfig {
     // Optional config-file global timeout. Applied to every server that
     // does NOT declare its own `timeout` field. Accepts a bare number
     // (both phases) or `{ startup?, request? }`. Omitted from the default
-    // config so built-in defaults (30s startup, 60s request) apply until
-    // an operator explicitly opts in.
+    // config so built-in defaults (3s startup, 60s request) apply until
+    // an operator explicitly opts in. Slow-starting servers (JVM-based
+    // like Oracle SQLcl, first-time `npx -y` cold installs) MUST bump
+    // `timeout.startup` to avoid tripping the aggressive 3s default.
     // Example:
     //   "timeout": { "startup": 45000, "request": 90000 }
     servers: [

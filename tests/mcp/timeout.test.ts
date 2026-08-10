@@ -175,10 +175,10 @@ describe('MCP split startup / request timeouts', () => {
 
     await manager.connect(cfg);
 
-    // Default startup timeout is 30000ms
+    // Default startup timeout is 3000ms (issue #1339: hung-server guard).
     expect(mockClientConnect).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ timeout: 30000 })
+      expect.objectContaining({ timeout: 3000 })
     );
 
     const result = await runTimingCall(manager, 'request-only', 2000);
@@ -191,10 +191,10 @@ describe('MCP split startup / request timeouts', () => {
 
     await manager.connect(cfg);
 
-    // Default startup: 30000ms
+    // Default startup: 3000ms (issue #1339: hung-server guard).
     expect(mockClientConnect).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ timeout: 30000 })
+      expect.objectContaining({ timeout: 3000 })
     );
 
     // Default request: 60000ms

@@ -262,10 +262,10 @@ describe('MCP global config timeout precedence', () => {
 
     await manager.connect({ ...baseServer, name: 'srv-cleared' });
 
-    // Falls through to DEFAULT_STARTUP_TIMEOUT_MS (30000).
+    // Falls through to DEFAULT_STARTUP_TIMEOUT_MS (3000; issue #1339).
     expect(mockClientConnect).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ timeout: 30000 })
+      expect.objectContaining({ timeout: 3000 })
     );
 
     // Falls through to DEFAULT_TOOL_CALL_TIMEOUT_MS (60000).

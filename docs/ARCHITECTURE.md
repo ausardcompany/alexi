@@ -991,11 +991,17 @@ Example error messages and their classification:
 
 MCP has TWO independent timeout budgets and a separate retry policy on top:
 
-- **Startup timeout** (`config.timeout.startup`, default 30000 ms) —
-  bounds the stdio handshake / cold-spawn phase (`client.connect`). A
-  cold `npx -y` install routinely takes 5-15 s; the budget is intentionally
-  generous. Exceeding it raises a named error pointing at
-  `timeout.startup` in `mcp-servers.json`.
+- **Startup timeout** (`config.timeout.startup`, default 3000 ms; see
+  issue #1339 and Cline #13086) — bounds the stdio handshake / cold-spawn
+  phase (`client.connect`). The 3 s cap is aggressive on purpose: a hung
+  MCP server that never responds to `initialize` must NOT stall session
+  creation on the critical path. It covers ~2 s cold `npx -y` warm-cache
+  starters while keeping worst-case per-server connect near ~6 s.
+  JVM-based servers (Oracle SQLcl and similar) OR a first-time cold
+  `npx -y` install exceed this bound and MUST set an explicit
+  `timeout.startup` override in `mcp-servers.json` (typical values
+  15000-45000 ms). Exceeding it raises a named error pointing at
+  `timeout.startup`.
 - **Request timeout** (`config.timeout.request`, default 60000 ms) —
   bounds every metadata or tool call made after the handshake
   (`callTool`, `listTools`, `listResources`, `listPrompts`, `readResource`,
