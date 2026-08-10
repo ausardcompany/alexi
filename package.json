@@ -42,7 +42,7 @@
     "duck-duck-scrape": "^2.2.7",
     "fzf": "^0.5.2",
     "gray-matter": "^4.0.3",
-    "hono": "^4.12.32",
+    "hono": "^4.13.1",
     "ink": "^7.1.1",
     "ink-select-input": "^6.2.0",
     "ink-spinner": "^5.0.0",
