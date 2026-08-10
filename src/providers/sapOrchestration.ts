@@ -42,6 +42,7 @@ import {
   ReauthenticationRequiredError,
   NoRefreshTokenError,
 } from './auth.js';
+import { isClaudeOpus4 } from './model-match.js';
 import { env } from '../config/env.js';
 
 // Types are exported from the main package
@@ -973,8 +974,24 @@ export class SapOrchestrationProvider {
     // Build model params
     const modelParams: Record<string, unknown> = {
       max_tokens: options?.maxTokens ?? this.config.maxTokens ?? 4096,
-      temperature: options?.temperature ?? this.config.temperature ?? 0.7,
     };
+
+    // Anthropic deprecated the `temperature` parameter for the Claude Opus 4
+    // family (4.1+) in favour of adaptive reasoning controls (Aider #5173,
+    // 2026-08-10). Sending `temperature` to these models triggers an API-side
+    // warning and, in some SAP AI Core deployment revisions, a
+    // `400 invalid_request`. Older Anthropic families and non-Anthropic
+    // models still accept `temperature` normally and keep the previous
+    // default of 0.7 when neither the caller nor the config supplies one.
+    if (!isClaudeOpus4(this.config.modelName)) {
+      modelParams.temperature = options?.temperature ?? this.config.temperature ?? 0.7;
+    } else if (options?.temperature !== undefined || this.config.temperature !== undefined) {
+      // Caller explicitly asked for a temperature on an Opus 4 model.
+      // Honour the explicit request — the caller may be pinning behaviour
+      // for a specific deployment revision that still accepts it — but do
+      // NOT synthesise a default when neither side asked for one.
+      modelParams.temperature = options?.temperature ?? this.config.temperature;
+    }
 
     if (options?.topP !== undefined || this.config.topP !== undefined) {
       modelParams.top_p = options?.topP ?? this.config.topP;
@@ -1507,8 +1524,22 @@ export function createToolResponse(toolCallId: string, content: string | object)
 // ============================================================================
 
 /**
- * List of models available through SAP AI Core Orchestration
- * Based on SAP documentation
+ * List of models available through SAP AI Core Orchestration.
+ *
+ * Naming convention: SAP AI Core uses a double-dash form
+ * `<vendor>--<model-name>` (e.g. `anthropic--claude-4.5-opus`). Anthropic
+ * ids in this list use the `<major>.<minor>-<opus|sonnet|haiku>` shape,
+ * which is the SAP-side spelling of the underlying Anthropic model id.
+ * When calling `SapOrchestrationProvider` with a model that is NOT in
+ * this catalog, callers must supply the `deploymentId` escape hatch —
+ * a mismatch between the SAP AI Core deployment and the id here will
+ * surface as an `Invalid model` error from the SDK.
+ *
+ * Anthropic Opus 4.1+ variants (`4.5-opus`, `4.6-opus`, `4.7-opus`)
+ * added to keep parity with SAP's rolling deployment of the Claude
+ * Opus 4 family (Aider #5173, 2026-08-10). The `temperature` parameter
+ * is intentionally omitted from requests to these models — see
+ * `buildModuleConfig` and `isClaudeOpus4` in `./model-match.js`.
  */
 export const ORCHESTRATION_MODELS = [
   // OpenAI models
@@ -1522,6 +1553,7 @@ export const ORCHESTRATION_MODELS = [
   'anthropic--claude-4.5-haiku',
   'anthropic--claude-4.5-sonnet',
   'anthropic--claude-4.5-opus',
+  'anthropic--claude-4.6-opus',
   'anthropic--claude-4.7-opus',
   // Google models
   'gemini-2.5-flash',

@@ -91,6 +91,15 @@ export function isClaude(modelId: string): boolean {
  *
  * Added claude-opus-4, sonnet-4.5, sonnet-4.7 + -1221-v1 variants
  * (Cline #12620, 2026-07-20).
+ *
+ * Added claude-opus-4-1 / -4-5 / -4-6 / -4-7 and their dated snapshot ids
+ * (Aider #5173, 2026-08-10). SAP AI Core's naming convention uses the
+ * double-dash form (e.g. `anthropic--claude-4.5-opus`), so both forms are
+ * included: the SAP-native `claude-<major>.<minor>-opus` shape is already
+ * covered by substring detection via `claude-opus-4`, but the bare Anthropic
+ * `claude-opus-4-<minor>` and dated `claude-opus-4-<minor>-<yyyymmdd>` ids
+ * are listed explicitly so they are recognized when a routing config or
+ * environment variable references upstream Anthropic ids directly.
  */
 export const ANTHROPIC_MODELS: readonly string[] = [
   // Claude 3 family
@@ -100,17 +109,28 @@ export const ANTHROPIC_MODELS: readonly string[] = [
   'claude-3.5-sonnet',
   'claude-3.5-haiku',
   'claude-3.7-sonnet',
+  'claude-3-7-sonnet-20250219',
   // Claude 4 family
   'claude-4-opus',
   'claude-4-sonnet',
   'claude-opus-4',
   'claude-opus-4-1221-v1',
+  'claude-opus-4-1',
+  'claude-opus-4-1-20250805',
+  'claude-opus-4-5',
+  'claude-opus-4-5-20251101',
+  'claude-opus-4-6',
+  'claude-opus-4-6-20260205',
+  'claude-opus-4-7',
+  'claude-opus-4-7-20260416',
   'claude-sonnet-4',
   'claude-sonnet-4.5',
   'claude-sonnet-4.5-1221-v1',
   'claude-sonnet-4.7',
   'claude-sonnet-4.7-1221-v1',
   // Alexi-pinned agent model (SAP AI Core provider-prefixed form)
+  'claude-4.5-opus',
+  'claude-4.6-opus',
   'claude-4.7-opus',
 ];
 
@@ -131,6 +151,49 @@ export function isAnthropicModel(modelId: string): boolean {
     }
   }
   return isClaude(modelId);
+}
+
+/**
+ * Check if a model id refers to a Claude Opus 4 family variant (any minor
+ * revision >= 4, including dated snapshots and SAP-prefixed forms).
+ *
+ * Anthropic deprecated the `temperature` sampling parameter for the Opus 4
+ * family in favour of adaptive reasoning controls (per Aider #5173). Callers
+ * that assemble a request payload for these models MUST omit `temperature`
+ * — sending it triggers an API-side warning and, in some SAP AI Core
+ * deployment revisions, a `400 invalid_request` response.
+ *
+ * Detection rules (case-insensitive, any match wins):
+ *  - `opus-4` or `opus-4-<n>` (bare Anthropic naming), including dated
+ *    snapshot ids like `claude-opus-4-1-20250805`.
+ *  - `4.<n>-opus` (SAP AI Core double-dash naming, e.g.
+ *    `anthropic--claude-4.5-opus`).
+ *  - Provider-prefixed forms like `sap-ai-core/anthropic--claude-4.7-opus`
+ *    are matched via the substring rules above.
+ *
+ * Deliberately NOT matched:
+ *  - `claude-4-opus` (unversioned Claude 4 opus alias — the deprecation
+ *    only applies to 4.1+ per Aider #5173; keep temperature for the
+ *    unversioned family alias for backwards compatibility).
+ *
+ * @param modelId - The model identifier to test
+ * @returns true when the model belongs to the Claude Opus 4.1+ family
+ */
+export function isClaudeOpus4(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  // Bare Anthropic naming: `opus-4-<n>` where <n> is a single-digit minor
+  // revision. Dated snapshots (`opus-4-<n>-<yyyymmdd>`) match because the
+  // year suffix begins with a non-digit separator after the minor number.
+  // The negative lookahead prevents `claude-opus-4-1221-v1` (SAP extended-
+  // context variant of the unversioned opus-4) from matching as opus-4.1.
+  if (/\bopus-4-\d(?!\d)/.test(lower)) {
+    return true;
+  }
+  // SAP double-dash naming: `4.<n>-opus` (e.g. `anthropic--claude-4.5-opus`).
+  if (/\b4\.\d+-opus\b/.test(lower)) {
+    return true;
+  }
+  return false;
 }
 
 /**

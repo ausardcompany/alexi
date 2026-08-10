@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ANTHROPIC_MODELS,
   isAnthropicModel,
+  isClaudeOpus4,
   modelSupportsReasoningEffort,
   supportsReasoning,
 } from '../model-match.js';
@@ -107,5 +108,112 @@ describe('isAnthropicModel', () => {
     expect(isAnthropicModel('deepseek-r1')).toBe(false);
     expect(isAnthropicModel('gemini-2.5-pro')).toBe(false);
     expect(isAnthropicModel('')).toBe(false);
+  });
+});
+
+describe('ANTHROPIC_MODELS catalog - Aider #5173 additions', () => {
+  it('includes bare Anthropic opus 4.1 / 4.5 / 4.6 / 4.7 ids', () => {
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-1');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-5');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-6');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-7');
+  });
+
+  it('includes dated snapshot ids for opus 4.1+ variants', () => {
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-1-20250805');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-5-20251101');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-6-20260205');
+    expect(ANTHROPIC_MODELS).toContain('claude-opus-4-7-20260416');
+  });
+
+  it('includes the dated claude-3-7-sonnet snapshot id', () => {
+    expect(ANTHROPIC_MODELS).toContain('claude-3-7-sonnet-20250219');
+  });
+
+  it('includes SAP-shaped 4.5 / 4.6 / 4.7 opus aliases', () => {
+    expect(ANTHROPIC_MODELS).toContain('claude-4.5-opus');
+    expect(ANTHROPIC_MODELS).toContain('claude-4.6-opus');
+    expect(ANTHROPIC_MODELS).toContain('claude-4.7-opus');
+  });
+});
+
+describe('isAnthropicModel - new Claude opus 4.1+ ids', () => {
+  it('recognizes bare opus-4-N ids', () => {
+    expect(isAnthropicModel('claude-opus-4-1')).toBe(true);
+    expect(isAnthropicModel('claude-opus-4-5')).toBe(true);
+    expect(isAnthropicModel('claude-opus-4-6')).toBe(true);
+    expect(isAnthropicModel('claude-opus-4-7')).toBe(true);
+  });
+
+  it('recognizes dated snapshot ids', () => {
+    expect(isAnthropicModel('claude-opus-4-1-20250805')).toBe(true);
+    expect(isAnthropicModel('claude-opus-4-7-20260416')).toBe(true);
+  });
+
+  it('recognizes SAP AI Core provider-prefixed opus 4.1+ ids', () => {
+    expect(isAnthropicModel('sap-ai-core/anthropic--claude-4.5-opus')).toBe(true);
+    expect(isAnthropicModel('sap-ai-core/anthropic--claude-4.6-opus')).toBe(true);
+    expect(isAnthropicModel('sap-ai-core/anthropic--claude-4.7-opus')).toBe(true);
+  });
+});
+
+describe('isClaudeOpus4', () => {
+  it('returns true for bare opus-4-N ids', () => {
+    expect(isClaudeOpus4('claude-opus-4-1')).toBe(true);
+    expect(isClaudeOpus4('claude-opus-4-5')).toBe(true);
+    expect(isClaudeOpus4('claude-opus-4-6')).toBe(true);
+    expect(isClaudeOpus4('claude-opus-4-7')).toBe(true);
+  });
+
+  it('returns true for dated snapshot ids', () => {
+    expect(isClaudeOpus4('claude-opus-4-1-20250805')).toBe(true);
+    expect(isClaudeOpus4('claude-opus-4-7-20260416')).toBe(true);
+  });
+
+  it('returns true for SAP double-dash 4.N-opus ids', () => {
+    expect(isClaudeOpus4('anthropic--claude-4.5-opus')).toBe(true);
+    expect(isClaudeOpus4('anthropic--claude-4.6-opus')).toBe(true);
+    expect(isClaudeOpus4('anthropic--claude-4.7-opus')).toBe(true);
+  });
+
+  it('returns true for provider-prefixed SAP forms', () => {
+    expect(isClaudeOpus4('sap-ai-core/anthropic--claude-4.7-opus')).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isClaudeOpus4('CLAUDE-OPUS-4-7')).toBe(true);
+    expect(isClaudeOpus4('SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS')).toBe(true);
+  });
+
+  it('returns false for unversioned claude-4-opus (backwards compatibility)', () => {
+    // The deprecation only applies to 4.1+ per Aider #5173. The bare
+    // `claude-4-opus` alias must keep sending `temperature` for callers
+    // that still rely on it.
+    expect(isClaudeOpus4('claude-4-opus')).toBe(false);
+  });
+
+  it('returns false for the SAP extended-context claude-opus-4-1221-v1 alias', () => {
+    // `-1221-v1` is a Cline-side extended-context version tag on the
+    // UNVERSIONED opus-4, not the Anthropic 4.1 minor revision. Matching
+    // it as opus-4.1 would incorrectly drop temperature for a family
+    // that still accepts it.
+    expect(isClaudeOpus4('claude-opus-4-1221-v1')).toBe(false);
+  });
+
+  it('returns false for bare claude-opus-4 (no minor revision)', () => {
+    expect(isClaudeOpus4('claude-opus-4')).toBe(false);
+  });
+
+  it('returns false for Claude Sonnet and Haiku variants', () => {
+    expect(isClaudeOpus4('claude-4.5-sonnet')).toBe(false);
+    expect(isClaudeOpus4('anthropic--claude-4.5-sonnet')).toBe(false);
+    expect(isClaudeOpus4('anthropic--claude-4.5-haiku')).toBe(false);
+    expect(isClaudeOpus4('claude-3.7-sonnet')).toBe(false);
+  });
+
+  it('returns false for non-Anthropic models', () => {
+    expect(isClaudeOpus4('gpt-4o')).toBe(false);
+    expect(isClaudeOpus4('deepseek-r1')).toBe(false);
+    expect(isClaudeOpus4('')).toBe(false);
   });
 });

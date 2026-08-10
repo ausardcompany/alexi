@@ -53,6 +53,15 @@
       "maxTokens": 200000,
       "reasoning": true,
       "enabled": true
+    },
+    {
+      "id": "anthropic--claude-4.7-opus",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research", "advanced-coding"],
+      "maxTokens": 200000,
+      "reasoning": true,
+      "enabled": true
     }
   ],
   "rules": [
