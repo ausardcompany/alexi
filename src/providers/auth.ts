@@ -32,6 +32,8 @@
 
 import { getConnectorStore, type ConnectorState } from './connectorStore.js';
 import { TokenRefreshed } from '../bus/index.js';
+import { saveToken } from '../utils/tokenStorage.js';
+import { getConfigPersistAuthTokens } from '../config/userConfig.js';
 
 export class AuthError extends Error {
   constructor(
@@ -383,6 +385,22 @@ export async function refreshAccessToken(
     nextState.refreshToken = parsed.refresh_token;
   }
   await store.set(providerId, nextState);
+
+  // Persist the refreshed token to the on-disk token cache so a new
+  // Alexi process can reuse it without paying the refresh round-trip.
+  // Failures here are non-fatal -- the in-memory connector store still
+  // has the fresh token, and the caller can complete the current
+  // request. See `src/utils/tokenStorage.ts` for the file format.
+  if (getConfigPersistAuthTokens()) {
+    try {
+      await saveToken(providerId, parsed.access_token, expiry);
+    } catch {
+      // Ignore disk write errors (permissions, out-of-space). The
+      // token is already in the in-memory connector store, so the
+      // current invocation continues; only cross-process reuse is
+      // lost, which is a soft-fail we accept.
+    }
+  }
 
   TokenRefreshed.publish({
     providerId,

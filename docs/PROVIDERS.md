@@ -646,6 +646,39 @@ pattern).
 - OAuth2 authentication with client credentials
 - Support for corporate proxy configurations
 
+### Auth Token Persistence
+
+Alexi caches SAP AI Core OAuth access tokens between CLI invocations to cut ~500ms-2s of latency off each session start. Without caching, every `alexi` / `ax` invocation performs a fresh `grant_type=client_credentials` (or `refresh_token`) exchange with the SAP AI Core token endpoint before it can issue the first chat request.
+
+**Storage location**: `~/.alexi/tokens.json`. The file is written atomically (temp file + rename) with `0o600` permissions so only the current user can read it.
+
+**Contents**: a JSON map keyed by provider id. Each entry stores just the bearer `token` and its `expiresAt` (Unix epoch milliseconds).
+
+```json
+{
+  "sap-ai-core": {
+    "token": "eyJhbGciOi...",
+    "expiresAt": 1786000000000
+  }
+}
+```
+
+**Lifecycle**:
+
+1. On the first API call in a session, `SapOrchestrationProvider.primeAuthTokenCache()` loads the cached entry for `sap-ai-core`. If it exists and is not within 30 seconds of expiring, its `accessToken` and `expiry` are seeded into the in-memory connector store — the SAP SDK then reuses the token without a fresh exchange.
+2. When `refreshAccessToken` (in `src/providers/auth.ts`) successfully rotates a token, the new bearer is written back to the cache so the next CLI invocation picks it up.
+3. Expired or malformed entries are silently cleared on load. A corrupt file never blocks the first API call.
+
+**Opt-out**: set `persistAuthTokens: false` in `~/.alexi/config.json`. Every session will then perform a fresh authentication and no bearers will be written to disk. Use this in security-sensitive environments where any on-disk credential material is unacceptable.
+
+```json
+{
+  "persistAuthTokens": false
+}
+```
+
+The default (`persistAuthTokens: true`) is the right choice for developer workstations. On disk failure (permissions, ENOSPC), the current request still succeeds — only cross-process reuse is lost, which is a soft-fail Alexi accepts silently.
+
 ### Auto-CA Harvesting
 
 Corporate environments frequently front SAP AI Core (or any provider proxy) with an
