@@ -42,6 +42,7 @@ import {
   ReauthenticationRequiredError,
   NoRefreshTokenError,
 } from './auth.js';
+import { getConnectorStore, type ConnectorState } from './connectorStore.js';
 import { isClaudeOpus4 } from './model-match.js';
 import { env } from '../config/env.js';
 import {
@@ -50,6 +51,24 @@ import {
   isChatGPTSubscription,
   type LanguageModelV2Prompt,
 } from './openai/prompt-cache.js';
+import { loadToken, clearToken } from '../utils/tokenStorage.js';
+import { getConfigPersistAuthTokens } from '../config/userConfig.js';
+
+/**
+ * Provider id used as the cache key for SAP AI Core access tokens.
+ * Kept in a single constant so `saveToken` / `loadToken` / `clearToken`
+ * calls stay consistent across modules.
+ */
+const SAP_AI_CORE_PROVIDER_ID = 'sap-ai-core';
+
+/**
+ * Skew (ms) subtracted from `expiresAt` when checking whether a cached
+ * token is still usable. Tokens that are already within this window of
+ * expiring are treated as expired so the caller refreshes proactively
+ * instead of racing with the token endpoint mid-request. Matches the
+ * 30-second skew used elsewhere in the SAP SDK.
+ */
+const TOKEN_EXPIRY_SKEW_MS = 30_000;
 
 // Types are exported from the main package
 type ChatCompletionTool = import('@sap-ai-sdk/orchestration').ChatCompletionTool;
@@ -941,6 +960,7 @@ export async function withTokenRefresh<T>(
 export class SapOrchestrationProvider {
   private config: OrchestrationConfig;
   private _connectivityChecked = false;
+  private _authTokenCachePrimed = false;
 
   constructor(config: OrchestrationConfig) {
     // Validate model id against the SAP AI Core orchestration catalog so an
@@ -1005,6 +1025,79 @@ export class SapOrchestrationProvider {
     }
 
     this._connectivityChecked = true;
+  }
+
+  /**
+   * Prime the connector store from the on-disk token cache.
+   *
+   * When `persistAuthTokens` is enabled (the default), we look for a
+   * previously-saved bearer for `sap-ai-core` in
+   * `~/.alexi/tokens.json`. If one exists and has not expired, its
+   * `accessToken` / `expiry` are copied into the in-memory connector
+   * store so downstream refresh checks reuse it instead of paying
+   * another token-exchange round trip (500ms-2s).
+   *
+   * Contract:
+   *  - Runs at most once per provider instance (guarded by
+   *    `_authTokenCachePrimed`).
+   *  - Never throws. Missing file, unreadable file, expired token, or
+   *    persistence disabled all resolve to "no priming" and the caller
+   *    falls back to the SDK's normal fresh-auth path.
+   *  - When the cached entry is expired, we proactively `clearToken`
+   *    so the stale entry does not linger on disk.
+   */
+  private async primeAuthTokenCache(): Promise<void> {
+    if (this._authTokenCachePrimed) {
+      return;
+    }
+    this._authTokenCachePrimed = true;
+
+    if (!getConfigPersistAuthTokens()) {
+      return;
+    }
+
+    let cached;
+    try {
+      cached = await loadToken(SAP_AI_CORE_PROVIDER_ID);
+    } catch {
+      // `loadToken` already swallows the common ENOENT / malformed-JSON
+      // cases; this catch guards against unexpected runtime errors so
+      // a broken cache never blocks the first API call.
+      return;
+    }
+    if (!cached) {
+      return;
+    }
+
+    // Reject tokens that are already expired (or within the skew
+    // window). Best-effort remove the stale entry so it does not
+    // sit on disk forever.
+    if (cached.expiresAt - TOKEN_EXPIRY_SKEW_MS <= Date.now()) {
+      try {
+        await clearToken(SAP_AI_CORE_PROVIDER_ID);
+      } catch {
+        // Non-fatal: the entry will be overwritten on the next
+        // successful refresh.
+      }
+      return;
+    }
+
+    // Seed the connector store. Preserve any existing fields (e.g. a
+    // `refreshToken` written by a previous `alexi login`) so we do
+    // not clobber credentials the user already established.
+    try {
+      const store = getConnectorStore();
+      const existing = (await store.get(SAP_AI_CORE_PROVIDER_ID)) ?? {};
+      const nextState: ConnectorState = {
+        ...existing,
+        accessToken: cached.token,
+        expiry: cached.expiresAt,
+      };
+      await store.set(SAP_AI_CORE_PROVIDER_ID, nextState);
+    } catch {
+      // Seeding is a pure optimisation; a failure here just means the
+      // SDK performs a fresh auth on the next call.
+    }
   }
 
   /**
@@ -1148,6 +1241,7 @@ export class SapOrchestrationProvider {
     options?: CompletionOptions
   ): Promise<CompletionResult> {
     await this.ensureConnectivity();
+    await this.primeAuthTokenCache();
 
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);
@@ -1235,6 +1329,7 @@ export class SapOrchestrationProvider {
     options?: CompletionOptions
   ): AsyncGenerator<StreamChunk> {
     await this.ensureConnectivity();
+    await this.primeAuthTokenCache();
 
     const client = this.createClient(options);
     const orchestrationMessages = toOrchestrationMessages(messages);

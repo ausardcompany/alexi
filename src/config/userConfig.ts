@@ -212,6 +212,36 @@ export function clearConfigDefaultAgent(): void {
   deleteConfigValue('agent');
 }
 
+// ============ Auth token persistence ============
+
+/**
+ * Return whether Alexi should cache OAuth access tokens between CLI
+ * invocations. Defaults to `true` -- persistence saves ~500ms-2s on
+ * each session start by avoiding a fresh token exchange. Security-
+ * sensitive deployments can opt out by setting
+ * `persistAuthTokens: false` in `~/.alexi/config.json`, in which case
+ * every session performs a fresh authentication and no tokens are
+ * written to disk.
+ *
+ * The value is coerced to `boolean` -- non-boolean values fall back
+ * to the `true` default so a corrupt config never disables auth
+ * caching silently or vice-versa.
+ */
+export function getConfigPersistAuthTokens(): boolean {
+  const value = getConfigValue('persistAuthTokens');
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return true;
+}
+
+/**
+ * Persist the user's choice of whether to cache OAuth access tokens.
+ */
+export function setConfigPersistAuthTokens(enabled: boolean): void {
+  setConfigValue('persistAuthTokens', enabled);
+}
+
 // ============ Indexing (custom file extensions) ============
 
 /**
