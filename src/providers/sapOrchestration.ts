@@ -392,12 +392,14 @@ export interface EmbeddingResult {
  * See `./openai/prompt-cache.ts` for the model-id matcher and the
  * breakpoint-application logic.
  */
-export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(ctx: {
-  providerId: string;
-  modelId: string;
-  auth: { type?: string; source?: string };
-  prompt: LanguageModelV2Prompt;
-} & T): T {
+export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(
+  ctx: {
+    providerId: string;
+    modelId: string;
+    auth: { type?: string; source?: string };
+    prompt: LanguageModelV2Prompt;
+  } & T
+): T {
   const isChatGPT = isChatGPTSubscription(ctx.auth);
   if (
     supportsPromptCacheBreakpoint({

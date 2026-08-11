@@ -626,10 +626,7 @@ export class PermissionManager {
       // order the matcher checks them. This is best-effort — used only for
       // human-readable display in the UI.
       const matchedPattern =
-        rule.tools?.[0] ??
-        rule.paths?.[0] ??
-        rule.commands?.[0] ??
-        rule.hosts?.[0];
+        rule.tools?.[0] ?? rule.paths?.[0] ?? rule.commands?.[0] ?? rule.hosts?.[0];
       return {
         decision,
         rule,
