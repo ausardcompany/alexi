@@ -44,6 +44,12 @@ import {
 } from './auth.js';
 import { isClaudeOpus4 } from './model-match.js';
 import { env } from '../config/env.js';
+import {
+  supportsPromptCacheBreakpoint,
+  applyCacheBreakpoint,
+  isChatGPTSubscription,
+  type LanguageModelV2Prompt,
+} from './openai/prompt-cache.js';
 
 // Types are exported from the main package
 type ChatCompletionTool = import('@sap-ai-sdk/orchestration').ChatCompletionTool;
@@ -373,6 +379,38 @@ export interface EmbeddingResult {
  * report it — we never coerce to 0, because 0 is a meaningful signal
  * (cache was checked and missed) distinct from "provider did not report".
  */
+
+/**
+ * Prepare an outgoing OpenAI-family request, applying explicit prompt cache
+ * breakpoints when the provider/model supports them and the caller is NOT
+ * on a ChatGPT subscription (which caches implicitly).
+ *
+ * Upstream (opencode v1.17.13) introduced this scoping on the Vercel AI SDK
+ * path only — SAP AI Core routes OpenAI models via that same SDK, so the
+ * same scoping applies here. Non-OpenAI models are returned unchanged.
+ *
+ * See `./openai/prompt-cache.ts` for the model-id matcher and the
+ * breakpoint-application logic.
+ */
+export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(ctx: {
+  providerId: string;
+  modelId: string;
+  auth: { type?: string; source?: string };
+  prompt: LanguageModelV2Prompt;
+} & T): T {
+  const isChatGPT = isChatGPTSubscription(ctx.auth);
+  if (
+    supportsPromptCacheBreakpoint({
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
+      isChatGPTSubscription: isChatGPT,
+    })
+  ) {
+    return { ...ctx, prompt: applyCacheBreakpoint(ctx.prompt) };
+  }
+  return ctx;
+}
+
 export function extractCacheTokens(usage: unknown): {
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;

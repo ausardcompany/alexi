@@ -25,6 +25,17 @@ import { containsPath, safePathCheck } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { getAllToolNames } from '../tool/registry.js';
 import { AllowEverythingPermission } from './allow-everything.js';
+import { recordDenial, type PermissionProvenance } from './provenance.js';
+
+// Re-export provenance surface so consumers can `import { ... } from '../permission/index.js'`
+// without knowing about the internal module split.
+export {
+  recordDenial,
+  getDenialProvenance,
+  formatProvenanceMessage,
+  clearDenialStore,
+  type PermissionProvenance,
+} from './provenance.js';
 
 // Glob characters that flag a tool entry as a pattern rather than a literal name.
 const GLOB_CHARS = /[*?]/;
@@ -152,6 +163,12 @@ export interface PermissionResult {
   decision: PermissionDecision;
   rule?: PermissionRule;
   granted: boolean;
+  /**
+   * Provenance of the decision — which rule / rule-source made it. Optional
+   * for backwards compatibility with existing callers (older code that
+   * inspects `PermissionResult` continues to work unchanged).
+   */
+  provenance?: PermissionProvenance;
 }
 
 // Permission manager class
@@ -574,12 +591,24 @@ export class PermissionManager {
   /**
    * Evaluate permission using last-match-wins
    */
-  evaluate(ctx: PermissionContext): { decision: PermissionDecision; rule?: PermissionRule } {
+  evaluate(ctx: PermissionContext): {
+    decision: PermissionDecision;
+    rule?: PermissionRule;
+    provenance: PermissionProvenance;
+  } {
     // Check session grants first
     const sessionKey = `${ctx.toolName}:${ctx.action}:${ctx.resource}`;
     const sessionGrant = this.sessionGrants.get(sessionKey);
     if (sessionGrant !== undefined) {
-      return { decision: sessionGrant ? 'allow' : 'deny' };
+      const decision: PermissionDecision = sessionGrant ? 'allow' : 'deny';
+      return {
+        decision,
+        provenance: {
+          decision,
+          ruleSource: 'session',
+          reason: 'session grant',
+        },
+      };
     }
 
     // Evaluate rules in order (last match wins)
@@ -591,8 +620,34 @@ export class PermissionManager {
       }
     }
 
+    if (lastMatch) {
+      const { decision, rule } = lastMatch;
+      // Pick the pattern that actually contributed to the match, in the
+      // order the matcher checks them. This is best-effort — used only for
+      // human-readable display in the UI.
+      const matchedPattern =
+        rule.tools?.[0] ??
+        rule.paths?.[0] ??
+        rule.commands?.[0] ??
+        rule.hosts?.[0];
+      return {
+        decision,
+        rule,
+        provenance: {
+          decision,
+          ruleSource: 'config',
+          ruleId: rule.id,
+          ruleDescription: rule.description,
+          matchedPattern,
+        },
+      };
+    }
+
     // Default to "ask" if no rules match
-    return lastMatch ?? { decision: 'ask' };
+    return {
+      decision: 'ask',
+      provenance: { decision: 'ask', ruleSource: 'default' },
+    };
   }
 
   /**
@@ -639,19 +694,24 @@ export class PermissionManager {
       return result;
     }
 
-    const { decision, rule } = this.evaluate(ctx);
+    const { decision, rule, provenance } = this.evaluate(ctx);
 
     if (decision === 'allow') {
       // Reset operation tracking on success
       const key = this.getOperationKey(ctx);
       this.recentOperations.delete(key);
-      return { decision: 'allow', rule, granted: true };
+      return { decision: 'allow', rule, granted: true, provenance };
     }
 
     if (decision === 'deny') {
       // Record the denied attempt
       this.recordOperationAttempt(ctx);
-      return { decision: 'deny', rule, granted: false };
+      // Record provenance keyed by a synthetic tool-call id so the UI can
+      // look up "why was this denied?" later. We use the operation key as
+      // a stable identifier because the callers here do not have the
+      // tool-call id in scope.
+      recordDenial(this.getOperationKey(ctx), provenance);
+      return { decision: 'deny', rule, granted: false, provenance };
     }
 
     // Ask the user
