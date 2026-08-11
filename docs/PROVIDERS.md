@@ -480,6 +480,42 @@ export function getDefaultModel(): string {
 }
 ```
 
+### Prompt Cache Breakpoint Preparation
+
+The provider module exports a `prepareRequest<T>` helper (`src/providers/sapOrchestration.ts:395`) that is applied to outgoing OpenAI-family requests before they hit the Vercel AI SDK path. It applies explicit prompt-cache breakpoints when the provider/model combination supports them and the caller is not on a ChatGPT subscription (which caches implicitly).
+
+```typescript
+export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(
+  ctx: {
+    providerId: string;
+    modelId: string;
+    auth: { type?: string; source?: string };
+    prompt: LanguageModelV2Prompt;
+  } & T
+): T {
+  const isChatGPT = isChatGPTSubscription(ctx.auth);
+  if (
+    supportsPromptCacheBreakpoint({
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
+      isChatGPTSubscription: isChatGPT,
+    })
+  ) {
+    return { ...ctx, prompt: applyCacheBreakpoint(ctx.prompt) };
+  }
+  return ctx;
+}
+```
+
+**Behaviour**:
+
+- Non-OpenAI models (Anthropic Claude, Google Gemini) are returned unchanged; those model families use their own native cache primitives (Anthropic `cache_control` blocks are applied elsewhere in the request assembly path).
+- ChatGPT-subscription auth (`ctx.auth.type === 'oauth'` with an OpenAI subscription source) is detected via `isChatGPTSubscription(ctx.auth)`. When true, the helper skips explicit breakpoint insertion because the subscription tier caches implicitly on OpenAI's side.
+- The model-id matcher and the actual breakpoint-application logic live in `src/providers/openai/prompt-cache.ts` (`supportsPromptCacheBreakpoint`, `applyCacheBreakpoint`). This split keeps the SAP AI Core wrapper thin and reuses the upstream opencode v1.17.13 caching contract.
+- The intersection type `{ providerId; modelId; auth; prompt } & T` lets callers pass through additional per-request fields (temperature, max_tokens, tools, tool_choice) without losing type information — the returned object preserves the `T` extension while replacing only the `prompt` field when a breakpoint is applied.
+
+Cache-token accounting on the response path is handled by the paired `extractCacheTokens(usage)` helper (`src/providers/sapOrchestration.ts:416`), which normalises both Anthropic-style top-level `cache_read_input_tokens` / `cache_creation_input_tokens` and OpenAI/SAP-Orchestration-style `prompt_tokens_details.cached_tokens` into a single shape consumed by `getCostTracker().recordUsage(...)`.
+
 ## Error Handling
 
 ### Common Errors
