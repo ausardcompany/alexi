@@ -374,6 +374,38 @@ callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
 new providers, tools, or hooks that touch external I/O. See
 `docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
 
+### Pure-function helpers (preferred over stateful services)
+
+For helpers that transform data without I/O — e.g., prompt-shape transforms
+and result-filter helpers — write them as pure functions in a dedicated
+module and export a stable named surface. Two current canonical examples:
+
+- `src/providers/openai/prompt-cache.ts` — `applyCacheBreakpoint(prompt)`,
+  `supportsPromptCacheBreakpoint(opts)`, and `isChatGPTSubscription(auth)` are
+  pure functions with no I/O. They compose cleanly into
+  `prepareRequest(ctx)` on the SAP orchestration provider and are trivially
+  unit-testable without any mocking.
+- `src/tool/grep-signal-controls.ts` — `applySignalControls(matches, controls)`
+  is a pure filter/sort pipeline. `src/tool/grep.ts` re-exports it as a
+  plan-anchored surface so callers can wire signal filtering into ad-hoc
+  grep pipelines without reaching into the primary tool implementation at
+  `src/tool/tools/grep.ts`.
+
+Follow the same shape when adding new transforms: keep the module pure,
+export both the callable and its input types, and avoid globals so parallel
+tests do not need setup/teardown.
+
+### Process-local stores (require explicit teardown)
+
+Modules that maintain process-local mutable state MUST expose an explicit
+teardown/clear function and MUST be called from `afterEach` in tests and
+from server-mode session teardown. The current canonical example is
+`src/permission/provenance.ts`: `recordDenial(toolCallId, provenance)`
+writes into an unbounded `Map<string, PermissionProvenance>`, and
+`clearDenialStore()` is the paired teardown. Tests that seed the store MUST
+call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
+and avoid cross-test leakage.
+
 ### Environment-driven detection (snapshot-and-restore)
 
 Some detection modules read process-level environment variables directly and

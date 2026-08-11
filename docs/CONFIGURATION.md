@@ -412,6 +412,86 @@ Consecutive `Stop` hook rejections are capped to prevent infinite loops. When th
 
 When `continueOnBlock: true`, hook rejections feed the error message back to the model as context instead of halting execution. This allows the model to adapt its behavior.
 
+## Permission Provenance
+
+Every permission decision (`allow` / `deny` / `ask`) carries a `PermissionProvenance`
+record that describes *why* the decision was made. This is critical for SAP AI
+Core enterprise compliance auditing where every permission decision needs a paper
+trail, and it lets the TUI render a "why was this denied?" line alongside the
+denied call.
+
+### PermissionProvenance Shape
+
+```typescript
+// src/permission/provenance.ts
+export interface PermissionProvenance {
+  decision: 'allow' | 'deny' | 'ask';
+  ruleSource: 'config' | 'session' | 'agent' | 'sandbox' | 'default';
+  ruleId?: string;
+  ruleDescription?: string;
+  matchedPattern?: string;
+  reason?: string;
+}
+```
+
+- `ruleSource` identifies where the deciding rule came from:
+  - `config` — a rule in the persisted permission rule set
+  - `session` — a per-session grant (e.g., "allow this operation for the rest
+    of the session" chosen from an ask prompt)
+  - `agent` — an agent-scoped rule injected by the current agent profile
+  - `sandbox` — a sandbox / dangerously-skip-permissions override
+  - `default` — no rule matched, decision defaulted to `ask`
+- `matchedPattern` is a best-effort human-readable pattern (`tools[0]`,
+  `paths[0]`, `commands[0]`, or `hosts[0]` from the matched rule) used only
+  for display.
+- `reason` is an optional free-form string; the session-grant path sets it to
+  `"session grant"`.
+
+### Reading and Formatting Provenance
+
+The provenance surface is re-exported from `src/permission/index.ts`, so
+consumers can import everything from one module:
+
+```typescript
+import {
+  recordDenial,
+  getDenialProvenance,
+  formatProvenanceMessage,
+  clearDenialStore,
+  type PermissionProvenance,
+} from '../permission/index.js';
+
+// PermissionManager.check(ctx) returns { decision, rule, granted, provenance }
+const result = permissionManager.check(ctx);
+if (!result.granted && result.provenance) {
+  console.log(formatProvenanceMessage(result.provenance));
+  // -> Denied by config rule "block-dotfiles"
+  //    or: Auto-approved by session (matched src/**)
+  //    or: Awaiting approval
+}
+
+// Denials are also recorded in a process-local store keyed by operation id.
+const p = getDenialProvenance(operationId);
+if (p) {
+  console.log('Historical denial:', formatProvenanceMessage(p));
+}
+```
+
+`formatProvenanceMessage(p)` returns one of three shapes:
+
+- `Denied by <ruleSource> rule "<ruleId>": <reason>` (when `decision === 'deny'`)
+- `Auto-approved by <ruleSource> (matched <matchedPattern>)` (when `decision === 'allow'`)
+- `Awaiting approval` (when `decision === 'ask'`)
+
+### Denial Store Lifecycle
+
+`recordDenial(toolCallId, provenance)` writes to a **process-local, unbounded**
+`Map<string, PermissionProvenance>`. In short-lived CLI runs the map is
+reclaimed at process exit. In the long-running server surface
+(`src/server/index.ts`), teardown code MUST call `clearDenialStore()` on
+session end to avoid slow growth. Tests that seed the store MUST call it in
+`afterEach`.
+
 ## Instruction Files
 
 Instruction files provide context and guidelines to AI agents via a multi-layer system.
