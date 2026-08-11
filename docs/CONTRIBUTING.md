@@ -374,6 +374,38 @@ callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
 new providers, tools, or hooks that touch external I/O. See
 `docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
 
+### Pure-function helpers (preferred over stateful services)
+
+For helpers that transform data without I/O — e.g., prompt-shape transforms
+and result-filter helpers — write them as pure functions in a dedicated
+module and export a stable named surface. Two current canonical examples:
+
+- `src/providers/openai/prompt-cache.ts` — `applyCacheBreakpoint(prompt)`,
+  `supportsPromptCacheBreakpoint(opts)`, and `isChatGPTSubscription(auth)` are
+  pure functions with no I/O. They compose cleanly into
+  `prepareRequest(ctx)` on the SAP orchestration provider and are trivially
+  unit-testable without any mocking.
+- `src/tool/grep-signal-controls.ts` — `applySignalControls(matches, controls)`
+  is a pure filter/sort pipeline. `src/tool/grep.ts` re-exports it as a
+  plan-anchored surface so callers can wire signal filtering into ad-hoc
+  grep pipelines without reaching into the primary tool implementation at
+  `src/tool/tools/grep.ts`.
+
+Follow the same shape when adding new transforms: keep the module pure,
+export both the callable and its input types, and avoid globals so parallel
+tests do not need setup/teardown.
+
+### Process-local stores (require explicit teardown)
+
+Modules that maintain process-local mutable state MUST expose an explicit
+teardown/clear function and MUST be called from `afterEach` in tests and
+from server-mode session teardown. The current canonical example is
+`src/permission/provenance.ts`: `recordDenial(toolCallId, provenance)`
+writes into an unbounded `Map<string, PermissionProvenance>`, and
+`clearDenialStore()` is the paired teardown. Tests that seed the store MUST
+call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
+and avoid cross-test leakage.
+
 ### Environment-driven detection (snapshot-and-restore)
 
 Some detection modules read process-level environment variables directly and
@@ -602,6 +634,7 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Missing or extra trailing newlines at end of file
 - Inconsistent spacing in namespace and class method definitions
 - Quote-style normalization from double to single quotes per Prettier `singleQuote: true` (applied across `src/` and `tests/`)
+- Multi-line-vs-single-line reflows of nullish-coalescing chains and generic type-parameter blocks to satisfy the 100-column `printWidth`. Recent worked example: the 2026-08-11 pass in commit `cf7e01de` (`style(ci): auto-fix lint/format issues [alexi-bot]`) collapsed the four-part `rule.tools?.[0] ?? rule.paths?.[0] ?? rule.commands?.[0] ?? rule.hosts?.[0]` fallback chain in `src/permission/index.ts` (the `matchedPattern` computation inside the last-match rule-provenance block) onto a single line, and expanded the `prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(ctx: { providerId; modelId; auth; prompt } & T): T` signature in `src/providers/sapOrchestration.ts` from a single-line signature to a multi-line block (line 395-402). Diff statistics: `2 files changed, 9 insertions(+), 10 deletions(-)`. Both changes are pure formatting with no behavioural, API, or provider-routing impact — the fallback semantics (`??` order) and the intersection-type shape (`{ providerId; modelId; auth; prompt } & T`) are preserved verbatim. Unlike the orphan-stub pass documented above, these two files are **live runtime modules** (`PermissionManager.evaluate` and `prepareRequest<T>` respectively), so the auto-fix acts on real code rather than on autohealing-candidate scaffolds.
 - Missing trailing semicolons on statements (e.g., bare `return` inside an early-exit branch, field declarations in object type literals, `const` statements) per Prettier `semi: true` -- recent examples include the semicolon added after the early `return` in `cancel(sessionID)` inside `src/session/prompt-queue.ts` (commit `8a005f03`), the bulk semicolon/quote-style/trailing-newline fixes applied to the orphan `inherited(input)` helper in `src/tool/task.ts` (commit `fe8b98c5`), the nine-file quote-style and trailing-newline pass on the 2026-06-22 upstream-sync stubs across `src/agent/index.ts`, `src/core/config.ts`, `src/core/index.ts`, `src/event/index.ts`, `src/plugin/provider.ts`, `src/session/index.ts`, `src/tool/parameters.test.ts.snap.ts`, `src/tool/task.ts`, and `src/tool/webfetch.ts` (commit `6dc4b883`), the single-line trailing-newline fix appended to the Express OpenAI-compatible route stub `src/router/openaiRoute.ts` (commit `25b45885`, 2026-07-19) immediately after the 2026-07-19 upstream sync (commit `3cca78f4`) imported it without a final LF, the four-file indent-normalisation pass (4-space → 2-space `tabWidth: 2`) on `src/agent/instance-advertisement.ts`, `src/cli/remote.ts`, `src/context/global-sync/bootstrap.ts`, and `src/context/server-session-reducer.ts` (commit `9a914b57`, 2026-07-26) immediately after the 2026-07-26 upstream sync, the three-file trailing-newline / `yield*` → `yield * ` / terminating-semicolon pass on `src/core/config/plugin/provider.ts`, `src/tool/code-mode.ts`, and `src/tool/code-mode-integration.test.ts` (commit `3a9b850b`, 2026-07-29) immediately after the 2026-07-29 upstream sync (commit `719046d4`), and the three-file quote-style-normalisation / trailing-newline pass on `src/permission/PermissionView.ts` (four double-to-single-quote conversions inside an `updatePermissionView(card, permission)` function referencing an unresolved `'utils'` bare-module import and an undeclared `syncDescription` free identifier), `src/tool/BaseSearchToolView.ts` (a trivially-infinite-recursive `bindHeader(parts)` function with an implicit-`any` parameter), and `src/tool/PatchBody.ts` (a top-level `return` statement — a `SyntaxError` in ES modules — inside an `if (diffLines.length > DIFF_MAX_LINES)` block with three undeclared identifiers and a `./DiffOverflow` import missing the mandatory `.js` extension per `NodeNext`) — commit `36ac95b2`, 2026-08-01, immediately after the 2026-08-01 upstream sync (commit `b8b9f01b`, version bump `1.18.17` → `1.18.18`) — all remain orphan stubs and are recorded in the corresponding `CHANGELOG.md` `### Fixed` entry as autohealing candidates. When writing new code, run `npm run format` locally to avoid these no-op fix-up commits from the autohealer. Note that orphan stubs emitted by the daily upstream sync (single-file scaffolds at non-canonical paths under `src/`, importing missing namespaces or referencing undeclared symbols such as `EventHandler`, `FetchOptions`, or the non-existent `'core'`, `'session'`, `'plugin'` packages, or referencing missing sibling directories such as `../handlers/openai`) routinely receive these formatting fix-ups in the commit immediately following the sync; they do not indicate that the stub is wired into the runtime. Verify the canonical implementation path before treating an auto-fixed file as a live module -- for tools, the canonical location is always `src/tool/tools/<name>.ts` registered via `src/tool/registry.ts`, never directly under `src/tool/`; for the event bus the canonical location is `src/bus/index.ts`, not `src/event/index.ts`; for sessions it is `src/core/sessionManager.ts`, not `src/session/index.ts`; for configuration it is `src/config/` (`routingConfig.ts`, `userConfig.ts`, `projectContext.ts`), not `src/core/config.ts`; and for HTTP surfaces it is `src/server/` (the documented server-mode entry point in `docs/API.md`), not `src/router/` (which currently holds orphan Express router stubs). Recall that Alexi's sole provider surface is SAP AI Core Orchestration (`src/providers/`); files under `src/router/` that appear to expose an OpenAI-compatible ingress route are upstream-sync scaffolds and are not part of Alexi's runtime.
 
 ### Daily PR Merge

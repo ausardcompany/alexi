@@ -480,6 +480,42 @@ export function getDefaultModel(): string {
 }
 ```
 
+### Prompt Cache Breakpoint Preparation
+
+The provider module exports a `prepareRequest<T>` helper (`src/providers/sapOrchestration.ts:395`) that is applied to outgoing OpenAI-family requests before they hit the Vercel AI SDK path. It applies explicit prompt-cache breakpoints when the provider/model combination supports them and the caller is not on a ChatGPT subscription (which caches implicitly).
+
+```typescript
+export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(
+  ctx: {
+    providerId: string;
+    modelId: string;
+    auth: { type?: string; source?: string };
+    prompt: LanguageModelV2Prompt;
+  } & T
+): T {
+  const isChatGPT = isChatGPTSubscription(ctx.auth);
+  if (
+    supportsPromptCacheBreakpoint({
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
+      isChatGPTSubscription: isChatGPT,
+    })
+  ) {
+    return { ...ctx, prompt: applyCacheBreakpoint(ctx.prompt) };
+  }
+  return ctx;
+}
+```
+
+**Behaviour**:
+
+- Non-OpenAI models (Anthropic Claude, Google Gemini) are returned unchanged; those model families use their own native cache primitives (Anthropic `cache_control` blocks are applied elsewhere in the request assembly path).
+- ChatGPT-subscription auth (`ctx.auth.type === 'oauth'` with an OpenAI subscription source) is detected via `isChatGPTSubscription(ctx.auth)`. When true, the helper skips explicit breakpoint insertion because the subscription tier caches implicitly on OpenAI's side.
+- The model-id matcher and the actual breakpoint-application logic live in `src/providers/openai/prompt-cache.ts` (`supportsPromptCacheBreakpoint`, `applyCacheBreakpoint`). This split keeps the SAP AI Core wrapper thin and reuses the upstream opencode v1.17.13 caching contract.
+- The intersection type `{ providerId; modelId; auth; prompt } & T` lets callers pass through additional per-request fields (temperature, max_tokens, tools, tool_choice) without losing type information — the returned object preserves the `T` extension while replacing only the `prompt` field when a breakpoint is applied.
+
+Cache-token accounting on the response path is handled by the paired `extractCacheTokens(usage)` helper (`src/providers/sapOrchestration.ts:416`), which normalises both Anthropic-style top-level `cache_read_input_tokens` / `cache_creation_input_tokens` and OpenAI/SAP-Orchestration-style `prompt_tokens_details.cached_tokens` into a single shape consumed by `getCostTracker().recordUsage(...)`.
+
 ## Error Handling
 
 ### Common Errors
@@ -630,6 +666,60 @@ pattern).
 - Enable auto-routing with `--prefer-cheap` flag
 - Set up routing rules to prefer cost-effective models
 - Monitor usage with `/cost` command
+
+### Prompt Cache Breakpoints (OpenAI GPT-5.6+ family)
+
+The SAP orchestration provider applies explicit prompt-cache breakpoints on outgoing
+requests for OpenAI-family models routed through the Vercel AI SDK path. This is
+scoped to the GPT-5.6+ family (`gpt-5.6`, `gpt-5.7`, `gpt-5.8`, `gpt-5.9`, `gpt-6`,
+`gpt-7`, `gpt-8`, `gpt-9`) and only when the caller is **not** on a ChatGPT
+subscription account (which caches implicitly on the provider side, making an
+explicit breakpoint redundant at best and confusing to provider-side accounting
+at worst). Non-OpenAI models (Anthropic Claude, Google Gemini) are returned
+unchanged.
+
+The breakpoint marks a stable prefix boundary — everything up to and including
+the marked message is treated as cacheable across calls. Trailing user turns
+that typically carry per-call environment details (working directory, git
+status, current time) intentionally sit outside the breakpoint so the prefix
+cache stays stable.
+
+**Public surface** (`src/providers/sapOrchestration.ts` and
+`src/providers/openai/prompt-cache.ts`):
+
+```typescript
+import { prepareRequest } from './providers/sapOrchestration.js';
+
+const outgoing = prepareRequest({
+  providerId: 'sap-ai-core',
+  modelId: 'gpt-5.6-turbo',
+  auth: { type: 'oauth', source: 'sap-ai-core' }, // NOT chatgpt subscription
+  prompt: [
+    { role: 'system', content: 'You are a helpful assistant.' },
+    { role: 'user', content: 'Explain caching.' },
+  ],
+});
+// outgoing.prompt now has providerOptions.openai.cacheBreakpoint = true
+// on the last system/assistant message.
+```
+
+Under the hood, `applyCacheBreakpoint(prompt)` walks the prompt array from the
+tail and marks the last `system` or `assistant` message. The marker is written
+to `providerOptions.openai.cacheBreakpoint`. The `LanguageModelV2Prompt`
+structural type is kept local (not pulled in from `@ai-sdk/provider`) so the
+runtime dependency footprint stays minimal — the SAP AI SDK re-exports
+compatible shapes at runtime and callers can pass plain objects.
+
+**Detection helpers** exported from `src/providers/openai/prompt-cache.ts`:
+
+- `supportsPromptCacheBreakpoint({ providerId, modelId, isChatGPTSubscription })`
+  — pure predicate returning `true` when the model matches the GPT-5.6+ regex
+  and the caller is not a ChatGPT subscriber.
+- `isChatGPTSubscription(auth)` — zero-cost heuristic returning `true` when
+  `auth.type === 'oauth' && auth.source === 'chatgpt'`.
+- `applyCacheBreakpoint(prompt)` — the pure array transform.
+
+Aligns with upstream kilocode `c554409080..a5aaef74a` (opencode v1.17.13 parity).
 
 ## Security
 
