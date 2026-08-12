@@ -1475,3 +1475,139 @@ that need browser automation should install it explicitly.
 4. **Environment Isolation**: User config in `~/.alexi/`, never committed
 5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
 6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout
+
+## TUI Tool-Call Disclosure
+
+The Ink TUI renders tool calls through a two-layer component pair introduced in 1.20.2:
+
+- `src/cli/tui/components/ToolRow.tsx` — the primary renderer. Owns disclosure state, per-status colors (`colors.toolRunning`, `colors.toolCompleted`, `colors.toolFailed`), tool-specific icons, and body rendering (bash command output, diff, plain output, error).
+- `src/cli/tui/components/ToolCallBlock.tsx` — a thin backwards-compatible wrapper that re-exports `ToolRowProps` as `ToolCallBlockProps` and delegates to `ToolRow`. Preserved so external consumers importing `ToolCallBlock` continue to work.
+- `src/cli/tui/utils/formatToolOutput.ts` — pure string helpers (`formatBashCommand`, `truncateOutput`, `formatParamsPreview`, `formatDuration`, `guessLanguageFromPath`) kept separate from the React components so they can be unit-tested without an Ink render harness.
+- `src/cli/tui/components/DiffView.tsx` — now applies best-effort syntax highlighting via `cli-highlight` on every diff line, driven by `guessLanguageFromPath(filePath)`. Falls back to plain text on any highlighter failure so a broken grammar never breaks the render.
+
+Behavioural rules:
+
+- Rows auto-expand on `failed` status so users see errors without interacting.
+- Bash output renders with a classic terminal-style `$ command` prefix.
+- Long outputs are truncated to `DEFAULT_MAX_OUTPUT_LINES = 20` lines with a `... (N more lines)` hint (kept lines: `DEFAULT_TRUNCATED_OUTPUT_LINES = 15`).
+- Param previews (`filePath`, `path`, `file`, `command`, `pattern`, `query` in that priority order) are truncated to 50 characters with a `\u2026` ellipsis.
+
+```mermaid
+sequenceDiagram
+    participant Agent as AgenticChat
+    participant Bus as EventBus
+    participant MessageArea as MessageArea.tsx
+    participant ToolRow as ToolRow.tsx
+    participant DiffView as DiffView.tsx
+    participant Format as formatToolOutput.ts
+    participant Highlighter as cli-highlight
+
+    Agent->>Bus: toolCallStarted(id, toolName, params)
+    Bus->>MessageArea: ToolCallState (status: running)
+    MessageArea->>ToolRow: render (status=running, isExpanded=false)
+    ToolRow->>Format: formatParamsPreview(params)
+    Format-->>ToolRow: "filePath: src/foo.ts"
+    Note over ToolRow: Row shows Spinner + tool icon + params preview + " running\u2026"
+
+    Agent->>Bus: toolCallCompleted(id, output, diff?)
+    Bus->>MessageArea: ToolCallState (status: completed, output, diff?)
+    MessageArea->>ToolRow: render (status=completed, isExpanded=true)
+
+    alt Bash tool
+        ToolRow->>Format: formatBashCommand(params.command)
+        Format-->>ToolRow: "$ npm test"
+        ToolRow->>Format: truncateOutput(output, 20, 15)
+        Format-->>ToolRow: { text, truncated, remaining }
+    else Edit tool with diff
+        ToolRow->>DiffView: render(filePath, hunks)
+        DiffView->>Format: guessLanguageFromPath(filePath)
+        Format-->>DiffView: "typescript"
+        loop for each diff line
+            DiffView->>Highlighter: highlight(content, { language, ignoreIllegals: true })
+            alt Highlighter throws
+                Highlighter--xDiffView: error
+                DiffView->>DiffView: fall back to raw content
+            else
+                Highlighter-->>DiffView: highlighted ANSI string
+            end
+        end
+    end
+```
+
+## Session Retry with Bounded Exponential Backoff
+
+`src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `maxAttempts` | 8 | Maximum number of attempts (including the first) |
+| `baseMs` | 500 | Initial delay in ms before the first retry |
+| `maxMs` | 30 000 | Upper bound on any single delay in ms |
+| `jitter` | `true` | Apply full jitter to the computed delay |
+
+Formula: `delay(attempt) = min(maxMs, baseMs * 2^attempt)`, then full jitter (`Math.random() * delay`) — see AWS "Exponential Backoff and Jitter" (2015). Worst case with defaults: 8 attempts × 30s cap ≈ 4 minutes.
+
+The `shouldRetry` predicate is supplied by the caller so this module stays classifier-agnostic. The transient-vs-permanent contract lives in `AGENTS.md` and is implemented in `src/core/error-backoff.ts`.
+
+## Config Instance Cache Invalidation
+
+`src/config/invalidation.ts` (introduced in 1.20.2, ports kilocode `19a2a3c4d`) provides a registry-based invalidation surface for per-instance config caches. Modules that maintain a config-derived cache (routing config, provider config, permission ruleset, etc.) register a disposer via `registerInstanceCache(dispose)` at module load; when global config changes, `invalidateGlobalConfig()` flushes every registered cache.
+
+`updateGlobal(updates, { dispose: true })` in `src/config/userConfig.ts` performs a dynamic import of `./invalidation.js` and calls `invalidateGlobalConfig()` after writing the updated config to disk. This ensures in-flight sessions see fresh SAP AI Core credentials, routing rewrites, and permission changes without a restart. `dispose: false` opts out.
+
+```mermaid
+flowchart LR
+    User[User writes<br/>~/.alexi/config.json]
+    UpdateGlobal[updateGlobal<br/>userConfig.ts]
+    SaveDisk[fs.writeFileSync<br/>config.json]
+    DynImport[dynamic import<br/>invalidation.js]
+    Invalidate[invalidateGlobalConfig]
+    Reg[instanceCaches: Set]
+    Routing[Routing config cache]
+    Provider[Provider config cache]
+    Permission[Permission ruleset cache]
+
+    User --> UpdateGlobal
+    UpdateGlobal --> SaveDisk
+    UpdateGlobal -- "if dispose: true" --> DynImport
+    DynImport --> Invalidate
+    Invalidate --> Reg
+    Reg -->|dispose| Routing
+    Reg -->|dispose| Provider
+    Reg -->|dispose| Permission
+```
+
+Errors thrown by individual disposers are caught and logged via `console.warn` (this module intentionally does not depend on `src/utils/logger.ts` to keep it importable from early boot paths).
+
+## Database Migration Runner
+
+`src/core/database/migration.ts` (introduced in 1.20.2, ports kilocode `2c2b0a2ff`) prevents primary-key collisions when two processes race to apply the same migration. The runner takes an IMMEDIATE write lock via `db.transactionImmediate(fn)` and re-checks `tx.has(migration.id)` inside the transaction before applying the migration body. If the id is already present, the migration was applied by the other process while we were waiting for the lock — return without replaying.
+
+The `MigrationDb` / `MigrationTx` interfaces are intentionally narrow so this module does not hard-couple to a specific SQL adapter (better-sqlite3, effect-sql, or raw pg). Callers implement `transactionImmediate` against the equivalent of `BEGIN IMMEDIATE` (SQLite) or a serialize isolation level (Postgres).
+
+## Filesystem Watcher (VCS-Guarded)
+
+`src/core/filesystem/watcher.ts` (introduced in 1.20.2) only initializes the filesystem watcher when the workspace location has VCS metadata AND the experimental flag `ALEXI_EXPERIMENTAL_FILEWATCHER=1` is set. This prevents crashes and excessive polling in SAP AI Core sandboxed workspaces that may not be git repositories.
+
+```ts
+export function maybeStartFileWatcher(
+  location: WatchLocation,
+  subscribe: (dir: string) => () => void
+): (() => void) | null {
+  if (location.vcs && isExperimentalFileWatcherEnabled()) {
+    return subscribe(location.directory);
+  }
+  return null;
+}
+```
+
+The `subscribe` callback is injected so this module stays independent of the concrete watcher backend (chokidar, native `fs.watch`, or an Effect-based stream).
+
+## Provider Transform Additions
+
+`src/providers/transform.ts` gained two new helpers in 1.20.2 (ports kilocode `031ea2feb`):
+
+- `deriveReasoningVariants<T extends ModelInfoLike>(model): T[]` — returns the base model followed by one variant per available reasoning effort (id suffixed with `-<effort>`). Never mutates its input.
+- `mergeProviderModels<T>(base, custom): Record<string, T>` — merges a custom provider's model map on top of a base provider's model map without wiping base variants. Custom entries win per-id; base variants survive when the custom map does not redefine the same id.
+
+The pre-existing `sanitizeOpenAISchema`, `enforceStrictSchema`, `isOpenAIShapedModel`, `lowerMcpToolsForOpenAIShaped`, `transformInterleavedReasoning`, and `ensureDeepSeekReasoning` helpers are unchanged.

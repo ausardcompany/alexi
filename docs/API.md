@@ -1178,3 +1178,184 @@ logger.print('Raw output');  // Always outputs, for CLI display
 | `info` | 1 | `message` (no prefix) |
 | `warn` | 2 | `[WARN] message` |
 | `error` | 3 | `[ERROR] message` |
+
+## TUI Tool-Call Rendering API
+
+Introduced in 1.20.2. See `docs/ARCHITECTURE.md#tui-tool-call-disclosure` for the full flow.
+
+### `ToolRow` component (`src/cli/tui/components/ToolRow.tsx`)
+
+```typescript
+export type ToolStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface ToolRowProps {
+  toolName: string;
+  params: Record<string, unknown>;
+  status: ToolStatus;
+  output: string | null;
+  error: string | null;
+  isExpanded: boolean;
+  onToggle: () => void;
+  diff: DiffData | null;
+  /** Duration in ms (set on completion) */
+  duration?: number;
+}
+
+export function ToolRow(props: ToolRowProps): React.JSX.Element;
+```
+
+`ToolCallBlock` is retained as a thin wrapper — `type ToolCallBlockProps = ToolRowProps` and the component delegates to `ToolRow` — so existing callers do not need to change.
+
+### `formatToolOutput` helpers (`src/cli/tui/utils/formatToolOutput.ts`)
+
+Pure string helpers, unit-testable without an Ink render harness.
+
+```typescript
+export function formatBashCommand(command: string): string;
+
+export interface TruncatedOutput {
+  text: string;
+  truncated: boolean;
+  remaining: number;
+}
+export function truncateOutput(
+  text: string,
+  maxLines?: number, // default 20
+  keepLines?: number // default 15
+): TruncatedOutput;
+
+export function formatParamsPreview(
+  params: Record<string, unknown>,
+  maxLen?: number // default 50
+): string;
+
+export function formatDuration(ms: number): string;
+
+export function guessLanguageFromPath(filePath: string): string | undefined;
+```
+
+`guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. Returns `undefined` for unknown extensions so callers can fall back to plain text.
+
+## Agent Permission Expansion API
+
+Introduced in 1.20.2. Path in agent config files may use `~` / `~/foo` shorthand; this module normalizes them against `$HOME` before they reach the permission matcher.
+
+```typescript
+// src/agent/permissions-expand.ts
+
+export const PATH_ACTIONS = ['external_directory', 'read', 'edit'] as const;
+export type PathAction = (typeof PATH_ACTIONS)[number];
+
+export interface AgentPermissionEntry {
+  action: string;
+  path?: string;
+  [key: string]: unknown;
+}
+
+export function normalizePermissionPath(p: string, home: string): string;
+
+export function expandPermissions<T extends AgentPermissionEntry>(
+  entries: ReadonlyArray<T>,
+  home?: string // defaults to os.homedir()
+): T[];
+```
+
+Entries whose `action` is not in `PATH_ACTIONS` pass through unchanged. Rules with an unrecognised action pass through unchanged.
+
+## Session Retry API
+
+Introduced in 1.20.2. Bounded exponential backoff with full jitter.
+
+```typescript
+// src/core/session/retry.ts
+
+export interface RetryOptions {
+  /** Maximum number of attempts (including the first). Default: 8. */
+  maxAttempts?: number;
+  /** Initial delay in ms before the first retry. Default: 500. */
+  baseMs?: number;
+  /** Upper bound on any single delay in ms. Default: 30 000. */
+  maxMs?: number;
+  /** When true (default), apply full jitter. */
+  jitter?: boolean;
+}
+
+export function computeDelay(attempt: number, opts?: RetryOptions): number;
+
+export function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  shouldRetry: (err: unknown) => boolean,
+  opts?: RetryOptions
+): Promise<T>;
+```
+
+The `shouldRetry` predicate is supplied by the caller. The transient-vs-permanent classifier lives in `src/core/error-backoff.ts` and is documented in `AGENTS.md#error-classification-retry-vs-config-fix`.
+
+## Database Migration API
+
+Introduced in 1.20.2. Serialized migration application with primary-key-safe re-check inside the transaction.
+
+```typescript
+// src/core/database/migration.ts
+
+export interface Migration {
+  id: string;
+  up: (tx: MigrationTx) => Promise<void>;
+}
+
+export interface MigrationTx {
+  has(id: string): Promise<boolean>;
+  record(id: string): Promise<void>;
+}
+
+export interface MigrationDb {
+  transactionImmediate<T>(fn: (tx: MigrationTx) => Promise<T>): Promise<T>;
+  completedIds(): Promise<Set<string>>;
+}
+
+export async function applyMigrations(
+  db: MigrationDb,
+  migrations: readonly Migration[]
+): Promise<void>;
+```
+
+Callers implement `MigrationDb`/`MigrationTx` against their SQL adapter of choice (better-sqlite3, effect-sql, raw pg). `transactionImmediate` MUST issue the equivalent of `BEGIN IMMEDIATE` (SQLite) or set the isolation level to serialize (Postgres) so the re-check inside the transaction is meaningful.
+
+## Filesystem Watcher API
+
+Introduced in 1.20.2. VCS-guarded and gated behind an experimental flag.
+
+```typescript
+// src/core/filesystem/watcher.ts
+
+export interface WatchLocation {
+  directory: string;
+  vcs: boolean;
+}
+
+export function isExperimentalFileWatcherEnabled(): boolean;
+
+export function maybeStartFileWatcher(
+  location: WatchLocation,
+  subscribe: (dir: string) => () => void
+): (() => void) | null;
+```
+
+Returns a disposer or `null` when the watcher was skipped. Enable via `ALEXI_EXPERIMENTAL_FILEWATCHER=1`; callers must have already confirmed VCS metadata is present (`location.vcs = true`) before invoking.
+
+## Config Instance Cache Invalidation API
+
+Introduced in 1.20.2. Ports kilocode `19a2a3c4d`.
+
+```typescript
+// src/config/invalidation.ts
+
+type InstanceCacheDisposer = () => void;
+
+export function registerInstanceCache(dispose: InstanceCacheDisposer): () => void;
+export function invalidateGlobalConfig(): void;
+/** @internal test/debug helper */
+export function _instanceCacheCount(): number;
+```
+
+`updateGlobal(updates, { dispose: true })` in `src/config/userConfig.ts` calls `invalidateGlobalConfig()` after writing the updated config to disk. Pass `dispose: false` to suppress the flush.

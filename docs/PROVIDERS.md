@@ -909,6 +909,71 @@ errors:
 4. On Windows, either install the optional `win-ca` package or set
    `NODE_EXTRA_CA_CERTS` — native Windows harvest is not yet implemented.
 
+## Reasoning-Variant Derivation and Base/Custom Model Merge
+
+Introduced in 1.20.2 (ports kilocode `031ea2feb`). Lives in `src/providers/transform.ts` alongside the pre-existing `sanitizeOpenAISchema` / `enforceStrictSchema` helpers.
+
+### Why this exists
+
+Reasoning-enabled models (Grok reasoning, Kimi adaptive effort, GPT-5.x reasoning modes) declare a set of reasoning efforts on their base descriptor:
+
+```ts
+{
+  id: 'gpt-5',
+  reasoning: { efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }
+}
+```
+
+Previously, when a custom provider (e.g. a SAP AI Core deployment that wraps a base model) overrode the base model's map, reasoning variants were dropped. The custom map replaced the base map wholesale.
+
+### `deriveReasoningVariants`
+
+Returns the base model followed by one variant per available effort (id suffixed with `-<effort>`). When the model has no `reasoning.efforts`, the base is returned unchanged. Never mutates its input.
+
+```ts
+export interface ModelInfoLike {
+  id: string;
+  variant?: string;
+  reasoning?: {
+    efforts?: readonly string[];
+    defaultEffort?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export function deriveReasoningVariants<T extends ModelInfoLike>(model: T): T[];
+```
+
+Example:
+
+```ts
+const base = {
+  id: 'gpt-5',
+  reasoning: { efforts: ['low', 'medium', 'high'] as const },
+};
+deriveReasoningVariants(base);
+// [
+//   { id: 'gpt-5', reasoning: { efforts: [...] } },
+//   { id: 'gpt-5-low',    variant: 'low',    reasoning: { efforts: [...], defaultEffort: 'low' } },
+//   { id: 'gpt-5-medium', variant: 'medium', reasoning: { efforts: [...], defaultEffort: 'medium' } },
+//   { id: 'gpt-5-high',   variant: 'high',   reasoning: { efforts: [...], defaultEffort: 'high' } },
+// ]
+```
+
+### `mergeProviderModels`
+
+Merges a custom provider's model map on top of a base provider's model map without wiping base variants. Custom entries win per-id; base variants survive when the custom map does not redefine the same id.
+
+```ts
+export function mergeProviderModels<T>(
+  base: Readonly<Record<string, T>> | undefined,
+  custom: Readonly<Record<string, T>> | undefined
+): Record<string, T>;
+```
+
+The structural `ModelInfoLike` type is deliberately loose so callers using either the SAP orchestration model records or a custom `ModelInfo` shape can both use these helpers without a coercion.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

@@ -1332,3 +1332,79 @@ When contributing new features:
 4. Include edge cases
 5. Follow the patterns documented above
 6. Run full test suite before submitting: `npm test && npm run lint`
+
+## Testing Patterns Added in 1.20.2
+
+The 2026-08-12 sync introduces several new pure modules with unit-testable APIs. The tests added in this pass are worth calling out as reference patterns.
+
+### Pure string helpers testable without Ink
+
+`src/cli/tui/utils/formatToolOutput.ts` deliberately separates string transformation from React rendering so the helpers can be tested against `vitest` directly without booting an Ink render harness. See `tests/cli/tui/formatToolOutput.test.ts`:
+
+```typescript
+import {
+  formatBashCommand,
+  formatDuration,
+  formatParamsPreview,
+  guessLanguageFromPath,
+  truncateOutput,
+} from '../../../src/cli/tui/utils/formatToolOutput.js';
+import { describe, it, expect } from 'vitest';
+
+describe('formatBashCommand', () => {
+  it('prefixes command with $ ', () => {
+    expect(formatBashCommand('npm test')).toBe('$ npm test');
+  });
+
+  it('trims trailing whitespace', () => {
+    expect(formatBashCommand('ls -la   ')).toBe('$ ls -la');
+  });
+});
+```
+
+Rule of thumb: any time you have logic in a TUI component that does not consume Ink primitives, factor it out into `src/cli/tui/utils/*.ts` and test it there. Reserve the ink-testing-library / render-tree tests for component-level assertions only.
+
+### Component-level tests with `ink-testing-library`
+
+`tests/cli/tui/ToolRow.test.tsx` renders `ToolRow` under `ink-testing-library` and asserts on the frame contents. This is the correct place to test row-level concerns:
+
+- Auto-expansion on `failed` status
+- Terminal-style `$ command` prefix for bash output
+- Diff rendering with syntax highlighting
+- Status-driven colors
+
+### `withRetry` backoff assertions
+
+`tests/session/retry.test.ts` covers `withRetry` from `src/core/session/retry.ts`. Prefer `jitter: false` in tests so the exponential curve is deterministic:
+
+```typescript
+import { computeDelay, withRetry } from '../../src/core/session/retry.js';
+
+it('doubles the delay each attempt without jitter', () => {
+  expect(computeDelay(0, { baseMs: 500, maxMs: 30_000, jitter: false })).toBe(500);
+  expect(computeDelay(1, { baseMs: 500, maxMs: 30_000, jitter: false })).toBe(1_000);
+  expect(computeDelay(2, { baseMs: 500, maxMs: 30_000, jitter: false })).toBe(2_000);
+});
+```
+
+For assertions on the retry loop itself, provide a `shouldRetry` predicate and a `fn` that throws N transient errors before returning a value.
+
+### Concurrent migration tests
+
+`tests/core/database/migration-concurrent.test.ts` covers the primary-key-safe re-check inside the IMMEDIATE transaction. Build a minimal in-memory `MigrationDb` / `MigrationTx` mock that mirrors real SQL adapter semantics (the write lock is what makes the fix testable). Do not depend on `better-sqlite3` in unit tests — the interface is intentionally narrow so a plain JavaScript mock suffices.
+
+### Config invalidation tests
+
+`tests/config/global-invalidation.test.ts` covers `registerInstanceCache` / `invalidateGlobalConfig`. Use `_instanceCacheCount()` to assert on the registry size; cover the case where a disposer throws (the flush must continue for the remaining disposers, and `console.warn` should be invoked).
+
+### Reasoning-variant tests
+
+`tests/providers/reasoning-variants.test.ts` covers `deriveReasoningVariants` and `mergeProviderModels`. Key cases:
+
+- Model with no `reasoning.efforts` returns the base unchanged (single-element array).
+- Model with efforts returns `1 + efforts.length` variants; each variant's id is suffixed with `-<effort>` and its `reasoning.defaultEffort` equals the effort.
+- `mergeProviderModels(base, custom)` returns a shallow merge with custom entries winning per-id; base entries that are not redefined must survive.
+
+### Windows path canonicalization tests
+
+`tests/reference/canonicalize-repo-path.test.ts` covers `canonicalizeRepoPath` from `src/reference/repository-cache.ts` (re-exported through `src/reference/index.ts` as of 1.20.2). Cross-platform tests should conditionally skip Windows-specific assertions when `process.platform !== 'win32'`.

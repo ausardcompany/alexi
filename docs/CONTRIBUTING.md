@@ -732,6 +732,34 @@ When adding a new interactive REPL command (like `/rewind` or `/code-review`):
 - Provide minimal reproducible examples for bugs
 - Reference specific file paths and line numbers
 
+## Factoring TUI Components
+
+Effective 1.20.2, TUI components under `src/cli/tui/components/` should follow a two-layer separation:
+
+1. **Pure string / logic helpers** live in `src/cli/tui/utils/*.ts` and never import from `ink` or `react`. Example: `formatBashCommand`, `truncateOutput`, `formatParamsPreview`, `formatDuration`, `guessLanguageFromPath` in `src/cli/tui/utils/formatToolOutput.ts`.
+2. **Render-only components** live in `src/cli/tui/components/*.tsx` and consume the helpers above. Example: `ToolRow.tsx` delegates all string formatting to `formatToolOutput.ts` and focuses on layout, colors, and disclosure state.
+
+This split lets pure helpers be unit-tested without booting an Ink render harness (see `docs/TESTING.md#pure-string-helpers-testable-without-ink`). If you find yourself writing complex string manipulation inside a component's render body, move it to `utils/` first.
+
+When a component's public prop shape is stable and external consumers import it by name, prefer a thin backwards-compatible wrapper over a rename. `ToolCallBlock.tsx` is the reference example — it re-exports `ToolRowProps` as `ToolCallBlockProps` and delegates to `ToolRow` in ~4 lines.
+
+## Introducing Retry-Aware Modules
+
+Any new module that calls out to SAP AI Core (or another network dependency) should:
+
+1. Use `withRetry` from `src/core/session/retry.ts` for retries — do not roll your own loop.
+2. Supply a `shouldRetry` predicate that consults the transient-vs-permanent contract in `AGENTS.md#error-classification-retry-vs-config-fix`. The canonical implementation lives in `src/core/error-backoff.ts`.
+3. Tune `RetryOptions` for the workload: interactive chat uses the defaults (8 attempts × 30s cap); background jobs may prefer a lower `maxAttempts` and a higher `maxMs`.
+4. In tests, pass `jitter: false` so the exponential curve is deterministic.
+
+Never re-add unconditional retries. Retrying an expensive model call on a permanent failure (401, 403, 400, `model_not_found`) just burns tokens.
+
+## Config-Derived Caches
+
+If your module maintains a cache derived from `~/.alexi/config.json` (routing config, provider config, permission ruleset, model list, etc.), register a disposer via `registerInstanceCache` from `src/config/invalidation.ts` at module load. `updateGlobal(updates, { dispose: true })` will then flush your cache whenever the user rewrites global config.
+
+Do not read the config file synchronously on every operation — cache the parsed result and rely on invalidation for freshness.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
