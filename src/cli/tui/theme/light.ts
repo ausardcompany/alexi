@@ -22,6 +22,11 @@ export const lightTheme: ThemeColors = {
   warning: '#d68c27',
   info: '#318795',
 
+  // Tool-call status
+  toolRunning: '#7b5bb6', // violet — active/running
+  toolCompleted: '#8a8a8a', // dim — succeeded
+  toolFailed: '#d1383d', // red — failed
+
   // Agent colors
   agents: {
     code: '#3d9a57',
