@@ -6,10 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import {
-  deriveReasoningVariants,
-  mergeProviderModels,
-} from '../../src/providers/transform.js';
+import { deriveReasoningVariants, mergeProviderModels } from '../../src/providers/transform.js';
 
 describe('deriveReasoningVariants', () => {
   it('returns the base model unchanged when no reasoning.efforts are declared', () => {

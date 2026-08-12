@@ -56,7 +56,7 @@ describe('invalidateGlobalConfig', () => {
     const disposeB = registerInstanceCache(b);
 
     // Silence the console.warn emitted by the swallowed error.
-    // eslint-disable-next-line no-console
+
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     expect(() => invalidateGlobalConfig()).not.toThrow();

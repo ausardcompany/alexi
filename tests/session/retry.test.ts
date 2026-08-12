@@ -53,18 +53,14 @@ describe('withRetry', () => {
   it('retries transient errors up to maxAttempts then throws the last one', async () => {
     const err = new Error('transient');
     const fn = vi.fn().mockRejectedValue(err);
-    await expect(
-      withRetry(fn, () => true, { maxAttempts: 3, baseMs: 1 })
-    ).rejects.toBe(err);
+    await expect(withRetry(fn, () => true, { maxAttempts: 3, baseMs: 1 })).rejects.toBe(err);
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
   it('does not retry when shouldRetry returns false', async () => {
     const err = new Error('permanent');
     const fn = vi.fn().mockRejectedValue(err);
-    await expect(
-      withRetry(fn, () => false, { maxAttempts: 5, baseMs: 1 })
-    ).rejects.toBe(err);
+    await expect(withRetry(fn, () => false, { maxAttempts: 5, baseMs: 1 })).rejects.toBe(err);
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
