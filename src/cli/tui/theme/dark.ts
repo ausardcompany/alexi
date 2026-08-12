@@ -22,6 +22,11 @@ export const darkTheme: ThemeColors = {
   warning: '#f5a742',
   info: '#56b6c2',
 
+  // Tool-call status
+  toolRunning: '#9d7cd8', // violet — active/running
+  toolCompleted: '#6a6a6a', // dim — succeeded
+  toolFailed: '#e06c75', // red — failed
+
   // Agent colors
   agents: {
     code: '#7fd88f',

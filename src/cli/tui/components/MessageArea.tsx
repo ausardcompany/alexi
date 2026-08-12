@@ -4,7 +4,7 @@ import { Box, Text } from 'ink';
 import { MessageBubble } from './MessageBubble.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
 import { Spinner } from './Spinner.js';
-import { ToolCallBlock } from './ToolCallBlock.js';
+import { ToolRow } from './ToolRow.js';
 import type { ToolCallState } from '../context/ChatContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import type { ImageAttachmentPreview } from '../context/AttachmentContext.js';
@@ -82,7 +82,7 @@ export function MessageArea({
             images={msg.images}
           />
           {msg.toolCalls.map((tc) => (
-            <ToolCallBlock
+            <ToolRow
               key={tc.id}
               toolName={tc.toolName}
               params={tc.params}
@@ -99,7 +99,7 @@ export function MessageArea({
 
       {/* Active tool calls (currently executing) */}
       {activeToolCalls.map((tc) => (
-        <ToolCallBlock
+        <ToolRow
           key={tc.id}
           toolName={tc.toolName}
           params={tc.params}

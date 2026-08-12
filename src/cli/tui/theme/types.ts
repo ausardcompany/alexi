@@ -22,6 +22,11 @@ export interface ThemeColors {
   warning: string;
   info: string;
 
+  // Tool-call status colors (drive per-row styling in ToolRow)
+  toolRunning: string;
+  toolCompleted: string;
+  toolFailed: string;
+
   // Agent colors
   agents: Record<AgentName, string>;
 

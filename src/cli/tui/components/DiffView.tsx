@@ -1,8 +1,10 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { highlight } from 'cli-highlight';
 
 import { useTheme } from '../context/ThemeContext.js';
 import type { DiffHunk, DiffLine } from '../context/ChatContext.js';
+import { guessLanguageFromPath } from '../utils/formatToolOutput.js';
 
 export interface DiffViewProps {
   filePath: string;
@@ -75,12 +77,29 @@ function countChanges(hunks: DiffHunk[]): { additions: number; deletions: number
  * - diffLineNumber color for gutter
  * - Collapsible long diffs (first 10 lines + "N more")
  */
+/**
+ * Best-effort syntax highlight of a single line. Falls back to the raw
+ * text on any highlighter failure (unknown language, illegal input, …)
+ * so a broken highlighter never breaks the diff render.
+ */
+function highlightLine(content: string, language: string | undefined): string {
+  if (!language || content.length === 0) {
+    return content;
+  }
+  try {
+    return highlight(content, { language, ignoreIllegals: true });
+  } catch {
+    return content;
+  }
+}
+
 export function DiffView({ filePath, hunks }: DiffViewProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
 
   const gutterWidth = computeGutterWidth(hunks);
   const { additions, deletions } = countChanges(hunks);
+  const language = guessLanguageFromPath(filePath);
 
   return (
     <Box flexDirection="column">
@@ -140,12 +159,14 @@ export function DiffView({ filePath, hunks }: DiffViewProps): React.JSX.Element 
 
                   const gutter = `${padNum(leftNum, gutterWidth)} ${padNum(rightNum, gutterWidth)}`;
 
+                  const highlighted = highlightLine(line.content, language);
+
                   return (
                     <Box key={lineIdx}>
                       <Text color={colors.diffLineNumber}>{gutter} </Text>
                       <Text color={lineColor} backgroundColor={bgColor}>
                         {linePrefix(line.type)}
-                        {line.content}
+                        {highlighted}
                       </Text>
                     </Box>
                   );
