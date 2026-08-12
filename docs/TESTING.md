@@ -1145,6 +1145,45 @@ describe('resolveFileInclusions', () => {
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
 
+## Test File Formatting
+
+Test files under `tests/` and co-located `src/**/*.test.ts` files are subject to
+the same Prettier and ESLint policies as runtime source (see
+`docs/CONTRIBUTING.md` under **Style Auto-Fix**). Two patterns recur in
+CI-driven auto-fix passes on the test tree and are worth calling out so
+contributors do not re-introduce them by hand:
+
+1. **Do not add `// eslint-disable-next-line no-console` above `vi.spyOn(console, ...)`.**
+   The `no-console` ESLint rule targets the `console.*` call surface, not
+   `vi.spyOn(console, 'warn').mockImplementation(...)` which manipulates the
+   `console` object via property reference. Spy-and-silence patterns like this
+   need no eslint-disable pragma and Prettier's auto-fix pass will strip such
+   comments. Canonical example in `tests/config/global-invalidation.test.ts:56`:
+
+   ```typescript
+   // Silence the console.warn emitted by the swallowed error.
+   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+   expect(() => invalidateGlobalConfig()).not.toThrow();
+   ```
+
+2. **Prefer single-line imports and single-line `await expect(...)` chains when
+   the line fits within the 100-column `printWidth`.** Prettier will reflow
+   multi-line imports and multi-line chained expressions to a single line
+   whenever they fit; hand-authored multi-line breaks that could fit on one line
+   are removed by the auto-fix. Two canonical worked examples:
+
+   ```typescript
+   // tests/providers/reasoning-variants.test.ts:9
+   import { deriveReasoningVariants, mergeProviderModels } from '../../src/providers/transform.js';
+
+   // tests/session/retry.test.ts:56
+   await expect(withRetry(fn, () => true, { maxAttempts: 3, baseMs: 1 })).rejects.toBe(err);
+   ```
+
+   Only break these onto multiple lines when the resulting single line would
+   exceed 100 columns. Running `npm run format` before committing avoids the
+   `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up commit.
+
 ## Best Practices
 
 ### 1. Test Isolation
