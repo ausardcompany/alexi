@@ -15,6 +15,7 @@ export {
   RepositoryCacheService,
   initRepositoryCache,
   getRepositoryCache,
+  canonicalizeRepoPath,
   type CachedRepository,
   RepositoryCache,
 } from './repository-cache.js';

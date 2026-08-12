@@ -506,10 +506,14 @@ export function updateGlobal(
   Object.assign(config, updates);
   saveFullConfig(config);
 
-  // Disposal logic would go here if needed
-  // For now, this is a placeholder for future config instance management
+  // Ports kilocode `19a2a3c4d`: when global config changes, per-instance
+  // cached config becomes stale. Flush every registered instance cache
+  // so subsequent reads see the fresh values (SAP AI Core credentials
+  // refresh, routing rewrites, etc.). Dynamic import keeps this file
+  // free of a boot-time cycle with `invalidation.ts` consumers.
   if (dispose) {
-    // In a more complex system, this would dispose of cached config instances
-    // Currently, Alexi doesn't maintain config instances, so this is a no-op
+    void import('./invalidation.js').then(({ invalidateGlobalConfig }) => {
+      invalidateGlobalConfig();
+    });
   }
 }
