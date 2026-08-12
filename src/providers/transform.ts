@@ -464,3 +464,85 @@ export function lowerMcpToolsForOpenAIShaped<T extends McpToolForLowering>(
       }) as T
   );
 }
+
+// ============================================================================
+// Reasoning-variant derivation & base/custom model merge
+// ============================================================================
+//
+// Ports kilocode upstream `031ea2feb` — "preserve base model variants
+// alongside custom provider fallback". Without this, reasoning variants
+// (Grok reasoning, Kimi adaptive effort, GPT-5.x reasoning modes) get
+// dropped when a custom provider (e.g. a SAP AI Core deployment that
+// wraps a base model) overrides them.
+//
+// Two helpers:
+//   1. `deriveReasoningVariants` — given a base model with a set of
+//      reasoning efforts, produce one entry per effort (`gpt-5`,
+//      `gpt-5-low`, `gpt-5-medium`, `gpt-5-high`) so downstream code
+//      can pick the effort explicitly.
+//   2. `mergeProviderModels` — merge a custom provider's `models` on top
+//      of a base provider's `models` without wiping the base variants.
+//      Custom overrides win per-id; base variants only survive when
+//      the custom map does not define the same id.
+
+/**
+ * Minimal shape of a model descriptor consumed by the variant helpers.
+ * Structural type kept deliberately loose so callers using either the
+ * SAP orchestration model records or a custom `ModelInfo` shape can
+ * both use these helpers without a coercion.
+ */
+export interface ModelInfoLike {
+  id: string;
+  variant?: string;
+  reasoning?: {
+    /** Available effort names, e.g. `['low', 'medium', 'high']`. */
+    efforts?: readonly string[];
+    /** Effort chosen when none is provided at call time. */
+    defaultEffort?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+/**
+ * Derive reasoning variants for a base model. Returns the base model
+ * itself followed by one variant per available effort (id suffixed with
+ * `-<effort>`). When the model has no `reasoning.efforts` the base is
+ * returned unchanged.
+ *
+ * Never mutates its input.
+ */
+export function deriveReasoningVariants<T extends ModelInfoLike>(model: T): T[] {
+  const efforts = model.reasoning?.efforts;
+  if (!efforts || efforts.length === 0) {
+    return [model];
+  }
+  const variants: T[] = [model];
+  for (const effort of efforts) {
+    variants.push({
+      ...model,
+      id: `${model.id}-${effort}`,
+      variant: effort,
+      reasoning: { ...model.reasoning, defaultEffort: effort },
+    } as T);
+  }
+  return variants;
+}
+
+/**
+ * Merge a custom provider's model map on top of a base provider's model
+ * map. Custom entries win per-id; base variants (e.g. `-reasoning-high`)
+ * survive when the custom map does not redefine the same id. This is
+ * the fix behaviour from kilocode `031ea2feb` — previously the custom
+ * map replaced the base map wholesale and reasoning variants
+ * disappeared.
+ */
+export function mergeProviderModels<T>(
+  base: Readonly<Record<string, T>> | undefined,
+  custom: Readonly<Record<string, T>> | undefined
+): Record<string, T> {
+  return {
+    ...(base ?? {}),
+    ...(custom ?? {}),
+  };
+}

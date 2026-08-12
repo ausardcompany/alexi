@@ -873,6 +873,60 @@ alexi config show
 3. Verify script paths are correct and executable
 4. Check hook event matches the desired trigger point
 
+## Instance Cache Invalidation on Config Change
+
+Introduced in 1.20.2 (ports kilocode `19a2a3c4d`). When `updateGlobal(updates, { dispose: true })` writes to `~/.alexi/config.json`, Alexi now flushes every registered per-instance config cache so in-flight sessions see the fresh values without a restart. This matters for:
+
+- SAP AI Core credential rotation (`AICORE_SERVICE_KEY` refresh)
+- Model rotation via the `defaultModel` field
+- Routing config rewrites
+- Permission ruleset changes
+
+### Opting out
+
+Pass `dispose: false` to `updateGlobal` when you want a batch update to be visible in memory only after the next session restart:
+
+```ts
+import { updateGlobal } from './config/userConfig.js';
+
+updateGlobal(
+  { defaultModel: 'sap-ai-core/anthropic--claude-4.7-opus' },
+  { dispose: false }
+);
+```
+
+### Registering a cache disposer
+
+Modules that maintain a config-derived cache register a disposer at module load:
+
+```ts
+import { registerInstanceCache } from './config/invalidation.js';
+
+const dispose = registerInstanceCache(() => routingConfigCache.clear());
+// ...
+dispose(); // on teardown
+```
+
+Errors thrown by individual disposers are caught and logged via `console.warn` so a misbehaving disposer never blocks the rest of the flush.
+
+## Experimental Filesystem Watcher
+
+Introduced in 1.20.2. The filesystem watcher only initializes when the workspace location has VCS metadata AND the experimental flag is enabled. This prevents crashes and excessive polling in SAP AI Core sandboxed workspaces that may not be git repositories.
+
+### Enabling
+
+```bash
+export ALEXI_EXPERIMENTAL_FILEWATCHER=1
+```
+
+### Behaviour
+
+- Watcher skipped when `ALEXI_EXPERIMENTAL_FILEWATCHER` is unset or not `1`.
+- Watcher skipped when the location has no VCS metadata, even with the flag set.
+- Both conditions must hold for `maybeStartFileWatcher` to return a disposer; otherwise it returns `null`.
+
+See `src/core/filesystem/watcher.ts` and `docs/API.md#filesystem-watcher-api` for the injection-based subscriber contract.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

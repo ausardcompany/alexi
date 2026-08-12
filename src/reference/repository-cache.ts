@@ -3,6 +3,8 @@
  * Based on opencode refactor(repository): type cache failures
  */
 
+import path from 'path';
+
 // Typed cache failures based on opencode refactor(repository): type cache failures
 export class CacheError extends Error {
   readonly _tag: string = 'CacheError';
@@ -184,6 +186,39 @@ export function resetRepositoryCache(): void {
 
 // --- Legacy API for backward compatibility ---
 
+/**
+ * Canonicalize a repository / filesystem path so lookups match across
+ * case-insensitive Windows filesystems, mixed drive-letter case, and
+ * mixed path separators. Ports kilocode upstream commits `33c45bd78`,
+ * `343491e35`, `712346975`, `e958d4486` — before this fix, enterprise
+ * Windows users hit cache misses whenever the OS handed us the same
+ * repo with a different casing / separator style.
+ *
+ * Rules:
+ *  - Resolve `.` / `..` / trailing separators via `path.resolve`.
+ *  - On Windows only: uppercase the drive letter, normalize backslashes
+ *    to forward slashes, and lowercase the rest so `C:\Foo\Bar` and
+ *    `c:/foo/bar` land on the same cache key.
+ *  - On POSIX: `path.resolve` output is already canonical; pass through.
+ *
+ * URLs (`https://...`, `git@...`) are returned untouched — they are
+ * remote identifiers, not filesystem paths, and case matters for them
+ * on some hosts.
+ */
+export function canonicalizeRepoPath(p: string): string {
+  // Remote URLs pass through — case-sensitive on most git hosts.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(p) || /^[^\s@]+@[^\s:]+:/.test(p)) {
+    return p;
+  }
+  const resolved = path.resolve(p);
+  if (process.platform !== 'win32') {
+    return resolved;
+  }
+  const drive = resolved.charAt(0).toUpperCase();
+  const rest = resolved.slice(1).replace(/\\/g, '/');
+  return drive + rest.toLowerCase();
+}
+
 export interface CachedRepository {
   repository: string;
   path: string;
@@ -204,7 +239,10 @@ export class RepositoryCacheService {
   }
 
   private makeKey(repository: string, branch?: string): string {
-    return branch ? `${repository}#${branch}` : repository;
+    // Canonicalize so `C:\Foo` and `c:/foo` (Windows) or trailing-slash
+    // variants collide on the same cache key. Remote URLs pass through.
+    const canonical = canonicalizeRepoPath(repository);
+    return branch ? `${canonical}#${branch}` : canonical;
   }
 
   get(repository: string, branch?: string): CachedRepository | undefined {
@@ -227,7 +265,11 @@ export class RepositoryCacheService {
   }
 
   getCachePath(repository: string, branch?: string): string {
-    const safeName = repository.replace(/[^a-zA-Z0-9]/g, '_');
+    // Derive the on-disk directory from the canonical form so the same
+    // repo never lands in two different directories across restarts on
+    // Windows.
+    const canonical = canonicalizeRepoPath(repository);
+    const safeName = canonical.replace(/[^a-zA-Z0-9]/g, '_');
     const branchSuffix = branch ? `_${branch}` : '';
     return `${this.cacheDir}/repos/${safeName}${branchSuffix}`;
   }
