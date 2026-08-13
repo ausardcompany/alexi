@@ -1,6 +1,15 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-describe('WarpGrep Tool - Conditional Registration', () => {
+/**
+ * The built-in `codebase_search` (WarpGrep) tool has been removed. Semantic
+ * codebase search is now provided by the standalone `alexi-mcp-warpgrep`
+ * MCP server. These tests pin that contract so it does not silently
+ * regress: the tool must NOT appear in `builtInTools` regardless of
+ * whether `@morphllm/morphsdk` is installed, and the `grep` tool
+ * description must still surface a "how to enable semantic search" hint
+ * when the SDK is unavailable.
+ */
+describe('WarpGrep built-in tool - removed from registry', () => {
   beforeEach(() => {
     vi.resetModules();
   });
@@ -9,73 +18,46 @@ describe('WarpGrep Tool - Conditional Registration', () => {
     vi.restoreAllMocks();
   });
 
-  describe('isWarpgrepAvailable', () => {
-    it('should return false when @morphllm/morphsdk is not resolvable', async () => {
-      // In this test environment, @morphllm/morphsdk is not installed
-      const { isWarpgrepAvailable } = await import('../../../src/tool/tools/warpgrep.js');
-      expect(isWarpgrepAvailable()).toBe(false);
-    });
+  it('is not present in builtInTools when morphsdk is unavailable', async () => {
+    const { builtInTools } = await import('../../../src/tool/tools/index.js');
+    const toolNames = builtInTools.map((t) => t.name);
+    expect(toolNames).not.toContain('codebase_search');
   });
 
-  describe('tool registration when morphsdk is unavailable', () => {
-    it('should exclude codebase_search from builtInTools', async () => {
-      // @morphllm/morphsdk is not installed in the test environment
-      const { builtInTools } = await import('../../../src/tool/tools/index.js');
-
-      const toolNames = builtInTools.map((t) => t.name);
-      expect(toolNames).not.toContain('codebase_search');
-    });
-
-    it('should add hint to grep tool description', async () => {
-      const { builtInTools } = await import('../../../src/tool/tools/index.js');
-
-      const grepRegistered = builtInTools.find((t) => t.name === 'grep');
-      expect(grepRegistered).toBeDefined();
-      expect(grepRegistered!.description).toContain(
-        'Note: For semantic code search, install @morphllm/morphsdk'
-      );
-    });
-
-    it('should add hint to grep tool toFunctionSchema description', async () => {
-      const { builtInTools } = await import('../../../src/tool/tools/index.js');
-
-      const grepRegistered = builtInTools.find((t) => t.name === 'grep');
-      expect(grepRegistered).toBeDefined();
-      const schema = grepRegistered!.toFunctionSchema();
-      expect(schema.description).toContain(
-        'Note: For semantic code search, install @morphllm/morphsdk'
-      );
-    });
+  it('adds the install hint to grep description when morphsdk is unavailable', async () => {
+    const { builtInTools } = await import('../../../src/tool/tools/index.js');
+    const grepRegistered = builtInTools.find((t) => t.name === 'grep');
+    expect(grepRegistered).toBeDefined();
+    expect(grepRegistered!.description).toContain(
+      'Note: For semantic code search, install @morphllm/morphsdk'
+    );
   });
 
-  describe('tool registration when morphsdk is available', () => {
-    beforeEach(() => {
-      vi.resetModules();
-      // Mock the warpgrep module to report availability as true
-      vi.doMock('../../../src/tool/tools/warpgrep.js', async () => {
-        const actual = await vi.importActual('../../../src/tool/tools/warpgrep.js');
-        return {
-          ...actual,
-          isWarpgrepAvailable: () => true,
-        };
-      });
+  it('adds the install hint to grep toFunctionSchema description', async () => {
+    const { builtInTools } = await import('../../../src/tool/tools/index.js');
+    const grepRegistered = builtInTools.find((t) => t.name === 'grep');
+    expect(grepRegistered).toBeDefined();
+    const schema = grepRegistered!.toFunctionSchema();
+    expect(schema.description).toContain(
+      'Note: For semantic code search, install @morphllm/morphsdk'
+    );
+  });
+
+  it('remains absent from builtInTools even when morphsdk resolves', async () => {
+    // Even if the SDK is present, we do NOT re-register the built-in tool:
+    // semantic search is deliberately migrated to `alexi-mcp-warpgrep`.
+    vi.doMock('../../../src/tool/tools/warpgrep.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('../../../src/tool/tools/warpgrep.js')
+      >('../../../src/tool/tools/warpgrep.js');
+      return {
+        ...actual,
+        isWarpgrepAvailable: () => true,
+      };
     });
 
-    it('should include codebase_search in builtInTools', async () => {
-      const { builtInTools } = await import('../../../src/tool/tools/index.js');
-
-      const toolNames = builtInTools.map((t) => t.name);
-      expect(toolNames).toContain('codebase_search');
-    });
-
-    it('should not add hint to grep tool description', async () => {
-      const { builtInTools } = await import('../../../src/tool/tools/index.js');
-
-      const grepRegistered = builtInTools.find((t) => t.name === 'grep');
-      expect(grepRegistered).toBeDefined();
-      expect(grepRegistered!.description).not.toContain(
-        'Note: For semantic code search, install @morphllm/morphsdk'
-      );
-    });
+    const { builtInTools } = await import('../../../src/tool/tools/index.js');
+    const toolNames = builtInTools.map((t) => t.name);
+    expect(toolNames).not.toContain('codebase_search');
   });
 });

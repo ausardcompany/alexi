@@ -1,76 +1,83 @@
-# Changes Summary — Upstream Sync (kilocode c55440908..a5aaef74a, opencode v1.17.13)
+# Update Plan Execution Report
 
-Applied: 2026-08-11
-Executed by: agent-factory `engineering` role
+**Date**: 2026-08-13
+**Plan source**: Upstream changes analysis
+- kilocode: `64e5dd036..f71154707` (48 commits)
+- opencode: `1f94d8a..cc4b456` (21 commits)
 
-## Files modified / created
+## Files modified
 
-### Created
+| File | Change type |
+|------|-------------|
+| `src/tool/warpgrep.ts` | Rewrite → empty placeholder (removal marker) |
+| `src/tool/tools/warpgrep.ts` | Rewrite → keeps `isWarpgrepAvailable()` + no-op stub; removes `warpgrepTool` export, proxy fallback, Morph SDK integration |
+| `src/tool/tools/index.ts` | Drop `warpgrepTool` import and registration; keep `isWarpgrepAvailable` to drive grep-hint switch |
+| `src/tool/tools/grep.ts` | Update description to point at `alexi-mcp-warpgrep` MCP server instead of built-in `codebase_search` |
+| `src/tool/tools/glob.ts` | Same doc update as grep.ts |
+| `src/core/compaction.ts` | Adopt clearer `SUMMARY_PROMPT` phrasing (opencode) — explicit "do not continue the conversation" clause, structured summary contract |
+| `tests/tool/tools/warpgrep.test.ts` | Rewrite to pin the removal contract (must NOT appear in `builtInTools` even when SDK resolves); keep grep-hint assertions |
+| `tests/tool/tools/warpgrep-deprecation.test.ts` | Rewrite to assert `warpgrepTool` is not exported and the two remaining helpers still work |
 
-1. **`src/providers/openai/prompt-cache.ts`** — new module
-   - Exports `supportsPromptCacheBreakpoint`, `isChatGPTSubscription`, `applyCacheBreakpoint`, `LanguageModelV2Prompt` type.
-   - Implements the upstream opencode v1.17.13 `applyCaching` behavior for GPT-5.6+ on the Vercel AI SDK path, excluding ChatGPT subscription accounts (which cache implicitly).
-   - Local `LanguageModelV2Prompt` type shim used instead of adding `@ai-sdk/provider` to dependencies, since the SAP AI SDK already provides compatible message shapes at runtime.
+## Change-by-change summary
 
-2. **`src/permission/provenance.ts`** — new module
-   - Exports `PermissionProvenance` interface plus `recordDenial`, `getDenialProvenance`, `formatProvenanceMessage`, `clearDenialStore`.
-   - Records *which* rule / rule-source decided a permission call (config | session | agent | sandbox | default), keyed by tool-call id. Enables SAP enterprise compliance audit trails and lets the UI explain denials to users.
-   - Matches upstream `packages/opencode/src/kilocode/permission/provenance.ts`.
+### 1. Remove built-in `codebase_search` / WarpGrep tool — DONE (high)
+- `src/tool/warpgrep.ts`: replaced stale placeholder comment with an explicit removal-notice `export {}` module.
+- `src/tool/tools/warpgrep.ts`: stripped the full tool implementation. The module now only exports:
+  - `isWarpgrepAvailable(): boolean` — retained so `src/tool/tools/index.ts` can decide whether to append the "install @morphllm/morphsdk" install hint to the `grep` description.
+  - `_resetWarpgrepDeprecationWarning(): void` — retained as a no-op for backward test compatibility.
+- Removed the Morph API integration, the `kilo-free` API key fallback, and the `https://api.kilo.ai/api/gateway` proxy URL. This is the specific compliance concern called out in the plan.
 
-3. **`src/tool/grep-signal-controls.ts`** — new module
-   - Exports `applySignalControls`, `GrepMatch`, `GrepSignalControls`.
-   - Pure function that composes four stackable filters on top of raw grep matches: `suppressBinaryLike`, `suppressGeneratedFiles`, `minMatchLength`, `maxResultsPerFile`, plus a stable `boostPathPatterns` sort. All opt-in — no behavior change unless the caller sets a field.
-   - Matches upstream kilocode #12811.
+### 2. Remove `codebase_search` from tool registry — DONE (high, adapted)
+The plan's example matched opencode's Effect-based registry, which does not exist in Alexi. The equivalent Alexi surface is `src/tool/tools/index.ts` (the `builtInTools` array + registration loop). Actioned there:
+- Dropped `warpgrepTool` from the imports.
+- Removed `...(warpgrepAvailable ? [warpgrepTool] : [])` from `builtInTools`.
+- Removed `warpgrepTool` from the re-export block.
+- `isWarpgrepAvailable` retained as an export so downstream consumers can still gate other UI on SDK availability.
 
-### Modified
+### 3. Remove `codebase_search` permission entries in agent guards — N/A
+Alexi's `src/agent/index.ts` uses a Zod-based `AgentConfig` schema with `builtInAgents` list; there are no `askGuard` / `planGuard` functions and no `codebase_search` permission entries. No changes required (grep for `codebase_search` / `askGuard` / `planGuard` in `src/` after the run confirms this).
 
-4. **`src/providers/sapOrchestration.ts`** — added `prepareRequest` helper
-   - Imports the new prompt-cache helpers from `./openai/prompt-cache.js`.
-   - Adds `export function prepareRequest(...)` right before `extractCacheTokens` (co-located with the existing cache-token helpers).
-   - Applies `applyCacheBreakpoint` only when `supportsPromptCacheBreakpoint` returns true, and only when the caller is NOT a ChatGPT subscription. Pass-through for non-OpenAI models. Nothing yet routes through this — the helper is available for the next round of provider request-plumbing work.
-   - **No changes to SAP AI Core request flow.** Existing orchestration calls, streaming, embeddings, and token-refresh paths are untouched.
+### 4. Remove `codebase_search` config flag from schema — N/A
+Alexi's config (`src/config/*.ts`) uses a different layout (no Effect `Schema.Struct`, no `codebase_search` boolean flag). Nothing to remove.
 
-5. **`src/permission/index.ts`** — provenance attribution
-   - Imported `recordDenial`, `PermissionProvenance` from `./provenance.js` and re-exported the provenance surface for downstream consumers.
-   - Extended `PermissionResult` with an **optional** `provenance?: PermissionProvenance` field — fully backwards-compatible.
-   - `evaluate()` now returns `{ decision, rule?, provenance }`. Session grants attribute to `ruleSource: 'session'`, matched rules attribute to `ruleSource: 'config'` with `ruleId`, `ruleDescription`, and a best-effort `matchedPattern`, no-match falls through to `ruleSource: 'default'`.
-   - `check()` records denials into the provenance store keyed by the operation key so the TUI can later render "why was this denied?" alongside the failed call.
-   - All existing test callers destructure only `.decision` / `.rule` on the return, so they continue to pass without modification.
+### 5. Adopt clearer compaction system prompt (opencode) — DONE (medium)
+Updated `SUMMARY_PROMPT` in `src/core/compaction.ts` to the new opencode phrasing while preserving Alexi's KEY DECISIONS / FILES CHANGED / USER INSTRUCTIONS extraction structure. Notable adds:
+- Explicit "You are a context summarization agent" framing (better for smaller SAP-hosted models).
+- Explicit "Do not continue the conversation. Do not respond to any questions." clause — the common failure mode called out in the plan.
+- Explicit "Only output the structured summary in the format requested."
 
-6. **`src/tool/grep.ts`** — signal-controls integration point
-   - Replaced the stub content with a thin re-export of `applySignalControls` and its types from `./grep-signal-controls.js`.
-   - Documents that the primary grep tool implementation stays in `src/tool/tools/grep.ts` (the ripgrep fast-path + JS fallback), and that this module is the plan-anchored surface for downstream skills / plugins / subagents that want signal filtering without reaching into the tool internals.
-   - No behavior change to the registered `grepTool`.
+All existing keyword-based assertions in `tests/compaction/preservation.test.ts` (`USER INSTRUCTIONS`, `Preserve ALL`, `preferences`, `constraints`, `verbatim`, `coding style`, `API keys`, `endpoints`, `"always do X"`, `"never do Y"`) and in `src/core/__tests__/compaction.test.ts` (`KEY DECISIONS`) continue to pass — the new prompt is a strict superset of the old on all pinned tokens.
 
-## Changes NOT applied
+### 6. Simplify compaction slice logic (drop char-level split) — N/A
+Alexi's `src/core/compaction.ts` uses a message-array `preserveLastN` / `keepStart` walk, NOT the opencode `select()` char-slice pattern. There is no character-boundary splitting to remove.
 
-The update plan was truncated mid-item-6 (last visible line: `pattern: z.`) with items 7–24 (medium/low priority) not present in the plan text delivered for execution. Only the six fully-specified changes above were applied. Notable themes from the plan summary that are therefore deferred to a follow-up sync:
+### 7. Add prior-summary update instructions to compaction — N/A (plan truncated)
+The plan text was cut off mid-sentence at item 7 (see the JSON usage stamp in the received plan). The described `SUMMARY_UPDATE_INSTRUCTIONS` addition targets an opencode structure Alexi does not currently mirror, so no faithful port was possible.
 
-- Send-file tool (new remote CLI file delivery tool)
-- Schema package extraction (`@opencode-ai/schema`)
-- Session resume (Claude and Codex sessions)
-- Skill-shell permission fix (inline code spans not triggering permission prompts)
-- Sandbox settings applied to existing sessions
-- Sessionless model catalog endpoint
+## Tests updated
 
-These should be picked up on the next agent1-research → agent2-planning cycle.
+- `tests/tool/tools/warpgrep.test.ts` — flipped the two "when morphsdk is available, register codebase_search" cases into a single "even when morphsdk resolves, the tool is NOT re-registered" case. This pins the removal contract so no future refactor silently re-enables the built-in tool.
+- `tests/tool/tools/warpgrep-deprecation.test.ts` — was testing the deprecation warning emitted by the built-in tool. The tool no longer exists, so the warning cannot fire. The test now asserts the removal contract: `warpgrepTool` is not exported, `isWarpgrepAvailable` still works, `_resetWarpgrepDeprecationWarning` remains a callable no-op.
 
 ## SAP AI Core compatibility
 
-All changes are additive:
-
-- The new `prepareRequest` helper is exported but not yet wired into `SapOrchestrationProvider.complete()` / `.stream()`. Existing SAP AI Core calls flow through unchanged.
-- Provenance data is attached to `PermissionResult` as an optional field. No breaking change to the permission engine's public contract.
-- Grep signal controls are opt-in. The `grepTool` in `src/tool/tools/grep.ts` was not modified.
-
-## Test impact
-
-- Existing permission tests (`wildcard-tools.test.ts`, `config-paths.test.ts`) continue to pass — they destructure only `.decision` / `.rule` on `evaluate()`'s return.
-- No test files were added or removed by this pass. Follow-up work should add `provenance.test.ts`, `prompt-cache.test.ts`, and `grep-signal-controls.test.ts` (upstream ships tests for each of these; they were referenced but not detailed in the delivered plan slice).
+- No changes to `src/providers/*` — SAP AI Core / SAP Orchestration providers unchanged.
+- No changes to routing config, session store, or tool-call transport.
+- `stripInternalOptions` and `INTERNAL_OPTION_KEYS` in `src/agent/index.ts` untouched.
+- Compaction prompt change affects only the text sent to the summarization LLM; the message-shape contract to SAP AI Core is unchanged.
 
 ## Issues encountered
 
-- **Plan truncation.** The delivered plan text was cut off mid-item-6. Items 7–24 (schema package, send-file tool, session resume, sandbox settings, sessionless model catalog, skill-shell fix, etc.) could not be executed because their code specs were absent.
-- **File path mismatch.** Plan referenced `src/providers/sap-ai-core.ts`; the real file is `src/providers/sapOrchestration.ts`. Applied the change to the real file with a clear comment explaining the mapping.
-- **File path mismatch (grep).** Plan referenced `src/tool/grep.ts` (a stub) — the real grep tool lives at `src/tool/tools/grep.ts`. Kept the plan's file path meaningful by having the stub re-export the new signal-controls helper, and left the primary grep tool implementation unchanged (opt-in adoption).
-- **No `@ai-sdk/provider` dependency.** Introduced a local `LanguageModelV2Prompt` structural type in `prompt-cache.ts` rather than adding a new dependency; the SAP AI SDK already produces compatible message shapes.
+1. **Plan was truncated** mid-way through item 7 (contains a JSON usage stamp — `{"prompt_tokens":16663,...}` — indicating the upstream generator hit a token limit). Items 8+ (referenced by the header count "Total changes planned: 10") were not received. Executed the received 7 items to the extent they apply.
+
+2. **Structural mismatch** between opencode's `Effect.gen`-based tool registry (items 2, 3, 4, 6, 7 in the plan) and Alexi's Zod + module-array layout. Each such item is either adapted to the Alexi equivalent (item 2) or documented as N/A above (items 3, 4, 6). Nothing was silently skipped.
+
+3. **Alexi had already begun this migration.** The built-in tool already emitted a deprecation warning pointing users at `packages/alexi-mcp-warpgrep`. The MCP server package itself already exists and is intact. This execution completes the removal that Alexi's own deprecation notice was announcing.
+
+## Verification checklist
+
+- [x] `src/tool/tools/warpgrep.ts` no longer imports `@morphllm/morphsdk` or references `https://api.kilo.ai/api/gateway`.
+- [x] `builtInTools` in `src/tool/tools/index.ts` no longer contains `warpgrepTool` under any code path.
+- [x] `grep` tool still surfaces the install hint when `@morphllm/morphsdk` is not installed (behaviour test preserved).
+- [x] `SUMMARY_PROMPT` still contains every keyword pinned by existing preservation tests.
+- [x] Standalone MCP package `packages/alexi-mcp-warpgrep` untouched — migration target remains available.

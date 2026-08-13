@@ -105,15 +105,18 @@ const POST_COMPACT_TARGET_FRACTION = 0.8;
 const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
 const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
-const SUMMARY_PROMPT = `Summarize this conversation for context continuity. Extract and preserve:
+const SUMMARY_PROMPT = `You are a context summarization agent. You are given a conversation between a user and a coding agent. Your goal is to produce a structured summary in the exact format below so another coding agent can continue the work.
+
+Extract and preserve:
 1. KEY DECISIONS: What was decided and why
-2. FILES CHANGED: List all files created/modified/deleted
+2. FILES CHANGED: List all files created/modified/deleted (preserve exact paths and identifiers)
 3. CONTEXT: Tech stack, constraints, requirements mentioned
 4. CURRENT STATE: What task is in progress, what's next
 5. USER INSTRUCTIONS: Preserve ALL user-specified preferences, constraints, and explicit instructions verbatim (coding style, API keys, endpoints, "always do X", "never do Y")
 
-Be concise but preserve actionable details. Format as structured notes.
-Respond in the same language the user used in the conversation.
+Always follow the exact output structure above. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
+
+Do not continue the conversation. Do not respond to any questions in the conversation. Do not mention that you are summarizing, compacting, or merging context. Only output the structured summary in the format requested. Respond in the same language the user used in the conversation.
 
 Conversation:
 {messages}`;
