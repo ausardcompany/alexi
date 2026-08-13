@@ -179,7 +179,7 @@ Usage:
 - Supports patterns like "**/*.ts", "src/**/*.js"
 - Returns matching file paths sorted by modification time
 - Use this when searching for files by name patterns
-- When you are doing an open-ended search where you do not know the exact symbol name, use the \`codebase_search\` tool first to narrow down the search scope, then follow up with \`glob\` and/or \`read\`
+- When you are doing an open-ended search where you do not know the exact symbol name, install and register the \`alexi-mcp-warpgrep\` MCP server to enable semantic \`codebase_search\`, then follow up with \`glob\` and/or \`read\`
 
 When independent reads, searches, or edits are also needed, emit those tool calls in the same response instead of splitting across turns.`,
 

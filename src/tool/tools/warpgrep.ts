@@ -1,27 +1,35 @@
 /**
- * WarpGrep Codebase Search Tool - AI-powered semantic code search
+ * WarpGrep Codebase Search Tool - REMOVED
+ *
+ * The built-in `codebase_search` (WarpGrep) tool has been removed from the
+ * default tool registry. It relied on the proprietary Morph API and a
+ * free-period proxy (`https://api.kilo.ai/api/gateway`) that is not
+ * appropriate for Alexi's SAP AI Core context (data locality, licensing,
+ * and free-tier bootstrapping do not apply).
+ *
+ * ## Migration
+ *
+ * Semantic codebase search is now provided by the standalone MCP server
+ * `alexi-mcp-warpgrep` (see `packages/alexi-mcp-warpgrep`). Register it in
+ * your `mcp-servers.json` to restore the `codebase_search` tool surface.
+ * Users who want to run the SDK-backed variant directly can install
+ * `@morphllm/morphsdk` and configure the MCP server to use it.
+ *
+ * This module retains a minimal `isWarpgrepAvailable()` shim so
+ * `src/tool/tools/index.ts` can keep its "add semantic-search install hint
+ * to `grep`" behaviour without importing the deleted tool implementation.
+ * The `warpgrepTool` export is intentionally NOT provided here — importing
+ * it will fail loudly, which is the desired signal for any leftover caller.
  */
-
-import { z } from 'zod';
-import { defineTool, type ToolResult } from '../index.js';
-import { Telemetry } from '../../utils/telemetry.js';
-import { logger } from '../../utils/logger.js';
-
-/**
- * Track whether the deprecation warning has already been emitted this
- * process so we do not spam the log on every tool call. Exported for
- * tests to reset between cases.
- */
-let deprecationWarningEmitted = false;
-
-/** @internal - reset the module-level deprecation flag. Test-only. */
-export function _resetWarpgrepDeprecationWarning(): void {
-  deprecationWarningEmitted = false;
-}
 
 /**
  * Check whether `@morphllm/morphsdk` can be resolved at runtime.
- * Returns true when the package is installed and importable, false otherwise.
+ *
+ * Returns `true` when the package is installed and importable. Alexi no
+ * longer ships a built-in tool that uses it, but the flag still drives the
+ * "install @morphllm/morphsdk for semantic search" hint appended to
+ * `grep`'s description so users who have the SDK installed do not see the
+ * hint.
  */
 export function isWarpgrepAvailable(): boolean {
   try {
@@ -34,150 +42,11 @@ export function isWarpgrepAvailable(): boolean {
   }
 }
 
-const WarpGrepParamsSchema = z.object({
-  query: z
-    .string()
-    .describe(
-      'Search query describing what code you are looking for. Be specific and descriptive for best results.'
-    ),
-});
-
-interface CodeSpan {
-  filePath: string;
-  startLine: number;
-  endLine: number;
-  content: string;
+/**
+ * @internal - reset the module-level deprecation flag. Kept as a no-op so
+ * existing tests that call it continue to compile; the flag itself no longer
+ * exists because there is no built-in tool to warn about.
+ */
+export function _resetWarpgrepDeprecationWarning(): void {
+  // no-op: built-in tool removed
 }
-
-interface WarpGrepResult {
-  spans: CodeSpan[];
-  query: string;
-}
-
-const DESCRIPTION = `Find code snippets by semantic meaning and return ranked matches with file paths and line ranges.
-
-## When to use
-
-- Explore an unfamiliar code area before you know exact identifiers
-- Find related implementations of a concept or behavior across the workspace
-- Search by intent such as authentication, caching, or session resume logic
-- Narrow a large codebase before following up with \`Read\` or \`Grep\`
-- Limit semantic search to one subdirectory with \`path\`
-
-## When NOT to use
-
-- Search for an exact symbol or regex pattern — use \`Grep\`
-- Find files by filename or extension — use \`Glob\`
-- Read the contents of a known file — use \`Read\`
-- Explore files outside the current workspace - use \`Grep\`, \`Glob\`, and \`Read\`
-
-## Examples
-
-- "User login and password hashing" → search for auth-related code by meaning
-- "Database connection pooling" → find conceptually similar implementations
-- "Session resume flow" → retrieve snippets involved in restoring session state
-- "Tool approval UI" with \`path: "packages/opencode/src"\` → combine a natural-language query with \`path\`
-
-## Constraints
-
-- Write the query in English.
-- Use \`path\` only for subdirectories inside the current workspace.`;
-
-// FREE_PERIOD_TODO: Remove KILO_WARPGREP_PROXY_URL constant and the proxy
-// fallback below. After the free period ends, require MORPH_API_KEY and
-// return an error when it is missing.
-const KILO_WARPGREP_PROXY_URL = 'https://api.kilo.ai/api/gateway';
-
-export const warpgrepTool = defineTool<typeof WarpGrepParamsSchema, WarpGrepResult>({
-  name: 'codebase_search',
-  description: DESCRIPTION,
-  parameters: WarpGrepParamsSchema,
-
-  async execute(params, context): Promise<ToolResult<WarpGrepResult>> {
-    // Deprecation notice: WarpGrep is being migrated to a standalone MCP
-    // server (`alexi-mcp-warpgrep`). The built-in tool remains functional
-    // for backward compatibility but will be removed in a future major
-    // release. Emit the warning once per process to avoid log noise.
-    if (!deprecationWarningEmitted) {
-      logger.warn(
-        'The built-in `codebase_search` (WarpGrep) tool is deprecated. ' +
-          'A standalone MCP server (`alexi-mcp-warpgrep`) is now available. ' +
-          'See docs/mcp-servers.md for the migration guide.'
-      );
-      deprecationWarningEmitted = true;
-    }
-
-    // Check if MorphSDK is available
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let WarpGrepClient: any;
-    try {
-      // @ts-expect-error — @morphllm/morphsdk is an optional peer dependency
-      const morphSDK = await import('@morphllm/morphsdk');
-      WarpGrepClient = morphSDK.WarpGrepClient;
-    } catch {
-      return {
-        success: false,
-        error:
-          'WarpGrep requires @morphllm/morphsdk to be installed. Run: npm install @morphllm/morphsdk',
-      };
-    }
-
-    const apiKey = process.env['MORPH_API_KEY'];
-
-    // FREE_PERIOD_TODO: Remove proxy fallback — require apiKey, error if missing
-    const client = new WarpGrepClient({
-      morphApiKey: apiKey ?? 'kilo-free',
-      ...(apiKey ? {} : { morphApiUrl: KILO_WARPGREP_PROXY_URL }),
-      timeout: 60000,
-    });
-
-    try {
-      const result = await client.execute({
-        searchTerm: params.query,
-        repoRoot: context.workdir,
-      });
-
-      if (!result.success) {
-        return {
-          success: false,
-          error: `Search failed: ${result.error || 'Unknown error'}`,
-        };
-      }
-
-      const spans: CodeSpan[] = result.codeSpans || [];
-
-      // Track codebase search usage
-      Telemetry.track('codebase_search', {
-        tool: 'warpgrep',
-        query_length: params.query?.length ?? 0,
-        results_count: spans.length,
-        path_filter: false,
-      });
-
-      if (spans.length === 0) {
-        return {
-          success: true,
-          data: {
-            spans: [],
-            query: params.query,
-          },
-          hint: 'No relevant code found for the given query.',
-        };
-      }
-
-      return {
-        success: true,
-        data: {
-          spans,
-          query: params.query,
-        },
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        success: false,
-        error: `WarpGrep search failed: ${message}`,
-      };
-    }
-  },
-});

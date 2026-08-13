@@ -30,7 +30,12 @@ import { diagnosticsTool } from './diagnostics.js';
 // codesearch removed - use semantic search or grep instead
 import { batchTool } from './batch.js';
 import { storeMemoryTool, recallMemoryTool } from './memory.js';
-import { warpgrepTool, isWarpgrepAvailable } from './warpgrep.js';
+// The built-in `codebase_search` (WarpGrep) tool has been removed. Semantic
+// codebase search is now provided by the `alexi-mcp-warpgrep` MCP server
+// (see `packages/alexi-mcp-warpgrep`). We still consult `isWarpgrepAvailable`
+// to decide whether to append the "install @morphllm/morphsdk" hint to the
+// `grep` tool description — users who have the SDK installed do not need it.
+import { isWarpgrepAvailable } from './warpgrep.js';
 import { recallTool } from './recall.js';
 import { agentManagerTool } from './agent-manager.js';
 import { applyPatchTool } from './apply-patch.js';
@@ -87,7 +92,7 @@ export const builtInTools = [
   batchTool,
   storeMemoryTool,
   recallMemoryTool,
-  ...(warpgrepAvailable ? [warpgrepTool] : []),
+  // codebase_search (warpgrep) removed — provided by `alexi-mcp-warpgrep` MCP server
   recallTool,
   agentManagerTool,
   applyPatchTool,
@@ -134,7 +139,7 @@ export {
   batchTool,
   storeMemoryTool,
   recallMemoryTool,
-  warpgrepTool,
+  // warpgrepTool removed — codebase_search is now the `alexi-mcp-warpgrep` MCP server
   isWarpgrepAvailable,
   recallTool,
   agentManagerTool,

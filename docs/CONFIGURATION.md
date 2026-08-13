@@ -77,7 +77,12 @@ export SAP_PROXY_API_KEY=your_secret_key
 
 #### MORPH_API_KEY
 
-API key for WarpGrep semantic code search (optional during free period).
+API key for WarpGrep semantic code search. Consumed by the standalone
+[`alexi-mcp-warpgrep`](./mcp-servers.md#alexi-mcp-warpgrep---semantic-code-search)
+MCP server; Alexi's built-in tool surface no longer reads this variable
+(the built-in `codebase_search` tool was removed in `1.20.3`). Set it in
+the MCP server's `env` block of `mcp-servers.json`, or export it in the
+shell that spawns Alexi so the child MCP process inherits it.
 
 ```bash
 export MORPH_API_KEY=your_morph_api_key
