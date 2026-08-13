@@ -24,6 +24,10 @@ vi.mock('../../src/core/router.js', () => ({
 
 import { sendChat } from '../../src/core/orchestrator.js';
 import { getProviderForModel, getDefaultModel } from '../../src/providers/index.js';
+import {
+  FreeTierRateLimitError,
+  ProviderRateLimitError,
+} from '../../src/providers/sapOrchestration.js';
 
 describe('sendChat error formatting', () => {
   beforeEach(() => {
@@ -128,6 +132,66 @@ describe('sendChat error formatting', () => {
       expect(msg).toContain(providerMessage);
     }
   );
+
+  it('surfaces the paid-tier rate-limit message with retry-after', async () => {
+    // The provider layer wraps 429s in ProviderRateLimitError before they
+    // reach the orchestrator. The orchestrator must NOT clobber that
+    // user-friendly message with a folded cause (which would append the
+    // raw upstream text like `: Error: Too Many Requests`).
+    const rateLimitErr = new ProviderRateLimitError(
+      'anthropic--claude-4.7-opus',
+      new Error('Too Many Requests'),
+      60
+    );
+    const mockProvider = {
+      complete: vi.fn().mockRejectedValue(rateLimitErr),
+    };
+    vi.mocked(getProviderForModel).mockReturnValue(mockProvider as never);
+
+    let caught: unknown;
+    try {
+      await sendChat('hi');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBe(rateLimitErr);
+    const msg = (caught as Error).message;
+    expect(msg).toContain('Rate limit reached');
+    expect(msg).toContain("'anthropic--claude-4.7-opus'");
+    expect(msg).toContain('Wait 60 seconds');
+    expect(msg).toContain('smaller model');
+    expect(msg).toContain('Upgrade');
+    // The raw upstream cause message must NOT be appended — that would
+    // undo the user-friendly formatting.
+    expect(msg).not.toContain(': Error: Too Many Requests');
+  });
+
+  it('surfaces the free-tier rate-limit message when the provider raises FreeTierRateLimitError', async () => {
+    const err = new FreeTierRateLimitError(
+      'anthropic--claude-4.7-haiku-free',
+      new Error('Too Many Requests'),
+      30
+    );
+    const mockProvider = {
+      complete: vi.fn().mockRejectedValue(err),
+    };
+    vi.mocked(getProviderForModel).mockReturnValue(mockProvider as never);
+
+    let caught: unknown;
+    try {
+      await sendChat('hi');
+    } catch (thrown) {
+      caught = thrown;
+    }
+
+    expect(caught).toBe(err);
+    const msg = (caught as Error).message;
+    expect(msg.toLowerCase()).toContain('free-tier');
+    expect(msg).toContain('Retry after 30 seconds');
+    expect(msg).toContain('upgrade');
+    expect(msg).not.toContain(': Error: Too Many Requests');
+  });
 
   it('does NOT rewrite non-overflow provider errors', async () => {
     const providerErr = new Error('some unrelated 500 from provider');

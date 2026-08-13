@@ -59,6 +59,16 @@ export function formatProviderError(err: unknown): string {
     return String(err);
   }
 
+  // Rate-limit errors already carry a fully-formatted, multi-line
+  // user-facing message (with wait time, alternative-model guidance, and a
+  // documentation link). Appending the raw upstream cause here would only
+  // add noise ("Rate limit reached ... : Error: HTTP 429"). The upstream
+  // error is still preserved on `err.cause` for operators who need it.
+  const name = (err as Error).name;
+  if (name === 'FreeTierRateLimitError' || name === 'ProviderRateLimitError') {
+    return err.message;
+  }
+
   const cause = (err as Error & { cause?: unknown }).cause;
   if (!isErrorLike(cause)) {
     return err.message;

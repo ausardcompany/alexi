@@ -1779,6 +1779,18 @@ export const SAP_AI_CORE_RATE_LIMIT_DOCS_URL =
   'https://help.sap.com/docs/ai-core/generative-ai-hub/rate-limits';
 
 /**
+ * Machine-readable error code carried by {@link ProviderRateLimitError} —
+ * the paid-tier counterpart to {@link FREE_TIER_RATE_LIMIT_CODE}.
+ *
+ * Unlike the free-tier code, a paid-tier 429 is *transient* per the
+ * AGENTS.md error contract: the quota window will reset, so `ErrorBackoff`
+ * schedules a retry. The code exists purely so callers (CLI renderer,
+ * telemetry) can identify the class of failure without an `instanceof`
+ * check across module boundaries.
+ */
+export const PROVIDER_RATE_LIMIT_CODE = 'provider_rate_limit';
+
+/**
  * Error thrown when the SAP AI Core API rejects a request with HTTP 429 AND
  * the model id targets a free-tier deployment (heuristic: `-free` suffix,
  * see {@link isFreeModel}).
@@ -1789,26 +1801,85 @@ export const SAP_AI_CORE_RATE_LIMIT_DOCS_URL =
  * consumed by `ErrorBackoff.isFatal()` — treat any error with that code as
  * permanent and stop retrying immediately.
  *
- * Generic (non-free) 429 responses remain transient; they surface as normal
- * `Error` instances so the existing backoff/retry path in `ErrorBackoff`
- * and the workflow-level `KILO_RETRIES` loop handle them.
+ * When the upstream response carried a `Retry-After` header,
+ * `retryAfterSeconds` is populated so the CLI and telemetry can display an
+ * accurate wait time instead of a generic "later".
+ *
+ * Generic (non-free) 429 responses now surface as {@link ProviderRateLimitError}
+ * (transient) so the existing backoff/retry path in `ErrorBackoff` and the
+ * workflow-level `KILO_RETRIES` loop keep handling them, but with a
+ * user-friendly message.
  */
 export class FreeTierRateLimitError extends Error {
   readonly code: typeof FREE_TIER_RATE_LIMIT_CODE = FREE_TIER_RATE_LIMIT_CODE;
   readonly modelName: string;
   readonly statusCode = 429;
   readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
+  readonly retryAfterSeconds?: number;
 
-  constructor(modelName: string, cause?: unknown) {
+  constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
+    const retryLine =
+      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+        ? ` Retry after ${retryAfterSeconds} seconds.`
+        : '';
     const message =
       `Free-tier model rate limit exceeded for '${modelName}'. ` +
       `SAP AI Core free-tier deployments enforce strict per-minute request quotas; ` +
-      `retrying now will hit the same limit. Wait for the quota window to reset ` +
+      `retrying now will hit the same limit.${retryLine} Wait for the quota window to reset ` +
       `or upgrade to a paid SAP AI Core deployment. ` +
       `See: ${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
     super(message);
     this.name = 'FreeTierRateLimitError';
     this.modelName = modelName;
+    if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
+      this.retryAfterSeconds = retryAfterSeconds;
+    }
+    if (cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = cause;
+    }
+  }
+}
+
+/**
+ * Error thrown when a paid-tier deployment returns HTTP 429.
+ *
+ * Semantics: *transient* per the AGENTS.md error contract. The quota
+ * window will reset, so `ErrorBackoff` and the workflow `KILO_RETRIES`
+ * loop will retry with exponential backoff. When the response carried a
+ * `Retry-After` header, the wait time from the header wins over the
+ * default backoff schedule (see `getRetryAfterMs` in
+ * `src/core/error-backoff.ts`).
+ *
+ * The message provides three concrete options so the user is not stuck
+ * staring at a bare "HTTP 429": wait for the retry-after window, switch to
+ * a smaller/cheaper model, or upgrade the SAP AI Core deployment plan.
+ */
+export class ProviderRateLimitError extends Error {
+  readonly code: typeof PROVIDER_RATE_LIMIT_CODE = PROVIDER_RATE_LIMIT_CODE;
+  readonly modelName: string;
+  readonly statusCode = 429;
+  readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
+  readonly retryAfterSeconds?: number;
+
+  constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
+    const waitLine =
+      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+        ? `Wait ${retryAfterSeconds} seconds and try again`
+        : 'Wait 60 seconds and try again';
+    const message =
+      `Rate limit reached for model '${modelName}'. ` +
+      `The provider is throttling requests (HTTP 429).\n\n` +
+      `Options:\n` +
+      `  - ${waitLine}\n` +
+      `  - Switch to a smaller model (e.g. haiku instead of opus)\n` +
+      `  - Upgrade your SAP AI Core plan for higher limits\n\n` +
+      `See: ${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
+    super(message);
+    this.name = 'ProviderRateLimitError';
+    this.modelName = modelName;
+    if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
+      this.retryAfterSeconds = retryAfterSeconds;
+    }
     if (cause !== undefined) {
       (this as Error & { cause?: unknown }).cause = cause;
     }
@@ -1888,29 +1959,146 @@ function extractHttpStatus(err: unknown): number | undefined {
 }
 
 /**
- * If `err` represents a 429 response AND `modelName` looks like a free-tier
- * deployment (see {@link isFreeModel}), wrap the underlying error in a
- * {@link FreeTierRateLimitError} with actionable upgrade guidance.
+ * Parse a `Retry-After` header value into an integer number of seconds.
  *
- * Otherwise return the original error unchanged so the existing transient
- * retry path in `ErrorBackoff` and the workflow retry loop keeps handling
- * generic 429s the same way it does today.
+ * HTTP allows two shapes (RFC 7231 §7.1.3):
+ *   - A non-negative integer number of seconds ("120").
+ *   - An HTTP-date ("Wed, 21 Oct 2015 07:28:00 GMT"). We convert the date
+ *     to a delta from `now` and floor to seconds; negative deltas (a date
+ *     in the past) resolve to 0 rather than a negative delay.
+ *
+ * Returns `undefined` when the input is missing, empty, or unparseable so
+ * the caller can fall back to the default backoff schedule.
+ */
+export function parseRetryAfterHeader(raw: unknown): number | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  // Integer seconds. Anchored regex avoids `parseInt` accepting hex
+  // literals ("0x10") or trailing garbage.
+  if (/^\d+$/.test(trimmed)) {
+    return parseInt(trimmed, 10);
+  }
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  const deltaMs = parsed - Date.now();
+  if (deltaMs <= 0) {
+    return 0;
+  }
+  return Math.floor(deltaMs / 1000);
+}
+
+/**
+ * Walk common error shapes (SAP SDK, undici, fetch wrappers) looking for a
+ * `Retry-After` header value. Header lookup is case-insensitive to match
+ * both `Retry-After` (title case, per RFC 7231) and `retry-after` (lower
+ * case, per HTTP/2 which mandates lower-case headers).
+ *
+ * Returns `undefined` when no header could be found; callers then fall
+ * back to the default exponential backoff schedule.
+ */
+export function extractRetryAfterSeconds(err: unknown): number | undefined {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as {
+    headers?: unknown;
+    response?: { headers?: unknown };
+    retryAfter?: unknown;
+    retry_after?: unknown;
+  };
+
+  // Direct numeric field: some SDK wrappers surface this pre-parsed.
+  const directNumeric = candidate.retryAfter ?? candidate.retry_after;
+  if (typeof directNumeric === 'number' && Number.isFinite(directNumeric)) {
+    return directNumeric >= 0 ? Math.floor(directNumeric) : undefined;
+  }
+  if (typeof directNumeric === 'string') {
+    const parsed = parseRetryAfterHeader(directNumeric);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+
+  const readHeader = (headers: unknown): string | undefined => {
+    if (headers === null || headers === undefined) {
+      return undefined;
+    }
+    // fetch `Headers` object exposes `.get()` for case-insensitive lookup.
+    if (typeof (headers as { get?: unknown }).get === 'function') {
+      try {
+        const value = (headers as { get: (name: string) => unknown }).get('retry-after');
+        if (typeof value === 'string') {
+          return value;
+        }
+      } catch {
+        // Fall through to plain-object lookup.
+      }
+    }
+    if (typeof headers === 'object') {
+      const record = headers as Record<string, unknown>;
+      for (const key of Object.keys(record)) {
+        if (key.toLowerCase() === 'retry-after') {
+          const value = record[key];
+          if (typeof value === 'string') {
+            return value;
+          }
+          if (Array.isArray(value) && typeof value[0] === 'string') {
+            return value[0];
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const headerValue = readHeader(candidate.headers) ?? readHeader(candidate.response?.headers);
+  if (headerValue !== undefined) {
+    return parseRetryAfterHeader(headerValue);
+  }
+  return undefined;
+}
+
+/**
+ * If `err` represents a 429 response, wrap it in a user-friendly rate
+ * limit error carrying actionable guidance and (when present) the
+ * `Retry-After` window from the response headers.
+ *
+ * Two variants are produced:
+ *   - {@link FreeTierRateLimitError} when `modelName` looks like a
+ *     free-tier deployment (see {@link isFreeModel}). This variant is
+ *     *permanent* per the AGENTS.md error contract — `ErrorBackoff.isFatal`
+ *     short-circuits the retry loop so budget is not wasted.
+ *   - {@link ProviderRateLimitError} for all other (paid-tier) 429s. This
+ *     variant is *transient*; the existing exponential-backoff schedule
+ *     handles the retry, but the CLI now shows a user-friendly message
+ *     explaining the throttle, the options (wait, switch model, upgrade),
+ *     and the retry-after time when the header was present.
+ *
+ * Non-429 errors are returned unchanged.
  *
  * Exported for direct unit testing; production callers use it via the
  * `complete`/`streamComplete` catch blocks.
  */
 export function classifyRateLimitError(err: unknown, modelName: string): unknown {
-  if (err instanceof FreeTierRateLimitError) {
+  if (err instanceof FreeTierRateLimitError || err instanceof ProviderRateLimitError) {
     return err;
   }
   const status = extractHttpStatus(err);
   if (status !== 429) {
     return err;
   }
-  if (!isFreeModel(modelName)) {
-    return err;
+  const retryAfter = extractRetryAfterSeconds(err);
+  if (isFreeModel(modelName)) {
+    return new FreeTierRateLimitError(modelName, err, retryAfter);
   }
-  return new FreeTierRateLimitError(modelName, err);
+  return new ProviderRateLimitError(modelName, err, retryAfter);
 }
 
 // ============================================================================

@@ -71,12 +71,20 @@ describe('classifyRateLimitError', () => {
     expect((wrapped as Error & { cause?: unknown }).cause).toBe(upstream);
   });
 
-  it('returns the original error unchanged for 429 + paid model', () => {
+  it('wraps 429 + paid model in a ProviderRateLimitError (user-friendly, transient)', () => {
+    // Contract updated by issue #1373: paid-tier 429s are now wrapped in
+    // a user-friendly `ProviderRateLimitError` (transient) instead of
+    // being returned unchanged. This gives users an actionable message
+    // while preserving the transient-retry semantics — the new class
+    // does NOT carry the free-tier fatal marker.
     const upstream: Error & { status?: number } = new Error('Too Many Requests');
     upstream.status = 429;
     const classified = classifyRateLimitError(upstream, 'anthropic--claude-4.5-sonnet');
-    expect(classified).toBe(upstream);
+    expect(classified).not.toBe(upstream);
     expect(classified).not.toBeInstanceOf(FreeTierRateLimitError);
+    // The upstream error is preserved on `cause` so operator debugging
+    // via `formatProviderError` / logs still has the raw payload.
+    expect((classified as Error & { cause?: unknown }).cause).toBe(upstream);
   });
 
   it('returns the original error unchanged for non-429 + free model', () => {
