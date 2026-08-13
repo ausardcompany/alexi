@@ -607,7 +607,7 @@ The TUI provides Tab completion for:
 | `ALEXI_MAX_IMAGE_SIZE_MB` | `20` | Maximum image attachment size (MB) |
 | `SAP_PROXY_BASE_URL` | -- | OpenAI-compatible proxy endpoint URL |
 | `SAP_PROXY_API_KEY` | -- | Proxy endpoint API key |
-| `MORPH_API_KEY` | -- | WarpGrep semantic search API key |
+| `MORPH_API_KEY` | -- | WarpGrep (`@morphllm/morphsdk`) semantic search API key. Consumed by the `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); Alexi's built-in tool surface no longer reads it. |
 | `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | -- | Enable background task execution |
 | `KILO_DISABLE_EXTERNAL_SKILLS` | `false` | When set to `true` or `1` (case-insensitive), disables loading of external skills. Evaluated once at module load time via `src/core/flag.ts`. |
 
@@ -876,7 +876,8 @@ cleanupToolOutputs(): void
 | `webfetch` | `url`, `format?`, `timeout?` | Fetch web content |
 | `question` | `question`, `options?` | Ask user a question |
 | `todowrite` | `todos` | Manage task list |
-| `codebase_search` | `query` | AI-powered semantic code search (WarpGrep) |
+
+> `codebase_search` is no longer a built-in tool. It is provided by the standalone `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); once registered in `mcp-servers.json` it appears in the same tool list with the same `{ query: string }` parameter shape it had as a built-in.
 
 #### `read` tool: `denyDirectory` symlink safeguard
 

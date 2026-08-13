@@ -152,7 +152,7 @@ function getProviderForModel(modelId: string): SapOrchestrationProvider {
 
 ### Tool System
 
-Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
+Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `warpgrep` / `codebase_search` tool has been extracted to the `alexi-mcp-warpgrep` MCP server — see [`docs/mcp-servers.md`](./mcp-servers.md)):
 
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
@@ -161,8 +161,7 @@ Alexi registers **30 built-in tools** via `registerBuiltInTools()`:
 | `write` | `write.ts` | write | Write/create files |
 | `edit` | `edit.ts` | write | Exact string replacement in files |
 | `glob` | `glob.ts` | read | Find files by pattern |
-| `grep` | `grep.ts` | read | Search file contents by regex |
-| `warpgrep` | `warpgrep.ts` | read | AI-powered semantic code search |
+| `grep` | `grep.ts` | read | Search file contents by regex (appends an "install `@morphllm/morphsdk` for semantic search" hint to its description when `isWarpgrepAvailable()` returns `false`) |
 | `task` | `task.ts` | -- | Launch sub-agent tasks (foreground/background) |
 | `task_status` | `task_status.ts` | -- | Query background task status |
 | `webfetch` | `webfetch.ts` | network | Fetch web content |
