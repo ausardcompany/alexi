@@ -544,14 +544,78 @@ Cache-token accounting on the response path is handled by the paired `extractCac
 
 #### Rate Limiting
 
-```typescript
-{
-  success: false,
-  error: 'Rate limit exceeded. Please try again later.'
-}
+Alexi detects HTTP 429 responses from SAP AI Core and wraps them in a
+user-friendly error class with actionable guidance instead of surfacing a
+raw "HTTP 429" / "Too Many Requests" string. Two variants exist depending
+on whether the model targets a free-tier or paid-tier deployment.
+
+**Paid-tier throttling (`ProviderRateLimitError`, code `provider_rate_limit`)**
+
+Transient failure. `ErrorBackoff` will retry after the wait window; the
+`Retry-After` header from the response (when present) overrides the
+default exponential-backoff schedule so we honour the exact time the
+server advertised.
+
+```
+Rate limit reached for model 'anthropic--claude-4.7-opus'. The provider
+is throttling requests (HTTP 429).
+
+Options:
+  - Wait 60 seconds and try again
+  - Switch to a smaller model (e.g. haiku instead of opus)
+  - Upgrade your SAP AI Core plan for higher limits
+
+See: https://help.sap.com/docs/ai-core/generative-ai-hub/rate-limits
 ```
 
-**Solution**: Implement exponential backoff or reduce request frequency
+The specific wait time ("Wait 60 seconds") is taken from the
+`Retry-After` header when the response supplied one; otherwise the
+message shows a conservative default of 60 seconds so the user is not
+staring at a bare "later".
+
+**Free-tier quota exhaustion (`FreeTierRateLimitError`, code
+`free_tier_rate_limit`)**
+
+Permanent failure per the error contract in `AGENTS.md`. Retrying the
+same call at the same rate will hit the same limit — the operator must
+either wait for the quota window to reset or upgrade to a paid SAP AI
+Core deployment. `ErrorBackoff.isFatal()` returns `true` for this
+variant, which short-circuits the retry loop and prevents wasted budget.
+
+```
+Free-tier model rate limit exceeded for 'anthropic--claude-4.7-haiku-free'.
+SAP AI Core free-tier deployments enforce strict per-minute request
+quotas; retrying now will hit the same limit. Retry after 30 seconds.
+Wait for the quota window to reset or upgrade to a paid SAP AI Core
+deployment. See: https://help.sap.com/docs/ai-core/generative-ai-hub/rate-limits
+```
+
+Free-tier detection uses a narrow heuristic: model ids whose trailing
+hyphen-delimited segment is `free` (case-insensitive), e.g.
+`anthropic--claude-4.7-haiku-free`. Ids with `free` embedded elsewhere
+(`some-freerider-model`) are treated as paid.
+
+**Retry-After header handling.** Both classes carry an optional
+`retryAfterSeconds` field populated from the `Retry-After` response
+header. Both the integer-seconds (`Retry-After: 60`) and HTTP-date
+(`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`) shapes are supported. When
+present, `ErrorBackoff.recordError` schedules the next retry attempt at
+the header-provided time (capped at the configured `maxDelayMs` so a
+misconfigured server cannot pin the client into an unbounded wait).
+
+**Programmatic detection.** Two helpers in `src/core/error-backoff.ts`
+expose the classification structurally so callers do not need
+`instanceof` (which is fragile across module boundaries in tests):
+
+- `isRateLimitError(err)` — returns `true` for either variant, and also
+  for any raw error carrying `statusCode === 429`.
+- `getRetryAfterMs(err)` — returns the retry-after window in
+  milliseconds, or `undefined` when the header was absent.
+
+**Solution**: For paid-tier throttles, wait the advertised window,
+switch to a smaller model, or upgrade the deployment plan. For
+free-tier limits, either wait for the quota window to reset or upgrade
+to a paid SAP AI Core deployment.
 
 #### Quota Exceeded
 

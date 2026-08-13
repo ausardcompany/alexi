@@ -22,6 +22,13 @@ export interface BackoffConfig {
 const FREE_TIER_RATE_LIMIT_CODE = 'free_tier_rate_limit';
 
 /**
+ * Machine-readable error code for paid-tier rate limits. Same duplication
+ * rationale as {@link FREE_TIER_RATE_LIMIT_CODE}. Kept in sync with
+ * `PROVIDER_RATE_LIMIT_CODE` in `src/providers/sapOrchestration.ts`.
+ */
+const PROVIDER_RATE_LIMIT_CODE = 'provider_rate_limit';
+
+/**
  * Return true when `err` carries the free-tier rate-limit marker. Matches
  * either the `code` property (set by `FreeTierRateLimitError`) or the
  * class `name` — the latter keeps the check working across module-boundary
@@ -37,6 +44,59 @@ function isFreeTierRateLimitError(err: unknown): boolean {
     return true;
   }
   return candidate.name === 'FreeTierRateLimitError';
+}
+
+/**
+ * Return true when `err` is a rate-limit error (either free-tier or the
+ * generic paid-tier variant). Detection is structural — we match on
+ * `code`, `name`, or a numeric `statusCode === 429` — so it survives
+ * cross-module re-imports (identity `instanceof` checks fail when the
+ * providers module has been loaded twice, e.g. by vitest workers).
+ *
+ * This is the coarse test callers use to decide whether to render the
+ * user-friendly "rate limit reached" UX; use {@link ErrorBackoff.isFatal}
+ * to separate the permanent free-tier variant from the transient
+ * paid-tier one.
+ */
+export function isRateLimitError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { code?: unknown; name?: unknown; statusCode?: unknown };
+  if (candidate.code === FREE_TIER_RATE_LIMIT_CODE || candidate.code === PROVIDER_RATE_LIMIT_CODE) {
+    return true;
+  }
+  if (candidate.name === 'FreeTierRateLimitError' || candidate.name === 'ProviderRateLimitError') {
+    return true;
+  }
+  return candidate.statusCode === 429;
+}
+
+/**
+ * Extract a `Retry-After` window from a rate-limit error and convert it to
+ * milliseconds. Returns `undefined` when no header was captured — the
+ * caller then falls back to the default exponential-backoff schedule.
+ *
+ * The value read is `retryAfterSeconds` (set by the constructors of
+ * `FreeTierRateLimitError` / `ProviderRateLimitError` in
+ * `src/providers/sapOrchestration.ts`). We intentionally do NOT re-parse
+ * raw headers here — that parsing belongs to the providers layer where
+ * the raw response is still available.
+ *
+ * A zero value is preserved (returns 0) so callers can honour an
+ * "immediate retry allowed" hint from the server rather than defaulting
+ * to the standard exponential delay.
+ */
+export function getRetryAfterMs(err: unknown): number | undefined {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as { retryAfterSeconds?: unknown };
+  const seconds = candidate.retryAfterSeconds;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) {
+    return undefined;
+  }
+  return Math.floor(seconds * 1000);
 }
 
 export class ErrorBackoff {
@@ -84,10 +144,24 @@ export class ErrorBackoff {
       }
     }
 
-    const delay = Math.min(
-      this.config.initialDelayMs * Math.pow(this.config.multiplier, this.consecutiveErrors - 1),
-      this.config.maxDelayMs
-    );
+    // Server-provided Retry-After (from `Retry-After` header on a 429)
+    // wins over the default exponential schedule when present. Rationale:
+    // the server has explicitly told us when the quota window will reopen,
+    // so honouring that is both more accurate and cheaper than blindly
+    // doubling the delay on every attempt. When the header is absent,
+    // fall through to the standard `initialDelay * multiplier^n` curve.
+    const retryAfterMs = getRetryAfterMs(err);
+    let delay: number;
+    if (retryAfterMs !== undefined) {
+      // Cap at the configured maximum so a malicious/misconfigured server
+      // cannot pin the client into an unbounded wait.
+      delay = Math.min(retryAfterMs, this.config.maxDelayMs);
+    } else {
+      delay = Math.min(
+        this.config.initialDelayMs * Math.pow(this.config.multiplier, this.consecutiveErrors - 1),
+        this.config.maxDelayMs
+      );
+    }
     this.backoffUntil = Date.now() + delay;
   }
 
