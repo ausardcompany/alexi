@@ -1,0 +1,46 @@
+{
+  "name": "alexi-mcp-warpgrep",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "WarpGrep MCP server for semantic code search - standalone MCP server exposing @morphllm/morphsdk as a `codebase_search` tool",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "alexi-mcp-warpgrep": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@morphllm/morphsdk": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@morphllm/morphsdk": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "warpgrep",
+    "codebase-search",
+    "semantic-search",
+    "alexi"
+  ],
+  "author": "Ausard",
+  "license": "MIT"
+}

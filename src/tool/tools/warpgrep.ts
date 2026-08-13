@@ -5,6 +5,19 @@
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { Telemetry } from '../../utils/telemetry.js';
+import { logger } from '../../utils/logger.js';
+
+/**
+ * Track whether the deprecation warning has already been emitted this
+ * process so we do not spam the log on every tool call. Exported for
+ * tests to reset between cases.
+ */
+let deprecationWarningEmitted = false;
+
+/** @internal - reset the module-level deprecation flag. Test-only. */
+export function _resetWarpgrepDeprecationWarning(): void {
+  deprecationWarningEmitted = false;
+}
 
 /**
  * Check whether `@morphllm/morphsdk` can be resolved at runtime.
@@ -81,6 +94,19 @@ export const warpgrepTool = defineTool<typeof WarpGrepParamsSchema, WarpGrepResu
   parameters: WarpGrepParamsSchema,
 
   async execute(params, context): Promise<ToolResult<WarpGrepResult>> {
+    // Deprecation notice: WarpGrep is being migrated to a standalone MCP
+    // server (`alexi-mcp-warpgrep`). The built-in tool remains functional
+    // for backward compatibility but will be removed in a future major
+    // release. Emit the warning once per process to avoid log noise.
+    if (!deprecationWarningEmitted) {
+      logger.warn(
+        'The built-in `codebase_search` (WarpGrep) tool is deprecated. ' +
+          'A standalone MCP server (`alexi-mcp-warpgrep`) is now available. ' +
+          'See docs/mcp-servers.md for the migration guide.'
+      );
+      deprecationWarningEmitted = true;
+    }
+
     // Check if MorphSDK is available
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let WarpGrepClient: any;
