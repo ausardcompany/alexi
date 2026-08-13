@@ -47,9 +47,9 @@ describe('WarpGrep built-in tool - removed from registry', () => {
     // Even if the SDK is present, we do NOT re-register the built-in tool:
     // semantic search is deliberately migrated to `alexi-mcp-warpgrep`.
     vi.doMock('../../../src/tool/tools/warpgrep.js', async () => {
-      const actual = await vi.importActual<
-        typeof import('../../../src/tool/tools/warpgrep.js')
-      >('../../../src/tool/tools/warpgrep.js');
+      const actual = await vi.importActual<typeof import('../../../src/tool/tools/warpgrep.js')>(
+        '../../../src/tool/tools/warpgrep.js'
+      );
       return {
         ...actual,
         isWarpgrepAvailable: () => true,
