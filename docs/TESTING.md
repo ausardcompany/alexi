@@ -1184,6 +1184,98 @@ contributors do not re-introduce them by hand:
    exceed 100 columns. Running `npm run format` before committing avoids the
    `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up commit.
 
+3. **Keep the generic type argument of `vi.importActual<T>()` on the same line
+   as the call.** Prettier's reflow policy applies to generic type-argument
+   lists too. A hand-authored three-line break of the form
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix
+   const actual = await vi.importActual<
+     typeof import('../../../src/tool/tools/warpgrep.js')
+   >('../../../src/tool/tools/warpgrep.js');
+   ```
+
+   is collapsed by the CI auto-fix pass into the canonical two-line form the
+   moment the resulting line fits under `printWidth: 100`. The canonical form
+   keeps the `<...>` type argument on the same line as the identifier and only
+   breaks after the `(` for the runtime argument:
+
+   ```typescript
+   // tests/tool/tools/warpgrep.test.ts:50 (canonical form after the
+   // 2026-08-13 auto-fix pass in commit 2b2e5830)
+   const actual = await vi.importActual<typeof import('../../../src/tool/tools/warpgrep.js')>(
+     '../../../src/tool/tools/warpgrep.js'
+   );
+   ```
+
+   The `typeof import('...')` type argument is preserved verbatim; only the
+   line breaks around the `<>` delimiters change. Assertion semantics, mock
+   scope, and the resolved type of `actual` are all identical.
+
+### Registry-contract pinning tests
+
+Some tests exist solely to pin a public-surface contract that the codebase has
+deliberately broken with an upstream migration and must NOT regress. The
+canonical worked example is `tests/tool/tools/warpgrep.test.ts` (63 lines),
+which pins the following three-part contract for the retired
+`codebase_search` (WarpGrep) built-in tool:
+
+1. `builtInTools` (from `src/tool/tools/index.js`) must NOT contain a tool
+   named `'codebase_search'` when `@morphllm/morphsdk` is unavailable.
+2. The `grep` tool description (both the static string and the dynamic
+   `toFunctionSchema()` output) must still include the install hint
+   `'Note: For semantic code search, install @morphllm/morphsdk'` so the
+   agent can discover the migration path to the standalone
+   `alexi-mcp-warpgrep` MCP server.
+3. `builtInTools` must ALSO NOT contain `'codebase_search'` when the SDK is
+   present — semantic search is deliberately migrated to
+   `alexi-mcp-warpgrep` regardless of SDK availability.
+
+The third assertion is the interesting one because it requires a partial mock
+of the `isWarpgrepAvailable` predicate. The canonical pattern uses
+`vi.doMock` inside the test body (not `vi.mock` at the top level) so it only
+affects the fresh `await import(...)` that follows, and spreads the actual
+module to preserve `WARPGREP_DESCRIPTION`, `warpgrepTool`, and other exports
+verbatim:
+
+```typescript
+// tests/tool/tools/warpgrep.test.ts:49-57 (canonical form)
+vi.doMock('../../../src/tool/tools/warpgrep.js', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/tool/tools/warpgrep.js')>(
+    '../../../src/tool/tools/warpgrep.js'
+  );
+  return {
+    ...actual,
+    isWarpgrepAvailable: () => true,
+  };
+});
+
+const { builtInTools } = await import('../../../src/tool/tools/index.js');
+const toolNames = builtInTools.map((t) => t.name);
+expect(toolNames).not.toContain('codebase_search');
+```
+
+Key patterns for this class of test:
+
+1. **Use `vi.doMock` inside the test body**, paired with `vi.resetModules()`
+   in `beforeEach` and `vi.restoreAllMocks()` in `afterEach`. `vi.mock` at the
+   top level hoists above the imports and cannot be scoped to individual
+   `it()` blocks — `vi.doMock` is the correct primitive for per-test module
+   overrides.
+2. **Spread `...actual` when overriding a single export** so the rest of the
+   module surface (types, other functions, constants) is preserved verbatim.
+   The `vi.importActual<typeof import(...)>()` form gives the returned object
+   the exact type of the real module, so TypeScript still checks that the
+   override key (`isWarpgrepAvailable`) exists on the module.
+3. **Assert on tool NAMES, not tool objects**. The registry surface
+   (`builtInTools`) is an array of tool objects that would produce noisy diffs
+   on failure; mapping to `t.name` gives a small, readable failure message
+   (`expected ["read", "write", ...] not to contain "codebase_search"`).
+4. **Cover both branches of the SDK availability check** (`() => false`
+   implicit via missing package, `() => true` via `vi.doMock`). A migration
+   contract is only really pinned when the negative case fires under both
+   conditions.
+
 ## Best Practices
 
 ### 1. Test Isolation
