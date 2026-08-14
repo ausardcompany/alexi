@@ -402,7 +402,11 @@ async function executeWithRg(
         matches.push({
           file: path.relative(searchDir, filePath),
           line: e.data.line_number,
-          content: stripped.slice(0, 200),
+          // Trim the preview but never split a UTF-16 surrogate pair — otherwise
+          // the tool output contains a lone high surrogate and SAP AI Core
+          // (and some downstream JSON serializers) reject the invalid unicode.
+          // Upstream: opencode 6c035e1.
+          content: stripped.slice(0, 200).replace(/[\uD800-\uDBFF]$/, ''),
         });
       } else if (event.type === 'summary') {
         const e = event as RgSummaryEvent;
@@ -649,7 +653,9 @@ When independent reads, searches, or edits are also needed, emit those tool call
               matches.push({
                 file: path.relative(searchPath, file),
                 line: i + 1,
-                content: lines[i].slice(0, 200), // Limit line length
+                // See rg-path comment: never split a surrogate pair when
+                // slicing the preview. Upstream: opencode 6c035e1.
+                content: lines[i].slice(0, 200).replace(/[\uD800-\uDBFF]$/, ''),
               });
             }
           }

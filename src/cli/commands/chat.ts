@@ -115,6 +115,7 @@ export function registerChatCommand(program: Command): void {
         const sessionManager = new SessionManager();
 
         // Load or create session
+        let existingSessionAgent: string | undefined;
         if (opts.session) {
           const session = sessionManager.loadSession(opts.session);
           if (!session) {
@@ -122,12 +123,17 @@ export function registerChatCommand(program: Command): void {
             process.exit(1);
           }
           console.log(`[Continuing session: ${session.metadata.title || opts.session}]`);
+          // Preserve the session's previously-recorded agent so a headless
+          // `--session <id>` resume without an explicit `--agent` flag does
+          // not silently drop the user's selection. Upstream: kilocode
+          // f4cba053a.
+          existingSessionAgent = session.metadata.agent;
         }
 
-        // Resolve agent: --agent flag > config `agent` field > undefined.
+        // Resolve agent: --agent flag > session-recorded agent > config > undefined.
         // Unknown slugs log a warning and fall back to defaults.
         const agentId = await resolveDefaultAgent({
-          cliFlag: opts.agent,
+          cliFlag: opts.agent ?? existingSessionAgent,
           configValue: getConfigDefaultAgent(),
         });
 
@@ -165,6 +171,17 @@ export function registerChatCommand(program: Command): void {
         // Print session info
         const currentSession = sessionManager.getCurrentSession();
         if (currentSession) {
+          // Persist the resolved agent on the session metadata so a later
+          // `--session <id>` resume without an explicit `--agent` continues
+          // with the same agent (kilocode f4cba053a).
+          if (agentId && currentSession.metadata.agent !== agentId) {
+            currentSession.metadata.agent = agentId;
+            try {
+              sessionManager.persistActiveSession();
+            } catch {
+              // Non-fatal: agent preservation is best-effort.
+            }
+          }
           console.log(`\n[Session: ${currentSession.metadata.id}]`);
           console.log(
             `[Messages: ${currentSession.metadata.messageCount}, Tokens: ${currentSession.metadata.totalTokens}]`

@@ -5,12 +5,33 @@
 
 import { routePrompt } from '../core/router.js';
 import { getProviderForModelWithFallback } from '../providers/index.js';
+import { logger } from '../utils/logger.js';
 import type { GitConfig } from './config.js';
 
 export interface ChangedFile {
   filePath: string;
   toolName: string;
   description?: string;
+}
+
+/**
+ * Error thrown when commit-message generation via the LLM fails for a
+ * non-recoverable reason (provider unreachable, auth error, invalid
+ * response shape, …). The generator itself still falls back to the
+ * heuristic path so `generateCommitMessage` never rejects, but the
+ * underlying cause is now logged instead of silently swallowed —
+ * ported from upstream kilocode commit 738163bb1 so operators can
+ * diagnose SAP AI Core provider failures instead of wondering why
+ * they always see heuristic commit messages.
+ */
+export class CommitMessageError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: unknown
+  ) {
+    super(message);
+    this.name = 'CommitMessageError';
+  }
 }
 
 /**
@@ -101,11 +122,25 @@ async function generateWithLLM(files: ChangedFile[], config: GitConfig): Promise
     );
 
     const msg = result.text?.trim();
-    if (!msg) return null;
+    if (!msg) {
+      // Empty response is treated as "no message available" (not an
+      // error); caller falls back to heuristics. This is expected when
+      // the model is over-conservative on empty diffs.
+      logger.debug('[commit-message] LLM returned empty response — falling back to heuristic');
+      return null;
+    }
 
     // Strip surrounding quotes if LLM added them
     return msg.replace(/^["'`]|["'`]$/g, '');
-  } catch {
+  } catch (cause) {
+    // Distinguish transient/expected failures from real errors so
+    // operators can diagnose SAP AI Core provider issues instead of
+    // silently getting heuristic commit messages. Kilocode 738163bb1.
+    const err = new CommitMessageError(
+      `Failed to generate commit message via LLM: ${cause instanceof Error ? cause.message : String(cause)}`,
+      cause
+    );
+    logger.warn(err.message);
     return null;
   }
 }

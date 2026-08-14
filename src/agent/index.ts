@@ -552,3 +552,46 @@ const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
 export function getAskAgentBashRules(): Record<string, 'allow' | 'ask' | 'deny'> {
   return readOnlyBash;
 }
+
+/**
+ * Bash rules for the `explore` subagent.
+ *
+ * The explore agent is a *delegated* subagent — it cannot answer permission
+ * prompts, so any `ask` rule effectively behaves like a `deny`. It is also
+ * strictly read-only, so it must never be able to reach out to `gh` (which
+ * can mutate GitHub state) or `find` (which mutates the filesystem via
+ * `-delete` / `-exec`). Prefer `glob`/`list` over `find`.
+ *
+ * Ported from upstream kilocode commit 3a99f36d9 (`hardenExplore`). Any
+ * caller merging bash permissions for the explore agent MUST use this
+ * table instead of `readOnlyBash` directly.
+ */
+const exploreBash: Record<string, 'allow' | 'ask' | 'deny'> = {
+  ...readOnlyBash,
+  // Explore runs as a delegated agent, so it cannot answer permission prompts.
+  'gh *': 'deny',
+  // `find` can mutate through `-delete` and `-exec`; use glob/list instead.
+  'find *': 'deny',
+};
+
+/**
+ * Get bash rules for the `explore` subagent.
+ *
+ * Callers that construct a permission ruleset for a delegated `explore`
+ * subagent should merge this table on top of any user-supplied denies
+ * (hardening is a *ceiling* — stricter denies take precedence). See
+ * upstream kilocode `hardenExplore` for the reference semantics.
+ */
+export function getExploreAgentBashRules(): Record<string, 'allow' | 'ask' | 'deny'> {
+  return exploreBash;
+}
+
+/**
+ * Return `true` when the given agent id (or alias resolvable via the
+ * registry) is the built-in `explore` subagent. Callers use this to gate
+ * the stricter bash allow-list returned by `getExploreAgentBashRules`.
+ */
+export function isExploreAgent(idOrAlias: string): boolean {
+  const agent = getAgentRegistry().get(idOrAlias);
+  return agent?.id === 'explore';
+}

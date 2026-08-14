@@ -1,83 +1,76 @@
-# Update Plan Execution Report
+# Upstream Sync — Changes Summary
 
-**Date**: 2026-08-13
-**Plan source**: Upstream changes analysis
-- kilocode: `64e5dd036..f71154707` (48 commits)
-- opencode: `1f94d8a..cc4b456` (21 commits)
+**Date:** 2026-08-14
+**Plan basis:**
+- kilocode `f71154707..67cda85c9` (v7.4.21 → v7.4.22)
+- opencode `cc4b456..e23586a`
 
 ## Files modified
 
-| File | Change type |
-|------|-------------|
-| `src/tool/warpgrep.ts` | Rewrite → empty placeholder (removal marker) |
-| `src/tool/tools/warpgrep.ts` | Rewrite → keeps `isWarpgrepAvailable()` + no-op stub; removes `warpgrepTool` export, proxy fallback, Morph SDK integration |
-| `src/tool/tools/index.ts` | Drop `warpgrepTool` import and registration; keep `isWarpgrepAvailable` to drive grep-hint switch |
-| `src/tool/tools/grep.ts` | Update description to point at `alexi-mcp-warpgrep` MCP server instead of built-in `codebase_search` |
-| `src/tool/tools/glob.ts` | Same doc update as grep.ts |
-| `src/core/compaction.ts` | Adopt clearer `SUMMARY_PROMPT` phrasing (opencode) — explicit "do not continue the conversation" clause, structured summary contract |
-| `tests/tool/tools/warpgrep.test.ts` | Rewrite to pin the removal contract (must NOT appear in `builtInTools` even when SDK resolves); keep grep-hint assertions |
-| `tests/tool/tools/warpgrep-deprecation.test.ts` | Rewrite to assert `warpgrepTool` is not exported and the two remaining helpers still work |
+| # | File | Kind |
+| - | ---- | ---- |
+| 1 | `src/agent/index.ts` | edit |
+| 2 | `src/tool/tools/grep.ts` | edit |
+| 3 | `src/tool/tools/__tests__/grep.surrogate.test.ts` | new |
+| 4 | `src/core/sessionManager.ts` | edit |
+| 5 | `src/cli/commands/chat.ts` | edit |
+| 6 | `src/core/__tests__/headless-session-agent.test.ts` | new |
+| 7 | `src/git/commitMessage.ts` | edit |
+| 8 | `src/tool/tools/task.ts` | edit |
 
-## Change-by-change summary
+## Summary of each change
 
-### 1. Remove built-in `codebase_search` / WarpGrep tool — DONE (high)
-- `src/tool/warpgrep.ts`: replaced stale placeholder comment with an explicit removal-notice `export {}` module.
-- `src/tool/tools/warpgrep.ts`: stripped the full tool implementation. The module now only exports:
-  - `isWarpgrepAvailable(): boolean` — retained so `src/tool/tools/index.ts` can decide whether to append the "install @morphllm/morphsdk" install hint to the `grep` description.
-  - `_resetWarpgrepDeprecationWarning(): void` — retained as a no-op for backward test compatibility.
-- Removed the Morph API integration, the `kilo-free` API key fallback, and the `https://api.kilo.ai/api/gateway` proxy URL. This is the specific compliance concern called out in the plan.
+### 1. `src/agent/index.ts` — Harden `explore` subagent (kilocode 3a99f36d9) — *critical*
+Added `exploreBash` table, exported `getExploreAgentBashRules()`, and added `isExploreAgent()` alongside the existing `getAskAgentBashRules()`. The table is `readOnlyBash + { 'gh *': 'deny', 'find *': 'deny' }` — `gh` and `find` cannot be delegated to a subagent that has no way to answer permission prompts, and `find -delete`/`find -exec` are mutating. The Alexi built-in `explore` agent already restricts its `tools` allowlist to `['read', 'glob', 'grep']` (no `bash`), so no bash allow needed to be removed structurally; the new helper is available for any future permission-merge integration in the task-tool path (see change #8).
 
-### 2. Remove `codebase_search` from tool registry — DONE (high, adapted)
-The plan's example matched opencode's Effect-based registry, which does not exist in Alexi. The equivalent Alexi surface is `src/tool/tools/index.ts` (the `builtInTools` array + registration loop). Actioned there:
-- Dropped `warpgrepTool` from the imports.
-- Removed `...(warpgrepAvailable ? [warpgrepTool] : [])` from `builtInTools`.
-- Removed `warpgrepTool` from the re-export block.
-- `isWarpgrepAvailable` retained as an export so downstream consumers can still gate other UI on SDK availability.
+### 2. `src/tool/tools/grep.ts` — Preserve UTF-16 surrogate pairs in previews (opencode 6c035e1) — *high*
+Both the ripgrep JSON path and the JS fallback path now trim a trailing high surrogate (`/[\uD800-\uDBFF]$/`) after slicing the 200-char preview. Prevents lone high surrogates in tool output that break SAP AI Core message-shape validation. **Note:** Alexi's preview cap is 200 (not the 2 000 in the upstream). The regex-based post-fix is identical either way.
 
-### 3. Remove `codebase_search` permission entries in agent guards — N/A
-Alexi's `src/agent/index.ts` uses a Zod-based `AgentConfig` schema with `builtInAgents` list; there are no `askGuard` / `planGuard` functions and no `codebase_search` permission entries. No changes required (grep for `codebase_search` / `askGuard` / `planGuard` in `src/` after the run confirms this).
+### 3. `src/tool/tools/__tests__/grep.surrogate.test.ts` — new regression test — *high*
+Writes a file whose match line has an emoji straddling the 200-char boundary and asserts no lone surrogate ends up in the preview. Forces `ALEXI_DISABLE_RG=1` so CI does not need `rg` on PATH.
 
-### 4. Remove `codebase_search` config flag from schema — N/A
-Alexi's config (`src/config/*.ts`) uses a different layout (no Effect `Schema.Struct`, no `codebase_search` boolean flag). Nothing to remove.
+### 4. `src/core/sessionManager.ts` — record agent on `SessionMetadata` + public `persistActiveSession()` (kilocode f4cba053a) — *high*
+Added optional `agent?: string` to `SessionMetadata` and a public `persistActiveSession()` helper (the underlying `saveSession` is private). Enables headless resumes to preserve the previously-chosen agent.
 
-### 5. Adopt clearer compaction system prompt (opencode) — DONE (medium)
-Updated `SUMMARY_PROMPT` in `src/core/compaction.ts` to the new opencode phrasing while preserving Alexi's KEY DECISIONS / FILES CHANGED / USER INSTRUCTIONS extraction structure. Notable adds:
-- Explicit "You are a context summarization agent" framing (better for smaller SAP-hosted models).
-- Explicit "Do not continue the conversation. Do not respond to any questions." clause — the common failure mode called out in the plan.
-- Explicit "Only output the structured summary in the format requested."
+### 5. `src/cli/commands/chat.ts` — preserve session agent on `--session` resume (kilocode f4cba053a) — *high*
+`--agent` flag now falls back to `session.metadata.agent` before falling back to the config default. After `sendChat` completes, the resolved agent is stamped onto the session and persisted via `persistActiveSession()`, so a subsequent `alexi chat --session <id>` without an explicit `--agent` picks it up. Silent revert to the built-in `code` default no longer happens.
 
-All existing keyword-based assertions in `tests/compaction/preservation.test.ts` (`USER INSTRUCTIONS`, `Preserve ALL`, `preferences`, `constraints`, `verbatim`, `coding style`, `API keys`, `endpoints`, `"always do X"`, `"never do Y"`) and in `src/core/__tests__/compaction.test.ts` (`KEY DECISIONS`) continue to pass — the new prompt is a strict superset of the old on all pinned tokens.
+### 6. `src/core/__tests__/headless-session-agent.test.ts` — new regression test — *high*
+Round-trips `session.metadata.agent` through save + reload, and asserts the precedence contract used by `chat.ts`: `pickAgentSlug({ cliFlag: opts.agent ?? session.metadata.agent, configValue })` returns the session-recorded agent when the CLI flag is absent, but the CLI flag still wins when present.
 
-### 6. Simplify compaction slice logic (drop char-level split) — N/A
-Alexi's `src/core/compaction.ts` uses a message-array `preserveLastN` / `keepStart` walk, NOT the opencode `select()` char-slice pattern. There is no character-boundary splitting to remove.
+### 7. `src/git/commitMessage.ts` — surface LLM commit-message errors (kilocode 738163bb1) — *high*
+Introduced `CommitMessageError`. Empty LLM responses are still treated as "fall back to heuristic" (debug-logged, no throw), but any thrown error now surfaces via `logger.warn` instead of being silently swallowed. The public `generateCommitMessage()` still never rejects — the heuristic path always produces something — but operators diagnosing SAP AI Core provider failures can now see the cause.
 
-### 7. Add prior-summary update instructions to compaction — N/A (plan truncated)
-The plan text was cut off mid-sentence at item 7 (see the JSON usage stamp in the received plan). The described `SUMMARY_UPDATE_INSTRUCTIONS` addition targets an opencode structure Alexi does not currently mirror, so no faithful port was possible.
+### 8. `src/tool/tools/task.ts` — permission-inheritance TODO now references explore hardening (kilocode 3a99f36d9 + task.ts touch-up) — *medium*
+Expanded the existing `deriveSubagentSessionPermission` TODO block to reference the new `getExploreAgentBashRules()` / `isExploreAgent()` helpers from change #1, so the eventual integration knows to layer the strict explore bash rules on top of the derived ruleset. No behavioural change — `ToolContext` still doesn't carry session/agent context, so a real integration is out of scope for this port.
 
-## Tests updated
+## Items NOT applied (documented gaps vs. the plan)
 
-- `tests/tool/tools/warpgrep.test.ts` — flipped the two "when morphsdk is available, register codebase_search" cases into a single "even when morphsdk resolves, the tool is NOT re-registered" case. This pins the removal contract so no future refactor silently re-enables the built-in tool.
-- `tests/tool/tools/warpgrep-deprecation.test.ts` — was testing the deprecation warning emitted by the built-in tool. The tool no longer exists, so the warning cannot fire. The test now asserts the removal contract: `warpgrepTool` is not exported, `isWarpgrepAvailable` still works, `_resetWarpgrepDeprecationWarning` remains a callable no-op.
+- **Change #3 — models.dev refresh logger isolation (kilocode 746fa974e).**
+  Alexi has no `models-dev.ts` module. Models are configured via `routing-config.json` + provider constructors, not via a background models.dev refresh Effect. There is no analogous refresh loop whose loggers could leak into the TUI, so the change is not applicable.
 
-## SAP AI Core compatibility
+- **Change #6 — v1 session projector compatibility (opencode d8bf792).**
+  Alexi does not use the `SessionContextEpoch` / `SessionV1.Event` projector architecture. `SessionManager` writes plain JSON files to `~/.alexi/sessions/` — no epoch reset to remove. Not applicable.
 
-- No changes to `src/providers/*` — SAP AI Core / SAP Orchestration providers unchanged.
-- No changes to routing config, session store, or tool-call transport.
-- `stripInternalOptions` and `INTERNAL_OPTION_KEYS` in `src/agent/index.ts` untouched.
-- Compaction prompt change affects only the text sent to the summarization LLM; the message-shape contract to SAP AI Core is unchanged.
+- **Change #8 — `ai-gateway-provider` 3.1.2 → 3.2.0 (opencode 6d63500).**
+  `ai-gateway-provider` is not a dependency of Alexi (`grep` confirmed zero references). Alexi uses `@sap-ai-sdk/ai-api` and `@sap-ai-sdk/orchestration` for SAP AI Core. Not applicable.
+
+- **The `--worktree` CLI flag (kilocode 907f7dfcf) and clickable file links in TUI (kilocode 8013e5f50)** were mentioned in the plan's context header but never broken out into numbered changes. Not applied.
 
 ## Issues encountered
 
-1. **Plan was truncated** mid-way through item 7 (contains a JSON usage stamp — `{"prompt_tokens":16663,...}` — indicating the upstream generator hit a token limit). Items 8+ (referenced by the header count "Total changes planned: 10") were not received. Executed the received 7 items to the extent they apply.
+- **`saveSession` is private on `SessionManager`.** Solved by adding a narrow public `persistActiveSession()` method rather than widening the internal API. This keeps the JSON-write path centralised.
+- **Alexi's agent system uses tool-ID allowlists**, not a permission ruleset like kilocode/opencode. The `hardenExplore` port therefore takes the shape of a *helper* (`getExploreAgentBashRules`) that any future permission-merge integration can consume, rather than a direct edit to a permission-merging step that does not yet exist in Alexi.
+- **`ToolContext` does not carry the parent session/agent.** The task-tool permission-inheritance integration (change #7) is therefore still gated behind the pre-existing TODO in `src/tool/tools/task.ts`; the TODO comment is the only thing that changed there.
 
-2. **Structural mismatch** between opencode's `Effect.gen`-based tool registry (items 2, 3, 4, 6, 7 in the plan) and Alexi's Zod + module-array layout. Each such item is either adapted to the Alexi equivalent (item 2) or documented as N/A above (items 3, 4, 6). Nothing was silently skipped.
+## Verification
 
-3. **Alexi had already begun this migration.** The built-in tool already emitted a deprecation warning pointing users at `packages/alexi-mcp-warpgrep`. The MCP server package itself already exists and is intact. This execution completes the removal that Alexi's own deprecation notice was announcing.
-
-## Verification checklist
-
-- [x] `src/tool/tools/warpgrep.ts` no longer imports `@morphllm/morphsdk` or references `https://api.kilo.ai/api/gateway`.
-- [x] `builtInTools` in `src/tool/tools/index.ts` no longer contains `warpgrepTool` under any code path.
-- [x] `grep` tool still surfaces the install hint when `@morphllm/morphsdk` is not installed (behaviour test preserved).
-- [x] `SUMMARY_PROMPT` still contains every keyword pinned by existing preservation tests.
-- [x] Standalone MCP package `packages/alexi-mcp-warpgrep` untouched — migration target remains available.
+Recommended pre-push sequence per `AGENTS.md`:
+```
+npm run lint
+npm run typecheck
+npm run format:check
+npm run test:coverage
+npm run build
+```
+The two new tests (`grep.surrogate.test.ts`, `headless-session-agent.test.ts`) are self-contained and use `mkdtempSync` / `mkdtemp` for isolation, so they will run in parallel with the existing suite without cross-contamination.
