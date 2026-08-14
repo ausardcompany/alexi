@@ -1,5 +1,6 @@
 import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
 import { formatProviderError } from '../providers/format.js';
+import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -21,16 +22,26 @@ export async function sendChat(
      * is deliberately not touched -- see `classifyRouteError`.
      */
     signal?: AbortSignal;
+    /**
+     * Optional portable reasoning configuration. When provided, the
+     * orchestrator resolves it into provider-specific parameters via
+     * {@link resolveReasoning} and threads them through
+     * {@link CompletionOptions.reasoning} — no per-provider conditionals
+     * live in this file.
+     */
+    reasoning?: ReasoningConfig;
   }
 ) {
   let modelId: string;
   let routingReason: string | undefined;
+  let routeReasoning: ReasoningConfig | undefined;
 
   // Auto-routing enabled?
   if (options?.autoRoute && !options?.modelOverride) {
     const decision = routePrompt(message, { preferCheap: options.preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
+    routeReasoning = decision.reasoning;
     console.log(
       `[Router] Selected ${modelId}: ${decision.reason} (confidence: ${(decision.confidence * 100).toFixed(0)}%)`
     );
@@ -83,9 +94,21 @@ export async function sendChat(
   // (401/403/404, model_not_found, deployment_not_found) tick the route's
   // failure counter; success resets it. Transient errors are owned by
   // ErrorBackoff and are intentionally NOT recorded here.
+  // Resolve portable reasoning config into provider-specific parameters.
+  // Preference order: explicit caller option > router-attached hint.
+  // When neither is supplied, `resolveReasoning` returns an empty object
+  // so the completion request stays byte-for-byte identical to the
+  // previous call site.
+  const effectiveReasoning = options?.reasoning ?? routeReasoning;
+  const reasoningParams = effectiveReasoning ? resolveReasoning(modelId, effectiveReasoning) : {};
+
   let result;
   try {
-    result = await provider.complete(messages, { maxTokens: 4096, signal: options?.signal });
+    result = await provider.complete(messages, {
+      maxTokens: 4096,
+      signal: options?.signal,
+      reasoning: reasoningParams,
+    });
   } catch (err) {
     const classified = classifyRouteError(err);
     // User-initiated aborts are NOT a route health signal: skip recording

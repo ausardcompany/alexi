@@ -10,6 +10,7 @@ import {
 } from '../config/routingConfig.js';
 import { extractStatusCode } from './error-backoff.js';
 import { c } from '../cli/utils/colors.js';
+import type { ReasoningConfig } from '../providers/reasoning.js';
 
 export interface ModelCapability {
   id: string;
@@ -36,6 +37,18 @@ export interface RoutingDecision {
   reason: string;
   confidence: number;
   ruleApplied?: string;
+  /**
+   * Optional portable reasoning configuration attached to the routing
+   * decision. When present, callers (orchestrator, streaming
+   * orchestrator) forward it to
+   * {@link import('../providers/reasoning.js').resolveReasoning} so the
+   * selected model receives provider-specific reasoning parameters.
+   *
+   * Left unset by default; populated by the route dispatch when a
+   * reasoning-aware rule matches or when the classified prompt requires
+   * deep reasoning.
+   */
+  reasoning?: ReasoningConfig;
 }
 
 // Global configuration (loaded once)
@@ -394,11 +407,18 @@ export function routePrompt(
     reason += ` (influenced by rule: ${matchedRule.name})`;
   }
 
+  // Attach reasoning metadata when the classified prompt requires it.
+  // The concrete provider-specific parameters are resolved downstream
+  // by `resolveReasoning` in the orchestrators — the router only
+  // signals intent so the pipeline can stay provider-agnostic here.
+  const reasoning: ReasoningConfig | undefined = requiresReasoning ? { enabled: true } : undefined;
+
   return {
     modelId: best.model.id,
     reason,
     confidence,
     ruleApplied: matchedRule?.name,
+    reasoning,
   };
 }
 

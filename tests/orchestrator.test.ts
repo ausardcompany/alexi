@@ -140,7 +140,7 @@ describe('Orchestrator', () => {
 
         expect(mockProvider.complete).toHaveBeenCalledWith(
           [{ role: 'user', content: 'Test message' }],
-          { maxTokens: 4096, signal: undefined }
+          { maxTokens: 4096, signal: undefined, reasoning: {} }
         );
         expect(result.text).toBe('Provider response');
         expect(result.usage).toEqual({ prompt_tokens: 15, completion_tokens: 20 });
@@ -178,7 +178,7 @@ describe('Orchestrator', () => {
             { role: 'system', content: 'You are a helpful assistant' },
             { role: 'user', content: 'Hello' },
           ],
-          { maxTokens: 4096, signal: undefined }
+          { maxTokens: 4096, signal: undefined, reasoning: {} }
         );
       });
     });
@@ -309,6 +309,7 @@ describe('Orchestrator', () => {
         expect(mockProvider.complete).toHaveBeenCalledWith([{ role: 'user', content: 'Test' }], {
           maxTokens: 4096,
           signal: ac.signal,
+          reasoning: {},
         });
       });
 
@@ -389,6 +390,105 @@ describe('Orchestrator', () => {
         // recordRouteOutcome should not have been called at all -- neither
         // a success (never reached) nor a permanent (aborted != permanent).
         expect(recordRouteOutcome).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('reasoning parameter threading', () => {
+      it('forwards resolved reasoning params in the completion options', async () => {
+        const mockProvider = createMockProvider({
+          text: 'ok',
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        await sendChat('Hello', {
+          modelOverride: 'anthropic--claude-4.7-opus',
+          reasoning: { effort: 'high', budget: 25000 },
+        });
+
+        // Anthropic family: expect `thinking` shape with the explicit budget.
+        expect(mockProvider.complete).toHaveBeenCalledTimes(1);
+        const call = mockProvider.complete.mock.calls[0];
+        const opts = call[1];
+        expect(opts.reasoning).toEqual({
+          thinking: { type: 'enabled', budget_tokens: 25000 },
+        });
+        // Opus 4.7 must never see reasoning_effort.
+        expect(opts.reasoning.reasoning_effort).toBeUndefined();
+      });
+
+      it('maps OpenAI effort to reasoning_effort', async () => {
+        const mockProvider = createMockProvider({
+          text: 'ok',
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        await sendChat('Hello', {
+          modelOverride: 'gpt-4o',
+          reasoning: { effort: 'medium' },
+        });
+
+        const opts = mockProvider.complete.mock.calls[0][1];
+        expect(opts.reasoning).toEqual({ reasoning_effort: 'medium' });
+      });
+
+      it('sends an empty reasoning bag when no reasoning option is provided', async () => {
+        const mockProvider = createMockProvider({
+          text: 'ok',
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        await sendChat('Hello', { modelOverride: 'gpt-4o' });
+
+        const opts = mockProvider.complete.mock.calls[0][1];
+        // Byte-for-byte identical to the pre-feature call: empty object,
+        // safe to spread without changing the request shape.
+        expect(opts.reasoning).toEqual({});
+      });
+
+      it('uses router-attached reasoning when auto-routing signals it', async () => {
+        const mockProvider = createMockProvider({
+          text: 'ok',
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(routePrompt).mockReturnValue({
+          modelId: 'anthropic--claude-4.7-opus',
+          reason: 'auto',
+          confidence: 0.9,
+          reasoning: { enabled: true, budget: 10000 },
+        });
+
+        await sendChat('deep analysis please', { autoRoute: true });
+
+        const opts = mockProvider.complete.mock.calls[0][1];
+        expect(opts.reasoning).toEqual({
+          thinking: { type: 'enabled', budget_tokens: 10000 },
+        });
+      });
+
+      it('explicit caller reasoning wins over router-attached hint', async () => {
+        const mockProvider = createMockProvider({
+          text: 'ok',
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(routePrompt).mockReturnValue({
+          modelId: 'gpt-4o',
+          reason: 'auto',
+          confidence: 0.9,
+          reasoning: { enabled: true },
+        });
+
+        await sendChat('do a thing', {
+          autoRoute: true,
+          reasoning: { effort: 'high' },
+        });
+
+        const opts = mockProvider.complete.mock.calls[0][1];
+        expect(opts.reasoning).toEqual({ reasoning_effort: 'high' });
       });
     });
   });

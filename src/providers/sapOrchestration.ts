@@ -356,6 +356,22 @@ export interface CompletionOptions {
   toolChoice?: OrchestrationConfig['toolChoice'];
   /** Extra HTTP headers to include in the request (e.g. agent observability headers) */
   headers?: Record<string, string>;
+  /**
+   * Provider-specific reasoning parameters produced by
+   * {@link import('./reasoning.js').resolveReasoning}.
+   *
+   * The orchestrator computes this bag from a portable
+   * {@link import('./reasoning.js').ReasoningConfig} and threads it
+   * through so per-provider request builders can spread the fields into
+   * their outgoing payload without re-deriving conditionals themselves.
+   *
+   * Shape depends on the model family:
+   *   - Anthropic: `{ thinking: { type, budget_tokens? } }`
+   *   - OpenAI:    `{ reasoning_effort: 'low' | 'medium' | 'high' }`
+   *   - Gemini:    `{ thinkingConfig: { thinkingBudget } }`
+   *   - Unknown:   `{}` (empty; safe to spread)
+   */
+  reasoning?: Record<string, unknown>;
 }
 
 /**
