@@ -106,6 +106,16 @@ describe('Router', () => {
         expect(result.reason).toContain('requires reasoning');
       });
 
+      it('attaches reasoning hint on the decision when the prompt requires reasoning', () => {
+        const result = routePrompt('Explain why gravity affects time dilation step by step');
+        expect(result.reasoning).toEqual({ enabled: true });
+      });
+
+      it('leaves reasoning undefined when the prompt does not require it', () => {
+        const result = routePrompt('What is 2+2?');
+        expect(result.reasoning).toBeUndefined();
+      });
+
       it('should classify creative writing correctly', () => {
         const result = routePrompt('Write a story about a brave knight');
 

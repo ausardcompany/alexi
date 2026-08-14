@@ -9,6 +9,7 @@ import {
   type StreamChunk,
 } from '../providers/index.js';
 import { formatProviderError, classifyProviderError } from '../providers/format.js';
+import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
 import { NothingToCompactError } from './compaction.js';
 import { logger } from '../utils/logger.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
@@ -65,6 +66,14 @@ export interface StreamingOptions {
    * full contract (issue #1279, Kilo PR #12927).
    */
   emptyResponseMaxAttempts?: number;
+  /**
+   * Portable reasoning configuration. When set, {@link streamChat} calls
+   * {@link resolveReasoning} with the current model id and threads the
+   * resulting provider-specific parameter bag through
+   * {@link CompletionOptions.reasoning}. Callers do not need to branch
+   * on provider family themselves.
+   */
+  reasoning?: ReasoningConfig;
 }
 
 export interface StreamingResult {
@@ -133,11 +142,13 @@ export function streamChat(
   // `modelId` may be reassigned by the fallback resolver or the router.
   let modelId: string;
   let routingReason: string | undefined;
+  let routeReasoning: ReasoningConfig | undefined;
 
   if (options?.autoRoute && !options?.modelOverride) {
     const decision = routePrompt(messageText, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
+    routeReasoning = decision.reasoning;
   } else {
     modelId = (options?.modelOverride ?? getDefaultModel()).trim();
   }
@@ -242,6 +253,14 @@ export function streamChat(
     // Build the completion-options bag and strip any agent-metadata keys
     // before dispatch. Keys defined in `INTERNAL_OPTION_KEYS` must never
     // reach SAP AI Core / SAP Orchestration; see `stripInternalOptions`.
+    // Resolve portable reasoning config into provider-specific parameters
+    // exactly once per stream setup. Preference order: explicit caller
+    // option > router-attached hint from `routePrompt`. When neither is
+    // set, `resolveReasoning` returns `{}` so the completion request
+    // stays byte-for-byte identical for callers that never opt in.
+    const effectiveReasoning = options?.reasoning ?? routeReasoning;
+    const reasoningParams = effectiveReasoning ? resolveReasoning(modelId, effectiveReasoning) : {};
+
     const merged: CompletionOptions = {
       maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
       temperature: options?.temperature,
@@ -249,6 +268,7 @@ export function streamChat(
       // combining the caller signal with an idle-timeout controller. Do
       // not forward options.signal here — the watchdog forwards it.
       headers: extraHeaders as Record<string, string>,
+      reasoning: reasoningParams,
     };
     const providerOpts = stripInternalOptions(merged) as CompletionOptions;
 
