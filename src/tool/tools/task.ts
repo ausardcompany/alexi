@@ -309,13 +309,22 @@ Usage:
     // to inherit edit, bash, and MCP restrictions from the calling agent to prevent privilege
     // escalation. Sub-agents must inherit restrictions so they cannot bypass parent agent permissions.
     //
+    // For the `explore` subagent in particular, merge `getExploreAgentBashRules()` from
+    // `src/agent/index.ts` on top of the derived ruleset — the explore agent is delegated
+    // and cannot answer permission prompts, so `gh *` and `find *` must be strict denies
+    // (kilocode 3a99f36d9).
+    //
     // Example integration (requires session context in ToolContext):
     // import { deriveSubagentSessionPermission } from '../../agent/subagent-permissions.js';
+    // import { getExploreAgentBashRules, isExploreAgent } from '../../agent/index.js';
     // const subagentPermission = deriveSubagentSessionPermission({
     //   parentSessionPermission: context.session.permission,
     //   parentAgent: context.agent,
     //   subagent: agent,
     // });
+    // if (isExploreAgent(agent.id)) {
+    //   subagentPermission.bash = { ...subagentPermission.bash, ...getExploreAgentBashRules() };
+    // }
     //
     // See src/agent/subagent-permissions.ts for implementation.
 

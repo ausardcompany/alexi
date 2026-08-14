@@ -58,6 +58,16 @@ export interface SessionMetadata {
    * `MAX_SUBAGENT_DEPTH` guard.
    */
   parentSessionId?: string;
+  /**
+   * Agent slug the session was created / last-run with. Populated by
+   * headless (`alexi chat`) callers and by the interactive TUI when the
+   * user picks an agent, so that a subsequent `--session <id>` resume
+   * without an explicit `--agent` flag continues with the same agent
+   * instead of silently reverting to the built-in default.
+   *
+   * Ported from upstream kilocode commit f4cba053a.
+   */
+  agent?: string;
 }
 
 export interface Session {
@@ -297,6 +307,21 @@ export class SessionManager {
       fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
     } catch (error) {
       console.error('Failed to save session:', error);
+    }
+  }
+
+  /**
+   * Persist the current active session to disk without adding a message.
+   *
+   * Used by callers that mutate `metadata` directly (for example stamping
+   * the resolved agent slug after a headless chat completes so the next
+   * `--session <id>` resume picks it up — see kilocode f4cba053a) and
+   * therefore cannot rely on `addMessage`'s implicit save. No-ops when
+   * there is no active session so callers do not need a null check.
+   */
+  persistActiveSession(): void {
+    if (this.activeSession) {
+      this.saveSession(this.activeSession);
     }
   }
 
