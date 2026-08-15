@@ -1732,6 +1732,192 @@ export function isOrchestrationModel(modelId: string): boolean {
   return ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel);
 }
 
+// ============================================================================
+// Model Capabilities (issue #1389)
+// ============================================================================
+
+/**
+ * Coarse-grained capability tags advertised by a model.
+ *
+ * Ports Cline PR #13025's capability-validation surface, narrowed to the
+ * capabilities Alexi currently cares about at the provider layer:
+ *
+ *   - `image-generation` : model can produce image content (URL or base64
+ *     payload) in addition to text. Wired into
+ *     {@link ORCHESTRATION_MODEL_METADATA}; consumed by
+ *     `src/providers/transform.ts` to decide whether streaming image chunks
+ *     are expected.
+ *   - `tools` : model supports function/tool calling
+ *     (`ChatCompletionTool` on the request, `tool_calls` on the response).
+ *     Consumed by the agent loop's tool-registration gate.
+ *   - `embeddings` : model can be used with
+ *     {@link SapOrchestrationEmbeddings} to produce vector embeddings.
+ *
+ * The three tags are intentionally orthogonal — a single model can hold
+ * any subset. New capability tags are added by extending this union AND
+ * updating {@link ORCHESTRATION_MODEL_METADATA}; consumers should NEVER
+ * branch on stringly-typed capability names that are not part of this
+ * union, so a `switch` on `ModelCapability` in TypeScript strict mode
+ * remains exhaustive.
+ */
+export type ModelCapability = 'image-generation' | 'tools' | 'embeddings';
+
+/**
+ * Per-model metadata for capability lookups.
+ *
+ * Kept as a companion structure to {@link ORCHESTRATION_MODELS} (rather
+ * than replacing the string catalog) so that existing consumers which
+ * iterate the catalog as `readonly string[]` (`completer.ts`,
+ * `modelPicker.ts`, `aliases.test.ts`) are not disturbed. A model id
+ * MAY be absent from this map — that is not an error, it just means we
+ * have not authored capability data for it yet and
+ * {@link modelHasCapability} will honour the caller's
+ * `assumeWhenUnspecified` option.
+ *
+ * Provider-prefixed forms (`sap-ai-core/anthropic--claude-4.7-opus`) are
+ * NOT stored here; callers should strip the `<provider>/` prefix before
+ * lookup or use {@link modelHasCapability} which does the stripping
+ * itself.
+ */
+export interface OrchestrationModelMetadata {
+  /** Capability tags advertised by the model. Missing = unknown. */
+  capabilities?: ModelCapability[];
+}
+
+/**
+ * Capability metadata for models routed through SAP AI Core orchestration.
+ *
+ * Assignments follow the SAP AI Core documented feature matrix as of the
+ * 2026-08 catalog snapshot:
+ *
+ *   - Tool calling: all current OpenAI GPT-*, Anthropic Claude 3.5+,
+ *     Gemini 2.5 family, and the Nova micro/lite/pro trio advertise
+ *     function calling. `sap-abap-1`, `mistral-small-instruct`, the
+ *     Meta LLaMA 3.1 70B instruct model, and `deepseek-r1` do not.
+ *   - Image generation: SAP AI Core does not yet expose a chat-completion
+ *     model in `ORCHESTRATION_MODELS` that emits image payloads. The
+ *     capability tag is retained here so downstream code can be authored
+ *     against it, and a future SAP-hosted image model can be tagged
+ *     without a code change to callers.
+ *   - Embeddings: `SapOrchestrationEmbeddings` currently targets the
+ *     dedicated `text-embedding-ada-002` deployment (see
+ *     `buildEmbeddingConfig`), which is NOT in `ORCHESTRATION_MODELS`.
+ *     No chat model in the current catalog doubles as an embeddings
+ *     model, so no entry here declares that capability.
+ *
+ * Any model not listed below is treated as capability-unknown; callers
+ * decide via `assumeWhenUnspecified` how to interpret that state.
+ */
+export const ORCHESTRATION_MODEL_METADATA: Readonly<
+  Partial<Record<OrchestrationModel, OrchestrationModelMetadata>>
+> = {
+  // OpenAI GPT family: text + tool calling.
+  'gpt-4o': { capabilities: ['tools'] },
+  'gpt-4o-mini': { capabilities: ['tools'] },
+  'gpt-4.1': { capabilities: ['tools'] },
+  'gpt-5': { capabilities: ['tools'] },
+  'gpt-5-mini': { capabilities: ['tools'] },
+  // Anthropic Claude: tool calling supported by every id in the catalog.
+  'anthropic--claude-3.7-sonnet': { capabilities: ['tools'] },
+  'anthropic--claude-4.5-haiku': { capabilities: ['tools'] },
+  'anthropic--claude-4.5-sonnet': { capabilities: ['tools'] },
+  'anthropic--claude-4.5-opus': { capabilities: ['tools'] },
+  'anthropic--claude-4.6-opus': { capabilities: ['tools'] },
+  'anthropic--claude-4.7-opus': { capabilities: ['tools'] },
+  // Google Gemini 2.5 family: tool calling supported.
+  'gemini-2.5-flash': { capabilities: ['tools'] },
+  'gemini-2.5-pro': { capabilities: ['tools'] },
+  // Amazon Nova: tool calling supported (bedrock function calling).
+  'amazon--nova-micro': { capabilities: ['tools'] },
+  'amazon--nova-lite': { capabilities: ['tools'] },
+  'amazon--nova-pro': { capabilities: ['tools'] },
+  // Mistral small instruct, LLaMA 3.1 70B instruct, DeepSeek R1, and
+  // sap-abap-1 do not currently advertise tool calling via SAP AI Core.
+  'mistralai--mistral-small-instruct': { capabilities: [] },
+  'meta--llama3.1-70b-instruct': { capabilities: [] },
+  'deepseek-ai--deepseek-r1': { capabilities: [] },
+  'sap-abap-1': { capabilities: [] },
+};
+
+/**
+ * Options accepted by {@link modelHasCapability}.
+ */
+export interface ModelHasCapabilityOptions {
+  /**
+   * Return value when the model has no entry in
+   * {@link ORCHESTRATION_MODEL_METADATA} (i.e. we have not authored
+   * capability data for it). Defaults to `false` — the safe answer for
+   * feature gates that should stay off unless the model explicitly
+   * advertises support.
+   */
+  assumeWhenUnspecified?: boolean;
+}
+
+/**
+ * Strip a leading `<provider>/` prefix from a model id.
+ *
+ * SAP AI Core-routed ids frequently appear as
+ * `sap-ai-core/anthropic--claude-4.7-opus` (`getProviderForModel` treats
+ * the prefix as informational). The capability metadata map is keyed by
+ * the bare orchestration id, so we normalise before lookup. When the id
+ * has no `/`, it is returned unchanged.
+ */
+function stripProviderPrefix(modelId: string): string {
+  const slash = modelId.indexOf('/');
+  return slash === -1 ? modelId : modelId.slice(slash + 1);
+}
+
+/**
+ * Check whether a model advertises a given capability.
+ *
+ * Resolution rules:
+ *   1. Normalise `modelId` by stripping any leading `<provider>/` prefix
+ *      so `sap-ai-core/anthropic--claude-4.7-opus` and
+ *      `anthropic--claude-4.7-opus` produce the same answer.
+ *   2. Look up the normalised id in {@link ORCHESTRATION_MODEL_METADATA}.
+ *   3. When an entry exists, return whether its `capabilities` array
+ *      includes `capability`. An entry with `capabilities: []` (or with
+ *      `capabilities` omitted) reports `false` for every capability.
+ *   4. When no entry exists, return `options.assumeWhenUnspecified`
+ *      (default `false`). This is the escape hatch for callers who want
+ *      to opt in to "unknown-means-yes" semantics for a specific gate.
+ *
+ * The helper is safe to call with any string — non-orchestration ids
+ * (e.g. dedicated embedding deployments, deprecated aliases) simply
+ * resolve to the unspecified branch.
+ *
+ * @example
+ * ```ts
+ * // Feature gate that defaults to off:
+ * if (modelHasCapability(modelId, 'tools')) { registerTools(); }
+ *
+ * // Legacy path that assumed tool support before capability data existed:
+ * if (modelHasCapability(modelId, 'tools', { assumeWhenUnspecified: true })) {
+ *   registerTools();
+ * }
+ * ```
+ */
+export function modelHasCapability(
+  modelId: string,
+  capability: ModelCapability,
+  options: ModelHasCapabilityOptions = {}
+): boolean {
+  if (typeof modelId !== 'string' || modelId.length === 0) {
+    return options.assumeWhenUnspecified ?? false;
+  }
+  const bareId = stripProviderPrefix(modelId);
+  const entry = (ORCHESTRATION_MODEL_METADATA as Record<string, OrchestrationModelMetadata>)[
+    bareId
+  ];
+  if (!entry) {
+    return options.assumeWhenUnspecified ?? false;
+  }
+  if (!entry.capabilities) {
+    return false;
+  }
+  return entry.capabilities.includes(capability);
+}
+
 /**
  * Error thrown when `SapOrchestrationProvider` is constructed with a model id
  * that is not in the `ORCHESTRATION_MODELS` catalog and no `deploymentId`

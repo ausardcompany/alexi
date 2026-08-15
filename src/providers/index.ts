@@ -46,6 +46,9 @@ export {
 // Re-export auth errors
 export { StartupTimeoutError } from './auth.js';
 
+// Re-export image response transforms (issue #1389)
+export { extractImageChunk, extractImageChunks, type NormalizedImageChunk } from './transform.js';
+
 // Re-export everything from sapOrchestration
 export {
   SapOrchestrationProvider,
@@ -66,6 +69,11 @@ export {
   extractRetryAfterSeconds,
   parseRetryAfterHeader,
   ORCHESTRATION_MODELS,
+  ORCHESTRATION_MODEL_METADATA,
+  modelHasCapability,
+  type ModelCapability,
+  type ModelHasCapabilityOptions,
+  type OrchestrationModelMetadata,
   type OrchestrationModel,
   type OrchestrationConfig,
   type CompletionOptions,

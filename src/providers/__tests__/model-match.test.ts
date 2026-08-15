@@ -6,6 +6,12 @@ import {
   modelSupportsReasoningEffort,
   supportsReasoning,
 } from '../model-match.js';
+import {
+  ORCHESTRATION_MODEL_METADATA,
+  modelHasCapability,
+  type ModelCapability,
+} from '../sapOrchestration.js';
+import { extractImageChunk, extractImageChunks } from '../transform.js';
 
 describe('modelSupportsReasoningEffort', () => {
   it('returns "levels" for deepseek model ids', () => {
@@ -215,5 +221,158 @@ describe('isClaudeOpus4', () => {
     expect(isClaudeOpus4('gpt-4o')).toBe(false);
     expect(isClaudeOpus4('deepseek-r1')).toBe(false);
     expect(isClaudeOpus4('')).toBe(false);
+  });
+});
+
+describe('modelHasCapability', () => {
+  it('returns true when the model advertises the requested capability', () => {
+    expect(modelHasCapability('gpt-4o', 'tools')).toBe(true);
+    expect(modelHasCapability('anthropic--claude-4.7-opus', 'tools')).toBe(true);
+    expect(modelHasCapability('gemini-2.5-pro', 'tools')).toBe(true);
+    expect(modelHasCapability('amazon--nova-lite', 'tools')).toBe(true);
+  });
+
+  it('returns false when the model has an entry but not the capability', () => {
+    // deepseek-r1 has metadata with an empty capabilities array.
+    expect(modelHasCapability('deepseek-ai--deepseek-r1', 'tools')).toBe(false);
+    expect(modelHasCapability('meta--llama3.1-70b-instruct', 'tools')).toBe(false);
+    expect(modelHasCapability('mistralai--mistral-small-instruct', 'tools')).toBe(false);
+    // Nothing in the current catalog advertises image-generation.
+    expect(modelHasCapability('gpt-4o', 'image-generation')).toBe(false);
+    expect(modelHasCapability('anthropic--claude-4.7-opus', 'image-generation')).toBe(false);
+  });
+
+  it('returns false by default when the model id is unknown', () => {
+    expect(modelHasCapability('some-unknown-model', 'tools')).toBe(false);
+    expect(modelHasCapability('some-unknown-model', 'image-generation')).toBe(false);
+    expect(modelHasCapability('some-unknown-model', 'embeddings')).toBe(false);
+  });
+
+  it('honours assumeWhenUnspecified when the model id is unknown', () => {
+    expect(modelHasCapability('some-unknown-model', 'tools', { assumeWhenUnspecified: true })).toBe(
+      true
+    );
+    expect(
+      modelHasCapability('some-unknown-model', 'embeddings', { assumeWhenUnspecified: false })
+    ).toBe(false);
+  });
+
+  it('does NOT apply assumeWhenUnspecified when the model is known but lacks the capability', () => {
+    // deepseek-r1 has an explicit empty capability list; the assumption
+    // only kicks in when NO metadata entry exists at all.
+    expect(
+      modelHasCapability('deepseek-ai--deepseek-r1', 'tools', { assumeWhenUnspecified: true })
+    ).toBe(false);
+  });
+
+  it('strips leading provider prefix before lookup', () => {
+    expect(modelHasCapability('sap-ai-core/anthropic--claude-4.7-opus', 'tools')).toBe(true);
+    expect(modelHasCapability('sap-ai-core/gpt-4o', 'tools')).toBe(true);
+    expect(modelHasCapability('sap-ai-core/deepseek-ai--deepseek-r1', 'tools')).toBe(false);
+  });
+
+  it('returns the fallback for empty / non-string ids', () => {
+    expect(modelHasCapability('', 'tools')).toBe(false);
+    expect(modelHasCapability('', 'tools', { assumeWhenUnspecified: true })).toBe(true);
+  });
+
+  it('metadata surface uses only valid ModelCapability values', () => {
+    const valid: ReadonlySet<ModelCapability> = new Set<ModelCapability>([
+      'image-generation',
+      'tools',
+      'embeddings',
+    ]);
+    for (const meta of Object.values(ORCHESTRATION_MODEL_METADATA)) {
+      if (!meta?.capabilities) {
+        continue;
+      }
+      for (const cap of meta.capabilities) {
+        expect(valid.has(cap)).toBe(true);
+      }
+    }
+  });
+});
+
+describe('extractImageChunk', () => {
+  it('normalises an OpenAI-style image_url payload', () => {
+    const chunk = extractImageChunk({
+      type: 'image_url',
+      image_url: { url: 'https://example.com/cat.png', mime_type: 'image/png' },
+    });
+    expect(chunk).toEqual({
+      kind: 'url',
+      url: 'https://example.com/cat.png',
+      mimeType: 'image/png',
+    });
+  });
+
+  it('omits mimeType when image_url does not carry one', () => {
+    const chunk = extractImageChunk({
+      type: 'image_url',
+      image_url: { url: 'https://example.com/cat.png' },
+    });
+    expect(chunk).toEqual({ kind: 'url', url: 'https://example.com/cat.png' });
+  });
+
+  it('normalises an Anthropic-style base64 image payload (b64_json)', () => {
+    const chunk = extractImageChunk({
+      type: 'image',
+      image: { b64_json: 'AAECAw==', mime_type: 'image/png' },
+    });
+    expect(chunk).toEqual({ kind: 'base64', data: 'AAECAw==', mimeType: 'image/png' });
+  });
+
+  it('normalises a Gemini-style base64 image payload (data)', () => {
+    const chunk = extractImageChunk({
+      type: 'image',
+      image: { data: 'AAECAw==' },
+    });
+    expect(chunk).toEqual({ kind: 'base64', data: 'AAECAw==' });
+  });
+
+  it('returns undefined for non-image items', () => {
+    expect(extractImageChunk({ type: 'text', text: 'hi' })).toBeUndefined();
+    expect(extractImageChunk({ type: 'tool_use' })).toBeUndefined();
+    expect(extractImageChunk(null)).toBeUndefined();
+    expect(extractImageChunk(undefined)).toBeUndefined();
+    expect(extractImageChunk('plain string')).toBeUndefined();
+    expect(extractImageChunk(42)).toBeUndefined();
+  });
+
+  it('returns undefined for malformed image payloads', () => {
+    expect(extractImageChunk({ type: 'image_url', image_url: { url: '' } })).toBeUndefined();
+    expect(extractImageChunk({ type: 'image_url', image_url: { url: 42 } })).toBeUndefined();
+    expect(extractImageChunk({ type: 'image_url' })).toBeUndefined();
+    expect(extractImageChunk({ type: 'image', image: {} })).toBeUndefined();
+    expect(extractImageChunk({ type: 'image', image: { b64_json: '' } })).toBeUndefined();
+  });
+});
+
+describe('extractImageChunks', () => {
+  it('returns [] for null / undefined / empty payloads', () => {
+    expect(extractImageChunks(null)).toEqual([]);
+    expect(extractImageChunks(undefined)).toEqual([]);
+    expect(extractImageChunks([])).toEqual([]);
+  });
+
+  it('extracts multiple image chunks from an array, skipping non-images', () => {
+    const chunks = extractImageChunks([
+      { type: 'text', text: 'here' },
+      { type: 'image_url', image_url: { url: 'https://a/1.png' } },
+      { type: 'image', image: { b64_json: 'ZZ==', mime_type: 'image/jpeg' } },
+      { type: 'tool_use' },
+    ]);
+    expect(chunks).toEqual([
+      { kind: 'url', url: 'https://a/1.png' },
+      { kind: 'base64', data: 'ZZ==', mimeType: 'image/jpeg' },
+    ]);
+  });
+
+  it('handles a single non-array item', () => {
+    const chunks = extractImageChunks({
+      type: 'image_url',
+      image_url: { url: 'https://a/1.png' },
+    });
+    expect(chunks).toEqual([{ kind: 'url', url: 'https://a/1.png' }]);
   });
 });

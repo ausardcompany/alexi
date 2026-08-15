@@ -10,6 +10,125 @@ interface Message {
   [key: string]: unknown;
 }
 
+// ============================================================================
+// Image response transforms (issue #1389)
+// ============================================================================
+//
+// SAP AI Core orchestration is planned to expose chat models with image
+// generation via streaming responses. The SDK surfaces image payloads in
+// two shapes depending on the underlying provider:
+//   - URL form: `{ type: 'image_url', image_url: { url: '<https://...>' } }`
+//     (OpenAI-style — GPT image and dedicated image endpoints).
+//   - Base64 form: `{ type: 'image', image: { b64_json?, data?, mime_type? } }`
+//     (Anthropic and Gemini-style — the payload is a base64-encoded blob
+//     with a MIME type, no hosted URL).
+//
+// `extractImageChunk` normalises both shapes into a discriminated union
+// so downstream code (the TUI image renderer, the session log serializer)
+// can handle either without re-parsing the raw SDK payload. Callers gate
+// on `modelHasCapability(modelId, 'image-generation')` before invoking
+// this transform.
+
+/**
+ * Normalised image payload extracted from a streaming chunk.
+ *
+ * The two variants are structurally identical apart from the `kind`
+ * discriminator; consumers narrow on `kind` to know whether to render
+ * a remote URL or decode the base64 blob.
+ */
+export type NormalizedImageChunk =
+  | { kind: 'url'; url: string; mimeType?: string }
+  | { kind: 'base64'; data: string; mimeType?: string };
+
+/**
+ * Attempt to extract a normalised image payload from an SDK streaming
+ * chunk item. Returns `undefined` when the item does not look like an
+ * image (text delta, tool call, structural marker, ...) or when the
+ * required fields are missing.
+ *
+ * The two supported shapes:
+ *   - `type: 'image_url'` with `image_url.url` (OpenAI-style, hosted URL).
+ *     Optional `image_url.mime_type` is preserved when present.
+ *   - `type: 'image'` with either `image.b64_json` or `image.data` holding
+ *     the base64 payload (Anthropic / Gemini-style). Optional
+ *     `image.mime_type` is preserved.
+ *
+ * The extractor is deliberately permissive on the wrapping object type
+ * (`unknown`) so it composes with the loosely-typed SAP SDK stream chunk
+ * without a full interface duplication. Non-string URL / data fields are
+ * rejected to guard against upstream schema drift.
+ */
+export function extractImageChunk(item: unknown): NormalizedImageChunk | undefined {
+  if (item === null || item === undefined || typeof item !== 'object') {
+    return undefined;
+  }
+  const rec = item as Record<string, unknown>;
+  const type = rec.type;
+
+  if (type === 'image_url') {
+    const imageUrl = rec.image_url;
+    if (!imageUrl || typeof imageUrl !== 'object') {
+      return undefined;
+    }
+    const urlField = (imageUrl as Record<string, unknown>).url;
+    if (typeof urlField !== 'string' || urlField.length === 0) {
+      return undefined;
+    }
+    const mimeField = (imageUrl as Record<string, unknown>).mime_type;
+    const result: NormalizedImageChunk = { kind: 'url', url: urlField };
+    if (typeof mimeField === 'string' && mimeField.length > 0) {
+      result.mimeType = mimeField;
+    }
+    return result;
+  }
+
+  if (type === 'image') {
+    const image = rec.image;
+    if (!image || typeof image !== 'object') {
+      return undefined;
+    }
+    const imageRec = image as Record<string, unknown>;
+    // Anthropic uses `b64_json`; Gemini uses `data`. Accept either.
+    const b64 = imageRec.b64_json ?? imageRec.data;
+    if (typeof b64 !== 'string' || b64.length === 0) {
+      return undefined;
+    }
+    const mimeField = imageRec.mime_type;
+    const result: NormalizedImageChunk = { kind: 'base64', data: b64 };
+    if (typeof mimeField === 'string' && mimeField.length > 0) {
+      result.mimeType = mimeField;
+    }
+    return result;
+  }
+
+  return undefined;
+}
+
+/**
+ * Walk an arbitrary streaming payload (single item or array of items) and
+ * return the normalised image chunks it contains, in order. Non-image
+ * items are skipped. Returns an empty array when the payload holds no
+ * recognisable image content.
+ *
+ * Accepts `unknown` on purpose: the SAP SDK exposes streaming content as
+ * a loosely-typed union (`string | Array<{ type; ... }>`), and callers
+ * routinely feed the raw `delta.content` field.
+ */
+export function extractImageChunks(content: unknown): NormalizedImageChunk[] {
+  if (content === null || content === undefined) {
+    return [];
+  }
+  const items = Array.isArray(content) ? content : [content];
+  const out: NormalizedImageChunk[] = [];
+  for (const item of items) {
+    const chunk = extractImageChunk(item);
+    if (chunk) {
+      out.push(chunk);
+    }
+  }
+  return out;
+}
+
 /**
  * Transform interleaved reasoning for DeepSeek models via OpenRouter
  * Preserves empty reasoning_content to maintain message structure
