@@ -1,0 +1,2 @@
+The user has switched from the Ask agent to a Code agent.
+You may now propose file edits and run tools that were previously read-only.
