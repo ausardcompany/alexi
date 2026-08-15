@@ -1610,3 +1610,121 @@ The `subscribe` callback is injected so this module stays independent of the con
 - `mergeProviderModels<T>(base, custom): Record<string, T>` — merges a custom provider's model map on top of a base provider's model map without wiping base variants. Custom entries win per-id; base variants survive when the custom map does not redefine the same id.
 
 The pre-existing `sanitizeOpenAISchema`, `enforceStrictSchema`, `isOpenAIShapedModel`, `lowerMcpToolsForOpenAIShaped`, `transformInterleavedReasoning`, and `ensureDeepSeekReasoning` helpers are unchanged.
+
+## Image Generation
+
+Alexi ships **capability infrastructure and streaming payload normalisation** for image generation via SAP AI Core. The end-to-end user surface (a dedicated `alexi image` CLI command and an `image_generate` tool the agent can call) is planned but not yet landed — see [Roadmap and unimplemented pieces](#image-generation-roadmap-and-unimplemented-pieces) below. This section documents what is in the code today so callers can start building against the stable pieces without waiting for the CLI/tool layer.
+
+> Note: this section is about image _generation_ (the model produces an image as output). Attaching an image _to_ a prompt (multimodal input via clipboard paste, `/image <path>` in the TUI, drag-and-drop) is a separate, fully-shipped feature backed by `src/utils/image.ts`, `src/utils/imageValidation.ts`, `src/utils/clipboard.ts`, and `src/cli/tui/context/AttachmentContext.tsx`. Do not conflate the two.
+
+### Capability system
+
+The provider layer publishes a narrow, closed set of capability tags used by feature gates (tool registration, image response handling, embeddings dispatch). Defined in `src/providers/sapOrchestration.ts` and re-exported by `src/providers/index.ts`.
+
+```typescript
+// src/providers/sapOrchestration.ts
+export type ModelCapability = 'image-generation' | 'tools' | 'embeddings';
+
+export interface OrchestrationModelMetadata {
+  /** Capability tags advertised by the model. Missing = unknown. */
+  capabilities?: ModelCapability[];
+}
+
+// Companion map keyed by OrchestrationModel id. Absence of an entry
+// means "capability data not authored yet" (see `assumeWhenUnspecified`).
+export const ORCHESTRATION_MODEL_METADATA: Readonly<
+  Partial<Record<OrchestrationModel, OrchestrationModelMetadata>>
+>;
+```
+
+The router has an unrelated `ModelCapability` interface at `src/core/router.ts:15` that describes a routable model (cost tier, strengths, max tokens). That router-facing type is _not_ the same as the capability-tag union above — the two live in different modules and serve different purposes. When reading or contributing code, always resolve the type via its import path.
+
+### `modelHasCapability`
+
+The single entry point for feature gates. Callers check the tag before invoking capability-specific logic (image chunk extraction, tool schema attachment, embeddings dispatch).
+
+```typescript
+// src/providers/sapOrchestration.ts
+export interface ModelHasCapabilityOptions {
+  /** Default: false. Returned when the model has no metadata entry. */
+  assumeWhenUnspecified?: boolean;
+}
+
+export function modelHasCapability(
+  modelId: string,
+  capability: ModelCapability,
+  options?: ModelHasCapabilityOptions
+): boolean;
+```
+
+Resolution rules:
+
+1. The id is normalised by stripping a leading `<provider>/` prefix (`stripProviderPrefix`), so `sap-ai-core/anthropic--claude-4.7-opus` and `anthropic--claude-4.7-opus` resolve identically.
+2. If the normalised id exists in `ORCHESTRATION_MODEL_METADATA`, the answer is `capabilities?.includes(capability) ?? false`.
+3. If the id is unknown, the answer is `options.assumeWhenUnspecified ?? false`. This is the escape hatch for legacy call sites; new call sites should keep the default `false` so a missing tag stays visible.
+4. Behavioural subtlety: `assumeWhenUnspecified` only fires when there is **no entry at all**. An entry with `capabilities: []` reports `false` for every capability, regardless of the option — this is intentional so authors can distinguish "not authored yet" (missing entry) from "explicitly does not support anything in this dimension" (empty list).
+
+Example usage from a streaming consumer:
+
+```typescript
+import { modelHasCapability } from '../providers/index.js';
+import { extractImageChunks } from '../providers/transform.js';
+
+if (modelHasCapability(session.modelId, 'image-generation')) {
+  const chunks = extractImageChunks(delta.content);
+  for (const chunk of chunks) {
+    if (chunk.kind === 'url') {
+      // fetch chunk.url
+    } else {
+      // decode chunk.data (base64) with chunk.mimeType
+    }
+  }
+}
+```
+
+### Streaming image response handling
+
+SAP AI Core surfaces image payloads in **two shapes** depending on the underlying provider, and `src/providers/transform.ts` normalises both into a discriminated union so downstream code (session log serializer, TUI image renderer once landed) does not need to re-parse SDK payloads.
+
+```typescript
+// src/providers/transform.ts
+export type NormalizedImageChunk =
+  | { kind: 'url'; url: string; mimeType?: string }
+  | { kind: 'base64'; data: string; mimeType?: string };
+
+export function extractImageChunk(item: unknown): NormalizedImageChunk | undefined;
+export function extractImageChunks(content: unknown): NormalizedImageChunk[];
+```
+
+The two supported input shapes:
+
+| SDK shape                                                       | Emitted by                     | Normalised to                                   |
+| --------------------------------------------------------------- | ------------------------------ | ----------------------------------------------- |
+| `{ type: 'image_url', image_url: { url, mime_type? } }`         | OpenAI-style (GPT image)       | `{ kind: 'url', url, mimeType? }`               |
+| `{ type: 'image', image: { b64_json \| data, mime_type? } }` | Anthropic / Gemini-style       | `{ kind: 'base64', data, mimeType? }`           |
+
+Guarantees of the extractors:
+
+- Both accept `unknown` — they compose with the loosely-typed `delta.content` field (`string | Array<{ type; ... }>`) without requiring a caller-side type narrowing.
+- Non-image items are silently skipped, so callers can invoke `extractImageChunks` unconditionally on any streaming payload.
+- Missing / non-string `url` or base64 fields cause the item to be rejected (`undefined`). This guards against upstream schema drift.
+- No I/O, no allocation of oversized buffers — safe to call on every chunk.
+
+Callers **must** gate on `modelHasCapability(modelId, 'image-generation')` before invoking the extractors; the extractors themselves do not check.
+
+### Model routing for image-generation requests
+
+The router (`src/core/router.ts`) does not currently apply image-generation-specific rules — `scoreModel` scores on complexity, task type, cost preference, and the reasoning flag only. The design intent (see issue #1389 in the research notes) is that capability validation happens at the **provider dispatch layer** rather than as new router rules: a request that requires image generation is answered by dispatching to a model that advertises the tag, or by falling back with a clear error when no such model is available.
+
+Practically this means that until an image-gen-capable model is added to `ORCHESTRATION_MODEL_METADATA` (see below), routing an image-generation request through the auto-router will land on a text model and the request will fail at the provider boundary rather than at the router. This is the intended failure mode for the current partial-implementation state.
+
+### Roadmap and unimplemented pieces
+
+The following pieces of the image-generation feature are **not yet in the codebase** and are documented here so contributors and users know the current boundary:
+
+- **`image-generation` on any model in the catalog.** `ORCHESTRATION_MODEL_METADATA` currently tags no model with `image-generation`. The `image-generation` string is a valid `ModelCapability`, and the transform layer will normalise the payloads when a model starts emitting them, but there is no model to route to today. A future SAP-hosted image model (Anthropic Claude with image output, Gemini Imagen, Stable Diffusion) will be enabled by a single edit to the metadata map, without any code change to consumers.
+- **`alexi image` CLI command.** Planned at `src/cli/commands/image.ts` with flags `--model`, `--size`, `--output`, registered in `src/cli/program.ts`. Tracked as issue #1391.
+- **`image_generate` tool.** Planned at `src/tool/tools/image-generate.ts` using `defineTool` from `src/tool/index.ts`, with a Zod schema accepting `prompt` (required) and optional `model`, `size`, `style`, `quality`. Registered in `src/tool/registry.ts`. Tracked as issue #1390.
+- **TUI image rendering.** A component under `src/cli/tui/components/` will render a `NormalizedImageChunk` inline in terminals that support Kitty or iTerm2 graphics protocols, falling back to `[Image: <mime>, <size>]` placeholders elsewhere. The optional `terminal-image` module (already used for the input-side attachment flow in `src/cli/tui/utils/terminalImage.ts`) is the anticipated backend.
+
+When these pieces land, this section will be revised to document their user-facing surfaces alongside the infrastructure above.

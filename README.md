@@ -326,6 +326,58 @@ Once in interactive mode, the following commands are available:
 | `/notes clear` | Clear all notes |
 | `/quit` or `/exit` | Exit interactive mode |
 
+## Image Generation
+
+Alexi has infrastructure for **image generation** via SAP AI Core: a capability tag on the provider layer, a helper to gate feature code on it, and streaming-chunk normalisation for both URL-style (OpenAI) and base64-style (Anthropic / Gemini) image payloads. The user-facing surfaces — a dedicated `alexi image` command and an `image_generate` tool the agent can call from within chat — are on the roadmap but not yet shipped. This section documents what works today and where the boundary is, so you can build against the stable pieces without waiting.
+
+> This section is about the model _producing_ an image. Attaching an image _to_ your prompt (drag-and-drop, `/image <path>` in the TUI, Ctrl+V paste from the clipboard) is a separate, fully-shipped feature — see `src/utils/imageValidation.ts` and the `/image` / `/clear-images` slash commands in interactive mode.
+
+### What ships today
+
+- `ModelCapability` union with the `image-generation` tag (`src/providers/sapOrchestration.ts`).
+- `modelHasCapability(modelId, capability, { assumeWhenUnspecified? })` — the gate every image-aware caller should use.
+- `NormalizedImageChunk` discriminated union + `extractImageChunk` / `extractImageChunks` in `src/providers/transform.ts`, normalising both SDK shapes into `{ kind: 'url', url, mimeType? }` or `{ kind: 'base64', data, mimeType? }`.
+
+### What does not ship yet
+
+- No model in the current catalog advertises `image-generation`. The tag exists so a future SAP-hosted image model (Anthropic Claude image output, Gemini Imagen, Stable Diffusion deployments) can be enabled with a single metadata-map edit.
+- No `alexi image "<prompt>"` command. The planned interface is:
+
+  ```bash
+  # PLANNED — not yet implemented
+  alexi image "a diagram showing microservices architecture" \
+    --model anthropic--claude-4.7-opus \
+    --size 1024x1024 \
+    --output diagram.png
+  ```
+
+- No `image_generate` tool the agent loop can call. The planned Zod schema takes `prompt` (required) and optional `model`, `size`, `style`, `quality`, and streams the resulting image back through the same chunk-normalisation path documented below.
+
+### Sample usage from consumer code (works today)
+
+Gate on the capability tag before invoking the transform. The transform is safe to call on any chunk shape — non-image items are silently skipped — but the gate keeps the intent visible and stops it from running against text-only models.
+
+```typescript
+import { modelHasCapability } from './providers/index.js';
+import { extractImageChunks } from './providers/transform.js';
+
+if (modelHasCapability(session.modelId, 'image-generation')) {
+  for (const chunk of extractImageChunks(delta.content)) {
+    if (chunk.kind === 'url') {
+      // fetch chunk.url (mimeType via chunk.mimeType if present)
+    } else {
+      // decode chunk.data (base64) with chunk.mimeType
+    }
+  }
+}
+```
+
+### Deeper reference
+
+- `docs/PROVIDERS.md` — capability tag semantics and `modelHasCapability` resolution rules.
+- `docs/ARCHITECTURE.md` — "Image Generation" section covering the streaming payload shapes, transform guarantees, and the current router boundary.
+- Tracking issues: capability layer (issue #1389, partially landed), tool (#1390), CLI command (#1391), streaming markdown (#1392), documentation (#1393 — this change).
+
 ## Routing Configuration
 
 Create a `routing-config.json` in the project root (see `routing-config.example.json`):
@@ -511,6 +563,7 @@ alexi explain -m "$(cat very_long_document.txt)"
 - [x] Document grounding
 - [x] Translation support
 - [x] Embeddings support
+- [ ] Image generation (capability layer + streaming chunk normalisation landed; CLI command, tool, and image-gen-capable model tags pending — see [Image Generation](#image-generation))
 - [ ] Cost tracking and budget limits
 - [ ] Token usage analytics
 - [ ] Channel integrations (Telegram, Slack, WebChat)

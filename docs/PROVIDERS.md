@@ -318,6 +318,86 @@ discriminated union `NormalizedImageChunk` (`{ kind: 'url' | 'base64',
 ... }`). The extractors return `undefined` / `[]` for non-image or
 malformed content, so consumers can invoke them unconditionally.
 
+#### Which models advertise `image-generation` today
+
+**None**, at the time of writing. Every entry in the current
+`ORCHESTRATION_MODEL_METADATA` map declares either `['tools']` or
+`[]`. The `image-generation` string is a valid `ModelCapability` and
+the transform layer already understands the two SDK payload shapes,
+but SAP AI Core does not yet expose a chat-completion model that emits
+image payloads through `ORCHESTRATION_MODELS`.
+
+The intended activation path is a single edit to the metadata map —
+for example, adding `capabilities: ['image-generation']` (or
+`['tools', 'image-generation']`) to whichever future model in the
+catalog gains the capability. No changes to `modelHasCapability`,
+`extractImageChunks`, or callers are required.
+
+Candidate future models discussed in the research artefacts (all
+subject to SAP AI Core exposing them via orchestration):
+
+- Anthropic Claude with image output.
+- Gemini Imagen.
+- Stable Diffusion deployments.
+
+Anticipated activation for one of these (hypothetical, do not copy
+verbatim until the model actually ships):
+
+```typescript
+// src/providers/sapOrchestration.ts (illustrative future edit)
+'anthropic--claude-image-experimental': {
+  capabilities: ['image-generation'],
+},
+```
+
+#### Example — capability-gated image chunk extraction
+
+```typescript
+import { modelHasCapability } from './providers/index.js';
+import { extractImageChunks } from './providers/transform.js';
+
+// Somewhere in a streaming consumer:
+for await (const delta of stream) {
+  if (modelHasCapability(modelId, 'image-generation')) {
+    for (const chunk of extractImageChunks(delta.content)) {
+      if (chunk.kind === 'url') {
+        // Fetch chunk.url. `chunk.mimeType` may be undefined —
+        // fall back to the Content-Type response header or sniff.
+      } else {
+        // Decode chunk.data (base64) using chunk.mimeType.
+      }
+    }
+  }
+}
+```
+
+If `modelHasCapability` returns `false`, the gate short-circuits and
+`extractImageChunks` is never called. Passing
+`{ assumeWhenUnspecified: true }` is **discouraged for image
+generation** — the whole point of the tag is to fail closed on a text
+model that happens to emit something image-shaped. `true` is only
+appropriate for legacy paths that predate the capability data and
+cannot yet be audited.
+
+#### `assumeWhenUnspecified` — full behaviour matrix
+
+| Model in `ORCHESTRATION_MODEL_METADATA`? | `capabilities` value                    | `assumeWhenUnspecified` | Result for the queried capability |
+| ---------------------------------------- | --------------------------------------- | ----------------------- | --------------------------------- |
+| Yes                                      | Includes the queried capability         | ignored                 | `true`                            |
+| Yes                                      | Does NOT include the queried capability | ignored                 | `false`                           |
+| Yes                                      | `[]` (explicit empty list)              | ignored                 | `false`                           |
+| No entry at all                          | —                                       | `false` (default)       | `false`                           |
+| No entry at all                          | —                                       | `true`                  | `true`                            |
+| id is empty string / non-string          | —                                       | any                     | `assumeWhenUnspecified ?? false`  |
+
+The subtle case is the third row: an entry with `capabilities: []`
+reports `false` for every capability regardless of the option. This is
+by design — an empty list is an explicit "does not support anything in
+this dimension" signal, distinct from "not authored yet" (missing
+entry). This lets contributors distinguish models the team has
+audited (present in the map) from those that have not been reviewed
+(absent from the map).
+
 ## Configuration
 
 ### Environment Variables
