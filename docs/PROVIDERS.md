@@ -247,6 +247,77 @@ interface ModelCapability {
 }
 ```
 
+### Provider-Layer Capability Validation (issue #1389)
+
+In addition to the router-facing `ModelCapability` shape above, the
+provider layer publishes a narrower capability tag set consumed by
+feature gates (tool registration, image response handling, embeddings
+dispatch). Ported from Cline PR #13025 and exported from
+`src/providers/sapOrchestration.ts` (re-exported by
+`src/providers/index.ts`).
+
+```typescript
+// From src/providers/sapOrchestration.ts
+export type ModelCapability = 'image-generation' | 'tools' | 'embeddings';
+
+export interface OrchestrationModelMetadata {
+  capabilities?: ModelCapability[];
+}
+
+// Companion map keyed by OrchestrationModel id. Absence of an entry
+// means "capability data not authored yet" (see `assumeWhenUnspecified`).
+export const ORCHESTRATION_MODEL_METADATA: Readonly<
+  Partial<Record<OrchestrationModel, OrchestrationModelMetadata>>
+>;
+
+export function modelHasCapability(
+  modelId: string,
+  capability: ModelCapability,
+  options?: { assumeWhenUnspecified?: boolean }
+): boolean;
+```
+
+Capability tags:
+
+- **`image-generation`** — model can emit image content (URL or base64
+  payload) as part of a streaming response. Consumers gate on this tag
+  before invoking `extractImageChunk` / `extractImageChunks` from
+  `src/providers/transform.ts`. No id in the current
+  `ORCHESTRATION_MODELS` catalog advertises this — the tag is retained
+  so a future SAP-hosted image model can be enabled by a single map edit.
+- **`tools`** — model supports function / tool calling. Tagged on all
+  current OpenAI GPT-\*, Anthropic Claude 3.5+, Gemini 2.5 family, and
+  the Amazon Nova micro/lite/pro trio. NOT tagged on `deepseek-r1`,
+  `meta--llama3.1-70b-instruct`, `mistralai--mistral-small-instruct`, or
+  `sap-abap-1` — they do not advertise tool calling via SAP AI Core
+  today.
+- **`embeddings`** — model can be used with `SapOrchestrationEmbeddings`.
+  No chat model in the current catalog doubles as an embeddings model;
+  the dedicated `text-embedding-ada-002` deployment sits outside
+  `ORCHESTRATION_MODELS`.
+
+Validation semantics (`modelHasCapability`):
+
+1. The id is normalised by stripping a leading `<provider>/` prefix, so
+   `sap-ai-core/anthropic--claude-4.7-opus` and
+   `anthropic--claude-4.7-opus` resolve identically.
+2. When the normalised id exists in `ORCHESTRATION_MODEL_METADATA`, the
+   answer is `capabilities?.includes(capability) ?? false`.
+3. When the id is unknown, the answer is
+   `options.assumeWhenUnspecified ?? false`. `assumeWhenUnspecified` is
+   the escape hatch for legacy call sites that predate capability data
+   and want "unknown-means-yes" behaviour; new call sites should default
+   to `false` so a missing tag stays visible.
+
+Streaming image payloads are surfaced by `extractImageChunk` /
+`extractImageChunks` in `src/providers/transform.ts`, which normalise
+both OpenAI-style URL payloads (`type: 'image_url'`,
+`image_url.url`) and Anthropic / Gemini-style base64 payloads
+(`type: 'image'`, `image.b64_json` or `image.data`) into a
+discriminated union `NormalizedImageChunk` (`{ kind: 'url' | 'base64',
+... }`). The extractors return `undefined` / `[]` for non-image or
+malformed content, so consumers can invoke them unconditionally.
+
 ## Configuration
 
 ### Environment Variables
