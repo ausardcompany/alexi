@@ -214,6 +214,16 @@ class AgentRegistry {
    * - In-memory only. A process restart clears the pending state naturally.
    */
   private pendingSwitchMarker: { from: string; to: string } | null = null;
+  /**
+   * Most-recent non-`ask` agent id seen before switching *into* `ask`. Used
+   * by `restorePreviousAgent` so that leaving `ask` returns to the caller's
+   * prior working agent (typically `code`) instead of resetting to default.
+   *
+   * Ports upstream kilocode commit `e2966abcb` — "preserve Code agent when
+   * switching from Ask" — which fixed a UX bug where the user had to
+   * manually reselect their coding agent after every Ask handoff.
+   */
+  private preAskAgentId: string | null = null;
 
   constructor() {
     // Register built-in agents
@@ -269,12 +279,31 @@ class AgentRegistry {
 
   /**
    * Switch to a different agent
+   *
+   * Bookkeeping: when the caller switches INTO the `ask` agent, the current
+   * (non-`ask`) agent id is remembered in `preAskAgentId` so that
+   * `restorePreviousAgent` can send the user back to their working agent
+   * when they leave Ask. Consecutive switches into `ask` do NOT overwrite an
+   * existing `preAskAgentId` — otherwise a rapid `code → ask → ask` sequence
+   * would lose the original `code` context.
    */
   switchTo(idOrAlias: string, reason?: string): Agent | null {
     const agent = this.get(idOrAlias);
     if (!agent) return null;
 
     const fromId = this.currentAgentId;
+
+    // Remember the pre-Ask working agent on the transition INTO Ask so a
+    // subsequent leave-Ask restore returns to the same coding context.
+    // See kilocode e2966abcb.
+    if (agent.id === 'ask' && fromId !== 'ask') {
+      this.preAskAgentId = fromId;
+    } else if (agent.id !== 'ask' && fromId !== 'ask') {
+      // Any non-Ask ↔ non-Ask switch invalidates the stale marker so we do
+      // not "restore" the user to something they no longer expect.
+      this.preAskAgentId = null;
+    }
+
     this.currentAgentId = agent.id;
 
     // Stamp a pending marker so the next outbound user turn can inform the
@@ -291,6 +320,35 @@ class AgentRegistry {
     });
 
     return agent;
+  }
+
+  /**
+   * Restore the pre-Ask working agent when leaving the Ask agent. Returns
+   * `null` if the current agent is not `ask`, no pre-Ask agent was recorded,
+   * or the recorded agent is no longer registered.
+   *
+   * Callers use this from the UI/switch handler:
+   *
+   *   if (currentAgent.id === 'ask') {
+   *     const restored = registry.restorePreviousAgent();
+   *     if (restored) return restored;
+   *   }
+   *   // fall through to default switch behaviour
+   *
+   * Ports upstream kilocode commit `e2966abcb`.
+   */
+  restorePreviousAgent(reason?: string): Agent | null {
+    if (this.currentAgentId !== 'ask') return null;
+    const prevId = this.preAskAgentId;
+    if (!prevId) return null;
+    const prev = this.agents.get(prevId);
+    if (!prev) {
+      // Stale reference (agent was removed). Clear the marker and bail.
+      this.preAskAgentId = null;
+      return null;
+    }
+    this.preAskAgentId = null;
+    return this.switchTo(prev.id, reason ?? 'Restored pre-Ask agent');
   }
 
   /**
@@ -443,6 +501,15 @@ export function getCurrentAgent(): Agent {
 
 export function switchAgent(idOrAlias: string, reason?: string): Agent | null {
   return getAgentRegistry().switchTo(idOrAlias, reason);
+}
+
+/**
+ * Restore the pre-Ask agent when currently on `ask`. See
+ * `AgentRegistry.restorePreviousAgent` for semantics. Ports upstream kilocode
+ * `e2966abcb`.
+ */
+export function restorePreviousAgent(reason?: string): Agent | null {
+  return getAgentRegistry().restorePreviousAgent(reason);
 }
 
 export function removeAgent(idOrAlias: string): boolean {
