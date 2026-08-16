@@ -42,7 +42,11 @@ import {
   ReauthenticationRequiredError,
   NoRefreshTokenError,
 } from './auth.js';
-import { getConnectorStore, type ConnectorState } from './connectorStore.js';
+import {
+  getConnectorStore,
+  initializeConnectorStore,
+  type ConnectorState,
+} from './connectorStore.js';
 import { isClaudeOpus4 } from './model-match.js';
 import { env } from '../config/env.js';
 import {
@@ -1070,6 +1074,19 @@ export class SapOrchestrationProvider {
 
     if (!getConfigPersistAuthTokens()) {
       return;
+    }
+
+    // Hydrate the connector store from `~/.alexi/connectors.json`
+    // (refresh tokens + expiry + access tokens) BEFORE reading the
+    // narrower `tokens.json` cache. The two files complement each
+    // other: `tokens.json` holds just the current bearer for the
+    // hot path, `connectors.json` holds the durable refresh token
+    // and secondary provider state that survives multiple bearer
+    // rotations.
+    try {
+      await initializeConnectorStore();
+    } catch {
+      // Non-fatal — fall through to the `tokens.json` path.
     }
 
     let cached;

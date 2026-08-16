@@ -30,7 +30,7 @@
  * `ErrorBackoff` / route-retry layers do not spend budget on them.
  */
 
-import { getConnectorStore, type ConnectorState } from './connectorStore.js';
+import { getConnectorStore, saveConnectorState, type ConnectorState } from './connectorStore.js';
 import { TokenRefreshed } from '../bus/index.js';
 import { saveToken } from '../utils/tokenStorage.js';
 import { getConfigPersistAuthTokens } from '../config/userConfig.js';
@@ -399,6 +399,18 @@ export async function refreshAccessToken(
       // token is already in the in-memory connector store, so the
       // current invocation continues; only cross-process reuse is
       // lost, which is a soft-fail we accept.
+    }
+
+    // Also persist the broader connector state (refresh token +
+    // access token + expiry) to `~/.alexi/connectors.json` so the
+    // next session can skip re-authentication entirely. Failures
+    // here are non-fatal for the same reason as the `saveToken`
+    // path above: the in-memory store already has the fresh
+    // credentials, so the current invocation succeeds regardless.
+    try {
+      await saveConnectorState({ [providerId]: nextState });
+    } catch {
+      // Non-fatal — see comment above.
     }
   }
 

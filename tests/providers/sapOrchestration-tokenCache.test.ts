@@ -68,6 +68,8 @@ import {
   getConnectorStore,
   setConnectorStore,
   createInMemoryConnectorStore,
+  setConnectorStatePath,
+  resetConnectorStatePath,
 } from '../../src/providers/connectorStore.js';
 
 describe('SapOrchestrationProvider token cache priming', () => {
@@ -76,12 +78,14 @@ describe('SapOrchestrationProvider token cache priming', () => {
   beforeEach(async () => {
     tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'alexi-sap-token-'));
     setTokenStoragePath(path.join(tmpDir, 'tokens.json'));
+    setConnectorStatePath(path.join(tmpDir, 'connectors.json'));
     setConnectorStore(createInMemoryConnectorStore());
     persistAuthTokensMock.mockReturnValue(true);
   });
 
   afterEach(async () => {
     resetTokenStoragePath();
+    resetConnectorStatePath();
     setConnectorStore(createInMemoryConnectorStore());
     await fs.promises.rm(tmpDir, { recursive: true, force: true });
   });

@@ -25,6 +25,8 @@ import { refreshAccessToken, type FetchLike } from '../../src/providers/auth.js'
 import {
   setConnectorStore,
   createInMemoryConnectorStore,
+  setConnectorStatePath,
+  resetConnectorStatePath,
 } from '../../src/providers/connectorStore.js';
 import {
   loadToken,
@@ -47,12 +49,14 @@ describe('refreshAccessToken -> tokenStorage persistence', () => {
   beforeEach(async () => {
     tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'alexi-auth-persist-'));
     setTokenStoragePath(path.join(tmpDir, 'tokens.json'));
+    setConnectorStatePath(path.join(tmpDir, 'connectors.json'));
     setConnectorStore(createInMemoryConnectorStore());
     persistAuthTokensMock.mockReturnValue(true);
   });
 
   afterEach(async () => {
     resetTokenStoragePath();
+    resetConnectorStatePath();
     setConnectorStore(createInMemoryConnectorStore());
     await fs.promises.rm(tmpDir, { recursive: true, force: true });
   });
