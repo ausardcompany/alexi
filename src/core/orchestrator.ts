@@ -5,6 +5,8 @@ import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './contextOverflow.js';
+import { isRateLimitError } from './error-backoff.js';
+import { logger } from '../utils/logger.js';
 
 export async function sendChat(
   message: string,
@@ -123,6 +125,34 @@ export async function sendChat(
     // any operator with logs can still see the vendor-specific string.
     if (err instanceof Error && isContextOverflowError(err)) {
       err.message = `${CONTEXT_OVERFLOW_USER_MESSAGE} (${err.message})`;
+      throw err;
+    }
+    // Rate-limit UX: `FreeTierRateLimitError` and `ProviderRateLimitError`
+    // already carry a fully-formatted, user-facing message with model,
+    // wait time, and the docs link. Log the full details at debug level
+    // (including the upstream `cause` and any `Retry-After`) so operators
+    // running with `LOG_LEVEL=debug` see the provider's raw payload, then
+    // rethrow the classified error unchanged so the CLI displays the
+    // curated message instead of a stack trace of the raw HTTP failure.
+    if (isRateLimitError(err)) {
+      const rateLimitErr = err as {
+        name?: string;
+        code?: string;
+        modelName?: string;
+        retryAfterSeconds?: number;
+        suggestedAction?: string;
+        cause?: unknown;
+        message?: string;
+      };
+      logger.debug('Rate limit error from provider', {
+        name: rateLimitErr.name,
+        code: rateLimitErr.code,
+        model: rateLimitErr.modelName ?? modelId,
+        retryAfterSeconds: rateLimitErr.retryAfterSeconds,
+        suggestedAction: rateLimitErr.suggestedAction,
+        message: rateLimitErr.message,
+        cause: rateLimitErr.cause,
+      });
       throw err;
     }
     const formatted = formatProviderError(err);

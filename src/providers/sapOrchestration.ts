@@ -2035,6 +2035,14 @@ export class FreeTierRateLimitError extends Error {
   readonly statusCode = 429;
   readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
   readonly retryAfterSeconds?: number;
+  /**
+   * Short, single-line, user-facing guidance for the CLI to show alongside
+   * the full error message. Distinct from `message` so callers (CLI,
+   * telemetry) can render it prominently without re-parsing the long
+   * multi-line message. Always includes the upgrade path for free-tier
+   * exhaustion; the wait-time detail is folded in when we know it.
+   */
+  readonly suggestedAction: string;
 
   constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
     const retryLine =
@@ -2053,6 +2061,13 @@ export class FreeTierRateLimitError extends Error {
     if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
       this.retryAfterSeconds = retryAfterSeconds;
     }
+    const waitPhrase =
+      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+        ? `Wait ${retryAfterSeconds}s`
+        : 'Wait for the quota window to reset';
+    this.suggestedAction =
+      `${waitPhrase} or upgrade to a paid SAP AI Core deployment: ` +
+      `${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
     if (cause !== undefined) {
       (this as Error & { cause?: unknown }).cause = cause;
     }
@@ -2079,6 +2094,13 @@ export class ProviderRateLimitError extends Error {
   readonly statusCode = 429;
   readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
   readonly retryAfterSeconds?: number;
+  /**
+   * Short, single-line, user-facing guidance for the CLI to show alongside
+   * the full error message. For paid-tier throttling the primary action is
+   * to wait for the quota window; upgrading is offered as a secondary
+   * option and the docs link is the same as {@link docsUrl}.
+   */
+  readonly suggestedAction: string;
 
   constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
     const waitLine =
@@ -2099,6 +2121,13 @@ export class ProviderRateLimitError extends Error {
     if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
       this.retryAfterSeconds = retryAfterSeconds;
     }
+    const waitPhrase =
+      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+        ? `Wait ${retryAfterSeconds}s`
+        : 'Wait 60s';
+    this.suggestedAction =
+      `${waitPhrase}, switch to a smaller model, or contact SAP to increase quota: ` +
+      `${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
     if (cause !== undefined) {
       (this as Error & { cause?: unknown }).cause = cause;
     }
