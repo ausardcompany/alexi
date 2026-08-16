@@ -1,76 +1,47 @@
-# Upstream Sync — Changes Summary
+# Changes Summary
 
-**Date:** 2026-08-14
-**Plan basis:**
-- kilocode `f71154707..67cda85c9` (v7.4.21 → v7.4.22)
-- opencode `cc4b456..e23586a`
+Generated: 2026-08-16
+Executor: Alexi update-plan execution agent
 
-## Files modified
+## Result: No-op
 
-| # | File | Kind |
-| - | ---- | ---- |
-| 1 | `src/agent/index.ts` | edit |
-| 2 | `src/tool/tools/grep.ts` | edit |
-| 3 | `src/tool/tools/__tests__/grep.surrogate.test.ts` | new |
-| 4 | `src/core/sessionManager.ts` | edit |
-| 5 | `src/cli/commands/chat.ts` | edit |
-| 6 | `src/core/__tests__/headless-session-agent.test.ts` | new |
-| 7 | `src/git/commitMessage.ts` | edit |
-| 8 | `src/tool/tools/task.ts` | edit |
+The update plan for this cycle explicitly declared **0 actionable changes** across all priority tiers (critical: 0, high: 0, medium: 0, low: 0). No files in the Alexi repository were modified.
 
-## Summary of each change
+## Files Modified
 
-### 1. `src/agent/index.ts` — Harden `explore` subagent (kilocode 3a99f36d9) — *critical*
-Added `exploreBash` table, exported `getExploreAgentBashRules()`, and added `isExploreAgent()` alongside the existing `getAskAgentBashRules()`. The table is `readOnlyBash + { 'gh *': 'deny', 'find *': 'deny' }` — `gh` and `find` cannot be delegated to a subagent that has no way to answer permission prompts, and `find -delete`/`find -exec` are mutating. The Alexi built-in `explore` agent already restricts its `tools` allowlist to `['read', 'glob', 'grep']` (no `bash`), so no bash allow needed to be removed structurally; the new helper is available for any future permission-merge integration in the task-tool path (see change #8).
+_None._
 
-### 2. `src/tool/tools/grep.ts` — Preserve UTF-16 surrogate pairs in previews (opencode 6c035e1) — *high*
-Both the ripgrep JSON path and the JS fallback path now trim a trailing high surrogate (`/[\uD800-\uDBFF]$/`) after slicing the 200-char preview. Prevents lone high surrogates in tool output that break SAP AI Core message-shape validation. **Note:** Alexi's preview cap is 200 (not the 2 000 in the upstream). The regex-based post-fix is identical either way.
+The only file created by this run is this report itself:
 
-### 3. `src/tool/tools/__tests__/grep.surrogate.test.ts` — new regression test — *high*
-Writes a file whose match line has an emoji straddling the 200-char boundary and asserts no lone surrogate ends up in the preview. Forces `ALEXI_DISABLE_RG=1` so CI does not need `rg` on PATH.
+- `.github/reports/changes-summary.md` (this file — execution audit trail only, no source code impact)
 
-### 4. `src/core/sessionManager.ts` — record agent on `SessionMetadata` + public `persistActiveSession()` (kilocode f4cba053a) — *high*
-Added optional `agent?: string` to `SessionMetadata` and a public `persistActiveSession()` helper (the underlying `saveSession` is private). Enables headless resumes to preserve the previously-chosen agent.
+## Summary of Changes Made
 
-### 5. `src/cli/commands/chat.ts` — preserve session agent on `--session` resume (kilocode f4cba053a) — *high*
-`--agent` flag now falls back to `session.metadata.agent` before falling back to the config default. After `sendChat` completes, the resolved agent is stamped onto the session and persisted via `persistActiveSession()`, so a subsequent `alexi chat --session <id>` without an explicit `--agent` picks it up. Silent revert to the built-in `code` default no longer happens.
+None. Per the plan:
 
-### 6. `src/core/__tests__/headless-session-agent.test.ts` — new regression test — *high*
-Round-trips `session.metadata.agent` through save + reload, and asserts the precedence contract used by `chat.ts`: `pickAgentSlug({ cliFlag: opts.agent ?? session.metadata.agent, configValue })` returns the session-recorded agent when the CLI flag is absent, but the CLI flag still wins when present.
+- **kilocode** produced no commits in the analysed window (`c8271ad6f..c8271ad6f`), so nothing to port.
+- **opencode** produced a single commit (`976c185` — "docs(go): remove DeepSeek Flash promotion (#42858)") that touched only `packages/console/app/src/i18n/*.ts` (18 locale files) and `packages/console/app/src/routes/go/index.tsx`. That is promotional/marketing copy in a Solid.js web console web app that Alexi does not ship.
 
-### 7. `src/git/commitMessage.ts` — surface LLM commit-message errors (kilocode 738163bb1) — *high*
-Introduced `CommitMessageError`. Empty LLM responses are still treated as "fall back to heuristic" (debug-logged, no throw), but any thrown error now surfaces via `logger.warn` instead of being silently swallowed. The public `generateCommitMessage()` still never rejects — the heuristic path always produces something — but operators diagnosing SAP AI Core provider failures can now see the cause.
+### Verification that no Alexi subsystems were affected by the upstream diff
 
-### 8. `src/tool/tools/task.ts` — permission-inheritance TODO now references explore hardening (kilocode 3a99f36d9 + task.ts touch-up) — *medium*
-Expanded the existing `deriveSubagentSessionPermission` TODO block to reference the new `getExploreAgentBashRules()` / `isExploreAgent()` helpers from change #1, so the eventual integration knows to layer the strict explore bash rules on top of the derived ruleset. No behavioural change — `ToolContext` still doesn't carry session/agent context, so a real integration is out of scope for this port.
+- `src/tool/` — no tool system changes upstream.
+- `src/agent/` — no agent system changes upstream.
+- `src/permission/` — no permission system changes upstream.
+- `src/bus/` — no event bus changes upstream.
+- `src/core/` — no orchestration/router/session changes upstream.
+- `src/providers/` — no provider changes upstream; SAP AI Core integration is unaffected. The DeepSeek reference in the upstream commit is marketing copy, not a provider/model integration.
+- `src/cli/` — no CLI changes upstream.
+- No web console exists in Alexi, so the `packages/console/**` files have no analog to update.
 
-## Items NOT applied (documented gaps vs. the plan)
+## Issues Encountered
 
-- **Change #3 — models.dev refresh logger isolation (kilocode 746fa974e).**
-  Alexi has no `models-dev.ts` module. Models are configured via `routing-config.json` + provider constructors, not via a background models.dev refresh Effect. There is no analogous refresh loop whose loggers could leak into the TUI, so the change is not applicable.
+None.
 
-- **Change #6 — v1 session projector compatibility (opencode d8bf792).**
-  Alexi does not use the `SessionContextEpoch` / `SessionV1.Event` projector architecture. `SessionManager` writes plain JSON files to `~/.alexi/sessions/` — no epoch reset to remove. Not applicable.
+## Follow-up Notes
 
-- **Change #8 — `ai-gateway-provider` 3.1.2 → 3.2.0 (opencode 6d63500).**
-  `ai-gateway-provider` is not a dependency of Alexi (`grep` confirmed zero references). Alexi uses `@sap-ai-sdk/ai-api` and `@sap-ai-sdk/orchestration` for SAP AI Core. Not applicable.
+- When the next opencode sync includes substantive changes (tool/agent/provider/core), re-run the diff report against `976c185` as the new baseline so this docs-only commit is not re-scanned.
+- Recommend confirming the current CI baseline is green before the next upstream sync so any real changes in the following window can be isolated cleanly.
 
-- **The `--worktree` CLI flag (kilocode 907f7dfcf) and clickable file links in TUI (kilocode 8013e5f50)** were mentioned in the plan's context header but never broken out into numbered changes. Not applied.
+## Testing
 
-## Issues encountered
-
-- **`saveSession` is private on `SessionManager`.** Solved by adding a narrow public `persistActiveSession()` method rather than widening the internal API. This keeps the JSON-write path centralised.
-- **Alexi's agent system uses tool-ID allowlists**, not a permission ruleset like kilocode/opencode. The `hardenExplore` port therefore takes the shape of a *helper* (`getExploreAgentBashRules`) that any future permission-merge integration can consume, rather than a direct edit to a permission-merging step that does not yet exist in Alexi.
-- **`ToolContext` does not carry the parent session/agent.** The task-tool permission-inheritance integration (change #7) is therefore still gated behind the pre-existing TODO in `src/tool/tools/task.ts`; the TODO comment is the only thing that changed there.
-
-## Verification
-
-Recommended pre-push sequence per `AGENTS.md`:
-```
-npm run lint
-npm run typecheck
-npm run format:check
-npm run test:coverage
-npm run build
-```
-The two new tests (`grep.surrogate.test.ts`, `headless-session-agent.test.ts`) are self-contained and use `mkdtempSync` / `mkdtemp` for isolation, so they will run in parallel with the existing suite without cross-contamination.
+No tests were required or executed — no code changes were applied. Existing CI (`lint → typecheck → format:check → test:coverage → build`) remains the source of truth for repository health.
