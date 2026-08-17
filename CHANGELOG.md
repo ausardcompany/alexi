@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-08-17
+
+### Added
+
+- **MCP per-server timeout validation and documentation** (`src/config/mcp.ts`, `docs/mcp-servers.md`, PR #1427, commit `bcfe252d`, 2026-08-17): Introduced validation for per-server `timeout` configuration in `mcp-servers.json` to ensure values are positive integers. The config loader now rejects invalid timeout values (negative, zero, non-numeric) with a descriptive error message. Documentation in `docs/mcp-servers.md` clarifies the precedence order: per-server `timeout` field overrides the global default (3s), and the global default can be overridden via `ALEXI_MCP_TIMEOUT` environment variable. User-visible impact: invalid MCP server configs now fail fast at session startup rather than silently falling back to the default timeout.
+
+### Changed
+
+- **Dependency updates** (2026-08-17):
+  - `@commitlint/cli`: `21.2.1` → `21.2.2` (PR #1423, commit `cf7b9a75`) — patch update; dev-only dependency used for commit message linting via the husky `commit-msg` hook. No runtime impact.
+  - `puppeteer`: `25.5.0` → `25.7.0` (PR #1424, commit `09224c4a`) — patch update with no breaking changes; used by `src/tool/tools/webfetch.ts` for headless browser-based page fetching.
+  - `@hono/node-server`: `2.1.0` → `2.1.1` (PR #1426, commit `b26f56cf`) — patch update; used by `src/server/index.ts` for the embedded HTTP server. No breaking changes.
+  - `@typescript-eslint/eslint-plugin`: `8.66.0` → `8.67.0` (PR #1425, commit `14036e30`) — patch update; dev-only dependency for TypeScript-specific ESLint rules. No runtime impact.
+  - `hono`: `4.13.1` → `4.13.2` (PR #1422, commit `dee8662b`) — patch update; used by `src/server/index.ts` for HTTP routing. No breaking changes.
+  - `@commitlint/config-conventional`: `21.0.0` → `21.1.0` (PR #1420, commit `ea126671`) — minor version bump; dev-only dependency for Conventional Commits enforcement. No runtime impact.
+  - `tsx`: `4.23.10` → `4.23.12` (PR #1421, commit `e61a1f7c`) — patch update; dev-only dependency used by `npm run dev`. No runtime impact.
+  - `mammoth`: `1.12.0` → `1.12.1` (PR #1418, commit `d54ba9f3`) — patch update; used for Word document conversion in the document tool.
+  - Dev dependencies group update (PR #1417, commit `f272037a`) — batch update of development tooling dependencies with no runtime impact.
+
+- **Agent fleet maintenance** (2026-08-17):
+  - Factory engineering workflow execution (`chore(agent): factory engineering run [agent]`, PR #1416, commit `dcf199a9`).
+  - Factory architecture workflow execution (`chore(agent): factory architecture run [agent]`, commit `8cebe2a1`).
+  - Factory consulting workflow execution (`chore(ci): factory consulting run [agent]`, commit `af287da2`).
+
 ### Added
 
 - **`packages/alexi-mcp-warpgrep` — standalone MCP server for semantic code search** (`packages/alexi-mcp-warpgrep/`, commit `49692298`, 2026-08-13): New in-repo npm package that exposes the `codebase_search` (WarpGrep) tool over the Model Context Protocol using stdio transport. Public surface: `createWarpgrepServer({ repoRoot? })` returns a configured but unstarted `McpServer` (exported for tests); `main()` boots the server on stdio; `warpgrepExecute(params, { repoRoot? })` runs the search without going through the MCP layer and returns a `WarpGrepOutcome` discriminated union (`{ success: true; data: WarpGrepResult; hint? } | { success: false; error }`) that never throws; `WarpGrepParamsSchema` (Zod, `{ query: string }`) and the `WARPGREP_DESCRIPTION` string are shared with any downstream integrator. `@morphllm/morphsdk` is a **peer** dependency marked optional via `peerDependenciesMeta` — the server responds with a helpful `Search failed: WarpGrep requires @morphllm/morphsdk to be installed` message instead of crashing when the SDK is absent. Tests inject a stub constructor via `setWarpgrepClientLoader(loader)` / `resetWarpgrepClientLoader()`. Bin `alexi-mcp-warpgrep` (mapped to `dist/index.js`) is auto-invoked only when the module runs as the entry point (`import.meta.url === new URL(\\`file://${process.argv[1]}\\`).href`), so `import`-ing the module in tests does not spawn the transport. Registration guidance lives in `docs/mcp-servers.md#alexi-mcp-warpgrep---semantic-code-search`.
