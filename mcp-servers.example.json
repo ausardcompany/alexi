@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "timeout": { "startup": 5000, "request": 8000 },
+  "servers": [
+    {
+      "name": "filesystem",
+      "description": "File system access via MCP (fast local server, inherits global timeout)",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "enabled": false,
+      "autoConnect": false
+    },
+    {
+      "name": "github",
+      "description": "GitHub API access (bare-number override applied to both startup and request)",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "enabled": false,
+      "autoConnect": false,
+      "timeout": 15000
+    },
+    {
+      "name": "slow-ai-tool",
+      "description": "AI-powered tool with slow JVM warmup and long-running requests",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["ai_tool.py"],
+      "enabled": false,
+      "autoConnect": false,
+      "timeout": { "startup": 30000, "request": 60000 }
+    },
+    {
+      "name": "brave-search",
+      "description": "Web search via Brave Search API (partial override; startup inherits global)",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "enabled": false,
+      "autoConnect": false,
+      "timeout": { "request": 20000 },
+      "retry": {
+        "enabled": true,
+        "maxAttempts": 3,
+        "initialDelayMs": 1000,
+        "maxDelayMs": 4000
+      }
+    }
+  ]
+}
