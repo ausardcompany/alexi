@@ -10,6 +10,16 @@ import path from 'path';
 import { logger } from '../utils/logger.js';
 import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
 
+/**
+ * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
+ * (`MCP_TIMEOUT_MIN_MS`, `MCP_TIMEOUT_MAX_MS`) but inlined here so
+ * partial mocks of `./config.js` in tests do not need to re-export
+ * them — the tree of `vi.mock('.../mcp/config.js', ...)` call sites
+ * would otherwise all need to be updated in lockstep.
+ */
+const RUNTIME_TIMEOUT_MIN_MS = 1000;
+const RUNTIME_TIMEOUT_MAX_MS = 300000;
+
 export interface McpToolInfo {
   /** Tool name (raw short name as advertised by the server) */
   name: string;
@@ -1291,21 +1301,64 @@ export class McpClientManager {
   /**
    * Normalize a raw `timeout` config value into a `{startup, request}`
    * pair. Returns `undefined` if the value is absent so the caller can
-   * fall through to the next precedence layer. Zero and negative numbers
-   * are treated as unset (they would disable the timeout, which is never
-   * what an operator wants).
+   * fall through to the next precedence layer.
+   *
+   * Invalid values (non-finite, zero, negative, out-of-range) are dropped
+   * to `undefined` with a `logger.warn`. Out-of-range means outside
+   * `[MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]`. Config-load-time
+   * validation (see {@link validateMcpConfig}) rejects these up-front,
+   * so a warning here only fires for values that bypassed the loader
+   * (e.g. injected programmatically at runtime).
    */
   private normalizeTimeout(
     raw: number | { startup?: number; request?: number } | undefined | null
   ): { startup?: number; request?: number } | undefined {
     if (typeof raw === 'number') {
       if (!isFinite(raw) || raw <= 0) {
+        logger.warn(
+          `MCP timeout ${raw}ms is non-positive; ignoring and falling through ` +
+            `to the next precedence layer. Valid range: ` +
+            `${RUNTIME_TIMEOUT_MIN_MS}-${RUNTIME_TIMEOUT_MAX_MS}ms.`
+        );
+        return undefined;
+      }
+      if (raw < RUNTIME_TIMEOUT_MIN_MS || raw > RUNTIME_TIMEOUT_MAX_MS) {
+        logger.warn(
+          `MCP timeout ${raw}ms is outside the valid range ` +
+            `[${RUNTIME_TIMEOUT_MIN_MS}, ${RUNTIME_TIMEOUT_MAX_MS}]ms; ignoring and ` +
+            `falling through to the next precedence layer.`
+        );
         return undefined;
       }
       return { startup: raw, request: raw };
     }
     if (raw !== undefined && raw !== null && typeof raw === 'object') {
-      return { startup: raw.startup, request: raw.request };
+      const normalizeField = (field: 'startup' | 'request', value: number | undefined) => {
+        if (value === undefined) {
+          return undefined;
+        }
+        if (!isFinite(value) || value <= 0) {
+          logger.warn(
+            `MCP timeout.${field}=${value}ms is non-positive; ignoring and ` +
+              `falling through to the next precedence layer. Valid range: ` +
+              `${RUNTIME_TIMEOUT_MIN_MS}-${RUNTIME_TIMEOUT_MAX_MS}ms.`
+          );
+          return undefined;
+        }
+        if (value < RUNTIME_TIMEOUT_MIN_MS || value > RUNTIME_TIMEOUT_MAX_MS) {
+          logger.warn(
+            `MCP timeout.${field}=${value}ms is outside the valid range ` +
+              `[${RUNTIME_TIMEOUT_MIN_MS}, ${RUNTIME_TIMEOUT_MAX_MS}]ms; ignoring ` +
+              `and falling through to the next precedence layer.`
+          );
+          return undefined;
+        }
+        return value;
+      };
+      return {
+        startup: normalizeField('startup', raw.startup),
+        request: normalizeField('request', raw.request),
+      };
     }
     return undefined;
   }
