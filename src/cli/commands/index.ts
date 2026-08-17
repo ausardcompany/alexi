@@ -17,6 +17,7 @@ import { registerCodeReviewCommand } from './codeReview.js';
 import { registerPluginCommand } from './plugin.js';
 import { registerRevertCommand } from './revert.js';
 import { registerServerCommand } from './server.js';
+import { registerGenerateCommand } from './generate.js';
 
 /**
  * Register all CLI commands on the program
@@ -37,6 +38,7 @@ export function registerAllCommands(program: Command): void {
   registerPluginCommand(program);
   registerRevertCommand(program);
   registerServerCommand(program);
+  registerGenerateCommand(program);
 }
 
 export {
@@ -54,4 +56,5 @@ export {
   registerPluginCommand,
   registerRevertCommand,
   registerServerCommand,
+  registerGenerateCommand,
 };
