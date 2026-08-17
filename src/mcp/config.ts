@@ -6,6 +6,93 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { z } from 'zod';
+
+/**
+ * Bounds for `timeout` fields (per-server or global) in milliseconds.
+ *
+ * - Minimum: 1000ms (1s). Anything below is a foot-gun: even the fastest
+ *   local stdio MCP server needs a few hundred ms for the JSON-RPC
+ *   handshake, and a sub-second budget guarantees false-positive timeouts.
+ * - Maximum: 300000ms (5min). Above this you are almost certainly using
+ *   MCP for the wrong kind of workload; long-running jobs should use a
+ *   background-task pattern, not a synchronous tool call.
+ *
+ * Values outside `[MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]` are rejected
+ * by {@link validateMcpConfig} at config-load time and warned about by
+ * `McpClientManager.normalizeTimeout` at call time.
+ */
+export const MCP_TIMEOUT_MIN_MS = 1000;
+export const MCP_TIMEOUT_MAX_MS = 300000;
+
+/**
+ * Zod schema for a single `timeout` field. Accepts either a bare number
+ * (applied to both startup and request phases) or an object with per-phase
+ * budgets. Values must fall within `[MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]`.
+ */
+const TimeoutMsSchema = z
+  .number()
+  .int('timeout must be an integer number of milliseconds')
+  .min(
+    MCP_TIMEOUT_MIN_MS,
+    `timeout must be >= ${MCP_TIMEOUT_MIN_MS}ms (sub-second budgets cause false-positive timeouts)`
+  )
+  .max(
+    MCP_TIMEOUT_MAX_MS,
+    `timeout must be <= ${MCP_TIMEOUT_MAX_MS}ms (use a background-task pattern for longer workloads)`
+  );
+
+const TimeoutSchema = z.union([
+  TimeoutMsSchema,
+  z
+    .object({
+      startup: TimeoutMsSchema.optional(),
+      request: TimeoutMsSchema.optional(),
+    })
+    .strict(),
+]);
+
+/**
+ * Zod schema for a single MCP server entry. Only the fields relevant to
+ * validation are enforced strictly; extra keys are accepted so future
+ * additions do not require a schema bump.
+ */
+const McpServerConfigSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    transport: z.enum(['stdio', 'sse', 'http']),
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    url: z.string().optional(),
+    apiKey: z.string().optional(),
+    enabled: z.boolean(),
+    autoConnect: z.boolean().optional(),
+    timeout: TimeoutSchema.optional(),
+    cwd: z.string().optional(),
+    retry: z
+      .object({
+        enabled: z.boolean(),
+        maxAttempts: z.number().int().min(1).optional(),
+        initialDelayMs: z.number().int().min(0).optional(),
+        maxDelayMs: z.number().int().min(0).optional(),
+      })
+      .optional(),
+  })
+  .passthrough();
+
+/**
+ * Zod schema for the top-level MCP config. Validates version, servers,
+ * and the optional global `timeout` field.
+ */
+export const McpConfigSchema = z
+  .object({
+    version: z.string(),
+    servers: z.array(McpServerConfigSchema),
+    timeout: TimeoutSchema.optional(),
+  })
+  .passthrough();
 
 export interface McpServerConfig {
   /** Unique server identifier */
@@ -180,7 +267,40 @@ function getDefaultConfig(): McpConfig {
 }
 
 /**
- * Load MCP configuration from file
+ * Validate an MCP configuration object against {@link McpConfigSchema}.
+ *
+ * Returns `{ ok: true, config }` on success, `{ ok: false, errors }` on
+ * failure. Callers may choose to hard-fail (a fresh `mcp add` mutation)
+ * or degrade gracefully (a load-time validation of an existing file
+ * where the operator already committed to the values).
+ *
+ * The primary contract this enforces is that `timeout` fields fall
+ * within `[MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]`. Zero, negative, and
+ * out-of-range values used to silently disable the timeout at runtime
+ * (see `McpClientManager.normalizeTimeout`); this check surfaces them
+ * up-front instead.
+ */
+export function validateMcpConfig(
+  raw: unknown
+): { ok: true; config: McpConfig } | { ok: false; errors: string[] } {
+  const parsed = McpConfigSchema.safeParse(raw);
+  if (parsed.success) {
+    return { ok: true, config: parsed.data as unknown as McpConfig };
+  }
+  const errors = parsed.error.issues.map((issue) => {
+    const p = issue.path.length > 0 ? issue.path.join('.') : '(root)';
+    return `${p}: ${issue.message}`;
+  });
+  return { ok: false, errors };
+}
+
+/**
+ * Load MCP configuration from file.
+ *
+ * If the file is missing, a default config is written to disk and
+ * returned. If parsing or validation fails, a warning is logged and the
+ * built-in defaults are returned; this keeps a broken config from
+ * bricking session creation while still surfacing the problem in logs.
  */
 export function loadMcpConfig(): McpConfig {
   try {
@@ -192,7 +312,16 @@ export function loadMcpConfig(): McpConfig {
     }
 
     const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
-    return JSON.parse(content) as McpConfig;
+    const raw = JSON.parse(content) as unknown;
+    const result = validateMcpConfig(raw);
+    if (!result.ok) {
+      console.warn(
+        `Invalid MCP config in ${CONFIG_FILE} - falling back to defaults:\n  ` +
+          result.errors.join('\n  ')
+      );
+      return getDefaultConfig();
+    }
+    return result.config;
   } catch (error) {
     console.warn('Failed to load MCP config, using defaults:', error);
     return getDefaultConfig();
@@ -214,7 +343,13 @@ export function saveMcpConfig(config: McpConfig): void {
 }
 
 /**
- * Add a new MCP server to configuration
+ * Add a new MCP server to configuration.
+ *
+ * Throws when the merged config fails validation (e.g. an out-of-range
+ * `timeout`). Callers that already trust the input can wrap the call in
+ * a try/catch and surface the message to the operator; this is the
+ * write path, so hard-failing keeps invalid values from being persisted
+ * to disk in the first place.
  */
 export function addMcpServer(server: McpServerConfig): McpConfig {
   const config = loadMcpConfig();
@@ -225,6 +360,11 @@ export function addMcpServer(server: McpServerConfig): McpConfig {
     config.servers[existing] = server;
   } else {
     config.servers.push(server);
+  }
+
+  const result = validateMcpConfig(config);
+  if (!result.ok) {
+    throw new Error(`Invalid MCP server config: ${result.errors.join('; ')}`);
   }
 
   saveMcpConfig(config);
