@@ -40,6 +40,7 @@ import { recallTool } from './recall.js';
 import { agentManagerTool } from './agent-manager.js';
 import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
+import { imageGenTool } from './image-gen.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -97,6 +98,7 @@ export const builtInTools = [
   agentManagerTool,
   applyPatchTool,
   repoCloneTool,
+  imageGenTool,
 ];
 
 /**
@@ -145,6 +147,7 @@ export {
   agentManagerTool,
   applyPatchTool,
   repoCloneTool,
+  imageGenTool,
 };
 
 // Re-export UI utilities from specific tools

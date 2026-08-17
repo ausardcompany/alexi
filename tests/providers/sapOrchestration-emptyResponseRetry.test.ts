@@ -71,6 +71,19 @@ describe('classifyStreamPart', () => {
   it('classifies an empty tool-calls array as structural', () => {
     expect(classifyStreamPart({ text: '', toolCalls: [] })).toBe('structural');
   });
+
+  it('classifies image-only chunks as output', () => {
+    expect(
+      classifyStreamPart({
+        text: '',
+        images: [{ kind: 'url', url: 'https://example.com/1.png' }],
+      })
+    ).toBe('output');
+  });
+
+  it('classifies an empty images array as structural', () => {
+    expect(classifyStreamPart({ text: '', images: [] })).toBe('structural');
+  });
 });
 
 describe('mergeUsage', () => {

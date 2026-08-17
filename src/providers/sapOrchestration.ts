@@ -48,6 +48,7 @@ import {
   type ConnectorState,
 } from './connectorStore.js';
 import { isClaudeOpus4 } from './model-match.js';
+import { extractImageChunks } from './transform.js';
 import { env } from '../config/env.js';
 import {
   supportsPromptCacheBreakpoint,
@@ -141,12 +142,25 @@ export interface ToolCallChunk {
 
 /**
  * Stream chunk with tool call support
+ *
+ * When the underlying model advertises the `image-generation` capability
+ * (see {@link modelHasCapability}), streaming responses may include
+ * normalised image payloads alongside the text delta. Callers that render
+ * chat output must inspect `images` in addition to `text` — a chunk MAY
+ * carry only images with an empty `text`.
  */
 export interface StreamChunk {
   text: string;
   toolCalls?: ToolCallChunk[];
   finishReason?: string;
   usage?: TokenUsage;
+  /**
+   * Normalised image payloads extracted from the SDK delta content by
+   * {@link extractImageChunks}. Present only when the model streamed a
+   * URL-form (`image_url`) or base64-form (`image`) content item; text-only
+   * deltas set this field to `undefined`.
+   */
+  images?: import('./transform.js').NormalizedImageChunk[];
 }
 
 /**
@@ -531,7 +545,8 @@ export type StreamPartKind = 'output' | 'structural' | 'error';
 export function classifyStreamPart(chunk: StreamChunk): StreamPartKind {
   const hasText = typeof chunk.text === 'string' && chunk.text.length > 0;
   const hasToolCalls = Array.isArray(chunk.toolCalls) && chunk.toolCalls.length > 0;
-  if (hasText || hasToolCalls) {
+  const hasImages = Array.isArray(chunk.images) && chunk.images.length > 0;
+  if (hasText || hasToolCalls || hasImages) {
     return 'output';
   }
   return 'structural';
@@ -1400,13 +1415,24 @@ export class SapOrchestrationProvider {
         const deltaContent = chunk.getDeltaContent();
         const deltaToolCalls = chunk.getDeltaToolCalls();
 
-        // Only yield if there's content or tool calls
-        if (deltaContent || (deltaToolCalls && deltaToolCalls.length > 0)) {
+        // Extract image content items from the delta. `extractImageChunks`
+        // is safe on any input: a string delta returns `[]`, an
+        // array-of-content-items delta returns whichever entries match the
+        // `image_url` / `image` shapes. Models without the
+        // `image-generation` capability never emit these items.
+        const images = extractImageChunks(deltaContent);
+
+        // Only yield if there's text content, tool calls, or images.
+        const hasText = typeof deltaContent === 'string' && deltaContent.length > 0;
+        const hasToolCalls = Array.isArray(deltaToolCalls) && deltaToolCalls.length > 0;
+        const hasImages = images.length > 0;
+
+        if (hasText || hasToolCalls || hasImages) {
           const streamChunk: StreamChunk = {
-            text: deltaContent ?? '',
+            text: hasText ? (deltaContent as string) : '',
           };
 
-          if (deltaToolCalls && deltaToolCalls.length > 0) {
+          if (hasToolCalls) {
             streamChunk.toolCalls = deltaToolCalls.map((tc: SdkToolCallChunk) => ({
               index: tc.index,
               id: tc.id,
@@ -1418,6 +1444,10 @@ export class SapOrchestrationProvider {
                   }
                 : undefined,
             }));
+          }
+
+          if (hasImages) {
+            streamChunk.images = images;
           }
 
           yield streamChunk;
