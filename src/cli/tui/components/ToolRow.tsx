@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 
 import { useTheme } from '../context/ThemeContext.js';
+import { AnimatedDisclosure } from './AnimatedDisclosure.js';
 import { DiffView } from './DiffView.js';
 import { Spinner } from './Spinner.js';
 import type { DiffData } from '../context/ChatContext.js';
@@ -25,6 +26,57 @@ export interface ToolRowProps {
   diff: DiffData | null;
   /** Duration in ms (set on completion) */
   duration?: number;
+  /**
+   * Enable animated expand/collapse for the body. Defaults to `true`.
+   * Set to `false` in tests or environments where a synchronous snap is
+   * preferable (screen readers, CI snapshots, low-power terminals).
+   */
+  animate?: boolean;
+  /**
+   * Called with `true` when the disclosure animation starts and `false`
+   * when it settles. Parents can use this to gate keyboard input during
+   * the transition so a second toggle does not race the animation.
+   */
+  onAnimatingChange?: (isAnimating: boolean) => void;
+}
+
+/**
+ * Estimate the number of terminal rows the tool body will occupy.
+ * The AnimatedDisclosure component needs a target row count up-front
+ * because Ink's `useBoxMetrics` cannot report a natural (unclipped)
+ * height from inside its own clipping Box. This estimate is conservative:
+ * over-estimating produces a slightly longer animation, under-estimating
+ * clips the last row briefly — both are visually acceptable.
+ */
+function estimateBodyLines(args: {
+  toolName: string;
+  params: Record<string, unknown>;
+  output: string | null;
+  error: string | null;
+  diff: DiffData | null;
+}): number {
+  const { toolName, output, error, diff } = args;
+  if (error !== null) {
+    return Math.max(1, error.split('\n').length);
+  }
+  if (diff !== null) {
+    // 1 header row for the file path + one row per hunk header + one row
+    // per line in the hunk. Callers rarely exceed 30 rows before
+    // truncation kicks in downstream.
+    let rows = 1;
+    for (const hunk of diff.hunks) {
+      rows += 1 + hunk.lines.length;
+    }
+    return Math.max(1, rows);
+  }
+  if (output !== null) {
+    const lineCount = output.split('\n').length;
+    // bash prefixes with a `$ command` row; add 1. Truncated output adds
+    // a "... (N more lines)" hint; add 1 defensively.
+    const overhead = toolName === 'bash' ? 2 : 1;
+    return Math.max(1, Math.min(lineCount, 20) + overhead);
+  }
+  return 1;
 }
 
 /** Tool-specific icons */
@@ -65,6 +117,8 @@ export function ToolRow({
   onToggle,
   diff,
   duration,
+  animate = true,
+  onAnimatingChange,
 }: ToolRowProps): React.JSX.Element {
   void onToggle;
   const { theme } = useTheme();
@@ -74,6 +128,7 @@ export function ToolRow({
   const icon = TOOL_ICONS[toolName] ?? '\u{1F527}';
 
   const shouldShow = isExpanded || status === 'failed';
+  const contentLines = estimateBodyLines({ toolName, params, output, error, diff });
 
   const statusColor: string =
     status === 'running'
@@ -111,22 +166,18 @@ export function ToolRow({
     return <Text color={colors.toolFailed}> failed</Text>;
   };
 
-  const renderBody = (): React.JSX.Element | null => {
-    if (!shouldShow) {
-      return null;
-    }
-
-    let bodyContent: React.JSX.Element | null = null;
-
+  const renderBodyContent = (): React.JSX.Element | null => {
     if (error !== null) {
-      bodyContent = <Text color={colors.error}>{error}</Text>;
-    } else if (diff !== null) {
-      bodyContent = <DiffView filePath={diff.filePath} hunks={diff.hunks} />;
-    } else if (toolName === 'bash' && output !== null) {
+      return <Text color={colors.error}>{error}</Text>;
+    }
+    if (diff !== null) {
+      return <DiffView filePath={diff.filePath} hunks={diff.hunks} />;
+    }
+    if (toolName === 'bash' && output !== null) {
       const command = typeof params.command === 'string' ? params.command : '';
       const commandLine = formatBashCommand(command);
       const { text: truncatedText, truncated, remaining } = truncateOutput(output);
-      bodyContent = (
+      return (
         <Box flexDirection="column">
           <Text color={colors.toolOutput}>
             <Text bold>{commandLine}</Text>
@@ -136,21 +187,25 @@ export function ToolRow({
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
       );
-    } else if (output !== null) {
+    }
+    if (output !== null) {
       const { text: truncatedText, truncated, remaining } = truncateOutput(output);
-      bodyContent = (
+      return (
         <Box flexDirection="column">
           <Text color={colors.toolOutput}>{truncatedText}</Text>
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
       );
     }
+    return null;
+  };
 
+  const renderBody = (): React.JSX.Element | null => {
+    const bodyContent = renderBodyContent();
     if (bodyContent === null) {
       return null;
     }
-
-    return (
+    const wrapped = (
       <Box
         borderLeft
         borderStyle="single"
@@ -162,6 +217,16 @@ export function ToolRow({
       >
         {bodyContent}
       </Box>
+    );
+    return (
+      <AnimatedDisclosure
+        isExpanded={shouldShow}
+        contentLines={contentLines}
+        duration={animate ? 120 : 0}
+        onAnimatingChange={onAnimatingChange}
+      >
+        {wrapped}
+      </AnimatedDisclosure>
     );
   };
 

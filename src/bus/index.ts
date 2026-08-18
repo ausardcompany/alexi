@@ -325,6 +325,23 @@ export const CompactionComplete = defineEvent(
   })
 );
 
+// Image generation events
+export const ImageGenerationChunk = defineEvent(
+  'image.generation.chunk',
+  z.object({
+    model: z.string(),
+    /** Sequence index of the image within the current call (0-based). */
+    index: z.number(),
+    /** Payload discriminator: hosted URL or base64-encoded blob. */
+    kind: z.enum(['url', 'base64']),
+    /** Reported MIME type, when the provider surfaced one. */
+    mimeType: z.string().optional(),
+    /** Byte length of the decoded payload, when known (base64 only). */
+    sizeBytes: z.number().optional(),
+    timestamp: z.number(),
+  })
+);
+
 // Error events
 export const ErrorOccurred = defineEvent(
   'error.occurred',
