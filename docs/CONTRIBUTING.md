@@ -433,6 +433,37 @@ platform-specific. The bash-tool shell-type suite in
 `tests/tool/tools/bash.test.ts:41` is the canonical worked example; see
 `docs/TESTING.md#testing-bash-tool-shell-type-reporting`.
 
+### Testing streaming tools and bus events
+
+Tools that consume a provider stream and publish `defineEvent`-produced bus
+events (the canonical example is `image_gen` in `src/tool/tools/image-gen.ts`,
+which publishes `ImageGenerationChunk` from `src/bus/index.ts`) have three
+extra concerns beyond a standard tool test:
+
+1. **Fake the provider with an async generator that can also throw.** Two
+   shapes cover most cases: `makeProviderStub(chunks)` yields chunks and
+   completes cleanly; `makeThrowingProviderStub(chunks, err)` yields chunks
+   and then throws, which is the only way to reach the partial-success path
+   where some payloads have already been persisted before the upstream stream
+   fails. Cast the fake to `ReturnType<typeof getProviderForModel>` and only
+   implement the `streamComplete` method the tool actually calls.
+2. **Scope bus subscriptions per test.** `ImageGenerationChunk` (and any
+   `defineEvent`-produced surface) is process-global; a stray subscriber will
+   observe events from later tests and cause flakes under `--reporter=verbose`.
+   Subscribe inside the `it` body and `unsub()` in a `try / finally` so the
+   subscription is torn down even when an assertion throws.
+3. **Assert on the partial-success contract explicitly.** A tool that emits
+   `truncated: true` alongside `success: true` will silently regress under a
+   test that only checks `success`. Assert on `truncated`, on the length of
+   `data.images` (or the equivalent data field), and on the `hint` string
+   both for the error classification and for the `"Partial result: N ..."`
+   suffix.
+
+The full worked example is in `docs/TESTING.md` under **Image-generation
+tool tests**. New streaming tools with progress events (audio generation,
+long-running search, streaming file transforms) should mirror the same three
+patterns rather than reinventing bus-subscription bookkeeping.
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:
