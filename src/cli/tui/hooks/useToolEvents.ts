@@ -11,6 +11,33 @@ import {
   BashDetachedExited,
   resolveDetachDecision,
 } from '../../../tool/tools/bash-detach.js';
+import { getConfigMcpToolDisplay } from '../../../config/userConfig.js';
+
+/**
+ * MCP-namespaced tools follow the `mcp__<server>__<tool>` convention
+ * (see `src/permission/index.ts`). We treat that prefix as the MCP
+ * detector for the `mcp_tool_display` preference.
+ */
+const MCP_TOOL_PREFIX = 'mcp__';
+
+/**
+ * Resolve the completed-state expansion default for a given tool name
+ * based on the user's `mcpToolDisplay` preference. Non-MCP tools keep
+ * the historical behaviour (collapsed on completion). MCP tools honour
+ * the preference — `'expanded'` keeps the body visible after the tool
+ * finishes so users can inspect MCP output without an extra keypress.
+ */
+function resolveCompletedExpansion(toolName: string): boolean {
+  if (!toolName.startsWith(MCP_TOOL_PREFIX)) {
+    return false;
+  }
+  try {
+    return getConfigMcpToolDisplay() === 'expanded';
+  } catch {
+    // Never let a corrupt config disable the completion signal.
+    return false;
+  }
+}
 
 /**
  * Optional handler surface for "Proceed While Running" (issue #1017).
@@ -63,8 +90,16 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
   const { onDetachAvailable, onDetachedExited } = options;
 
   useEffect(() => {
+    // Per-effect scratch map: remember the completed-state expansion
+    // default we should use for each tool id. Populated when a tool
+    // starts (so we read `mcpToolDisplay` once per invocation), drained
+    // when the tool completes or fails. Bounded by the number of
+    // in-flight tools so no leak concerns.
+    const mcpExpansionByToolId = new Map<string, boolean>();
+
     const unsubStarted = ToolExecutionStarted.subscribe(
       ({ toolName, toolId, parameters, timestamp }) => {
+        mcpExpansionByToolId.set(toolId, resolveCompletedExpansion(toolName));
         addToolCall({
           id: toolId,
           toolName,
@@ -84,9 +119,14 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
       updateToolCall(toolId, {
         status: 'completed',
         output: String(result),
-        isExpanded: false,
+        // MCP tools honour the `mcpToolDisplay` preference — when the
+        // user opted into `'expanded'`, keep the body visible after the
+        // tool finishes. Non-MCP tools always collapse on completion,
+        // preserving Alexi's historical behaviour.
+        isExpanded: mcpExpansionByToolId.get(toolId) ?? false,
         completedAt: timestamp,
       });
+      mcpExpansionByToolId.delete(toolId);
     });
 
     const unsubFailed = ToolExecutionFailed.subscribe(({ toolId, error, timestamp }) => {
@@ -96,6 +136,7 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
         isExpanded: true,
         completedAt: timestamp,
       });
+      mcpExpansionByToolId.delete(toolId);
     });
 
     // Bash detach ("Proceed While Running"). We ALWAYS subscribe so late-
@@ -128,6 +169,7 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
       unsubFailed();
       unsubDetach();
       unsubDetachedExited();
+      mcpExpansionByToolId.clear();
     };
   }, [addToolCall, updateToolCall, onDetachAvailable, onDetachedExited]);
 }
