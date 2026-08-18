@@ -154,6 +154,11 @@ interface UserConfig {
                                   //   (overridden per-invocation by `--agent <name>`)
   soundEnabled?: boolean;         // Enable notification sounds
   autoRoute?: boolean;            // Auto-routing preference
+  mcpToolDisplay?: 'expanded' | 'collapsed'; // TUI disclosure default for
+                                             //   completed MCP tool blocks
+  mcp_tool_display?: 'expanded' | 'collapsed'; // Upstream snake_case alias for
+                                               //   cross-tool config portability
+  persistAuthTokens?: boolean;    // Cache SAP AI Core OAuth tokens on disk
   [key: string]: unknown;         // Extensible for custom settings
 }
 ```
@@ -218,6 +223,86 @@ updateGlobal({
   autoRoute: true,
 });
 ```
+
+### TUI Tool Call Display (`mcpToolDisplay`)
+
+Controls whether MCP tool blocks stay expanded or collapse automatically once
+the tool has finished executing in the interactive Ink TUI. MCP-namespaced
+tools are those whose name starts with the `mcp__<server>__<tool>` prefix (see
+`src/permission/index.ts`). Built-in tools (`read`, `write`, `edit`, `bash`,
+`grep`, `glob`, etc.) always collapse on completion regardless of this
+setting — the preference is intentionally scoped to MCP output so users can
+inspect remote tool results without an extra keypress while keeping fast
+built-in tools tidy.
+
+| Value         | Behaviour after tool completion                              |
+| ------------- | ------------------------------------------------------------ |
+| `'collapsed'` | Default. Both built-in and MCP tool blocks collapse to a one-line summary. Matches Alexi's historical behaviour and upstream kilocode default. |
+| `'expanded'`  | MCP tool blocks stay expanded so the full body remains visible; built-in tools still collapse. |
+
+Failure output ignores this preference — any tool that reports
+`ToolExecutionFailed` auto-expands so errors are always immediately visible.
+For the exact wiring, see `resolveCompletedExpansion(toolName)` in
+`src/cli/tui/hooks/useToolEvents.ts:24-39`.
+
+For cross-tool config portability with upstream kilocode (which uses
+`mcp_tool_display` under kilocode #13010 lineage), the getter accepts either
+the camelCase `mcpToolDisplay` key OR the snake_case `mcp_tool_display` key.
+When both keys are present, the camelCase key wins. Non-string / unknown
+values fall back to the `'collapsed'` default so a corrupt config never
+crashes the TUI.
+
+```typescript
+import {
+  getConfigMcpToolDisplay,
+  setConfigMcpToolDisplay,
+  type McpToolDisplay,
+} from './config/userConfig.js';
+
+// Read the current preference (returns 'collapsed' by default)
+const display: McpToolDisplay = getConfigMcpToolDisplay();
+
+// Persist a new preference
+setConfigMcpToolDisplay('expanded');
+```
+
+Direct config file examples:
+
+```json
+{
+  "mcpToolDisplay": "expanded"
+}
+```
+
+```json
+{
+  "mcp_tool_display": "expanded"
+}
+```
+
+The setter throws a descriptive `Error` for any value other than
+`'expanded'` or `'collapsed'`:
+
+```typescript
+setConfigMcpToolDisplay('sideways');
+// throws: mcpToolDisplay must be 'expanded' or 'collapsed' (got 'sideways')
+```
+
+### Auth Token Caching (`persistAuthTokens`)
+
+Controls whether SAP AI Core OAuth access tokens are cached to
+`~/.alexi/tokens.json` between sessions. Defaults to `true` (caching enabled)
+so interactive sessions start faster by skipping a fresh token exchange.
+Security-sensitive deployments can opt out:
+
+```json
+{
+  "persistAuthTokens": false
+}
+```
+
+When disabled, every session performs a fresh authentication and no tokens
+are written to disk. Non-boolean values fall back to `true`.
 
 ## Routing Configuration
 
