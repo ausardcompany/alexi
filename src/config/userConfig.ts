@@ -275,9 +275,7 @@ export function getConfigMcpToolDisplay(): McpToolDisplay {
 
 export function setConfigMcpToolDisplay(display: McpToolDisplay): void {
   if (display !== 'expanded' && display !== 'collapsed') {
-    throw new Error(
-      `mcpToolDisplay must be 'expanded' or 'collapsed' (got '${String(display)}')`
-    );
+    throw new Error(`mcpToolDisplay must be 'expanded' or 'collapsed' (got '${String(display)}')`);
   }
   setConfigValue('mcpToolDisplay', display);
 }
