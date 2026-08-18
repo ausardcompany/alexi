@@ -242,6 +242,46 @@ export function setConfigPersistAuthTokens(enabled: boolean): void {
   setConfigValue('persistAuthTokens', enabled);
 }
 
+// ============ Tool call display preferences ============
+
+/**
+ * Controls whether MCP tool blocks (and generic tool call bodies) are
+ * expanded or collapsed by default in the interactive TUI once the tool
+ * has finished executing.
+ *
+ * Mirrors upstream kilocode's `mcp_tool_display` config option
+ * (kilocode #13010 lineage) so serialized configs stay compatible.
+ * Default behaviour (`'collapsed'`) matches upstream and Alexi's
+ * existing behaviour in `useToolEvents.ts`, which flips `isExpanded`
+ * to `false` once a tool completes.
+ *
+ * The value is read from the `mcpToolDisplay` (camelCase, matches the
+ * rest of Alexi's config) OR `mcp_tool_display` (snake_case, matches
+ * upstream serialized configs) top-level key.
+ *
+ * Non-string / non-`"expanded"|"collapsed"` values fall back to the
+ * `'collapsed'` default so a corrupt config never crashes the TUI.
+ */
+export type McpToolDisplay = 'expanded' | 'collapsed';
+
+export function getConfigMcpToolDisplay(): McpToolDisplay {
+  const config = loadFullConfig();
+  const raw = config.mcpToolDisplay ?? config.mcp_tool_display;
+  if (raw === 'expanded' || raw === 'collapsed') {
+    return raw;
+  }
+  return 'collapsed';
+}
+
+export function setConfigMcpToolDisplay(display: McpToolDisplay): void {
+  if (display !== 'expanded' && display !== 'collapsed') {
+    throw new Error(
+      `mcpToolDisplay must be 'expanded' or 'collapsed' (got '${String(display)}')`
+    );
+  }
+  setConfigValue('mcpToolDisplay', display);
+}
+
 // ============ Indexing (custom file extensions) ============
 
 /**

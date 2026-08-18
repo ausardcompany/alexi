@@ -23,6 +23,8 @@ import {
   getIndexingExtensions,
   readProjectConfigExtensions,
   readProjectExtensionsFile,
+  getConfigMcpToolDisplay,
+  setConfigMcpToolDisplay,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -562,6 +564,42 @@ describe('userConfig', () => {
     it('returns [] when no config exists anywhere', () => {
       saveFullConfig({});
       expect(getIndexingExtensions(tempDir)).toEqual([]);
+    });
+  });
+
+  describe('getConfigMcpToolDisplay / setConfigMcpToolDisplay', () => {
+    it("defaults to 'collapsed' when the key is absent", () => {
+      saveFullConfig({});
+      expect(getConfigMcpToolDisplay()).toBe('collapsed');
+    });
+
+    it("returns 'expanded' when explicitly set via setConfigMcpToolDisplay", () => {
+      setConfigMcpToolDisplay('expanded');
+      expect(getConfigMcpToolDisplay()).toBe('expanded');
+    });
+
+    it("round-trips 'collapsed' via setConfigMcpToolDisplay", () => {
+      setConfigMcpToolDisplay('collapsed');
+      expect(getConfigMcpToolDisplay()).toBe('collapsed');
+    });
+
+    it("accepts the upstream snake_case key 'mcp_tool_display' for compatibility", () => {
+      saveFullConfig({ mcp_tool_display: 'expanded' });
+      expect(getConfigMcpToolDisplay()).toBe('expanded');
+    });
+
+    it("prefers the camelCase 'mcpToolDisplay' over 'mcp_tool_display' when both exist", () => {
+      saveFullConfig({ mcpToolDisplay: 'expanded', mcp_tool_display: 'collapsed' });
+      expect(getConfigMcpToolDisplay()).toBe('expanded');
+    });
+
+    it("falls back to 'collapsed' for corrupt / unknown values", () => {
+      saveFullConfig({ mcpToolDisplay: 'sideways' });
+      expect(getConfigMcpToolDisplay()).toBe('collapsed');
+    });
+
+    it('rejects invalid values in the setter', () => {
+      expect(() => setConfigMcpToolDisplay('sideways' as 'expanded')).toThrow();
     });
   });
 });
