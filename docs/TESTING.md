@@ -1489,6 +1489,97 @@ For assertions on the retry loop itself, provide a `shouldRetry` predicate and a
 
 `tests/config/global-invalidation.test.ts` covers `registerInstanceCache` / `invalidateGlobalConfig`. Use `_instanceCacheCount()` to assert on the registry size; cover the case where a disposer throws (the flush must continue for the remaining disposers, and `console.warn` should be invoked).
 
+### Image-generation tool tests
+
+`src/tool/tools/__tests__/image-gen.test.ts` covers the `image_gen` tool
+(`src/tool/tools/image-gen.ts`) including its streaming, error-classification,
+and inline base64 modes. Three patterns are worth calling out because they
+repeat across any new streaming tool test:
+
+1. **Fake provider stubs.** The provider is mocked at
+   `src/providers/index.js` with two shapes: `makeProviderStub(chunks)` yields
+   the given chunks and completes, while `makeThrowingProviderStub(chunks, err)`
+   yields the chunks and then throws — the second shape drives the partial-
+   success path where some images have already been persisted before the
+   stream fails. Both return an object satisfying
+   `ReturnType<typeof getProviderForModel>` with only the `streamComplete`
+   async-generator method the tool actually calls, avoiding the need to
+   construct a full provider implementation:
+
+   ```typescript
+   function makeThrowingProviderStub(chunks: FakeChunk[], err: Error) {
+     return {
+       streamComplete: async function* () {
+         for (const c of chunks) {
+           yield c;
+         }
+         throw err;
+       },
+     } as unknown as ReturnType<typeof getProviderForModel>;
+   }
+   ```
+
+2. **Bus-event subscription is scoped per test.** `ImageGenerationChunk` is a
+   process-global event, so tests that assert on delivery must
+   `subscribe(...)` inside the test body and `unsub()` in a `finally` block.
+   The pattern is the standard one for any `defineEvent`-produced surface:
+
+   ```typescript
+   const events: Array<{ index: number; kind: string; sizeBytes?: number }> = [];
+   const unsub = ImageGenerationChunk.subscribe((payload) => {
+     events.push({ index: payload.index, kind: payload.kind, sizeBytes: payload.sizeBytes });
+   });
+   try {
+     await imageGenTool.executeUnsafe(/* ... */);
+     expect(events).toHaveLength(2);
+     expect(events[0]).toMatchObject({ index: 0, kind: 'url' });
+   } finally {
+     unsub();
+   }
+   ```
+
+3. **Error classification is table-driven.** `classifyImageGenError` is a
+   pure function exported for test use; cover the four buckets
+   (`rate-limit` / `quota` / `model-unavailable` / `other`) with a
+   `it.each` matrix rather than one test per case:
+
+   ```typescript
+   it.each([
+     ['rate limit exceeded', 'rate-limit'],
+     ['HTTP 429 Too Many Requests', 'rate-limit'],
+     ['insufficient_quota', 'quota'],
+     ['402 payment required', 'quota'],
+     ['deployment_not_found', 'model-unavailable'],
+     ['HTTP 404 not found', 'model-unavailable'],
+     ['random weird thing', 'other'],
+   ] as const)('classifies %s -> %s', (message, expected) => {
+     expect(classifyImageGenError(message)).toBe(expected);
+   });
+   ```
+
+Additional coverage worth mirroring in future streaming-tool tests:
+
+- **Partial success on mid-stream failure.** After a throwing stub yields one
+  image and then throws, assert `result.success === true`, `result.truncated
+  === true`, `result.data?.images` has length 1, and `result.hint` matches
+  both `/rate limit/i` and `/Partial result: 1 image/`. Callers that treat
+  any error as fatal must inspect `truncated`; a test that only asserts on
+  `success` will silently accept a regression that drops partial results.
+- **Abort mid-stream.** Wire an `AbortController` through the tool context
+  (`{ ...context, signal: abort.signal }`), call `abort.abort()` between two
+  yielded chunks in the stub, and assert `success: false`, `error: /aborted/i`,
+  and `data?.images` contains only the chunk delivered before the abort
+  landed.
+- **Inline base64 mode.** With `returnBase64: true`, assert that the entry
+  carries `kind: 'base64'`, `data` equal to the base64 string, `path`
+  undefined, and — most importantly — that the output directory contains
+  zero files after the call (`fs.readdir(tmpDir)` returns `[]`).
+- **Every branch of `extensionForMimeType`.** Loop the six real MIME types
+  (`image/png` -> `.png`, `image/jpg` -> `.jpg`, `image/gif` -> `.gif`,
+  `image/webp` -> `.webp`, `image/svg+xml` -> `.svg`, and both `undefined`
+  and unknown MIME -> `.bin`) so the fall-through arm does not silently
+  regress.
+
 ### Reasoning-variant tests
 
 `tests/providers/reasoning-variants.test.ts` covers `deriveReasoningVariants` and `mergeProviderModels`. Key cases:

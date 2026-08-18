@@ -92,6 +92,128 @@ The tool returns `{ filePath, definitions, language }` where each definition
 carries `name`, `type`, `line`, `signature`, and `exported`. Results are
 sorted by line number.
 
+## Image Generation Tool
+
+The `image_gen` tool routes a text prompt through an SAP AI Core
+image-capable model and surfaces the returned image(s) as either hosted
+URLs, on-disk PNG/JPEG/... files, or inline base64 payloads. It is
+implemented in
+[`src/tool/tools/image-gen.ts`](../src/tool/tools/image-gen.ts) and
+consumes the shared payload normaliser
+`extractImageChunks` from
+[`src/providers/transform.ts`](../src/providers/transform.ts).
+
+Model capability is validated up-front via
+`modelHasCapability(model, 'image-generation')` — unknown or non-image
+models are rejected before any provider round-trip. See
+[PROVIDERS.md#model-capabilities](./PROVIDERS.md#model-capabilities) for
+the capability system.
+
+### Parameters
+
+```ts
+{
+  prompt: string;                    // required
+  model?: string;                    // defaults to $ALEXI_IMAGE_MODEL
+  size?: string;                     // e.g. "1024x1024" (appended to prompt)
+  outputPath?: string;               // dir for saved files (default: $TMPDIR/alexi-images)
+  returnBase64?: boolean;            // return inline base64 instead of writing a file
+}
+```
+
+### Two return modes
+
+The tool has two ways to surface a base64 image chunk. URL chunks are
+always returned verbatim regardless of the flag below.
+
+- **File-save mode (default).** Every base64 chunk is decoded and
+  written to `outputPath` (or `$TMPDIR/alexi-images`) under a
+  nanoid-suffixed filename. The result entry carries `path` and
+  `sizeBytes` and NO inline `data`. Best for large payloads and for
+  handing the file off to another CLI tool (imagemagick, sips, feh).
+- **Inline base64 mode (`returnBase64: true`).** Every base64 chunk is
+  returned in-memory on the result entry as `data`, along with
+  `sizeBytes` and (when reported) `mimeType`. Nothing is written to
+  disk. Best for round-tripping the image straight to a client that
+  can render base64 (web UI, MCP tool response, HTTP JSON reply).
+
+The permission bucket is `write` on `outputPath` in BOTH modes so a
+caller cannot switch modes to bypass a disk-write deny rule.
+
+### Streaming
+
+The tool consumes the provider's streaming response and publishes an
+`image.generation.chunk` bus event for every image payload as it
+arrives (see
+[`ImageGenerationChunk`](../src/bus/index.ts)). Subscribe to observe
+progress:
+
+```ts
+import { ImageGenerationChunk } from './src/bus/index.js';
+
+const unsub = ImageGenerationChunk.subscribe(({ index, kind, sizeBytes }) => {
+  console.log(`image ${index}: ${kind} (${sizeBytes ?? '?'} bytes)`);
+});
+```
+
+The subscriber sees images as they materialise, not only once the full
+model response has ended. TUI renderers use this to show a spinner and
+switch to the actual image the instant the first chunk lands.
+
+### Error handling
+
+Provider errors are classified into four buckets and surfaced on the
+result's `hint` field so a caller (or an agent) can react without
+re-parsing the raw error message:
+
+| Kind                | Trigger substrings (case-insensitive)                                 |
+| ------------------- | --------------------------------------------------------------------- |
+| `rate-limit`        | `rate limit`, `rate-limit`, `too many requests`, HTTP `429`           |
+| `quota`             | `quota`, `insufficient_quota`, `billing`, `payment required`, `402`   |
+| `model-unavailable` | `model_not_found`, `deployment_not_found`, `unknown model`, `404`     |
+| `other`             | anything else                                                         |
+
+Two additional behaviours worth noting:
+
+- **Model unavailable at validation time.** When the requested model
+  does not advertise `image-generation`, the tool fails immediately
+  with the `model-unavailable` hint — no provider round-trip.
+- **Partial success on mid-stream failure.** If the model has already
+  emitted one or more images before the stream throws, the tool
+  returns `success: true` with `truncated: true`, the images that DID
+  arrive, and a hint that includes the underlying error message.
+  Callers that treat any error as fatal should also check `truncated`.
+
+### Example — inline base64 mode
+
+```ts
+const result = await imageGenTool.executeUnsafe(
+  {
+    prompt: 'a cat wearing a hat',
+    model: 'gemini-imagen-3',
+    returnBase64: true,
+  },
+  { workdir: process.cwd() }
+);
+if (result.success) {
+  for (const image of result.data!.images) {
+    if (image.kind === 'url') {
+      console.log(`URL: ${image.url}`);
+    } else {
+      console.log(`base64 ${image.mimeType ?? ''} ${image.sizeBytes} bytes`);
+      // image.data is the raw base64 string, ready for e.g. `data:<mime>;base64,<data>`
+    }
+  }
+}
+```
+
+### CLI wrapper
+
+The `alexi generate` subcommand
+([`src/cli/commands/generate.ts`](../src/cli/commands/generate.ts))
+exposes the file-save flavour on the shell. For inline base64 output,
+call the tool directly or invoke it from an agent turn.
+
 ## Subagent Nesting Depth
 
 Alexi's `task` tool spawns a subagent to handle a self-contained piece of
