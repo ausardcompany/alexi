@@ -6,12 +6,25 @@
  * `ModelCapability = 'image-generation'` tag from
  * `src/providers/sapOrchestration.ts` to route a text prompt through an
  * image-capable SAP AI Core deployment and surface the returned image(s)
- * as either hosted URLs or on-disk base64 blobs.
+ * as either hosted URLs, on-disk base64 blobs, or raw inline base64
+ * payloads.
  *
  * The tool ALWAYS validates that the target model advertises
  * `image-generation` before making a call. Unknown / non-image models are
  * rejected up-front instead of paying for a round-trip that would fail
  * server-side.
+ *
+ * Streaming: the tool consumes the provider's streaming response and
+ * publishes an `ImageGenerationChunk` bus event for every image payload
+ * as it arrives. Callers that only want the final result can ignore the
+ * event stream; TUIs and progress meters can subscribe.
+ *
+ * Error handling: provider errors are classified into three actionable
+ * buckets (rate-limit / quota / model-unavailable / other) and surfaced
+ * with hints the user or an agent can act on. If a stream begins to
+ * emit images and then fails part-way, the tool returns the images that
+ * WERE produced as a partial success with `truncated: true` and a hint
+ * describing the upstream failure.
  */
 
 import * as fs from 'fs/promises';
@@ -24,6 +37,7 @@ import {
   modelHasCapability,
   type NormalizedImageChunk,
 } from '../../providers/index.js';
+import { ImageGenerationChunk } from '../../bus/index.js';
 import { defineTool, type ToolResult } from '../index.js';
 
 const ImageGenParamsSchema = z.object({
@@ -42,9 +56,24 @@ const ImageGenParamsSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Optional directory to write decoded base64 images to. Defaults to $TMPDIR/alexi-images.'
+      'Optional directory to write decoded base64 images to. Defaults to $TMPDIR/alexi-images. Ignored when returnBase64=true.'
+    ),
+  returnBase64: z
+    .boolean()
+    .optional()
+    .describe(
+      'When true, return decoded base64 payloads INLINE on the result (no file write). ' +
+        'When false or omitted, decoded base64 payloads are written to `outputPath` and the result carries the on-disk path only. ' +
+        'URL payloads are unaffected by this flag.'
     ),
 });
+
+/**
+ * Classification of a provider-side failure. Drives the hint attached to
+ * the tool result so a caller (or an agent) can react without re-parsing
+ * the raw error message.
+ */
+export type ImageGenErrorKind = 'rate-limit' | 'quota' | 'model-unavailable' | 'aborted' | 'other';
 
 /**
  * Result surfaced to the caller for one image generation request.
@@ -53,8 +82,9 @@ const ImageGenParamsSchema = z.object({
  * Each entry preserves the discriminator from
  * {@link NormalizedImageChunk}:
  *  - `kind: 'url'`  — a hosted URL the caller can render or open.
- *  - `kind: 'base64'` — the raw base64 blob AND an on-disk `path` where
- *    the decoded bytes were written for downstream tooling.
+ *  - `kind: 'base64'` — the raw base64 blob AND either an on-disk `path`
+ *    where the decoded bytes were written for downstream tooling, or the
+ *    inline `data` field when the caller requested `returnBase64: true`.
  */
 export interface ImageGenResultEntry {
   kind: 'url' | 'base64';
@@ -62,10 +92,12 @@ export interface ImageGenResultEntry {
   url?: string;
   /** MIME type (`image/png`, `image/jpeg`, ...) when the model reported one. */
   mimeType?: string;
-  /** Absolute path to the decoded blob when `kind === 'base64'`. */
+  /** Absolute path to the decoded blob when `kind === 'base64'` and returnBase64 was false. */
   path?: string;
   /** Byte length of the decoded blob when `kind === 'base64'`. */
   sizeBytes?: number;
+  /** Raw base64 payload when `kind === 'base64'` and returnBase64 was true. */
+  data?: string;
 }
 
 export interface ImageGenResult {
@@ -104,19 +136,40 @@ function extensionForMimeType(mimeType: string | undefined): string {
 
 /**
  * Decode one {@link NormalizedImageChunk} into an {@link ImageGenResultEntry}.
- * For URL chunks this is a straight pass-through; for base64 chunks the
- * bytes are decoded and persisted to `outputDir` under a nanoid-suffixed
- * filename so parallel calls do not collide.
+ *
+ * Behaviour:
+ *  - URL chunks: straight pass-through (mime type preserved when present).
+ *  - Base64 chunks with `inlineBase64 === true`: decoded to compute
+ *    `sizeBytes` but NOT persisted; the raw base64 string is returned on
+ *    `data`.
+ *  - Base64 chunks with `inlineBase64 === false` (or omitted): decoded and
+ *    written to `outputDir` under a nanoid-suffixed filename so parallel
+ *    calls do not collide.
  *
  * Exported for tests so the decode / persist path can be exercised without
  * spinning up a real provider.
  */
 export async function persistImageChunk(
   chunk: NormalizedImageChunk,
-  outputDir: string
+  outputDir: string,
+  inlineBase64 = false
 ): Promise<ImageGenResultEntry> {
   if (chunk.kind === 'url') {
     const entry: ImageGenResultEntry = { kind: 'url', url: chunk.url };
+    if (chunk.mimeType) {
+      entry.mimeType = chunk.mimeType;
+    }
+    return entry;
+  }
+
+  const buffer = Buffer.from(chunk.data, 'base64');
+
+  if (inlineBase64) {
+    const entry: ImageGenResultEntry = {
+      kind: 'base64',
+      data: chunk.data,
+      sizeBytes: buffer.byteLength,
+    };
     if (chunk.mimeType) {
       entry.mimeType = chunk.mimeType;
     }
@@ -127,7 +180,6 @@ export async function persistImageChunk(
   const ext = extensionForMimeType(chunk.mimeType);
   const filename = `image-${nanoid(8)}.${ext}`;
   const filePath = path.join(outputDir, filename);
-  const buffer = Buffer.from(chunk.data, 'base64');
   await fs.writeFile(filePath, buffer);
 
   const entry: ImageGenResultEntry = {
@@ -168,6 +220,70 @@ export function defaultImageOutputDir(): string {
   return path.join(os.tmpdir(), 'alexi-images');
 }
 
+/**
+ * Classify a provider-side error message into an {@link ImageGenErrorKind}
+ * so the tool result carries an actionable hint. The classifier is pure
+ * (no side effects) and exported for tests.
+ *
+ * Rules (first match wins):
+ *  - `rate limit`, `rate-limit`, `429`, `too many requests` -> `rate-limit`
+ *  - `quota`, `insufficient_quota`, `billing`, `payment required`, `402` -> `quota`
+ *  - `model_not_found`, `deployment_not_found`, `unknown model`, `404`,
+ *    `not available` -> `model-unavailable`
+ *  - Anything else -> `other`.
+ */
+export function classifyImageGenError(message: string): ImageGenErrorKind {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes('rate limit') ||
+    lower.includes('rate-limit') ||
+    lower.includes('too many requests') ||
+    /\b429\b/.test(lower)
+  ) {
+    return 'rate-limit';
+  }
+  if (
+    lower.includes('quota') ||
+    lower.includes('insufficient_quota') ||
+    lower.includes('billing') ||
+    lower.includes('payment required') ||
+    /\b402\b/.test(lower)
+  ) {
+    return 'quota';
+  }
+  if (
+    lower.includes('model_not_found') ||
+    lower.includes('deployment_not_found') ||
+    lower.includes('unknown model') ||
+    lower.includes('not available') ||
+    lower.includes('unavailable') ||
+    /\b404\b/.test(lower)
+  ) {
+    return 'model-unavailable';
+  }
+  return 'other';
+}
+
+/**
+ * Turn an {@link ImageGenErrorKind} + raw message into a user-facing hint.
+ * Kept separate from the classifier so callers that already know the kind
+ * (e.g. tests) can reuse the same wording.
+ */
+function hintForErrorKind(kind: ImageGenErrorKind, model: string): string {
+  switch (kind) {
+    case 'rate-limit':
+      return `The provider reported a rate limit for "${model}". Retry after a backoff, or lower request concurrency.`;
+    case 'quota':
+      return `The provider reported a quota / billing failure for "${model}". Check the SAP AI Core resource-group quota and account billing.`;
+    case 'model-unavailable':
+      return `Model "${model}" is not currently available. Verify the deployment exists in your resource group and that the id is spelt correctly.`;
+    case 'aborted':
+      return 'The request was aborted before the model could respond.';
+    case 'other':
+      return `Unclassified provider error while generating images with "${model}".`;
+  }
+}
+
 export const imageGenTool = defineTool<typeof ImageGenParamsSchema, ImageGenResult>({
   name: 'image_gen',
   description: `Generate one or more images from a text prompt using an SAP AI Core image-capable model.
@@ -176,22 +292,30 @@ Usage:
 - Pass a natural-language \`prompt\` describing the desired image.
 - Optionally pin a specific \`model\` id; otherwise \`$ALEXI_IMAGE_MODEL\` is used.
 - The model MUST advertise the \`image-generation\` capability; unknown models are rejected.
-- Base64 payloads are decoded and saved under \`$TMPDIR/alexi-images\` (or \`outputPath\`).
-- URL payloads are returned verbatim for the caller to fetch or display.`,
+- Base64 payloads are decoded and saved under \`$TMPDIR/alexi-images\` (or \`outputPath\`) unless \`returnBase64\` is true, in which case the raw base64 string is returned inline.
+- URL payloads are returned verbatim for the caller to fetch or display.
+- Streams images progressively: subscribe to the \`image.generation.chunk\` bus event to observe payloads as they arrive.`,
 
   parameters: ImageGenParamsSchema,
 
   permission: {
     // Writing decoded images to disk requires the same permission bucket as
     // other file-producing tools; hosted URLs still go through the network
-    // permission via the caller's follow-up fetch.
+    // permission via the caller's follow-up fetch. When `returnBase64` is
+    // set the tool does NOT write to disk, but the permission is still
+    // requested on `outputPath` (or the default dir) so the caller cannot
+    // switch between modes to escape a disk-write deny rule.
     action: 'write',
     getResource: (params) => params.outputPath ?? defaultImageOutputDir(),
   },
 
   async execute(params, context): Promise<ToolResult<ImageGenResult>> {
     if (context.signal?.aborted) {
-      return { success: false, error: 'Operation aborted' };
+      return {
+        success: false,
+        error: 'Operation aborted',
+        hint: hintForErrorKind('aborted', params.model ?? 'unknown'),
+      };
     }
 
     const model = resolveModel(params.model);
@@ -206,9 +330,11 @@ Usage:
       return {
         success: false,
         error: `Model "${model}" does not advertise the image-generation capability. Choose a model that does, or add capability metadata for it.`,
+        hint: hintForErrorKind('model-unavailable', model),
       };
     }
 
+    const inlineBase64 = params.returnBase64 === true;
     const outputDir = params.outputPath ?? defaultImageOutputDir();
 
     // Build a user message. Size hint (if any) is appended to the prompt so
@@ -223,56 +349,88 @@ Usage:
     try {
       provider = getProviderForModel(model);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const kind = classifyImageGenError(message);
       return {
         success: false,
-        error: `Failed to initialise provider for model "${model}": ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        error: `Failed to initialise provider for model "${model}": ${message}`,
+        hint: hintForErrorKind(kind, model),
       };
     }
 
-    const collected: NormalizedImageChunk[] = [];
+    // Progressive accumulation: persist each chunk as soon as it arrives
+    // and publish a bus event so subscribers (TUI, progress meters, tests)
+    // can react. When the stream throws part-way we still return whatever
+    // we managed to materialise as a partial success.
+    const persisted: ImageGenResultEntry[] = [];
+    let streamError: Error | undefined;
+
     try {
       for await (const chunk of provider.streamComplete(
         [{ role: 'user', content: promptWithHint }],
         { signal: context.signal }
       )) {
         if (context.signal?.aborted) {
-          return { success: false, error: 'Operation aborted' };
+          return {
+            success: false,
+            error: 'Operation aborted',
+            hint: hintForErrorKind('aborted', model),
+            data:
+              persisted.length > 0
+                ? { model, prompt: params.prompt, images: persisted }
+                : undefined,
+          };
         }
-        if (chunk.images && chunk.images.length > 0) {
-          collected.push(...chunk.images);
+        if (!chunk.images || chunk.images.length === 0) {
+          continue;
+        }
+        for (const imageChunk of chunk.images) {
+          try {
+            const entry = await persistImageChunk(imageChunk, outputDir, inlineBase64);
+            persisted.push(entry);
+            ImageGenerationChunk.publish({
+              model,
+              index: persisted.length - 1,
+              kind: entry.kind,
+              mimeType: entry.mimeType,
+              sizeBytes: entry.sizeBytes,
+              timestamp: Date.now(),
+            });
+          } catch (err) {
+            // Persist failure on a single chunk (e.g. disk full, invalid
+            // base64) — record and continue so we still surface any other
+            // images that ARE valid. Rethrown as a stream error only when
+            // no other images succeed.
+            streamError = err instanceof Error ? err : new Error(String(err));
+            break;
+          }
+        }
+        if (streamError) {
+          break;
         }
       }
     } catch (err) {
+      streamError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    if (streamError && persisted.length === 0) {
+      const kind = classifyImageGenError(streamError.message);
       return {
         success: false,
-        error: `Image generation failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Image generation failed: ${streamError.message}`,
+        hint: hintForErrorKind(kind, model),
       };
     }
 
-    if (collected.length === 0) {
+    if (persisted.length === 0) {
       return {
         success: false,
         error: `Model "${model}" returned no image payloads for the prompt.`,
+        hint: hintForErrorKind('other', model),
       };
     }
 
-    const persisted: ImageGenResultEntry[] = [];
-    for (const chunk of collected) {
-      try {
-        persisted.push(await persistImageChunk(chunk, outputDir));
-      } catch (err) {
-        return {
-          success: false,
-          error: `Failed to persist image chunk: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        };
-      }
-    }
-
-    return {
+    const result: ToolResult<ImageGenResult> = {
       success: true,
       data: {
         model,
@@ -280,5 +438,16 @@ Usage:
         images: persisted,
       },
     };
+
+    if (streamError) {
+      // Partial success: we got at least one image but the stream ended in
+      // an error. Flag as truncated so downstream renderers can show a
+      // warning without losing the images that did arrive.
+      result.truncated = true;
+      const kind = classifyImageGenError(streamError.message);
+      result.hint = `${hintForErrorKind(kind, model)} Partial result: ${persisted.length} image(s) delivered before "${streamError.message}".`;
+    }
+
+    return result;
   },
 });
