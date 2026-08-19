@@ -56,6 +56,7 @@ type ChatAction =
   | { type: 'CLEAR_COMPLETED_TOOL_CALLS' }
   | { type: 'ADD_TOOL_CALL'; payload: ToolCallState }
   | { type: 'UPDATE_TOOL_CALL'; payload: { id: string } & Partial<ToolCallState> }
+  | { type: 'APPEND_TOOL_CALL_OUTPUT'; payload: { id: string; chunk: string } }
   | { type: 'TOGGLE_TOOL_CALL_EXPANSION'; payload: string }
   | { type: 'SET_ERROR'; payload: string | null }
   | { type: 'SET_ABORT_CONTROLLER'; payload: AbortController | null }
@@ -116,6 +117,23 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, activeToolCalls: updated };
     }
 
+    case 'APPEND_TOOL_CALL_OUTPUT': {
+      // Live-append a bash / shell chunk to the running tool row without
+      // moving the entry between active / completed buckets (unlike
+      // UPDATE_TOOL_CALL). Only touches `activeToolCalls`: a chunk for
+      // a tool that already completed is silently dropped, which
+      // matches the invariant that `BashOutputChunk` fires strictly
+      // between `ToolExecutionStarted` and `ToolExecutionCompleted`.
+      const { id, chunk } = action.payload;
+      if (chunk.length === 0) {
+        return state;
+      }
+      const activeToolCalls = state.activeToolCalls.map((tc) =>
+        tc.id === id ? { ...tc, output: (tc.output ?? '') + chunk } : tc
+      );
+      return { ...state, activeToolCalls };
+    }
+
     case 'TOGGLE_TOOL_CALL_EXPANSION': {
       const toggleIn = (list: ToolCallState[]) =>
         list.map((tc) => (tc.id === action.payload ? { ...tc, isExpanded: !tc.isExpanded } : tc));
@@ -158,6 +176,13 @@ export interface ChatContextValue extends ChatState {
   clearCompletedToolCalls: () => void;
   addToolCall: (toolCall: ToolCallState) => void;
   updateToolCall: (id: string, updates: Partial<ToolCallState>) => void;
+  /**
+   * Live-append a stdout / stderr chunk to an in-flight tool row.
+   * Wired to `BashOutputChunk` by `useToolEvents` so the TUI renders
+   * bash / shell output as it arrives instead of blocking until the
+   * process exits (issue #1442).
+   */
+  appendToolCallOutput: (id: string, chunk: string) => void;
   toggleToolCallExpansion: (id: string) => void;
   setError: (error: string | null) => void;
   setAbortController: (controller: AbortController | null) => void;
@@ -187,12 +212,9 @@ export function ChatProvider({ children }: ChatProviderProps) {
     rewindHandlerRef.current = handler;
   }, []);
 
-  const rewindTo: RewindFn = useCallback(
-    async (index: number, mode: RewindMode) => {
-      await rewindHandlerRef.current(index, mode);
-    },
-    []
-  );
+  const rewindTo: RewindFn = useCallback(async (index: number, mode: RewindMode) => {
+    await rewindHandlerRef.current(index, mode);
+  }, []);
 
   const setStreaming = useCallback((streaming: boolean) => {
     dispatch({ type: 'SET_STREAMING', payload: streaming });
@@ -216,6 +238,10 @@ export function ChatProvider({ children }: ChatProviderProps) {
 
   const updateToolCall = useCallback((id: string, updates: Partial<ToolCallState>) => {
     dispatch({ type: 'UPDATE_TOOL_CALL', payload: { id, ...updates } });
+  }, []);
+
+  const appendToolCallOutput = useCallback((id: string, chunk: string) => {
+    dispatch({ type: 'APPEND_TOOL_CALL_OUTPUT', payload: { id, chunk } });
   }, []);
 
   const toggleToolCallExpansion = useCallback((id: string) => {
@@ -246,6 +272,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
     clearCompletedToolCalls,
     addToolCall,
     updateToolCall,
+    appendToolCallOutput,
     toggleToolCallExpansion,
     setError,
     setAbortController,

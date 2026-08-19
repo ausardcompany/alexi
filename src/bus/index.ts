@@ -325,6 +325,31 @@ export const CompactionComplete = defineEvent(
   })
 );
 
+// Bash streaming events
+/**
+ * Incremental output chunk from a running bash / shell command. Emitted
+ * from `src/tool/tools/bash.ts` on every stdout / stderr `data` event so
+ * the TUI can render live command output before the process exits. The
+ * final aggregated stdout / stderr are still returned in the normal
+ * `ToolExecutionCompleted` payload; consumers who don't care about live
+ * output can ignore this event entirely without changing behaviour.
+ *
+ * `toolId` matches the id used by `ToolExecutionStarted` / `Completed`
+ * so consumers can correlate chunks to a specific in-flight tool call.
+ * `logId` matches the id stored in the command-log registry (see
+ * `src/tool/tools/bash-streaming.ts`) and survives PID reuse.
+ */
+export const BashOutputChunk = defineEvent(
+  'bash.output.chunk',
+  z.object({
+    toolId: z.string(),
+    logId: z.string(),
+    stream: z.enum(['stdout', 'stderr']),
+    chunk: z.string(),
+    timestamp: z.number(),
+  })
+);
+
 // Image generation events
 export const ImageGenerationChunk = defineEvent(
   'image.generation.chunk',

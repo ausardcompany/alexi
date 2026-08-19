@@ -11,6 +11,7 @@ import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from 
 import { normalizeUrls } from '../../utils/url.js';
 import { auditCommand } from '../../permission/next.js';
 import { getPlanModeManager } from '../../plan/index.js';
+import { BashOutputChunk } from '../../bus/index.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import {
@@ -26,6 +27,12 @@ import {
   registerDetachedProcess,
   waitForDetachedExit,
 } from './bash-detach.js';
+import {
+  appendCommandLog,
+  cleanupCommandLog,
+  markCommandLogFinished,
+  registerCommandLog,
+} from './bash-streaming.js';
 
 const BashParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -229,6 +236,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
       let killed = false;
       let detached = false;
       const detachId = nanoid();
+      const startedAt = Date.now();
 
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
@@ -243,6 +251,20 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
         detached: true,
+      });
+
+      // Register the command in the streaming log registry BEFORE any
+      // 'data' handler fires. The registry survives the process
+      // exiting (`markCommandLogFinished` + `COMPLETED_LOG_RETENTION_MS`
+      // grace period) so a briefly-disconnected TUI hub can still fetch
+      // the log tail on reconnect. The synthetic `logId` is PID-reuse
+      // safe (see `bash-streaming.ts`).
+      const logId = registerCommandLog({
+        pid: proc.pid,
+        command: params.command,
+        sessionId: context.sessionId,
+        toolId: context.toolId,
+        startedAt,
       });
 
       // Kill the entire process group (shell + all children)
@@ -279,15 +301,55 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         clearTimeout(timer);
         killGroup('SIGTERM');
         setTimeout(() => killGroup('SIGKILL'), 500);
+        // Mark the streaming log as finished immediately on abort so a
+        // consumer that queries the registry sees a terminal state
+        // even before the process's `close` event lands. The final
+        // registry cleanup happens in the `close` / `error` handlers
+        // below (which run for aborted commands too).
+        markCommandLogFinished(logId);
       };
       context.signal?.addEventListener('abort', abortHandler);
 
+      // Publish a streaming chunk without letting a downstream event-bus
+      // subscriber's exception tear down the tool. The bus itself
+      // already catches synchronous handler errors and logs them, but
+      // if the payload fails schema validation we would otherwise
+      // propagate up and kill the running command.
+      const publishChunk = (stream: 'stdout' | 'stderr', chunk: string): void => {
+        if (chunk.length === 0 || context.toolId === undefined) {
+          return;
+        }
+        try {
+          BashOutputChunk.publish({
+            toolId: context.toolId,
+            logId,
+            stream,
+            chunk,
+            timestamp: Date.now(),
+          });
+        } catch {
+          // Never let telemetry take down a running command.
+        }
+      };
+
       proc.stdout.on('data', (data: Buffer) => {
-        stdout += stdoutDecoder.write(data);
+        const decoded = stdoutDecoder.write(data);
+        if (decoded.length === 0) {
+          return;
+        }
+        stdout += decoded;
+        appendCommandLog(logId, decoded);
+        publishChunk('stdout', decoded);
       });
 
       proc.stderr.on('data', (data: Buffer) => {
-        stderr += stderrDecoder.write(data);
+        const decoded = stderrDecoder.write(data);
+        if (decoded.length === 0) {
+          return;
+        }
+        stderr += decoded;
+        appendCommandLog(logId, decoded);
+        publishChunk('stderr', decoded);
       });
 
       // Resolves when the underlying process's `close` event fires. Used
@@ -369,9 +431,29 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
 
-        // Flush any remaining bytes in the decoders
-        stdout += stdoutDecoder.end();
-        stderr += stderrDecoder.end();
+        // Flush any remaining bytes in the decoders. Any trailing bytes
+        // that were still buffered mid-codepoint are now emitted as a
+        // final chunk to any streaming subscriber.
+        const stdoutTail = stdoutDecoder.end();
+        const stderrTail = stderrDecoder.end();
+        if (stdoutTail.length > 0) {
+          stdout += stdoutTail;
+          appendCommandLog(logId, stdoutTail);
+          publishChunk('stdout', stdoutTail);
+        }
+        if (stderrTail.length > 0) {
+          stderr += stderrTail;
+          appendCommandLog(logId, stderrTail);
+          publishChunk('stderr', stderrTail);
+        }
+
+        // Mark the streaming log as finished so it enters the retention
+        // window and is eventually reaped by `cleanupCompletedLogs`.
+        // Detached commands intentionally keep their log around too so
+        // a "Proceed" user can still observe the eventual exit tail
+        // via `getCommandLog` even if the tool call itself returned a
+        // partial result several minutes earlier.
+        markCommandLogFinished(logId);
 
         // Process carriage returns for consistent output formatting
         stdout = processCarriageReturns(stdout);
@@ -463,6 +545,10 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         cancelDetachDecision(detachId);
         context.signal?.removeEventListener('abort', abortHandler);
         killed = true;
+        // Spawn errors mean no output was captured and the process is
+        // definitively gone. Drop the streaming log entry immediately
+        // instead of retaining it — nothing useful to replay.
+        cleanupCommandLog(logId);
         notifyExit?.();
 
         if (detached) {

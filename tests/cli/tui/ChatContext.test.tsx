@@ -140,4 +140,63 @@ describe('ChatContext', () => {
     );
     expect(lastFrame()).toBeDefined();
   });
+
+  it('appendToolCallOutput streams chunks onto an active tool call', async () => {
+    function Capture() {
+      const chat = useChat();
+      const [phase, setPhase] = React.useState(0);
+
+      useEffect(() => {
+        if (phase === 0) {
+          chat.addToolCall(makeToolCall({ id: 'stream-1', status: 'running' }));
+          setPhase(1);
+        } else if (phase === 1) {
+          chat.appendToolCallOutput('stream-1', 'hello ');
+          chat.appendToolCallOutput('stream-1', 'world');
+          chat.appendToolCallOutput('stream-1', '');
+          setPhase(2);
+        }
+      }, [phase, chat]);
+
+      const active = chat.activeToolCalls.find((tc) => tc.id === 'stream-1');
+      return <Text>output:{active?.output ?? 'null'}</Text>;
+    }
+
+    const { lastFrame } = render(
+      <ChatProvider>
+        <Capture />
+      </ChatProvider>
+    );
+
+    // Let React flush the phased effects.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    expect(lastFrame()).toContain('output:hello world');
+  });
+
+  it('appendToolCallOutput silently drops chunks for unknown ids', () => {
+    let capturedActiveCount = -1;
+
+    function Capture() {
+      const chat = useChat();
+
+      useEffect(() => {
+        chat.appendToolCallOutput('does-not-exist', 'ignored');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
+      capturedActiveCount = chat.activeToolCalls.length;
+      return <Text>active:{chat.activeToolCalls.length}</Text>;
+    }
+
+    render(
+      <ChatProvider>
+        <Capture />
+      </ChatProvider>
+    );
+
+    expect(capturedActiveCount).toBe(0);
+  });
 });

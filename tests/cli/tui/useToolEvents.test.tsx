@@ -11,8 +11,9 @@ import type { ChatContextValue } from '../../../src/cli/tui/context/ChatContext.
 
 const mockAddToolCall = vi.fn();
 const mockUpdateToolCall = vi.fn();
+const mockAppendToolCallOutput = vi.fn();
 
-const mockChat: ChatContextValue = {
+const mockChat = {
   isStreaming: false,
   streamingText: '',
   activeToolCalls: [],
@@ -23,14 +24,16 @@ const mockChat: ChatContextValue = {
   setStreaming: vi.fn(),
   appendStreamText: vi.fn(),
   clearStreamText: vi.fn(),
+  clearCompletedToolCalls: vi.fn(),
   addToolCall: mockAddToolCall,
   updateToolCall: mockUpdateToolCall,
+  appendToolCallOutput: mockAppendToolCallOutput,
   toggleToolCallExpansion: vi.fn(),
   setError: vi.fn(),
   setAbortController: vi.fn(),
   setResponseModel: vi.fn(),
   reset: vi.fn(),
-};
+} as unknown as ChatContextValue;
 
 vi.mock('../../../src/cli/tui/context/ChatContext.js', () => ({
   useChat: () => mockChat,
@@ -42,6 +45,7 @@ import {
   ToolExecutionStarted,
   ToolExecutionCompleted,
   ToolExecutionFailed,
+  BashOutputChunk,
   clearAllHandlers,
 } from '../../../src/bus/index.js';
 
@@ -201,6 +205,31 @@ describe('useToolEvents', () => {
     expect(updates.isExpanded).toBe(true);
   });
 
+  it('appends streaming chunks to the tool call output live', () => {
+    render(<TestComponent />);
+
+    BashOutputChunk.publish({
+      toolId: 'tool-stream-1',
+      logId: 'log-abc',
+      stream: 'stdout',
+      chunk: 'installing...',
+      timestamp: 1700000000000,
+    });
+
+    BashOutputChunk.publish({
+      toolId: 'tool-stream-1',
+      logId: 'log-abc',
+      stream: 'stdout',
+      chunk: ' done\n',
+      timestamp: 1700000000010,
+    });
+
+    // One append call per chunk, in order.
+    expect(mockAppendToolCallOutput).toHaveBeenCalledTimes(2);
+    expect(mockAppendToolCallOutput).toHaveBeenNthCalledWith(1, 'tool-stream-1', 'installing...');
+    expect(mockAppendToolCallOutput).toHaveBeenNthCalledWith(2, 'tool-stream-1', ' done\n');
+  });
+
   it('unsubscribes on unmount', () => {
     const { unmount } = render(<TestComponent />);
 
@@ -216,7 +245,18 @@ describe('useToolEvents', () => {
     // Clear mocks and unmount
     mockAddToolCall.mockClear();
     mockUpdateToolCall.mockClear();
+    mockAppendToolCallOutput.mockClear();
     unmount();
+
+    // Streaming chunks published after unmount must not reach the mock.
+    BashOutputChunk.publish({
+      toolId: 'tool-post-stream',
+      logId: 'log-post',
+      stream: 'stdout',
+      chunk: 'ignored',
+      timestamp: 1700000000004,
+    });
+    expect(mockAppendToolCallOutput).not.toHaveBeenCalled();
 
     // Publish all three event types — none should reach the mocks
     ToolExecutionStarted.publish({

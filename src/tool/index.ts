@@ -35,6 +35,15 @@ export interface ToolContext {
    * rate limits by spawning subagents without bound.
    */
   subagentDepth?: number;
+  /**
+   * The synthetic tool-execution id assigned by `executeUnsafe` and
+   * carried by `ToolExecutionStarted` / `Completed` / `Failed`. Threaded
+   * through to `execute()` so streaming-capable tools (bash / shell)
+   * can correlate incremental output chunks (`BashOutputChunk`) with
+   * the row the TUI is already rendering. `undefined` when a tool is
+   * invoked outside the standard registry (tests, one-shot calls).
+   */
+  toolId?: string;
 }
 
 /**
@@ -499,8 +508,14 @@ export function defineTool<TParams extends z.ZodType, TResult>(
           throw new Error('Operation aborted');
         }
 
-        // Execute the tool
-        const result = await definition.execute(validatedParams, context);
+        // Execute the tool. Thread the freshly-minted `toolId` through
+        // the context so streaming-capable tools (bash / shell) can
+        // correlate live output chunks with the row already rendered by
+        // ToolExecutionStarted. Non-streaming tools may safely ignore it.
+        const result = await definition.execute(validatedParams, {
+          ...context,
+          toolId: context.toolId ?? toolId,
+        });
         const duration = Date.now() - startTime;
 
         // Publish completion event

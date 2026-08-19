@@ -5,6 +5,7 @@ import {
   ToolExecutionStarted,
   ToolExecutionCompleted,
   ToolExecutionFailed,
+  BashOutputChunk,
 } from '../../../bus/index.js';
 import {
   BashDetachAvailable,
@@ -86,7 +87,7 @@ export interface UseToolEventsOptions {
  * event bus into the ChatContext reducer.
  */
 export function useToolEvents(options: UseToolEventsOptions = {}): void {
-  const { addToolCall, updateToolCall } = useChat();
+  const { addToolCall, updateToolCall, appendToolCallOutput } = useChat();
   const { onDetachAvailable, onDetachedExited } = options;
 
   useEffect(() => {
@@ -114,6 +115,19 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
         });
       }
     );
+
+    // Live streaming of bash / shell output. The bash tool publishes
+    // one `BashOutputChunk` per `data` event (issue #1442); we append
+    // the chunk to the tool row's `output` so the TUI renders progress
+    // bars, install output, and long test runs live instead of the
+    // previous head-of-line-blocked spinner-only path. On completion
+    // the `ToolExecutionCompleted` handler below replaces `output`
+    // with the final aggregated payload from the tool result, which
+    // may be truncated / normalised differently (carriage returns,
+    // head-and-tail elision) than the raw streamed chunks.
+    const unsubChunk = BashOutputChunk.subscribe(({ toolId, chunk }) => {
+      appendToolCallOutput(toolId, chunk);
+    });
 
     const unsubCompleted = ToolExecutionCompleted.subscribe(({ toolId, result, timestamp }) => {
       updateToolCall(toolId, {
@@ -165,11 +179,12 @@ export function useToolEvents(options: UseToolEventsOptions = {}): void {
 
     return () => {
       unsubStarted();
+      unsubChunk();
       unsubCompleted();
       unsubFailed();
       unsubDetach();
       unsubDetachedExited();
       mcpExpansionByToolId.clear();
     };
-  }, [addToolCall, updateToolCall, onDetachAvailable, onDetachedExited]);
+  }, [addToolCall, updateToolCall, appendToolCallOutput, onDetachAvailable, onDetachedExited]);
 }
