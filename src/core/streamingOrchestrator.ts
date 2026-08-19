@@ -26,6 +26,7 @@ import {
   DEFAULT_STREAM_TOOL_EXTENSION_MS,
   resolveDefaultStreamIdleTimeoutMs,
 } from './streamWatchdog.js';
+import { notifyInBackground } from './notifications.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -334,6 +335,14 @@ export function streamChat(
       modelUsed: modelId,
       routingReason,
     };
+
+    // Fire a completion notification for interactive users who have
+    // opted in via `notifications: allow` in ~/.alexi/config.json.
+    // Only emitted on a naturally-completed stream so aborts and
+    // provider errors do not fire a "task completed" alert.
+    if (completedCleanly) {
+      notifyInBackground('Alexi', 'Task completed');
+    }
     return cachedResult;
   }
 
