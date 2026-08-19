@@ -13,6 +13,8 @@ import { normalizeUrls } from '../../utils/url.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import { auditCommand } from '../../permission/next.js';
+import { getPermissionManager } from '../../permission/index.js';
+import { requiresSandboxEscalation } from '../../kilocode/sandbox/git.js';
 import {
   BashDetachAvailable,
   BashDetachedExited,
@@ -167,6 +169,32 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
         data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
       };
     }
+
+    // alexi_change start: prompt before sandboxed git writes.
+    // On macOS `sandbox-exec` (and analogous restricted environments),
+    // git subcommands that mutate the working tree, index, refs, or
+    // config can silently fail or succeed with unexpected side-effects.
+    // Escalate through the interactive permission prompt so the user is
+    // aware their sandbox is about to be punched through. Sandbox mode
+    // is signalled by the `ALEXI_SANDBOX` env var (set by the launcher
+    // when running under sandbox-exec).
+    const sandboxEnabled = process.env.ALEXI_SANDBOX === '1';
+    if (requiresSandboxEscalation(params.command, sandboxEnabled)) {
+      const result = await getPermissionManager().check({
+        toolName: 'shell',
+        action: 'execute',
+        resource: normalizeUrls(params.command),
+        description: `Sandboxed git write: ${params.command}`,
+      });
+      if (!result.granted) {
+        return {
+          success: false,
+          error: 'Sandboxed git write denied by permission prompt',
+          data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
+        };
+      }
+    }
+    // alexi_change end
 
     // Re-attach: if a previous invocation on this session detached, wait
     // for it to exit before spawning a new shell so the model does not
