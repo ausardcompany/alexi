@@ -60,6 +60,54 @@ export type PermissionDecision = 'allow' | 'deny' | 'ask';
 // `--yolo` / `--dangerously-skip-permissions` CLI flags.
 export type PermissionMode = 'auto' | 'normal';
 
+// alexi_change start: Modes that promise read-only behaviour to the user.
+// Under these modes, write-shaped tools are denied even if a broad
+// wildcard rule like `"*": "allow"` would otherwise match. An explicit
+// per-tool `allow` still wins so operators can opt individual tools back
+// in without regressing on the read-only guarantee. This mirrors the
+// kilocode upstream fix and is important for SAP AI Core compliance
+// workflows that rely on `ask` / `plan` for reviewable read-only runs.
+const READ_ONLY_MODES = new Set<string>(['ask', 'plan']);
+const WRITE_TOOLS = new Set<string>([
+  'write',
+  'edit',
+  'patch',
+  'shell',
+  'bash',
+  'kilo_edit',
+  'kilo_write',
+  'apply_patch',
+]);
+
+/**
+ * Evaluate a single (tool, mode, rules) triple to a decision, honouring
+ * read-only mode semantics. Exposed for tests and for callers (agent
+ * factory, hooks) that need to gate write-shaped tools without going
+ * through the full `PermissionManager.check()` flow.
+ *
+ * @param input - the tool name, session mode, and the rule map
+ *   (`{ toolName | '*': 'allow' | 'ask' | 'deny' }`)
+ * @returns the resolved decision; defaults to `'ask'` when no rule
+ *   matches so behaviour is safe by default.
+ */
+export function evaluate(input: {
+  tool: string;
+  mode: string;
+  rules: Record<string, 'allow' | 'ask' | 'deny'>;
+}): 'allow' | 'ask' | 'deny' {
+  // Enforce read-only in ask/plan regardless of broad wildcards.
+  // A tool-specific rule still wins so explicit allow-lists remain honored.
+  if (READ_ONLY_MODES.has(input.mode) && WRITE_TOOLS.has(input.tool)) {
+    const explicit = input.rules[input.tool];
+    if (explicit === 'allow') {
+      return 'allow';
+    }
+    return 'deny';
+  }
+  return input.rules[input.tool] ?? input.rules['*'] ?? 'ask';
+}
+// alexi_change end
+
 // Doom loop configuration
 export interface DoomLoopConfig {
   maxRetries: number; // Max retries for same operation (default: 3)

@@ -15,6 +15,7 @@
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import os from 'os';
 import type { FileCheckpoint } from './checkpoints.js';
 
 /**
@@ -210,3 +211,124 @@ export async function revertTo(snapshot: Snapshot): Promise<RevertResult> {
 
   return { restored, skipped };
 }
+
+// ============================================================================
+// alexi_change start: persist snapshot-disable across restarts
+// ============================================================================
+//
+// Users who disable snapshotting expect the choice to survive a CLI
+// restart. Previously this was an in-memory flag only. Persist it in a
+// small JSON state file under `~/.alexi/state/snapshot.json` so the
+// setting round-trips.
+//
+// State file shape: `{ "disabled": boolean }`. Missing / unreadable
+// file is treated as "not disabled" (snapshots on by default) so an
+// unwritable state directory degrades gracefully rather than silently
+// disabling snapshots.
+
+const SNAPSHOT_STATE_KEY = 'kilocode.snapshot.disabled';
+
+interface SnapshotState {
+  disabled?: boolean;
+}
+
+function getSnapshotStateFile(): string {
+  return path.join(os.homedir(), '.alexi', 'state', 'snapshot.json');
+}
+
+async function readSnapshotState(): Promise<SnapshotState> {
+  try {
+    const raw = await fs.readFile(getSnapshotStateFile(), 'utf-8');
+    const parsed = JSON.parse(raw) as SnapshotState;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeSnapshotState(state: SnapshotState): Promise<void> {
+  const target = getSnapshotStateFile();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+/**
+ * Disable snapshotting for this project persistently. Setting survives
+ * CLI restart. Storage key: `kilocode.snapshot.disabled`.
+ */
+export async function disableSnapshots(): Promise<void> {
+  const state = await readSnapshotState();
+  state.disabled = true;
+  await writeSnapshotState(state);
+}
+
+/**
+ * Re-enable snapshotting persistently.
+ */
+export async function enableSnapshots(): Promise<void> {
+  const state = await readSnapshotState();
+  state.disabled = false;
+  await writeSnapshotState(state);
+}
+
+/**
+ * Return `true` when snapshots should be taken, `false` when the user
+ * has persistently disabled them.
+ */
+export async function shouldSnapshot(): Promise<boolean> {
+  const state = await readSnapshotState();
+  return !state.disabled;
+}
+
+/**
+ * Stable storage key for the disable flag. Exposed so tests and other
+ * modules can reference the key without duplicating the string.
+ */
+export const SNAPSHOT_DISABLE_STATE_KEY = SNAPSHOT_STATE_KEY;
+
+/**
+ * Prune stale snapshot / truncation files for the given session by
+ * modified-time, oldest first. Retains the newest `keep` files
+ * (defaults to 20). No-op when the snapshots directory does not
+ * exist.
+ *
+ * alexi_change: clean truncation files by mtime, oldest first
+ */
+export async function pruneSnapshots(sessionId: string, keep = 20): Promise<string[]> {
+  const dir = getSnapshotsDir(sessionId);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+
+  const withMtime: Array<{ file: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) {
+      continue;
+    }
+    try {
+      const stat = await fs.stat(path.join(dir, entry));
+      withMtime.push({ file: entry, mtimeMs: stat.mtimeMs });
+    } catch {
+      // Skip files we cannot stat (raced deletion, permission).
+    }
+  }
+
+  // Sort oldest first, drop everything past the `keep` newest.
+  withMtime.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const toDelete = withMtime.slice(0, Math.max(0, withMtime.length - keep));
+
+  const deleted: string[] = [];
+  for (const { file } of toDelete) {
+    try {
+      await fs.unlink(path.join(dir, file));
+      deleted.push(file);
+    } catch {
+      // Best-effort — skip files that vanished under us.
+    }
+  }
+  return deleted;
+}
+// alexi_change end

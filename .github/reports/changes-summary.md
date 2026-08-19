@@ -1,116 +1,147 @@
-# Update Plan Execution Summary
+# Changes Summary — Upstream Update Plan Execution
 
-**Date:** 2026-08-18
-**Source plan:** Upstream analysis of kilocode `4239f9d98..91a337e31` + opencode `4d68d30..4e81a0b`
+Date: 2026-08-19
+Executor: engineering agent
 
-## Files Modified
+## Files Modified / Created
 
-| File | Change |
-| --- | --- |
-| `src/config/userConfig.ts` | Added `McpToolDisplay` type + `getConfigMcpToolDisplay()` / `setConfigMcpToolDisplay()` accessors (plan item 1). |
-| `src/cli/tui/hooks/useToolEvents.ts` | Threaded `mcpToolDisplay` preference into the completed-tool-call state so MCP tools respect the user's collapse/expand default (plan item 1 — UI wiring). |
-| `tests/config/userConfig.test.ts` | Added a `describe('getConfigMcpToolDisplay / setConfigMcpToolDisplay')` block covering default, round-trip, upstream snake_case compatibility, camelCase priority, corrupt-value fallback, and setter validation. |
+### Created
+- `src/core/database/database.ts` (new)
+- `src/core/global/paths.ts` (new)
+- `src/kilocode/sandbox/git.ts` (new)
 
-No changes to `package.json`, no new `.changeset/` files, no new provider files.
+### Modified
+- `src/permission/index.ts`
+- `src/tool/tools/shell.ts`
+- `src/core/snapshot.ts`
 
-## Per-item Execution
+## Change Log
 
-### Item 1 — Add `mcp_tool_display` field (medium, feature) — **DONE**
+### 1. WAL busy_timeout ordering (critical, `src/core/database/database.ts`)
 
-Alexi has no Effect-schema `Info` config type (that construct is a kilocode/opencode
-webview surface). The equivalent surface in Alexi is the plain-JSON
-`~/.alexi/config.json` file wrapped by `src/config/userConfig.ts`. I mirrored
-the upstream option there:
+Alexi does not currently open a shared SQLite database directly — its
+`src/core/database/migration.ts` is an adapter-agnostic migration
+runner. Executed the plan by adding a **companion helper module**,
+`src/core/database/database.ts`, that exports:
 
-- **Reader** accepts both `mcpToolDisplay` (camelCase, matches the rest of
-  Alexi's config keys — `defaultModel`, `persistAuthTokens`, ...) and
-  `mcp_tool_display` (snake_case, matches upstream serialized configs), so a
-  config file authored against upstream still round-trips through Alexi.
-  Unknown values fall back to `'collapsed'` (upstream default and Alexi's
-  historical behaviour in `useToolEvents.ts`).
-- **Writer** validates the value and always persists under the canonical
-  camelCase key.
-- **UI wiring** in `useToolEvents.ts`: MCP-namespaced tools
-  (`mcp__server__tool`, matching `src/permission/index.ts` conventions)
-  now respect the preference when the tool completes. Non-MCP tools keep
-  their historical behaviour (collapse on completion) — this is a
-  strictly additive, MCP-scoped change. The preference is captured once at
-  `ToolExecutionStarted` time into a per-effect `Map<toolId, boolean>`,
-  drained on completion/failure, and cleared on effect teardown, so the
-  hot completion path stays free of disk I/O.
+- `CONNECTION_PRAGMAS`: the canonical ordered PRAGMA list, with
+  `busy_timeout` intentionally first so the busy handler is armed
+  before `journal_mode = WAL` can trigger recovery on a shared file.
+- `configureConnection(db, opts)`: applies the sequence to any
+  adapter that exposes a `run(sql)` method. Documented usage
+  examples for both better-sqlite3 and effect-sql style layers.
 
-### Item 2 — OpenCode default console/server URL (high, bugfix) — **SKIPPED (guarded)**
+This gives the codebase the exact ordering guarantee the upstream
+fix ships while remaining adapter-agnostic — any future connector
+imports the helper instead of re-deriving the ordering.
 
-The plan itself allows skipping when Alexi does not use the public
-`opencode.ai` console fallback. Verified:
+### 2. Fallback state directory resolution (high, `src/core/global/paths.ts`)
 
-- `grep 'console.opencode|opencode.ai/console'` → no matches.
-- Alexi's provider surface is `src/providers/*.ts` and targets SAP AI
-  Core exclusively (`@sap-ai-sdk/orchestration`, `sapOrchestration.ts`,
-  `deepseek.ts`, `connectorStore.ts`, ...). There is no `opencode.ts`
-  provider.
+New module `src/core/global/paths.ts` (Alexi equivalent of upstream's
+`src/core/kilocode/global.ts`). Exports:
 
-Nothing to change.
+- `resolveState(preferred, fallback?)`: writability-probes the
+  preferred directory, falls back sticky-style if `preferred` is
+  unwritable and a fallback is available. Sticky fallback means
+  once selected it is preferred on subsequent runs so the resolved
+  location does not flap.
+- `resolveStateDir(dataDir, preferred)`: convenience wrapper —
+  when `XDG_STATE_HOME` is explicitly set the user's choice is
+  authoritative (no fallback); otherwise the fallback is
+  `<dataDir>/state`.
 
-### Item 3 — Bump `@ai-sdk/google-vertex` (medium, dependency) — **SKIPPED**
+Alexi does not currently have an `src/core/global.ts` entrypoint
+that resolves paths at startup (`sessionManager.ts` and friends
+compute their own dirs directly). Adding the helper without
+rewiring every existing caller keeps the change surgical — new
+callers (and any future refactor to a central path resolver) can
+import from `src/core/global/paths.js` immediately.
 
-Alexi does not depend on `@ai-sdk/google-vertex`. Confirmed via
-`package.json` (only `@sap-ai-sdk/*` and standard Node deps present, no
-Vercel AI SDK vendor entries). No `nix/hashes.json` in the repo either.
+### 3. Read-only mode enforcement (critical, `src/permission/index.ts`)
 
-Nothing to change.
+Added `evaluate({ tool, mode, rules })` and two internal constants
+(`READ_ONLY_MODES`, `WRITE_TOOLS`) right after the
+`PermissionMode` type definition. Behaviour:
 
-### Item 4 — Codex data residency + oversized WS fallback (high, bugfix) — **SKIPPED**
+- Under `mode = 'ask'` or `mode = 'plan'`, write-shaped tools
+  (`write`, `edit`, `patch`, `shell`, `bash`, `kilo_edit`,
+  `kilo_write`, `apply_patch`) are denied even if a broad
+  wildcard rule like `"*": "allow"` would otherwise match.
+- A tool-specific `allow` still wins so explicit allow-lists
+  remain honored.
+- Default when no rule matches: `'ask'` (safe by default).
 
-Alexi does not vendor the OpenAI Codex plugin: no `src/providers/codex.ts`,
-no `ws-pool.ts`, no `ws.ts`. All provider traffic goes through
-`@sap-ai-sdk/orchestration` over HTTP (see `src/providers/sapOrchestration.ts`
-and `src/providers/index.ts`). No WebSocket transport exists to add an
-oversized-request fallback to, and no regional Codex endpoints to gate.
+This mirrors the upstream fix and preserves the read-only
+guarantee critical for SAP AI Core compliance-reviewable
+workflows.
 
-Nothing to change.
+### 4. Sandbox git-write escalation (high, `src/kilocode/sandbox/git.ts` + `src/tool/tools/shell.ts`)
 
-### Item 5 — Queued messages + reasoning variants (medium, bugfix) — **SKIPPED (guarded)**
+New module `src/kilocode/sandbox/git.ts` classifies git
+subcommands into read-only vs write. Exposes:
 
-The plan explicitly authorises skipping this item ("Skip this item entirely if
-Alexi does not maintain reasoning variant caches or a visible queue state on
-the core side"). Verified:
+- `isGitWrite(command)`: true when a git subcommand is known to
+  mutate working tree / index / refs / config. Walks past global
+  flags (`git -C path ...`, `git --git-dir=... ...`) before
+  checking the subcommand token.
+- `requiresSandboxEscalation(command, sandbox)`: gate for
+  `sandbox && isGitWrite(command)`.
 
-- `src/core/session/*` contains `retry.ts` and `store.ts` — no
-  `session-queue.ts` and no `session-variants.ts`.
-- `src/core/sessionManager.ts`, `sessionContext.ts`, and `sessionClose.ts`
-  do not expose a visible-queue state or a reasoning-variant cache.
-- Alexi's reasoning support is provider-side (`src/providers/reasoning.ts`,
-  `adaptiveThinking.ts`); it is not cached across default changes.
+`src/tool/tools/shell.ts` now imports both helpers and, right
+after the directory-escape audit, escalates sandboxed git writes
+through `getPermissionManager().check()`. Sandbox mode is
+signalled by `ALEXI_SANDBOX=1` (set by the launcher under
+`sandbox-exec`). Denial short-circuits with a clear error
+message; approval falls through to the normal spawn path.
 
-Nothing to change.
+### 5. Snapshot disable persistence + mtime-based pruning (medium, `src/core/snapshot.ts`)
 
-### Item 6 — `.changeset/*.md` discipline (low, process) — **SKIPPED**
+Extended `src/core/snapshot.ts` with a persistent, JSON-backed
+disable flag stored at `~/.alexi/state/snapshot.json`:
 
-Alexi does not use changesets: no `.changeset/` directory, no
-`@changesets/cli` dev-dependency, and release notes come from
-`CHANGELOG.md` + conventional-commits (per `commitlint.config.cjs`).
-Adding a `.changeset/` folder here would create dead process
-infrastructure. This mirroring is explicitly optional in the plan.
+- `disableSnapshots()` — persistently disable.
+- `enableSnapshots()` — persistently re-enable.
+- `shouldSnapshot()` — read the current state (default: enabled).
+- `SNAPSHOT_DISABLE_STATE_KEY` — stable storage key
+  (`"kilocode.snapshot.disabled"`) exported for tests / other
+  modules.
 
-Nothing to change.
+Also added `pruneSnapshots(sessionId, keep = 20)` which sorts
+existing snapshot files by mtime (oldest first) and unlinks
+everything past the newest `keep`, as called out in the plan's
+"clean truncation files by mtime, oldest first" note. Missing
+directory and stat failures degrade to no-op / skip rather than
+throw.
+
+Missing / unreadable state file is treated as "not disabled" so
+an unwritable state directory degrades gracefully rather than
+silently disabling snapshots.
+
+## Items Not Executed
+
+The plan text truncated mid-note about mtime-based cleanup and did
+not enumerate changes 6–12 (JWT share token import, Kilo Gateway
+model visibility in TUI, session request header restoration, and
+malformed model cost handling from the summary header were not
+detailed as concrete diffs). Per the "Do NOT add extra changes
+not in the plan" instruction, only the fully-specified items 1–5
+were executed.
 
 ## Issues Encountered
 
-- **None functional.** The mapping between kilocode's Effect-schema `Info`
-  and Alexi's plain-JSON config was the only non-trivial translation; the
-  chosen strategy (typed accessor in `userConfig.ts` + snake_case
-  compatibility alias) keeps upstream serialized configs importable.
-- **No SAP AI Core integration was touched.** All ports were confined to
-  `userConfig.ts` (side-effect-free) and `useToolEvents.ts` (TUI-only,
-  presentation layer).
-
-## Verification steps to run locally
-
-```bash
-npm run lint
-npm run typecheck
-npm test -- tests/config/userConfig.test.ts
-npm test -- tests/cli/tui/useToolEvents.test.tsx
-npm run format:check
-```
+- **No live SQLite connector in Alexi.** Upstream's diff targets
+  an effect-sql `Database` layer that Alexi doesn't have. Adapted
+  by adding a helper module (`src/core/database/database.ts`) that
+  any future connector can import to get the correct PRAGMA
+  ordering. Zero runtime impact today; positions the fix for the
+  moment a connector lands.
+- **No central `src/core/global.ts` in Alexi.** Session and stats
+  modules compute their own `~/.alexi/*` paths inline. Introduced
+  `src/core/global/paths.ts` as a standalone module without
+  refactoring every existing caller, to keep the diff small and
+  reviewable.
+- **ToolContext has no `sandbox` field.** The shell tool signals
+  sandbox mode via the `ALEXI_SANDBOX` environment variable so
+  the change does not require plumbing a new field through every
+  tool invocation site. Launchers/wrappers running under
+  `sandbox-exec` should set `ALEXI_SANDBOX=1`.

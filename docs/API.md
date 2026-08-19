@@ -793,6 +793,25 @@ interface ToolContext {
   sessionId?: string;
   gitManager?: AutoCommitManager;
   /**
+   * Per-session set of realpath()ed AGENTS.md files that have already been
+   * surfaced to the agent as system-reminders.
+   */
+  agentsMdSeen?: Set<string>;
+  /**
+   * Current subagent nesting depth (0 for top-level user session).
+   * The `task` tool uses this to enforce MAX_SUBAGENT_DEPTH (default 3).
+   */
+  subagentDepth?: number;
+  /**
+   * The synthetic tool-execution id assigned by `executeUnsafe` and
+   * carried by ToolExecutionStarted / Completed / Failed. Threaded
+   * through to `execute()` so streaming-capable tools (bash / shell)
+   * can correlate incremental output chunks (`BashOutputChunk`) with
+   * the row the TUI is already rendering. `undefined` when a tool is
+   * invoked outside the standard registry (tests, one-shot calls).
+   */
+  toolId?: string;
+  /**
    * Free-form per-invocation options that a caller can attach to a tool call.
    * Consumed by individual tools; unknown keys are ignored by tools that do
    * not recognize them. See tool-specific docs for supported keys.
@@ -870,7 +889,8 @@ cleanupToolOutputs(): void
 | `edit` | `filePath`, `oldString`, `newString`, `replaceAll?` | Exact string replacement |
 | `glob` | `pattern`, `path?` | Find files by glob pattern |
 | `grep` | `pattern`, `path?`, `include?` | Search file contents by regex |
-| `bash` | `command`, `description?`, `timeout?`, `workdir?` | Execute shell commands |
+| `bash` | `command`, `description?`, `timeout?`, `workdir?` | Execute shell commands with real-time streaming (`BashOutputChunk` events) |
+| `shell` | `command`, `description?`, `timeout?`, `workdir?` | Cross-platform shell tool (alias for `bash`, with sandbox git-write escalation) |
 | `task` | `prompt`, `description`, `subagent_type`, `task_id?`, `background?` | Launch sub-agent |
 | `task_status` | `taskId` | Query background task status |
 | `webfetch` | `url`, `format?`, `timeout?` | Fetch web content |
@@ -918,6 +938,193 @@ if (!result.success) {
 }
 ```
 
+## Event Bus API — Bash Streaming
+
+The bash and shell tools publish incremental output chunks over the event bus so TUIs and other observers can render command output as it arrives.
+
+```typescript
+import { BashOutputChunk } from '../bus/index.js';
+
+// Payload shape (Zod-validated on publish):
+// {
+//   toolId: string;                     // matches ToolExecutionStarted / Completed
+//   logId: string;                      // matches command-log registry entry (PID-reuse safe)
+//   stream: 'stdout' | 'stderr';
+//   chunk: string;                      // UTF-8 decoded chunk (may span 'data' events)
+//   timestamp: number;
+// }
+
+const unsubscribe = BashOutputChunk.subscribe(({ toolId, stream, chunk }) => {
+  console.log(`[${stream}] ${chunk}`);
+});
+```
+
+Invariants:
+
+- `BashOutputChunk` fires strictly between `ToolExecutionStarted` and `ToolExecutionCompleted` for the same `toolId`.
+- The final aggregated `stdout` / `stderr` are still returned in the normal `ToolExecutionCompleted` payload; consumers who don't care about live output can ignore this event entirely without changing behaviour.
+- Empty chunks are filtered out at publish time.
+- A failing subscriber cannot tear down the running command — publish is wrapped in a try/catch on the tool side.
+
+## Command Log Registry API
+
+`src/tool/tools/bash-streaming.ts` exposes the process-local store that backs bash / shell live chunks. Correlate by `logId` (PID-reuse safe) rather than OS PID.
+
+```typescript
+import {
+  registerCommandLog,
+  appendCommandLog,
+  markCommandLogFinished,
+  getCommandLog,
+  getCommandLogByPid,
+  cleanupCommandLog,
+  cleanupCompletedLogs,
+  listCommandLogIds,
+  MAX_LOG_BYTES,               // 32 KB per-log append buffer
+  COMPLETED_LOG_RETENTION_MS,  // 60_000ms retention after finish
+} from '../tool/tools/bash-streaming.js';
+
+// Register BEFORE any 'data' handler fires
+const logId = registerCommandLog({
+  pid: proc.pid,
+  command: 'npm install',
+  sessionId,
+  toolId,
+  startedAt: Date.now(),
+});
+
+// Append chunks from stdout / stderr
+appendCommandLog(logId, chunk);
+
+// Mark finished — entry enters retention window
+markCommandLogFinished(logId);
+
+// Later: fetch the tail
+const snapshot = getCommandLog(logId); // Readonly snapshot with buffer
+
+// PID-reuse-safe diagnostic lookup (requires BOTH pid AND startedAt)
+const byPid = getCommandLogByPid(pid, startedAt);
+```
+
+`CommandLogSnapshot` shape:
+
+```typescript
+export type CommandLogSnapshot = Readonly<Omit<CommandLogEntry, 'buffer'>> & {
+  buffer: string;
+};
+
+interface CommandLogEntry {
+  id: string;                  // primary key (nanoid), PID-reuse-safe
+  pid: number | undefined;
+  startedAt: number;
+  finishedAt?: number;
+  command: string;
+  sessionId?: string;
+  toolId?: string;
+  buffer: string;              // rolling append buffer, capped at MAX_LOG_BYTES
+  totalBytes: number;          // total bytes ever appended
+  truncated: boolean;          // true once buffer has been truncated at least once
+}
+```
+
+Truncation marker inserted when `MAX_LOG_BYTES` is exceeded: `\n[... older output evicted from streaming buffer ...]\n`. Eviction snaps forward to the next `\n` within 1 KB so partial lines are not shown to the TUI.
+
+## SQLite Connection Configuration
+
+`src/core/database/database.ts` produces the canonical PRAGMA sequence for opening a shared SQLite database from multiple processes. Order matters: `busy_timeout` must be installed before `journal_mode = WAL` so the busy handler is armed before WAL recovery can race.
+
+```typescript
+import { CONNECTION_PRAGMAS, configureConnection } from '../core/database/database.js';
+
+// Canonical ordered list (immutable):
+CONNECTION_PRAGMAS === Object.freeze([
+  'PRAGMA busy_timeout = 5000',
+  'PRAGMA journal_mode = WAL',
+  'PRAGMA synchronous = NORMAL',
+  'PRAGMA cache_size = -64000',
+  'PRAGMA foreign_keys = ON',
+  'PRAGMA wal_checkpoint(PASSIVE)',
+]);
+
+// Adapter-agnostic — pass anything with a { run(sql) } method
+export interface PragmaRunner {
+  run(sql: string): Promise<unknown> | unknown;
+}
+
+// better-sqlite3 example
+const db = new Database(filename);
+await configureConnection({ run: (sql) => db.exec(sql) });
+
+// Options
+export interface ConfigureConnectionOptions {
+  busyTimeoutMs?: number;   // default 5000
+  ownsWalInit?: boolean;    // default true; false skips 'PRAGMA journal_mode = WAL'
+}
+```
+
+## State Directory Resolution API
+
+`src/core/global/paths.ts` transparently probes the preferred state directory and falls back to a secondary location when the primary is unwritable (containers, restricted user profiles, VS Code Server on Windows).
+
+```typescript
+import { resolveState, resolveStateDir } from '../core/global/paths.js';
+
+// General form: preferred with optional fallback
+const dir = await resolveState(preferred, fallback);
+
+// Convenience wrapper: falls back to `<dataDir>/state` unless
+// $XDG_STATE_HOME was explicitly set by the user
+const stateDir = await resolveStateDir(dataDir, preferred);
+```
+
+Behaviour:
+
+- Writability is probed via an exclusive-mode temp file (`wx`, mode `0o600`) so a stale probe file cannot mask a real permission problem.
+- The fallback is **sticky**: once selected it is preferred on subsequent runs so the resolved state directory does not flap between locations across restarts.
+- When `$XDG_STATE_HOME` was explicitly set by the user, no fallback is provided — any failure surfaces rather than silently redirecting.
+
+## Snapshot Persistence API
+
+`src/core/snapshot.ts` persists the "snapshots disabled" flag across CLI restarts.
+
+```typescript
+import {
+  disableSnapshots,
+  enableSnapshots,
+  shouldSnapshot,
+  SNAPSHOT_DISABLE_STATE_KEY,   // 'kilocode.snapshot.disabled'
+  pruneSnapshots,
+} from '../core/snapshot.js';
+
+await disableSnapshots();                 // persist disable to ~/.alexi/state/snapshot.json
+await enableSnapshots();                  // re-enable
+const on = await shouldSnapshot();        // true when snapshots are on
+
+// Prune stale snapshot / truncation files by mtime, oldest first.
+// Retains the newest `keep` files (default 20). No-op when the
+// snapshots directory does not exist.
+const deleted = await pruneSnapshots(sessionId, 20);
+```
+
+A missing or unreadable state file is treated as "not disabled" so an unwritable state directory degrades gracefully rather than silently disabling snapshots.
+
+## Sandbox Git-Write API
+
+`src/kilocode/sandbox/git.ts` classifies git subcommands as write-shaped for sandbox escalation.
+
+```typescript
+import { isGitWrite, requiresSandboxEscalation } from '../kilocode/sandbox/git.js';
+
+isGitWrite('git commit -m msg');                    // true
+isGitWrite('git -C repo push origin main');         // true (walks past -C flag)
+isGitWrite('git log --oneline');                    // false (read-only)
+
+const sandboxEnabled = process.env.ALEXI_SANDBOX === '1';
+if (requiresSandboxEscalation(command, sandboxEnabled)) {
+  // prompt the user via getPermissionManager().check(...)
+}
+```
+
 ## Permission System
 
 ### Permission Actions
@@ -925,6 +1132,35 @@ if (!result.success) {
 ```typescript
 type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 ```
+
+### Read-only mode evaluator
+
+```typescript
+import { evaluate } from '../permission/index.js';
+
+// Under 'ask' / 'plan' modes, write-shaped tools are denied even when
+// a broad wildcard rule like { '*': 'allow' } would otherwise match.
+// An explicit per-tool 'allow' still wins.
+evaluate({
+  tool: 'write',
+  mode: 'ask',
+  rules: { '*': 'allow' },
+}); // => 'deny'
+
+evaluate({
+  tool: 'write',
+  mode: 'ask',
+  rules: { '*': 'allow', write: 'allow' },
+}); // => 'allow'  (explicit per-tool wins)
+
+evaluate({
+  tool: 'read',
+  mode: 'ask',
+  rules: { '*': 'allow' },
+}); // => 'allow'  (read is not write-shaped)
+```
+
+Write-shaped tools: `write`, `edit`, `patch`, `shell`, `bash`, `kilo_edit`, `kilo_write`, `apply_patch`. Read-only modes: `ask`, `plan`.
 
 ### Permission Rule
 

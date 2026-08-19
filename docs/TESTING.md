@@ -343,6 +343,105 @@ Key patterns:
    reflects the raw environment value and is stable across platforms, but the
    `type` classification is the invariant the tool guarantees to callers.
 
+### Testing Bash Streaming Output
+
+The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  registerCommandLog,
+  appendCommandLog,
+  markCommandLogFinished,
+  getCommandLog,
+  getCommandLogByPid,
+  cleanupCommandLog,
+  cleanupCompletedLogs,
+  _resetStreamingStateForTests,
+  MAX_LOG_BYTES,
+  COMPLETED_LOG_RETENTION_MS,
+} from '../../../src/tool/tools/bash-streaming.js';
+
+describe('bash-streaming', () => {
+  beforeEach(() => {
+    _resetStreamingStateForTests();
+  });
+
+  it('correlates chunks by logId, not PID', () => {
+    const id = registerCommandLog({ pid: 42, command: 'npm test', startedAt: 100 });
+    appendCommandLog(id, 'hello');
+    expect(getCommandLog(id)?.buffer).toBe('hello');
+
+    // A later process reusing PID 42 has a different startedAt.
+    expect(getCommandLogByPid(42, 999)).toBeUndefined();
+    expect(getCommandLogByPid(42, 100)?.id).toBe(id);
+  });
+
+  it('retains finished logs for COMPLETED_LOG_RETENTION_MS', () => {
+    const id = registerCommandLog({ pid: 1, command: 'ls', startedAt: 0 });
+    appendCommandLog(id, 'output');
+    markCommandLogFinished(id);
+    expect(getCommandLog(id)?.buffer).toBe('output');
+
+    // Simulate retention window expiry.
+    const now = Date.now() + COMPLETED_LOG_RETENTION_MS + 1;
+    cleanupCompletedLogs(now);
+    expect(getCommandLog(id)).toBeUndefined();
+  });
+
+  it('evicts oldest bytes past MAX_LOG_BYTES and inserts a truncation marker', () => {
+    const id = registerCommandLog({ pid: 2, command: 'stream', startedAt: 0 });
+    // Push over the cap in one shot.
+    appendCommandLog(id, 'x'.repeat(MAX_LOG_BYTES + 1024) + '\nDONE\n');
+    const snap = getCommandLog(id);
+    expect(snap?.truncated).toBe(true);
+    expect(snap?.buffer.startsWith('\n[... older output evicted')).toBe(true);
+    expect(snap?.buffer.endsWith('DONE\n')).toBe(true);
+  });
+
+  it('cleanupCommandLog reaps unconditionally', () => {
+    const id = registerCommandLog({ pid: 3, command: 'x', startedAt: 0 });
+    cleanupCommandLog(id);
+    expect(getCommandLog(id)).toBeUndefined();
+  });
+});
+```
+
+Key patterns:
+
+1. **Call `_resetStreamingStateForTests()` in `beforeEach`.** The registry is process-local and survives across bash invocations by design; without this reset, tests interfere with each other.
+2. **PID-reuse assertions.** Always vary `startedAt` when testing PID-reuse defence — a matching PID alone must NOT surface the earlier entry.
+3. **Retention window.** Pass an explicit `now` to `cleanupCompletedLogs(now)` rather than using `vi.useFakeTimers()`; the helper accepts a timestamp so tests can be deterministic without touching the global clock.
+4. **Byte cap eviction.** Assert on the `[... older output evicted from streaming buffer ...]` marker literally — that string is part of the observable contract for reconnecting TUI clients.
+
+### Testing TUI Chat Reducer for Streaming
+
+The `ChatContext` reducer (`src/cli/tui/context/ChatContext.tsx`) exposes `APPEND_TOOL_CALL_OUTPUT` for live-appending bash / shell chunks to active tool rows. Tests at `tests/cli/tui/ChatContext.test.tsx` cover the reducer branches and the `useToolEvents` wiring at `tests/cli/tui/useToolEvents.test.tsx` covers the bus-to-reducer dispatch:
+
+```typescript
+import { render } from 'ink-testing-library';
+import { ChatProvider, useChat } from '../../../src/cli/tui/context/ChatContext.js';
+import { BashOutputChunk, ToolExecutionStarted } from '../../../src/bus/index.js';
+
+it('appends BashOutputChunk chunks to the active row', () => {
+  // ...render ChatProvider + a test consumer that reads activeToolCalls
+  ToolExecutionStarted.publish({ toolId: 't1', toolName: 'bash', /* ... */ });
+  BashOutputChunk.publish({ toolId: 't1', logId: 'l1', stream: 'stdout', chunk: 'hello', timestamp: 0 });
+  BashOutputChunk.publish({ toolId: 't1', logId: 'l1', stream: 'stdout', chunk: ' world', timestamp: 1 });
+  // Assert row.output === 'hello world'
+});
+
+it('drops chunks for tools that already completed', () => {
+  // Publish ToolExecutionCompleted before the chunk; assert the chunk is silently dropped.
+});
+```
+
+Assertion invariants:
+
+1. Empty chunks (`chunk === ''`) are no-ops at the reducer level and MUST NOT create an `output` property on the row.
+2. `APPEND_TOOL_CALL_OUTPUT` only touches `activeToolCalls`; a chunk for a completed row is silently dropped.
+3. On `ToolExecutionCompleted`, the aggregated `result.data.stdout` / `result.data.stderr` replaces the streamed `output` — this is expected because the final payload may be truncated / normalised (carriage-return collapsing, head-and-tail elision) differently from raw chunks.
+
 ### Skill Tool Description Guard
 
 The skill tool exposes a description string to the LLM that is rendered into the
