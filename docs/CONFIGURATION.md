@@ -135,6 +135,45 @@ file is not replaced, so user extras and OS-discovered CAs coexist.
 export NODE_EXTRA_CA_CERTS=/path/to/corporate-bundle.pem
 ```
 
+#### XDG_STATE_HOME
+
+Standard XDG base-directory variable pointing at the parent of the preferred
+state directory. When set, Alexi treats `$XDG_STATE_HOME/alexi` as the
+preferred location for persistent state (session store, snapshot flag, MCP
+runtime state). See `src/core/global/paths.ts` for the resolution logic.
+
+**Important:** when `XDG_STATE_HOME` is set explicitly, Alexi does NOT fall
+back to `<dataDir>/state` on failure — the user's explicit choice wins and
+any writability error surfaces at startup. When the variable is unset, the
+default fallback is `<dataDir>/state` (typically `~/.alexi/state`) with
+sticky preference: once the fallback has been chosen it is preferred on
+subsequent runs so the resolved directory does not flap between locations
+across restarts.
+
+```bash
+# Explicit — no fallback, failures surface immediately
+export XDG_STATE_HOME=/var/lib/alexi/state
+```
+
+#### ALEXI_SANDBOX
+
+Set to `1` to signal that Alexi is running under macOS `sandbox-exec` or an
+analogous restricted environment. When this flag is set, git subcommands
+that mutate the working tree, index, refs, or config are escalated through
+the interactive permission prompt so the user is aware their sandbox is
+about to be punched through. See
+[ARCHITECTURE.md — Sandbox Git-Write Detection](./ARCHITECTURE.md#sandbox-git-write-detection)
+for the classification list and rationale.
+
+```bash
+export ALEXI_SANDBOX=1
+```
+
+Read-only git subcommands (`log`, `status`, `diff`, `show`, `ls-files`,
+`rev-parse`, …) are NOT escalated — only write-shaped subcommands such as
+`add`, `commit`, `push`, `checkout`, `config`, `stash`, `merge`, `rebase`,
+`reset`, `restore`, `revert`, `rm`, `submodule`, `switch`, `tag`, `worktree`.
+
 ## User Configuration
 
 User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.
@@ -713,6 +752,8 @@ Sessions are stored as JSON files in `~/.alexi/sessions/`.
 │   ├── abc-123.json
 │   ├── def-456.json
 │   └── ghi-789.json
+├── state/                       # persistent state (fallback for XDG_STATE_HOME)
+│   └── snapshot.json            # { "disabled": boolean } — snapshots disable flag
 ├── config.json
 ├── ALEXI.md
 ├── routing-config.json
@@ -720,6 +761,61 @@ Sessions are stored as JSON files in `~/.alexi/sessions/`.
 └── agents/
     └── custom-agent.md
 ```
+
+### State Directory Resolution
+
+The `state/` sub-directory is resolved by `src/core/global/paths.ts` with a
+writability probe and a sticky fallback:
+
+1. If `$XDG_STATE_HOME` is set, Alexi uses `$XDG_STATE_HOME/alexi` and does
+   NOT fall back on failure — the user's explicit choice wins.
+2. Otherwise the preferred location is the XDG default (typically
+   `~/.local/state/alexi`); on failure, Alexi falls back to `<dataDir>/state`
+   (usually `~/.alexi/state`).
+3. The fallback is **sticky**: once selected it is preferred on subsequent
+   runs so the resolved directory does not flap between locations.
+
+Writability is checked by creating an exclusive-mode temp file (`wx` flag,
+mode `0o600`). If the state directory is unwritable AND no fallback is
+available, Alexi fails fast at startup with the underlying `EACCES` / `EROFS`
+error rather than silently disabling persistence.
+
+### Snapshot Disable Persistence
+
+The snapshots-disabled flag persists across CLI restarts via
+`state/snapshot.json`:
+
+```json
+{ "disabled": true }
+```
+
+A missing or unreadable file is treated as "not disabled" (snapshots on by
+default) so an unwritable state directory degrades gracefully. See
+[API.md — Snapshot Persistence API](./API.md#snapshot-persistence-api) for
+the programmatic surface (`disableSnapshots`, `enableSnapshots`,
+`shouldSnapshot`, `SNAPSHOT_DISABLE_STATE_KEY`).
+
+### SQLite Databases
+
+When Alexi persists state to SQLite (session store shared between CLI and
+daemon), the connection is opened with a canonical PRAGMA sequence defined
+in `src/core/database/database.ts`:
+
+```
+PRAGMA busy_timeout = 5000       -- MUST come first (arms busy handler before WAL recovery)
+PRAGMA journal_mode = WAL
+PRAGMA synchronous = NORMAL
+PRAGMA cache_size = -64000       -- 64 MB page cache
+PRAGMA foreign_keys = ON
+PRAGMA wal_checkpoint(PASSIVE)
+```
+
+Order matters: when two processes open the same database and one is racing
+to recover an abandoned WAL/SHM segment, the busy handler must already be
+installed before `journal_mode = WAL` runs — otherwise the recovering
+process can crash with `SQLITE_BUSY` before any retry logic kicks in. SAP AI
+Core deployments frequently run the daemon and CLI in parallel against the
+same session store, so this ordering is a required stability guarantee.
 
 ### Session Schema
 

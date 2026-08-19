@@ -504,6 +504,63 @@ const result = await waitForEvent(MyEvent, (p) => p.toolName === 'bash', 5000);
 
 Subscriptions are acquired eagerly to prevent race conditions where events could be missed between the `subscribe()` call and the first `listen`. The handler is immediately added to the event handler set before the unsubscribe function is returned.
 
+### Bash / Shell Output Streaming
+
+The bash and shell tools (`src/tool/tools/bash.ts`, `src/tool/tools/shell.ts`) emit incremental `stdout` / `stderr` chunks on the event bus as they arrive from the underlying child process. The final aggregated `stdout` / `stderr` are still returned in the normal `ToolExecutionCompleted` payload; the streaming path is purely additive for TUI rendering of progress bars, `npm install` output, and long test runs (issue #1442).
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agentic Chat
+    participant Tool as Bash Tool
+    participant Reg as CommandLogRegistry<br/>(bash-streaming.ts)
+    participant Bus as Event Bus
+    participant TUI as TUI (useToolEvents)
+
+    Agent->>Tool: execute({ command })
+    Tool->>Bus: ToolExecutionStarted { toolId }
+    Bus->>TUI: ToolExecutionStarted -> addToolCall(row)
+    Tool->>Reg: registerCommandLog { pid, toolId, startedAt } -> logId
+    Note over Tool,Reg: registered BEFORE any 'data' handler fires
+
+    loop for every stdout / stderr 'data' event
+        Tool->>Reg: appendCommandLog(logId, chunk)
+        Tool->>Bus: BashOutputChunk { toolId, logId, stream, chunk }
+        Bus->>TUI: appendToolCallOutput(toolId, chunk)
+        Note over TUI: reducer APPEND_TOOL_CALL_OUTPUT<br/>live-appends to row.output
+    end
+
+    Tool->>Reg: markCommandLogFinished(logId)
+    Note over Reg: enters COMPLETED_LOG_RETENTION_MS<br/>window (60s) for reconnect replay
+    Tool->>Bus: ToolExecutionCompleted { toolId, result }
+    Bus->>TUI: updateToolCall(row, { status: 'completed', output: aggregated })
+    Note over TUI: final output replaces streamed chunks<br/>(may be truncated / normalised)
+```
+
+The `BashOutputChunk` payload is defined in `src/bus/index.ts:325`:
+
+```typescript
+export const BashOutputChunk = defineEvent(
+  'bash.output.chunk',
+  z.object({
+    toolId: z.string(),  // matches ToolExecutionStarted / Completed
+    logId: z.string(),   // matches command-log registry entry
+    stream: z.enum(['stdout', 'stderr']),
+    chunk: z.string(),
+    timestamp: z.number(),
+  })
+);
+```
+
+Design invariants of the command-log registry (`src/tool/tools/bash-streaming.ts`):
+
+1. **PID-reuse defence**: logs are keyed by a synthetic `logId` (nanoid) rather than the OS PID. `getCommandLogByPid(pid, startedAt)` cross-references the recorded PID plus `startedAt` timestamp, so a subsequent process that happens to reuse the same PID cannot collide with the earlier entry. Callers requiring a stable identifier must match on `logId`.
+2. **Probe-outage retention**: completed logs are retained for `COMPLETED_LOG_RETENTION_MS` (60 seconds) after `markCommandLogFinished`, so a TUI hub that briefly drops its subscription (probe outage, hot reload) can still fetch the tail on reconnect. Entries are dropped by `cleanupCompletedLogs`, which is auto-triggered on each new `registerCommandLog`.
+3. **Bounded memory**: each log has an in-memory append buffer capped at `MAX_LOG_BYTES` (32 KB). When the cap is exceeded, the oldest bytes are dropped (snapping forward to the next newline within 1 KB) and a `[... older output evicted from streaming buffer ...]` truncation marker is inserted. The authoritative full output still lives in the process's own `stdout` accumulator (bash.ts) or on disk (`persistLargeOutput`).
+4. **Telemetry-safe publish**: `BashOutputChunk.publish` is wrapped in `try { … } catch { /* never let telemetry take down a running command */ }` so a failing bus subscriber cannot tear down the running child process.
+5. **Abort cleanup**: `cleanupCommandLog(logId)` reaps a log unconditionally. The bash tool calls it on `close`, on `error`, and from the abort-signal handler, so a cancelled command does not leak into the registry.
+
+The TUI consumes the stream via `useToolEvents` (`src/cli/tui/hooks/useToolEvents.ts`), which subscribes to `BashOutputChunk` alongside `ToolExecutionStarted` / `Completed` / `Failed`. Chunks are dispatched into the `ChatContext` reducer as `APPEND_TOOL_CALL_OUTPUT`, which live-appends to the active row's `output` without moving the entry between the `activeToolCalls` and `completedToolCalls` buckets. On completion, the `ToolExecutionCompleted` handler replaces `output` with the final aggregated payload from the tool result — this may be truncated or normalised differently (carriage returns, head-and-tail elision) than the raw streamed chunks.
+
 ## Agent System
 
 > **Build status (2026-07-24):** the 2026-07-24 upstream sync (commit `530351f4`) destructively replaced `src/agent/index.ts` with a 3-line broken import stub (`import { newAgentPatterns } from 'packages/opencode/src/agent/agent';`). The agent-registry surface documented in this section — `AgentRegistry`, the five built-in agents, `stripInternalOptions`, `INTERNAL_OPTION_KEYS`, `getAgentRegistry` / `switchAgent` / `parseAgentMention`, and the `AgentSwitched` bus event — is currently unresolvable and breaks the build. Seven downstream modules import from `src/agent/index.js` and are all failing to type-check: `src/core/agenticChat.ts`, `src/core/streamingOrchestrator.ts`, `src/cli/commands/chat.ts`, `src/config/modes-migrator.ts`, `src/server/index.ts`, `src/tool/tools/task.ts`, and the tests in `src/agent/index.test.ts` / `src/core/__tests__/agenticChat.test.ts`. Autohealing must revert the file to its pre-sync content (parent commit `9f9fad90`); see the corresponding CHANGELOG `### Removed` entry for the full recovery specification. The rest of this section describes the intended runtime shape once the file is restored.
@@ -1150,6 +1207,35 @@ type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
 type PermissionDecision = 'allow' | 'deny' | 'ask';
 ```
 
+### Read-only mode enforcement
+
+`src/permission/index.ts` treats the session modes `ask` and `plan` as promises of read-only behaviour to the user. Under these modes, write-shaped tools are denied even when a broad wildcard rule like `"*": "allow"` would otherwise match. An explicit per-tool `allow` still wins so operators can opt individual tools back in without regressing on the read-only guarantee. This is important for SAP AI Core compliance workflows that rely on `ask` / `plan` for reviewable read-only runs.
+
+```typescript
+const READ_ONLY_MODES = new Set<string>(['ask', 'plan']);
+const WRITE_TOOLS = new Set<string>([
+  'write', 'edit', 'patch', 'shell', 'bash',
+  'kilo_edit', 'kilo_write', 'apply_patch',
+]);
+
+export function evaluate(input: {
+  tool: string;
+  mode: string;
+  rules: Record<string, 'allow' | 'ask' | 'deny'>;
+}): 'allow' | 'ask' | 'deny' {
+  if (READ_ONLY_MODES.has(input.mode) && WRITE_TOOLS.has(input.tool)) {
+    const explicit = input.rules[input.tool];
+    if (explicit === 'allow') {
+      return 'allow';
+    }
+    return 'deny';
+  }
+  return input.rules[input.tool] ?? input.rules['*'] ?? 'ask';
+}
+```
+
+`evaluate` defaults to `'ask'` when no rule matches so behaviour is safe by default. Exposed for tests and for callers (agent factory, hooks) that need to gate write-shaped tools without going through the full `PermissionManager.check()` flow.
+
 ### Doom Loop Detection
 
 The permission system detects repeated denials and configures mitigation:
@@ -1276,6 +1362,74 @@ The helpers above live in `src/mcp/client.ts`:
 
 When adding a new consumer of `getAllTools()`, import from `src/mcp/client.ts`
 rather than re-implementing the split/escape logic.
+
+## Persistent State and SQLite
+
+Alexi persists a small amount of long-lived state to the user's home directory. Two modules govern how that state is resolved and how the shared SQLite database is opened.
+
+### State directory resolution
+
+`src/core/global/paths.ts` transparently probes the preferred state directory (usually `$XDG_STATE_HOME/alexi`) for writability before use, and falls back to a secondary location when the primary is unwritable. This matters on containers, restricted user profiles, and VS Code Server on Windows where the preferred directory frequently is not writable; previously the CLI crashed on startup with an opaque `EACCES` / `EROFS`.
+
+```mermaid
+flowchart TD
+    A[resolveStateDir<br/>dataDir, preferred] --> B{XDG_STATE_HOME<br/>explicitly set?}
+    B -- yes --> C[fallback = undefined<br/>user's choice wins]
+    B -- no --> D["fallback = &lt;dataDir&gt;/state"]
+    C --> E[resolveState preferred, fallback]
+    D --> E
+    E --> F{fallback exists<br/>AND writable?<br/>sticky check}
+    F -- yes --> G[return fallback<br/>no flapping]
+    F -- no --> H[ready preferred:<br/>mkdirp + writable probe]
+    H -- ok --> I[return preferred]
+    H -- fail + no fallback --> J[throw]
+    H -- fail + fallback --> K[ready fallback]
+    K -- ok --> L[return fallback]
+    K -- fail --> J
+```
+
+Writability is checked with an exclusive-mode temp file (`wx` flag, filename `.alexi-write-<pid>-<uuid>`, mode `0o600`) so a stale probe file from a crashed run cannot mask a real permission problem. The fallback is **sticky**: once selected it is preferred on subsequent runs so the resolved state directory does not flap between locations across restarts. When `$XDG_STATE_HOME` was explicitly set by the user, no fallback is provided — the user's explicit choice wins and any failure is surfaced rather than silently redirected.
+
+### SQLite connection PRAGMAs
+
+`src/core/database/database.ts` produces the canonical ordered list of PRAGMA statements a caller should execute against whichever SQLite binding is in use (better-sqlite3, effect-sql, node:sqlite). Order matters: when two processes open the same database and one is racing to recover an abandoned WAL/SHM segment, the busy handler MUST already be installed before `journal_mode = WAL` runs — otherwise the recovering process can crash with `SQLITE_BUSY` before any retry logic kicks in.
+
+```typescript
+export const CONNECTION_PRAGMAS: readonly string[] = Object.freeze([
+  'PRAGMA busy_timeout = 5000',     // install busy handler FIRST
+  'PRAGMA journal_mode = WAL',      // may trigger WAL recovery
+  'PRAGMA synchronous = NORMAL',
+  'PRAGMA cache_size = -64000',
+  'PRAGMA foreign_keys = ON',
+  'PRAGMA wal_checkpoint(PASSIVE)',
+]);
+```
+
+`configureConnection(db, options?)` applies the sequence via a minimal `PragmaRunner` interface:
+
+```typescript
+export interface PragmaRunner {
+  run(sql: string): Promise<unknown> | unknown;
+}
+
+// better-sqlite3
+const db = new Database(filename);
+await configureConnection({ run: (sql) => db.exec(sql) });
+```
+
+`ownsWalInit` (default `true`) skips the `journal_mode = WAL` step for adapters that already ran it — you almost certainly want the default. SAP AI Core deployments frequently run the daemon and CLI in parallel against the same session store, so this ordering is a required stability guarantee.
+
+### Persistent snapshot-disable
+
+`src/core/snapshot.ts` persists the "snapshots disabled" flag under `~/.alexi/state/snapshot.json` (JSON key: `disabled`) so the choice survives CLI restart. A missing or unreadable file is treated as "not disabled" (snapshots on by default) so an unwritable state directory degrades gracefully rather than silently disabling snapshots. Public API: `disableSnapshots()`, `enableSnapshots()`, `shouldSnapshot()`, `SNAPSHOT_DISABLE_STATE_KEY` (`kilocode.snapshot.disabled`). The paired `pruneSnapshots(sessionId, keep = 20)` helper cleans stale snapshot / truncation files by `mtime`, oldest first.
+
+## Sandbox Git-Write Detection
+
+`src/kilocode/sandbox/git.ts` isolates classification logic for git subcommands that mutate the working tree, index, refs, or config. On macOS `sandbox-exec` (and analogous restricted environments), such commands can silently fail or succeed with unexpected side-effects. The shell tool (`src/tool/tools/shell.ts`) consults `requiresSandboxEscalation(command, sandbox)` when `ALEXI_SANDBOX=1` and escalates through the interactive permission prompt so the user is aware their sandbox is about to be punched through.
+
+Classification is deliberately broad — "when in doubt, escalate", not "only escalate on destructive commands". Read-only subcommands (`log`, `status`, `diff`, `show`, `ls-files`, `rev-parse`, …) are NOT included. Write-shaped subcommands: `add`, `am`, `apply`, `branch`, `checkout`, `cherry-pick`, `clean`, `commit`, `config`, `fetch`, `gc`, `init`, `merge`, `mv`, `pull`, `push`, `rebase`, `reflog`, `remote`, `reset`, `restore`, `revert`, `rm`, `stash`, `submodule`, `switch`, `tag`, `worktree`.
+
+`isGitWrite(command)` walks past leading global flags (`-C`, `-c`, `--git-dir`, `--work-tree`) before checking the subcommand token, so `git -C path subcommand ...` and `git --git-dir=... subcommand ...` classify correctly.
 
 ## Directory Structure
 

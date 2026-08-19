@@ -464,6 +464,32 @@ tool tests**. New streaming tools with progress events (audio generation,
 long-running search, streaming file transforms) should mirror the same three
 patterns rather than reinventing bus-subscription bookkeeping.
 
+The bash / shell tools follow the same three-part contract via
+`BashOutputChunk` (`src/bus/index.ts:325`) plus a process-local command-log
+registry at `src/tool/tools/bash-streaming.ts`. Tests at
+`tests/tool/tools/bash-streaming.test.ts` cover:
+
+1. **PID-reuse defence** — assert on `logId` correlation, not OS PID. Vary
+   `startedAt` when writing PID-reuse tests so a matching PID alone does NOT
+   surface the earlier entry.
+2. **Retention window** — `cleanupCompletedLogs(now)` accepts an explicit
+   timestamp so tests can be deterministic without `vi.useFakeTimers()`.
+3. **Byte-cap eviction** — assert on the literal
+   `[... older output evicted from streaming buffer ...]` marker; that
+   string is part of the observable contract for reconnecting TUI clients.
+4. **Reset between tests** — call `_resetStreamingStateForTests()` in
+   `beforeEach` because the registry is process-local and survives across
+   bash invocations by design.
+
+The TUI wiring (`APPEND_TOOL_CALL_OUTPUT` reducer action in `src/cli/tui/
+context/ChatContext.tsx`, `useToolEvents` subscription in `src/cli/tui/
+hooks/useToolEvents.ts`) is tested at `tests/cli/tui/ChatContext.test.tsx`
+and `tests/cli/tui/useToolEvents.test.tsx`. Key invariants: empty chunks
+are no-ops; chunks for already-completed rows are silently dropped;
+`ToolExecutionCompleted` replaces the streamed `output` with the aggregated
+result payload (which may be normalised differently — carriage-return
+collapsing, head-and-tail elision).
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:
