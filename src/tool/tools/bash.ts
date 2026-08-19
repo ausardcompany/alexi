@@ -33,6 +33,7 @@ import {
   markCommandLogFinished,
   registerCommandLog,
 } from './bash-streaming.js';
+import { LONG_RUNNING_THRESHOLD_MS, notifyInBackground } from '../../core/notifications.js';
 
 const BashParamsSchema = z.object({
   command: z.string().describe('The command to execute'),
@@ -473,7 +474,22 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
             exitCode: code,
             timestamp: Date.now(),
           });
+          // A detached command's final exit is, by definition, long-running
+          // (the user picked "Proceed" only after DETACH_PROMPT_MS). Fire a
+          // completion notification unconditionally for these — the same
+          // opt-in `notifications` config gate applies inside
+          // `notifyInBackground` so users who declined never see anything.
+          notifyInBackground('Command finished', params.description ?? params.command);
           return;
+        }
+
+        // Long-running foreground command: notify on completion so the
+        // user knows their `npm test` / `docker build` finished while
+        // they were doing something else. The threshold matches the
+        // exported constant so tests can validate the boundary.
+        const elapsed = Date.now() - startedAt;
+        if (elapsed >= LONG_RUNNING_THRESHOLD_MS) {
+          notifyInBackground('Command finished', params.description ?? params.command);
         }
 
         // Command finished BEFORE the user answered the detach prompt.
