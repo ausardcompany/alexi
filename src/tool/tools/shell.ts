@@ -217,7 +217,11 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
     // The detector caches its result for a short TTL, so calling this on
     // every invocation is cheap but still picks up profile changes.
     const shellInfo = detectShell();
-    const { file: shellFile, prefixArgs: shellPrefix } = shellSpawnArgs(shellInfo);
+    const {
+      file: shellFile,
+      prefixArgs: shellPrefix,
+      suffixArgs: shellSuffix = [],
+    } = shellSpawnArgs(shellInfo);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -235,7 +239,7 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
       // `%ComSpec%` on Windows). The command string is passed as a
       // single argument after the shell's "-c"/"-Command"/"/c" flag,
       // preserving quoting semantics equivalent to the previous path.
-      const proc = spawn(shellFile, [...shellPrefix, params.command], {
+      const proc = spawn(shellFile, [...shellPrefix, params.command, ...shellSuffix], {
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,

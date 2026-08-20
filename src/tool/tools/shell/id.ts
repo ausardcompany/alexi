@@ -209,18 +209,74 @@ export function detectShell(): ShellInfo {
 }
 
 /**
- * Return `[executable, [flag]]` suitable for `spawn(cmd, args, { shell: false })`
+ * Return `{ file, prefixArgs, suffixArgs? }` suitable for
+ * `spawn(file, [...prefixArgs, userCommand, ...suffixArgs], { shell: false })`
  * to invoke a single command string in the detected shell. Callers pass
- * the user command as the LAST element of the args array.
+ * the user command AFTER the `prefixArgs` and BEFORE the `suffixArgs`,
+ * so the user's script text remains byte-identical (no in-place mutation
+ * of the command string).
  *
  * PowerShell requires `-Command` (or `-c` shorthand) rather than the
  * POSIX `-c`, and expects the command as a single argument.
  * cmd.exe uses `/d /s /c "<cmd>"`. Everything else uses `-c`.
+ *
+ * PowerShell fail-fast semantics (Cline PR #13358 pattern for
+ * https://github.com/cline/cline/issues/13285): the `-Command` bootstrap
+ * sets `$ErrorActionPreference='Stop'` BEFORE invoking the user script
+ * as a scriptblock via `& { <user command> }`. This gives the invoked
+ * scriptblock fail-fast semantics (first non-terminating error
+ * terminates with a non-zero exit and a single error record) while
+ * keeping the user command:
+ *   - byte-identical (not string-mutated by us; passed as its own arg
+ *     that PowerShell joins between the opening `& {` and closing `}`),
+ *   - `param(...)`-compatible (param stays first-statement inside the
+ *     scriptblock braces, so scripts starting with `param($x = 5)` still
+ *     work — a plain top-level prepend would displace `param` and fail
+ *     with CommandNotFoundException),
+ *   - opt-out-able per-cmdlet with `-ErrorAction Continue` /
+ *     `-ErrorAction SilentlyContinue`, or globally by reassigning
+ *     `$ErrorActionPreference` inside the user script.
+ *
+ * Precedent: GitHub Actions prepends `$ErrorActionPreference = 'stop'`
+ * to every `powershell` / `pwsh` step
+ * (https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsshell),
+ * so model-authored PowerShell commands already run under these
+ * semantics in CI. Aligning the bash tool matches that contract.
+ *
+ * Deliberate tradeoffs (documented so the tradeoff is chosen, not
+ * accidental):
+ *   - `Stop` promotes every non-terminating error, not just per-item
+ *     pipeline floods. `Get-ChildItem -Recurse` crossing an
+ *     access-denied junction ("Application Data", "System Volume
+ *     Information") now aborts at the first denial with truncated
+ *     output and exit 1, where it previously completed with warnings.
+ *     Users who need partial results should add `-ErrorAction Continue`
+ *     to the specific cmdlet.
+ *   - On Windows PowerShell 5.1, in-script stderr redirection (`2>&1`,
+ *     `2>file`) of a succeeding native command wraps each stderr line
+ *     in a `NativeCommandError`; under `Stop` the first one terminates
+ *     the script. PowerShell 7.2+ exempts native stderr from the
+ *     preference (PowerShell/PowerShell#3996, #14273). This matches
+ *     GitHub Actions behaviour on 5.1 today.
  */
-export function shellSpawnArgs(info: ShellInfo): { file: string; prefixArgs: string[] } {
+export function shellSpawnArgs(info: ShellInfo): {
+  file: string;
+  prefixArgs: string[];
+  suffixArgs?: string[];
+} {
   switch (info.type) {
     case 'powershell':
-      return { file: info.path, prefixArgs: ['-NoProfile', '-Command'] };
+      // Bootstrap prelude: set fail-fast preference at the -Command
+      // scope, then open a scriptblock `& { ` that PowerShell will
+      // close with the trailing `}` suffix arg once it joins all
+      // -Command arguments. The user command sits verbatim between
+      // the opening brace and the closing brace, so `param(...)` still
+      // occupies first-statement position inside the scriptblock.
+      return {
+        file: info.path,
+        prefixArgs: ['-NoProfile', '-Command', "$ErrorActionPreference='Stop'; & {"],
+        suffixArgs: ['}'],
+      };
     case 'cmd':
       return { file: info.path, prefixArgs: ['/d', '/s', '/c'] };
     default:

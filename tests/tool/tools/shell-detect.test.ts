@@ -254,10 +254,18 @@ describe('shellSpawnArgs', () => {
     });
   });
 
-  it('emits -NoProfile -Command for PowerShell', () => {
+  it('emits -NoProfile -Command with fail-fast bootstrap and closing brace for PowerShell', () => {
+    // The PowerShell branch sets $ErrorActionPreference='Stop' at the
+    // -Command bootstrap scope and wraps the user command in a
+    // scriptblock `& { <user command> }` (Cline PR #13358 pattern).
+    // The user command itself is passed as a separate spawn arg
+    // between prefixArgs and suffixArgs so its text stays
+    // byte-identical (no in-place mutation, `param(...)` stays first
+    // statement inside the scriptblock).
     expect(shellSpawnArgs({ type: 'powershell', path: 'C:\\pwsh.exe' })).toEqual({
       file: 'C:\\pwsh.exe',
-      prefixArgs: ['-NoProfile', '-Command'],
+      prefixArgs: ['-NoProfile', '-Command', "$ErrorActionPreference='Stop'; & {"],
+      suffixArgs: ['}'],
     });
   });
 
