@@ -9,6 +9,21 @@ const TodoSchema = z.object({
   content: z.string().describe('Brief description of the task'),
   status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']).describe('Current status'),
   priority: z.enum(['high', 'medium', 'low']).describe('Priority level'),
+  /**
+   * Optional natural-language schedule (e.g. "in 5 minutes",
+   * "tomorrow at 9am", "daily at 9am"). When present, the todo is
+   * eligible to be promoted into a `ScheduledTask` executed by
+   * {@link ../../core/task-scheduler.ts}.
+   */
+  schedule: z
+    .string()
+    .optional()
+    .describe('Optional schedule: "in 5 minutes", "tomorrow at 9am", "daily at 9am"'),
+  /**
+   * Workspace identifier for scheduled tasks. Auto-populated by the
+   * scheduler at promotion time; agents do not need to fill this.
+   */
+  workspaceId: z.string().optional().describe('Workspace ID for scheduled tasks (auto-populated)'),
 });
 
 const TodoWriteParamsSchema = z.object({
