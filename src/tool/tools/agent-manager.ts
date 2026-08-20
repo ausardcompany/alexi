@@ -11,16 +11,8 @@ import { defineTool, type ToolResult } from '../index.js';
 // provider validate without provider-specific pre-processing.
 const AgentManagerParamsSchema = z.object({
   action: z.enum(['create', 'list', 'stop', 'status']).describe('Action to perform'),
-  sessionId: z
-    .string()
-    .nullable()
-    .optional()
-    .describe('Session ID for stop/status actions'),
-  worktreeId: z
-    .string()
-    .nullable()
-    .optional()
-    .describe('Worktree ID for session creation'),
+  sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
+  worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
   config: z
     .object({
       mode: z.string().nullable().optional().describe('Agent mode'),
