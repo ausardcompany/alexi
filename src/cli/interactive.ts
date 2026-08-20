@@ -43,6 +43,7 @@ import {
   isPermissionPromptSupported,
 } from '../permission/index.js';
 import { getMcpClientManager, loadMcpConfig, type McpServerConfig } from '../mcp/index.js';
+import { startScheduler, stopScheduler } from '../core/task-scheduler.js';
 import { getDoctor } from '../doctor/index.js';
 import { killAllTracked } from '../tool/tools/background-process.js';
 import { getCostTracker } from '../core/costTracker.js';
@@ -2383,6 +2384,11 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
 
   printHeader(state);
 
+  // Start the durable task scheduler so tasks promoted via `todowrite`
+  // (with a `schedule` field) execute at their due time even across
+  // interactive sessions. Idempotent — safe if already running.
+  startScheduler();
+
   // Start permission prompt handler if in interactive terminal
   let permissionPromptCleanup: (() => void) | undefined;
   if (isPermissionPromptSupported()) {
@@ -2517,6 +2523,7 @@ export async function startInteractive(options: InteractiveOptions = {}): Promis
     if (permissionPromptCleanup) {
       permissionPromptCleanup();
     }
+    stopScheduler();
     console.log(c('gray', '\n\n  Goodbye!\n'));
     killAllTracked()
       .catch(() => undefined)
