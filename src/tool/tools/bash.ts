@@ -228,7 +228,11 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
     // executed the command (helpful for debugging shell-specific
     // syntax across platforms).
     const shellInfo = detectShell();
-    const { file: shellFile, prefixArgs: shellPrefix } = shellSpawnArgs(shellInfo);
+    const {
+      file: shellFile,
+      prefixArgs: shellPrefix,
+      suffixArgs: shellSuffix = [],
+    } = shellSpawnArgs(shellInfo);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -247,7 +251,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
       // `%ComSpec%` — usually `cmd.exe` — on Windows). Passing the
       // command as a single argument after the shell's "-c" flag keeps
       // quoting semantics identical to the previous `shell: true` path.
-      const proc = spawn(shellFile, [...shellPrefix, params.command], {
+      const proc = spawn(shellFile, [...shellPrefix, params.command, ...shellSuffix], {
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
