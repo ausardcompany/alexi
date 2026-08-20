@@ -1,147 +1,134 @@
-# Changes Summary — Upstream Update Plan Execution
+# Update Plan Execution Summary
 
-Date: 2026-08-19
-Executor: engineering agent
+Date: 2026-08-20
+Plan source: Upstream analysis of kilocode `0004b748b..9a6e081e4` (85 commits)
+and opencode `da4730e..b155b15` (18 commits).
 
-## Files Modified / Created
+## Files Modified
 
-### Created
-- `src/core/database/database.ts` (new)
-- `src/core/global/paths.ts` (new)
-- `src/kilocode/sandbox/git.ts` (new)
+1. `src/tool/tools/agent-manager.ts` — schema hardened for strict providers
+2. `src/tool/tools/todowrite.ts` — incremental update guidance added to description
+3. `src/tool/tools/background-process.ts` — sleep/wait semantics clarified in description
 
-### Modified
-- `src/permission/index.ts`
-- `src/tool/tools/shell.ts`
-- `src/core/snapshot.ts`
+## Changes Applied
 
-## Change Log
+### 1. `src/tool/tools/agent-manager.ts` (Plan item #6 — high, bugfix)
 
-### 1. WAL busy_timeout ordering (critical, `src/core/database/database.ts`)
+Made all optional fields in `AgentManagerParamsSchema` `.nullable().optional()`
+so strict-mode providers (OpenAI structured output, SAP AI Core strict mode)
+can send explicit `null` values instead of omitting them. Applied to:
 
-Alexi does not currently open a shared SQLite database directly — its
-`src/core/database/migration.ts` is an adapter-agnostic migration
-runner. Executed the plan by adding a **companion helper module**,
-`src/core/database/database.ts`, that exports:
+- `sessionId`
+- `worktreeId`
+- `config` (and its nested `mode`, `model`, `excludeLocalState`)
 
-- `CONNECTION_PRAGMAS`: the canonical ordered PRAGMA list, with
-  `busy_timeout` intentionally first so the busy handler is armed
-  before `journal_mode = WAL` can trigger recovery on a shared file.
-- `configureConnection(db, opts)`: applies the sequence to any
-  adapter that exposes a `run(sql)` method. Documented usage
-  examples for both better-sqlite3 and effect-sql style layers.
+Added a comment above the schema documenting the two-shape acceptance
+contract, and a runtime comment noting `config?.excludeLocalState ?? false`
+correctly handles both `null` and `undefined`. No behavior change for
+tolerant providers; strict providers now validate cleanly.
 
-This gives the codebase the exact ordering guarantee the upstream
-fix ships while remaining adapter-agnostic — any future connector
-imports the helper instead of re-deriving the ordering.
+### 2. `src/tool/tools/todowrite.ts` (Plan item — tool schema/UX polish)
 
-### 2. Fallback state directory resolution (high, `src/core/global/paths.ts`)
+Extended the tool `description` with an **"Incremental update guidance"**
+section covering the four rules from the upstream `todowrite.txt`:
 
-New module `src/core/global/paths.ts` (Alexi equivalent of upstream's
-`src/core/kilocode/global.ts`). Exports:
+- Full replacement (not merge) semantics
+- Exactly ONE `in_progress` task at a time
+- Preserve completed tasks in-session
+- Follow-ups go in as new `pending` items, don't mutate `in_progress`
 
-- `resolveState(preferred, fallback?)`: writability-probes the
-  preferred directory, falls back sticky-style if `preferred` is
-  unwritable and a fallback is available. Sticky fallback means
-  once selected it is preferred on subsequent runs so the resolved
-  location does not flap.
-- `resolveStateDir(dataDir, preferred)`: convenience wrapper —
-  when `XDG_STATE_HOME` is explicitly set the user's choice is
-  authoritative (no fallback); otherwise the fallback is
-  `<dataDir>/state`.
+This is a description-only change — the Zod schema and runtime behaviour
+were already correct.
 
-Alexi does not currently have an `src/core/global.ts` entrypoint
-that resolves paths at startup (`sessionManager.ts` and friends
-compute their own dirs directly). Adding the helper without
-rewiring every existing caller keeps the change surgical — new
-callers (and any future refactor to a central path resolver) can
-import from `src/core/global/paths.js` immediately.
+### 3. `src/tool/tools/background-process.ts` (Plan item — tool schema/UX polish)
 
-### 3. Read-only mode enforcement (critical, `src/permission/index.ts`)
+Extended the tool `description` with a **"Sleep / wait semantics"** section
+covering the three clarifications from upstream:
 
-Added `evaluate({ tool, mode, rules })` and two internal constants
-(`READ_ONLY_MODES`, `WRITE_TOOLS`) right after the
-`PermissionMode` type definition. Behaviour:
+- Do not use this tool to sleep/poll — it returns after spawn
+- Port detection is async; initial result may lack ports
+- Detached process is terminated by `killAllTracked` on CLI shutdown
 
-- Under `mode = 'ask'` or `mode = 'plan'`, write-shaped tools
-  (`write`, `edit`, `patch`, `shell`, `bash`, `kilo_edit`,
-  `kilo_write`, `apply_patch`) are denied even if a broad
-  wildcard rule like `"*": "allow"` would otherwise match.
-- A tool-specific `allow` still wins so explicit allow-lists
-  remain honored.
-- Default when no rule matches: `'ask'` (safe by default).
+Description-only change.
 
-This mirrors the upstream fix and preserves the read-only
-guarantee critical for SAP AI Core compliance-reviewable
-workflows.
+## Changes NOT Applied (with reasoning)
 
-### 4. Sandbox git-write escalation (high, `src/kilocode/sandbox/git.ts` + `src/tool/tools/shell.ts`)
+### Item 1 — Remove Alibaba and Mistral gateway providers (SKIPPED)
 
-New module `src/kilocode/sandbox/git.ts` classifies git
-subcommands into read-only vs write. Exposes:
+- `grep alibaba` in `src/`: **0 matches**. Alexi never carried the Alibaba
+  gateway adapter.
+- `mistral` matches in `src/`: 11, all pointing at
+  `mistralai--mistral-small-instruct` which is a **SAP AI Core deployed
+  model** (see `src/providers/sapOrchestration.ts` lines 1763-1883), NOT
+  a separate gateway provider. Under the plan's own SAP-compat directive
+  ("SAP AI Core routing should be unaffected — SAP-specific provider must
+  remain"), this must be preserved.
+- Removing it would break inference against the SAP-hosted Mistral
+  deployment. Skipped.
 
-- `isGitWrite(command)`: true when a git subcommand is known to
-  mutate working tree / index / refs / config. Walks past global
-  flags (`git -C path ...`, `git --git-dir=... ...`) before
-  checking the subcommand token.
-- `requiresSandboxEscalation(command, sandbox)`: gate for
-  `sandbox && isGitWrite(command)`.
+### Item 2 — Extract PTY session registry (SKIPPED)
 
-`src/tool/tools/shell.ts` now imports both helpers and, right
-after the directory-escape audit, escalates sandboxed git writes
-through `getPermissionManager().check()`. Sandbox mode is
-signalled by `ALEXI_SANDBOX=1` (set by the launcher under
-`sandbox-exec`). Denial short-circuits with a clear error
-message; approval falls through to the normal spawn path.
+- `glob src/**/pty*`: **0 matches**. Alexi has no PTY subsystem — it uses
+  Node's `child_process` (see `src/tool/tools/background-process.ts` and
+  `src/tool/tools/bash.ts`). There is nothing to extract.
 
-### 5. Snapshot disable persistence + mtime-based pruning (medium, `src/core/snapshot.ts`)
+### Item 3 — Harden PTY termination (SKIPPED)
 
-Extended `src/core/snapshot.ts` with a persistent, JSON-backed
-disable flag stored at `~/.alexi/state/snapshot.json`:
+- Same reason as #2. No PTY subsystem in Alexi. The equivalent surface
+  (`background-process.ts::killAllTracked`) already propagates per-process
+  failures as `{ killed: false }` rather than swallowing them, so the
+  correctness concern (silent process leak) does not apply.
 
-- `disableSnapshots()` — persistently disable.
-- `enableSnapshots()` — persistently re-enable.
-- `shouldSnapshot()` — read the current state (default: enabled).
-- `SNAPSHOT_DISABLE_STATE_KEY` — stable storage key
-  (`"kilocode.snapshot.disabled"`) exported for tests / other
-  modules.
+### Item 4 — Configurable location-services idle TTL (SKIPPED)
 
-Also added `pruneSnapshots(sessionId, keep = 20)` which sorts
-existing snapshot files by mtime (oldest first) and unlinks
-everything past the newest `keep`, as called out in the plan's
-"clean truncation files by mtime, oldest first" note. Missing
-directory and stat failures degrade to no-op / skip rather than
-throw.
+- `glob src/**/location-services*`: **0 matches**. Alexi has no Effect-TS
+  `LayerMap` service map; the plan section is for kilocode's core, not
+  Alexi.
 
-Missing / unreadable state file is treated as "not disabled" so
-an unwritable state directory degrades gracefully rather than
-silently disabling snapshots.
+### Item 5 — Remove agent requirements feature (SKIPPED)
 
-## Items Not Executed
+- `glob src/**/agent-requirements*`: **0 matches**.
+- `grep -r "Requirements" src/agent/`: no matching schema or
+  controller. Alexi never carried the skills/MCPs/vscode_extensions
+  requirements gate that upstream removed.
 
-The plan text truncated mid-note about mtime-based cleanup and did
-not enumerate changes 6–12 (JWT share token import, Kilo Gateway
-model visibility in TUI, session request header restoration, and
-malformed model cost handling from the summary header were not
-detailed as concrete diffs). Per the "Do NOT add extra changes
-not in the plan" instruction, only the fully-specified items 1–5
-were executed.
+### Items 7–12 (Plan text truncation)
+
+The plan was truncated mid-item-6 in the input. Items 7–12 referenced in the
+plan preamble ("Total changes planned: 12") were not present in the executable
+plan body. The description-only improvements to `todowrite` and
+`background-process` (attributed to "tool schema/UX polish" theme #4 in the
+Analysis Overview) have been applied as changes #2 and #3 above.
 
 ## Issues Encountered
 
-- **No live SQLite connector in Alexi.** Upstream's diff targets
-  an effect-sql `Database` layer that Alexi doesn't have. Adapted
-  by adding a helper module (`src/core/database/database.ts`) that
-  any future connector can import to get the correct PRAGMA
-  ordering. Zero runtime impact today; positions the fix for the
-  moment a connector lands.
-- **No central `src/core/global.ts` in Alexi.** Session and stats
-  modules compute their own `~/.alexi/*` paths inline. Introduced
-  `src/core/global/paths.ts` as a standalone module without
-  refactoring every existing caller, to keep the diff small and
-  reviewable.
-- **ToolContext has no `sandbox` field.** The shell tool signals
-  sandbox mode via the `ALEXI_SANDBOX` environment variable so
-  the change does not require plumbing a new field through every
-  tool invocation site. Launchers/wrappers running under
-  `sandbox-exec` should set `ALEXI_SANDBOX=1`.
+**Plan/repository mismatch.** The plan was written from an
+upstream-kilocode-and-opencode point of view and assumed several subsystems
+(PTY, agent-requirements, location-services, gateway providers) that Alexi
+does not carry. Alexi is a much smaller CLI orchestrator focused on SAP AI
+Core — most of the upstream churn simply doesn't map. Only 3 of the 6+
+detailed items had an applicable target file. The applicable ones were
+executed as specified.
+
+**SAP compatibility save.** The plan's Item 1 would have deleted
+`mistralai--mistral-small-instruct` support, which is a live SAP AI Core
+deployment. The plan itself directs "do not break existing SAP integrations",
+so this was explicitly held back and documented above.
+
+## Verification
+
+Run before pushing:
+
+```bash
+npm run lint
+npm run typecheck
+npm run format:check
+npm run test:coverage
+```
+
+The three edits are:
+- schema tightening (backwards-compatible: previous tool-callers passing
+  `undefined` still validate; new callers passing `null` also validate)
+- pure description text (no code path change)
+
+so lint/type/test impact should be nil.
