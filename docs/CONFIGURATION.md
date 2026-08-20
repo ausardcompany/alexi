@@ -59,6 +59,16 @@ Maximum size in megabytes for image attachments. Defaults to 20MB if not specifi
 export ALEXI_MAX_IMAGE_SIZE_MB=20
 ```
 
+#### ALEXI_NO_NOTIFICATIONS
+
+Ephemeral opt-out for desktop notifications. When set to `1`, the notifications module treats the current context as non-interactive and silently skips every dispatch, regardless of the persistent `notifications: allow` config setting. Use this to silence notifications for a single session (`alexi chat -m "..."`) without editing `~/.alexi/config.json`. Any other value (including empty string) is ignored.
+
+```bash
+export ALEXI_NO_NOTIFICATIONS=1
+```
+
+See [Native Notifications](#native-notifications-notifications) below for the full decision matrix.
+
 #### SAP_PROXY_BASE_URL
 
 Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
@@ -198,6 +208,8 @@ interface UserConfig {
   mcp_tool_display?: 'expanded' | 'collapsed'; // Upstream snake_case alias for
                                                //   cross-tool config portability
   persistAuthTokens?: boolean;    // Cache SAP AI Core OAuth tokens on disk
+  notifications?: 'allow' | 'deny' | 'ask';   // Desktop-notification consent —
+                                              //   see Native Notifications below
   [key: string]: unknown;         // Extensible for custom settings
 }
 ```
@@ -342,6 +354,58 @@ Security-sensitive deployments can opt out:
 
 When disabled, every session performs a fresh authentication and no tokens
 are written to disk. Non-boolean values fall back to `true`.
+
+### Native Notifications (`notifications`)
+
+Controls whether Alexi surfaces desktop notifications when a streaming chat completes cleanly or when a long-running bash command finishes. Persisted under the `notifications` key in `~/.alexi/config.json` (see [`src/core/notifications.ts`](../src/core/notifications.ts) and the [API reference](API.md#native-notifications-api)).
+
+Accepted values:
+
+| Value | Behaviour |
+|-------|-----------|
+| `allow` | Notifications dispatch via `node-notifier` on every completion. |
+| `deny` | Notifications are suppressed silently. `node-notifier` is never loaded. |
+| `ask` (or unset) | On the first interactive call, Alexi prompts via `@inquirer/prompts` `confirm` and persists the answer. Non-interactive contexts silently skip without prompting. |
+
+Any other value coerces to `ask` when read.
+
+```jsonc
+{
+  "notifications": "allow"
+}
+```
+
+**Non-interactive short-circuits.** Even with `notifications: allow`, dispatch is suppressed when any of the following holds so agent workflows and CI runs never trigger a surprise desktop alert:
+
+- `ALEXI_NO_NOTIFICATIONS=1` is set.
+- `CI` is set to any value other than `0` / `false`.
+- Either `process.stdin` or `process.stdout` is not a TTY.
+
+**Which events fire.** Two internal call sites currently emit notifications:
+
+- `streamChat` fires `Alexi: Task completed` when the streaming loop exits via the `completedCleanly` branch. Aborts, provider errors, context-overflow retries, and rate-limit backoffs do NOT fire — the "task completed" signal is truthful.
+- The `bash` tool fires `Command finished: <description or command>` when either the command detached before exit, OR the foreground elapsed time reached the exported `LONG_RUNNING_THRESHOLD_MS` (30 seconds). Short-running foreground commands (`ls`, `git status`) never fire.
+
+Both events resolve the same `notifications` key on every call, so a single `deny` decision silences both surfaces and a single `allow` re-enables both. Editing the key from `deny` to `allow` mid-session takes effect on the next event without any restart.
+
+**Safety guarantee.** All errors — a missing native binary (`terminal-notifier`, `notify-send`, `snoretoast`), a failing `node-notifier` load, a broken inquirer prompt, an unwritable home directory — are swallowed at `logger.debug` level. No notification failure can throw or take down the CLI.
+
+**Runtime dependency.** `node-notifier@^10.0.1` is loaded via a cached dynamic import on the first `allow` call, so users who deny never pay the native-binary probe cost.
+
+**Example: disable notifications on a shared box:**
+
+```jsonc
+{
+  "notifications": "deny"
+}
+```
+
+**Example: disable via environment variable (no persistent change):**
+
+```bash
+export ALEXI_NO_NOTIFICATIONS=1
+alexi chat -m "..."
+```
 
 ## Routing Configuration
 

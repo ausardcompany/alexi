@@ -414,6 +414,146 @@ Key patterns:
 3. **Retention window.** Pass an explicit `now` to `cleanupCompletedLogs(now)` rather than using `vi.useFakeTimers()`; the helper accepts a timestamp so tests can be deterministic without touching the global clock.
 4. **Byte cap eviction.** Assert on the `[... older output evicted from streaming buffer ...]` marker literally — that string is part of the observable contract for reconnecting TUI clients.
 
+### Testing Native Notifications
+
+Tests at `tests/core/notifications.test.ts` and `tests/core/streamingOrchestrator.notifications.test.ts` cover the notification dispatch and its integration with the streaming orchestrator. `tests/tool/tools/bash-notifications.test.ts` covers the bash-tool completion trigger.
+
+Three concerns dominate the notification test suite: (1) never touch the real user `~/.alexi/config.json`, (2) never dispatch to a real desktop notifier, and (3) exercise the interactive / non-interactive branches deterministically.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+let tmpHome: string;
+let originalHome: string | undefined;
+let originalCi: string | undefined;
+let originalDisable: string | undefined;
+
+beforeEach(() => {
+  // Redirect HOME to a temp dir so tests never touch a real user config.
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-notifications-'));
+  originalHome = process.env.HOME;
+  originalCi = process.env.CI;
+  originalDisable = process.env.ALEXI_NO_NOTIFICATIONS;
+  process.env.HOME = tmpHome;
+  delete process.env.CI;
+  delete process.env.ALEXI_NO_NOTIFICATIONS;
+});
+
+afterEach(() => {
+  // Restore every mutated env var (delete when it was previously unset).
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  // ...same pattern for CI and ALEXI_NO_NOTIFICATIONS...
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  vi.restoreAllMocks();
+});
+
+async function freshImport() {
+  vi.resetModules();
+  return import('../../src/core/notifications.js');
+}
+
+describe('notifications', () => {
+  it('exports the documented 30s long-running threshold', async () => {
+    const mod = await freshImport();
+    expect(mod.LONG_RUNNING_THRESHOLD_MS).toBe(30_000);
+  });
+
+  it('dispatches to the injected notifier on allow', async () => {
+    const mod = await freshImport();
+    mod.setNotificationDecision('allow');
+    const notifier = { notify: vi.fn((_opts, cb) => cb?.(null)) };
+    const ok = await mod.sendNotification('t', 'm', { __notifierOverride: notifier });
+    expect(ok).toBe(true);
+    expect(notifier.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 't', message: 'm' }),
+      expect.any(Function)
+    );
+  });
+
+  it('resolves false without throwing when the notifier throws synchronously', async () => {
+    const mod = await freshImport();
+    mod.setNotificationDecision('allow');
+    const notifier = { notify: vi.fn(() => { throw new Error('boom'); }) };
+    const ok = await mod.sendNotification('t', 'm', { __notifierOverride: notifier });
+    expect(ok).toBe(false);
+  });
+});
+```
+
+Key patterns:
+
+1. **Redirect `HOME` per-test.** `~/.alexi/config.json` lives under `HOME` and the notifications module reads it on every call. Redirect via `process.env.HOME = tmpHome` in `beforeEach` and restore in `afterEach` (delete if previously unset) so parallel tests do not race on the real user config.
+2. **`vi.resetModules()` + dynamic import.** The notifications module caches the loaded `node-notifier` handle across calls. `resetModules()` + `await import(...)` gives every test a fresh cache so ordering is not observable.
+3. **Use `__notifierOverride` / `__askOverride`.** These test-only escape hatches are the supported API for driving dispatch without touching a real desktop or a real inquirer prompt. Never stub `@inquirer/prompts` or `node-notifier` directly.
+4. **Test the `ask -> interactive` gate with `process.stdin.isTTY` mocks.** `isInteractiveEnv()` inspects `process.stdin.isTTY` and `process.stdout.isTTY`; use `Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })` inside the test and restore in `afterEach`.
+5. **Assert `false` for every non-interactive short-circuit.** `CI=1`, `ALEXI_NO_NOTIFICATIONS=1`, and TTY-absent must all resolve `false` without persisting a decision — a subsequent interactive run must still see `'ask'`.
+6. **Assert the orchestrator gate.** `tests/core/streamingOrchestrator.notifications.test.ts` asserts that `streamChat` fires `notifyInBackground` only on `completedCleanly`, not on abort or provider error. Use a fake provider that yields chunks and then either resolves (clean) or rejects (error).
+7. **Assert the bash gate.** `tests/tool/tools/bash-notifications.test.ts` uses a fake clock (`vi.useFakeTimers()` with `vi.advanceTimersByTime`) to push a foreground command's elapsed time past `LONG_RUNNING_THRESHOLD_MS` and assert on the resulting notification. Short commands (< 30 s) must NOT fire.
+
+### Testing PowerShell fail-fast bootstrap
+
+`tests/tool/tools/shell/powershell-fail-fast.test.ts` end-to-end drives a real `pwsh` (or `powershell.exe` on Windows) to regression-guard the `shellSpawnArgs` PowerShell branch. The suite self-skips when no PowerShell binary is on PATH, so POSIX CI runners without pwsh installed stay green.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { shellSpawnArgs } from '../../../../src/tool/tools/shell/id.js';
+
+function findPowerShell(): string | undefined {
+  for (const cmd of ['pwsh', 'powershell.exe', 'powershell']) {
+    const probe = spawnSync(cmd, ['-NoProfile', '-Command', 'Write-Output ok'], {
+      encoding: 'utf8',
+    });
+    if (probe.status === 0 && probe.stdout.trim() === 'ok') return cmd;
+  }
+  return undefined;
+}
+
+const pwshCmd = findPowerShell();
+const describePwsh = pwshCmd ? describe : describe.skip;
+
+function runViaShellSpawnArgs(userCommand: string) {
+  const { prefixArgs, suffixArgs = [] } = shellSpawnArgs({
+    type: 'powershell',
+    path: pwshCmd as string,
+  });
+  return spawnSync(pwshCmd as string, [...prefixArgs, userCommand, ...suffixArgs], {
+    encoding: 'utf8',
+  });
+}
+
+describePwsh('shellSpawnArgs powershell fail-fast', () => {
+  it('exits non-zero on the FIRST non-terminating error', () => {
+    const result = runViaShellSpawnArgs('Get-Item /nonexistent/path/xyzzy');
+    expect(result.status).not.toBe(0);
+  });
+
+  it('opt-out with -ErrorAction Continue restores partial-result behaviour', () => {
+    const result = runViaShellSpawnArgs(
+      'Get-Item /nonexistent/xyzzy -ErrorAction Continue; Write-Output done'
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('done');
+  });
+
+  it('scripts starting with param(...) still work', () => {
+    const result = runViaShellSpawnArgs('param($x = 5) Write-Output "x=$x"');
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('x=5');
+  });
+});
+```
+
+Key patterns:
+
+1. **Self-skip when pwsh is unavailable.** Use `describePwsh = pwshCmd ? describe : describe.skip` so the file compiles and imports on every platform but only asserts when there is a real shell to drive.
+2. **Reuse `shellSpawnArgs` exactly as bash.ts does.** Destructure `prefixArgs` and `suffixArgs = []` and spawn `[...prefixArgs, userCommand, ...suffixArgs]` — asserting on the return value directly guarantees the tests catch any drift between the tool code and the shell binding.
+3. **Assert the four contract properties.** Fail-fast exit code, bounded stderr (single error record), successful commands still succeed, per-cmdlet `-ErrorAction` opt-out, and `param(...)` compatibility. The shape-only assertions on `shellSpawnArgs` (no shell spawn required) live in `tests/tool/tools/shell-detect.test.ts`.
+
 ### Testing TUI Chat Reducer for Streaming
 
 The `ChatContext` reducer (`src/cli/tui/context/ChatContext.tsx`) exposes `APPEND_TOOL_CALL_OUTPUT` for live-appending bash / shell chunks to active tool rows. Tests at `tests/cli/tui/ChatContext.test.tsx` cover the reducer branches and the `useToolEvents` wiring at `tests/cli/tui/useToolEvents.test.tsx` covers the bus-to-reducer dispatch:

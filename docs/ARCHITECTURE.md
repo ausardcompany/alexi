@@ -183,6 +183,45 @@ Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `
 | `apply-patch` | `apply-patch.ts` | write | Apply code patches |
 | `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
 
+#### Shell detection and PowerShell fail-fast bootstrap
+
+The `bash` and `shell` tools do NOT rely on `spawn(..., { shell: true })`. They resolve the shell binary themselves via `detectShell()` (`src/tool/tools/shell/id.ts`), then compose a `spawn(file, [...prefixArgs, userCommand, ...suffixArgs], { shell: false })` invocation using `shellSpawnArgs(info)`. This gives the tools three properties `shell: true` could not:
+
+1. **The tool description knows which shell it is talking to.** `shellType` is emitted on `BashResult` so debuggers, tests, and the TUI can display "ran in `pwsh`" vs "ran in `bash`".
+2. **Byte-identical passthrough.** The user's command string is passed as its own `spawn` argument. Nothing rewrites it; nothing quotes it. Multibyte characters, embedded quotes, and `param(...)` blocks survive intact.
+3. **Per-shell semantics.** `shellSpawnArgs` returns a different prelude for each shell.
+
+The `shellSpawnArgs(info)` contract (`src/tool/tools/shell/id.ts:262`):
+
+```typescript
+export function shellSpawnArgs(info: ShellInfo): {
+  file: string;
+  prefixArgs: string[];
+  suffixArgs?: string[];
+};
+```
+
+- **POSIX shells** (`bash`, `zsh`, `fish`, `sh`, unknown): returns `{ file, prefixArgs: ['-c'] }`. Command is `spawn(file, ['-c', userCommand], ...)`.
+- **cmd.exe**: returns `{ file, prefixArgs: ['/d', '/s', '/c'] }`. Command is `spawn(file, ['/d', '/s', '/c', userCommand], ...)`.
+- **PowerShell** (`pwsh`, `powershell.exe`): returns `{ file, prefixArgs: ['-NoProfile', '-Command', "$ErrorActionPreference='Stop'; & {"], suffixArgs: ['}'] }`. Command is `spawn(file, ['-NoProfile', '-Command', "$ErrorActionPreference='Stop'; & {", userCommand, '}'], ...)`.
+
+The PowerShell branch is the interesting one. It wraps every user command in a scriptblock `& { <user command> }` that runs under `$ErrorActionPreference='Stop'`. This is the Cline PR #13358 pattern for cline/cline#13285 (mirrored in alexi issue #1456) and it gives PowerShell commands **fail-fast semantics**: the first non-terminating error terminates with a non-zero exit and a single error record, matching what a naive user expects when they run a broken pipeline.
+
+Three properties are preserved deliberately:
+
+- **The user command is byte-identical.** It is passed as its own `spawn` argument that PowerShell joins between the opening `& {` and closing `}`. Alexi never mutates the string.
+- **`param(...)` scripts still work.** Because `param` occupies the first-statement position INSIDE the scriptblock braces, scripts starting with `param($x = 5)` still parse. A naive top-level prepend would displace `param` and fail with `CommandNotFoundException`.
+- **Per-cmdlet opt-out is intact.** Users who need partial results from an intentionally noisy command can add `-ErrorAction Continue` / `-ErrorAction SilentlyContinue` to the specific cmdlet, or reassign `$ErrorActionPreference` inside their script to restore the old non-fail-fast behaviour.
+
+**Tradeoffs** (documented so the tradeoff is chosen, not accidental):
+
+- `Stop` promotes every non-terminating error, not just per-item pipeline floods. `Get-ChildItem -Recurse` crossing an access-denied junction ("Application Data", "System Volume Information") now aborts at the first denial with truncated output and exit 1, where it previously completed with warnings. Users who need partial results add `-ErrorAction Continue` to the specific cmdlet.
+- On Windows PowerShell 5.1, in-script stderr redirection (`2>&1`, `2>file`) of a succeeding native command wraps each stderr line in a `NativeCommandError`; under `Stop` the first one terminates the script. PowerShell 7.2+ exempts native stderr from the preference (PowerShell/PowerShell#3996, #14273). This matches GitHub Actions behaviour on 5.1 today.
+
+**Precedent.** GitHub Actions prepends `$ErrorActionPreference = 'stop'` to every `powershell` / `pwsh` step ([workflow-syntax docs](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsshell)), so model-authored PowerShell commands already run under these semantics in CI. Aligning the bash / shell tools matches that contract, so the same PowerShell script produces the same behaviour whether Alexi runs it locally or via a CI workflow step.
+
+**Regression tests.** `tests/tool/tools/shell/powershell-fail-fast.test.ts` end-to-end-drives `pwsh` (skipped when no `pwsh` / `powershell.exe` is on PATH) and asserts on all four behaviours: fail-fast exit-code, single-error-record bounded stderr, successful commands still succeed (no false-positive Stop), `-ErrorAction Continue` opt-out, and `param(...)` compatibility.
+
 #### Indexing config: custom file extensions
 
 `glob`, `grep`, and `codesearch` extend their default extension whitelist
@@ -560,6 +599,98 @@ Design invariants of the command-log registry (`src/tool/tools/bash-streaming.ts
 5. **Abort cleanup**: `cleanupCommandLog(logId)` reaps a log unconditionally. The bash tool calls it on `close`, on `error`, and from the abort-signal handler, so a cancelled command does not leak into the registry.
 
 The TUI consumes the stream via `useToolEvents` (`src/cli/tui/hooks/useToolEvents.ts`), which subscribes to `BashOutputChunk` alongside `ToolExecutionStarted` / `Completed` / `Failed`. Chunks are dispatched into the `ChatContext` reducer as `APPEND_TOOL_CALL_OUTPUT`, which live-appends to the active row's `output` without moving the entry between the `activeToolCalls` and `completedToolCalls` buckets. On completion, the `ToolExecutionCompleted` handler replaces `output` with the final aggregated payload from the tool result — this may be truncated or normalised differently (carriage returns, head-and-tail elision) than the raw streamed chunks.
+
+## Native OS Notifications
+
+Alexi surfaces desktop notifications when a streaming chat completes cleanly or when a long-running bash command finishes. The implementation lives in `src/core/notifications.ts` and is wired into `src/core/streamingOrchestrator.ts` and `src/tool/tools/bash.ts`.
+
+### Design goals
+
+The module has three responsibilities that are worth stating explicitly because they inform every branch of the code:
+
+1. **Never crash the CLI.** A missing native binary (`terminal-notifier`, `notify-send`, `snoretoast`), a broken `node-notifier` load, a platform-specific dispatch error, or an unwritable config file all resolve `false` after `logger.debug`. There is no code path in which a failed notification can throw.
+2. **Never surprise CI or agents.** Non-interactive contexts (no TTY, `CI=1`, `ALEXI_NO_NOTIFICATIONS=1`, or an `ask` decision with no attached terminal) short-circuit before any prompt or dispatch. Agent workflows and GitHub Actions runs never trigger a desktop alert.
+3. **Ask once, remember forever.** The first interactive call with an unset `notifications` key prompts via `@inquirer/prompts` `confirm`; the answer is persisted to `~/.alexi/config.json` under the `notifications` key as `allow` or `deny`. Subsequent calls resolve the decision on every invocation so a user who edits the config from `deny` to `allow` mid-session sees the change on the next completion event.
+
+### Decision flow
+
+```mermaid
+flowchart TD
+    Call([sendNotification/<br/>notifyInBackground])
+    ReadCfg[Read ~/.alexi/config.json<br/>notifications key]
+    Decision{decision?}
+    Ask{isInteractiveEnv?}
+    Skip[Return false<br/>silently skip]
+    Prompt[inquirer confirm<br/>Allow desktop notifications?]
+    Persist[Persist decision<br/>best-effort]
+    LoadNotifier[Cached dynamic import<br/>node-notifier]
+    NotifierOk{notifier<br/>available?}
+    Dispatch[notifier.notify payload<br/>title/message/icon/sound/wait]
+    Success[Return true]
+    Error[logger.debug<br/>Return false]
+
+    Call --> ReadCfg
+    ReadCfg --> Decision
+    Decision -->|deny| Skip
+    Decision -->|ask| Ask
+    Ask -->|no TTY / CI| Skip
+    Ask -->|TTY| Prompt
+    Prompt -->|allow| Persist
+    Prompt -->|deny| Persist
+    Persist --> Decision
+    Decision -->|allow| LoadNotifier
+    LoadNotifier --> NotifierOk
+    NotifierOk -->|no| Error
+    NotifierOk -->|yes| Dispatch
+    Dispatch -->|err| Error
+    Dispatch -->|ok| Success
+```
+
+### Public surface
+
+```typescript
+// src/core/notifications.ts
+export type NotificationDecision = 'allow' | 'deny' | 'ask';
+
+export interface SendNotificationOptions {
+  icon?: string;
+  sound?: boolean;
+  wait?: boolean;
+  __notifierOverride?: NotifierLike; // tests only
+  __askOverride?: (title: string, message: string) => Promise<boolean>; // tests only
+}
+
+export const LONG_RUNNING_THRESHOLD_MS = 30_000;
+
+export function isInteractiveEnv(): boolean;
+export function getNotificationDecision(): NotificationDecision;
+export function setNotificationDecision(decision: NotificationDecision): void;
+export function sendNotification(
+  title: string,
+  message: string,
+  options?: SendNotificationOptions
+): Promise<boolean>;
+export function notifyInBackground(
+  title: string,
+  message: string,
+  options?: SendNotificationOptions
+): void;
+```
+
+`isInteractiveEnv()` returns `false` when `ALEXI_NO_NOTIFICATIONS=1`, when `CI` is set to any value other than `0` / `false`, or when either `process.stdin` or `process.stdout` is not a TTY. `getNotificationDecision()` coerces malformed persisted values back to `'ask'` so callers never see arbitrary strings. `notifyInBackground` is the fire-and-forget wrapper — it discards the promise safely and inherits `sendNotification`'s no-throw guarantee.
+
+### Call sites
+
+Two call sites currently invoke `notifyInBackground`:
+
+- **`src/core/streamingOrchestrator.ts:344`** — fires `notifyInBackground('Alexi', 'Task completed')` only when the streaming loop exits via the `completedCleanly` branch. Aborts (`AbortSignal`), provider errors, context-overflow retries, and rate-limit backoffs do NOT fire a completion alert, so "task completed" is a truthful signal.
+- **`src/tool/tools/bash.ts`** — fires `notifyInBackground('Command finished', description ?? command)` in two cases: (a) a detached command's final exit event (by definition long-running because the user picked "Proceed" only after `DETACH_PROMPT_MS`), and (b) a foreground command whose wall-clock elapsed time is `>= LONG_RUNNING_THRESHOLD_MS` (30 seconds). Short-running foreground commands (`ls`, `git status`) never fire — the notification is only useful when the user has switched context.
+
+Both sites gate on the shared `notifications` config key, so a single `deny` decision silences both surfaces without any per-caller wiring.
+
+### Dependency loading
+
+`node-notifier` is loaded via a cached dynamic import in `loadNotifier()`. The cache is a three-state variable (`undefined` = not attempted, `null` = attempted and failed, `NotifierLike` = ready) so users who deny notifications never pay the native-binary probe cost — the module is only imported on the first `allow` call. `_resetNotifierCacheForTests()` clears the cache for unit tests. The `NotifierLike` interface is deliberately reduced to the single `notify(options, callback?)` method Alexi uses so `@types/node-notifier` is a devDependency rather than a hard runtime type import and tests can pass inline mocks.
 
 ## Agent System
 

@@ -433,6 +433,76 @@ platform-specific. The bash-tool shell-type suite in
 `tests/tool/tools/bash.test.ts:41` is the canonical worked example; see
 `docs/TESTING.md#testing-bash-tool-shell-type-reporting`.
 
+The notifications module extends this pattern to `HOME`, `CI`, and
+`ALEXI_NO_NOTIFICATIONS` because `~/.alexi/config.json` lives under `HOME`
+and the interactive-context probe reads all three. `tests/core/notifications.test.ts`
+snapshots each variable in `beforeEach`, redirects `HOME` to a `fs.mkdtempSync`
+temp directory, and restores every variable (deleting when previously unset)
+plus `fs.rmSync(tmpHome, { recursive: true, force: true })` in `afterEach`.
+This keeps parallel test workers from racing on the real user config and
+guarantees a test can never accidentally dispatch a real desktop notification.
+
+### Binary-optional native dependencies (cached dynamic import)
+
+Modules that wrap a native-binary-backed npm package (e.g. `node-notifier`
+in `src/core/notifications.ts`, or any future binding to `terminal-notifier`,
+`notify-send`, `snoretoast`) SHOULD load the dependency via a cached
+dynamic import rather than a top-level `import`. Two reasons:
+
+1. **Startup cost.** A user who has denied the feature at the config layer
+   must never pay the native-binary probe cost. Deferring the import to
+   the first `allow` call means `alexi chat` starts in the same time on a
+   Linux container without a notification daemon as it does on a macOS
+   dev box.
+2. **Missing-binary resilience.** A native probe that throws at import
+   time will crash the CLI. A dynamic import failure inside a `try / catch`
+   resolves to a cached `null` handle, and every subsequent call short-circuits
+   without retrying the import — a broken feature stays disabled but the
+   rest of the CLI keeps working.
+
+Canonical pattern (from `src/core/notifications.ts`):
+
+```typescript
+// Three-state cache: undefined = never attempted, null = attempted and
+// failed, NotifierLike = ready. This lets one failed probe silence every
+// subsequent call without retrying the import.
+let cachedNotifier: NotifierLike | null | undefined;
+
+async function loadNotifier(): Promise<NotifierLike | null> {
+  if (cachedNotifier !== undefined) return cachedNotifier;
+  try {
+    const mod = (await import('node-notifier')) as unknown as {
+      default?: NotifierLike;
+      notify?: NotifierLike['notify'];
+    };
+    if (mod.default && typeof mod.default.notify === 'function') {
+      cachedNotifier = mod.default;
+    } else if (typeof mod.notify === 'function') {
+      cachedNotifier = { notify: mod.notify.bind(mod) };
+    } else {
+      cachedNotifier = null;
+    }
+  } catch (err) {
+    logger.debug('node-notifier failed to load', err);
+    cachedNotifier = null;
+  }
+  return cachedNotifier;
+}
+
+// Test-only escape hatch: expose a reset so unit tests can force a fresh
+// import. NEVER call this from production code.
+export function _resetNotifierCacheForTests(): void {
+  cachedNotifier = undefined;
+}
+```
+
+Guidelines when introducing a new module that follows this pattern:
+
+- Define a minimum interface (`NotifierLike` above) that names ONLY the methods you call. This keeps the corresponding `@types/*` package as a devDependency rather than a hard runtime type import, and lets tests pass an inline mock object without stubbing a whole third-party API surface.
+- Expose a `_resetXxxCacheForTests()` reset. Never import it from index barrels; only unit tests should call it.
+- Accept a test-only override in the options bag (`__notifierOverride`, `__askOverride` in the notifications module) prefixed with `__` so it is visually flagged as non-production surface.
+- Never let a load failure propagate. `logger.debug` and cache `null`.
+
 ### Testing streaming tools and bus events
 
 Tools that consume a provider stream and publish `defineEvent`-produced bus
