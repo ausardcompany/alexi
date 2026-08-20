@@ -5,19 +5,25 @@
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 
+// Nullable-friendly schema: strict providers (OpenAI structured output,
+// SAP AI Core in strict mode) may omit optional fields entirely OR pass
+// explicit `null`. Accept both so tool-call payloads coming from any
+// provider validate without provider-specific pre-processing.
 const AgentManagerParamsSchema = z.object({
   action: z.enum(['create', 'list', 'stop', 'status']).describe('Action to perform'),
-  sessionId: z.string().optional().describe('Session ID for stop/status actions'),
-  worktreeId: z.string().optional().describe('Worktree ID for session creation'),
+  sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
+  worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
   config: z
     .object({
-      mode: z.string().optional().describe('Agent mode'),
-      model: z.string().optional().describe('Model to use'),
+      mode: z.string().nullable().optional().describe('Agent mode'),
+      model: z.string().nullable().optional().describe('Model to use'),
       excludeLocalState: z
         .boolean()
+        .nullable()
         .optional()
         .describe('Exclude local state on startup for fresh session initialization'),
     })
+    .nullable()
     .optional()
     .describe('Configuration for session creation'),
 });
@@ -63,6 +69,8 @@ Actions:
           // Create new agent session
           // In a real implementation, this would interact with the agent system
           const newSessionId = `session-${Date.now()}`;
+          // `config` and `config.excludeLocalState` may be `null` (strict
+          // providers) or `undefined` (omitted). Both mean "use default".
           const excludeLocalState = config?.excludeLocalState ?? false;
 
           return {

@@ -64,7 +64,19 @@ Examples:
 - Run docker compose: docker-compose up
 - Start a database: mongod --dbpath ./data
 
-The tool will automatically detect ports the process is listening on.`,
+The tool will automatically detect ports the process is listening on.
+
+Sleep / wait semantics:
+- Do NOT use this tool to sleep, poll, or wait — it returns as soon as the
+  child process has spawned (typically within a couple of seconds while ports
+  are being detected). If you need to wait for a service to become ready,
+  spawn it here and then poll the endpoint from a separate shell/tool call.
+- The tool detects listening ports asynchronously after spawn; the initial
+  result may return before ports are populated. Query \`listBackgroundProcesses\`
+  a moment later to observe the resolved port set.
+- The process is detached and unref'd — it survives the tool call but WILL be
+  terminated by \`killAllTracked\` on CLI shutdown. Do not rely on it outliving
+  the parent Alexi session.`,
 
   parameters: BackgroundProcessParamsSchema,
 

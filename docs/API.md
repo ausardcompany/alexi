@@ -895,7 +895,79 @@ cleanupToolOutputs(): void
 | `task_status` | `taskId` | Query background task status |
 | `webfetch` | `url`, `format?`, `timeout?` | Fetch web content |
 | `question` | `question`, `options?` | Ask user a question |
-| `todowrite` | `todos` | Manage task list |
+| `todowrite` | `todos` | Manage task list (see [TodoWrite tool contract](#todowrite-tool-contract) below) |
+| `background_process` | `command`, `name?`, `workingDirectory?`, `env?` | Spawn long-running detached process (see [background_process semantics](#background_process-tool-semantics) below) |
+| `agent_manager` | `action`, `sessionId?`, `worktreeId?`, `config?` | Manage agent sessions (nullable-friendly schema — see below) |
+
+#### `todowrite` tool contract
+
+`src/tool/tools/todowrite.ts` maintains a session-scoped task list. The parameter shape is:
+
+```typescript
+const TodoSchema = z.object({
+  content: z.string(),
+  status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']),
+  priority: z.enum(['high', 'medium', 'low']),
+});
+
+const TodoWriteParamsSchema = z.object({
+  todos: z.array(TodoSchema),
+});
+```
+
+The tool description explicitly enforces four incremental-update rules for callers:
+
+1. Every call sends the **full** updated list. The tool replaces state — it does not merge.
+2. Exactly **one** task must be in `in_progress` at a time. The previous task must be marked `completed` in the same call that starts the next one.
+3. Completed tasks must remain in the list so the user sees the trail of finished work.
+4. Newly discovered follow-up tasks are added as `pending` items rather than editing the currently-running task's `content`.
+
+`getTodos()`, `onTodosChange(callback)`, and `clearTodos()` are exported for TUI integration.
+
+#### `background_process` tool semantics
+
+`src/tool/tools/background-process.ts` spawns a detached, unref'd child process and returns immediately once port detection completes. Its description explicitly documents four properties models kept getting wrong:
+
+- **Not a sleep primitive.** The tool returns as soon as the child has spawned (typically a couple of seconds while ports are being detected). Do NOT use it to `sleep`, poll, or wait for a service to become ready — spawn the service here and poll the endpoint from a separate `bash` / `shell` call.
+- **Port detection is asynchronous.** The initial result may return before ports are populated. Call `listBackgroundProcesses` a moment later to observe the resolved port set.
+- **Detached and unref'd.** The process survives the tool call but WILL be terminated by `killAllTracked` on CLI shutdown. Do not rely on it outliving the parent Alexi session.
+- **Permission gated.** The tool declares `permission: { action: 'execute', getResource: (params) => params.command }`, so it goes through the same permission evaluator as `bash`.
+
+Result shape:
+
+```typescript
+export interface BackgroundProcess {
+  id: string;                 // "bg_<timestamp>_<nanoid>"
+  name: string;
+  command: string;
+  pid: number;
+  startedAt: Date;
+  status: 'running' | 'stopped' | 'failed';
+  ports: number[];            // asynchronously populated
+}
+```
+
+#### `agent_manager` tool: nullable-friendly schema
+
+`src/tool/tools/agent-manager.ts` accepts explicit `null` in addition to `undefined` for every optional field, so tool-call payloads from strict-mode providers (OpenAI structured output, SAP AI Core in strict mode) validate without provider-specific pre-processing:
+
+```typescript
+const AgentManagerParamsSchema = z.object({
+  action: z.enum(['create', 'list', 'stop', 'status']),
+  sessionId: z.string().nullable().optional(),
+  worktreeId: z.string().nullable().optional(),
+  config: z
+    .object({
+      mode: z.string().nullable().optional(),
+      model: z.string().nullable().optional(),
+      excludeLocalState: z.boolean().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+```
+
+Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
 
 > `codebase_search` is no longer a built-in tool. It is provided by the standalone `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); once registered in `mcp-servers.json` it appears in the same tool list with the same `{ query: string }` parameter shape it had as a built-in.
 
@@ -1124,6 +1196,94 @@ if (requiresSandboxEscalation(command, sandboxEnabled)) {
   // prompt the user via getPermissionManager().check(...)
 }
 ```
+
+## Native Notifications API
+
+`src/core/notifications.ts` exposes the desktop-notification surface. Every function is safe to call from any context — no path throws, and non-interactive environments (`CI`, `ALEXI_NO_NOTIFICATIONS=1`, no TTY) silently resolve `false`.
+
+```typescript
+import {
+  sendNotification,
+  notifyInBackground,
+  getNotificationDecision,
+  setNotificationDecision,
+  isInteractiveEnv,
+  LONG_RUNNING_THRESHOLD_MS,
+  type NotificationDecision,
+  type SendNotificationOptions,
+  type NotifierLike,
+} from '../core/notifications.js';
+
+export type NotificationDecision = 'allow' | 'deny' | 'ask';
+
+export interface SendNotificationOptions {
+  /** Absolute path to an icon image. Ignored on platforms without icon support. */
+  icon?: string;
+  /** Play the OS default notification sound. */
+  sound?: boolean;
+  /** Block until the notification is dismissed. */
+  wait?: boolean;
+  /** Test-only: override the node-notifier layer. */
+  __notifierOverride?: NotifierLike;
+  /** Test-only: override the inquirer confirm prompt. */
+  __askOverride?: (title: string, message: string) => Promise<boolean>;
+}
+
+export interface NotifierLike {
+  notify(
+    options: Record<string, unknown>,
+    callback?: (err: Error | null, response?: string, metadata?: unknown) => void
+  ): unknown;
+}
+
+/** Minimum wall-clock duration (ms) before a bash/shell command is "long-running". Currently 30_000. */
+export const LONG_RUNNING_THRESHOLD_MS: number;
+
+/** Returns false when CI, ALEXI_NO_NOTIFICATIONS=1, or either stream is not a TTY. */
+export function isInteractiveEnv(): boolean;
+
+/** Reads the persisted decision from ~/.alexi/config.json; malformed values coerce to 'ask'. */
+export function getNotificationDecision(): NotificationDecision;
+
+/** Persists the decision to ~/.alexi/config.json. */
+export function setNotificationDecision(decision: NotificationDecision): void;
+
+/**
+ * Dispatch a notification. Never throws — a failed dispatch resolves to `false` after
+ * logger.debug. Returns `true` iff the notification was accepted by node-notifier.
+ * The decision is re-read on every call, so a `deny -> allow` config edit takes
+ * effect on the next invocation without any restart.
+ */
+export function sendNotification(
+  title: string,
+  message: string,
+  options?: SendNotificationOptions
+): Promise<boolean>;
+
+/** Fire-and-forget wrapper. Discards the promise safely; errors are already swallowed. */
+export function notifyInBackground(
+  title: string,
+  message: string,
+  options?: SendNotificationOptions
+): void;
+```
+
+**Call-site contract.** Two internal call sites currently invoke `notifyInBackground`:
+
+- `src/core/streamingOrchestrator.ts` — fires `notifyInBackground('Alexi', 'Task completed')` when the streaming loop exits via the `completedCleanly` branch. Aborts, provider errors, context-overflow retries, and rate-limit backoffs do NOT fire.
+- `src/tool/tools/bash.ts` — fires `notifyInBackground('Command finished', description ?? command)` when either the command detached before exit, OR the foreground elapsed time reached `LONG_RUNNING_THRESHOLD_MS` (30 s).
+
+Both sites resolve the shared `notifications` config key on every call. A single user `deny` decision silences both surfaces; a single `allow` re-enables both.
+
+**Config key.** The decision persists as a JSON string under `notifications` in `~/.alexi/config.json`:
+
+```jsonc
+{
+  "notifications": "allow"  // or "deny" | "ask" (unset defaults to "ask")
+}
+```
+
+See also: [Configuration -> Native Notifications](CONFIGURATION.md#native-notifications).
 
 ## Permission System
 

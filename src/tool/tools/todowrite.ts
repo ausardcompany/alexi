@@ -55,7 +55,16 @@ Use this tool when:
 - After completing a task (mark complete)
 - When starting a task (mark in_progress)
 
-Do NOT use for single trivial tasks.`,
+Do NOT use for single trivial tasks.
+
+Incremental update guidance:
+- Send the FULL updated list on every call — the tool replaces state, it does not merge.
+- Keep exactly ONE task in \`in_progress\` at a time. Mark the previous task
+  \`completed\` in the same call you start the next one.
+- Do not delete tasks that were completed earlier in the session; keep them in
+  the list so the user can see the trail of finished work.
+- Add newly discovered follow-up tasks as \`pending\` items rather than editing
+  the currently \`in_progress\` task's content.`,
 
   parameters: TodoWriteParamsSchema,
 
