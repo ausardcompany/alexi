@@ -136,7 +136,6 @@ describe('InstanceWatcher', () => {
 
   it('setDebounceTimer clears the previous timer for the same directory', () => {
     const w = new InstanceWatcher();
-    let firstCleared = false;
     const first = setTimeout(() => {}, 60_000) as ReturnType<typeof setTimeout>;
     // Replace clearTimeout would be racy; instead observe indirectly by
     // scheduling two timers and calling dispose (which must clear them
@@ -146,10 +145,9 @@ describe('InstanceWatcher', () => {
       '/tmp/x',
       setTimeout(() => {}, 60_000)
     );
-    // Signal that the previous timer is expected to have been cleared —
-    // if it wasn't, this test would keep the event loop alive for 60s.
-    firstCleared = true;
-    expect(firstCleared).toBe(true);
+    // If the previous timer weren't cleared, this test would keep the event
+    // loop alive for 60s. dispose() must also clear the current timer.
     w.dispose();
+    expect(w.size()).toBe(0);
   });
 });
