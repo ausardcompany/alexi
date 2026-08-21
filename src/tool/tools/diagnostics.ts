@@ -10,6 +10,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { defineTool, type ToolResult } from '../index.js';
+import { formatFileMention } from '../../utils/file-mention.js';
 
 // ============ Types ============
 
@@ -413,7 +414,7 @@ export function formatDiagnostics(diagnostics: Diagnostic[], workdir?: string): 
 
   for (const d of diagnostics) {
     const file = workdir ? path.relative(workdir, d.file) : d.file;
-    const location = `${file}:${d.line}:${d.column}`;
+    const location = formatFileMention(file, d.line, d.column);
     const severity = d.severity.toUpperCase().padEnd(7);
     const code = d.code ? ` [${d.code}]` : '';
     const source = ` (${d.source})`;
