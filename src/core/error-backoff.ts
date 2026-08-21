@@ -73,6 +73,42 @@ export function isRateLimitError(err: unknown): boolean {
 }
 
 /**
+ * Return true when `err` looks like an xAI capacity-exceeded error.
+ *
+ * Ported from opencode 71d08e9. xAI (and some SAP proxies fronting
+ * xAI-family models) occasionally emits a mid-stream "capacity
+ * exceeded" error that is semantically the same as a 5xx transient
+ * overload — retrying with backoff clears it. Without this classifier
+ * such errors are treated as permanent and surface to the user as a
+ * hard failure.
+ *
+ * Detection is intentionally structural (message regex) because the
+ * upstream API does not attach a stable machine-readable code. Callers
+ * feed this through the retry loop alongside rate-limit checks.
+ */
+export function isXAICapacityError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { message?: unknown };
+  if (typeof candidate.message !== 'string') {
+    return false;
+  }
+  return /xai.*capacity|capacity.*exceeded/i.test(candidate.message);
+}
+
+/**
+ * Coarse "is this transient?" check consulted by higher-level retry
+ * drivers. Currently returns true for rate limits and xAI capacity
+ * errors; extend cautiously — a false positive here means real config
+ * failures get retried and waste provider budget.
+ */
+export function isRetryableError(err: unknown): boolean {
+  return isRateLimitError(err) || isXAICapacityError(err);
+}
+
+
+/**
  * Extract a `Retry-After` window from a rate-limit error and convert it to
  * milliseconds. Returns `undefined` when no header was captured — the
  * caller then falls back to the default exponential-backoff schedule.

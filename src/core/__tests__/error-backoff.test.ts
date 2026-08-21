@@ -17,6 +17,8 @@ import {
   getRetryAfterMs,
   extractStatusCode,
   isPermanentAuthFailure,
+  isXAICapacityError,
+  isRetryableError,
 } from '../error-backoff.js';
 
 describe('isRateLimitError', () => {
@@ -43,6 +45,48 @@ describe('isRateLimitError', () => {
     expect(isRateLimitError('string')).toBe(false);
     expect(isRateLimitError({ statusCode: 500 })).toBe(false);
     expect(isRateLimitError({ code: 'other' })).toBe(false);
+  });
+});
+
+describe('isXAICapacityError', () => {
+  it('detects a canonical xAI capacity message', () => {
+    expect(isXAICapacityError({ message: 'xAI capacity exceeded, please retry' })).toBe(true);
+  });
+
+  it('detects a generic capacity-exceeded message regardless of provider prefix', () => {
+    expect(isXAICapacityError({ message: 'capacity exceeded for grok-2' })).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isXAICapacityError({ message: 'XAI CAPACITY overloaded' })).toBe(true);
+  });
+
+  it('returns false for unrelated errors', () => {
+    expect(isXAICapacityError({ message: 'permission denied' })).toBe(false);
+    expect(isXAICapacityError({ statusCode: 429 })).toBe(false);
+    expect(isXAICapacityError(null)).toBe(false);
+    expect(isXAICapacityError(undefined)).toBe(false);
+    expect(isXAICapacityError('capacity exceeded')).toBe(false);
+  });
+});
+
+describe('isRetryableError', () => {
+  it('is true for rate-limit errors', () => {
+    expect(isRetryableError({ code: 'free_tier_rate_limit' })).toBe(true);
+    expect(isRetryableError({ statusCode: 429 })).toBe(true);
+  });
+
+  it('is true for xAI capacity errors', () => {
+    expect(isRetryableError({ message: 'xai capacity exceeded' })).toBe(true);
+  });
+
+  it('is false for permanent auth failures', () => {
+    expect(isRetryableError({ name: 'NoRefreshTokenError' })).toBe(false);
+  });
+
+  it('is false for null / undefined', () => {
+    expect(isRetryableError(null)).toBe(false);
+    expect(isRetryableError(undefined)).toBe(false);
   });
 });
 
