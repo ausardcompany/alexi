@@ -107,7 +107,6 @@ export function isRetryableError(err: unknown): boolean {
   return isRateLimitError(err) || isXAICapacityError(err);
 }
 
-
 /**
  * Extract a `Retry-After` window from a rate-limit error and convert it to
  * milliseconds. Returns `undefined` when no header was captured — the

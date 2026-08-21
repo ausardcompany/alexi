@@ -1945,5 +1945,9 @@ export async function resolvePluginRulesForPrompt(
  * callers (`getPluginManager().load(...)`) can register any subset
  * without importing the concrete modules directly.
  */
-export { CerebrasPlugin, CEREBRAS_MAX_COMPLETION_TOKENS, clampCerebrasMaxTokens, isCerebrasTarget } from './cerebras.js';
-
+export {
+  CerebrasPlugin,
+  CEREBRAS_MAX_COMPLETION_TOKENS,
+  clampCerebrasMaxTokens,
+  isCerebrasTarget,
+} from './cerebras.js';

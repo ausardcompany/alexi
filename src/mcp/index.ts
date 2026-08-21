@@ -19,4 +19,3 @@ export {
   MCP_APPS_ENV_FLAG,
   type MCPResource,
 } from './apps.js';
-

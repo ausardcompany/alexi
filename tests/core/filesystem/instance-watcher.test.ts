@@ -142,7 +142,10 @@ describe('InstanceWatcher', () => {
     // scheduling two timers and calling dispose (which must clear them
     // without hanging the test).
     w.setDebounceTimer('/tmp/x', first);
-    w.setDebounceTimer('/tmp/x', setTimeout(() => {}, 60_000));
+    w.setDebounceTimer(
+      '/tmp/x',
+      setTimeout(() => {}, 60_000)
+    );
     // Signal that the previous timer is expected to have been cleared —
     // if it wasn't, this test would keep the event loop alive for 60s.
     firstCleared = true;
