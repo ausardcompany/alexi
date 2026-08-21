@@ -68,12 +68,21 @@ vi.mock('../../src/tool/tools/index.js', () => ({
   registerBuiltInTools: vi.fn(),
 }));
 
-// Mock hooks module
+// Mock hooks module. `mockExecuteHooks` receives PostToolUse and Stop
+// calls in the sequential order tests expect via `mockResolvedValueOnce`.
+// PreToolUse hooks default to `[]` (no rejection, no context) so wiring
+// PreToolUse execution into the agentic loop does not consume the queued
+// mock results intended for PostToolUse.
 const mockExecuteHooks = vi.fn();
 const mockCreateHookContext = vi.fn();
 
 vi.mock('../../src/hooks/index.js', () => ({
-  executeHooks: (...args: unknown[]) => mockExecuteHooks(...args),
+  executeHooks: (event: string, ...rest: unknown[]) => {
+    if (event === 'PreToolUse') {
+      return Promise.resolve([]);
+    }
+    return mockExecuteHooks(event, ...rest);
+  },
   createHookContext: (...args: unknown[]) => mockCreateHookContext(...args),
 }));
 
