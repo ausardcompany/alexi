@@ -4,6 +4,7 @@
 
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
+import { quoteFilePath } from '../../utils/file-mention.js';
 
 const SuggestParamsSchema = z.object({
   suggestion: z.string().describe('The code review suggestion to present to the user'),
@@ -38,7 +39,7 @@ Usage:
       data: {
         type: 'suggestion',
         suggestion: params.suggestion,
-        file: params.file,
+        file: params.file ? quoteFilePath(params.file) : params.file,
         line: params.line,
       },
     };

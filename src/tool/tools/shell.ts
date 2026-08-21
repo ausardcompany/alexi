@@ -10,6 +10,7 @@ import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
+import { quoteFilePath } from '../../utils/file-mention.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import { auditCommand } from '../../permission/next.js';
@@ -418,10 +419,10 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
         if (stdoutTruncated || stderrTruncated) {
           const fileParts: string[] = [];
           if (stdoutFile) {
-            fileParts.push(`stdout: ${stdoutFile}`);
+            fileParts.push(`stdout: ${quoteFilePath(stdoutFile)}`);
           }
           if (stderrFile) {
-            fileParts.push(`stderr: ${stderrFile}`);
+            fileParts.push(`stderr: ${quoteFilePath(stderrFile)}`);
           }
           hint =
             fileParts.length > 0

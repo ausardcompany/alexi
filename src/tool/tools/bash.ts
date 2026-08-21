@@ -9,6 +9,7 @@ import { StringDecoder } from 'node:string_decoder';
 import * as path from 'path';
 import { defineTool, truncateOutput, persistLargeOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
+import { quoteFilePath } from '../../utils/file-mention.js';
 import { auditCommand } from '../../permission/next.js';
 import { getPlanModeManager } from '../../plan/index.js';
 import { BashOutputChunk } from '../../bus/index.js';
@@ -536,10 +537,10 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         if (stdoutTruncated || stderrTruncated) {
           const fileParts: string[] = [];
           if (stdoutFile) {
-            fileParts.push(`stdout: ${stdoutFile}`);
+            fileParts.push(`stdout: ${quoteFilePath(stdoutFile)}`);
           }
           if (stderrFile) {
-            fileParts.push(`stderr: ${stderrFile}`);
+            fileParts.push(`stderr: ${quoteFilePath(stderrFile)}`);
           }
           hint =
             fileParts.length > 0
