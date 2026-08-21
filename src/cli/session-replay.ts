@@ -55,6 +55,15 @@ export class SessionReplay {
 
     // Filter messages based on options
     const filteredMessages = messages.filter((msg) => {
+      // Always hide messages tagged with `displayRole: 'system'` — these
+      // are internal instrumentation (typically hook `contextModification`
+      // payloads) that were sent to the model but should never appear in
+      // a user-facing replay, regardless of `showSystemMessages`.
+      if (msg.displayRole === 'system') {
+        skippedMessages++;
+        return false;
+      }
+
       // Skip system messages if not enabled
       if (msg.role === 'system' && !showSystemMessages) {
         skippedMessages++;

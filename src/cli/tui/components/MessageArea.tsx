@@ -24,6 +24,14 @@ export interface MessageDisplay {
   timestamp: number;
   /** Image attachments included with this message (display metadata only). */
   images?: ImageAttachmentPreview[];
+  /**
+   * Optional per-message display-role override. Messages with
+   * `displayRole: 'system'` are hidden from the transcript so internal
+   * instrumentation (e.g. hook `contextModification` payloads that were
+   * injected into the model conversation) does not clutter the user's
+   * view. Model API calls are unaffected — this is a UI-only filter.
+   */
+  displayRole?: 'system' | 'user' | 'assistant';
 }
 
 export interface MessageAreaProps {
@@ -60,17 +68,22 @@ export function MessageArea({
     theme: { colors },
   } = useTheme();
 
+  // Hide messages tagged with `displayRole: 'system'` from the transcript.
+  // These are typically hook `contextModification` payloads that were sent
+  // to the model as instrumentation but should not clutter the user's view.
+  const visibleMessages = messages.filter((m) => m.displayRole !== 'system');
+
   return (
     <Box flexDirection="column" flexGrow={1} overflow="hidden" backgroundColor={colors.background}>
       {/* Empty state */}
-      {messages.length === 0 && !isStreaming && (
+      {visibleMessages.length === 0 && !isStreaming && (
         <Box flexGrow={1} alignItems="center" justifyContent="center">
           <Text color={colors.dimText}>Start a conversation…</Text>
         </Box>
       )}
 
       {/* Completed messages (history) */}
-      {messages.map((msg) => (
+      {visibleMessages.map((msg) => (
         <Box key={msg.id} flexDirection="column">
           <MessageBubble
             role={msg.role}

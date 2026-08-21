@@ -34,6 +34,17 @@ export interface Message {
     input?: number;
     output?: number;
   };
+  /**
+   * Optional metadata that overrides how the message is presented to the
+   * user in transcripts (TUI rendering, `sessions export`, and session
+   * replay). The value does NOT change how the message is delivered to
+   * the model — providers still receive the message with its logical
+   * `role`. Set `displayRole: 'system'` on hook context messages or
+   * other internal instrumentation that should reach the model but be
+   * hidden from user-facing transcripts. Absent for regular user /
+   * assistant / system messages, which are always rendered.
+   */
+  displayRole?: 'system' | 'user' | 'assistant';
 }
 
 export interface SessionMetadata {
@@ -326,18 +337,32 @@ export class SessionManager {
   }
 
   /**
-   * Add a message to the current session
+   * Add a message to the current session.
+   *
+   * The optional 4th argument accepts either a raw `displayRole` string
+   * (for the common hook-context case) or an options object carrying
+   * additional per-message metadata. The `displayRole` value overrides
+   * how the message is rendered in user-facing transcripts (see
+   * `Message.displayRole`) without changing its logical `role`.
    */
-  addMessage(role: Message['role'], content: string, tokens?: Message['tokens']): void {
+  addMessage(
+    role: Message['role'],
+    content: string,
+    tokens?: Message['tokens'],
+    options?: { displayRole?: Message['displayRole'] } | Message['displayRole']
+  ): void {
     if (!this.activeSession) {
       this.createSession();
     }
+
+    const displayRole = typeof options === 'string' ? options : options?.displayRole;
 
     const message: Message = {
       role,
       content,
       timestamp: Date.now(),
       tokens,
+      ...(displayRole ? { displayRole } : {}),
     };
 
     this.activeSession!.messages.push(message);
@@ -348,8 +373,11 @@ export class SessionManager {
       this.activeSession!.metadata.totalTokens += (tokens.input || 0) + (tokens.output || 0);
     }
 
-    // Auto-generate title from first user message
-    if (!this.activeSession!.metadata.title && role === 'user') {
+    // Auto-generate title from first user message. Skip messages that
+    // are hidden from the transcript (e.g. hook context stamped with
+    // `displayRole: 'system'`) so internal instrumentation cannot end
+    // up as the session title.
+    if (!this.activeSession!.metadata.title && role === 'user' && !displayRole) {
       const title = content.slice(0, 50) + (content.length > 50 ? '...' : '');
       this.activeSession!.metadata.title = title;
     }
