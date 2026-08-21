@@ -106,6 +106,22 @@ Enable experimental background task execution in the task tool.
 export ALEXI_EXPERIMENTAL_BACKGROUND_TASKS=true
 ```
 
+#### ALEXI_EXPERIMENTAL_MCP_APPS
+
+Enable the experimental MCP Apps HTTP surface (introduced in 1.21.4). When set to `1`, `isMCPAppsEnabled()` returns `true` and the `mcpAppsListResources` / `mcpAppsCallTool` verbs may be invoked. HTTP handlers that expose these verbs MUST gate on the flag; callers that ignore the gate risk exposing an unstable API. See [Experimental MCP Apps](#experimental-mcp-apps) below.
+
+```bash
+export ALEXI_EXPERIMENTAL_MCP_APPS=1
+```
+
+#### MAX_SUBAGENT_DEPTH
+
+Override the maximum subagent nesting depth for the `task` tool. A top-level user session has depth 0; each `task` invocation would spawn a subagent one level deeper. Spawning at depth greater than this value is rejected before any provider request is made. Defaults to `3`; values above `~10` are strongly discouraged because latency and cost multiply per level. Non-numeric or non-positive values fall back to the default.
+
+```bash
+export MAX_SUBAGENT_DEPTH=5
+```
+
 #### ALEXI_PROJECT_DIR
 
 Override the project directory for configuration resolution.
@@ -1176,6 +1192,29 @@ export ALEXI_EXPERIMENTAL_FILEWATCHER=1
 - Both conditions must hold for `maybeStartFileWatcher` to return a disposer; otherwise it returns `null`.
 
 See `src/core/filesystem/watcher.ts` and `docs/API.md#filesystem-watcher-api` for the injection-based subscriber contract.
+
+### Per-instance scoping (1.21.4)
+
+Since 1.21.4, the watcher's state is scoped to an `InstanceWatcher` object rather than a module-level singleton (port of kilocode `b8984e468`). Two concurrent Alexi sessions can now own independent watch sets; a `stop()` from one session no longer tears down the peer's watches. The module-level `startWatcher(...)` shim is preserved for backwards compatibility but new code should own its own `InstanceWatcher`. See [ARCHITECTURE.md — Per-instance scoping](ARCHITECTURE.md#per-instance-scoping-instancewatcher) for the contract diagram.
+
+## Experimental MCP Apps
+
+Introduced in 1.21.4 (port of kilocode `36c57c12c`, `c02134ab4`, `b7069922d`). The experimental MCP Apps surface (`src/mcp/apps.ts`) wraps `McpClientManager` with a thin `listResources` / `callTool` API and a stable error envelope (`MCPAppsError`). Intended for eventual wiring into a permanent HTTP surface, but the current shape may still change.
+
+### Enabling
+
+```bash
+export ALEXI_EXPERIMENTAL_MCP_APPS=1
+```
+
+### Behaviour
+
+- Exports `mcpAppsListResources`, `mcpAppsCallTool`, `MCPAppsError`, `MCP_APPS_ENV_FLAG`, `isMCPAppsEnabled`, `MCPResource` are always importable from `src/mcp/index.ts` for feature detection.
+- Callers MUST gate on `isMCPAppsEnabled()` before invoking the verbs; when the flag is unset, HTTP handlers should short-circuit with a `404` / "not enabled" response.
+- All errors from `callTool` and `refreshResources` are normalised into `MCPAppsError` carrying `operation`, `server`, optional `tool`, and the underlying `cause`. Cross-module `instanceof` is avoided; match on `name === 'MCPAppsError'`.
+- `listResources` gracefully returns an empty array when the server does not advertise the optional method.
+
+See [ARCHITECTURE.md — MCP Apps (experimental)](ARCHITECTURE.md#mcp-apps-experimental) for design notes.
 
 ## Related Documentation
 

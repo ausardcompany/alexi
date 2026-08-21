@@ -875,17 +875,41 @@ When a component's public prop shape is stable and external consumers import it 
 Any new module that calls out to SAP AI Core (or another network dependency) should:
 
 1. Use `withRetry` from `src/core/session/retry.ts` for retries — do not roll your own loop.
-2. Supply a `shouldRetry` predicate that consults the transient-vs-permanent contract in `AGENTS.md#error-classification-retry-vs-config-fix`. The canonical implementation lives in `src/core/error-backoff.ts`.
+2. Supply a `shouldRetry` predicate that consults the transient-vs-permanent contract in `AGENTS.md#error-classification-retry-vs-config-fix`. The canonical implementations live in `src/core/error-backoff.ts` — prefer `isRetryableError(err)` for the coarse "is this transient?" check; use `isRateLimitError`, `isXAICapacityError`, and `isPermanentAuthFailure` directly when you need to distinguish sub-cases (e.g. render a rate-limit-specific UX).
 3. Tune `RetryOptions` for the workload: interactive chat uses the defaults (8 attempts × 30s cap); background jobs may prefer a lower `maxAttempts` and a higher `maxMs`.
 4. In tests, pass `jitter: false` so the exponential curve is deterministic.
 
 Never re-add unconditional retries. Retrying an expensive model call on a permanent failure (401, 403, 400, `model_not_found`) just burns tokens.
+
+When adding a new transient-error classifier to `src/core/error-backoff.ts` (as with `isXAICapacityError` in 1.21.4), also wire it into `isRetryableError` so higher-level drivers pick it up automatically. Extend the transient-error table in `docs/ARCHITECTURE.md#error-classification-tables` and add a coverage matrix under `src/core/__tests__/error-backoff.test.ts` — a false positive here means real config failures get retried and waste provider budget, so the test suite must cover both positive and negative cases.
 
 ## Config-Derived Caches
 
 If your module maintains a cache derived from `~/.alexi/config.json` (routing config, provider config, permission ruleset, model list, etc.), register a disposer via `registerInstanceCache` from `src/config/invalidation.ts` at module load. `updateGlobal(updates, { dispose: true })` will then flush your cache whenever the user rewrites global config.
 
 Do not read the config file synchronously on every operation — cache the parsed result and rely on invalidation for freshness.
+
+## Per-Instance State
+
+Effective 1.21.4, module-level singleton state that is unsafe to share between concurrent Alexi sessions (multiple SAP AI Core workspaces in the same process, headless `alexi agent` alongside the interactive TUI, subagents, ...) MUST be refactored into a per-instance class. `src/core/filesystem/watcher.ts` is the reference: an `InstanceWatcher` class owns the `Map<directory, disposer>` and every debounce timer, plus a module-level `defaultInstance` and `startWatcher(...)` shim to keep pre-refactor call sites compiling.
+
+Contract for a new per-instance module:
+
+1. Encapsulate the state on the instance. No `Map` or `Set` at module scope — those become cross-session bombs.
+2. Expose `dispose()` and make it idempotent (iterate a snapshot when disposers mutate the map during iteration).
+3. Provide a backwards-compatible module-level shim only if there are existing call sites that cannot be migrated in the same PR. Every new call site owns its own instance.
+4. Add a `getDefault<Thing>Instance()` accessor gated on test use so tests can assert on the default instance's behaviour without touching internals.
+5. Cover isolation between two instances in the tests (see `tests/core/filesystem/instance-watcher.test.ts` for the reference pattern) — this is the regression the refactor exists to prevent.
+
+## `displayRole` for Hidden Instrumentation
+
+Effective 1.21.4 (issue #1466), messages that must reach the model but stay out of the user-facing transcript should be persisted with `displayRole: 'system'` on the `Message` interface. The provider still receives the message with its logical `role` (`'user'`, `'assistant'`, `'system'`); `displayRole` is a UI-only filter honoured by `MessageArea`, `SessionReplay`, and any future transcript surface.
+
+Contract for hook / instrumentation authors:
+
+- Use `sessionManager.addMessage(role, content, tokens, { displayRole: 'system' })` when persisting a message the user should not see. Do NOT set `role: 'system'` unless the message is genuinely part of the system prompt — `role` is the model-facing dimension.
+- Auto-title generation skips any message carrying `displayRole`, so a `displayRole: 'system'` hook message will not become the session title.
+- If you add a new transcript view (a `sessions view` subcommand, an HTTP `/api/session/:id` endpoint, an MCP resource), you MUST honour `displayRole: 'system'` as a hard-hide. Tests should cover both the "user message is visible" and "displayRole=system is hidden even when showSystemMessages=true" cases.
 
 ## License
 

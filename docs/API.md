@@ -68,6 +68,8 @@ alexi agent -m <message> [options]
 | `--effort <level>` | string | Effort level: low, medium, high, max |
 | `--agent <id>` | string | Agent to use (code, debug, plan, explore) |
 | `--auto` | boolean | Run in fully autonomous mode (no permission prompts) |
+| `--yolo` | boolean | Grant every permission request without prompting (see "Headless permission handling" below) |
+| `--dangerously-skip-permissions` | boolean | Alias of `--yolo`; explicit opt-in for CI / non-interactive runs |
 
 #### Examples
 
@@ -97,6 +99,12 @@ In agent mode, Alexi:
 4. Detects context overflow and triggers reactive compaction
 5. Executes lifecycle hooks (PreToolUse, PostToolUse, Stop)
 6. Returns final response with iteration count and tool call summary
+
+#### Headless permission handling (1.21.4)
+
+The non-interactive `agent` command subscribes to `PermissionRequested` on the event bus and publishes a `PermissionResponse` for every request — `granted: true` when `--yolo` (or `--dangerously-skip-permissions`) was passed, `granted: false` otherwise. Without this, a `PermissionRequested` event from a subagent (spawned via the `task` tool) has no listener in headless mode and the agent loop hangs waiting for a response that never arrives. The subscription is unsubscribed on `process.exit` so it does not leak into subsequent invocations under tests. Reference: opencode `08faeb3`.
+
+A `subagentSessionIds: Set<string>` is populated (currently empty — the `task` tool does not yet spawn distinct sessions, so the wiring is reserved for a future real-subagent implementation that will gate the auto-response on sessionId membership without a second refactor).
 
 ### interactive / i
 
@@ -692,8 +700,43 @@ interface Message {
   content: string;
   timestamp?: number;
   tokens?: { input: number; output: number };
+  /**
+   * Optional metadata that overrides how the message is presented to the
+   * user in transcripts (TUI rendering, `sessions export`, and session
+   * replay). Does NOT change how the message is delivered to the model —
+   * providers still receive the message with its logical `role`. Set
+   * `displayRole: 'system'` on hook context messages or other internal
+   * instrumentation that should reach the model but be hidden from
+   * user-facing transcripts. Introduced in 1.21.4 (issue #1466).
+   */
+  displayRole?: 'system' | 'user' | 'assistant';
 }
 ```
+
+#### SessionManager.addMessage
+
+`addMessage` accepts either a raw `displayRole` string or an options object as its fourth argument. Existing three-argument call sites continue to compile.
+
+```typescript
+class SessionManager {
+  addMessage(
+    role: Message['role'],
+    content: string,
+    tokens?: Message['tokens'],
+    options?: { displayRole?: Message['displayRole'] } | Message['displayRole']
+  ): void;
+}
+
+// Common uses
+sessionManager.addMessage('user', 'hi');
+sessionManager.addMessage('assistant', 'hello', { input: 5, output: 3 });
+
+// Persist a hook contextModification message that is hidden from the
+// transcript but still logged in the session file.
+sessionManager.addMessage('user', hookMessage, undefined, { displayRole: 'system' });
+```
+
+Auto-title generation skips messages carrying any `displayRole` value so internal instrumentation cannot end up as the session title.
 
 ### Compaction Interfaces
 
@@ -1451,6 +1494,109 @@ interface ReplayOptions {
 }
 ```
 
+### `displayRole: 'system'` hard-hide
+
+Introduced in 1.21.4 (issue #1466). `SessionReplay.replay` hard-hides any message tagged with `displayRole: 'system'` regardless of `showSystemMessages`. Real `role: 'system'` messages (the actual system prompt) remain visible when `showSystemMessages: true`. These skipped messages are counted in `result.skippedMessages`.
+
+```typescript
+const messages = [
+  { role: 'system', content: 'real-system-prompt', timestamp: 1 },
+  { role: 'user', content: 'hidden-hook', timestamp: 2, displayRole: 'system' },
+  { role: 'user', content: 'visible', timestamp: 3 },
+];
+
+const result = await replay.replay(messages, {
+  showSystemMessages: true,
+  onMessage: (m) => console.log(m.content),
+});
+// Prints: real-system-prompt, visible
+// result.skippedMessages === 1
+```
+
+## MCP Apps API (experimental)
+
+Introduced in 1.21.4 (port of kilocode `36c57c12c`, tightened by `c02134ab4` and `b7069922d`). Wraps `McpClientManager` in a thin API that presents each connected server as an "app" with `listResources` and `callTool` verbs. Gated behind `ALEXI_EXPERIMENTAL_MCP_APPS=1`; the exports are always available for feature detection.
+
+```typescript
+// src/mcp/apps.ts (re-exported via src/mcp/index.ts under prefixed names)
+
+export const MCP_APPS_ENV_FLAG = 'ALEXI_EXPERIMENTAL_MCP_APPS';
+export function isMCPAppsEnabled(): boolean;
+
+export interface MCPResource {
+  uri?: string;
+  name?: string;
+  mimeType?: string;
+  [key: string]: unknown;
+}
+
+export function listResources(
+  server: string,
+  manager?: McpClientManager
+): Promise<MCPResource[]>;
+
+export function callTool(
+  server: string,
+  tool: string,
+  args: Record<string, unknown>,
+  manager?: McpClientManager
+): Promise<unknown>;
+
+export class MCPAppsError extends Error {
+  readonly operation: 'listResources' | 'callTool';
+  readonly server: string;
+  readonly tool?: string;
+  override readonly cause: unknown;
+}
+```
+
+Re-exports from `src/mcp/index.ts` use prefixed names to avoid collision with the raw manager methods:
+
+```typescript
+export {
+  isMCPAppsEnabled,
+  listResources as mcpAppsListResources,
+  callTool as mcpAppsCallTool,
+  MCPAppsError,
+  MCP_APPS_ENV_FLAG,
+  type MCPResource,
+} from './apps.js';
+```
+
+All errors are normalised to `MCPAppsError` so downstream HTTP handlers can render a stable envelope. Cross-module `instanceof` checks are avoided by matching on `name === 'MCPAppsError'`.
+
+## Cerebras Completion-Token Cap API
+
+Introduced in 1.21.4 (port of opencode `e49772a`). Cerebras enforces a hard cap of `32_768` on `max_completion_tokens`; higher values cause silent truncation without an error. The `CerebrasPlugin` (builtin) clamps any explicit `maxTokens` on a Cerebras-routed call to the documented ceiling.
+
+```typescript
+// src/plugin/cerebras.ts
+
+/** Hard upper bound for max_completion_tokens on Cerebras deployments. */
+export const CEREBRAS_MAX_COMPLETION_TOKENS = 32_768;
+
+/**
+ * True when the given provider/model identifier should be treated as
+ * Cerebras. Both direct provider ids and prefixed model ids (e.g.
+ * `cerebras/llama-3.1-70b`) are recognised.
+ */
+export function isCerebrasTarget(providerOrModel: string | undefined): boolean;
+
+/**
+ * Clamp a caller-supplied `maxTokens` value to the Cerebras ceiling.
+ * Returns the original value unchanged for non-Cerebras targets or
+ * when `maxTokens` is undefined / already within bounds.
+ */
+export function clampCerebrasMaxTokens(
+  providerOrModel: string | undefined,
+  maxTokens: number | undefined
+): number | undefined;
+
+export const CerebrasPlugin: Plugin;
+```
+
+Applicability: Alexi routes exclusively through SAP AI Core, so under normal operation there is no direct Cerebras provider. The plugin ships as a builtin because (1) SAP AI Core proxy deployments MAY expose a Cerebras-family model id (`cerebras-*`) which the guard catches, and (2) users running the fork behind a custom proxy that adds Cerebras get the cap for free. No-op for every non-Cerebras provider.
+
 ## Network Management
 
 The `NetworkManager` provides automatic reconnection with exponential backoff:
@@ -1720,7 +1866,7 @@ Callers implement `MigrationDb`/`MigrationTx` against their SQL adapter of choic
 
 ## Filesystem Watcher API
 
-Introduced in 1.20.2. VCS-guarded and gated behind an experimental flag.
+Introduced in 1.20.2. VCS-guarded and gated behind an experimental flag. Extended in 1.21.4 with the `InstanceWatcher` class for per-session scoping.
 
 ```typescript
 // src/core/filesystem/watcher.ts
@@ -1736,9 +1882,95 @@ export function maybeStartFileWatcher(
   location: WatchLocation,
   subscribe: (dir: string) => () => void
 ): (() => void) | null;
+
+/**
+ * Per-instance watcher registry (kilocode `b8984e468`). Prefer over the
+ * module-level `startWatcher` shim for new code.
+ */
+export class InstanceWatcher {
+  start(location: WatchLocation, subscribe: (dir: string) => () => void): (() => void) | null;
+  stop(directory: string): boolean;
+  has(directory: string): boolean;
+  size(): number;
+  setDebounceTimer(directory: string, timer: ReturnType<typeof setTimeout>): void;
+  dispose(): void;
+}
+
+/** Backwards-compatible shim — delegates to the module-level default instance. */
+export function startWatcher(
+  location: WatchLocation,
+  subscribe: (dir: string) => () => void
+): (() => void) | null;
+
+/** Test-only accessor for the default instance. */
+export function getDefaultWatcherInstance(): InstanceWatcher;
 ```
 
-Returns a disposer or `null` when the watcher was skipped. Enable via `ALEXI_EXPERIMENTAL_FILEWATCHER=1`; callers must have already confirmed VCS metadata is present (`location.vcs = true`) before invoking.
+`maybeStartFileWatcher` returns a disposer or `null` when the watcher was skipped. Enable via `ALEXI_EXPERIMENTAL_FILEWATCHER=1`; callers must have already confirmed VCS metadata is present (`location.vcs = true`) before invoking.
+
+`InstanceWatcher.start` is idempotent per directory — a second call for the same directory returns the existing disposer without invoking `subscribe` again. `stop(directory)` only tears down the requested directory and returns `true` if a watch was disposed. `dispose()` is safe to call multiple times: it clears every debounce timer first, then iterates a snapshot of `watchers.values()` and invokes each disposer.
+
+## Error Backoff API
+
+`src/core/error-backoff.ts` exposes error classifiers that higher-level retry drivers use to decide whether a failure is worth another attempt. Extended in 1.21.4 with `isXAICapacityError` and `isRetryableError` (port of opencode `71d08e9`).
+
+```typescript
+// src/core/error-backoff.ts
+
+/** True for free-tier or paid-tier rate limits, or HTTP 429. */
+export function isRateLimitError(err: unknown): boolean;
+
+/**
+ * True when `err.message` matches /xai.*capacity|capacity.*exceeded/i.
+ * xAI (and some SAP proxies fronting xAI-family models) occasionally
+ * emits a mid-stream "capacity exceeded" error that is semantically the
+ * same as a 5xx transient overload — retrying with backoff clears it.
+ * Detection is structural (message regex) because the upstream API does
+ * not attach a stable machine-readable code.
+ */
+export function isXAICapacityError(err: unknown): boolean;
+
+/**
+ * Coarse "is this transient?" check. True when `isRateLimitError(err)`
+ * OR `isXAICapacityError(err)` returns true. False for `null` /
+ * `undefined` and for permanent auth failures. Extend cautiously — a
+ * false positive means real config failures get retried and waste
+ * provider budget.
+ */
+export function isRetryableError(err: unknown): boolean;
+
+/** Extract a Retry-After window and convert to milliseconds. */
+export function getRetryAfterMs(err: unknown): number | undefined;
+
+/** Extract `status: NNN` from a raw error message (4xx / 5xx only). */
+export function extractStatusCode(err: unknown): number | undefined;
+
+/** True for auth failures that will NOT recover on retry. */
+export function isPermanentAuthFailure(err: unknown): boolean;
+```
+
+Example — gate a retry loop on `isRetryableError`:
+
+```typescript
+import { isRetryableError, getRetryAfterMs } from './core/error-backoff.js';
+
+async function callWithRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableError(err) || attempt === maxAttempts) {
+        throw err;
+      }
+      const wait = getRetryAfterMs(err) ?? Math.min(1000 * 2 ** (attempt - 1), 30_000);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+```
 
 ## Config Instance Cache Invalidation API
 
