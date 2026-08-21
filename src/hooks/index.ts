@@ -105,6 +105,20 @@ export interface HookResult {
    * (script hooks) with shape `{ "hookSpecificOutput": { ... } }`.
    */
   hookSpecificOutput?: HookSpecificOutput;
+
+  /**
+   * Optional free-form context the hook wants injected back into the model
+   * conversation. When present on a PreToolUse/PostToolUse hook result the
+   * agent loop appends a stamped `<hook_context tool_name="..."
+   * tool_call_id="...">...</hook_context>` user message after the tool
+   * results for the current iteration.
+   *
+   * Surfaced from a hook by emitting a JSON object on stdout / HTTP body /
+   * script return with shape `{ "contextModification": "..." }`. Payload is
+   * markup-sanitized (see `src/utils/markup-sanitize.ts`) before injection
+   * so embedded `<hook_context>` tags cannot break out of the envelope.
+   */
+  contextModification?: string;
 }
 
 // Zod schemas for validation
@@ -121,6 +135,7 @@ export const HookResultSchema = z.object({
   capped: z.boolean().optional(),
   continueOnBlock: z.boolean().optional(),
   hookSpecificOutput: HookSpecificOutputSchema.optional(),
+  contextModification: z.string().optional(),
 });
 
 export const HookDefinitionSchema = z.object({
@@ -202,6 +217,13 @@ const HOOK_CONFIG_FILES = ['.alexi/hooks.json', 'alexi.config.json'];
 export const STOP_HOOK_BLOCK_CAP = 8;
 
 /**
+ * Maximum size, in characters, of a single hook's `contextModification`
+ * payload before it is truncated. Matches Cline's 50KB cap so a runaway
+ * hook cannot drown the model prompt with an unbounded blob.
+ */
+export const MAX_HOOK_CONTEXT_BYTES = 50 * 1024;
+
+/**
  * Get the effective block cap from env var or default
  */
 export function getBlockCap(): number {
@@ -254,6 +276,46 @@ export function parseHookSpecificOutput(value: unknown): HookSpecificOutput | un
 
   const parsed = HookSpecificOutputSchema.safeParse(block);
   return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Attempt to extract a `contextModification` string from arbitrary hook
+ * output. Accepts either a raw string (stdout / HTTP body) or an object
+ * (script return value). Strings are parsed as JSON; if the parse fails
+ * or the field is missing / non-string, returns `undefined`.
+ *
+ * The extracted value is truncated to `MAX_HOOK_CONTEXT_BYTES` bytes to
+ * bound per-hook context injection cost (matches upstream Cline's 50KB
+ * cap so a runaway hook cannot drown the model prompt).
+ */
+export function parseContextModification(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  let candidate: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{')) {
+      return undefined;
+    }
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (typeof candidate !== 'object' || candidate === null) {
+    return undefined;
+  }
+
+  const ctx = (candidate as { contextModification?: unknown }).contextModification;
+  if (typeof ctx !== 'string') {
+    return undefined;
+  }
+
+  return ctx.length > MAX_HOOK_CONTEXT_BYTES ? ctx.slice(0, MAX_HOOK_CONTEXT_BYTES) : ctx;
 }
 
 // ============ Template Substitution ============
@@ -370,6 +432,10 @@ async function executeCommandHook(hook: HookDefinition, context: HookContext): P
         if (hso) {
           result.hookSpecificOutput = hso;
         }
+        const ctxMod = parseContextModification(stdout);
+        if (ctxMod !== undefined) {
+          result.contextModification = ctxMod;
+        }
         resolve(result);
       }
     });
@@ -445,6 +511,10 @@ async function executeHttpHook(hook: HookDefinition, context: HookContext): Prom
     const hso = parseHookSpecificOutput(responseText);
     if (hso) {
       result.hookSpecificOutput = hso;
+    }
+    const ctxMod = parseContextModification(responseText);
+    if (ctxMod !== undefined) {
+      result.contextModification = ctxMod;
     }
     return result;
   } catch (err) {
@@ -528,6 +598,10 @@ async function executeScriptHook(hook: HookDefinition, context: HookContext): Pr
     const hso = parseHookSpecificOutput(scriptReturn);
     if (hso) {
       hookResult.hookSpecificOutput = hso;
+    }
+    const ctxMod = parseContextModification(scriptReturn);
+    if (ctxMod !== undefined) {
+      hookResult.contextModification = ctxMod;
     }
     return hookResult;
   } catch (err) {

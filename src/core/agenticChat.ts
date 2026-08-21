@@ -39,6 +39,7 @@ import {
   getBlockCap,
   type HookResult as HookExecResult,
 } from '../hooks/index.js';
+import { sanitizeHookContext } from '../utils/markup-sanitize.js';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -676,6 +677,18 @@ export async function agenticChat(
       const preIterationCheckpointCount = getCheckpointManager().getHistory().length;
       const iterationToolNames: string[] = [];
 
+      // Collect hook `contextModification` payloads across every tool in
+      // this iteration and inject them as stamped `<hook_context>` user
+      // messages once every tool result has been appended. This keeps the
+      // (assistant tool_calls → tool result → tool result → ...) block
+      // contiguous, which some providers (notably Anthropic via SAP AI
+      // Core) require, while still delivering hook output to the model.
+      const pendingHookContexts: Array<{
+        toolName: string;
+        toolCallId: string;
+        contextModification: string;
+      }> = [];
+
       // Execute each tool call
       for (const toolCall of result.toolCalls) {
         const { id, result: toolResult } = await executeToolCall(
@@ -736,8 +749,37 @@ export async function agenticChat(
                 hookResult.error || hookResult.output || 'Hook rejected tool execution';
               throw new Error(`PostToolUse hook blocked execution: ${reason}`);
             }
+            continue;
+          }
+
+          // Successful hook — collect any `contextModification` payload so
+          // it can be stamped with tool identity and injected once all
+          // tool-result messages for this iteration have been appended.
+          if (
+            typeof hookResult.contextModification === 'string' &&
+            hookResult.contextModification.length > 0
+          ) {
+            pendingHookContexts.push({
+              toolName: toolCall.function.name,
+              toolCallId: id,
+              contextModification: hookResult.contextModification,
+            });
           }
         }
+      }
+
+      // Flush collected hook contexts as stamped user messages, one per
+      // successful hook. Each block records the originating tool_name and
+      // tool_call_id so parallel tool executions remain attributable, and
+      // the payload is markup-sanitized so embedded `<hook_context>` tags
+      // cannot break out of the envelope or forge tool identity.
+      for (const ctx of pendingHookContexts) {
+        const sanitized = sanitizeHookContext(ctx.contextModification);
+        const hookMessage =
+          `<hook_context tool_name="${ctx.toolName}" tool_call_id="${ctx.toolCallId}">\n` +
+          `${sanitized}\n` +
+          `</hook_context>`;
+        messages.push({ role: 'user', content: hookMessage });
       }
 
       // Persist a session-level snapshot for this agent step. Best-effort:
