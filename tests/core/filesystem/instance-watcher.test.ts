@@ -12,7 +12,7 @@ import {
   getDefaultWatcherInstance,
   startWatcher,
   type WatchLocation,
-} from '../../core/filesystem/watcher.js';
+} from '../../../src/core/filesystem/watcher.js';
 
 describe('InstanceWatcher', () => {
   const originalFlag = process.env.ALEXI_EXPERIMENTAL_FILEWATCHER;
