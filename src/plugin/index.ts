@@ -1937,3 +1937,17 @@ export async function resolvePluginRulesForPrompt(
 }
 
 // Type exports are already included via class declarations above
+
+// ============ Builtin Plugins ============
+
+/**
+ * Builtin plugins that ship with Alexi. Kept as a re-export list so
+ * callers (`getPluginManager().load(...)`) can register any subset
+ * without importing the concrete modules directly.
+ */
+export {
+  CerebrasPlugin,
+  CEREBRAS_MAX_COMPLETION_TOKENS,
+  clampCerebrasMaxTokens,
+  isCerebrasTarget,
+} from './cerebras.js';

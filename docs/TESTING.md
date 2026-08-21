@@ -1319,6 +1319,67 @@ mutates the harvest inputs mid-run must call `_resetHarvestedCAsCache()` in
 regardless of the injected overrides. The reset hook is `@internal` and only
 exists to unblock unit tests; do not use it in production code.
 
+## Testing InstanceWatcher and Debounce-Timer Cleanup
+
+The `InstanceWatcher` class in `src/core/filesystem/watcher.ts` scopes filesystem watches to a single instance so two concurrent Alexi sessions (CLI plus daemon, or two side-by-side worktrees) cannot tear down each other's watches when one of them calls `dispose()`. Its regression suite at `tests/core/filesystem/instance-watcher.test.ts` locks in ten invariants; the ones most likely to break when refactoring the watcher module are:
+
+1. **Two-instance state isolation** (`kilocode b8984e468`). Disposing instance `b` must not affect instance `a`'s watches or `size()`.
+2. **Idempotent registration.** Calling `start(location, subscribe)` twice for the same `directory` must return the same disposer and invoke `subscribe` only once.
+3. **`stop(directory)` returns `false` for unknown directories** and only tears down the requested entry, leaving every other watch on the instance intact.
+4. **VCS guard.** `start({ vcs: false, ... })` returns `null` and does not increment `size()` — the watcher refuses to attach to non-VCS locations.
+5. **Experimental flag gate.** With `ALEXI_EXPERIMENTAL_FILEWATCHER=0` or unset, `start()` returns `null` regardless of VCS status.
+6. **`setDebounceTimer` clears the previous timer for the same directory** — and `dispose()` clears every remaining timer alongside the `watchers` map, so `size()` returns `0` after `dispose()`.
+
+The last case (`tests/core/filesystem/instance-watcher.test.ts:137`) is worth calling out separately because it exercises two properties at once with a single 60-second timer. If the watcher stopped clearing debounce timers, the test would keep the Node event loop alive for a minute and time out; but the test _also_ asserts `expect(w.size()).toBe(0)` after `dispose()` so a regression that clears the timer but not the underlying `watchers` map is caught explicitly rather than silently.
+
+Note the import path in the example below: because the test file lives three levels deep at `tests/core/filesystem/instance-watcher.test.ts`, the correct relative path to the runtime module is `../../../src/core/filesystem/watcher.js` — not `../../core/filesystem/watcher.js`, which would resolve to a nonexistent sibling of the test itself. A prior version of this file used the shorter (broken) prefix and was corrected by autohealing in commit `b4fcb19a` (`fix(tests): correct import path in instance-watcher test [autohealing]`, 2026-08-21); see the entry in `CHANGELOG.md` `[Unreleased] > Fixed`. The general rule is documented under **Test import-path depth** in `docs/CONTRIBUTING.md`.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  InstanceWatcher,
+  getDefaultWatcherInstance,
+} from '../../../src/core/filesystem/watcher.js';
+
+describe('InstanceWatcher', () => {
+  beforeEach(() => {
+    process.env.ALEXI_EXPERIMENTAL_FILEWATCHER = '1';
+    getDefaultWatcherInstance().dispose();
+  });
+
+  afterEach(() => {
+    getDefaultWatcherInstance().dispose();
+  });
+
+  it('setDebounceTimer clears the previous timer for the same directory', () => {
+    const w = new InstanceWatcher();
+    const first = setTimeout(() => {}, 60_000) as ReturnType<typeof setTimeout>;
+    // Replace clearTimeout would be racy; instead observe indirectly by
+    // scheduling two timers and calling dispose (which must clear them
+    // without hanging the test).
+    w.setDebounceTimer('/tmp/x', first);
+    w.setDebounceTimer(
+      '/tmp/x',
+      setTimeout(() => {}, 60_000)
+    );
+    // If the previous timer weren't cleared, this test would keep the event
+    // loop alive for 60s. dispose() must also clear the current timer.
+    w.dispose();
+    expect(w.size()).toBe(0);
+  });
+});
+```
+
+Key patterns to reuse when extending the suite:
+
+1. **Reset the default instance in both `beforeEach` and `afterEach`.** The `getDefaultWatcherInstance()` singleton survives across cases and will leak watches from an earlier test into a later one. Always dispose it symmetrically, and restore `process.env.ALEXI_EXPERIMENTAL_FILEWATCHER` to its original value (delete when it was previously unset) so tests are parallel-safe.
+2. **Prefer post-dispose observable assertions over "test does not hang" as the sole signal.** Asserting `w.size() === 0` after `w.dispose()` is cheap and catches the class of regressions where dispose clears the visible collection but leaves a hidden resource (a debounce timer, a subscriber ref) alive. A hang-based assertion alone would still pass a test that had the opposite regression — cleared the map but leaked the timer, or vice versa.
+3. **Do not introduce tautological locals like `let flag = false; flag = true; expect(flag).toBe(true)`.** ESLint (`no-unused-vars` after the assignment) and the autohealing workflow will strip them, and they add no signal beyond what a direct assertion on the object under test already provides. See the 2026-08-21 fix logged in `CHANGELOG.md` for the concrete example.
+4. **Never call `clearTimeout` directly to spy on cleanup.** The test above documents this: overriding `clearTimeout` at module scope is racy across Vitest workers. Observe cleanup indirectly through the object under test's own accessors (`size()`, `has(directory)`) or through the event-loop-liveness signal that a leaked 60s timer would produce.
+5. **Use synthetic 60s timers rather than short ones.** A leaked short timer might fire between the `dispose()` call and the assertion; a leaked 60s timer is guaranteed to still be pending, so the assertion executes in a well-defined state.
+
+The paired module-level shims — `startWatcher(location, subscribe)` and `getDefaultWatcherInstance()` — are covered by their own case (`'backwards-compatible startWatcher shim delegates to the default instance'`); when adding shims to the module, add a matching case there to lock in the delegation contract.
+
 ## Testing Agent Custom Loader
 
 ### Test Files
@@ -1830,3 +1891,59 @@ Additional coverage worth mirroring in future streaming-tool tests:
 ### Windows path canonicalization tests
 
 `tests/reference/canonicalize-repo-path.test.ts` covers `canonicalizeRepoPath` from `src/reference/repository-cache.ts` (re-exported through `src/reference/index.ts` as of 1.20.2). Cross-platform tests should conditionally skip Windows-specific assertions when `process.platform !== 'win32'`.
+
+## Testing Patterns Added in 1.21.4
+
+### `displayRole` transcript filtering
+
+`tests/cli/tui/transcript-display-role.test.tsx` covers the UI-side hard-hide of messages carrying `displayRole: 'system'` (issue #1466). It combines two harnesses in one file: `ink-testing-library` for the `MessageArea` component and a direct `SessionReplay` instance for the CLI replay path.
+
+Reference patterns:
+
+- **`MessageArea` frame snapshotting.** Render the component wrapped in the real `ThemeProvider`, capture `lastFrame()`, and assert on substring presence:
+
+  ```tsx
+  const { lastFrame } = render(
+    <ThemeProvider>
+      <MessageArea {...defaultAreaProps} messages={messages} />
+    </ThemeProvider>
+  );
+  const frame = lastFrame() ?? '';
+  expect(frame).toContain('VISIBLE_USER_MESSAGE');
+  expect(frame).not.toContain('HIDDEN_HOOK_CONTEXT_PAYLOAD');
+  ```
+
+- **Empty-state assertion when every message is filtered.** When only `displayRole: 'system'` messages exist, the empty-state placeholder (`Start a conversation…`) is expected to render. The test asserts on the ellipsis character (`…`) so it does not couple to the exact placeholder wording.
+
+- **`SessionReplay` hard-hide takes precedence over `showSystemMessages: true`.** Real `role: 'system'` messages remain visible when `showSystemMessages: true`, but `displayRole: 'system'` messages MUST NOT render. Cover both in one test using `onMessage` callback capture and inspecting `result.skippedMessages`.
+
+### `InstanceWatcher` isolation tests
+
+`tests/core/filesystem/instance-watcher.test.ts` covers the per-instance filesystem watcher (kilocode `b8984e468`). Patterns worth mirroring for future per-instance state:
+
+- **Isolation between two instances.** Start watches on two `InstanceWatcher` objects for different directories, dispose one, and assert the other's disposer was NOT invoked. This is the cross-talk regression the refactor exists to prevent.
+- **Idempotency assertions.** Call `start(location, subscribe)` twice for the same directory and assert `subscribe` was called exactly once (`subscribeCalls === 1`), and that both `start` calls returned the same disposer instance.
+- **Flag toggling.** Save `process.env.ALEXI_EXPERIMENTAL_FILEWATCHER` in a `beforeEach` and restore it in `afterEach`. Between tests, call `getDefaultWatcherInstance().dispose()` to guarantee a clean default instance — the module-level shim would otherwise leak state across the file.
+- **Debounce timer replacement without hanging the event loop.** `setDebounceTimer` MUST clear the previous timer for the same directory. To assert this without observing internal state, schedule two 60-second timers on the same directory and rely on `dispose()` cleaning them up; if the previous timer was NOT cleared, the test would keep the event loop alive for a minute.
+
+### `isXAICapacityError` / `isRetryableError` classifier tests
+
+`src/core/__tests__/error-backoff.test.ts` covers the two new transient-error classifiers (port of opencode `71d08e9`). Reference patterns:
+
+- **Regex coverage matrix.** Assert canonical (`'xAI capacity exceeded, please retry'`), generic (`'capacity exceeded for grok-2'`), and case-insensitive (`'XAI CAPACITY overloaded'`) forms all return `true`. Negative cases: unrelated messages, HTTP 429 alone (goes through `isRateLimitError`), and non-object inputs (`null`, `undefined`, plain strings) return `false`.
+- **`isRetryableError` composition.** True for rate limits (`{ code: 'free_tier_rate_limit' }`, `{ statusCode: 429 }`) and xAI capacity errors. False for permanent auth failures (`{ name: 'NoRefreshTokenError' }`) and `null` / `undefined`. Cover both branches so a future regression that inverts the OR is caught.
+
+### Hook `contextModification` persistence tests
+
+`tests/orchestrator-hooks.test.ts` gained a persistence test asserting that hook `contextModification` payloads are written to the session with `displayRole: 'system'`. The pattern:
+
+1. Mock `sessionManager.addMessage` with `vi.fn()`.
+2. Drive `agenticChat('go', { sessionManager })` through a full iteration where a `PostToolUse` hook returns `contextModification: '...'`.
+3. Filter the recorded `addMessage.mock.calls` for the ones whose second argument contains `<hook_context`.
+4. Assert the persisted call carries `role: 'user'`, the raw payload, and `opts: { displayRole: 'system' }`.
+
+The test complements — does not replace — the existing "model receives the payload verbatim" tests earlier in the file. Both paths must pass: the model still sees the payload via the in-memory `messages` array, and the session file records it with the display-role override.
+
+### Headless permission auto-responder tests
+
+The `--yolo` / default-deny path in `src/cli/commands/agent.ts` can be exercised without spinning up a real provider: publish a synthetic `PermissionRequested` event on the bus and assert a `PermissionResponse` is published with the expected `granted` value. Unsubscribe on `process.once('exit', ...)` is the leak-prevention contract — a test that spawns two `agent` invocations back-to-back would otherwise see the earlier subscription answer the later invocation's request.

@@ -779,7 +779,39 @@ interface HookDefinition {
 Key features:
 - **Block Cap**: Consecutive Stop hook rejections are capped to prevent infinite loops
 - **continueOnBlock**: When a hook rejects, the error is fed back to the model instead of halting
-- **Template Variables**: Hook commands support `{{toolName}}`, `{{sessionId}}`, etc.
+- **Template Variables**: Hook commands support `{​{toolName}}`, `{​{sessionId}}`, etc.
+
+### `contextModification` payloads and `displayRole` hiding
+
+When a `PostToolUse` hook returns a `contextModification` string, the agentic loop (`src/core/agenticChat.ts`) injects it as a stamped `<hook_context tool_name="…" tool_call_id="…">…</hook_context>` user message AFTER every tool-result message for that iteration. The payload is markup-sanitized (embedded `<hook_context>` tags are HTML-escaped) so a malicious tool cannot break out of the envelope or forge tool identity.
+
+Introduced in 1.21.4 (issue #1466): the same message that reaches the model is ALSO persisted to the session with `displayRole: 'system'` so it is hidden from the user-facing transcript (TUI `MessageArea`, `sessions export`, `SessionReplay`). This gives hook authors an "instrument the model, don't clutter the user" primitive.
+
+```mermaid
+flowchart TB
+    Hook[PostToolUse hook returns<br/>contextModification: 'lint warnings ...']
+    Sanitize[sanitizeHookContext<br/>escape embedded tags]
+    Stamp[Wrap in &lt;hook_context&gt; envelope<br/>stamp tool_name + tool_call_id]
+    Model[Push into messages array<br/>-&gt; next provider.complete call]
+    Session[sessionManager.addMessage<br/>role='user'<br/>displayRole='system']
+    TUI[MessageArea filter:<br/>hide displayRole=='system']
+    Replay[SessionReplay filter:<br/>hide displayRole=='system'<br/>even when showSystemMessages=true]
+
+    Hook --> Sanitize
+    Sanitize --> Stamp
+    Stamp --> Model
+    Stamp --> Session
+    Session --> TUI
+    Session --> Replay
+```
+
+Contract:
+
+- The provider always receives the message with its logical `role` (`'user'` for hook context). `displayRole` is a UI-only filter.
+- `MessageArea` filters `messages.filter(m => m.displayRole !== 'system')` before rendering. When every message is filtered, the empty-state placeholder ("Start a conversation…") appears.
+- `SessionReplay.replay(messages, opts)` hard-hides `displayRole: 'system'` even when `showSystemMessages: true`. Real `role: 'system'` messages (the actual system prompt) remain visible when that option is set.
+- `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument for backwards compatibility with three-argument call sites.
+- Auto-title generation (`activeSession.metadata.title` from the first user message) skips messages carrying any `displayRole` value, so hook payloads cannot end up as the session title.
 
 ## Compaction System
 
@@ -1087,6 +1119,7 @@ Alexi and its CI wrappers:
 | `fetch failed`                         | CI retry loops                        |
 | HTTP `502`, `503`, `429` / `rate limit`| Agent factory retry regex, kilo run wrappers |
 | MCP `startup timeout for server ...`   | `classifyConnectError` in `src/mcp/client.ts` |
+| `xai capacity exceeded` / `capacity exceeded` (message match) | `isXAICapacityError` in `src/core/error-backoff.ts` |
 
 The following patterns are treated as permanent (must NOT be retried) and
 require operator intervention:
@@ -1150,6 +1183,8 @@ through two independent mechanisms:
   counter on any successful call. Status codes are extracted from raw
   error messages with `extractStatusCode(errorMessage)`, which matches
   `status: NNN` for 4xx/5xx values only.
+- **`isRetryableError(err)` in `src/core/error-backoff.ts`** (added 1.21.4, port of opencode `71d08e9`) — a coarse "is this transient?" check consulted by higher-level retry drivers. Returns `true` when `isRateLimitError(err)` OR `isXAICapacityError(err)` returns true, `false` for `null` / `undefined` and for permanent auth failures. Extend cautiously — a false positive means real config failures get retried and waste provider budget.
+- **`isXAICapacityError(err)` in `src/core/error-backoff.ts`** — matches `err.message` against `/xai.*capacity|capacity.*exceeded/i`. xAI (and some SAP proxies fronting xAI-family models) occasionally emits a mid-stream "capacity exceeded" error that is semantically the same as a 5xx transient overload; without this classifier such errors would be treated as permanent and surface to the user as a hard failure. Detection is intentionally structural (message regex) because the upstream API does not attach a stable machine-readable code.
 - **`classifyRouteError` in `src/core/router.ts`** — a permanent-failure
   classifier. Returns `{ kind: 'aborted' }` for user-initiated Ctrl+C
   (short-circuits so aborts never poison route health), `{ kind:
@@ -1493,6 +1528,38 @@ The helpers above live in `src/mcp/client.ts`:
 
 When adding a new consumer of `getAllTools()`, import from `src/mcp/client.ts`
 rather than re-implementing the split/escape logic.
+
+### MCP Apps (experimental)
+
+Introduced in 1.21.4 (port of kilocode `36c57c12c`, tightened by `c02134ab4` and `b7069922d`). "MCP Apps" is a thin API that wraps the existing `McpClientManager` and presents each connected server as an "app" with two verbs — `listResources` and `callTool`. Gated behind `ALEXI_EXPERIMENTAL_MCP_APPS=1` at the call site; the intent is to stabilise the shape before wiring it into a permanent HTTP surface. Exports live at `src/mcp/apps.ts` and are re-exported by `src/mcp/index.ts` under prefixed names (`mcpAppsListResources`, `mcpAppsCallTool`, `MCPAppsError`, `MCP_APPS_ENV_FLAG`, `isMCPAppsEnabled`, `MCPResource`) so both the flag check and the verbs are always available for feature detection.
+
+Design notes:
+
+1. **Tight error surface.** Every thrown value from `manager.callTool` or `manager.refreshResources` is wrapped in `MCPAppsError` carrying `operation: 'listResources' | 'callTool'`, `server`, optional `tool`, and the underlying `cause`. Upstream HTTP handlers can render a stable JSON envelope without inspecting the raw cause, and cross-module `instanceof` checks are avoided by matching on `name === 'MCPAppsError'`.
+2. **Optional-method tolerance.** `listResources` gracefully returns an empty array when the connected server does not implement the optional method, mirroring the existing `McpClientManager.listResources` semantics so apps aren't forced to wrap it in `try/catch` for a common case.
+3. **Borrowed transport.** The module intentionally does not spawn its own MCP transport; it borrows the connection already owned by the manager. Once the per-instance refactor (kilocode `b8984e468`) propagates to MCP, this will honour cross-instance isolation for free.
+
+```typescript
+import { isMCPAppsEnabled, mcpAppsListResources, mcpAppsCallTool, MCPAppsError } from '../mcp/index.js';
+
+if (!isMCPAppsEnabled()) {
+  // Short-circuit with a 404 or "not enabled" response.
+  return { status: 404, body: 'mcp-apps not enabled' };
+}
+
+try {
+  const resources = await mcpAppsListResources('filesystem');
+  const result = await mcpAppsCallTool('filesystem', 'read_file', { path: '/etc/hosts' });
+  return { status: 200, body: { resources, result } };
+} catch (err) {
+  if (err instanceof MCPAppsError) {
+    return { status: 502, body: { operation: err.operation, server: err.server, cause: String(err.cause) } };
+  }
+  throw err;
+}
+```
+
+`MCPResource` (`{ uri?, name?, mimeType?, [key: string]: unknown }`) is deliberately loose because the MCP resource contract has been evolving — callers are expected to pass this straight through to the HTTP client rather than reasoning about individual fields.
 
 ## Persistent State and SQLite
 
@@ -1886,6 +1953,46 @@ export function maybeStartFileWatcher(
 ```
 
 The `subscribe` callback is injected so this module stays independent of the concrete watcher backend (chokidar, native `fs.watch`, or an Effect-based stream).
+
+### Per-instance scoping (`InstanceWatcher`)
+
+Introduced in 1.21.4 (port of kilocode `b8984e468`). The watcher's `Map<directory, disposer>` state is now scoped to an `InstanceWatcher` object rather than a module-level singleton. Two concurrent Alexi sessions — multiple SAP AI Core workspaces running in the same process, or a headless `alexi agent` command running alongside the interactive TUI — MUST NOT share watcher state; a `stop()` from one session would otherwise tear down the peer's watches.
+
+```mermaid
+sequenceDiagram
+    participant SessionA as Session A
+    participant SessionB as Session B
+    participant WatcherA as InstanceWatcher A
+    participant WatcherB as InstanceWatcher B
+    participant Default as defaultInstance (legacy)
+
+    SessionA->>WatcherA: start(/proj/a, subscribe)
+    WatcherA-->>SessionA: disposer (idempotent)
+    SessionB->>WatcherB: start(/proj/b, subscribe)
+    WatcherB-->>SessionB: disposer
+
+    Note over WatcherA,WatcherB: state is isolated
+    SessionB->>WatcherB: dispose()
+    Note over WatcherA: WatcherA.size() still 1
+    SessionA->>WatcherA: dispose()
+
+    Note over Default: legacy callers use<br/>startWatcher() shim
+```
+
+Contract:
+
+- `start(location, subscribe)` is idempotent per directory. A second call for the same directory returns the existing disposer without invoking `subscribe` again.
+- `stop(directory)` only tears down the requested directory on this instance. Returns `true` if a watch was disposed, `false` otherwise.
+- `has(directory)`, `size()` expose read-only introspection.
+- `setDebounceTimer(directory, timer)` replaces any previously stored timer for the same directory (previous timer is `clearTimeout`'d first). Exposed so watcher backends can share the instance's timer table without holding a private `Map` of their own.
+- `dispose()` is safe to call multiple times. It clears every debounce timer first, then iterates a snapshot of `watchers.values()` (each disposer mutates the map during iteration) and invokes each disposer.
+
+Backwards compatibility is preserved via two shims:
+
+- `startWatcher(location, subscribe)` — module-level function that delegates to `defaultInstance`. Pre-refactor call sites that assumed a global watcher keep working unchanged.
+- `getDefaultWatcherInstance()` — test-only accessor exposed so watcher tests can assert on cross-instance isolation without exposing the raw instance state.
+
+New code should own its own `InstanceWatcher` (typically hung off the session or workspace object) so concurrent sessions cannot tear down each other's watches.
 
 ## Provider Transform Additions
 

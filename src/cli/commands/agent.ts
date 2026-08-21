@@ -21,6 +21,7 @@ import { createWorktree } from '../../utils/gitWorktree.js';
 import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
 import { getConfigDefaultAgent } from '../../config/userConfig.js';
 import { getPermissionManager } from '../../permission/index.js';
+import { PermissionRequested, PermissionResponse } from '../../bus/index.js';
 
 interface AgentOptions {
   message?: string;
@@ -135,6 +136,43 @@ export function registerAgentCommand(program: Command): void {
         }
 
         const sessionManager = new SessionManager();
+
+        // Upstream fix (opencode 08faeb3): the non-interactive `agent` command
+        // must also answer permission requests raised by *subagent* sessions
+        // spawned via the `task` tool. Without this, a `PermissionRequested`
+        // event from a subagent has no listener in headless mode and the
+        // agent loop hangs waiting for a `PermissionResponse` that never
+        // arrives.
+        //
+        // We track subagent session ids in a local Set (populated whenever a
+        // sub-session is created via the task tool — currently the task tool
+        // is stub-based and does not spawn distinct sessions, so this set
+        // stays empty; the wiring is here so a future real-subagent
+        // implementation gets the correct headless behaviour for free) and
+        // auto-answer any `PermissionRequested` event whose `id` belongs
+        // to either the current session or a tracked subagent session,
+        // respecting `--yolo` (grant) or the default policy (deny).
+        const subagentSessionIds = new Set<string>();
+        const permissionUnsub = PermissionRequested.subscribe((event) => {
+          // The Alexi PermissionRequested payload does not carry a
+          // sessionID today; we accept every request in headless mode
+          // when --yolo is set, and deny otherwise. The subagentSessionIds
+          // set is retained so a future payload extension (adding
+          // `sessionId` to the schema) can gate on membership without a
+          // second refactor. Reference: opencode 08faeb3.
+          const grant = Boolean(opts.yolo || opts.dangerouslySkipPermissions);
+          PermissionResponse.publish({
+            id: event.id,
+            granted: grant,
+            timestamp: Date.now(),
+          });
+        });
+        // Ensure the subscription is cleaned up on process exit so it
+        // does not leak into subsequent invocations under tests.
+        process.once('exit', () => permissionUnsub());
+        // Suppress the "declared but never read" lint on subagentSessionIds
+        // — the set is deliberately reserved for future wiring (see above).
+        void subagentSessionIds;
 
         // Load or create session
         if (opts.session) {

@@ -297,6 +297,28 @@ Usage:
     } else {
       // Existing task — keep the caller-supplied id so resumption works.
       taskId = params.task_id as string;
+
+      // Upstream fix: surface resumable subagent errors instead of silently
+      // returning the last text part (opencode c313504). If the task we are
+      // resuming failed on a prior run, the parent agent MUST see a
+      // descriptive failure — otherwise it proceeds as if the subtask
+      // succeeded and downstream reasoning is silently broken.
+      //
+      // Reference format matches opencode: `Subagent failed (task_id: <id>): <message>`.
+      if (taskData.status === 'failed') {
+        const message = taskData.error ?? 'Subagent execution failed';
+        return {
+          success: false,
+          error: `Subagent failed (task_id: ${taskId}): ${message}`,
+          data: {
+            taskId,
+            agentId: taskData.agentId,
+            response: '',
+            completed: false,
+            status: 'failed',
+          },
+        };
+      }
     }
 
     // Add the prompt to messages
