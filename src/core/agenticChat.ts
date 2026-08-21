@@ -773,6 +773,12 @@ export async function agenticChat(
       // tool_call_id so parallel tool executions remain attributable, and
       // the payload is markup-sanitized so embedded `<hook_context>` tags
       // cannot break out of the envelope or forge tool identity.
+      //
+      // The message is sent to the model verbatim (via the in-memory
+      // `messages` array below) but persisted to the session with
+      // `displayRole: 'system'` so it is hidden from the user-facing
+      // transcript (TUI, `sessions export`, session replay). See issue
+      // #1466.
       for (const ctx of pendingHookContexts) {
         const sanitized = sanitizeHookContext(ctx.contextModification);
         const hookMessage =
@@ -780,6 +786,16 @@ export async function agenticChat(
           `${sanitized}\n` +
           `</hook_context>`;
         messages.push({ role: 'user', content: hookMessage });
+
+        // Persist to the session (if one is attached) with a display-role
+        // override so transcripts hide it. The model has already received
+        // the same payload via the `messages` push above; this only
+        // affects rendering / replay.
+        if (options?.sessionManager) {
+          options.sessionManager.addMessage('user', hookMessage, undefined, {
+            displayRole: 'system',
+          });
+        }
       }
 
       // Persist a session-level snapshot for this agent step. Best-effort:

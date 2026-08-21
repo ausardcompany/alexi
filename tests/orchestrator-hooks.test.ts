@@ -319,6 +319,61 @@ describe('orchestrator hook context injection', () => {
     expect(hookMsgs).toHaveLength(0);
   });
 
+  it('persists hook_context messages to the session with displayRole: "system"', async () => {
+    // Only the persisted message needs to carry displayRole; the model
+    // still receives the payload via the in-memory `messages` array
+    // (verified by the other tests in this file).
+    mockProvider.complete.mockResolvedValueOnce({
+      text: '',
+      toolCalls: [
+        { id: 'call_1', type: 'function', function: { name: 'tool_a', arguments: '{}' } },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    } satisfies CompletionResult);
+
+    mockExecuteHooks.mockResolvedValueOnce([
+      { success: true, duration: 1, contextModification: 'hook payload' },
+    ]);
+
+    mockProvider.complete.mockResolvedValueOnce({
+      text: 'Done',
+      usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 },
+    } satisfies CompletionResult);
+
+    const addMessage = vi.fn();
+    const sessionManager = {
+      addMessage,
+      getCurrentSession: vi.fn(() => null),
+      createSession: vi.fn(() => ({
+        metadata: {
+          id: 'sess-1',
+          created: 0,
+          updated: 0,
+          totalTokens: 0,
+          messageCount: 0,
+        },
+        messages: [],
+      })),
+      getHistory: vi.fn(() => []),
+      persistActiveSession: vi.fn(),
+    } as unknown as import('../src/core/sessionManager.js').SessionManager;
+
+    await agenticChat('go', { sessionManager });
+
+    // Find the persisted hook_context call. addMessage is also called at
+    // the end of the loop with the outbound user + final assistant text,
+    // so filter to just the hook_context stamped writes.
+    const hookAdds = addMessage.mock.calls.filter(
+      (args: unknown[]) =>
+        typeof args[1] === 'string' && (args[1] as string).includes('<hook_context')
+    );
+    expect(hookAdds).toHaveLength(1);
+    const [role, content, _tokens, opts] = hookAdds[0];
+    expect(role).toBe('user');
+    expect(content).toContain('hook payload');
+    expect(opts).toEqual({ displayRole: 'system' });
+  });
+
   it('does NOT inject a hook_context message when a hook failed (rejected)', async () => {
     mockProvider.complete.mockResolvedValueOnce({
       text: '',
