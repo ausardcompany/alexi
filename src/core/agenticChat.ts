@@ -683,6 +683,18 @@ export async function agenticChat(
       // (assistant tool_calls → tool result → tool result → ...) block
       // contiguous, which some providers (notably Anthropic via SAP AI
       // Core) require, while still delivering hook output to the model.
+      //
+      // Two separate arrays keep pre- and post-tool contexts distinguishable
+      // during flush: PreToolUse contexts are flushed FIRST (marked
+      // `phase="pre"`) so the transcript reflects lifecycle ordering
+      // (pre → tool result → post). Both arrays are drained after every
+      // tool result for the iteration has been appended so the
+      // (assistant tool_calls → tool result → ...) block stays contiguous.
+      const preToolHookContexts: Array<{
+        toolName: string;
+        toolCallId: string;
+        contextModification: string;
+      }> = [];
       const pendingHookContexts: Array<{
         toolName: string;
         toolCallId: string;
@@ -691,6 +703,72 @@ export async function agenticChat(
 
       // Execute each tool call
       for (const toolCall of result.toolCalls) {
+        // Execute PreToolUse hooks BEFORE dispatching the tool. This
+        // mirrors the PostToolUse behaviour further down and gives hook
+        // authors a chance to (a) inject `contextModification` into the
+        // model conversation (e.g. rate-limit warnings, cache hints) and
+        // (b) block execution via `success: false`.
+        const preHookContext = createHookContext('PreToolUse', {
+          sessionId: toolContext.sessionId,
+          toolName: toolCall.function.name,
+        });
+        const preHookResults: HookExecResult[] = await executeHooks('PreToolUse', preHookContext);
+
+        let preToolBlocked = false;
+        for (const hookResult of preHookResults) {
+          if (!hookResult.success) {
+            if (hookResult.continueOnBlock) {
+              // Soft-block: skip this tool call, feed rejection reason back
+              // to the model as a synthetic tool-result so the assistant's
+              // tool_calls message still has a matching tool response
+              // (Anthropic via SAP AI Core requires this pairing).
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({
+                  success: false,
+                  error: `PreToolUse hook blocked execution: ${reason}`,
+                }),
+              });
+              toolCallSummary.push({
+                name: toolCall.function.name,
+                success: false,
+                error: `PreToolUse hook blocked execution: ${reason}`,
+                arguments: toolCall.function.arguments,
+              });
+              preToolBlocked = true;
+              break;
+            } else {
+              // Halt: throw to stop the agentic loop
+              const reason =
+                hookResult.error || hookResult.output || 'Hook rejected tool execution';
+              throw new Error(`PreToolUse hook blocked execution: ${reason}`);
+            }
+          }
+
+          // Successful hook — collect any `contextModification` payload so
+          // it can be stamped with tool identity and injected once all
+          // tool-result messages for this iteration have been appended.
+          if (
+            typeof hookResult.contextModification === 'string' &&
+            hookResult.contextModification.length > 0
+          ) {
+            preToolHookContexts.push({
+              toolName: toolCall.function.name,
+              toolCallId: toolCall.id,
+              contextModification: hookResult.contextModification,
+            });
+          }
+        }
+
+        if (preToolBlocked) {
+          // Skip the tool dispatch but still count and continue with the
+          // next tool call in this iteration.
+          continue;
+        }
+
         const { id, result: toolResult } = await executeToolCall(
           toolCall as ToolCall,
           toolContext,
@@ -779,10 +857,21 @@ export async function agenticChat(
       // `displayRole: 'system'` so it is hidden from the user-facing
       // transcript (TUI, `sessions export`, session replay). See issue
       // #1466.
-      for (const ctx of pendingHookContexts) {
+      //
+      // PreToolUse contexts flush BEFORE PostToolUse contexts and carry a
+      // `phase="pre"` attribute so the model can distinguish lifecycle
+      // stages. PostToolUse retains its original wire shape (no phase
+      // attribute) to preserve backwards compatibility with prompts that
+      // already reference `<hook_context tool_name="...">` without a
+      // phase discriminator.
+      const flushContext = (
+        ctx: { toolName: string; toolCallId: string; contextModification: string },
+        phase: 'pre' | 'post'
+      ): void => {
         const sanitized = sanitizeHookContext(ctx.contextModification);
+        const phaseAttr = phase === 'pre' ? ' phase="pre"' : '';
         const hookMessage =
-          `<hook_context tool_name="${ctx.toolName}" tool_call_id="${ctx.toolCallId}">\n` +
+          `<hook_context tool_name="${ctx.toolName}" tool_call_id="${ctx.toolCallId}"${phaseAttr}>\n` +
           `${sanitized}\n` +
           `</hook_context>`;
         messages.push({ role: 'user', content: hookMessage });
@@ -796,6 +885,13 @@ export async function agenticChat(
             displayRole: 'system',
           });
         }
+      };
+
+      for (const ctx of preToolHookContexts) {
+        flushContext(ctx, 'pre');
+      }
+      for (const ctx of pendingHookContexts) {
+        flushContext(ctx, 'post');
       }
 
       // Persist a session-level snapshot for this agent step. Best-effort:
