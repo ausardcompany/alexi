@@ -1319,6 +1319,65 @@ mutates the harvest inputs mid-run must call `_resetHarvestedCAsCache()` in
 regardless of the injected overrides. The reset hook is `@internal` and only
 exists to unblock unit tests; do not use it in production code.
 
+## Testing InstanceWatcher and Debounce-Timer Cleanup
+
+The `InstanceWatcher` class in `src/core/filesystem/watcher.ts` scopes filesystem watches to a single instance so two concurrent Alexi sessions (CLI plus daemon, or two side-by-side worktrees) cannot tear down each other's watches when one of them calls `dispose()`. Its regression suite at `tests/core/filesystem/instance-watcher.test.ts` locks in ten invariants; the ones most likely to break when refactoring the watcher module are:
+
+1. **Two-instance state isolation** (`kilocode b8984e468`). Disposing instance `b` must not affect instance `a`'s watches or `size()`.
+2. **Idempotent registration.** Calling `start(location, subscribe)` twice for the same `directory` must return the same disposer and invoke `subscribe` only once.
+3. **`stop(directory)` returns `false` for unknown directories** and only tears down the requested entry, leaving every other watch on the instance intact.
+4. **VCS guard.** `start({ vcs: false, ... })` returns `null` and does not increment `size()` — the watcher refuses to attach to non-VCS locations.
+5. **Experimental flag gate.** With `ALEXI_EXPERIMENTAL_FILEWATCHER=0` or unset, `start()` returns `null` regardless of VCS status.
+6. **`setDebounceTimer` clears the previous timer for the same directory** — and `dispose()` clears every remaining timer alongside the `watchers` map, so `size()` returns `0` after `dispose()`.
+
+The last case (`tests/core/filesystem/instance-watcher.test.ts:137`) is worth calling out separately because it exercises two properties at once with a single 60-second timer. If the watcher stopped clearing debounce timers, the test would keep the Node event loop alive for a minute and time out; but the test _also_ asserts `expect(w.size()).toBe(0)` after `dispose()` so a regression that clears the timer but not the underlying `watchers` map is caught explicitly rather than silently:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  InstanceWatcher,
+  getDefaultWatcherInstance,
+} from '../../core/filesystem/watcher.js';
+
+describe('InstanceWatcher', () => {
+  beforeEach(() => {
+    process.env.ALEXI_EXPERIMENTAL_FILEWATCHER = '1';
+    getDefaultWatcherInstance().dispose();
+  });
+
+  afterEach(() => {
+    getDefaultWatcherInstance().dispose();
+  });
+
+  it('setDebounceTimer clears the previous timer for the same directory', () => {
+    const w = new InstanceWatcher();
+    const first = setTimeout(() => {}, 60_000) as ReturnType<typeof setTimeout>;
+    // Replace clearTimeout would be racy; instead observe indirectly by
+    // scheduling two timers and calling dispose (which must clear them
+    // without hanging the test).
+    w.setDebounceTimer('/tmp/x', first);
+    w.setDebounceTimer(
+      '/tmp/x',
+      setTimeout(() => {}, 60_000)
+    );
+    // If the previous timer weren't cleared, this test would keep the event
+    // loop alive for 60s. dispose() must also clear the current timer.
+    w.dispose();
+    expect(w.size()).toBe(0);
+  });
+});
+```
+
+Key patterns to reuse when extending the suite:
+
+1. **Reset the default instance in both `beforeEach` and `afterEach`.** The `getDefaultWatcherInstance()` singleton survives across cases and will leak watches from an earlier test into a later one. Always dispose it symmetrically, and restore `process.env.ALEXI_EXPERIMENTAL_FILEWATCHER` to its original value (delete when it was previously unset) so tests are parallel-safe.
+2. **Prefer post-dispose observable assertions over "test does not hang" as the sole signal.** Asserting `w.size() === 0` after `w.dispose()` is cheap and catches the class of regressions where dispose clears the visible collection but leaves a hidden resource (a debounce timer, a subscriber ref) alive. A hang-based assertion alone would still pass a test that had the opposite regression — cleared the map but leaked the timer, or vice versa.
+3. **Do not introduce tautological locals like `let flag = false; flag = true; expect(flag).toBe(true)`.** ESLint (`no-unused-vars` after the assignment) and the autohealing workflow will strip them, and they add no signal beyond what a direct assertion on the object under test already provides. See the 2026-08-21 fix logged in `CHANGELOG.md` for the concrete example.
+4. **Never call `clearTimeout` directly to spy on cleanup.** The test above documents this: overriding `clearTimeout` at module scope is racy across Vitest workers. Observe cleanup indirectly through the object under test's own accessors (`size()`, `has(directory)`) or through the event-loop-liveness signal that a leaked 60s timer would produce.
+5. **Use synthetic 60s timers rather than short ones.** A leaked short timer might fire between the `dispose()` call and the assertion; a leaked 60s timer is guaranteed to still be pending, so the assertion executes in a well-defined state.
+
+The paired module-level shims — `startWatcher(location, subscribe)` and `getDefaultWatcherInstance()` — are covered by their own case (`'backwards-compatible startWatcher shim delegates to the default instance'`); when adding shims to the module, add a matching case there to lock in the delegation contract.
+
 ## Testing Agent Custom Loader
 
 ### Test Files
