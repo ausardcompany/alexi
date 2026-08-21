@@ -362,6 +362,21 @@ vi.mock('../src/providers/index.js', () => ({
 import { sendChat } from '../src/core/orchestrator.js';
 ```
 
+### Test import-path depth
+
+Test files under `tests/` walk up to the repository root before descending into `src/`. The number of `../` segments needed depends on where the test file lives, and it must always land in `src/` — never in a sibling under `tests/` itself. Concrete rules:
+
+| Test file location                                       | Relative prefix to `src/` |
+| -------------------------------------------------------- | ------------------------- |
+| `tests/*.test.ts` (top-level)                            | `../src/`                 |
+| `tests/<category>/*.test.ts` (one nested directory)      | `../../src/`              |
+| `tests/<category>/<sub>/*.test.ts` (two nested)          | `../../../src/`           |
+| `tests/<a>/<b>/<c>/*.test.ts` (three nested)             | `../../../../src/`        |
+
+A common failure mode is to omit the final `src/` segment and target a nested `tests/<category>/<name>.js` sibling that does not exist. Vitest reports this as `Failed to resolve import "..."` at collection time and every case in the file fails at import, not at assertion. Worked example, 2026-08-21, commit `b4fcb19a` (`fix(tests): correct import path in instance-watcher test [autohealing]`): `tests/core/filesystem/instance-watcher.test.ts` imported `../../core/filesystem/watcher.js` — which resolves to a nonexistent `tests/core/filesystem/watcher.js` — and was corrected to `../../../src/core/filesystem/watcher.js` (three parent segments to escape `tests/core/filesystem/`, then `src/core/filesystem/watcher.js`). Diff statistics: `1 file changed, 1 insertion(+), 1 deletion(-)`. All ten cases in the file — the two-instance state isolation regression from kilocode `b8984e468`, the idempotent-registration case, the `stop()` scoping case, the VCS-guard skip, the experimental-flag skip, the debounce-timer replace-and-cleanup case, and the backwards-compatible `startWatcher` shim delegation case — were failing at import-time until the prefix was fixed. See `CHANGELOG.md` `[Unreleased] > Fixed` and `docs/TESTING.md#testing-instancewatcher-and-debounce-timer-cleanup` for the corrected code example.
+
+Reminder: every local import ends in `.js` even from `.ts` files (`AGENTS.md` under **ESM + import rules**). An import without `.js` will pass `tsc --noEmit` but fail at runtime and in Vitest.
+
 ### Injectable I/O boundaries (preferred over module mocks)
 
 When code touches platform-specific I/O — filesystem, subprocess, `https`
