@@ -7,6 +7,8 @@ import {
   getHookManager,
   resetHookManager,
   substituteTemplates,
+  parseContextModification,
+  MAX_HOOK_CONTEXT_BYTES,
   type HookDefinition,
   type HookContext,
   type HookEvent,
@@ -884,6 +886,51 @@ describe('Hooks System', () => {
 
       expect(writeResults).toHaveLength(1);
       expect(writeResults[0].success).toBe(true);
+    });
+  });
+
+  describe('parseContextModification', () => {
+    it('returns the string as-is when under the truncation cap', () => {
+      const payload = JSON.stringify({ contextModification: 'lint found 3 warnings' });
+      expect(parseContextModification(payload)).toBe('lint found 3 warnings');
+    });
+
+    it('accepts an object return value (script hook shape)', () => {
+      expect(parseContextModification({ contextModification: 'inline' })).toBe('inline');
+    });
+
+    it('truncates payloads larger than MAX_HOOK_CONTEXT_BYTES to the cap', () => {
+      const oversized = 'x'.repeat(MAX_HOOK_CONTEXT_BYTES + 5000);
+      const payload = JSON.stringify({ contextModification: oversized });
+      const parsed = parseContextModification(payload);
+      expect(parsed).toBeDefined();
+      expect(parsed?.length).toBe(MAX_HOOK_CONTEXT_BYTES);
+      // Truncation slices from the start: the first N chars must survive
+      // verbatim so the model still sees the informative prefix.
+      expect(parsed?.slice(0, 10)).toBe('xxxxxxxxxx');
+    });
+
+    it('returns undefined when contextModification field is missing', () => {
+      expect(parseContextModification(JSON.stringify({ other: 'value' }))).toBeUndefined();
+    });
+
+    it('returns undefined when contextModification is not a string', () => {
+      expect(parseContextModification({ contextModification: 42 })).toBeUndefined();
+      expect(parseContextModification({ contextModification: null })).toBeUndefined();
+      expect(parseContextModification({ contextModification: { nested: 'x' } })).toBeUndefined();
+    });
+
+    it('returns undefined for non-JSON stdout (plain text)', () => {
+      expect(parseContextModification('just some plain text output')).toBeUndefined();
+    });
+
+    it('returns undefined for invalid JSON', () => {
+      expect(parseContextModification('{not valid json')).toBeUndefined();
+    });
+
+    it('returns undefined for null / undefined inputs', () => {
+      expect(parseContextModification(null)).toBeUndefined();
+      expect(parseContextModification(undefined)).toBeUndefined();
     });
   });
 });
