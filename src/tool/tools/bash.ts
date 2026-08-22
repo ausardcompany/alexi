@@ -465,6 +465,11 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         stdout = processCarriageReturns(stdout);
         stderr = processCarriageReturns(stderr);
 
+        const elapsed = Date.now() - startedAt;
+        const exitCodeForNotify = code ?? -1;
+        const notifyTitle = `Alexi: ${params.description ?? params.command}`;
+        const notifyBody = `Command finished in ${Math.round(elapsed / 1000)}s (exit ${exitCodeForNotify})`;
+
         // Fast-path: the command already detached. The outer promise has
         // been resolved with a partial result; emit the exit event so
         // observers can render "npm run dev finished" and drop the
@@ -484,7 +489,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
           // completion notification unconditionally for these — the same
           // opt-in `notifications` config gate applies inside
           // `notifyInBackground` so users who declined never see anything.
-          notifyInBackground('Command finished', params.description ?? params.command);
+          notifyInBackground(notifyTitle, notifyBody);
           return;
         }
 
@@ -492,9 +497,8 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
         // user knows their `npm test` / `docker build` finished while
         // they were doing something else. The threshold matches the
         // exported constant so tests can validate the boundary.
-        const elapsed = Date.now() - startedAt;
         if (elapsed >= LONG_RUNNING_THRESHOLD_MS) {
-          notifyInBackground('Command finished', params.description ?? params.command);
+          notifyInBackground(notifyTitle, notifyBody);
         }
 
         // Command finished BEFORE the user answered the detach prompt.
