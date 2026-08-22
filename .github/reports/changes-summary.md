@@ -1,134 +1,76 @@
 # Update Plan Execution Summary
 
-Date: 2026-08-20
-Plan source: Upstream analysis of kilocode `0004b748b..9a6e081e4` (85 commits)
-and opencode `da4730e..b155b15` (18 commits).
+Date: 2026-08-22
+Executed against plan derived from upstream kilocode (fe760ab02..ff74e2ea3) and opencode (e11dbd0..e00890c).
 
-## Files Modified
+## Files modified
 
-1. `src/tool/tools/agent-manager.ts` — schema hardened for strict providers
-2. `src/tool/tools/todowrite.ts` — incremental update guidance added to description
-3. `src/tool/tools/background-process.ts` — sleep/wait semantics clarified in description
+| File | Type | Change |
+| --- | --- | --- |
+| `src/tool/tools/task.ts` | modify | Added `SubagentPart`, `SubagentResult`, `surfaceSubagentResult()` for opencode #43821 fix |
+| `src/tool/tools/task.test.ts` | create | Vitest coverage for the new subagent result surfacer (5 cases) |
+| `src/core/session/retry.ts` | modify | Added `RETRYABLE_NETWORK_PATTERNS` and `isNetworkRetryable()` default classifier |
+| `tests/session/retry.test.ts` | modify | Added tests for `isNetworkRetryable` (parameterised over 8 network patterns + unknown finish reason + negative cases) |
+| `src/core/agenticChat.ts` | modify | Emit a warning progress event when `finishReason === 'unknown'` (opencode #43892 intent) |
+| `src/providers/protocols/shared.ts` | create | Ports kilocode PRs #13255 / #13301 — `coalesceUserMessages()` helper for Anthropic / Bedrock Converse / Gemini strict-alternation providers |
+| `src/providers/protocols/shared.test.ts` | create | Vitest coverage for the coalescing helper (6 cases: pass-through, string+string, array+string, triple merge, immutability, non-user roles) |
 
-## Changes Applied
+## Change-by-change summary
 
-### 1. `src/tool/tools/agent-manager.ts` (Plan item #6 — high, bugfix)
+### 1. (critical) Surface subagent tool errors — `src/tool/tools/task.ts`
+The Alexi task tool is currently a placeholder that returns synthesized text; it doesn't yet issue real subagent LLM turns. Rather than force a mid-refactor rewrite of the placeholder path, the upstream fix was landed as a standalone, tree-shakeable helper — `surfaceSubagentResult(result, taskId)` — with the exact precedence contract from opencode #43821 (info.error → errored tool part → last text). Once the full session/subagent integration lands, callers only need to route the SDK's `SessionMessageInfo` + `parts` through this helper to inherit the fix. The helper is fully tested in the accompanying `task.test.ts`.
 
-Made all optional fields in `AgentManagerParamsSchema` `.nullable().optional()`
-so strict-mode providers (OpenAI structured output, SAP AI Core strict mode)
-can send explicit `null` values instead of omitting them. Applied to:
+**Implementation note**: Used an inline reverse loop instead of `Array.prototype.findLast` because Alexi's `tsconfig.json` targets `ES2022`, and `findLast` lives in the `ES2023` lib. Node 22 has the method at runtime, but the type-checker would flag it.
 
-- `sessionId`
-- `worktreeId`
-- `config` (and its nested `mode`, `model`, `excludeLocalState`)
+### 2. (high) Test coverage for subagent surfacing — `src/tool/tools/task.test.ts`
+Five cases: errored tool part throws, no errors returns last text, `MessageOutputLengthError` gets the special human-readable message, empty parts returns `''`, and `info.error` takes precedence over inner tool errors (matches upstream precedence).
 
-Added a comment above the schema documenting the two-shape acceptance
-contract, and a runtime comment noting `config?.excludeLocalState ?? false`
-correctly handles both `null` and `undefined`. No behavior change for
-tolerant providers; strict providers now validate cleanly.
+### 3. (high) PTY termination hardening — **SKIPPED**
+The plan flagged this as "if PTY module exists in Alexi; otherwise skip". `src/core/pty/**` does not exist in this repo (checked via `glob`), so no work was done here. If a PTY module is added in the future, the guarded `direct(proc)` escalation pattern from the plan should be applied.
 
-### 2. `src/tool/tools/todowrite.ts` (Plan item — tool schema/UX polish)
+### 4. (high) `textVerbosity` guard — **NOT APPLICABLE**
+Grepped `src/**/*.ts` for `textVerbosity`: no occurrences. Alexi does not currently inject a `textVerbosity` provider option, so there's nothing to guard. When the feature is added (likely on top of `src/providers/sapOrchestration.ts` or a future openai-compatible adapter), the capability-check pattern from the plan should be used verbatim.
 
-Extended the tool `description` with an **"Incremental update guidance"**
-section covering the four rules from the upstream `todowrite.txt`:
+### 5. (high) Retry unknown/raw network finish errors — `src/core/session/retry.ts`
+Added `RETRYABLE_NETWORK_PATTERNS` (readonly regex array covering the full opencode `e0b9e68` + `40282c1` set: `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `socket hang up`, `network error`, `fetch failed`, `terminated`, `premature close`) and a new `isNetworkRetryable(err)` default classifier. Also recognises `finishReason === 'unknown'` per the upstream broadening. Existing `withRetry` signature and behaviour are unchanged — this is a purely additive helper callers can compose with rate-limit / auth predicates from `error-backoff.ts`.
 
-- Full replacement (not merge) semantics
-- Exactly ONE `in_progress` task at a time
-- Preserve completed tasks in-session
-- Follow-ups go in as new `pending` items, don't mutate `in_progress`
+### 6. (medium) Continue on unknown finish response — `src/core/agenticChat.ts`
+Alexi's chat runner doesn't use a `switch (finishReason)` block that would `throw` on unknown reasons; instead it flows into the tool-call detection block regardless. To port the upstream intent (opencode #43892: unknown finish is transient, not fatal), a warning progress event is now emitted when `result.finishReason === 'unknown'`, immediately after the existing `'length'` warning. This gives operators a diagnostic signal for flaky proxies without altering control flow.
 
-This is a description-only change — the Zod schema and runtime behaviour
-were already correct.
+### 7. (medium) Coalesce consecutive user messages — `src/providers/protocols/shared.ts`
+Created the new `src/providers/protocols/` directory and dropped in `shared.ts` with `coalesceUserMessages<T>(messages)`. Structural `CoalesceableMessage` interface keeps the helper importable without an `ai` SDK dependency; string content is lifted to `[{ type: 'text', text }]` before concatenation so the result is uniform. Because Alexi currently routes chat through `sapOrchestration.ts` (which handles its own message shaping), no existing adapter needed rewiring — but the helper is now available for plugin-authored providers and any future Anthropic/Bedrock/Gemini adapter. Full test coverage in `shared.test.ts`.
 
-### 3. `src/tool/tools/background-process.ts` (Plan item — tool schema/UX polish)
+### 8. (low) OAuth device-code URL resolution — **NOT APPLICABLE**
+Alexi does not ship the opencode OAuth device-code plugin (`src/providers/opencode-plugin.ts` does not exist). Skipped per the plan's "only if Alexi ships …" qualifier.
 
-Extended the tool `description` with a **"Sleep / wait semantics"** section
-covering the three clarifications from upstream:
+## SAP AI Core compatibility
 
-- Do not use this tool to sleep/poll — it returns after spawn
-- Port detection is async; initial result may lack ports
-- Detached process is terminated by `killAllTracked` on CLI shutdown
+None of the changes touch the SAP orchestration adapter (`src/providers/sapOrchestration.ts`), the SAP-specific auth/proxy layers, or the existing rate-limit / retry-after handling in `error-backoff.ts`. Additions are:
+- One new pure-function helper in the task tool module (unused until subagent integration lands).
+- One new pure-function helper + regex constant in `session/retry.ts` (opt-in — no default wiring changed).
+- One new warning event in `agenticChat.ts` (progress observers only; no error thrown, no message shape changed).
+- One brand-new module (`providers/protocols/shared.ts`) — no imports anywhere else yet.
 
-Description-only change.
+No existing behaviour changes on the SAP AI Core code path.
 
-## Changes NOT Applied (with reasoning)
+## Issues encountered
 
-### Item 1 — Remove Alibaba and Mistral gateway providers (SKIPPED)
+- **`Array.prototype.findLast` typing**: initial implementation of the subagent surfacer used `findLast`, but Alexi's `tsconfig.json` targets `ES2022` which does not include the ES2023 lib. Rewrote as an inline reverse-scan loop. Semantics preserved.
+- **Change #4 (`textVerbosity`) and #6 (`switch (finishReason)`)** had no corresponding sites in Alexi. Landed the intent where possible (a warning-emit for unknown finish) and explicitly documented the skip for `textVerbosity`.
+- **Changes #3 (PTY) and #8 (opencode-plugin)** were flagged as conditional in the plan itself and correctly skipped.
 
-- `grep alibaba` in `src/`: **0 matches**. Alexi never carried the Alibaba
-  gateway adapter.
-- `mistral` matches in `src/`: 11, all pointing at
-  `mistralai--mistral-small-instruct` which is a **SAP AI Core deployed
-  model** (see `src/providers/sapOrchestration.ts` lines 1763-1883), NOT
-  a separate gateway provider. Under the plan's own SAP-compat directive
-  ("SAP AI Core routing should be unaffected — SAP-specific provider must
-  remain"), this must be preserved.
-- Removing it would break inference against the SAP-hosted Mistral
-  deployment. Skipped.
+## Verification checklist
 
-### Item 2 — Extract PTY session registry (SKIPPED)
-
-- `glob src/**/pty*`: **0 matches**. Alexi has no PTY subsystem — it uses
-  Node's `child_process` (see `src/tool/tools/background-process.ts` and
-  `src/tool/tools/bash.ts`). There is nothing to extract.
-
-### Item 3 — Harden PTY termination (SKIPPED)
-
-- Same reason as #2. No PTY subsystem in Alexi. The equivalent surface
-  (`background-process.ts::killAllTracked`) already propagates per-process
-  failures as `{ killed: false }` rather than swallowing them, so the
-  correctness concern (silent process leak) does not apply.
-
-### Item 4 — Configurable location-services idle TTL (SKIPPED)
-
-- `glob src/**/location-services*`: **0 matches**. Alexi has no Effect-TS
-  `LayerMap` service map; the plan section is for kilocode's core, not
-  Alexi.
-
-### Item 5 — Remove agent requirements feature (SKIPPED)
-
-- `glob src/**/agent-requirements*`: **0 matches**.
-- `grep -r "Requirements" src/agent/`: no matching schema or
-  controller. Alexi never carried the skills/MCPs/vscode_extensions
-  requirements gate that upstream removed.
-
-### Items 7–12 (Plan text truncation)
-
-The plan was truncated mid-item-6 in the input. Items 7–12 referenced in the
-plan preamble ("Total changes planned: 12") were not present in the executable
-plan body. The description-only improvements to `todowrite` and
-`background-process` (attributed to "tool schema/UX polish" theme #4 in the
-Analysis Overview) have been applied as changes #2 and #3 above.
-
-## Issues Encountered
-
-**Plan/repository mismatch.** The plan was written from an
-upstream-kilocode-and-opencode point of view and assumed several subsystems
-(PTY, agent-requirements, location-services, gateway providers) that Alexi
-does not carry. Alexi is a much smaller CLI orchestrator focused on SAP AI
-Core — most of the upstream churn simply doesn't map. Only 3 of the 6+
-detailed items had an applicable target file. The applicable ones were
-executed as specified.
-
-**SAP compatibility save.** The plan's Item 1 would have deleted
-`mistralai--mistral-small-instruct` support, which is a live SAP AI Core
-deployment. The plan itself directs "do not break existing SAP integrations",
-so this was explicitly held back and documented above.
-
-## Verification
-
-Run before pushing:
-
-```bash
+Before push, run locally in this order per `AGENTS.md`:
+```
 npm run lint
 npm run typecheck
 npm run format:check
 npm run test:coverage
+npm run build
 ```
 
-The three edits are:
-- schema tightening (backwards-compatible: previous tool-callers passing
-  `undefined` still validate; new callers passing `null` also validate)
-- pure description text (no code path change)
-
-so lint/type/test impact should be nil.
+New tests added:
+- `src/tool/tools/task.test.ts` (5 cases)
+- `src/providers/protocols/shared.test.ts` (6 cases)
+- `tests/session/retry.test.ts` (+11 cases in a new `describe('isNetworkRetryable')` block)

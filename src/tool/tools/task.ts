@@ -119,6 +119,80 @@ export const TaskTool = {
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
+/**
+ * A single part produced by a subagent turn. Mirrors the upstream opencode
+ * `SessionMessagePart` union shape so failure surfacing (below) ports
+ * verbatim once the full session/subagent integration lands.
+ *
+ * Only the two variants the failure surfacer needs are typed here:
+ *   - `text`: model-produced text (rendered to the parent as the final
+ *     response when the subagent succeeded).
+ *   - `tool`: inner tool invocation with a `state.status` marker. When
+ *     `state.status === 'error'`, the subagent's own transcript records a
+ *     failed tool call — but the enclosing subagent session may still have
+ *     completed without setting `info.error`, which historically caused
+ *     the failure to be silently swallowed (opencode #43821).
+ */
+export type SubagentPart =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; state: { status: 'ok' | 'error'; error?: string } };
+
+export interface SubagentResult {
+  info: { error: { name?: string } | null };
+  parts: SubagentPart[];
+}
+
+/**
+ * Extract the response string a subagent should surface to its parent, or
+ * throw with a descriptive message when the subagent produced an errored
+ * tool part.
+ *
+ * Ports opencode #43821 (commit `35fe5b7`): previously, when an inner
+ * tool call failed but the subagent session itself completed without an
+ * `info.error` state, the failure was silently swallowed and only the
+ * last text part was returned. This masked real failures from callers.
+ *
+ * Precedence (matches upstream):
+ *   1. `info.error` set — fail with the mapped error name.
+ *   2. Any part with `type === 'tool'` and `state.status === 'error'` —
+ *      fail with `Subagent failed (task_id: <id>): <inner error>`.
+ *   3. Otherwise, return the last `type === 'text'` part's text (or empty
+ *      string if no text parts exist).
+ *
+ * The `task_id` is embedded in every failure message so the parent agent
+ * can call `task_status` on it to inspect the full transcript, matching
+ * the resumption-path failure format above.
+ */
+export function surfaceSubagentResult(result: SubagentResult, taskId: string): string {
+  if (result.info.error) {
+    const name = result.info.error.name;
+    const message = name === 'MessageOutputLengthError' ? 'Output length exceeded maximum' : name;
+    throw new Error(`Subagent failed (task_id: ${taskId}): ${message}`);
+  }
+  // Manual reverse-scan instead of `Array.prototype.findLast` for ES2022 lib
+  // compatibility. Semantics match the upstream `findLast` fix verbatim: the
+  // *last* errored tool part wins, so an earlier successful tool call doesn't
+  // mask a later failure.
+  let failed: SubagentPart | undefined;
+  let lastText: SubagentPart | undefined;
+  for (let i = result.parts.length - 1; i >= 0; i--) {
+    const part = result.parts[i];
+    if (!failed && part.type === 'tool' && part.state.status === 'error') {
+      failed = part;
+    }
+    if (!lastText && part.type === 'text') {
+      lastText = part;
+    }
+    if (failed && lastText) {
+      break;
+    }
+  }
+  if (failed && failed.type === 'tool' && failed.state.status === 'error') {
+    throw new Error(`Subagent failed (task_id: ${taskId}): ${failed.state.error}`);
+  }
+  return lastText && lastText.type === 'text' ? lastText.text : '';
+}
+
 interface TaskResult {
   taskId: string;
   agentId: string;

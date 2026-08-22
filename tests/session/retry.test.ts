@@ -9,7 +9,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { computeDelay, withRetry } from '../../src/core/session/retry.js';
+import {
+  computeDelay,
+  withRetry,
+  isNetworkRetryable,
+  RETRYABLE_NETWORK_PATTERNS,
+} from '../../src/core/session/retry.js';
 
 describe('computeDelay', () => {
   it('returns exact exponential values when jitter is disabled', () => {
@@ -74,5 +79,44 @@ describe('withRetry', () => {
     const result = await withRetry(fn, () => true, { maxAttempts: 5, baseMs: 1 });
     expect(result).toBe('recovered');
     expect(fn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('isNetworkRetryable', () => {
+  // Ports opencode `e0b9e68` and `40282c1`: raw network variants and
+  // unknown finish reasons should be treated as transient by default.
+  it.each([
+    ['ECONNRESET', 'socket ECONNRESET while reading'],
+    ['ETIMEDOUT', 'request ETIMEDOUT after 30s'],
+    ['ENOTFOUND', 'getaddrinfo ENOTFOUND api.example.com'],
+    ['EAI_AGAIN', 'getaddrinfo EAI_AGAIN'],
+    ['socket hang up', 'socket hang up'],
+    ['fetch failed', 'TypeError: fetch failed'],
+    ['terminated', 'undici: response terminated'],
+    ['premature close', 'Error: Premature close'],
+  ])('matches %s', (_label, message) => {
+    expect(isNetworkRetryable(new Error(message))).toBe(true);
+  });
+
+  it('matches unknown finish reason on Error instances', () => {
+    const err = Object.assign(new Error('stream ended'), { finishReason: 'unknown' });
+    expect(isNetworkRetryable(err)).toBe(true);
+  });
+
+  it('does not match ordinary error messages', () => {
+    expect(isNetworkRetryable(new Error('invalid api key'))).toBe(false);
+    expect(isNetworkRetryable(new Error('deployment_not_found'))).toBe(false);
+  });
+
+  it('does not match non-Error values', () => {
+    expect(isNetworkRetryable('ECONNRESET')).toBe(false);
+    expect(isNetworkRetryable(undefined)).toBe(false);
+    expect(isNetworkRetryable(null)).toBe(false);
+    expect(isNetworkRetryable({ message: 'ECONNRESET' })).toBe(false);
+  });
+
+  it('exposes the pattern list for extension in tests', () => {
+    expect(RETRYABLE_NETWORK_PATTERNS.length).toBeGreaterThan(0);
+    expect(RETRYABLE_NETWORK_PATTERNS.every((p) => p instanceof RegExp)).toBe(true);
   });
 });

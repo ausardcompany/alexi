@@ -78,3 +78,55 @@ export async function withRetry<T>(
   }
   throw lastErr;
 }
+
+/**
+ * Raw network-error patterns treated as transient by the default retry
+ * classifier. Ports opencode `e0b9e68` and `40282c1` which broadened the
+ * matcher to cover truncated streams and undici-side `terminated` /
+ * `premature close` errors — both routinely surface when SAP AI Core
+ * traffic is fronted by a corporate proxy that drops long-lived
+ * connections mid-stream.
+ *
+ * Kept as a plain array (not compiled once at module load) so tests can
+ * override / extend it if a future SAP variant needs an additional
+ * pattern. The array is `readonly` — do not mutate.
+ */
+export const RETRYABLE_NETWORK_PATTERNS: readonly RegExp[] = [
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /ENOTFOUND/i,
+  /EAI_AGAIN/i,
+  /socket hang up/i,
+  /network error/i,
+  /fetch failed/i,
+  /terminated/i, // undici stream terminated
+  /premature close/i, // truncated response body
+];
+
+/**
+ * Default `shouldRetry` predicate: returns true when `err`'s message
+ * matches a known-transient network pattern, or when its `finishReason`
+ * marker equals `'unknown'` (opencode "continue on unknown finish"
+ * change — a stream that never reported a proper finish reason is almost
+ * always a transient truncation, not a permanent classification failure).
+ *
+ * Callers who need HTTP-status-code retry logic should compose this
+ * with their own predicate (e.g. `isRetryableError` from
+ * `src/core/error-backoff.ts` for rate-limit / xAI-capacity cases). This
+ * predicate is intentionally narrow: it covers *only* the network-layer
+ * and finish-reason cases that upstream now retries, and leaves rate
+ * limits, auth, and validation classification to the callers who own
+ * those domains.
+ */
+export function isNetworkRetryable(err: unknown): boolean {
+  if (err instanceof Error) {
+    if (RETRYABLE_NETWORK_PATTERNS.some((p) => p.test(err.message))) {
+      return true;
+    }
+    const finishReason = (err as { finishReason?: unknown }).finishReason;
+    if (finishReason === 'unknown') {
+      return true;
+    }
+  }
+  return false;
+}

@@ -653,6 +653,24 @@ export async function agenticChat(
       });
     }
 
+    // Ports opencode #43892 (commit `57fa34f`): when a model reports an
+    // `unknown` finish reason (rather than `stop`/`length`/`tool_calls`),
+    // the runner should continue rather than aborting the assistant turn.
+    // This routinely happens when a corporate proxy in front of SAP AI
+    // Core truncates the SSE stream before the terminal event arrives.
+    // We surface a warning so operators can diagnose the flaky link, but
+    // otherwise fall through to the tool-call detection below and let
+    // the retry / continuation logic own the recovery.
+    if (result.finishReason === 'unknown') {
+      options?.onProgress?.({
+        type: 'iteration',
+        iteration: iterations,
+        message:
+          'Warning: LLM stream ended with an unknown finish reason. ' +
+          'Treating as transient — continuing the response.',
+      });
+    }
+
     // Final turn: ignore any tool calls the model still tried to emit and
     // commit whatever text it produced. Guarantees finalText is non-empty.
     if (isFinalTurn) {
