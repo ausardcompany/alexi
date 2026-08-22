@@ -783,9 +783,16 @@ Key features:
 
 ### `contextModification` payloads and `displayRole` hiding
 
-When a `PostToolUse` hook returns a `contextModification` string, the agentic loop (`src/core/agenticChat.ts`) injects it as a stamped `<hook_context tool_name="…" tool_call_id="…">…</hook_context>` user message AFTER every tool-result message for that iteration. The payload is markup-sanitized (embedded `<hook_context>` tags are HTML-escaped) so a malicious tool cannot break out of the envelope or forge tool identity.
+Both `PreToolUse` and `PostToolUse` hooks can return a `contextModification` string. The agentic loop (`src/core/agenticChat.ts`) collects them across every tool call in an iteration and, once every tool result for that iteration has been appended, flushes them as stamped user messages in a fixed order:
 
-Introduced in 1.21.4 (issue #1466): the same message that reaches the model is ALSO persisted to the session with `displayRole: 'system'` so it is hidden from the user-facing transcript (TUI `MessageArea`, `sessions export`, `SessionReplay`). This gives hook authors an "instrument the model, don't clutter the user" primitive.
+1. Every `PreToolUse` payload for the iteration is emitted first, each wrapped as `<hook_context tool_name=\"…\" tool_call_id=\"…\" phase=\"pre\">…</hook_context>`.
+2. Then every `PostToolUse` payload is emitted, wrapped as `<hook_context tool_name=\"…\" tool_call_id=\"…\">…</hook_context>` (no `phase` attribute — the omission preserves backwards compatibility with prompts that already reference the un-phased envelope).
+
+Each payload is markup-sanitized via `sanitizeHookContext` (`src/utils/markup-sanitize.ts`): embedded `<hook_context>` tags are HTML-escaped so a malicious or buggy hook cannot break out of the envelope, forge a different `tool_name`, or spoof a `phase`. Each payload is also independently truncated to `MAX_HOOK_CONTEXT_BYTES` (50 KB, matching upstream Cline) inside `parseContextModification` — before it ever reaches the agent loop — so a runaway hook cannot drown the model prompt.
+
+`contextModification` on a hook result whose `success` is `false` is intentionally dropped: rejection handling (halt or `continueOnBlock` feedback) always takes precedence and no `<hook_context>` block is injected for a failed hook.
+
+Introduced in 1.21.4 (issue #1466): the same messages that reach the model are ALSO persisted to the session with `displayRole: 'system'` so they are hidden from the user-facing transcript (TUI `MessageArea`, `sessions export`, `SessionReplay`). This gives hook authors an \"instrument the model, don't clutter the user\" primitive.
 
 ```mermaid
 flowchart TB
