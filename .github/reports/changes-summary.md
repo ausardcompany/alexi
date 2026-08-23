@@ -1,76 +1,92 @@
-# Update Plan Execution Summary
+# Changes Summary — Upstream Sync 2026-08-23
 
-Date: 2026-08-22
-Executed against plan derived from upstream kilocode (fe760ab02..ff74e2ea3) and opencode (e11dbd0..e00890c).
+## Update Plan Reference
 
-## Files modified
+Based on upstream commits:
 
-| File | Type | Change |
-| --- | --- | --- |
-| `src/tool/tools/task.ts` | modify | Added `SubagentPart`, `SubagentResult`, `surfaceSubagentResult()` for opencode #43821 fix |
-| `src/tool/tools/task.test.ts` | create | Vitest coverage for the new subagent result surfacer (5 cases) |
-| `src/core/session/retry.ts` | modify | Added `RETRYABLE_NETWORK_PATTERNS` and `isNetworkRetryable()` default classifier |
-| `tests/session/retry.test.ts` | modify | Added tests for `isNetworkRetryable` (parameterised over 8 network patterns + unknown finish reason + negative cases) |
-| `src/core/agenticChat.ts` | modify | Emit a warning progress event when `finishReason === 'unknown'` (opencode #43892 intent) |
-| `src/providers/protocols/shared.ts` | create | Ports kilocode PRs #13255 / #13301 — `coalesceUserMessages()` helper for Anthropic / Bedrock Converse / Gemini strict-alternation providers |
-| `src/providers/protocols/shared.test.ts` | create | Vitest coverage for the coalescing helper (6 cases: pass-through, string+string, array+string, triple merge, immutability, non-user roles) |
+- opencode `3a31c4e` — `fix(app): keep model provider headers visible (#44115)`
+- kilocode `ff74e2ea3..ff74e2ea3` — no new commits
 
-## Change-by-change summary
+Total planned changes: 1 (Medium priority, defensive/parity review).
 
-### 1. (critical) Surface subagent tool errors — `src/tool/tools/task.ts`
-The Alexi task tool is currently a placeholder that returns synthesized text; it doesn't yet issue real subagent LLM turns. Rather than force a mid-refactor rewrite of the placeholder path, the upstream fix was landed as a standalone, tree-shakeable helper — `surfaceSubagentResult(result, taskId)` — with the exact precedence contract from opencode #43821 (info.error → errored tool part → last text). Once the full session/subagent integration lands, callers only need to route the SDK's `SessionMessageInfo` + `parts` through this helper to inherit the fix. The helper is fully tested in the accompanying `task.test.ts`.
+## Files Modified
 
-**Implementation note**: Used an inline reverse loop instead of `Array.prototype.findLast` because Alexi's `tsconfig.json` targets `ES2022`, and `findLast` lives in the `ES2023` lib. Node 22 has the method at runtime, but the type-checker would flag it.
+**None.** This sync is a documented no-op after investigation, per the update plan's explicit fallback:
 
-### 2. (high) Test coverage for subagent surfacing — `src/tool/tools/task.test.ts`
-Five cases: errored tool part throws, no errors returns last text, `MessageOutputLengthError` gets the special human-readable message, empty parts returns `''`, and `info.error` takes precedence over inner tool errors (matches upstream precedence).
+> **Action if no such component exists**: Document a "no-op" in the changelog and skip. Do not introduce new UI code just to mirror upstream.
 
-### 3. (high) PTY termination hardening — **SKIPPED**
-The plan flagged this as "if PTY module exists in Alexi; otherwise skip". `src/core/pty/**` does not exist in this repo (checked via `glob`), so no work was done here. If a PTY module is added in the future, the guarded `direct(proc)` escalation pattern from the plan should be applied.
+## Change-by-Change Report
 
-### 4. (high) `textVerbosity` guard — **NOT APPLICABLE**
-Grepped `src/**/*.ts` for `textVerbosity`: no occurrences. Alexi does not currently inject a `textVerbosity` provider option, so there's nothing to guard. When the feature is added (likely on top of `src/providers/sapOrchestration.ts` or a future openai-compatible adapter), the capability-check pattern from the plan should be used verbatim.
+### 1. Defensive review of model selection UI (Priority: Medium)
 
-### 5. (high) Retry unknown/raw network finish errors — `src/core/session/retry.ts`
-Added `RETRYABLE_NETWORK_PATTERNS` (readonly regex array covering the full opencode `e0b9e68` + `40282c1` set: `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `socket hang up`, `network error`, `fetch failed`, `terminated`, `premature close`) and a new `isNetworkRetryable(err)` default classifier. Also recognises `finishReason === 'unknown'` per the upstream broadening. Existing `withRetry` signature and behaviour are unchanged — this is a purely additive helper callers can compose with rate-limit / auth predicates from `error-backoff.ts`.
+**Status**: No-op — Alexi's pickers are structurally immune to the upstream bug.
 
-### 6. (medium) Continue on unknown finish response — `src/core/agenticChat.ts`
-Alexi's chat runner doesn't use a `switch (finishReason)` block that would `throw` on unknown reasons; instead it flows into the tool-call detection block regardless. To port the upstream intent (opencode #43892: unknown finish is transient, not fatal), a warning progress event is now emitted when `result.finishReason === 'unknown'`, immediately after the existing `'length'` warning. This gives operators a diagnostic signal for flaky proxies without altering control flow.
+**Investigation performed**:
 
-### 7. (medium) Coalesce consecutive user messages — `src/providers/protocols/shared.ts`
-Created the new `src/providers/protocols/` directory and dropped in `shared.ts` with `coalesceUserMessages<T>(messages)`. Structural `CoalesceableMessage` interface keeps the helper importable without an `ai` SDK dependency; string content is lifted to `[{ type: 'text', text }]` before concatenation so the result is uniform. Because Alexi currently routes chat through `sapOrchestration.ts` (which handles its own message shaping), no existing adapter needed rewiring — but the helper is now available for plugin-authored providers and any future Anthropic/Bedrock/Gemini adapter. Full test coverage in `shared.test.ts`.
+Ran `rg -n "dialog-select-model|selectModel|ModelPicker|modelPicker" src/`.
 
-### 8. (low) OAuth device-code URL resolution — **NOT APPLICABLE**
-Alexi does not ship the opencode OAuth device-code plugin (`src/providers/opencode-plugin.ts` does not exist). Skipped per the plan's "only if Alexi ships …" qualifier.
+Two model-selection surfaces exist in Alexi:
 
-## SAP AI Core compatibility
+1. **`src/cli/utils/modelPicker.ts`** — CLI (non-TUI) picker built on
+   `@inquirer/prompts` `select` + `Separator`. Groups are rendered as
+   `Separator` instances (`── OpenAI ──`, `── Anthropic ──`, `── SAP ──`,
+   etc.) which `@inquirer/prompts` treats as non-selectable and always
+   visible. There is no filter/query step in this picker (no `.filter(...)`
+   that could accidentally drop headers), so the upstream bug class cannot
+   manifest.
 
-None of the changes touch the SAP orchestration adapter (`src/providers/sapOrchestration.ts`), the SAP-specific auth/proxy layers, or the existing rate-limit / retry-after handling in `error-backoff.ts`. Additions are:
-- One new pure-function helper in the task tool module (unused until subagent integration lands).
-- One new pure-function helper + regex constant in `session/retry.ts` (opt-in — no default wiring changed).
-- One new warning event in `agenticChat.ts` (progress observers only; no error thrown, no message shape changed).
-- One brand-new module (`providers/protocols/shared.ts`) — no imports anywhere else yet.
+2. **`src/cli/tui/dialogs/ModelPicker.tsx`** — Ink TUI dialog built on
+   `ink-select-input`. It flattens groups via `flatMap` and inlines the
+   provider name into every row label (`[${group.provider}] ${model.label}`).
+   Because the provider tag travels with each model row, there is no
+   separate "header" element that could be scrolled off or filtered out —
+   every visible row shows its provider unconditionally. The component
+   also has no `useInput`-driven filter that removes items, so, again, the
+   upstream failure mode does not apply.
 
-No existing behaviour changes on the SAP AI Core code path.
+**Verification against upstream fix**: The opencode fix
+(`packages/app/src/components/dialog-select-model.tsx`, +1/-1) targets a
+Tauri/SolidJS desktop component with a separate rendered `<header>` node
+that could be scrolled/filtered out of view. Alexi ships no such
+component — neither picker separates headers from rows in a way that
+allows them to disappear independently.
 
-## Issues encountered
+**Applied change**: None. Per the plan's explicit guidance, no new UI
+code is introduced solely to mirror upstream. The existing implementations
+already satisfy the spirit of the upstream fix.
 
-- **`Array.prototype.findLast` typing**: initial implementation of the subagent surfacer used `findLast`, but Alexi's `tsconfig.json` targets `ES2022` which does not include the ES2023 lib. Rewrote as an inline reverse-scan loop. Semantics preserved.
-- **Change #4 (`textVerbosity`) and #6 (`switch (finishReason)`)** had no corresponding sites in Alexi. Landed the intent where possible (a warning-emit for unknown finish) and explicitly documented the skip for `textVerbosity`.
-- **Changes #3 (PTY) and #8 (opencode-plugin)** were flagged as conditional in the plan itself and correctly skipped.
+**Guardrails for future work**: If either Alexi picker is later refactored
+to add a filter/search step (`items.filter((item) => item.label.includes(query))`),
+the maintainer MUST preserve group headers by short-circuiting the filter
+for header/separator entries — matching the upstream pattern:
 
-## Verification checklist
-
-Before push, run locally in this order per `AGENTS.md`:
-```
-npm run lint
-npm run typecheck
-npm run format:check
-npm run test:coverage
-npm run build
+```ts
+const visibleItems = items.filter((item) => {
+  if (item.type === 'header') return true; // preserve provider headers
+  return item.label.toLowerCase().includes(query.toLowerCase());
+});
 ```
 
-New tests added:
-- `src/tool/tools/task.test.ts` (5 cases)
-- `src/providers/protocols/shared.test.ts` (6 cases)
-- `tests/session/retry.test.ts` (+11 cases in a new `describe('isNetworkRetryable')` block)
+For `@inquirer/prompts` `Separator` instances, use `item instanceof Separator`
+as the sentinel. For a future Ink-native grouped picker, tag header rows
+with a discriminator field (e.g., `kind: 'header'`) and skip them in both
+filter and keyboard-navigation logic.
+
+## SAP AI Core Compatibility
+
+Unaffected. No provider, router, orchestrator, agent, tool, permission,
+bus, or config code paths were touched. `src/providers/sapOrchestration.ts`
+and related SAP integration surfaces are untouched.
+
+## Issues Encountered
+
+None. The investigation was conclusive: both Alexi pickers are already
+structurally safe from the upstream bug class.
+
+## Testing Recommendations Executed
+
+- ✅ `rg -n "dialog-select-model|selectModel|ModelPicker|modelPicker" src/` — located both pickers.
+- ✅ Read `src/cli/tui/dialogs/ModelPicker.tsx` end-to-end — no filter logic, provider tag inlined per row.
+- ✅ Read `src/cli/utils/modelPicker.ts` end-to-end — uses `@inquirer/prompts` `Separator`, no filter logic.
+- ⏭️ Runtime smoke test (`alexi model` / TUI ModelPicker) — not required; no code change to verify.
+- ⏭️ `npm test` — not required; no code change was made.
