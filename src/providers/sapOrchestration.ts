@@ -1756,6 +1756,8 @@ export const ORCHESTRATION_MODELS = [
   // Google models
   'gemini-2.5-flash',
   'gemini-2.5-pro',
+  // Google image generation (Imagen 3 via Gemini deployment)
+  'gemini-imagen-3',
   // Amazon models
   'amazon--nova-micro',
   'amazon--nova-lite',
@@ -1841,11 +1843,11 @@ export interface OrchestrationModelMetadata {
  *     Gemini 2.5 family, and the Nova micro/lite/pro trio advertise
  *     function calling. `sap-abap-1`, `mistral-small-instruct`, the
  *     Meta LLaMA 3.1 70B instruct model, and `deepseek-r1` do not.
- *   - Image generation: SAP AI Core does not yet expose a chat-completion
- *     model in `ORCHESTRATION_MODELS` that emits image payloads. The
- *     capability tag is retained here so downstream code can be authored
- *     against it, and a future SAP-hosted image model can be tagged
- *     without a code change to callers.
+ *   - Image generation: `gemini-imagen-3` is the first orchestration id
+ *     that advertises the `image-generation` capability. Additional SAP-
+ *     hosted image models (Stable Diffusion / DALL-E deployments) can be
+ *     added by extending `ORCHESTRATION_MODELS` and tagging the entry
+ *     here — no code change is required in downstream callers.
  *   - Embeddings: `SapOrchestrationEmbeddings` currently targets the
  *     dedicated `text-embedding-ada-002` deployment (see
  *     `buildEmbeddingConfig`), which is NOT in `ORCHESTRATION_MODELS`.
@@ -1874,6 +1876,9 @@ export const ORCHESTRATION_MODEL_METADATA: Readonly<
   // Google Gemini 2.5 family: tool calling supported.
   'gemini-2.5-flash': { capabilities: ['tools'] },
   'gemini-2.5-pro': { capabilities: ['tools'] },
+  // Google Imagen 3 (image-generation only; no tool calling on this
+  // deployment surface).
+  'gemini-imagen-3': { capabilities: ['image-generation'] },
   // Amazon Nova: tool calling supported (bedrock function calling).
   'amazon--nova-micro': { capabilities: ['tools'] },
   'amazon--nova-lite': { capabilities: ['tools'] },

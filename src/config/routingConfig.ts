@@ -94,6 +94,19 @@ const DEFAULT_CONFIG: RoutingConfig = {
       maxTokens: 200000,
       reasoning: true,
     },
+    {
+      // Google Imagen 3 via SAP AI Core orchestration. Image-generation
+      // only — `isImageGenerationOnly` keeps it out of default text
+      // routing; the `image_gen` tool / `alexi generate` command are the
+      // intended entry points.
+      id: 'gemini-imagen-3',
+      type: 'gemini',
+      costTier: 'medium',
+      strengths: ['image-generation'],
+      maxTokens: 0,
+      reasoning: false,
+      capabilities: ['image-generation'],
+    },
   ],
   rules: [],
   preferences: {
