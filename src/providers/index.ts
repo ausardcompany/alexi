@@ -65,6 +65,7 @@ export {
   PROVIDER_RATE_LIMIT_CODE,
   SAP_AI_CORE_RATE_LIMIT_DOCS_URL,
   isFreeModel,
+  hasFreeTierErrorSignal,
   classifyRateLimitError,
   extractRetryAfterSeconds,
   parseRetryAfterHeader,

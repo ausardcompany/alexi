@@ -27,6 +27,7 @@ import {
   extractRetryAfterSeconds,
   parseRetryAfterHeader,
   isFreeModel,
+  hasFreeTierErrorSignal,
 } from '../sapOrchestration.js';
 
 describe('classifyRateLimitError (HTTP 429 → typed rate-limit error)', () => {
@@ -169,6 +170,72 @@ describe('isFreeModel', () => {
 
   it('does not match `free` embedded elsewhere in the id', () => {
     expect(isFreeModel('some-freerider-model')).toBe(false);
+  });
+});
+
+describe('hasFreeTierErrorSignal', () => {
+  it('detects a top-level `FreeTierQuotaExceeded` code', () => {
+    expect(hasFreeTierErrorSignal({ code: 'FreeTierQuotaExceeded' })).toBe(true);
+    expect(hasFreeTierErrorSignal({ code: 'free_tier_exceeded' })).toBe(true);
+  });
+
+  it('detects a nested `error.code` free-tier marker', () => {
+    expect(hasFreeTierErrorSignal({ error: { code: 'FreeTierExceeded' } })).toBe(true);
+  });
+
+  it('detects a `plan: "free"` or `tier: "free"` marker', () => {
+    expect(hasFreeTierErrorSignal({ plan: 'free' })).toBe(true);
+    expect(hasFreeTierErrorSignal({ tier: 'FREE' })).toBe(true);
+    expect(hasFreeTierErrorSignal({ error: { tier: 'free' } })).toBe(true);
+  });
+
+  it('detects the "free tier" phrase in the message', () => {
+    expect(hasFreeTierErrorSignal({ message: 'Free tier quota exceeded' })).toBe(true);
+    expect(hasFreeTierErrorSignal({ message: 'HTTP 429 free-tier limit reached' })).toBe(true);
+    expect(hasFreeTierErrorSignal({ error: { message: 'free tier quota' } })).toBe(true);
+  });
+
+  it('walks into response.data / response.body payloads', () => {
+    expect(
+      hasFreeTierErrorSignal({ response: { data: { error: { code: 'FreeTierExceeded' } } } })
+    ).toBe(true);
+    expect(hasFreeTierErrorSignal({ response: { body: { plan: 'free' } } })).toBe(true);
+    expect(hasFreeTierErrorSignal({ body: { message: 'free tier exhausted' } })).toBe(true);
+  });
+
+  it('does not match unrelated shapes', () => {
+    expect(hasFreeTierErrorSignal(null)).toBe(false);
+    expect(hasFreeTierErrorSignal(undefined)).toBe(false);
+    expect(hasFreeTierErrorSignal('string')).toBe(false);
+    expect(hasFreeTierErrorSignal({ code: 'other' })).toBe(false);
+    expect(hasFreeTierErrorSignal({ message: 'free memory low' })).toBe(false);
+    expect(hasFreeTierErrorSignal({ plan: 'premium' })).toBe(false);
+  });
+});
+
+describe('classifyRateLimitError uses free-tier error-body signals', () => {
+  it('wraps a 429 with a free-tier body signal in FreeTierRateLimitError even on a paid model id', () => {
+    const upstream = Object.assign(new Error('HTTP 429'), {
+      status: 429,
+      response: { data: { error: { code: 'FreeTierQuotaExceeded' } } },
+    });
+    const classified = classifyRateLimitError(upstream, 'anthropic--claude-4.5-sonnet');
+    expect(classified).toBeInstanceOf(FreeTierRateLimitError);
+    expect((classified as FreeTierRateLimitError).code).toBe(FREE_TIER_RATE_LIMIT_CODE);
+  });
+
+  it('wraps a 429 with a "free tier" message in FreeTierRateLimitError on a paid model id', () => {
+    const upstream = Object.assign(new Error('HTTP 429: free tier quota exceeded'), {
+      status: 429,
+    });
+    const classified = classifyRateLimitError(upstream, 'gpt-4o');
+    expect(classified).toBeInstanceOf(FreeTierRateLimitError);
+  });
+
+  it('leaves a paid-model 429 without any free-tier signal as transient ProviderRateLimitError', () => {
+    const upstream = Object.assign(new Error('HTTP 429 rate limit'), { status: 429 });
+    const classified = classifyRateLimitError(upstream, 'gpt-4o');
+    expect(classified).toBeInstanceOf(ProviderRateLimitError);
   });
 });
 
