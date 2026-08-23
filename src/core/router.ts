@@ -30,6 +30,21 @@ export interface ModelCapability {
   inputPrice?: number;
   outputPrice?: number;
   supportsPromptCache?: boolean;
+  /**
+   * Optional capability tags advertised by the model in the routing
+   * catalog. Mirrors the provider-layer
+   * {@link import('../providers/sapOrchestration.js').ModelCapability}
+   * union (`'image-generation' | 'tools' | 'embeddings'`) but is kept as
+   * a plain string array here so that routing-config.json remains
+   * forward-compatible with capability tags added later without
+   * breaking parsing.
+   *
+   * Consumers that need a compile-time check should use
+   * {@link import('../providers/sapOrchestration.js').modelHasCapability}
+   * against the provider-layer id; this field is purely informational
+   * for the router and the `alexi generate --model` selection UX.
+   */
+  capabilities?: string[];
 }
 
 export interface RoutingDecision {
@@ -199,6 +214,27 @@ export function isRouteDisabled(modelId: string): boolean {
  */
 export function resetRouteFailures(): void {
   routeFailureState.clear();
+}
+
+/**
+ * A model that advertises `image-generation` and nothing else should not
+ * be picked by the default text-chat router. This helper isolates that
+ * check so both `routePrompt` and `explainRouting` share the same
+ * definition.
+ *
+ * Rules:
+ *   - No `capabilities` field, or an empty array -> treat as normal text
+ *     model (not image-only).
+ *   - Contains `'image-generation'` but nothing else -> image-only.
+ *   - Contains `'image-generation'` alongside other capabilities -> mixed,
+ *     still eligible for text routing.
+ */
+export function isImageGenerationOnly(model: ModelCapability): boolean {
+  const caps = model.capabilities;
+  if (!caps || caps.length === 0) {
+    return false;
+  }
+  return caps.length === 1 && caps[0] === 'image-generation';
 }
 
 /**
@@ -373,6 +409,13 @@ export function routePrompt(
   }
   // Drop routes that have been auto-disabled this session.
   candidates = candidates.filter((m) => !isRouteDisabled(m.id));
+  // Drop image-generation-only models from default chat routing. A model
+  // that ONLY advertises `image-generation` (no `tools` / no text-chat
+  // strength) cannot service a text prompt and would fail server-side.
+  // Callers who want image generation go through the dedicated
+  // `image_gen` tool / `alexi generate` command, which resolve the model
+  // via `modelHasCapability` directly.
+  candidates = candidates.filter((m) => !isImageGenerationOnly(m));
 
   // Pathological case: every candidate has been auto-disabled. Fall back to
   // the configured fallbackModel with low confidence instead of throwing, so
@@ -447,29 +490,31 @@ export async function explainRouting(prompt: string): Promise<{
     }))
     .sort((a, b) => b.priority - a.priority);
 
-  const scored = getModelRegistry().map((model) => {
-    const score = scoreModel(
-      model,
-      classification.type,
-      classification.complexity,
-      classification.requiresReasoning,
-      false
-    );
+  const scored = getModelRegistry()
+    .filter((m) => !isImageGenerationOnly(m))
+    .map((model) => {
+      const score = scoreModel(
+        model,
+        classification.type,
+        classification.complexity,
+        classification.requiresReasoning,
+        false
+      );
 
-    let reason = `${model.costTier} tier`;
-    if (model.strengths.includes(classification.type)) {
-      reason += `, strong at ${classification.type}`;
-    }
-    if (classification.requiresReasoning && model.reasoning) {
-      reason += ', has reasoning';
-    }
+      let reason = `${model.costTier} tier`;
+      if (model.strengths.includes(classification.type)) {
+        reason += `, strong at ${classification.type}`;
+      }
+      if (classification.requiresReasoning && model.reasoning) {
+        reason += ', has reasoning';
+      }
 
-    return {
-      modelId: model.id,
-      score,
-      reason,
-    };
-  });
+      return {
+        modelId: model.id,
+        score,
+        reason,
+      };
+    });
 
   scored.sort((a, b) => b.score - a.score);
 

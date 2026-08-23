@@ -53,6 +53,16 @@
       "maxTokens": 200000,
       "reasoning": true,
       "enabled": true
+    },
+    {
+      "id": "gemini-imagen-3",
+      "type": "gemini",
+      "costTier": "medium",
+      "strengths": ["image-generation"],
+      "maxTokens": 0,
+      "reasoning": false,
+      "capabilities": ["image-generation"],
+      "enabled": true
     }
   ],
   "rules": [

@@ -237,9 +237,13 @@ describe('modelHasCapability', () => {
     expect(modelHasCapability('deepseek-ai--deepseek-r1', 'tools')).toBe(false);
     expect(modelHasCapability('meta--llama3.1-70b-instruct', 'tools')).toBe(false);
     expect(modelHasCapability('mistralai--mistral-small-instruct', 'tools')).toBe(false);
-    // Nothing in the current catalog advertises image-generation.
+    // Text-only models never advertise image-generation.
     expect(modelHasCapability('gpt-4o', 'image-generation')).toBe(false);
     expect(modelHasCapability('anthropic--claude-4.7-opus', 'image-generation')).toBe(false);
+    // But the dedicated Imagen 3 deployment does.
+    expect(modelHasCapability('gemini-imagen-3', 'image-generation')).toBe(true);
+    // And it does NOT falsely advertise other capabilities.
+    expect(modelHasCapability('gemini-imagen-3', 'tools')).toBe(false);
   });
 
   it('returns false by default when the model id is unknown', () => {
