@@ -2185,6 +2185,100 @@ export function isFreeModel(modelId: string): boolean {
 }
 
 /**
+ * Structural inspection: does the 429 error body carry a SAP AI Core
+ * signal indicating that the *deployment* itself is on the free tier?
+ *
+ * The model-name heuristic (`isFreeModel`) covers deployments that adopt
+ * the `-free` convention in their model id, but some free-tier
+ * deployments reuse a paid model id and only surface the tier via the
+ * response body (SAP's `orchestration` service emits fields like
+ * `error.code = 'FreeTierQuotaExceeded'` or a `plan: 'free'` marker,
+ * and free-tier bcp/proxy fronts sometimes include the literal phrase
+ * "free tier" in the error message).
+ *
+ * The check is deliberately structural (walks a few well-known shapes
+ * and applies a narrow message regex) so it survives across SDK
+ * versions and does not require a live SAP response fixture in tests.
+ *
+ * Returns `false` for any input that does not look like an object we
+ * can inspect — the caller then falls back to `isFreeModel` alone.
+ */
+export function hasFreeTierErrorSignal(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    code?: unknown;
+    plan?: unknown;
+    tier?: unknown;
+    body?: unknown;
+    data?: unknown;
+    response?: { data?: unknown; body?: unknown };
+    error?: { code?: unknown; message?: unknown; plan?: unknown; tier?: unknown };
+    message?: unknown;
+  };
+
+  // Direct code/plan/tier markers on the error object itself.
+  if (typeof candidate.code === 'string' && /free.?tier/i.test(candidate.code)) {
+    return true;
+  }
+  if (typeof candidate.plan === 'string' && /^free$/i.test(candidate.plan)) {
+    return true;
+  }
+  if (typeof candidate.tier === 'string' && /^free$/i.test(candidate.tier)) {
+    return true;
+  }
+
+  // Nested `error` sub-object (SAP orchestration error envelope shape).
+  const nested = candidate.error;
+  if (nested && typeof nested === 'object') {
+    if (typeof nested.code === 'string' && /free.?tier/i.test(nested.code)) {
+      return true;
+    }
+    if (typeof nested.plan === 'string' && /^free$/i.test(nested.plan)) {
+      return true;
+    }
+    if (typeof nested.tier === 'string' && /^free$/i.test(nested.tier)) {
+      return true;
+    }
+    if (typeof nested.message === 'string' && /free[- ]?tier/i.test(nested.message)) {
+      return true;
+    }
+  }
+
+  // Response body / data payloads may carry the same envelope; recurse
+  // one level so we do not have to duplicate the walk.
+  const nestedBodies: unknown[] = [
+    candidate.body,
+    candidate.data,
+    candidate.response?.data,
+    candidate.response?.body,
+  ];
+  for (const body of nestedBodies) {
+    if (body && typeof body === 'object') {
+      // Guard against self-referential structures by not recursing on
+      // the top-level `err` — only inspect strictly nested payloads.
+      if (body === err) {
+        continue;
+      }
+      if (hasFreeTierErrorSignal(body)) {
+        return true;
+      }
+    }
+  }
+
+  // Narrow message regex as the last resort. Anchored to the "free
+  // tier" phrase to avoid matching unrelated uses of "free" (e.g.
+  // "free memory"), and case-insensitive because upstream messages
+  // are not consistent about capitalisation.
+  if (typeof candidate.message === 'string' && /free[- ]?tier/i.test(candidate.message)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Extract an HTTP status code from a variety of error shapes that SAP AI
  * Core, the SAP SDK, undici, and Node/fetch throwables use.
  *
@@ -2349,9 +2443,11 @@ export function extractRetryAfterSeconds(err: unknown): number | undefined {
  * `Retry-After` window from the response headers.
  *
  * Two variants are produced:
- *   - {@link FreeTierRateLimitError} when `modelName` looks like a
- *     free-tier deployment (see {@link isFreeModel}). This variant is
- *     *permanent* per the AGENTS.md error contract — `ErrorBackoff.isFatal`
+ *   - {@link FreeTierRateLimitError} when EITHER `modelName` looks like
+ *     a free-tier deployment (see {@link isFreeModel}) OR the error
+ *     body carries a free-tier signal (see
+ *     {@link hasFreeTierErrorSignal}). This variant is *permanent* per
+ *     the AGENTS.md error contract — `ErrorBackoff.isFatal`
  *     short-circuits the retry loop so budget is not wasted.
  *   - {@link ProviderRateLimitError} for all other (paid-tier) 429s. This
  *     variant is *transient*; the existing exponential-backoff schedule
@@ -2373,7 +2469,7 @@ export function classifyRateLimitError(err: unknown, modelName: string): unknown
     return err;
   }
   const retryAfter = extractRetryAfterSeconds(err);
-  if (isFreeModel(modelName)) {
+  if (isFreeModel(modelName) || hasFreeTierErrorSignal(err)) {
     return new FreeTierRateLimitError(modelName, err, retryAfter);
   }
   return new ProviderRateLimitError(modelName, err, retryAfter);
