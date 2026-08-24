@@ -1,6 +1,6 @@
 {
   "name": "alexi",
-  "version": "1.21.7",
+  "version": "1.22.0",
   "type": "module",
   "description": "Alexi - Intelligent LLM orchestrator with multi-provider support and auto-routing",
   "main": "dist/index.js",
@@ -30,11 +30,11 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "@inquirer/prompts": "^8.5.2",
+    "@inquirer/prompts": "^8.6.0",
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "@sap-ai-sdk/ai-api": "^2.12.0",
-    "@sap-ai-sdk/orchestration": "^2.14.0",
+    "@sap-ai-sdk/orchestration": "^2.15.0",
     "@types/node-notifier": "^8.0.5",
     "cli-highlight": "^2.1.11",
     "commander": "^15.0.0",
@@ -43,7 +43,7 @@
     "duck-duck-scrape": "^2.2.7",
     "fzf": "^0.5.2",
     "gray-matter": "^4.0.3",
-    "hono": "^4.13.2",
+    "hono": "^4.13.3",
     "ink": "^7.1.1",
     "ink-select-input": "^6.2.0",
     "ink-spinner": "^5.0.0",
@@ -94,7 +94,7 @@
     }
   },
   "optionalDependencies": {
-    "puppeteer": "^25.7.0"
+    "puppeteer": "^25.8.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",
@@ -106,7 +106,7 @@
     "@types/react": "^19.2.18",
     "@typescript-eslint/eslint-plugin": "^8.67.0",
     "@typescript-eslint/parser": "^8.66.0",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@vitejs/plugin-react": "^6.1.0",
     "@vitest/coverage-v8": "^4.1.6",
     "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.5",
@@ -119,7 +119,7 @@
     "tsc-files": "^1.1.4",
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=22.12.0"
