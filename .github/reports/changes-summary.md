@@ -1,92 +1,69 @@
-# Changes Summary — Upstream Sync 2026-08-23
+# Changes Summary
 
-## Update Plan Reference
-
-Based on upstream commits:
-
-- opencode `3a31c4e` — `fix(app): keep model provider headers visible (#44115)`
-- kilocode `ff74e2ea3..ff74e2ea3` — no new commits
-
-Total planned changes: 1 (Medium priority, defensive/parity review).
+Generated: 2026-08-24
+Update plan basis: upstream commits 4161695, 7bbfe42, f2a1d54, b1ce938, 63a883a, b3bad6b, dd3f915, fa11755, 17b4730, 3d31e4b, 32c3637, 9d466cd, dc13c6b
 
 ## Files Modified
 
-**None.** This sync is a documented no-op after investigation, per the update plan's explicit fallback:
+**None.** No source files required changes in this update window.
 
-> **Action if no such component exists**: Document a "no-op" in the changelog and skip. Do not introduce new UI code just to mirror upstream.
+## Executed Plan Items
 
-## Change-by-Change Report
+The update plan contained 2 medium-priority items, both explicitly conditional on Alexi
+having a stats/telemetry model-normalization utility equivalent to opencode's
+`packages/stats/core/src/domain/model-normalization.ts` (`normalizeInferenceModel`).
 
-### 1. Defensive review of model selection UI (Priority: Medium)
+### 1. Lowercase model names before suffix stripping (stats normalization) — SKIPPED (condition not met)
 
-**Status**: No-op — Alexi's pickers are structurally immune to the upstream bug.
+- **Plan condition**: "Only apply if Alexi has a stats/telemetry normalization utility."
+- **Investigation performed**:
+  - `glob src/stats/**/*.ts` → no matches (Alexi has no `src/stats/` directory).
+  - `grep normalizeInferenceModel|model-normalization|normalizeModel` across `src/` → 0 matches.
+  - `grep normalizeInference|normaliseModel|normalizeModelName` across `src/` → 0 matches.
+  - `grep '(-free|:free|:global)'` across `src/` → matches only relate to
+    `src/providers/sapOrchestration.ts` free-tier 429 classification (an
+    unrelated heuristic that already uses case-insensitive matching on the
+    `-free` suffix — see `isFreeModel`). No suffix-stripping normalizer
+    exists.
+  - `src/core/stats.ts` inspected: aggregates sessions/costs/memories but
+    stores model identifiers verbatim (see `sessionsByModel: Record<string, number>`);
+    no canonicalization step exists that could gain a `.toLowerCase()` call.
+- **Result**: The utility this fix targets does not exist in Alexi, so there
+  is nothing to patch. Creating a new normalizer just to receive this fix
+  would be scope creep (no consumers).
 
-**Investigation performed**:
+### 2. Add test case for uppercase model normalization — SKIPPED (condition not met)
 
-Ran `rg -n "dialog-select-model|selectModel|ModelPicker|modelPicker" src/`.
+- **Plan condition**: "Only add if the utility above exists in Alexi."
+- **Result**: The utility does not exist (see item 1), so no test file was created.
 
-Two model-selection surfaces exist in Alexi:
+## Changes Explicitly NOT Ported (per plan)
 
-1. **`src/cli/utils/modelPicker.ts`** — CLI (non-TUI) picker built on
-   `@inquirer/prompts` `select` + `Separator`. Groups are rendered as
-   `Separator` instances (`── OpenAI ──`, `── Anthropic ──`, `── SAP ──`,
-   etc.) which `@inquirer/prompts` treats as non-selectable and always
-   visible. There is no filter/query step in this picker (no `.filter(...)`
-   that could accidentally drop headers), so the upstream bug class cannot
-   manifest.
+The plan already enumerated these upstream commits as non-applicable:
 
-2. **`src/cli/tui/dialogs/ModelPicker.tsx`** — Ink TUI dialog built on
-   `ink-select-input`. It flattens groups via `flatMap` and inlines the
-   provider name into every row label (`[${group.provider}] ${model.label}`).
-   Because the provider tag travels with each model row, there is no
-   separate "header" element that could be scrolled off or filtered out —
-   every visible row shows its provider unconditionally. The component
-   also has no `useInput`-driven filter that removes items, so, again, the
-   upstream failure mode does not apply.
-
-**Verification against upstream fix**: The opencode fix
-(`packages/app/src/components/dialog-select-model.tsx`, +1/-1) targets a
-Tauri/SolidJS desktop component with a separate rendered `<header>` node
-that could be scrolled/filtered out of view. Alexi ships no such
-component — neither picker separates headers from rows in a way that
-allows them to disappear independently.
-
-**Applied change**: None. Per the plan's explicit guidance, no new UI
-code is introduced solely to mirror upstream. The existing implementations
-already satisfy the spirit of the upstream fix.
-
-**Guardrails for future work**: If either Alexi picker is later refactored
-to add a filter/search step (`items.filter((item) => item.label.includes(query))`),
-the maintainer MUST preserve group headers by short-circuiting the filter
-for header/separator entries — matching the upstream pattern:
-
-```ts
-const visibleItems = items.filter((item) => {
-  if (item.type === 'header') return true; // preserve provider headers
-  return item.label.toLowerCase().includes(query.toLowerCase());
-});
-```
-
-For `@inquirer/prompts` `Separator` instances, use `item instanceof Separator`
-as the sentinel. For a future Ink-native grouped picker, tag header rows
-with a discriminator field (e.g., `kind: 'header'`) and skip them in both
-filter and keyboard-navigation logic.
-
-## SAP AI Core Compatibility
-
-Unaffected. No provider, router, orchestrator, agent, tool, permission,
-bus, or config code paths were touched. `src/providers/sapOrchestration.ts`
-and related SAP integration surfaces are untouched.
+| Upstream Commit | Reason |
+|---|---|
+| `17b4730` unblock workspace action | Console admin UI/API — not part of Alexi CLI |
+| `b1ce938` DeepSeek weekend pricing | opencode Zen cloud proxy — Alexi uses SAP AI Core |
+| `32c3637`, `3d31e4b`, `fa11755`, `dd3f915`, `b3bad6b`, `63a883a`, `f2a1d54` | Zen request body streaming — no equivalent in Alexi |
+| `dc13c6b` reduce zen request memory | Zen internals — N/A |
+| `7bbfe42` always allow ox alpha in go | Support/release tooling — N/A |
+| `03bba46`, `ca10088`, `c11c41b`, `bb72277`, `e3bd6e0` | Auto-generated console artifacts — N/A |
 
 ## Issues Encountered
 
-None. The investigation was conclusive: both Alexi pickers are already
-structurally safe from the upstream bug class.
+None. The plan itself flagged both actionable items as conditional; the
+condition (existence of a `normalizeInferenceModel`-style utility in Alexi)
+evaluated to false after direct inspection of `src/`, so both items were
+correctly no-ops.
 
-## Testing Recommendations Executed
+## SAP AI Core Compatibility
 
-- ✅ `rg -n "dialog-select-model|selectModel|ModelPicker|modelPicker" src/` — located both pickers.
-- ✅ Read `src/cli/tui/dialogs/ModelPicker.tsx` end-to-end — no filter logic, provider tag inlined per row.
-- ✅ Read `src/cli/utils/modelPicker.ts` end-to-end — uses `@inquirer/prompts` `Separator`, no filter logic.
-- ⏭️ Runtime smoke test (`alexi model` / TUI ModelPicker) — not required; no code change to verify.
-- ⏭️ `npm test` — not required; no code change was made.
+Untouched. No provider code, routing config, or model-id handling was
+modified in this run.
+
+## Testing Recommendations
+
+None triggered by this run (no code changes). If a future patch introduces
+an Alexi-side model normalizer, revisit this plan and apply the lowercase
+fix + regression test at that time.
