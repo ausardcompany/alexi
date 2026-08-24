@@ -15,6 +15,8 @@ import {
   getCommandRegistry,
 } from '../../command/index.js';
 import { getPermissionManager } from '../../permission/index.js';
+import { imageGenTool, type ImageGenResult } from '../../tool/tools/image-gen.js';
+import type { ToolResult } from '../../tool/index.js';
 
 /**
  * Result of running a custom command in non-interactive (chat) mode.
@@ -78,6 +80,136 @@ interface ChatOptions {
   agent?: string;
   yolo?: boolean;
   dangerouslySkipPermissions?: boolean;
+  /**
+   * When set, `chat` runs in image-generation mode instead of text chat.
+   * The argument is treated as a natural-language image prompt and routed
+   * through the `image_gen` tool. Combines with `--model <id>` to pin an
+   * image-capable model (otherwise falls back to `$ALEXI_IMAGE_MODEL`).
+   */
+  image?: string;
+  /** Optional size hint (e.g. "1024x1024") forwarded to `image_gen`. */
+  imageSize?: string;
+  /**
+   * Optional output directory for decoded base64 image payloads. When
+   * omitted the tool writes into `$TMPDIR/alexi-images`.
+   */
+  imageOutputPath?: string;
+}
+
+/**
+ * Rendered outcome of a chat-command run in image-generation mode. Kept
+ * as a plain object so tests can assert on the shape without capturing
+ * stdout.
+ *
+ * - `exitCode`  : 0 on success, 1 on failure. Mirrors what the Commander
+ *                 action would exit with, so tests can rely on the same
+ *                 semantics as a shell invocation.
+ * - `lines`     : the ordered stdout lines the command would print. First
+ *                 line is `[Model: <id>]`, followed by one line per image
+ *                 payload (`url ...` or `file ...`).
+ * - `errorLines`: the ordered stderr lines emitted on failure.
+ * - `toolResult`: the raw `ToolResult<ImageGenResult>` so callers/tests can
+ *                 inspect hints, truncation, and per-image metadata.
+ */
+export interface ChatImageResult {
+  exitCode: 0 | 1;
+  lines: string[];
+  errorLines: string[];
+  toolResult: ToolResult<ImageGenResult>;
+}
+
+/**
+ * Options accepted by {@link runChatImageMode}. Mirrors the subset of
+ * `ChatOptions` that governs image generation so the helper is callable
+ * from tests without constructing a full Commander action closure.
+ */
+export interface ChatImageModeOptions {
+  prompt: string;
+  model?: string;
+  size?: string;
+  outputPath?: string;
+  yolo?: boolean;
+  dangerouslySkipPermissions?: boolean;
+}
+
+/**
+ * Run the chat command in image-generation mode.
+ *
+ * The `--image` flag on `alexi chat` short-circuits the text-chat pipeline
+ * (session manager, agent resolution, `sendChat`) and delegates to the
+ * `image_gen` tool. The tool takes care of:
+ *  - Model resolution (`--model`, then `$ALEXI_IMAGE_MODEL`).
+ *  - Capability validation via `modelHasCapability(id, 'image-generation')`
+ *    so unknown / non-image models are rejected up-front instead of paying
+ *    for a doomed round-trip.
+ *  - Streaming the response and normalising URL / base64 image payloads.
+ *  - Persisting decoded base64 blobs to disk (unless `outputPath` is a
+ *    session-scoped override).
+ *
+ * The returned {@link ChatImageResult} captures both the stdout the caller
+ * would print AND the underlying tool result, so tests can assert on the
+ * rendered output without shelling out.
+ *
+ * Exported so tests can exercise the branch directly without booting
+ * Commander.
+ */
+export async function runChatImageMode(opts: ChatImageModeOptions): Promise<ChatImageResult> {
+  const lines: string[] = [];
+  const errorLines: string[] = [];
+
+  if (!opts.prompt || opts.prompt.trim().length === 0) {
+    errorLines.push('Error: --image requires a non-empty prompt');
+    return {
+      exitCode: 1,
+      lines,
+      errorLines,
+      toolResult: { success: false, error: 'empty prompt' },
+    };
+  }
+
+  if (opts.yolo || opts.dangerouslySkipPermissions) {
+    getPermissionManager().setPermissionMode('auto');
+  }
+
+  const toolResult = await imageGenTool.executeUnsafe(
+    {
+      prompt: opts.prompt,
+      model: opts.model,
+      size: opts.size,
+      outputPath: opts.outputPath,
+    },
+    { workdir: process.cwd() }
+  );
+
+  if (!toolResult.success || !toolResult.data) {
+    errorLines.push(`Error: ${toolResult.error ?? 'image generation failed'}`);
+    if (toolResult.hint) {
+      errorLines.push(`Hint: ${toolResult.hint}`);
+    }
+    return { exitCode: 1, lines, errorLines, toolResult };
+  }
+
+  const { model, images } = toolResult.data;
+  lines.push(`[Model: ${model}]`);
+  for (const image of images) {
+    if (image.kind === 'url') {
+      lines.push(`url ${image.mimeType ?? ''} ${image.url}`.trim());
+    } else if (image.path) {
+      const size = image.sizeBytes !== undefined ? ` (${image.sizeBytes} bytes)` : '';
+      lines.push(`file ${image.mimeType ?? ''} ${image.path}${size}`.trim());
+    } else if (image.data) {
+      // returnBase64 mode: image_gen returns raw base64 inline. Report the
+      // size only; the raw base64 is not echoed to stdout so we do not
+      // spam ~1MB of characters into a shell log.
+      const size = image.sizeBytes !== undefined ? ` (${image.sizeBytes} bytes)` : '';
+      lines.push(`base64 ${image.mimeType ?? ''}${size}`.trim());
+    }
+  }
+  if (toolResult.truncated && toolResult.hint) {
+    lines.push(`[Partial: ${toolResult.hint}]`);
+  }
+
+  return { exitCode: 0, lines, errorLines, toolResult };
 }
 
 export function registerChatCommand(program: Command): void {
@@ -96,8 +228,38 @@ export function registerChatCommand(program: Command): void {
     )
     .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
     .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
+    .option(
+      '--image <prompt>',
+      'Generate an image from the given prompt instead of running a text chat turn'
+    )
+    .option('--image-size <spec>', 'Optional size hint for --image, e.g. "1024x1024"')
+    .option('--image-output-path <dir>', 'Directory to save decoded base64 images from --image')
     .action(async (opts: ChatOptions) => {
       try {
+        // Image-generation short-circuit. When `--image` is provided the
+        // command bypasses the text-chat pipeline entirely and delegates
+        // to the `image_gen` tool via `runChatImageMode`.
+        if (opts.image !== undefined) {
+          const result = await runChatImageMode({
+            prompt: opts.image,
+            model: opts.model,
+            size: opts.imageSize,
+            outputPath: opts.imageOutputPath,
+            yolo: opts.yolo,
+            dangerouslySkipPermissions: opts.dangerouslySkipPermissions,
+          });
+          for (const line of result.lines) {
+            console.log(line);
+          }
+          for (const line of result.errorLines) {
+            console.error(line);
+          }
+          if (result.exitCode !== 0) {
+            process.exit(result.exitCode);
+          }
+          return;
+        }
+
         if (opts.yolo || opts.dangerouslySkipPermissions) {
           getPermissionManager().setPermissionMode('auto');
         }
