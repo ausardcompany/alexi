@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-08-24
+
+### Added
+
+- **`--image` flag for chat command** (`src/cli/commands/chat.ts`, PR #1509, commit `db2dd69b`, 2026-08-24): New `--image` flag enables image generation in chat sessions. Integrates with existing image_gen tool to provide multimodal capabilities via SAP AI Core.
+
+### Changed
+
+- **Dependency updates** (2026-08-24):
+  - `puppeteer`: `25.7.0` → `25.8.0` (PR #1521) — patch update; used by webfetch tool for headless browser-based page fetching.
+  - `@sap-ai-sdk/orchestration`: `2.14.0` → `2.15.0` (PR #1523) — minor update; core provider SDK for SAP AI Core integration.
+  - `@inquirer/prompts`: `8.5.2` → `8.6.0` (PR #1520) — minor update; used by interactive CLI prompts.
+  - `hono`: `4.13.2` → `4.13.3` (PR #1519) — patch update; used by embedded HTTP server.
+  - `@vitejs/plugin-react`: `6.0.5` → `6.1.0` (PR #1517, dev-only) — minor update; vitest plugin for React/Ink TUI test environment.
+  - `vitest`: updated in dev-dependencies group (PR #1516, dev-only) — test framework for unit and integration tests.
+
+### Maintenance
+
+- **Documentation updates** (2026-08-24):
+  - Planning brief 2026-08-24 (docs/ci, commit `86661244`)
+  - Architecture review 2026-08-24 with directory structure refresh (docs/core, commit `d38e1f06`)
+- **Agent factory runs** (2026-08-24):
+  - Consulting agent run (commit `cdface73`)
+  - Security agent run (commit `6c6cab9e`)
+
 ### Added
 
 - **`displayRole` per-message override for hidden instrumentation** (`src/core/sessionManager.ts`, `src/cli/tui/components/MessageArea.tsx`, `src/cli/session-replay.ts`, `src/core/agenticChat.ts`, `tests/orchestrator-hooks.test.ts`, `tests/cli/tui/transcript-display-role.test.tsx`, issue #1466, commit `cc2f76af`, 2026-08-21): New optional field `displayRole?: 'system' | 'user' | 'assistant'` on the `Message` interface overrides how a message is presented in user-facing transcripts (TUI `MessageArea`, `sessions export`, session replay) WITHOUT changing how the message is delivered to the model. Providers still receive the message with its logical `role`. Callers that want a message to reach the model but stay out of the transcript stamp it with `displayRole: 'system'`. `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument so existing three-argument call sites continue to compile. Auto-title generation (`activeSession.metadata.title` from the first user message) now skips messages carrying any `displayRole` value, so internal instrumentation cannot end up as the session title. `agenticChat` uses this for hook `contextModification` messages: the payload is still pushed onto the in-memory `messages` array delivered to the provider on the next iteration, and additionally persisted to the session with `displayRole: 'system'`. `MessageArea` filters out any `displayRole: 'system'` messages before rendering (empty-state placeholder appears when only hidden messages exist). `SessionReplay.replay(messages, opts)` also hard-hides `displayRole: 'system'` messages even when `showSystemMessages: true` — real `role: 'system'` messages are unaffected. New test files: `tests/cli/tui/transcript-display-role.test.tsx` (+167) and `tests/orchestrator-hooks.test.ts` `+55` (persistence + hidden-only rendering paths).
