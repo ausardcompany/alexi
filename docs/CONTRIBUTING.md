@@ -725,7 +725,7 @@ graph LR
     G --> H[CI + Auto-Merge]
 ```
 
-Sync commits follow the pattern `feat(sync): apply upstream changes (YYYY-MM-DD)` followed by a `style(ci): auto-fix lint/format issues [alexi-bot]` commit if formatting adjustments are needed.
+Sync commits follow the pattern `feat(sync): apply upstream changes (YYYY-MM-DD)` followed by a `style(ci): auto-fix lint/format issues [alexi-bot]` commit if formatting adjustments are needed. On quiet upstream days (no new commits on any tracked upstream in the 24h window since the previous sync), the sync commit may be a version-only bump paired with a timestamp-refresh in `.github/last-sync-commits.json` — no runtime, config, tool, provider, or TUI surface is modified. The 2026-08-24 sync (commit `c9e6fa10`, `1.21.6` → `1.21.7`) is the canonical example: `opencode` advanced (`3a31c4ea` → `41616958`) while `kilocode` (`ff74e2ea`) and `claude-code` (`45bdfa96`) held steady, and no `.ts` files were modified. When reviewing a sync PR, verify against `git diff --stat` — if only `package.json` (version field) and `.github/last-sync-commits.json` (timestamps + optional commit hashes) are touched, no CHANGELOG surface additions are expected beyond the paired `### Changed` sync-tracking entry.
 
 ### CI Autohealing
 

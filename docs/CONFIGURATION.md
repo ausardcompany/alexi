@@ -1222,3 +1222,4 @@ See [ARCHITECTURE.md — MCP Apps (experimental)](ARCHITECTURE.md#mcp-apps-exper
 - [Architecture](ARCHITECTURE.md) -- System architecture and design
 - [Testing Guide](TESTING.md) -- Testing configuration and environment setup
 - [Automation](AUTOMATION.md) -- CI/CD workflows and automation
+- [Changelog](../CHANGELOG.md) -- Version history in Keep a Changelog format. The 1.21.5 → 1.21.7 cycle is a sequence of daily-sync version bumps that do not change any configuration surface documented on this page; the last configuration-surface additions were `ALEXI_EXPERIMENTAL_MCP_APPS`, `mcpToolDisplay` / `mcp_tool_display`, and the `InstanceWatcher` per-instance scoping described inline above, all shipped in 1.21.4.
