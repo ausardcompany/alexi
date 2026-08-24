@@ -1658,21 +1658,25 @@ alexi/
 │   ├── hooks/          # Lifecycle hooks (command, HTTP, script)
 │   ├── i18n/           # Internationalization tables
 │   ├── init/           # `alexi init` project bootstrap
+│   ├── kilocode/       # Upstream-ported classification utilities
+│   │                   #   (e.g. sandbox/git.ts) -- pending ADR 006
 │   ├── log/            # Log surface (separate from utils/logger)
 │   ├── mcp/            # Model Context Protocol client/server
 │   ├── permission/     # Permission rules, doom loop detection,
 │   │                   #   shell-parser
-│   ├── plan/           # Plan-mode helpers
+│   ├── plan/           # Plan-mode helpers (consumed by tool/tools/bash.ts)
 │   ├── plugin/         # Plugin auto-load + rule command runner
 │   ├── profile/        # Profile management
 │   ├── providers/      # SAP AI Core Orchestration (SOLE provider surface)
 │   ├── reference/      # External repository references and caching
 │   ├── server/         # Embedded server entrypoint
+│   ├── session/        # Session-side helpers (reminders, ask-code-switch)
 │   ├── share/          # Sharing / export helpers
 │   ├── skill/          # Specialized prompt skills (with reload)
 │   ├── sound/          # Audio notification surface
 │   ├── sync/           # Sync helpers (e.g. upstream sync)
 │   ├── tool/           # Tool system + built-in tool implementations
+│   ├── ui/             # UI shims (composer.css, timers.ts -- pending cleanup)
 │   ├── undo/           # Undo / rewind state
 │   ├── update/         # Self-update command
 │   └── utils/          # Logger, telemetry, shared utilities
@@ -1689,10 +1693,12 @@ alexi/
 └── tsconfig.json
 ```
 
-The current top-level layout has grown beyond the original ~10 modules.
-ADR 001 (`docs/adr/001-establish-adr-process.md`) records the layering
-rules these directories must respect; planned follow-up ADRs will
-backfill rationale for each newer top-level module.
+The current top-level layout has grown to 34 modules (up from the
+original ~10). ADR 001 (`docs/adr/001-establish-adr-process.md`) records
+the layering rules these directories must respect; planned follow-up
+ADRs will backfill rationale for each newer top-level module. See
+`docs/adr/REVIEW-2026-08-24.md` for the current baseline snapshot and
+`docs/adr/REVIEW-*.md` more generally for the running architecture log.
 
 ## Key Design Decisions
 

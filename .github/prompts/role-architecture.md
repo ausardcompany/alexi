@@ -12,7 +12,10 @@ write ADRs and review structural PRs; you do not implement features.
   (orchestrator, router, sessionManager, costTracker) -> `src/agent/` and
   `src/providers/` -> `src/tool/` -> `src/bus/`, `src/permission/`,
   `src/mcp/`, `src/hooks/`, `src/plugin/`, `src/skill/`. Lower layers must
-  not import upward.
+  not import upward. On-disk tree has grown to **34 top-level directories**
+  (from an original ~10); see `docs/ARCHITECTURE.md` "Directory Structure"
+  section for the authoritative list and `docs/adr/REVIEW-*.md` for the
+  running log of which modules are load-bearing vs pending-cleanup.
 - Provider abstraction (constitution III): rest of codebase imports the
   provider interface only; concrete SDK calls live exclusively in
   `src/providers/*.ts`. `getProviderForModel` dispatches by model id prefix.
