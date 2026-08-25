@@ -9,6 +9,7 @@ import { defineTool, type ToolResult } from '../index.js';
 import { encodeWithEncoding, type EncodingInfo } from '../encoded-io.js';
 import { getFileEncoding } from './read.js';
 import { attachAgentsMdReminders } from '../../agent/agentsMdReminders.js';
+import { normalizeNewFileLineEndings, preserveExistingLineEndings } from '../eol-normalizer.js';
 
 const WriteParamsSchema = z.object({
   filePath: z.string().describe('Absolute path to the file to write'),
@@ -78,6 +79,27 @@ Usage:
         params.content.charCodeAt(0) === 0xfeff
       ) {
         finalContent = params.content.slice(1);
+      }
+
+      // Line-ending normalization:
+      // - New files get the host platform's native EOL (os.EOL) so Windows
+      //   projects don't see spurious full-file diffs from LF-only writes.
+      // - Existing files preserve whatever EOL style the file currently uses,
+      //   so overwriting a CRLF file keeps it CRLF (and vice-versa).
+      if (!exists) {
+        finalContent = normalizeNewFileLineEndings(finalContent);
+      } else {
+        try {
+          const existingBuffer = await fs.readFile(filePath);
+          // Decode as UTF-8 for EOL sniffing - good enough because CR/LF are
+          // ASCII in every encoding we care about here.
+          const existingText = existingBuffer.toString('utf-8');
+          finalContent = preserveExistingLineEndings(finalContent, existingText);
+        } catch {
+          // If we can't read the existing file for some reason, fall back
+          // to platform-native EOL rather than blocking the write.
+          finalContent = normalizeNewFileLineEndings(finalContent);
+        }
       }
 
       // Encode with proper encoding
