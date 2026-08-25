@@ -36,8 +36,7 @@ export interface CompletenessInput {
 }
 
 export type CompletenessResult =
-  | { status: 'complete' }
-  | { status: 'retry'; reason: 'reasoning-only' };
+  { status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' };
 
 /**
  * True when the message body contains ONLY reasoning / thinking parts

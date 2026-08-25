@@ -86,8 +86,8 @@ function windowsCandidates(): string[] {
   // still wins over the always-present legacy shell. Any hits are
   // prepended to the hard-coded win32 candidate list below so behaviour
   // matches the previous version when pwsh is not installed.
-  const pwshHits = [PowerShell.pwsh(), ...PowerShell.probe()].filter(
-    (item): item is string => Boolean(item)
+  const pwshHits = [PowerShell.pwsh(), ...PowerShell.probe()].filter((item): item is string =>
+    Boolean(item)
   );
 
   return [

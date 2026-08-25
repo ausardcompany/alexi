@@ -11,9 +11,7 @@ import { getBlocker, answerQuestion } from '../../permission/agent-manager.js';
 // explicit `null`. Accept both so tool-call payloads coming from any
 // provider validate without provider-specific pre-processing.
 const AgentManagerParamsSchema = z.object({
-  action: z
-    .enum(['create', 'list', 'stop', 'status', 'answer'])
-    .describe('Action to perform'),
+  action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
   sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
   agentId: z
     .string()
