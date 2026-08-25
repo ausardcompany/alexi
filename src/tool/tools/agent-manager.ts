@@ -4,14 +4,29 @@
 
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
+import { getBlocker, answerQuestion } from '../../permission/agent-manager.js';
 
 // Nullable-friendly schema: strict providers (OpenAI structured output,
 // SAP AI Core in strict mode) may omit optional fields entirely OR pass
 // explicit `null`. Accept both so tool-call payloads coming from any
 // provider validate without provider-specific pre-processing.
 const AgentManagerParamsSchema = z.object({
-  action: z.enum(['create', 'list', 'stop', 'status']).describe('Action to perform'),
+  action: z
+    .enum(['create', 'list', 'stop', 'status', 'answer'])
+    .describe('Action to perform'),
   sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
+  agentId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe('Agent ID for answer action (the sub-agent blocked on a pending question)'),
+  answer: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
+    ),
   worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
   config: z
     .object({
@@ -40,6 +55,7 @@ interface AgentManagerResult {
     id: string;
     status: string;
   };
+  answered?: string;
   message?: string;
 }
 
@@ -51,7 +67,10 @@ Actions:
 - create: Create a new agent session with optional configuration
 - list: List all active agent sessions
 - stop: Stop a specific agent session
-- status: Get the status of a specific agent session`,
+- status: Get the status of a specific agent session
+- answer: Provide an answer to a sub-agent that is blocked on a pending question.
+  Required params: agentId, answer.
+  Use when a sub-agent's status shows a pending question that only you can resolve.`,
 
   parameters: AgentManagerParamsSchema,
 
@@ -61,7 +80,7 @@ Actions:
   },
 
   async execute(params, _context): Promise<ToolResult<AgentManagerResult>> {
-    const { action, sessionId, config } = params;
+    const { action, sessionId, agentId, answer, config } = params;
 
     try {
       switch (action) {
@@ -143,6 +162,41 @@ Actions:
                 status: 'unknown',
               },
               message: `Status for session: ${sessionId}`,
+            },
+          };
+        }
+
+        case 'answer': {
+          // Ports kilocode `7baefdddf feat(agent-manager): answer pending
+          // questions`. Lets the orchestrator LLM unblock a sub-agent
+          // that is stuck on a permission or clarification question.
+          if (!agentId || !answer) {
+            return {
+              success: false,
+              error: 'agentId and answer are required for action=answer',
+            };
+          }
+          // Fail-closed lookup (see `98559c9d6` / src/permission/agent-manager.ts).
+          const blocker = await getBlocker(agentId);
+          if (!blocker) {
+            return {
+              success: false,
+              error: `No pending question for agent ${agentId}`,
+            };
+          }
+          if (blocker.kind !== 'question') {
+            return {
+              success: false,
+              error: `Agent ${agentId} is not blocked on a question`,
+            };
+          }
+          await answerQuestion(agentId, answer);
+          return {
+            success: true,
+            data: {
+              action: 'answer',
+              answered: agentId,
+              message: `Answer delivered to agent ${agentId}`,
             },
           };
         }
