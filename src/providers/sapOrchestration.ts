@@ -2064,12 +2064,43 @@ export const PROVIDER_RATE_LIMIT_CODE = 'provider_rate_limit';
  * workflow-level `KILO_RETRIES` loop keep handling them, but with a
  * user-friendly message.
  */
+/**
+ * Optional structured metadata carried alongside a rate-limit error.
+ *
+ * Populated from the response headers `X-RateLimit-Reset` (converted to a
+ * `Date`) and `X-RateLimit-Limit` (integer quota). Present when the
+ * upstream provider surfaces the standard rate-limit headers; `undefined`
+ * when the response only carried a bare 429 without a hint.
+ *
+ * These fields are optional constructor arguments so that existing call
+ * sites (which only know `retryAfterSeconds`) keep working unchanged.
+ */
+export interface RateLimitDetails {
+  /** Absolute reset time parsed from `X-RateLimit-Reset` (seconds or ms). */
+  resetAt?: Date;
+  /** Quota ceiling from `X-RateLimit-Limit`. */
+  limit?: number;
+}
+
 export class FreeTierRateLimitError extends Error {
   readonly code: typeof FREE_TIER_RATE_LIMIT_CODE = FREE_TIER_RATE_LIMIT_CODE;
   readonly modelName: string;
   readonly statusCode = 429;
   readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
   readonly retryAfterSeconds?: number;
+  /**
+   * Absolute reset timestamp parsed from `X-RateLimit-Reset`. Present when
+   * the upstream provider surfaced the header AND `retryAfterSeconds` was
+   * not already supplied; consumers can render this as an absolute time
+   * (`Resets at ...`) when a relative wait is unavailable.
+   */
+  readonly resetAt?: Date;
+  /**
+   * Quota ceiling from `X-RateLimit-Limit`. Purely informational for the
+   * user — the actual "when to retry" decision is driven by
+   * `retryAfterSeconds` / `resetAt`.
+   */
+  readonly limit?: number;
   /**
    * Short, single-line, user-facing guidance for the CLI to show alongside
    * the full error message. Distinct from `message` so callers (CLI,
@@ -2079,11 +2110,18 @@ export class FreeTierRateLimitError extends Error {
    */
   readonly suggestedAction: string;
 
-  constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
+  constructor(
+    modelName: string,
+    cause?: unknown,
+    retryAfterSeconds?: number,
+    details?: RateLimitDetails
+  ) {
     const retryLine =
       typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
         ? ` Retry after ${retryAfterSeconds} seconds.`
-        : '';
+        : details?.resetAt instanceof Date && !Number.isNaN(details.resetAt.getTime())
+          ? ` Resets at ${details.resetAt.toISOString()}.`
+          : '';
     const message =
       `Free-tier model rate limit exceeded for '${modelName}'. ` +
       `SAP AI Core free-tier deployments enforce strict per-minute request quotas; ` +
@@ -2096,10 +2134,22 @@ export class FreeTierRateLimitError extends Error {
     if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
       this.retryAfterSeconds = retryAfterSeconds;
     }
+    if (details?.resetAt instanceof Date && !Number.isNaN(details.resetAt.getTime())) {
+      this.resetAt = details.resetAt;
+    }
+    if (
+      typeof details?.limit === 'number' &&
+      Number.isFinite(details.limit) &&
+      details.limit >= 0
+    ) {
+      this.limit = Math.floor(details.limit);
+    }
     const waitPhrase =
       typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
         ? `Wait ${retryAfterSeconds}s`
-        : 'Wait for the quota window to reset';
+        : this.resetAt !== undefined
+          ? `Resets at ${this.resetAt.toISOString()}`
+          : 'Wait for the quota window to reset';
     this.suggestedAction =
       `${waitPhrase} or upgrade to a paid SAP AI Core deployment: ` +
       `${SAP_AI_CORE_RATE_LIMIT_DOCS_URL}`;
@@ -2130,6 +2180,14 @@ export class ProviderRateLimitError extends Error {
   readonly docsUrl: string = SAP_AI_CORE_RATE_LIMIT_DOCS_URL;
   readonly retryAfterSeconds?: number;
   /**
+   * Absolute reset timestamp parsed from `X-RateLimit-Reset`. Present when
+   * the upstream provider surfaced the header AND `retryAfterSeconds` was
+   * not already supplied.
+   */
+  readonly resetAt?: Date;
+  /** Quota ceiling from `X-RateLimit-Limit`. */
+  readonly limit?: number;
+  /**
    * Short, single-line, user-facing guidance for the CLI to show alongside
    * the full error message. For paid-tier throttling the primary action is
    * to wait for the quota window; upgrading is offered as a secondary
@@ -2137,10 +2195,21 @@ export class ProviderRateLimitError extends Error {
    */
   readonly suggestedAction: string;
 
-  constructor(modelName: string, cause?: unknown, retryAfterSeconds?: number) {
-    const waitLine =
-      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
-        ? `Wait ${retryAfterSeconds} seconds and try again`
+  constructor(
+    modelName: string,
+    cause?: unknown,
+    retryAfterSeconds?: number,
+    details?: RateLimitDetails
+  ) {
+    const hasRetryAfter = typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0;
+    const validResetAt =
+      details?.resetAt instanceof Date && !Number.isNaN(details.resetAt.getTime())
+        ? details.resetAt
+        : undefined;
+    const waitLine = hasRetryAfter
+      ? `Wait ${retryAfterSeconds} seconds and try again`
+      : validResetAt !== undefined
+        ? `Wait until ${validResetAt.toISOString()} and try again`
         : 'Wait 60 seconds and try again';
     const message =
       `Rate limit reached for model '${modelName}'. ` +
@@ -2156,9 +2225,20 @@ export class ProviderRateLimitError extends Error {
     if (typeof retryAfterSeconds === 'number' && retryAfterSeconds >= 0) {
       this.retryAfterSeconds = retryAfterSeconds;
     }
-    const waitPhrase =
-      typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
-        ? `Wait ${retryAfterSeconds}s`
+    if (validResetAt !== undefined) {
+      this.resetAt = validResetAt;
+    }
+    if (
+      typeof details?.limit === 'number' &&
+      Number.isFinite(details.limit) &&
+      details.limit >= 0
+    ) {
+      this.limit = Math.floor(details.limit);
+    }
+    const waitPhrase = hasRetryAfter
+      ? `Wait ${retryAfterSeconds}s`
+      : validResetAt !== undefined
+        ? `Wait until ${validResetAt.toISOString()}`
         : 'Wait 60s';
     this.suggestedAction =
       `${waitPhrase}, switch to a smaller model, or contact SAP to increase quota: ` +
@@ -2443,6 +2523,130 @@ export function extractRetryAfterSeconds(err: unknown): number | undefined {
 }
 
 /**
+ * Read a single header value (string) from a heterogeneous headers
+ * container. Accepts both the fetch `Headers` object (case-insensitive
+ * `.get()`) and plain record shapes ({ 'Retry-After': '30' } or
+ * { 'retry-after': ['30'] }). Returns `undefined` when the header is
+ * absent or the value is not a string / non-empty string array.
+ *
+ * Kept as a local helper (not exported) because the extractor functions
+ * below are the public entry points; the header-plumbing is an
+ * implementation detail.
+ */
+function readHeaderValue(headers: unknown, name: string): string | undefined {
+  if (headers === null || headers === undefined) {
+    return undefined;
+  }
+  const wanted = name.toLowerCase();
+  if (typeof (headers as { get?: unknown }).get === 'function') {
+    try {
+      const value = (headers as { get: (n: string) => unknown }).get(wanted);
+      if (typeof value === 'string') {
+        return value;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (typeof headers === 'object') {
+    const record = headers as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (key.toLowerCase() === wanted) {
+        const value = record[key];
+        if (typeof value === 'string') {
+          return value;
+        }
+        if (Array.isArray(value) && typeof value[0] === 'string') {
+          return value[0];
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Parse an `X-RateLimit-Reset` header value into a `Date`.
+ *
+ * Two conventions are seen in the wild (SAP AI Core, OpenAI, GitHub):
+ *   - Unix epoch **seconds** (10-digit integer, e.g. `1700000000`).
+ *   - Unix epoch **milliseconds** (13-digit integer, e.g.
+ *     `1700000000000`).
+ *
+ * Heuristic: values with more than 12 digits are treated as milliseconds;
+ * smaller values as seconds. Non-numeric / non-finite / negative values
+ * resolve to `undefined` so the caller falls back to a generic message.
+ */
+export function parseRateLimitResetHeader(raw: unknown): Date | undefined {
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    return undefined;
+  }
+  const asString = typeof raw === 'number' ? String(raw) : raw.trim();
+  if (asString.length === 0 || !/^\d+$/.test(asString)) {
+    return undefined;
+  }
+  const numeric = parseInt(asString, 10);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return undefined;
+  }
+  // Heuristic: >= 10^12 is milliseconds (any date after Sep 2001 in ms is
+  // 13 digits); anything smaller is seconds. This avoids the ambiguity
+  // between "60" (seconds relative to now?) and a real epoch value.
+  const ms = numeric >= 1_000_000_000_000 ? numeric : numeric * 1000;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+}
+
+/**
+ * Walk common error shapes looking for an `X-RateLimit-Reset` value.
+ * Case-insensitive header lookup, same as `extractRetryAfterSeconds`.
+ *
+ * Returns a `Date` when the header was found AND parseable; `undefined`
+ * otherwise so the caller can fall through to the generic "wait 60s"
+ * message.
+ */
+export function extractRateLimitReset(err: unknown): Date | undefined {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as {
+    headers?: unknown;
+    response?: { headers?: unknown };
+  };
+  const raw =
+    readHeaderValue(candidate.headers, 'x-ratelimit-reset') ??
+    readHeaderValue(candidate.response?.headers, 'x-ratelimit-reset');
+  return parseRateLimitResetHeader(raw);
+}
+
+/**
+ * Walk common error shapes looking for an `X-RateLimit-Limit` value.
+ * Returns the integer quota when the header was found AND is a
+ * non-negative finite number; `undefined` otherwise.
+ */
+export function extractRateLimitLimit(err: unknown): number | undefined {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as {
+    headers?: unknown;
+    response?: { headers?: unknown };
+  };
+  const raw =
+    readHeaderValue(candidate.headers, 'x-ratelimit-limit') ??
+    readHeaderValue(candidate.response?.headers, 'x-ratelimit-limit');
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const numeric = parseInt(trimmed, 10);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : undefined;
+}
+
+/**
  * If `err` represents a 429 response, wrap it in a user-friendly rate
  * limit error carrying actionable guidance and (when present) the
  * `Retry-After` window from the response headers.
@@ -2474,10 +2678,14 @@ export function classifyRateLimitError(err: unknown, modelName: string): unknown
     return err;
   }
   const retryAfter = extractRetryAfterSeconds(err);
+  const resetAt = extractRateLimitReset(err);
+  const limit = extractRateLimitLimit(err);
+  const details: RateLimitDetails | undefined =
+    resetAt !== undefined || limit !== undefined ? { resetAt, limit } : undefined;
   if (isFreeModel(modelName) || hasFreeTierErrorSignal(err)) {
-    return new FreeTierRateLimitError(modelName, err, retryAfter);
+    return new FreeTierRateLimitError(modelName, err, retryAfter, details);
   }
-  return new ProviderRateLimitError(modelName, err, retryAfter);
+  return new ProviderRateLimitError(modelName, err, retryAfter, details);
 }
 
 // ============================================================================

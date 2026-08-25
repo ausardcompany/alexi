@@ -112,11 +112,18 @@ export function isRetryableError(err: unknown): boolean {
  * milliseconds. Returns `undefined` when no header was captured — the
  * caller then falls back to the default exponential-backoff schedule.
  *
- * The value read is `retryAfterSeconds` (set by the constructors of
- * `FreeTierRateLimitError` / `ProviderRateLimitError` in
- * `src/providers/sapOrchestration.ts`). We intentionally do NOT re-parse
- * raw headers here — that parsing belongs to the providers layer where
- * the raw response is still available.
+ * Two sources are consulted, in order:
+ *   1. `retryAfterSeconds` (set by the constructors of
+ *      `FreeTierRateLimitError` / `ProviderRateLimitError` from the
+ *      `Retry-After` response header).
+ *   2. `resetAt` (set from `X-RateLimit-Reset`). Only used when
+ *      `retryAfterSeconds` is absent; converted to a positive delta from
+ *      the current wall-clock. A past reset time collapses to 0
+ *      (retry-immediately).
+ *
+ * We intentionally do NOT re-parse raw headers here — that parsing
+ * belongs to the providers layer where the raw response is still
+ * available.
  *
  * A zero value is preserved (returns 0) so callers can honour an
  * "immediate retry allowed" hint from the server rather than defaulting
@@ -126,12 +133,17 @@ export function getRetryAfterMs(err: unknown): number | undefined {
   if (err === null || err === undefined || typeof err !== 'object') {
     return undefined;
   }
-  const candidate = err as { retryAfterSeconds?: unknown };
+  const candidate = err as { retryAfterSeconds?: unknown; resetAt?: unknown };
   const seconds = candidate.retryAfterSeconds;
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) {
-    return undefined;
+  if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0) {
+    return Math.floor(seconds * 1000);
   }
-  return Math.floor(seconds * 1000);
+  const resetAt = candidate.resetAt;
+  if (resetAt instanceof Date && !Number.isNaN(resetAt.getTime())) {
+    const delta = resetAt.getTime() - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+  return undefined;
 }
 
 export class ErrorBackoff {
