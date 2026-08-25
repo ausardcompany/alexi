@@ -948,6 +948,22 @@ Contract for a new per-instance module:
 4. Add a `getDefault<Thing>Instance()` accessor gated on test use so tests can assert on the default instance's behaviour without touching internals.
 5. Cover isolation between two instances in the tests (see `tests/core/filesystem/instance-watcher.test.ts` for the reference pattern) — this is the regression the refactor exists to prevent.
 
+## Line-Ending Normalization When Writing Files
+
+Effective the 2026-08-25 write-tool EOL patch (commit `d0dec417`), any tool or module that produces file bytes destined for the user's working tree MUST route through the helpers in `src/tool/eol-normalizer.ts` rather than writing raw model output directly. Two functions cover the two cases:
+
+1. **New file** — `normalizeNewFileLineEndings(content)` rewrites the content to `os.EOL` (LF on POSIX, CRLF on Windows). Windows contributors on `core.autocrlf=true` no longer see whole-file diffs for LF-only model output.
+2. **Overwrite existing file** — `preserveExistingLineEndings(newContent, existingContent)` detects the existing file's line-ending style via `detectLineEnding` and rewrites the new content to match. Overwriting a CRLF file with LF content (or vice versa) is what causes spurious full-file diffs; preserving the existing style keeps the diff scoped to the actual textual change.
+
+The canonical integration is `src/tool/tools/write.ts:84-103`. Contract for a new file-writing tool:
+
+- Branch on whether the target file exists before normalization. Read the existing bytes for the overwrite case; fall back to `normalizeNewFileLineEndings` when the read fails so a permissions error does not block the write.
+- Decode the existing file as UTF-8 for EOL sniffing. `\r` and `\n` are ASCII in every encoding the tool layer supports, so a UTF-8 decode is safe even for a file whose actual encoding is UTF-16 or a legacy code page.
+- Apply normalization AFTER any BOM / encoding handling and BEFORE `encodeWithEncoding`, so the buffer sent to `fs.writeFile` reflects the final byte sequence.
+- Do NOT normalize when the caller has explicitly asked for LF-only output (e.g. a code generator that emits JSON or a config file with a required LF terminator). The current default is "match the platform / preserve the existing style"; opt-out is caller-provided.
+
+Testing guidance: co-locate pure-function tests next to the module (`src/tool/eol-normalizer.test.ts` is the reference), and add end-to-end integration tests that drive the tool via `executeUnsafe` against a `fs.mkdtempSync` temp directory. Simulate the opposite platform by mocking `getPlatformEol` via `vi.doMock` + `vi.resetModules` + dynamic `await import(...)` — see `docs/TESTING.md#simulating-windows-on-a-linux-ci-runner` for the worked pattern.
+
 ## `displayRole` for Hidden Instrumentation
 
 Effective 1.21.4 (issue #1466), messages that must reach the model but stay out of the user-facing transcript should be persisted with `displayRole: 'system'` on the `Message` interface. The provider still receives the message with its logical `role` (`'user'`, `'assistant'`, `'system'`); `displayRole` is a UI-only filter honoured by `MessageArea`, `SessionReplay`, and any future transcript surface.

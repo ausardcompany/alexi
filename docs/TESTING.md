@@ -343,6 +343,179 @@ Key patterns:
    reflects the raw environment value and is stable across platforms, but the
    `type` classification is the invariant the tool guarantees to callers.
 
+### Testing the Write Tool EOL Normalizer
+
+The write tool applies platform-native line-ending normalization when creating new files and preserves the existing EOL style when overwriting existing files. Two test suites cover this contract: pure-function unit tests in `src/tool/eol-normalizer.test.ts` (co-located with the module) and end-to-end integration tests in `src/tool/tools/__tests__/write.eol.test.ts` that drive `writeTool.executeUnsafe` against a real temp directory.
+
+#### Pure-function tests (`src/tool/eol-normalizer.test.ts`)
+
+The normalizer module exposes four pure helpers — `detectLineEnding`, `normalizeNewFileLineEndings`, `preserveExistingLineEndings`, and `getPlatformEol` — all of which are trivially unit-testable without any I/O or mocking:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  detectLineEnding,
+  normalizeNewFileLineEndings,
+  preserveExistingLineEndings,
+  getPlatformEol,
+} from './eol-normalizer.js';
+
+describe('detectLineEnding', () => {
+  it('returns CRLF when any \\r\\n sequence is present', () => {
+    expect(detectLineEnding('a\r\nb\r\n')).toBe('\r\n');
+  });
+
+  it('returns LF for content with only \\n', () => {
+    expect(detectLineEnding('a\nb\n')).toBe('\n');
+  });
+
+  it('prefers CRLF for mixed line ending files', () => {
+    // If any CRLF is found we treat the whole file as CRLF.
+    expect(detectLineEnding('a\nb\r\nc\n')).toBe('\r\n');
+  });
+});
+
+describe('normalizeNewFileLineEndings', () => {
+  it('collapses pre-existing CRLF to LF before re-applying target EOL', () => {
+    // Guard against double CR: input already has \r\n, target is \r\n.
+    expect(normalizeNewFileLineEndings('a\r\nb\r\n', '\r\n')).toBe('a\r\nb\r\n');
+  });
+
+  it('is idempotent when re-applying the same target', () => {
+    const once = normalizeNewFileLineEndings('a\nb\n', '\r\n');
+    const twice = normalizeNewFileLineEndings(once, '\r\n');
+    expect(twice).toBe(once);
+  });
+});
+```
+
+Key patterns:
+
+1. **Co-located tests.** The unit tests live next to `src/tool/eol-normalizer.ts` because they cover only the module's exported surface and never touch the tool layer. Vitest's `src/**/*.test.ts` pattern picks them up alongside `tests/`.
+2. **No mocks, no fixtures.** All four helpers are pure string transforms; every case can be expressed as `expect(fn(input)).toBe(expected)`.
+3. **Guard against double-CR.** The `'a\r\nb\r\n'` → `'\r\n'` case verifies that `normalizeNewFileLineEndings` collapses CRLF to LF before re-applying the target, which is what prevents a `\r\r\n` sequence when the caller already passed CRLF content.
+4. **Idempotence.** Assert that applying the same target twice is a no-op — this is the load-bearing property that lets callers apply normalization in any order without accumulating extra `\r` bytes.
+
+#### Integration tests (`src/tool/tools/__tests__/write.eol.test.ts`)
+
+The integration suite drives `writeTool.executeUnsafe` against a real temp directory to verify the tool's branching between `normalizeNewFileLineEndings` (new file) and `preserveExistingLineEndings` (existing file). Every case follows the standard tool-test pattern of `fs.mkdtemp` in `beforeEach` and `fs.rmSync(..., { recursive: true, force: true })` in `afterEach`:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { ToolContext } from '../../index.js';
+
+describe('write tool - platform-native line endings', () => {
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'write-eol-')));
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it('preserves CRLF when overwriting an existing CRLF file', async () => {
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'crlf.txt');
+    fs.writeFileSync(target, 'old\r\ncontent\r\n');
+
+    const context: ToolContext = { workdir };
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'new\nvalue\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+
+    const written = fs.readFileSync(target, 'utf-8');
+    expect(written).toBe('new\r\nvalue\r\n');
+  });
+
+  it('preserves LF when overwriting an existing LF file', async () => {
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'lf.txt');
+    fs.writeFileSync(target, 'old\ncontent\n');
+
+    const context: ToolContext = { workdir };
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'new\r\nvalue\r\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('new\nvalue\n');
+  });
+});
+```
+
+#### Simulating Windows on a Linux CI runner
+
+CI runs on Linux where `os.EOL === '\n'`, so the CRLF-on-new-file branch cannot be observed directly. The suite covers it by mocking `getPlatformEol` and `normalizeNewFileLineEndings` from the normalizer module, then re-importing `writeTool` so the tool picks up the mocked helpers:
+
+```typescript
+describe('write tool - simulated Windows platform (CRLF)', () => {
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'write-eol-win-')));
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    vi.doUnmock('../../eol-normalizer.js');
+    vi.resetModules();
+  });
+
+  it('creates new files with CRLF when the platform reports CRLF', async () => {
+    vi.doMock('../../eol-normalizer.js', async () => {
+      const actual =
+        await vi.importActual<typeof import('../../eol-normalizer.js')>('../../eol-normalizer.js');
+      return {
+        ...actual,
+        getPlatformEol: () => '\r\n' as const,
+        normalizeNewFileLineEndings: (content: string) =>
+          content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'),
+      };
+    });
+
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'new-crlf.txt');
+    const context: ToolContext = { workdir };
+
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'alpha\nbeta\ngamma\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+
+    const written = fs.readFileSync(target, 'utf-8');
+    expect(written).toBe('alpha\r\nbeta\r\ngamma\r\n');
+    // Bytes written should reflect CRLF (3 extra bytes for 3 line endings).
+    expect(result.data?.bytesWritten).toBe(Buffer.byteLength(written, 'utf-8'));
+  });
+});
+```
+
+Key patterns:
+
+1. **`vi.doMock` + `vi.resetModules` + dynamic import.** `vi.doMock` (unlike `vi.mock`) is NOT hoisted, so the mock declaration must be immediately followed by `vi.resetModules()` (already done in `beforeEach`) and a dynamic `await import('../write.js')` so the tool picks up the mocked normalizer instead of the cached copy. `vi.doUnmock` in `afterEach` restores the real module for subsequent tests.
+2. **Import `vi.importActual` inside the mock factory.** Only `getPlatformEol` and `normalizeNewFileLineEndings` need to change; the rest of the module (`detectLineEnding`, `preserveExistingLineEndings`, the `LineEnding` type) is imported from the actual module so the overwrite-existing-file branch keeps working correctly.
+3. **`fs.realpathSync(fs.mkdtempSync(...))`.** On macOS the tmp directory is symlinked (`/var/folders/...` vs `/private/var/folders/...`); `realpathSync` resolves the symlink so path comparisons in the tool (e.g. `path.isAbsolute` checks and `resolve` calls) do not observe a different value than the one passed in.
+4. **Assert on `bytesWritten` too.** The tool's `WriteResult` reports the byte length of the encoded buffer, not the string length. In CRLF mode the byte count includes the extra `\r` bytes — asserting on it catches regressions where the tool would write CRLF but report the LF byte count.
+
 ### Testing Bash Streaming Output
 
 The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.
