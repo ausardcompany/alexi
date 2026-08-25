@@ -575,6 +575,36 @@ are no-ops; chunks for already-completed rows are silently dropped;
 result payload (which may be normalised differently — carriage-return
 collapsing, head-and-tail elision).
 
+### Testing concurrent timer budgets with fake timers
+
+Modules that expose per-entity timeout budgets (e.g. `McpClientManager.callTool`
+creating one `AbortController` per server in `src/mcp/client.ts:537`) require
+tests that assert two adjacent promises make independent progress on different
+budgets. The canonical worked example is `tests/mcp/client-timeout.test.ts`
+under the `per-server independence` describe block (issue #1532); see
+`docs/TESTING.md#testing-per-server-timeout-independence-issue-1532` for the
+full walkthrough. The load-bearing rules are:
+
+1. **Fake timers only.** Use `vi.useFakeTimers()` in `beforeEach` and
+   `vi.useRealTimers()` in `afterEach`. Real timers would make the 30 s / 60 s
+   assertions unusably slow AND flaky under CI scheduling variability.
+2. **Advance time explicitly per assertion.** Prefer
+   `await vi.advanceTimersByTimeAsync(ms)` at each budget boundary so a
+   regression that couples two supposedly-independent timers is detected as an
+   ordering violation, not as a total-elapsed-time drift.
+3. **Drain microtasks with `await Promise.resolve()` before asserting the
+   pending-side of a concurrent call.** A newly-created promise is only
+   observably unresolved after the current microtask queue drains; skipping
+   this step is the most common source of flakes in concurrent-timer tests.
+4. **Route shared mocks by request-shape, not by connection identity.** When a
+   single mock handler serves two logical connections (as with the shared
+   `mockClientCallTool` in the MCP test file), branch on a request field
+   (`params.name` for MCP) rather than trying to stub two `Client` classes.
+5. **Assert on error message shape, not just `success: false`.** The named
+   source (`(request timeout for server 'X')`) and the numeric bound
+   (`/^MCP callTool timed out after <ms>ms /`) are the operator-facing contract
+   and must be pinned so a refactor cannot silently drop them.
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:
@@ -918,6 +948,22 @@ Contract for a new per-instance module:
 3. Provide a backwards-compatible module-level shim only if there are existing call sites that cannot be migrated in the same PR. Every new call site owns its own instance.
 4. Add a `getDefault<Thing>Instance()` accessor gated on test use so tests can assert on the default instance's behaviour without touching internals.
 5. Cover isolation between two instances in the tests (see `tests/core/filesystem/instance-watcher.test.ts` for the reference pattern) — this is the regression the refactor exists to prevent.
+
+## Line-Ending Normalization When Writing Files
+
+Effective the 2026-08-25 write-tool EOL patch (commit `d0dec417`), any tool or module that produces file bytes destined for the user's working tree MUST route through the helpers in `src/tool/eol-normalizer.ts` rather than writing raw model output directly. Two functions cover the two cases:
+
+1. **New file** — `normalizeNewFileLineEndings(content)` rewrites the content to `os.EOL` (LF on POSIX, CRLF on Windows). Windows contributors on `core.autocrlf=true` no longer see whole-file diffs for LF-only model output.
+2. **Overwrite existing file** — `preserveExistingLineEndings(newContent, existingContent)` detects the existing file's line-ending style via `detectLineEnding` and rewrites the new content to match. Overwriting a CRLF file with LF content (or vice versa) is what causes spurious full-file diffs; preserving the existing style keeps the diff scoped to the actual textual change.
+
+The canonical integration is `src/tool/tools/write.ts:84-103`. Contract for a new file-writing tool:
+
+- Branch on whether the target file exists before normalization. Read the existing bytes for the overwrite case; fall back to `normalizeNewFileLineEndings` when the read fails so a permissions error does not block the write.
+- Decode the existing file as UTF-8 for EOL sniffing. `\r` and `\n` are ASCII in every encoding the tool layer supports, so a UTF-8 decode is safe even for a file whose actual encoding is UTF-16 or a legacy code page.
+- Apply normalization AFTER any BOM / encoding handling and BEFORE `encodeWithEncoding`, so the buffer sent to `fs.writeFile` reflects the final byte sequence.
+- Do NOT normalize when the caller has explicitly asked for LF-only output (e.g. a code generator that emits JSON or a config file with a required LF terminator). The current default is "match the platform / preserve the existing style"; opt-out is caller-provided.
+
+Testing guidance: co-locate pure-function tests next to the module (`src/tool/eol-normalizer.test.ts` is the reference), and add end-to-end integration tests that drive the tool via `executeUnsafe` against a `fs.mkdtempSync` temp directory. Simulate the opposite platform by mocking `getPlatformEol` via `vi.doMock` + `vi.resetModules` + dynamic `await import(...)` — see `docs/TESTING.md#simulating-windows-on-a-linux-ci-runner` for the worked pattern.
 
 ## `displayRole` for Hidden Instrumentation
 

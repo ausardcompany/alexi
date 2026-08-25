@@ -343,6 +343,179 @@ Key patterns:
    reflects the raw environment value and is stable across platforms, but the
    `type` classification is the invariant the tool guarantees to callers.
 
+### Testing the Write Tool EOL Normalizer
+
+The write tool applies platform-native line-ending normalization when creating new files and preserves the existing EOL style when overwriting existing files. Two test suites cover this contract: pure-function unit tests in `src/tool/eol-normalizer.test.ts` (co-located with the module) and end-to-end integration tests in `src/tool/tools/__tests__/write.eol.test.ts` that drive `writeTool.executeUnsafe` against a real temp directory.
+
+#### Pure-function tests (`src/tool/eol-normalizer.test.ts`)
+
+The normalizer module exposes four pure helpers — `detectLineEnding`, `normalizeNewFileLineEndings`, `preserveExistingLineEndings`, and `getPlatformEol` — all of which are trivially unit-testable without any I/O or mocking:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  detectLineEnding,
+  normalizeNewFileLineEndings,
+  preserveExistingLineEndings,
+  getPlatformEol,
+} from './eol-normalizer.js';
+
+describe('detectLineEnding', () => {
+  it('returns CRLF when any \\r\\n sequence is present', () => {
+    expect(detectLineEnding('a\r\nb\r\n')).toBe('\r\n');
+  });
+
+  it('returns LF for content with only \\n', () => {
+    expect(detectLineEnding('a\nb\n')).toBe('\n');
+  });
+
+  it('prefers CRLF for mixed line ending files', () => {
+    // If any CRLF is found we treat the whole file as CRLF.
+    expect(detectLineEnding('a\nb\r\nc\n')).toBe('\r\n');
+  });
+});
+
+describe('normalizeNewFileLineEndings', () => {
+  it('collapses pre-existing CRLF to LF before re-applying target EOL', () => {
+    // Guard against double CR: input already has \r\n, target is \r\n.
+    expect(normalizeNewFileLineEndings('a\r\nb\r\n', '\r\n')).toBe('a\r\nb\r\n');
+  });
+
+  it('is idempotent when re-applying the same target', () => {
+    const once = normalizeNewFileLineEndings('a\nb\n', '\r\n');
+    const twice = normalizeNewFileLineEndings(once, '\r\n');
+    expect(twice).toBe(once);
+  });
+});
+```
+
+Key patterns:
+
+1. **Co-located tests.** The unit tests live next to `src/tool/eol-normalizer.ts` because they cover only the module's exported surface and never touch the tool layer. Vitest's `src/**/*.test.ts` pattern picks them up alongside `tests/`.
+2. **No mocks, no fixtures.** All four helpers are pure string transforms; every case can be expressed as `expect(fn(input)).toBe(expected)`.
+3. **Guard against double-CR.** The `'a\r\nb\r\n'` → `'\r\n'` case verifies that `normalizeNewFileLineEndings` collapses CRLF to LF before re-applying the target, which is what prevents a `\r\r\n` sequence when the caller already passed CRLF content.
+4. **Idempotence.** Assert that applying the same target twice is a no-op — this is the load-bearing property that lets callers apply normalization in any order without accumulating extra `\r` bytes.
+
+#### Integration tests (`src/tool/tools/__tests__/write.eol.test.ts`)
+
+The integration suite drives `writeTool.executeUnsafe` against a real temp directory to verify the tool's branching between `normalizeNewFileLineEndings` (new file) and `preserveExistingLineEndings` (existing file). Every case follows the standard tool-test pattern of `fs.mkdtemp` in `beforeEach` and `fs.rmSync(..., { recursive: true, force: true })` in `afterEach`:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { ToolContext } from '../../index.js';
+
+describe('write tool - platform-native line endings', () => {
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'write-eol-')));
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    vi.resetModules();
+    vi.unstubAllGlobals();
+  });
+
+  it('preserves CRLF when overwriting an existing CRLF file', async () => {
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'crlf.txt');
+    fs.writeFileSync(target, 'old\r\ncontent\r\n');
+
+    const context: ToolContext = { workdir };
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'new\nvalue\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+
+    const written = fs.readFileSync(target, 'utf-8');
+    expect(written).toBe('new\r\nvalue\r\n');
+  });
+
+  it('preserves LF when overwriting an existing LF file', async () => {
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'lf.txt');
+    fs.writeFileSync(target, 'old\ncontent\n');
+
+    const context: ToolContext = { workdir };
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'new\r\nvalue\r\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('new\nvalue\n');
+  });
+});
+```
+
+#### Simulating Windows on a Linux CI runner
+
+CI runs on Linux where `os.EOL === '\n'`, so the CRLF-on-new-file branch cannot be observed directly. The suite covers it by mocking `getPlatformEol` and `normalizeNewFileLineEndings` from the normalizer module, then re-importing `writeTool` so the tool picks up the mocked helpers:
+
+```typescript
+describe('write tool - simulated Windows platform (CRLF)', () => {
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'write-eol-win-')));
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    vi.doUnmock('../../eol-normalizer.js');
+    vi.resetModules();
+  });
+
+  it('creates new files with CRLF when the platform reports CRLF', async () => {
+    vi.doMock('../../eol-normalizer.js', async () => {
+      const actual =
+        await vi.importActual<typeof import('../../eol-normalizer.js')>('../../eol-normalizer.js');
+      return {
+        ...actual,
+        getPlatformEol: () => '\r\n' as const,
+        normalizeNewFileLineEndings: (content: string) =>
+          content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'),
+      };
+    });
+
+    const { writeTool } = await import('../write.js');
+    const target = path.join(workdir, 'new-crlf.txt');
+    const context: ToolContext = { workdir };
+
+    const result = await writeTool.executeUnsafe(
+      { filePath: target, content: 'alpha\nbeta\ngamma\n' },
+      context
+    );
+    expect(result.success).toBe(true);
+
+    const written = fs.readFileSync(target, 'utf-8');
+    expect(written).toBe('alpha\r\nbeta\r\ngamma\r\n');
+    // Bytes written should reflect CRLF (3 extra bytes for 3 line endings).
+    expect(result.data?.bytesWritten).toBe(Buffer.byteLength(written, 'utf-8'));
+  });
+});
+```
+
+Key patterns:
+
+1. **`vi.doMock` + `vi.resetModules` + dynamic import.** `vi.doMock` (unlike `vi.mock`) is NOT hoisted, so the mock declaration must be immediately followed by `vi.resetModules()` (already done in `beforeEach`) and a dynamic `await import('../write.js')` so the tool picks up the mocked normalizer instead of the cached copy. `vi.doUnmock` in `afterEach` restores the real module for subsequent tests.
+2. **Import `vi.importActual` inside the mock factory.** Only `getPlatformEol` and `normalizeNewFileLineEndings` need to change; the rest of the module (`detectLineEnding`, `preserveExistingLineEndings`, the `LineEnding` type) is imported from the actual module so the overwrite-existing-file branch keeps working correctly.
+3. **`fs.realpathSync(fs.mkdtempSync(...))`.** On macOS the tmp directory is symlinked (`/var/folders/...` vs `/private/var/folders/...`); `realpathSync` resolves the symlink so path comparisons in the tool (e.g. `path.isAbsolute` checks and `resolve` calls) do not observe a different value than the one passed in.
+4. **Assert on `bytesWritten` too.** The tool's `WriteResult` reports the byte length of the encoded buffer, not the string length. In CRLF mode the byte count includes the extra `\r` bytes — asserting on it catches regressions where the tool would write CRLF but report the LF byte count.
+
 ### Testing Bash Streaming Output
 
 The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.
@@ -1655,11 +1828,77 @@ describe('resolveFileInclusions', () => {
 
 ## Testing MCP Client
 
-### Test File
+### Test Files
 
-- `tests/mcp/client.test.ts`
+- `tests/mcp/client.test.ts` — connection management, tool discovery, and reconnection behaviour
+- `tests/mcp/client-timeout.test.ts` — `callTool` / handshake timeout budgets, precedence, and per-server independence (issue #1532)
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing per-server timeout independence (issue #1532)
+
+`McpClientManager.callTool` runs every request under a dedicated `AbortController` created inside `withRequestTimeout(serverName, 'callTool', run)` (`src/mcp/client.ts:537`). Each connected server therefore owns an independent budget — one slow peer must NOT delay a call on a fast peer, and every abort must name the exceeded bound plus the exact `mcp-servers.json` field to raise. The regression suite for this contract lives at `tests/mcp/client-timeout.test.ts` under the `per-server independence` describe block.
+
+Two invariants are exercised:
+
+1. **A slow server does not block a fast server.** With two connections whose configured `timeout` values are 5 s (`fast-server`) and 30 s (`slow-server`), both `callTool` invocations are fired concurrently. The mock `callTool` is shared across clients, so the test routes behaviour by the tool `name`: `fast-tool` resolves synchronously while `slow-tool` hangs until its own `AbortSignal` fires. The critical assertions are that the fast call resolves without advancing any timer (a microtask flush is sufficient) and that draining pending microtasks after the fast call does NOT observe the slow call resolving — its independent 30 s budget has not elapsed. Only after `vi.advanceTimersByTimeAsync(30000)` does the slow call abort, and its error matches `/^MCP callTool timed out after 30000ms /` and contains `(request timeout for server 'slow-server')`.
+2. **Default fallback preserved.** When a server declares no `timeout` field, the manager falls through to the next precedence layer (`per-server > MCP_TOOL_TIMEOUT env > 60 s default`) and the pre-existing 60 s default remains observable — no breaking change. The test advances time to 59 s, drains microtasks, and asserts the promise is still pending; advancing the last second crosses the 60 s boundary and the error message contains `60000ms` and the server name.
+
+```typescript
+// Excerpt from tests/mcp/client-timeout.test.ts (describe 'per-server independence')
+it('slow server times out independently without blocking fast server', async () => {
+  const fastConfig: McpServerConfig = { ...stdioConfig, name: 'fast-server', timeout: 5000 };
+  const slowConfig: McpServerConfig = { ...stdioConfig, name: 'slow-server', timeout: 30000 };
+  await manager.connect(fastConfig);
+  await manager.connect(slowConfig);
+
+  mockClientCallTool.mockImplementation(
+    (params: { name: string }, options?: { signal?: AbortSignal }) => {
+      if (params.name === 'fast-tool') {
+        return Promise.resolve({ content: [{ type: 'text', text: 'fast ok' }], isError: false });
+      }
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          const error = new Error('The operation was aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      });
+    }
+  );
+
+  const fastPromise = manager.callTool('fast-server', 'fast-tool', {});
+  const slowPromise = manager.callTool('slow-server', 'slow-tool', {});
+
+  // Fast call resolves without any timer advance.
+  const fastResult = await fastPromise;
+  expect(fastResult.success).toBe(true);
+  expect(fastResult.result).toBe('fast ok');
+
+  // Slow call is still pending: fast completion did not force early abort.
+  let slowResolved = false;
+  void slowPromise.then(() => { slowResolved = true; });
+  await Promise.resolve();
+  expect(slowResolved).toBe(false);
+
+  // Advance past the slow server's independent 30 s budget.
+  await vi.advanceTimersByTimeAsync(30000);
+  const slowResult = await slowPromise;
+  expect(slowResult.success).toBe(false);
+  expect(slowResult.error).toMatch(/^MCP callTool timed out after 30000ms /);
+  expect(slowResult.error).toContain("(request timeout for server 'slow-server')");
+});
+```
+
+Key patterns to reuse when extending the MCP timeout suite:
+
+1. **Use `vi.useFakeTimers()` in `beforeEach` and `vi.useRealTimers()` in `afterEach`.** Every case in `client-timeout.test.ts` relies on `vi.advanceTimersByTimeAsync(ms)` to cross budget boundaries deterministically. Real timers would make the 30 s / 60 s assertions unusably slow AND flaky under CI scheduling variability.
+2. **Route by `params.name` when two connections share a mock.** The `@modelcontextprotocol/client` mock at the top of the file uses one shared `mockClientCallTool`, so distinguishing fast vs slow behaviour by tool name (rather than by connection identity) is the cleanest way to model per-server semantics without stubbing two separate `Client` classes.
+3. **Assert on message shape, not just `success: false`.** The error message is the observable contract that tells operators which `mcp-servers.json` field to raise. Every timeout case asserts `/^MCP callTool timed out after <ms>ms /` for the numeric bound AND `(request timeout for server '<name>')` for the named source, mirroring the format built by `withRequestTimeout` in `src/mcp/client.ts`.
+4. **Drain microtasks with `await Promise.resolve()` before asserting the pending-side of a concurrent call.** A newly-created promise is only observably unresolved after the current microtask queue drains. Skipping this step is the most common source of flakes in concurrent-timer tests.
+5. **Preserve the abort-name convention (`AbortError`).** The manager's abort path branches on `err.name === 'AbortError'` to distinguish user-cancellation from a real transport error. Tests that reject with a plain `Error` (no `.name` assignment) will fall through the wrong branch and produce misleading diagnostics.
+
+The three existing describe blocks (`callTool timeout`, `per-server independence`, `connect handshake timeout`) together cover the four-layer precedence chain (per-server config > global config > `MCP_TOOL_TIMEOUT` env > 60 s default for requests, 3 s default for connect handshake per the issue #1339 hung-server guard) plus the concurrency contract from issue #1532.
 
 ## Test File Formatting
 

@@ -261,6 +261,128 @@ describe('MCP Tool Call Timeout', () => {
     });
   });
 
+  describe('per-server independence', () => {
+    // Issue #1532: a slow MCP server must not block callTool on a fast
+    // server. Each server owns its own timeout budget (AbortController)
+    // and the fast server's response must be delivered on schedule
+    // regardless of how long the slow server hangs.
+    it('slow server times out independently without blocking fast server', async () => {
+      const fastConfig: McpServerConfig = {
+        ...stdioConfig,
+        name: 'fast-server',
+        timeout: 5000,
+      };
+      const slowConfig: McpServerConfig = {
+        ...stdioConfig,
+        name: 'slow-server',
+        timeout: 30000,
+      };
+
+      await manager.connect(fastConfig);
+      await manager.connect(slowConfig);
+
+      // The mock is shared across clients (both connections share the
+      // same `mockClientCallTool`). Route behaviour by the tool name so
+      // the fast server responds immediately while the slow one hangs
+      // until its own signal aborts.
+      mockClientCallTool.mockImplementation(
+        (params: { name: string }, options?: { signal?: AbortSignal }) => {
+          if (params.name === 'fast-tool') {
+            return Promise.resolve({
+              content: [{ type: 'text', text: 'fast ok' }],
+              isError: false,
+            });
+          }
+          return new Promise((_resolve, reject) => {
+            if (options?.signal) {
+              options.signal.addEventListener('abort', () => {
+                const error = new Error('The operation was aborted');
+                error.name = 'AbortError';
+                reject(error);
+              });
+            }
+          });
+        }
+      );
+
+      // Fire both calls concurrently. The fast call must resolve while
+      // the slow one is still pending the 30s deadline.
+      const fastPromise = manager.callTool('fast-server', 'fast-tool', {});
+      const slowPromise = manager.callTool('slow-server', 'slow-tool', {});
+
+      // The fast call completes without any timer advance (microtask
+      // flush is enough). This is the critical assertion: a slow peer
+      // with a 30s budget must not delay a fast peer's response.
+      const fastResult = await fastPromise;
+      expect(fastResult.success).toBe(true);
+      expect(fastResult.result).toBe('fast ok');
+
+      // The slow call is still pending — its 30s budget has NOT
+      // elapsed. Fast server's completion did not force the slow one
+      // to abort early.
+      let slowResolved = false;
+      void slowPromise.then(() => {
+        slowResolved = true;
+      });
+      // Drain any pending microtasks without advancing timers.
+      await Promise.resolve();
+      expect(slowResolved).toBe(false);
+
+      // Advance past the slow server's independent 30s budget. Only
+      // now does it trip.
+      await vi.advanceTimersByTimeAsync(30000);
+      const slowResult = await slowPromise;
+      expect(slowResult.success).toBe(false);
+      expect(slowResult.error).toMatch(/^MCP callTool timed out after 30000ms /);
+      expect(slowResult.error).toContain("(request timeout for server 'slow-server')");
+    });
+
+    // Issue #1532: when a server declares no `timeout` field, the manager
+    // must fall through to the next precedence layer and preserve the
+    // pre-existing 60s default (no breaking change).
+    it('falls back to the 60s default when per-server timeout is not specified', async () => {
+      const noTimeoutConfig: McpServerConfig = {
+        ...stdioConfig,
+        name: 'default-server',
+      };
+
+      await manager.connect(noTimeoutConfig);
+
+      mockClientCallTool.mockImplementation(
+        (_params: unknown, options?: { signal?: AbortSignal }) => {
+          return new Promise((_resolve, reject) => {
+            if (options?.signal) {
+              options.signal.addEventListener('abort', () => {
+                const error = new Error('The operation was aborted');
+                error.name = 'AbortError';
+                reject(error);
+              });
+            }
+          });
+        }
+      );
+
+      const resultPromise = manager.callTool('default-server', 'some-tool', {});
+
+      // At 59s the call must still be pending — the 60s default has
+      // not elapsed yet.
+      await vi.advanceTimersByTimeAsync(59000);
+      let resolved = false;
+      void resultPromise.then(() => {
+        resolved = true;
+      });
+      await Promise.resolve();
+      expect(resolved).toBe(false);
+
+      // Advance the last second to cross the 60s boundary.
+      await vi.advanceTimersByTimeAsync(1000);
+      const result = await resultPromise;
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^MCP callTool timed out after 60000ms /);
+      expect(result.error).toContain("(request timeout for server 'default-server')");
+    });
+  });
+
   describe('connect handshake timeout', () => {
     it('should pass timeout to client.connect()', async () => {
       const configWithTimeout: McpServerConfig = {
