@@ -1612,11 +1612,77 @@ describe('resolveFileInclusions', () => {
 
 ## Testing MCP Client
 
-### Test File
+### Test Files
 
-- `tests/mcp/client.test.ts`
+- `tests/mcp/client.test.ts` — connection management, tool discovery, and reconnection behaviour
+- `tests/mcp/client-timeout.test.ts` — `callTool` / handshake timeout budgets, precedence, and per-server independence (issue #1532)
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing per-server timeout independence (issue #1532)
+
+`McpClientManager.callTool` runs every request under a dedicated `AbortController` created inside `withRequestTimeout(serverName, 'callTool', run)` (`src/mcp/client.ts:537`). Each connected server therefore owns an independent budget — one slow peer must NOT delay a call on a fast peer, and every abort must name the exceeded bound plus the exact `mcp-servers.json` field to raise. The regression suite for this contract lives at `tests/mcp/client-timeout.test.ts` under the `per-server independence` describe block.
+
+Two invariants are exercised:
+
+1. **A slow server does not block a fast server.** With two connections whose configured `timeout` values are 5 s (`fast-server`) and 30 s (`slow-server`), both `callTool` invocations are fired concurrently. The mock `callTool` is shared across clients, so the test routes behaviour by the tool `name`: `fast-tool` resolves synchronously while `slow-tool` hangs until its own `AbortSignal` fires. The critical assertions are that the fast call resolves without advancing any timer (a microtask flush is sufficient) and that draining pending microtasks after the fast call does NOT observe the slow call resolving — its independent 30 s budget has not elapsed. Only after `vi.advanceTimersByTimeAsync(30000)` does the slow call abort, and its error matches `/^MCP callTool timed out after 30000ms /` and contains `(request timeout for server 'slow-server')`.
+2. **Default fallback preserved.** When a server declares no `timeout` field, the manager falls through to the next precedence layer (`per-server > MCP_TOOL_TIMEOUT env > 60 s default`) and the pre-existing 60 s default remains observable — no breaking change. The test advances time to 59 s, drains microtasks, and asserts the promise is still pending; advancing the last second crosses the 60 s boundary and the error message contains `60000ms` and the server name.
+
+```typescript
+// Excerpt from tests/mcp/client-timeout.test.ts (describe 'per-server independence')
+it('slow server times out independently without blocking fast server', async () => {
+  const fastConfig: McpServerConfig = { ...stdioConfig, name: 'fast-server', timeout: 5000 };
+  const slowConfig: McpServerConfig = { ...stdioConfig, name: 'slow-server', timeout: 30000 };
+  await manager.connect(fastConfig);
+  await manager.connect(slowConfig);
+
+  mockClientCallTool.mockImplementation(
+    (params: { name: string }, options?: { signal?: AbortSignal }) => {
+      if (params.name === 'fast-tool') {
+        return Promise.resolve({ content: [{ type: 'text', text: 'fast ok' }], isError: false });
+      }
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          const error = new Error('The operation was aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      });
+    }
+  );
+
+  const fastPromise = manager.callTool('fast-server', 'fast-tool', {});
+  const slowPromise = manager.callTool('slow-server', 'slow-tool', {});
+
+  // Fast call resolves without any timer advance.
+  const fastResult = await fastPromise;
+  expect(fastResult.success).toBe(true);
+  expect(fastResult.result).toBe('fast ok');
+
+  // Slow call is still pending: fast completion did not force early abort.
+  let slowResolved = false;
+  void slowPromise.then(() => { slowResolved = true; });
+  await Promise.resolve();
+  expect(slowResolved).toBe(false);
+
+  // Advance past the slow server's independent 30 s budget.
+  await vi.advanceTimersByTimeAsync(30000);
+  const slowResult = await slowPromise;
+  expect(slowResult.success).toBe(false);
+  expect(slowResult.error).toMatch(/^MCP callTool timed out after 30000ms /);
+  expect(slowResult.error).toContain("(request timeout for server 'slow-server')");
+});
+```
+
+Key patterns to reuse when extending the MCP timeout suite:
+
+1. **Use `vi.useFakeTimers()` in `beforeEach` and `vi.useRealTimers()` in `afterEach`.** Every case in `client-timeout.test.ts` relies on `vi.advanceTimersByTimeAsync(ms)` to cross budget boundaries deterministically. Real timers would make the 30 s / 60 s assertions unusably slow AND flaky under CI scheduling variability.
+2. **Route by `params.name` when two connections share a mock.** The `@modelcontextprotocol/client` mock at the top of the file uses one shared `mockClientCallTool`, so distinguishing fast vs slow behaviour by tool name (rather than by connection identity) is the cleanest way to model per-server semantics without stubbing two separate `Client` classes.
+3. **Assert on message shape, not just `success: false`.** The error message is the observable contract that tells operators which `mcp-servers.json` field to raise. Every timeout case asserts `/^MCP callTool timed out after <ms>ms /` for the numeric bound AND `(request timeout for server '<name>')` for the named source, mirroring the format built by `withRequestTimeout` in `src/mcp/client.ts`.
+4. **Drain microtasks with `await Promise.resolve()` before asserting the pending-side of a concurrent call.** A newly-created promise is only observably unresolved after the current microtask queue drains. Skipping this step is the most common source of flakes in concurrent-timer tests.
+5. **Preserve the abort-name convention (`AbortError`).** The manager's abort path branches on `err.name === 'AbortError'` to distinguish user-cancellation from a real transport error. Tests that reject with a plain `Error` (no `.name` assignment) will fall through the wrong branch and produce misleading diagnostics.
+
+The three existing describe blocks (`callTool timeout`, `per-server independence`, `connect handshake timeout`) together cover the four-layer precedence chain (per-server config > global config > `MCP_TOOL_TIMEOUT` env > 60 s default for requests, 3 s default for connect handshake per the issue #1339 hung-server guard) plus the concurrency contract from issue #1532.
 
 ## Test File Formatting
 
