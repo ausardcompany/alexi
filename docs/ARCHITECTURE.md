@@ -122,6 +122,10 @@ graph TB
 | Compaction Chunks | `src/core/compaction-chunks.ts` | Splits large contexts into manageable chunks for API limits |
 | Network Manager | `src/core/network.ts` | Auto-reconnection with exponential backoff |
 | Core Flags | `src/core/flag.ts` | Minimal feature-flag module exposing environment-driven boolean flags consumed by `alexi` (e.g. `KILO_DISABLE_EXTERNAL_SKILLS`). Evaluated once at module load via a private `truthy()` helper that matches `"true"` or `"1"` (case-insensitive). |
+| PowerShell Resolver | `src/core/powershell.ts` | Filesystem-only `pwsh.exe` (PowerShell 7) locator used by the Windows shell resolver. Prefers PS 7 over legacy PS 5.1 to avoid UTF-8 / redirected-pipe bugs. See [PowerShell 7 Resolver](#powershell-7-resolver-srccorepowershellts). |
+| PTY Process Tree | `src/core/pty/termination.ts` | `/proc`-preferred process tree walker for PTY descendant signalling. Falls back to `ps` on non-Linux or when `/proc` is unavailable. Tolerates `/proc` vanish races (kilocode `aadded4a3`). See [Process Tree Walker](#process-tree-walker-srccorepty-terminationts). |
+| Session Overflow | `src/core/session/overflow.ts` | `usableOutputBudget(max, used)` excludes encrypted reasoning tokens from the deduction so reasoning-heavy models do not trigger premature overflow (opencode `17611729e`). |
+| Session Processor | `src/core/session/processor.ts` | `evaluateCompleteness(input)` classifies reasoning-only stream endings as `{ status: 'retry', reason: 'reasoning-only' }` when the finish reason is not `stop` (opencode `58eea7381`). |
 
 ### Provider Layer
 
@@ -191,7 +195,7 @@ The `bash` and `shell` tools do NOT rely on `spawn(..., { shell: true })`. They 
 2. **Byte-identical passthrough.** The user's command string is passed as its own `spawn` argument. Nothing rewrites it; nothing quotes it. Multibyte characters, embedded quotes, and `param(...)` blocks survive intact.
 3. **Per-shell semantics.** `shellSpawnArgs` returns a different prelude for each shell.
 
-The `shellSpawnArgs(info)` contract (`src/tool/tools/shell/id.ts:262`):
+The `shellSpawnArgs(info)` contract (`src/tool/tools/shell/id.ts:275`):
 
 ```typescript
 export function shellSpawnArgs(info: ShellInfo): {
@@ -282,6 +286,7 @@ case dotted form. See `src/config/userConfig.ts` for details.
 |--------|------|-------------|
 | Event Bus | `src/bus/index.ts` | Typed pub/sub event system with Zod validation |
 | Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
+| Sub-agent Blockers | `src/permission/agent-manager.ts` | Fail-closed blocker store (`isBlocked`, `getBlocker`, `answerQuestion`, `setBlocker`) for orchestrator-to-sub-agent unblock flow. Wired into the `agent_manager` tool's `answer` action. See [Sub-agent Blocker Store](#sub-agent-blocker-store-srcpermissionagent-managerts). |
 | Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents (**pending autohealing revert as of 2026-07-24 — see [Agent System](#agent-system)**) |
 | Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
 | MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration (qualified `${escapedServer}::${tool}` keys — see [MCP tool key composition](#mcp-tool-key-composition)) |
@@ -1898,6 +1903,69 @@ sequenceDiagram
     end
 ```
 
+## Session Response Completeness Classifier
+
+`src/core/session/processor.ts` (ports opencode `58eea7381 fix(cli): retry reasoning-only incomplete responses`) is a small, purely-functional classifier that inspects the shape of a completed streaming response and decides whether the caller should surface it to the user OR retry silently. It exists to handle a specific pathological shape seen on reasoning-heavy models routed through SAP AI Core: the stream closes with a finish reason other than `stop` AND the entire message body consists only of `reasoning` / `thinking` parts with no visible `text` / `tool-call` / `tool-result` output. Without this check, the user would see a blank assistant turn.
+
+Public surface:
+
+```typescript
+export type MessagePartType = 'text' | 'reasoning' | 'thinking' | 'tool-call' | 'tool-result';
+
+export interface MessagePart {
+  type: MessagePartType;
+  [key: string]: unknown;
+}
+
+export interface CompletenessInput {
+  parts: readonly MessagePart[];
+  /**
+   * Provider-reported stream finish reason. `stop` is the only value
+   * that means "the model reached a natural end"; every other value
+   * (`length`, `content-filter`, `error`, `unknown`, ...) is treated
+   * as potentially incomplete when combined with a reasoning-only body.
+   */
+  finishReason?: string;
+}
+
+export type CompletenessResult =
+  { status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' };
+
+export function isReasoningOnly(parts: readonly MessagePart[]): boolean;
+export function evaluateCompleteness(input: CompletenessInput): CompletenessResult;
+```
+
+`isReasoningOnly` returns `true` when the parts list is non-empty AND every part has `type === 'reasoning'` or `type === 'thinking'`. The empty-parts case (no output at all) is deliberately NOT this classifier's job — that shape is caught by the separate empty-response check.
+
+`evaluateCompleteness` returns:
+
+- `{ status: 'retry', reason: 'reasoning-only' }` when both conditions hold — reasoning-only body AND `finishReason !== 'stop'`.
+- `{ status: 'complete' }` in every other shape (any visible content, or a natural `stop`).
+
+The `retry` outcome is wired into the same retry pump as transient network errors: the session store treats it identically to a `socket hang up` from the SAP AI Core Orchestration API, so it takes one attempt off the `withRetry(...)` budget documented below and does not consume the caller's `KILO_RETRIES` in agent workflows. The classifier is strictly additive — pre-existing complete responses (any shape with a `text` / `tool-call` / `tool-result` part, OR any shape with `finishReason === 'stop'`) still classify as `{ status: 'complete' }`.
+
+```mermaid
+flowchart LR
+    Stream[Stream closes]
+    Parts[parts: readonly MessagePart[]]
+    Finish[finishReason]
+    Classify[evaluateCompleteness]
+    Complete[status: complete<br/>surface to user]
+    Retry[status: retry<br/>reason: reasoning-only]
+    Pump[Retry pump<br/>withRetry / session store]
+
+    Stream --> Parts
+    Stream --> Finish
+    Parts --> Classify
+    Finish --> Classify
+    Classify -->|reasoning-only<br/>AND !== stop| Retry
+    Classify -->|any visible content<br/>OR === stop| Complete
+    Retry --> Pump
+    Pump -->|re-issue request| Stream
+```
+
+The `CompletenessResult` type is a single flat discriminated union (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`) — Prettier collapses this onto one line as of `de9d1530`, 2026-08-25; no semantic change.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
@@ -2014,7 +2082,222 @@ New code should own its own `InstanceWatcher` (typically hung off the session or
 - `deriveReasoningVariants<T extends ModelInfoLike>(model): T[]` — returns the base model followed by one variant per available reasoning effort (id suffixed with `-<effort>`). Never mutates its input.
 - `mergeProviderModels<T>(base, custom): Record<string, T>` — merges a custom provider's model map on top of a base provider's model map without wiping base variants. Custom entries win per-id; base variants survive when the custom map does not redefine the same id.
 
+1.22.1 adds a third:
+
+- `preserveCompletionLimit(provider: string, computed: number): number` (port of opencode `da4a91b36`) — clamps the caller's computed `max_completion_tokens` to a provider-declared hard cap. Cerebras (and a handful of other SAP-orchestrated providers) hard-cap `max_completion_tokens` at a value BELOW the model's advertised context window; Alexi's generic normalization step recomputes `max_completion_tokens = contextWindow - promptTokens`, which silently overwrites that cap and causes the request to fail with a 400 at the provider edge. The helper reads a static `PROVIDER_COMPLETION_LIMITS: Readonly<Record<string, number>>` table (currently `{ cerebras: 8192 }` — the tightest per-model cap across the SAP AI Core catalog) and returns `Math.max(0, Math.min(computed, cap))` when a cap exists, or the unclamped `computed` (still floored at zero) otherwise. Never raises above the cap; never returns a negative limit. New entries are added to `PROVIDER_COMPLETION_LIMITS` only when a provider's cap is BELOW its context window — providers whose cap equals the context window use the default assumption. See [PROVIDERS.md](./PROVIDERS.md#provider-completion-token-hard-caps) for the full call-site rationale.
+
 The pre-existing `sanitizeOpenAISchema`, `enforceStrictSchema`, `isOpenAIShapedModel`, `lowerMcpToolsForOpenAIShaped`, `transformInterleavedReasoning`, and `ensureDeepSeekReasoning` helpers are unchanged.
+
+## Session Response Classification and Output Budget
+
+Two 1.22.1 modules port upstream fixes for reasoning-heavy models routed through the SAP AI Core orchestration API.
+
+### `src/core/session/processor.ts` — reasoning-only response classifier
+
+Some SAP AI Core deployments (notably OpenAI o1 / o3 and Claude reasoning models) occasionally emit a stream containing ONLY `reasoning` / `thinking` parts and then close the stream without ever producing a visible assistant message. Treating that as "complete" strands the user on a blank turn — the transcript renders empty and the retry pump has no signal to re-issue the request.
+
+`evaluateCompleteness(input)` classifies each completed streaming response:
+
+```typescript
+export type MessagePartType = 'text' | 'reasoning' | 'thinking' | 'tool-call' | 'tool-result';
+
+export interface MessagePart {
+  type: MessagePartType;
+  [key: string]: unknown;
+}
+
+export interface CompletenessInput {
+  parts: readonly MessagePart[];
+  finishReason?: string;
+}
+
+export type CompletenessResult =
+  | { status: 'complete' }
+  | { status: 'retry'; reason: 'reasoning-only' };
+
+export function evaluateCompleteness(input: CompletenessInput): CompletenessResult;
+export function isReasoningOnly(parts: readonly MessagePart[]): boolean;
+```
+
+Rules:
+
+- Returns `{ status: 'retry', reason: 'reasoning-only' }` when the body contains ONLY reasoning/thinking parts AND the finish reason is anything except `'stop'`.
+- Returns `{ status: 'complete' }` when `finishReason === 'stop'` even on a reasoning-only body (the model explicitly signalled a natural end — retrying would just burn budget).
+- Returns `{ status: 'complete' }` when any `text` / `tool-call` / `tool-result` part is present.
+- `isReasoningOnly([])` returns `false` — the "no output at all" case is handled by a separate empty-response classifier, not by this helper.
+
+Callers wire the `retry` outcome into their existing retry pump; the session store treats this identically to a transient network error. Ports opencode `58eea7381`.
+
+### `src/core/session/overflow.ts` — output-budget accounting
+
+Some providers surface an ENCRYPTED reasoning payload alongside the visible output. That payload is provider-side state — the client never gets renderable tokens for it — so it must NOT be deducted from the `max_output_tokens` budget when Alexi decides whether the response fits or has overflowed.
+
+```typescript
+export interface OutputBudgetUsage {
+  output: number;
+  reasoningEncrypted?: number;
+}
+
+export function usableOutputBudget(max: number, used: OutputBudgetUsage): number;
+```
+
+Returns `Math.max(0, max - used.output)` — encrypted reasoning is DELIBERATELY excluded from the deduction. Clamps to zero on overshoot so callers never see a negative budget. Before this fix, `remaining = max - (output + reasoningEncrypted)` caused premature truncation whenever a reasoning-heavy model burned a large encrypted budget: Alexi would signal overflow and start compaction even though the user's visible output was well under the limit. Ports opencode `17611729e`.
+
+## Sub-agent Blocker Store (`src/permission/agent-manager.ts`)
+
+New 1.22.1 module for the orchestration layer to record and resolve blockers against sub-agent sessions. Ports opencode `7baefdddf feat(agent-manager): answer pending questions` plus `98559c9d6 fix(agent-manager): fail closed on blocker lookup errors`.
+
+A blocker is a small record attached to a sub-agent id:
+
+```typescript
+export interface Blocker {
+  kind: 'question' | 'permission';
+  prompt?: string;
+  meta?: Record<string, unknown>;
+}
+```
+
+- `kind: 'question'` — the sub-agent is waiting for a text answer from the orchestrator.
+- `kind: 'permission'` — the sub-agent is waiting on a tool-permission decision. Only `question` blockers are answerable through the `agent_manager` tool today.
+
+Public API:
+
+- `getBlocker(agentId): Promise<Blocker | undefined>` — return the blocker or `undefined`. Lookup failures propagate as `undefined` from this helper; use `isBlocked` when you need fail-closed semantics.
+- `setBlocker(agentId, blocker): Promise<void>` — record a blocker against `agentId`.
+- `answerQuestion(agentId, answer): Promise<void>` — clear the blocker after the orchestrator delivered an answer.
+- `isBlocked(agentId): Promise<boolean>` — **fail-closed** lookup: returns `true` when the sub-agent is blocked OR when the store throws.
+- `setBlockerStore(next: BlockerStore): void` — swap the backing store. Intended for tests and for future persistent backends (Redis, filesystem journal).
+- `_resetBlockerStoreForTests(): void` — reset to a fresh `InMemoryBlockerStore`. Test hook only.
+
+### Fail-closed invariant
+
+`isBlocked` is the pinch point that keeps sub-agent permission safe under transient IO failure:
+
+```typescript
+export async function isBlocked(agentId: string): Promise<boolean> {
+  try {
+    const blocker = await store.get(agentId);
+    return blocker != null;
+  } catch (err) {
+    logger.warn('blocker lookup failed; failing closed', { agentId, err });
+    // Fail-closed: treat as blocked so caller cannot proceed on stale state.
+    return true;
+  }
+}
+```
+
+Returning `false` on a store error would let a caller silently bypass a real block on a corrupted map, revoked credentials, or a partially-restarted Redis. That contradicts SAP-grade security posture — any ambiguity is resolved against the sub-agent, never against the user. The `_resetBlockerStoreForTests` hook combined with `setBlockerStore` lets tests inject a throwing `BlockerStore` implementation and pin the invariant down (see `tests/permission/agent-manager.test.ts`).
+
+### `agent_manager` tool `answer` action
+
+`src/tool/tools/agent-manager.ts` gains an `action: 'answer'` handler wired to `getBlocker` + `answerQuestion`:
+
+```typescript
+case 'answer': {
+  if (!agentId || !answer) {
+    return { success: false, error: 'agentId and answer are required for action=answer' };
+  }
+  const blocker = await getBlocker(agentId);      // fail-closed lookup
+  if (!blocker) {
+    return { success: false, error: `No pending question for agent ${agentId}` };
+  }
+  if (blocker.kind !== 'question') {
+    return { success: false, error: `Agent ${agentId} is not blocked on a question` };
+  }
+  await answerQuestion(agentId, answer);
+  return {
+    success: true,
+    data: {
+      action: 'answer',
+      answered: agentId,
+      message: `Answer delivered to agent ${agentId}`,
+    },
+  };
+}
+```
+
+The orchestrator LLM invokes this whenever a sub-agent's `status` shows a pending question. The Zod schema (`AgentManagerParamsSchema`) accepts both `undefined` and explicit `null` for every optional field, so strict providers (OpenAI structured output, SAP AI Core in strict mode) that emit `null` for absent fields validate cleanly without provider-specific pre-processing.
+
+## PowerShell 7 Resolver (`src/core/powershell.ts`)
+
+New 1.22.1 module that detects `pwsh.exe` (PowerShell 7) so Windows tool invocation can prefer it over the legacy `powershell.exe` (Windows PowerShell 5.1). PS 5.1 has known UTF-8 / encoding bugs — redirected pipes lose non-ASCII characters, `Out-File` defaults to UTF-16 with BOM — which manifested in Alexi as broken diff and grep output on Windows hosts. Ports kilocode `98ea338c8`.
+
+### Detection strategy
+
+Filesystem-only, no process spawn (safe to call from cold paths):
+
+1. `which('pwsh')` walks `$PATH` honouring `%PATHEXT%` (`.COM;.EXE;.BAT;.CMD` by default on Windows).
+2. `probe(env)` filters `locations(env)` down to files that actually exist. Known install roots covered: MSI (`%ProgramFiles%\PowerShell\7\pwsh.exe`), MSIX (`%ProgramFiles(x86)%\PowerShell\7\pwsh.exe`), and the Store alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`).
+
+### Public API
+
+```typescript
+export function args(command: string): string[];      // ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]
+export const locations: (env?: NodeJS.ProcessEnv) => string[];   // candidate absolute paths
+export const probe:     (env?: NodeJS.ProcessEnv) => string[];   // subset of `locations` that exist as files
+export const pwsh:      (env?: NodeJS.ProcessEnv) => string | undefined; // best available `pwsh.exe`
+export const PowerShell = { args, locations, probe, pwsh };
+```
+
+All env-reading helpers accept an injected `NodeJS.ProcessEnv` map so tests can supply synthetic environments without mutating `process.env`.
+
+### Integration with the shell resolver
+
+`src/tool/tools/shell/id.ts:76` (`windowsCandidates()`) now prepends `PowerShell.pwsh()` and `PowerShell.probe()` results before its hard-coded candidate list:
+
+```typescript
+const pwshHits = [PowerShell.pwsh(), ...PowerShell.probe()].filter(
+  (item): item is string => Boolean(item)
+);
+return [
+  ...pwshHits,
+  winJoin(programFiles, 'PowerShell', '7', 'pwsh.exe'),
+  winJoin(programFilesX86, 'PowerShell', '7', 'pwsh.exe'),
+  winJoin(localAppData, 'Microsoft', 'WindowsApps', 'pwsh.exe'),
+  winJoin(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  winJoin(systemRoot, 'System32', 'cmd.exe'),
+];
+```
+
+Effect: pwsh installed off-`PATH` still wins over the always-present legacy shell, and behaviour when pwsh is not installed matches the previous version exactly (falls through to the hard-coded win32 candidate list).
+
+## Process Tree Walker (`src/core/pty/termination.ts`)
+
+New 1.22.1 module returning the flat pid/ppid list the PTY termination logic walks before signalling descendants of a spawned leader.
+
+### `/proc`-preferred fast path
+
+On Linux, `tree()` reads every numeric entry under `/proc`, parses each `/proc/<pid>/stat` payload, and returns one `{ pid, parent }` row per running process:
+
+```mermaid
+flowchart TD
+  A[tree called] --> B{process.platform === 'linux'?}
+  B -- yes --> C[readdir /proc]
+  C --> D[for each numeric dirent]
+  D --> E[readFile /proc/pid/stat]
+  E -- ENOENT / race --> F[drop silently]
+  E -- ok --> G[parse '&lt;pid&gt; (&lt;comm&gt;) &lt;state&gt; &lt;ppid&gt;']
+  G --> H[push ProcessRow]
+  F --> I[Promise.all resolves]
+  H --> I
+  I --> J{rows.length &gt; 0?}
+  J -- yes --> K[return rows]
+  J -- no --> L[fall back to ps -axo pid=,ppid=]
+  B -- no --> L
+  L --> K
+```
+
+### Why prefer `/proc` over `ps`
+
+- Faster (no process spawn, no pipe buffering, no locale parsing).
+- No dependency on the `ps` binary — slim SAP AI Core runtime containers frequently strip procps/busybox and the `ps` code path fails with `ENOENT` in exactly the environments where PTY termination is most needed.
+- Cannot be broken by exotic locale settings that change the `ps` output format.
+
+### `aadded4a3` race tolerance
+
+The regex `/^\d+ \(.*\) [A-Z] (\d+)/` intentionally skips past the LAST `)` in the comm field so process names containing spaces or parentheses parse unambiguously. Entries that vanish between `readdir('/proc')` and `readFile('/proc/<pid>/stat')` are silently dropped — a process exiting mid-walk is the expected outcome and must NOT propagate as an error. Ports kilocode `aadded4a3`.
+
+The `ps` fallback path is preserved for non-Linux platforms and for the (unlikely) case that `/proc` is not mounted or readable, so behaviour on macOS and inside restricted containers is unchanged.
 
 ## Image Generation
 

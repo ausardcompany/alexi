@@ -19,6 +19,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { PowerShell } from '../../../core/powershell.js';
+
 export type ShellType = 'bash' | 'zsh' | 'fish' | 'powershell' | 'cmd' | 'sh' | 'unknown';
 
 export interface ShellInfo {
@@ -78,7 +80,18 @@ function windowsCandidates(): string[] {
   const localAppData = process.env['LOCALAPPDATA'] || winJoin(os.homedir(), 'AppData', 'Local');
   const systemRoot = process.env['SystemRoot'] || 'C:\\Windows';
 
+  // Prefer PowerShell 7 (`pwsh.exe`) over legacy 5.1 (`powershell.exe`)
+  // per kilocode `98ea338c8`. `PowerShell.pwsh()` first checks PATH and
+  // then probes the known install roots, so pwsh installed off PATH
+  // still wins over the always-present legacy shell. Any hits are
+  // prepended to the hard-coded win32 candidate list below so behaviour
+  // matches the previous version when pwsh is not installed.
+  const pwshHits = [PowerShell.pwsh(), ...PowerShell.probe()].filter((item): item is string =>
+    Boolean(item)
+  );
+
   return [
+    ...pwshHits,
     winJoin(programFiles, 'PowerShell', '7', 'pwsh.exe'),
     winJoin(programFilesX86, 'PowerShell', '7', 'pwsh.exe'),
     winJoin(localAppData, 'Microsoft', 'WindowsApps', 'pwsh.exe'),

@@ -665,3 +665,64 @@ export function mergeProviderModels<T>(
     ...(custom ?? {}),
   };
 }
+
+// ============================================================================
+// Provider-specific completion-limit preservation (Cerebras et al.)
+// ============================================================================
+//
+// Ports opencode `da4a91b36 fix(opencode): preserve Cerebras completion
+// limit`. Cerebras (and a handful of other SAP-orchestrated providers)
+// hard-cap `max_completion_tokens` at a value BELOW the model's advertised
+// context window. When Alexi's generic normalization step recomputes
+// `max_completion_tokens = contextWindow - promptTokens`, that cap gets
+// silently overwritten and the request fails with a 400 at the provider
+// edge.
+//
+// `preserveCompletionLimit` returns the smaller of:
+//   1. the caller's computed limit (context-window minus prompt),
+//   2. the provider-declared hard cap (if any).
+// It NEVER raises the limit above the provider cap, and it NEVER lowers
+// it below zero. Callers wire it into the transform pipeline right
+// before the request is serialized.
+//
+// Only providers that have declared a hard cap need to be listed here;
+// everything else passes through unchanged. This is deliberately a
+// short static table rather than a per-model attribute so the fix is
+// easy to audit — the upstream commit does exactly the same.
+
+/**
+ * Provider-declared hard caps on `max_completion_tokens`, keyed by the
+ * provider id used in the routing config. Values are the maximum
+ * completion tokens the provider will accept in a single request; a
+ * request with a larger value is rejected at the provider edge.
+ *
+ * Add a new entry here when a provider surfaces a cap that is BELOW the
+ * model's context window. Do NOT list providers whose cap equals the
+ * context window — that is the default assumption and does not need an
+ * override.
+ */
+export const PROVIDER_COMPLETION_LIMITS: Readonly<Record<string, number>> = {
+  // Cerebras publishes per-model limits in their API docs; the tightest
+  // one across the SAP AI Core catalog is 8192 for llama-3.1-70b. Using
+  // the tightest ensures we never overshoot when the specific model id
+  // is not otherwise recognised.
+  cerebras: 8192,
+};
+
+/**
+ * Return the completion-token limit to actually use for a request,
+ * respecting any provider-declared hard cap. When `provider` has no
+ * declared cap, the caller's `computed` limit is returned unchanged.
+ *
+ * @param provider - Provider id from the routing config (e.g. `cerebras`).
+ * @param computed - The caller's own computed limit
+ *   (typically `contextWindow - promptTokens`).
+ * @returns The clamped, non-negative completion limit.
+ */
+export function preserveCompletionLimit(provider: string, computed: number): number {
+  const cap = PROVIDER_COMPLETION_LIMITS[provider];
+  if (typeof cap !== 'number' || cap <= 0) {
+    return Math.max(0, computed);
+  }
+  return Math.max(0, Math.min(computed, cap));
+}

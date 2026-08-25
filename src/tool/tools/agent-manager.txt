@@ -1,0 +1,13 @@
+Manage and orchestrate multiple agent sessions and workflows.
+
+Actions:
+- create: Create a new agent session with optional configuration.
+  Optional params: worktreeId, config.
+- list: List all active agent sessions.
+- stop: Stop a specific agent session.
+  Required params: sessionId.
+- status: Get the status of a specific agent session.
+  Required params: sessionId.
+- answer: Provide an answer to a sub-agent that is blocked on a pending question.
+  Required params: agentId, answer.
+  Use when a sub-agent's status shows a pending question that only you can resolve.

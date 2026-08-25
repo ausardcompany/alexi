@@ -667,6 +667,42 @@ export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(
 
 Cache-token accounting on the response path is handled by the paired `extractCacheTokens(usage)` helper (`src/providers/sapOrchestration.ts:416`), which normalises both Anthropic-style top-level `cache_read_input_tokens` / `cache_creation_input_tokens` and OpenAI/SAP-Orchestration-style `prompt_tokens_details.cached_tokens` into a single shape consumed by `getCostTracker().recordUsage(...)`.
 
+### Provider Completion-Token Hard Caps
+
+Some providers routed through the SAP AI Core orchestration API hard-cap `max_completion_tokens` at a value BELOW the model's advertised context window. Alexi's generic normalization step recomputes `max_completion_tokens = contextWindow - promptTokens`, which silently overwrites that cap and causes the provider to reject the request with a 400 at its edge.
+
+`preserveCompletionLimit(provider, computed)` in `src/providers/transform.ts` clamps the caller's computed limit to the provider-declared cap:
+
+```typescript
+// src/providers/transform.ts
+export const PROVIDER_COMPLETION_LIMITS: Readonly<Record<string, number>> = {
+  // Tightest per-model cap across the SAP AI Core catalog for Cerebras
+  // (llama-3.1-70b: 8192).
+  cerebras: 8192,
+};
+
+export function preserveCompletionLimit(provider: string, computed: number): number {
+  const cap = PROVIDER_COMPLETION_LIMITS[provider];
+  if (typeof cap !== 'number' || cap <= 0) {
+    return Math.max(0, computed);
+  }
+  return Math.max(0, Math.min(computed, cap));
+}
+```
+
+**Semantics**:
+
+- Returns `Math.max(0, Math.min(computed, cap))` when the provider has a declared cap.
+- Returns `Math.max(0, computed)` (no cap applied, but still floored at zero) when the provider is not in the table.
+- Never raises `computed` above `cap`.
+- Never returns a negative limit — an overshoot on a small budget is clamped to `0` so callers do not have to guard against negative values on their side.
+
+**When to add an entry**: only when the provider's cap is BELOW its context window. Providers whose cap equals the context window fall through to the default assumption (unclamped) — adding them here would be a no-op that muddies the audit trail.
+
+**Applicability to Alexi**: Alexi routes exclusively through SAP AI Core, so there is no direct Cerebras provider under normal operation. The clamp is retained because (1) SAP AI Core proxy deployments MAY expose a Cerebras-family model id (`cerebras-*`) which the guard catches, and (2) users running the fork behind a custom proxy that adds Cerebras get the cap for free. No-op for every non-Cerebras provider.
+
+Test coverage (`tests/session/upstream-ports.test.ts`) pins down all four cases: cap enforced when `computed > cap`, `computed` returned when `computed <= cap`, unclamped pass-through for providers not in the table, and non-negative clamp on negative input. Ports opencode `da4a91b36 fix(opencode): preserve Cerebras completion limit`.
+
 ## Error Handling
 
 ### Common Errors

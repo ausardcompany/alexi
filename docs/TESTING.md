@@ -727,6 +727,222 @@ Key patterns:
 2. **Reuse `shellSpawnArgs` exactly as bash.ts does.** Destructure `prefixArgs` and `suffixArgs = []` and spawn `[...prefixArgs, userCommand, ...suffixArgs]` — asserting on the return value directly guarantees the tests catch any drift between the tool code and the shell binding.
 3. **Assert the four contract properties.** Fail-fast exit code, bounded stderr (single error record), successful commands still succeed, per-cmdlet `-ErrorAction` opt-out, and `param(...)` compatibility. The shape-only assertions on `shellSpawnArgs` (no shell spawn required) live in `tests/tool/tools/shell-detect.test.ts`.
 
+### Testing the PowerShell 7 resolver
+
+`tests/core/powershell.test.ts` (added in 1.22.1) unit-tests the pure resolver in `src/core/powershell.ts`. Because the tests run on Linux CI, none of the Windows install locations exist — the suite is written so that shape assertions pass on every platform and the "is anything installed?" question is asserted only through explicit env-injection:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { PowerShell, args, locations, probe, pwsh } from '../../src/core/powershell.js';
+
+describe('core/powershell', () => {
+  it('args() returns the expected pwsh invocation flags', () => {
+    expect(args('Get-Date')).toEqual([
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Get-Date',
+    ]);
+  });
+
+  it('locations() derives candidates from the provided env map', () => {
+    const env = {
+      ProgramFiles: 'C:\\Program Files',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+      LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local',
+    } as NodeJS.ProcessEnv;
+    const locs = locations(env);
+    expect(locs).toHaveLength(3);
+    for (const p of locs) expect(p.endsWith('pwsh.exe')).toBe(true);
+  });
+
+  it('probe() returns an array (may be empty on non-Windows CI)', () => {
+    expect(Array.isArray(probe({}))).toBe(true);
+  });
+
+  it('pwsh() returns undefined when no pwsh is installed and env is empty', () => {
+    expect(pwsh({} as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+});
+```
+
+Patterns worth carrying forward for similar filesystem-touching helpers:
+
+1. **Inject an env map instead of mutating `process.env`.** Every env-reading helper on `PowerShell` accepts a `NodeJS.ProcessEnv` argument. Tests supply synthetic env objects (including the deliberately-empty `{}` for the "no pwsh anywhere" case) without cross-test contamination.
+2. **Assert `Array.isArray(...)` for filesystem probes.** On CI runners where the target files never exist, the probe returns `[]`. Asserting the return type without asserting a specific length keeps the test green on every platform while still catching regressions that would make the probe throw or return `undefined`.
+3. **Assert the namespace bundling.** `expect(PowerShell.pwsh).toBe(pwsh)` catches regressions where a re-export was accidentally rewrapped in a bound function (breaks reference equality).
+
+### Testing the process tree walker
+
+`tests/core/pty-termination.test.ts` (added in 1.22.1) is a smoke test on the module in `src/core/pty/termination.ts`:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { tree } from '../../src/core/pty/termination.js';
+
+describe('core/pty/termination.tree', () => {
+  it('returns a non-empty process list on any Node platform', async () => {
+    const rows = await tree();
+    expect(rows.length).toBeGreaterThan(0);
+    const self = rows.find((r) => r.pid === process.pid);
+    expect(self).toBeDefined();
+    expect(typeof self?.parent).toBe('number');
+  });
+
+  it('tolerates vanished /proc entries without throwing', async () => {
+    // The `aadded4a3` fix guarantees any race between readdir and readFile
+    // is silently dropped. We cannot easily force the race in a unit test,
+    // but five back-to-back walks under normal fork pressure would have
+    // caught the original crash regression.
+    for (let i = 0; i < 5; i++) {
+      const rows = await tree();
+      expect(rows.length).toBeGreaterThan(0);
+    }
+  });
+});
+```
+
+The test intentionally uses the current process as the ground-truth pid it expects to find in the returned list — this is portable across the Linux `/proc` fast path and the macOS `ps` fallback and does not require mocking either backend.
+
+### Testing session response classifier and output budget
+
+`tests/session/upstream-ports.test.ts` (added in 1.22.1) covers the three pure helpers ported from upstream (`evaluateCompleteness`, `usableOutputBudget`, `preserveCompletionLimit`):
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  evaluateCompleteness,
+  isReasoningOnly,
+  type MessagePart,
+} from '../../src/core/session/processor.js';
+import { usableOutputBudget } from '../../src/core/session/overflow.js';
+import { preserveCompletionLimit } from '../../src/providers/transform.js';
+
+describe('session/processor.evaluateCompleteness', () => {
+  it('signals retry when only reasoning parts are present and finishReason != stop', () => {
+    const parts: MessagePart[] = [
+      { type: 'reasoning', text: 'thinking' },
+      { type: 'thinking', text: 'more thinking' },
+    ];
+    expect(evaluateCompleteness({ parts, finishReason: 'length' })).toEqual({
+      status: 'retry',
+      reason: 'reasoning-only',
+    });
+  });
+
+  it('is complete when finishReason is stop, even if reasoning-only', () => {
+    const parts: MessagePart[] = [{ type: 'reasoning', text: 'r' }];
+    expect(evaluateCompleteness({ parts, finishReason: 'stop' })).toEqual({ status: 'complete' });
+  });
+
+  it('is complete when a visible text part is present', () => {
+    const parts: MessagePart[] = [
+      { type: 'reasoning', text: 'r' },
+      { type: 'text', text: 'hello' },
+    ];
+    expect(evaluateCompleteness({ parts, finishReason: 'length' })).toEqual({
+      status: 'complete',
+    });
+  });
+
+  it('isReasoningOnly returns false for an empty parts list', () => {
+    expect(isReasoningOnly([])).toBe(false);
+  });
+});
+
+describe('session/overflow.usableOutputBudget', () => {
+  it('subtracts only visible output tokens', () => {
+    expect(usableOutputBudget(1000, { output: 200, reasoningEncrypted: 500 })).toBe(800);
+  });
+
+  it('clamps to zero on overshoot', () => {
+    expect(usableOutputBudget(100, { output: 300 })).toBe(0);
+  });
+});
+
+describe('providers/transform.preserveCompletionLimit', () => {
+  it('caps at the provider hard limit when computed is higher (cerebras)', () => {
+    expect(preserveCompletionLimit('cerebras', 100_000)).toBe(8192);
+  });
+
+  it('returns computed when below the provider cap', () => {
+    expect(preserveCompletionLimit('cerebras', 1024)).toBe(1024);
+  });
+
+  it('passes through unchanged for providers with no declared cap', () => {
+    expect(preserveCompletionLimit('sap-ai-core', 32_000)).toBe(32_000);
+  });
+
+  it('never returns a negative limit', () => {
+    expect(preserveCompletionLimit('unknown', -5)).toBe(0);
+  });
+});
+```
+
+All three helpers are pure functions of their inputs — no mocks needed, no filesystem access. This is the preferred shape for upstream ports: land the algorithm as a pure helper and let it be exercised without touching provider state.
+
+### Testing sub-agent blocker store fail-closed invariant
+
+`tests/permission/agent-manager.test.ts` (added in 1.22.1) pins down the fail-closed contract of `isBlocked()` from `src/permission/agent-manager.ts`. The key pattern is that a throwing `BlockerStore` implementation is injected via `setBlockerStore(...)` and then `isBlocked(agentId)` is asserted to return `true` (not `false`, not throw):
+
+```typescript
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  _resetBlockerStoreForTests,
+  answerQuestion,
+  getBlocker,
+  isBlocked,
+  setBlocker,
+  setBlockerStore,
+  type Blocker,
+  type BlockerStore,
+} from '../../src/permission/agent-manager.js';
+
+afterEach(() => {
+  _resetBlockerStoreForTests();
+});
+
+describe('permission/agent-manager', () => {
+  it('returns true when a question blocker is set', async () => {
+    await setBlocker('agent-1', { kind: 'question', prompt: 'proceed?' });
+    expect(await isBlocked('agent-1')).toBe(true);
+  });
+
+  it('answerQuestion clears the pending blocker', async () => {
+    await setBlocker('agent-2', { kind: 'question' });
+    await answerQuestion('agent-2', 'yes');
+    expect(await isBlocked('agent-2')).toBe(false);
+    expect(await getBlocker('agent-2')).toBeUndefined();
+  });
+
+  it('fails closed (returns true) when the store throws', async () => {
+    const throwing: BlockerStore = {
+      async get(): Promise<Blocker | undefined> {
+        throw new Error('backing store unavailable');
+      },
+      async set(): Promise<void> {
+        throw new Error('backing store unavailable');
+      },
+      async clear(): Promise<void> {
+        throw new Error('backing store unavailable');
+      },
+    };
+    setBlockerStore(throwing);
+    // The invariant upstream 98559c9d6 pinned down: a lookup error MUST
+    // NOT be treated as "not blocked". Doing so would let a caller
+    // silently bypass a real blocker on transient IO failure.
+    expect(await isBlocked('any-agent')).toBe(true);
+  });
+});
+```
+
+Reusable patterns:
+
+1. **Use `afterEach(_resetBlockerStoreForTests)`** so a test that swaps in a throwing store does not poison subsequent tests. Test hooks named `_resetXForTests` / `_setXForTests` are a repo convention — production code paths must never call them.
+2. **Prefer a hand-rolled minimal stub over `vi.mock`** for injectable stores. The test constructs a `BlockerStore` object literal with three async throwing methods — this is easier to read than a hoisted `vi.mock` and keeps the fail-closed assertion adjacent to the injection.
+3. **The negative assertion is the contract.** A test that asserts `isBlocked` returns `false` on a store error would be actively wrong — it would encode the exact bug the upstream fix removed. Always assert `true` in the fail-closed branch.
+
 ### Testing TUI Chat Reducer for Streaming
 
 The `ChatContext` reducer (`src/cli/tui/context/ChatContext.tsx`) exposes `APPEND_TOOL_CALL_OUTPUT` for live-appending bash / shell chunks to active tool rows. Tests at `tests/cli/tui/ChatContext.test.tsx` cover the reducer branches and the `useToolEvents` wiring at `tests/cli/tui/useToolEvents.test.tsx` covers the bus-to-reducer dispatch:

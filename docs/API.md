@@ -940,7 +940,7 @@ cleanupToolOutputs(): void
 | `question` | `question`, `options?` | Ask user a question |
 | `todowrite` | `todos` | Manage task list (see [TodoWrite tool contract](#todowrite-tool-contract) below) |
 | `background_process` | `command`, `name?`, `workingDirectory?`, `env?` | Spawn long-running detached process (see [background_process semantics](#background_process-tool-semantics) below) |
-| `agent_manager` | `action`, `sessionId?`, `worktreeId?`, `config?` | Manage agent sessions (nullable-friendly schema — see below) |
+| `agent_manager` | `action`, `sessionId?`, `agentId?`, `answer?`, `worktreeId?`, `config?` | Manage agent sessions and answer pending sub-agent questions (nullable-friendly schema — see below) |
 
 #### `todowrite` tool contract
 
@@ -996,21 +996,58 @@ export interface BackgroundProcess {
 
 ```typescript
 const AgentManagerParamsSchema = z.object({
-  action: z.enum(['create', 'list', 'stop', 'status']),
-  sessionId: z.string().nullable().optional(),
-  worktreeId: z.string().nullable().optional(),
+  action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
+  sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
+  agentId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe('Agent ID for answer action (the sub-agent blocked on a pending question)'),
+  answer: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
+    ),
+  worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
   config: z
     .object({
-      mode: z.string().nullable().optional(),
-      model: z.string().nullable().optional(),
-      excludeLocalState: z.boolean().nullable().optional(),
+      mode: z.string().nullable().optional().describe('Agent mode'),
+      model: z.string().nullable().optional().describe('Model to use'),
+      excludeLocalState: z
+        .boolean()
+        .nullable()
+        .optional()
+        .describe('Exclude local state on startup for fresh session initialization'),
     })
     .nullable()
-    .optional(),
+    .optional()
+    .describe('Configuration for session creation'),
 });
 ```
 
-Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
+Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The `answer` action is used to unblock a sub-agent that is waiting on a permission question; it consumes the `agentId` and `answer` fields. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
+
+**Actions**:
+
+- `create` — Create a new agent session with optional `config` and `worktreeId`. When `config.excludeLocalState` is truthy (either `true` or `null`/omitted defaulting to `false`), the session boots without importing local state.
+- `list` — List all active agent sessions.
+- `stop` — Stop a specific agent session. Requires `sessionId`.
+- `status` — Get the status of a specific agent session. Requires `sessionId`.
+- `answer` — **[Added in 1.22.1, ports kilocode `7baefdddf`]** Provide an answer to a sub-agent that is blocked on a pending question. Requires `agentId` and `answer`. The handler consults `getBlocker(agentId)` (fail-closed — see [Sub-agent Blocker Store](./ARCHITECTURE.md#sub-agent-blocker-store-srcpermissionagent-managerts)) and rejects when there is no pending question OR when the blocker is of `kind: 'permission'` (only `question` blockers are answerable through this action today). Success clears the blocker via `answerQuestion(agentId, answer)`.
+
+Example invocation for the `answer` action:
+
+```json
+{
+  "action": "answer",
+  "agentId": "sub-agent-42",
+  "answer": "Yes, proceed with the migration."
+}
+```
+
+The `answer` action is the caller-side of the agent-manager blocker store (`src/permission/agent-manager.ts`). It delegates to `getBlocker(agentId)` to confirm a pending `Blocker { kind: 'question', prompt?, meta? }` exists, then calls `answerQuestion(agentId, answer)` which clears the entry from the in-memory store. When `action === 'answer'`, both `agentId` and `answer` must be non-null strings — the handler rejects the tool call otherwise so the orchestrator does not silently drop an answer meant for a waiting sub-agent. The complementary `isBlocked(agentId)` helper on the same module fails closed: a store lookup that throws is treated as "still blocked" so a caller cannot proceed on stale state (port of upstream `98559c9d6`, current strict form as of `de9d1530`, 2026-08-25: `return blocker !== null && blocker !== undefined`).
 
 > `codebase_search` is no longer a built-in tool. It is provided by the standalone `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); once registered in `mcp-servers.json` it appears in the same tool list with the same `{ query: string }` parameter shape it had as a built-in.
 
