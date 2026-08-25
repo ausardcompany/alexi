@@ -191,7 +191,7 @@ The `bash` and `shell` tools do NOT rely on `spawn(..., { shell: true })`. They 
 2. **Byte-identical passthrough.** The user's command string is passed as its own `spawn` argument. Nothing rewrites it; nothing quotes it. Multibyte characters, embedded quotes, and `param(...)` blocks survive intact.
 3. **Per-shell semantics.** `shellSpawnArgs` returns a different prelude for each shell.
 
-The `shellSpawnArgs(info)` contract (`src/tool/tools/shell/id.ts:262`):
+The `shellSpawnArgs(info)` contract (`src/tool/tools/shell/id.ts:275`):
 
 ```typescript
 export function shellSpawnArgs(info: ShellInfo): {

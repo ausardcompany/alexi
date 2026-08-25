@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Maintenance
+
+- **Prettier auto-fix pass on three modules** (commit `361d3cd4`, `style(ci): auto-fix lint/format issues [alexi-bot]`, 2026-08-25):
+  - `src/core/session/processor.ts`: reflowed the `CompletenessResult` discriminated-union type alias from a leading-pipe multi-line form onto a single line (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`). At 74 columns it fits comfortably under `printWidth: 100`, so Prettier prefers the single-line form.
+  - `src/tool/tools/agent-manager.ts`: collapsed the `action` field of `AgentManagerParamsSchema` from a three-line `z.enum([...]).describe(...)` chain onto a single line. The `action` enum value list (`'create' | 'list' | 'stop' | 'status' | 'answer'`) is unchanged.
+  - `src/tool/tools/shell/id.ts`: reflowed the arrow-function type-guard inside `windowsCandidates()` (`(item): item is string => Boolean(item)`) so the arrow lands on the same line as the callback signature. PowerShell probe order (`PowerShell.pwsh()` first, then `PowerShell.probe()` hits, then the hard-coded win32 candidates) is unchanged.
+  - Aggregate diff: `3 files changed, 4 insertions(+), 7 deletions(-)`. Pure formatting change with no runtime, validation, type-safety, permission, or CLI surface impact.
+
 ## [1.22.0] - 2026-08-24
 
 ### Added

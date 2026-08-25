@@ -996,8 +996,10 @@ export interface BackgroundProcess {
 
 ```typescript
 const AgentManagerParamsSchema = z.object({
-  action: z.enum(['create', 'list', 'stop', 'status']),
+  action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
   sessionId: z.string().nullable().optional(),
+  agentId: z.string().nullable().optional(),
+  answer: z.string().nullable().optional(),
   worktreeId: z.string().nullable().optional(),
   config: z
     .object({
@@ -1010,7 +1012,7 @@ const AgentManagerParamsSchema = z.object({
 });
 ```
 
-Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
+Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The `answer` action is used to unblock a sub-agent that is waiting on a permission question; it consumes the `agentId` and `answer` fields. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
 
 > `codebase_search` is no longer a built-in tool. It is provided by the standalone `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); once registered in `mcp-servers.json` it appears in the same tool list with the same `{ query: string }` parameter shape it had as a built-in.
 
