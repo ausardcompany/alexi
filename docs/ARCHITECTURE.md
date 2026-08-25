@@ -1903,6 +1903,69 @@ sequenceDiagram
     end
 ```
 
+## Session Response Completeness Classifier
+
+`src/core/session/processor.ts` (ports opencode `58eea7381 fix(cli): retry reasoning-only incomplete responses`) is a small, purely-functional classifier that inspects the shape of a completed streaming response and decides whether the caller should surface it to the user OR retry silently. It exists to handle a specific pathological shape seen on reasoning-heavy models routed through SAP AI Core: the stream closes with a finish reason other than `stop` AND the entire message body consists only of `reasoning` / `thinking` parts with no visible `text` / `tool-call` / `tool-result` output. Without this check, the user would see a blank assistant turn.
+
+Public surface:
+
+```typescript
+export type MessagePartType = 'text' | 'reasoning' | 'thinking' | 'tool-call' | 'tool-result';
+
+export interface MessagePart {
+  type: MessagePartType;
+  [key: string]: unknown;
+}
+
+export interface CompletenessInput {
+  parts: readonly MessagePart[];
+  /**
+   * Provider-reported stream finish reason. `stop` is the only value
+   * that means "the model reached a natural end"; every other value
+   * (`length`, `content-filter`, `error`, `unknown`, ...) is treated
+   * as potentially incomplete when combined with a reasoning-only body.
+   */
+  finishReason?: string;
+}
+
+export type CompletenessResult =
+  { status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' };
+
+export function isReasoningOnly(parts: readonly MessagePart[]): boolean;
+export function evaluateCompleteness(input: CompletenessInput): CompletenessResult;
+```
+
+`isReasoningOnly` returns `true` when the parts list is non-empty AND every part has `type === 'reasoning'` or `type === 'thinking'`. The empty-parts case (no output at all) is deliberately NOT this classifier's job — that shape is caught by the separate empty-response check.
+
+`evaluateCompleteness` returns:
+
+- `{ status: 'retry', reason: 'reasoning-only' }` when both conditions hold — reasoning-only body AND `finishReason !== 'stop'`.
+- `{ status: 'complete' }` in every other shape (any visible content, or a natural `stop`).
+
+The `retry` outcome is wired into the same retry pump as transient network errors: the session store treats it identically to a `socket hang up` from the SAP AI Core Orchestration API, so it takes one attempt off the `withRetry(...)` budget documented below and does not consume the caller's `KILO_RETRIES` in agent workflows. The classifier is strictly additive — pre-existing complete responses (any shape with a `text` / `tool-call` / `tool-result` part, OR any shape with `finishReason === 'stop'`) still classify as `{ status: 'complete' }`.
+
+```mermaid
+flowchart LR
+    Stream[Stream closes]
+    Parts[parts: readonly MessagePart[]]
+    Finish[finishReason]
+    Classify[evaluateCompleteness]
+    Complete[status: complete<br/>surface to user]
+    Retry[status: retry<br/>reason: reasoning-only]
+    Pump[Retry pump<br/>withRetry / session store]
+
+    Stream --> Parts
+    Stream --> Finish
+    Parts --> Classify
+    Finish --> Classify
+    Classify -->|reasoning-only<br/>AND !== stop| Retry
+    Classify -->|any visible content<br/>OR === stop| Complete
+    Retry --> Pump
+    Pump -->|re-issue request| Stream
+```
+
+The `CompletenessResult` type is a single flat discriminated union (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`) — Prettier collapses this onto one line as of `de9d1530`, 2026-08-25; no semantic change.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
