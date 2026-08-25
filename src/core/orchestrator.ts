@@ -140,6 +140,8 @@ export async function sendChat(
         code?: string;
         modelName?: string;
         retryAfterSeconds?: number;
+        resetAt?: Date;
+        limit?: number;
         suggestedAction?: string;
         cause?: unknown;
         message?: string;
@@ -150,13 +152,19 @@ export async function sendChat(
       // provider message) stays at debug to avoid flooding the console.
       const retryAfter = rateLimitErr.retryAfterSeconds;
       const retrySuffix =
-        typeof retryAfter === 'number' && retryAfter > 0 ? ` (retry after ${retryAfter}s)` : '';
+        typeof retryAfter === 'number' && retryAfter > 0
+          ? ` (retry after ${retryAfter}s)`
+          : rateLimitErr.resetAt instanceof Date && !Number.isNaN(rateLimitErr.resetAt.getTime())
+            ? ` (resets at ${rateLimitErr.resetAt.toISOString()})`
+            : '';
       logger.info(`Rate limit hit for model '${rateLimitErr.modelName ?? modelId}'${retrySuffix}`);
       logger.debug('Rate limit error from provider', {
         name: rateLimitErr.name,
         code: rateLimitErr.code,
         model: rateLimitErr.modelName ?? modelId,
         retryAfterSeconds: rateLimitErr.retryAfterSeconds,
+        resetAt: rateLimitErr.resetAt,
+        limit: rateLimitErr.limit,
         suggestedAction: rateLimitErr.suggestedAction,
         message: rateLimitErr.message,
         cause: rateLimitErr.cause,
