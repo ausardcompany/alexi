@@ -575,6 +575,36 @@ are no-ops; chunks for already-completed rows are silently dropped;
 result payload (which may be normalised differently — carriage-return
 collapsing, head-and-tail elision).
 
+### Testing concurrent timer budgets with fake timers
+
+Modules that expose per-entity timeout budgets (e.g. `McpClientManager.callTool`
+creating one `AbortController` per server in `src/mcp/client.ts:537`) require
+tests that assert two adjacent promises make independent progress on different
+budgets. The canonical worked example is `tests/mcp/client-timeout.test.ts`
+under the `per-server independence` describe block (issue #1532); see
+`docs/TESTING.md#testing-per-server-timeout-independence-issue-1532` for the
+full walkthrough. The load-bearing rules are:
+
+1. **Fake timers only.** Use `vi.useFakeTimers()` in `beforeEach` and
+   `vi.useRealTimers()` in `afterEach`. Real timers would make the 30 s / 60 s
+   assertions unusably slow AND flaky under CI scheduling variability.
+2. **Advance time explicitly per assertion.** Prefer
+   `await vi.advanceTimersByTimeAsync(ms)` at each budget boundary so a
+   regression that couples two supposedly-independent timers is detected as an
+   ordering violation, not as a total-elapsed-time drift.
+3. **Drain microtasks with `await Promise.resolve()` before asserting the
+   pending-side of a concurrent call.** A newly-created promise is only
+   observably unresolved after the current microtask queue drains; skipping
+   this step is the most common source of flakes in concurrent-timer tests.
+4. **Route shared mocks by request-shape, not by connection identity.** When a
+   single mock handler serves two logical connections (as with the shared
+   `mockClientCallTool` in the MCP test file), branch on a request field
+   (`params.name` for MCP) rather than trying to stub two `Client` classes.
+5. **Assert on error message shape, not just `success: false`.** The named
+   source (`(request timeout for server 'X')`) and the numeric bound
+   (`/^MCP callTool timed out after <ms>ms /`) are the operator-facing contract
+   and must be pinned so a refactor cannot silently drop them.
+
 ### Testing Async/Background Operations
 
 For feature-flagged functionality:

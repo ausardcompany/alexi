@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.22.0] - 2026-08-24
+### Added
+
+- **MCP per-server timeout independence regression tests** (`tests/mcp/client-timeout.test.ts`, issue #1532, 2026-08-25): New `per-server independence` describe block adds two cases that pin the concurrency contract of `McpClientManager.callTool` (`src/mcp/client.ts:1417`). Each connected server owns a dedicated `AbortController` created inside `withRequestTimeout(serverName, 'callTool', run)` (`src/mcp/client.ts:537`), so a slow peer must NOT delay a call on a fast peer. Case 1 (`slow server times out independently without blocking fast server`) fires concurrent `callTool` invocations against `fast-server` (5000 ms budget) and `slow-server` (30000 ms budget), asserts the fast call resolves without advancing any timer, drains pending microtasks and asserts the slow call is still pending, then advances 30000 ms and asserts the slow call aborts with `/^MCP callTool timed out after 30000ms /` and `(request timeout for server 'slow-server')`. Case 2 (`falls back to the 60s default when per-server timeout is not specified`) advances 59000 ms and asserts the promise is still pending, then advances the last 1000 ms and asserts a timeout at exactly the 60000 ms boundary with `(request timeout for server 'default-server')` — no breaking change to the pre-existing default. Diff statistics: `1 file changed, 122 insertions(+)`.
+
+
 
 ### Added
 
