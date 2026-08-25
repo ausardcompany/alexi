@@ -121,7 +121,7 @@ export async function answerQuestion(agentId: string, _answer: string): Promise<
 export async function isBlocked(agentId: string): Promise<boolean> {
   try {
     const blocker = await store.get(agentId);
-    return blocker != null;
+    return blocker !== null && blocker !== undefined;
   } catch (err) {
     logger.warn('blocker lookup failed; failing closed', { agentId, err });
     // Fail-closed: treat as blocked so caller cannot proceed on stale state.
