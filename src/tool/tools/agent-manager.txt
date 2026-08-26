@@ -3,6 +3,13 @@ Manage and orchestrate multiple agent sessions and workflows.
 Actions:
 - create: Create a new agent session with optional configuration.
   Optional params: worktreeId, config.
+  The optional `config` object accepts `mode`, `model`, an optional
+  `provider` to constrain model resolution to one provider ID (e.g.
+  `anthropic`, `sap-ai-core`), and `excludeLocalState`. Specify
+  `provider` with `model` to force a model-name match to one provider
+  ID; omit both to inherit the current turn's model and provider.
+  A `provider` without a `model` is rejected. Never choose a different
+  model merely because work is being fanned out.
 - list: List all active agent sessions.
 - stop: Stop a specific agent session.
   Required params: sessionId.

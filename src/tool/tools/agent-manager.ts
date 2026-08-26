@@ -30,6 +30,18 @@ const AgentManagerParamsSchema = z.object({
     .object({
       mode: z.string().nullable().optional().describe('Agent mode'),
       model: z.string().nullable().optional().describe('Model to use'),
+      // Ports upstream opencode `agent-manager` task `provider` field
+      // (2026-08 upstream sync). Lets the orchestrator LLM constrain
+      // model resolution to a specific provider ID when the same model
+      // name is offered by multiple providers (e.g. `sap-ai-core`
+      // deployment vs. direct `anthropic`). Requires `model` to be set.
+      provider: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
+        ),
       excludeLocalState: z
         .boolean()
         .nullable()
@@ -62,7 +74,10 @@ export const agentManagerTool = defineTool<typeof AgentManagerParamsSchema, Agen
   description: `Manage and orchestrate multiple agent sessions and workflows.
 
 Actions:
-- create: Create a new agent session with optional configuration
+- create: Create a new agent session with optional configuration.
+  The optional config accepts \`mode\`, \`model\`, an optional \`provider\` to
+  constrain model resolution to one provider ID (requires \`model\`), and
+  \`excludeLocalState\` for a fresh-state startup.
 - list: List all active agent sessions
 - stop: Stop a specific agent session
 - status: Get the status of a specific agent session
@@ -89,6 +104,18 @@ Actions:
           // `config` and `config.excludeLocalState` may be `null` (strict
           // providers) or `undefined` (omitted). Both mean "use default".
           const excludeLocalState = config?.excludeLocalState ?? false;
+
+          // Mirror the upstream opencode `Task` filter:
+          //   "A task provider requires a model"
+          // Reject a provider constraint that has no model to bind to,
+          // so the resolver cannot silently ignore the provider hint.
+          const providerHint = config?.provider?.trim();
+          if (providerHint && !config?.model?.trim()) {
+            return {
+              success: false,
+              error: 'config.provider requires config.model to be set',
+            };
+          }
 
           return {
             success: true,

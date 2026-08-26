@@ -50,7 +50,11 @@ export async function collectBoundedResponseBody(
       }
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel();
+        // Bun 1.4 rejects reader.cancel() with the abort reason (a change from
+        // Node 22 / earlier Bun releases). Swallow that rejection so an
+        // orderly "response too large" error is not shadowed by an unhandled
+        // promise rejection when running under Bun 1.4+.
+        await reader.cancel().catch(() => undefined);
         return {
           ok: false,
           error: `Response exceeds ${maxBytes} bytes (streamed)`,
