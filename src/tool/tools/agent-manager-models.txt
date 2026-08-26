@@ -1,0 +1,3 @@
+Use this tool before `agent_manager` when you need to pick a model or reasoning effort. Results are grouped by model, not by provider, and list every provider that offers each model so you can constrain the provider when needed.
+
+Each result includes the model name, its reasoning variant names, and the providers that offer it. Pass the model name back as the `agent_manager` task `model`; pass one of the listed provider IDs as the task `provider` when the provider must be explicit. When `provider` is omitted, Agent Manager prefers the provider used by the current turn and falls back to the configured default, so you do not need to choose a provider yourself.

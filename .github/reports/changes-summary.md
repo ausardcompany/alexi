@@ -1,120 +1,69 @@
-# Update Plan Execution Summary
+# Changes Summary — Upstream Sync 2026-08-26
 
-Date: 2026-08-25
-Plan source: upstream analysis of `Kilo-Org/kilocode` (ff74e2ea3..193a0b5e7) and
-`sst/opencode` (4161695..2f36ffe).
+Applied `.github/reports/update-plan.md` (kilocode `193a0b5e7..24b1fa1fc` + opencode `2f36ffe..13c2759`) against Alexi.
 
-## Files Modified / Created
+## Files modified
 
-| Priority | Change                                                             | File                                                | Op      |
-| -------- | ------------------------------------------------------------------ | --------------------------------------------------- | ------- |
-| critical | Linux `/proc` process tree w/ vanished-process tolerance           | `src/core/pty/termination.ts`                       | created |
-| high     | Prefer PowerShell 7 over legacy 5.1 on Windows                     | `src/core/powershell.ts`                            | created |
-| high     | Wire pwsh probe into existing shell detector                       | `src/tool/tools/shell/id.ts`                        | edited  |
-| high     | Agent-manager tool: `answer` action for pending questions          | `src/tool/tools/agent-manager.ts`                   | edited  |
-| high     | Agent-manager tool description text                                | `src/tool/tools/agent-manager.txt`                  | created |
-| high     | Fail-closed blocker lookup + `getBlocker`/`answerQuestion`         | `src/permission/agent-manager.ts`                   | created |
-| high     | Retry reasoning-only incomplete responses                          | `src/core/session/processor.ts`                     | created |
-| medium   | Preserve output budget for encrypted reasoning                     | `src/core/session/overflow.ts`                      | created |
-| medium   | Preserve provider-specific completion limits (Cerebras)            | `src/providers/transform.ts`                        | edited  |
-| —        | Tests: permission/agent-manager fail-closed contract               | `tests/permission/agent-manager.test.ts`            | created |
-| —        | Tests: session processor + overflow + Cerebras cap                 | `tests/session/upstream-ports.test.ts`              | created |
-| —        | Tests: PTY termination tree walk                                    | `tests/core/pty-termination.test.ts`                | created |
-| —        | Tests: PowerShell helpers (args/locations/probe/pwsh)              | `tests/core/powershell.test.ts`                     | created |
+| File | Change |
+| --- | --- |
+| `src/tool/tools/webfetch.ts` | **critical** — Bun 1.4 stream cancellation guard |
+| `src/tool/tools/agent-manager.ts` | **high** — added optional `config.provider` field + validation |
+| `src/tool/tools/agent-manager.txt` | **medium** — description text updated for `provider` |
+| `src/tool/tools/agent-manager-models.ts` | **medium** — new stub (hint export for future paired tool) |
+| `src/tool/tools/agent-manager-models.txt` | **medium** — new stub (doc text for future paired tool) |
 
-## Change Details
+## Per-change detail
 
-### 1. Linux `/proc`-based process tree (critical, bugfix)
+### 1. `src/tool/tools/webfetch.ts` — Bun 1.4 SSE/stream cancel rejection (critical, bugfix)
 
-New module `src/core/pty/termination.ts`. On Linux, walks `/proc/<pid>/stat`
-directly instead of spawning `ps`, tolerating vanished entries between
-`readdir` and `readFile` (kilocode `aadded4a3`). Falls back to `ps -axo pid=,ppid=`
-on macOS / restricted containers and when the `/proc` walk yields nothing.
+Alexi does not have a `wrapSSE` helper in `aisdk.ts` (upstream's file), but the same Bun 1.4 behaviour — `ReadableStreamDefaultReader.cancel()` rejecting with the abort reason — affects the one bounded-body reader in `collectBoundedResponseBody`. Guarded the call so an oversize-response error can no longer be shadowed by an unhandled promise rejection under Bun 1.4+.
 
-Faster, more robust in slim SAP AI Core runtime containers where `procps` may
-not be installed, and can no longer crash on legitimate PID races.
+```diff
+-        await reader.cancel();
++        // Bun 1.4 rejects reader.cancel() with the abort reason ...
++        await reader.cancel().catch(() => undefined);
+```
 
-### 2. PowerShell 7 preference (high, bugfix)
+Verified there are no other `reader.cancel(` call sites in `src/**` (single grep hit).
 
-New module `src/core/powershell.ts` exposes `pwsh()`, `probe()`, `locations()`,
-`args()`. `pwsh()` tries PATH via a lightweight in-module `which`, then probes
-`%ProgramFiles%\PowerShell\7\pwsh.exe`, `%ProgramFiles(x86)%\...`, and the
-Store-alias `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`.
+### 2. `src/tool/tools/agent-manager.ts` — optional `provider` field (high, feature)
 
-`src/tool/tools/shell/id.ts::windowsCandidates()` now prepends `PowerShell.pwsh()`
-and `PowerShell.probe()` results to the hard-coded candidate list so pwsh
-installed off PATH still wins over legacy `powershell.exe` (kilocode `98ea338c8`).
-Fixes UTF-8 output corruption when tool output flows through Windows PowerShell 5.1.
+Upstream's opencode `agent-manager` tool is Effect-Schema `Task.Struct`-based with a `select()` resolver. Alexi's tool is a Zod-based CRUD surface (`action: 'create' | 'list' | 'stop' | 'status' | 'answer'`) with a `config: { mode, model, excludeLocalState }` object. The closest architectural fit is adding `provider` to that config object — this preserves the *intent* of the upstream change (let the orchestrator pin a specific provider ID for the same model name) inside Alexi's existing shape, without introducing an Effect-Schema dependency.
 
-### 3. Agent-manager tool: `answer` action (high, feature)
+- Added `config.provider: z.string().nullable().optional()` with the description text from the plan (`'anthropic', 'sap-ai-core'` examples).
+- Mirrored upstream's `"A task provider requires a model"` filter as a runtime guard in the `create` handler: returns `success: false` with `error: 'config.provider requires config.model to be set'` when `provider` is set but `model` is not. This is the direct Zod-side analog of the plan's `Schema.makeFilter` invariant.
+- Updated the tool's `description` to mention `provider` so LLM callers emit the new field.
 
-Extended `src/tool/tools/agent-manager.ts` with a fifth action, `answer`, that
-takes `{ agentId, answer }` and unblocks a sub-agent stuck on a pending question
-(opencode `7baefdddf`). Validates the blocker via `getBlocker`, refuses when
-there is no blocker or when the blocker kind is not `question`. Companion
-description added at `src/tool/tools/agent-manager.txt`.
+**SAP AI Core compatibility**: `provider` is `.nullable().optional()`, so any existing SAP AI Core strict-mode tool-call payload (which may emit `null` for omitted fields) continues to validate unchanged. No change to the tool's `permission.action` (still `admin`) or to `defineTool`'s signature.
 
-### 4. Fail-closed on blocker lookup (high, security)
+### 3. `src/tool/tools/agent-manager.txt` — doc text (medium, feature/docs)
 
-New module `src/permission/agent-manager.ts` implements the blocker store
-(in-memory default, pluggable via `setBlockerStore`) plus `isBlocked`,
-`getBlocker`, `setBlocker`, `answerQuestion`. Critical invariant:
-`isBlocked` returns `true` when the underlying store throws — matches
-opencode `98559c9d6` and prevents accidental permission bypass on stale state.
-Covered by a dedicated fail-closed test in `tests/permission/agent-manager.test.ts`.
+Rewrote to include `provider` under `create` action config, matching the wording from the plan ("Specify `provider` with `model` to force a model-name match to one provider ID... A `provider` without a `model` is rejected. Never choose a different model merely because work is being fanned out.").
 
-### 5. Retry reasoning-only incomplete responses (high, bugfix)
+### 4 & 5. `src/tool/tools/agent-manager-models.{ts,txt}` — companion tool stubs (medium, feature/docs)
 
-New module `src/core/session/processor.ts` exports `evaluateCompleteness` and
-`isReasoningOnly`. Returns `{ status: 'retry', reason: 'reasoning-only' }` when
-the response body contains ONLY reasoning / thinking parts AND the finish
-reason is anything other than `stop` (opencode `58eea7381`). Callers wire
-the retry outcome into their existing retry pump.
+Alexi has **no** `agent-manager-models` tool today (no model catalog surface). The plan's textual `hint` and doc content for that tool are still useful landing points for the future — they document the paired-tool contract and stay consistent with the new `provider` wording in `agent-manager`. Created:
 
-### 6. Preserve output budget for encrypted reasoning (medium, bugfix)
+- `agent-manager-models.ts` — exports `AGENT_MANAGER_MODELS_HINT` string; does **not** register a tool (registration would require a model catalog + tests, beyond this sync's scope).
+- `agent-manager-models.txt` — text description ready for use when the tool is registered.
 
-New module `src/core/session/overflow.ts` exports `usableOutputBudget(max, used)`.
-Deliberately deducts only visible `output` tokens, not `reasoningEncrypted`,
-because encrypted reasoning is provider-side state that never becomes visible
-tokens the client can render (opencode `17611729e`). Prevents premature
-compaction when SAP AI Core routes a reasoning-heavy request.
+Both files are import-free (aside from the .ts having no imports) so they cannot break lint / typecheck / build. They are not wired into `src/tool/registry.ts`.
 
-### 7. Preserve Cerebras completion limit (medium, bugfix)
+## Skipped items
 
-Extended `src/providers/transform.ts` with `PROVIDER_COMPLETION_LIMITS` +
-`preserveCompletionLimit(provider, computed)`. Clamps the caller's computed
-`max_completion_tokens` to any provider-declared hard cap (Cerebras: 8192).
-Ports opencode `da4a91b36`. Never raises above the cap, never returns
-negative.
+- **Plan item #5 sub-scope** — "wire `agent-manager-models` tool into registry" was not part of the plan's literal instructions; the plan only described description text updates. Full tool implementation (row generation, provider grouping, tests) is deferred and should be tracked as its own feature spec under `specs/`.
+- **Optional Drizzle DB migration recovery** — plan item labelled "only if Alexi uses opencode's DB migration layer". Alexi does not use Drizzle (no matches for `drizzle` in `src/**`). Nothing to do.
 
-## Issues Encountered
+## Issues encountered
 
-- **Plan truncation.** The input plan was truncated mid-item-7 (Cerebras),
-  and items 8–11 were not specified. Items 1–7 are the ones described in the
-  plan body and have all been executed. Downstream items (bath-command
-  parser wiring, session overflow retry hook-up in the actual chat pump,
-  `agent-manager.txt` prompt loader wiring, etc.) require code paths not
-  present in the current tree; leaving those out honours the plan
-  contract ("do NOT add extra changes not in the plan").
+- Upstream `agent-manager` tool is a fundamentally different shape (Effect Schema `Task.Struct` fan-out) from Alexi's (Zod CRUD). The plan's literal `Schema.makeFilter` / `select()` diffs do not apply. Adapted the *intent* — an optional provider constraint that requires an accompanying model — into Alexi's Zod schema + the `create` handler.
+- Alexi's `src/core/agent-manager/` is a 4-line placeholder (`orchestrateAgentManagerSessions()` returns `void`). There is no live model-catalog `select()` function to update. The `create` action returns a placeholder `session-${Date.now()}` id, so the guard we added is currently the only user-visible effect of `provider` — this is faithful to the current "placeholder" state of the tool.
 
-- **`src/permission/agent-manager.ts` did not previously exist.** Created a
-  minimal in-memory blocker store so the fail-closed contract could be
-  exercised by tests. A persistent backing store can be plugged in later
-  via `setBlockerStore` without changing the public API.
+## Verification checklist
 
-- **`src/core/pty/termination.ts` had no pre-existing shape.** Wrote the
-  module from scratch matching the upstream signature (`tree()` returning
-  `{ pid, parent }[]`) so future callers can adopt it 1:1.
-
-- **`shell/id.ts` already preferred pwsh 7 statically.** The additive change
-  was to feed the new `PowerShell.pwsh()` + `PowerShell.probe()` results
-  in first, so PATH-based detection and future install-root additions
-  route through a single module.
-
-## Verification
-
-- All new source modules follow ESM + `.js` import convention.
-- All new helpers are pure / side-effect-free at import time.
-- New tests are pure Node (no external services), safe for CI.
-- No existing tests were modified.
-- No SAP AI Core provider surface was broken — additions only.
+- [x] Only one `reader.cancel(` call site exists in `src/**` — patched.
+- [x] No existing tests assert on the `agent-manager` tool description string or `config` schema shape (grep verified across `tests/**` and `src/**/*.test.ts`).
+- [x] New `provider` field is `.nullable().optional()` — no breakage for existing callers or strict SAP AI Core payloads.
+- [x] Tool `permission.action` unchanged (`admin`); no permission surface change.
+- [x] No new runtime dependencies added.
+- [x] ESLint `no-unused-vars` respected (removed intermediate `modelHint` local).
