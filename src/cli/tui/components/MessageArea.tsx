@@ -5,9 +5,11 @@ import { MessageBubble } from './MessageBubble.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
 import { Spinner } from './Spinner.js';
 import { ToolRow } from './ToolRow.js';
+import { WorkActivity } from './WorkActivity.js';
 import type { ToolCallState } from '../context/ChatContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import type { ImageAttachmentPreview } from '../context/AttachmentContext.js';
+import { collapseCompletedWork } from '../utils/collapseWork.js';
 
 // ---------------------------------------------------------------------------
 // Types (aligned with contracts/message-area.ts MessageDisplay)
@@ -73,6 +75,11 @@ export function MessageArea({
   // to the model as instrumentation but should not clutter the user's view.
   const visibleMessages = messages.filter((m) => m.displayRole !== 'system');
 
+  // Group the transcript into runs (user -> assistant deliverable). Each
+  // completed run's tool calls collapse into a single WorkActivity summary,
+  // keeping final answers visible while working details remain on demand.
+  const runs = collapseCompletedWork(visibleMessages, { isStreaming });
+
   return (
     <Box flexDirection="column" flexGrow={1} overflow="hidden" backgroundColor={colors.background}>
       {/* Empty state */}
@@ -82,31 +89,48 @@ export function MessageArea({
         </Box>
       )}
 
-      {/* Completed messages (history) */}
-      {visibleMessages.map((msg) => (
-        <Box key={msg.id} flexDirection="column">
-          <MessageBubble
-            role={msg.role}
-            content={msg.content}
-            agent={msg.agent}
-            model={msg.model}
-            tokens={msg.tokens}
-            timestamp={msg.timestamp}
-            images={msg.images}
-          />
-          {msg.toolCalls.map((tc) => (
-            <ToolRow
-              key={tc.id}
-              toolName={tc.toolName}
-              params={tc.params}
-              status={tc.status}
-              output={tc.output}
-              error={tc.error}
-              isExpanded={tc.isExpanded}
-              onToggle={() => onToggleToolCall(tc.id)}
-              diff={tc.diff}
+      {/* Completed messages (history), grouped into runs */}
+      {runs.map((run) => (
+        <Box key={run.id} flexDirection="column">
+          {run.userMessage !== null && (
+            <MessageBubble
+              role={run.userMessage.role}
+              content={run.userMessage.content}
+              agent={run.userMessage.agent}
+              model={run.userMessage.model}
+              tokens={run.userMessage.tokens}
+              timestamp={run.userMessage.timestamp}
+              images={run.userMessage.images}
             />
-          ))}
+          )}
+          {run.shouldCollapse ? (
+            <WorkActivity toolCalls={run.toolCalls} duration={run.durationMs} />
+          ) : (
+            run.toolCalls.map((tc) => (
+              <ToolRow
+                key={tc.id}
+                toolName={tc.toolName}
+                params={tc.params}
+                status={tc.status}
+                output={tc.output}
+                error={tc.error}
+                isExpanded={tc.isExpanded}
+                onToggle={() => onToggleToolCall(tc.id)}
+                diff={tc.diff}
+              />
+            ))
+          )}
+          {run.assistantMessage !== null && (
+            <MessageBubble
+              role={run.assistantMessage.role}
+              content={run.assistantMessage.content}
+              agent={run.assistantMessage.agent}
+              model={run.assistantMessage.model}
+              tokens={run.assistantMessage.tokens}
+              timestamp={run.assistantMessage.timestamp}
+              images={run.assistantMessage.images}
+            />
+          )}
         </Box>
       ))}
 
