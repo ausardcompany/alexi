@@ -47,6 +47,7 @@
  */
 
 import { nanoid } from 'nanoid';
+import { SessionEnded } from '../../bus/index.js';
 
 /**
  * Maximum number of bytes retained in the in-memory append buffer per
@@ -262,10 +263,75 @@ export function listCommandLogIds(): string[] {
 }
 
 /**
+ * Return every log currently associated with `sessionId`. Ordering is
+ * registration order. Both running and finished-but-still-in-retention
+ * entries are returned so a TUI hub that briefly disconnected can fetch
+ * the tail of both.
+ *
+ * Passing `undefined` returns entries whose `sessionId` is `undefined`
+ * (bash tool invoked without a session context) — not every entry.
+ * Callers who want everything should iterate `listCommandLogIds()`.
+ */
+export function getCommandLogsBySession(sessionId: string | undefined): CommandLogSnapshot[] {
+  const out: CommandLogSnapshot[] = [];
+  for (const entry of logs.values()) {
+    if (entry.sessionId === sessionId) {
+      out.push({ ...entry });
+    }
+  }
+  return out;
+}
+
+/**
+ * Drop every log associated with `sessionId`, regardless of state.
+ * Intended to be wired to `SessionEnded` so terminated sessions do not
+ * leave stale streaming buffers pinned in memory. Returns the number of
+ * entries removed so callers can log the cleanup.
+ *
+ * Detached processes that keep running after session end will re-appear
+ * in the registry only if a fresh bash invocation registers them; the
+ * bash tool never re-registers on behalf of a dead session.
+ */
+export function cleanupSessionCommandLogs(sessionId: string | undefined): number {
+  let removed = 0;
+  for (const [id, entry] of logs) {
+    if (entry.sessionId === sessionId) {
+      logs.delete(id);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+/**
  * Test-only helper: forget every registered log. MUST NOT be called
  * from production code — the registry survives across bash invocations
  * by design.
  */
 export function _resetStreamingStateForTests(): void {
   logs.clear();
+}
+
+/**
+ * Session-lifecycle wiring. Subscribed exactly once at module load: when
+ * `SessionEnded` fires, drop every command log associated with that
+ * session so a long-lived process (agent daemon, MCP server) does not
+ * pin streaming buffers of dead sessions in memory indefinitely.
+ *
+ * Left non-idempotent on purpose — importing this module twice in the
+ * same process is a bug already flagged by ESM's module cache. The
+ * unsubscribe handle is exported for tests that need to detach the
+ * wiring without tearing down the whole bus.
+ */
+const _sessionEndedUnsub = SessionEnded.subscribe(({ sessionId }) => {
+  cleanupSessionCommandLogs(sessionId);
+});
+
+/**
+ * Test-only: detach the module-level `SessionEnded` subscription so
+ * tests that publish `SessionEnded` manually do not have their own
+ * cleanup logic race the auto-wiring.
+ */
+export function _detachSessionLifecycleForTests(): void {
+  _sessionEndedUnsub();
 }
