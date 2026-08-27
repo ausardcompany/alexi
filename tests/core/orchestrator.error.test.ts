@@ -13,6 +13,8 @@ vi.mock('../../src/providers/index.js', () => {
       usedFallback: false,
     })),
     getDefaultModel: vi.fn(),
+    // Text-chat error paths only: image-generation dispatch is off.
+    modelHasCapability: vi.fn(() => false),
   };
 });
 

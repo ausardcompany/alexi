@@ -324,7 +324,29 @@ export function registerChatCommand(program: Command): void {
           systemPrompt: effectiveSystemPrompt,
         });
 
-        console.log(res.text);
+        // When the orchestrator dispatched to an image-generation model
+        // (see `sendChat` image-gen short-circuit for issue #1549), `text`
+        // is empty and `images` carries the structured payloads. Render
+        // each entry on its own line so the output is greppable from a
+        // shell pipeline. URL payloads print verbatim; base64 payloads
+        // print a marker with the MIME type and decoded byte count (the
+        // raw base64 is intentionally NOT echoed to avoid dumping ~1MB
+        // of characters into a shell log — callers that want the bytes
+        // should use the `alexi generate` / `alexi chat --image` flows
+        // which persist to disk).
+        if (res.images && res.images.length > 0) {
+          console.log(`[Model: ${res.modelUsed}]`);
+          for (const image of res.images) {
+            if (image.kind === 'url') {
+              console.log(`url ${image.mimeType ?? ''} ${image.url}`.trim());
+            } else {
+              const bytes = Math.floor((image.base64.length * 3) / 4);
+              console.log(`base64 ${image.mimeType ?? ''} ${bytes} bytes`.trim());
+            }
+          }
+        } else {
+          console.log(res.text);
+        }
         if (res.usage) console.log(JSON.stringify(res.usage));
         if (res.modelUsed && opts.autoRoute) {
           console.log(`\n[Model: ${res.modelUsed}]`);

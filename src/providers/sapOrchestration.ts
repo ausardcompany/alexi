@@ -175,6 +175,108 @@ export interface CompletionResult {
   allMessages?: ChatMessage[];
 }
 
+// ============================================================================
+// Image Generation (issue #1549)
+// ============================================================================
+//
+// Chat and streamComplete both surface image chunks inline (via
+// `StreamChunk.images` / `extractImageChunks`), which works for chat-shaped
+// requests that happen to produce images. The typed image-generation API
+// below is the first-class entry point for callers that specifically want
+// an image response: it validates the target model advertises
+// `image-generation`, ignores the streaming text channel, and aggregates
+// every image payload into a non-streaming result.
+//
+// The provider layer intentionally does NOT decode base64 payloads or write
+// them to disk — that responsibility belongs to callers (the `image_gen`
+// tool, the CLI, or downstream renderers) so tests can exercise the wire
+// contract without touching the filesystem.
+
+/**
+ * Parameters accepted by {@link SapOrchestrationProvider.generateImage}.
+ *
+ * Mirrors the OpenAI image-generation request shape but is deliberately
+ * minimal: SAP AI Core's orchestration surface does not expose typed
+ * `size` / `n` fields on the request today, so both are appended to the
+ * natural-language prompt when present. When SAP adds structured
+ * parameters we can promote them to typed fields without changing the
+ * public shape.
+ */
+export interface ImageGenerationParams {
+  /** Natural-language prompt describing the desired image. */
+  prompt: string;
+  /**
+   * Optional size hint (e.g. `"1024x1024"`). Appended to the prompt as
+   * a `[size: <spec>]` marker; the model interprets it best-effort.
+   */
+  size?: string;
+  /**
+   * Optional number-of-images hint. Appended to the prompt as a
+   * `[count: <n>]` marker; models that support batching return one
+   * chunk per image. Defaults to whatever the model chooses.
+   */
+  n?: number;
+  /**
+   * Optional AbortSignal forwarded to the SDK so a user-initiated
+   * Ctrl+C cancels the in-flight request instead of burning tokens.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * One image entry in an {@link ImageGenerationResult}.
+ *
+ * The discriminator (`kind`) mirrors {@link NormalizedImageChunk}: URL
+ * payloads carry only `url`, base64 payloads carry only `base64`. Callers
+ * MUST narrow on `kind` before accessing the payload-specific fields.
+ */
+export type ImageGenerationImage =
+  | { kind: 'url'; url: string; mimeType?: string }
+  | { kind: 'base64'; base64: string; mimeType?: string };
+
+/**
+ * Result of an {@link SapOrchestrationProvider.generateImage} call. The
+ * `images` array preserves the order the provider emitted the chunks;
+ * callers that only want the first image can index into `[0]` directly.
+ */
+export interface ImageGenerationResult {
+  /** Ordered list of image payloads returned by the model. */
+  images: ImageGenerationImage[];
+  /** Model id that produced the images (echoes the provider config). */
+  model: string;
+  /** Finish reason reported by the provider, when available. */
+  finishReason?: string;
+  /** Token usage statistics for the request. */
+  usage?: TokenUsage;
+}
+
+/**
+ * Error thrown when {@link SapOrchestrationProvider.generateImage} is
+ * called on a model that does not advertise the `image-generation`
+ * capability. The message names the model so a misconfigured caller
+ * can see at a glance which id to fix (env var, routing config, or
+ * CLI flag).
+ *
+ * This is a permanent failure per the error-classification contract in
+ * `AGENTS.md`: retrying the same request on the same model would still
+ * fail. Callers MUST route through a capability-aware selector before
+ * invoking `generateImage`.
+ */
+export class ImageGenerationNotSupportedError extends Error {
+  readonly modelName: string;
+
+  constructor(modelName: string) {
+    super(
+      `Model '${modelName}' does not advertise the image-generation capability. ` +
+        'Choose a model that does (e.g. gemini-imagen-3), or add capability metadata ' +
+        "for it via ORCHESTRATION_MODEL_METADATA. Callers should gate on modelHasCapability(id, 'image-generation') " +
+        'before invoking generateImage.'
+    );
+    this.name = 'ImageGenerationNotSupportedError';
+    this.modelName = modelName;
+  }
+}
+
 /**
  * Azure Content Safety filter configuration
  */
@@ -1474,6 +1576,100 @@ export class SapOrchestrationProvider {
           }
         : undefined,
     };
+  }
+
+  /**
+   * Generate one or more images from a natural-language prompt.
+   *
+   * First-class typed entry point for image generation (issue #1549). The
+   * method:
+   *   1. Validates the target model advertises the `image-generation`
+   *      capability (throws {@link ImageGenerationNotSupportedError}
+   *      otherwise). This is a permanent failure — callers MUST route
+   *      through a capability-aware selector before invoking.
+   *   2. Composes the user prompt with optional `size` and `n` hints
+   *      (SAP AI Core does not expose typed fields for these today, so
+   *      they are appended as `[size: WxH]` / `[count: N]` markers the
+   *      model can interpret best-effort).
+   *   3. Consumes the SDK streaming response, aggregating every image
+   *      chunk into an {@link ImageGenerationResult}. The text channel
+   *      is intentionally ignored — this method is for image responses.
+   *   4. Forwards `signal` to the SDK so a user-initiated Ctrl+C cancels
+   *      the in-flight request instead of burning tokens (identical
+   *      contract to {@link streamComplete}).
+   *
+   * Returns a non-streaming result. Callers that want progressive image
+   * chunks should use {@link streamComplete} directly and inspect
+   * `chunk.images`.
+   *
+   * @param params - Image generation parameters
+   * @returns Aggregated image result
+   * @throws {ImageGenerationNotSupportedError} When the model does not
+   *   advertise the `image-generation` capability. This is not caught by
+   *   the caller's retry budget — it is a config error.
+   */
+  async generateImage(params: ImageGenerationParams): Promise<ImageGenerationResult> {
+    if (!modelHasCapability(this.config.modelName, 'image-generation')) {
+      throw new ImageGenerationNotSupportedError(this.config.modelName);
+    }
+
+    // Append size / count hints to the prompt. SAP AI Core does not expose
+    // typed request fields for these on the orchestration surface today;
+    // when it does, promote them to structured params without breaking
+    // the public shape.
+    const hints: string[] = [];
+    if (params.size !== undefined && params.size.trim().length > 0) {
+      hints.push(`[size: ${params.size.trim()}]`);
+    }
+    if (typeof params.n === 'number' && Number.isFinite(params.n) && params.n > 0) {
+      hints.push(`[count: ${params.n}]`);
+    }
+    const promptWithHints =
+      hints.length > 0 ? `${params.prompt}\n\n${hints.join(' ')}` : params.prompt;
+
+    const images: ImageGenerationImage[] = [];
+    let finishReason: string | undefined;
+    let usage: TokenUsage | undefined;
+
+    for await (const chunk of this.streamComplete([{ role: 'user', content: promptWithHints }], {
+      signal: params.signal,
+    })) {
+      if (chunk.images && chunk.images.length > 0) {
+        for (const image of chunk.images) {
+          if (image.kind === 'url') {
+            const entry: ImageGenerationImage = { kind: 'url', url: image.url };
+            if (image.mimeType) {
+              entry.mimeType = image.mimeType;
+            }
+            images.push(entry);
+          } else {
+            const entry: ImageGenerationImage = { kind: 'base64', base64: image.data };
+            if (image.mimeType) {
+              entry.mimeType = image.mimeType;
+            }
+            images.push(entry);
+          }
+        }
+      }
+      if (chunk.finishReason !== undefined) {
+        finishReason = chunk.finishReason;
+      }
+      if (chunk.usage !== undefined) {
+        usage = chunk.usage;
+      }
+    }
+
+    const result: ImageGenerationResult = {
+      images,
+      model: this.config.modelName,
+    };
+    if (finishReason !== undefined) {
+      result.finishReason = finishReason;
+    }
+    if (usage !== undefined) {
+      result.usage = usage;
+    }
+    return result;
   }
 
   /**

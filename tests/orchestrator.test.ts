@@ -13,6 +13,10 @@ vi.mock('../src/providers/index.js', () => {
       usedFallback: false,
     })),
     getDefaultModel: vi.fn(),
+    // Text-chat tests: default to `false` so `sendChat` stays on the
+    // `complete()` path. Image-generation routing is exercised in
+    // `tests/core/orchestrator.imageGeneration.test.ts`.
+    modelHasCapability: vi.fn(() => false),
   };
 });
 
