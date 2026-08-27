@@ -97,6 +97,10 @@ export {
   type MessageToolCall,
   type ToolChatMessage,
   type ChatMessage,
+  ImageGenerationNotSupportedError,
+  type ImageGenerationParams,
+  type ImageGenerationImage,
+  type ImageGenerationResult,
 } from './sapOrchestration.js';
 
 /**

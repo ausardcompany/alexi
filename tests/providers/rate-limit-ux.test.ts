@@ -41,6 +41,10 @@ vi.mock('../../src/providers/index.js', () => {
       usedFallback: false,
     })),
     getDefaultModel: vi.fn(() => 'gpt-4o'),
+    // Rate-limit-UX tests exercise the text `complete()` path; keep
+    // image-generation dispatch off so mocked providers only need
+    // `complete()`.
+    modelHasCapability: vi.fn(() => false),
   };
 });
 

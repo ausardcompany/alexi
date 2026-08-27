@@ -1,4 +1,9 @@
-import { getProviderForModelWithFallback, getDefaultModel } from '../providers/index.js';
+import {
+  getProviderForModelWithFallback,
+  getDefaultModel,
+  modelHasCapability,
+  type ImageGenerationResult,
+} from '../providers/index.js';
 import { formatProviderError } from '../providers/format.js';
 import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
@@ -89,6 +94,83 @@ export async function sendChat(
   const provider = resolution.provider;
   if (resolution.usedFallback) {
     modelId = resolution.effectiveModelId;
+  }
+
+  // Image-generation short-circuit (issue #1549).
+  //
+  // When the resolved model advertises the `image-generation` capability,
+  // dispatch the prompt through `provider.generateImage()` instead of
+  // `complete()`. The result carries structured image payloads (URL or
+  // base64) that the caller can render via the CLI/TUI. The text field
+  // is left empty so downstream consumers that only inspect `text`
+  // observe a no-op rather than a stale chat response.
+  //
+  // Route health is recorded for permanent failures identically to the
+  // text path so misconfigured image deployments participate in the
+  // auto-disable circuit breaker.
+  if (modelHasCapability(modelId, 'image-generation')) {
+    let imageResult: ImageGenerationResult;
+    try {
+      imageResult = await provider.generateImage({
+        prompt: message,
+        signal: options?.signal,
+      });
+    } catch (err) {
+      const classified = classifyRouteError(err);
+      if (classified.kind === 'permanent') {
+        recordRouteOutcome(modelId, classified);
+      }
+      const formatted = formatProviderError(err);
+      if (err instanceof Error && formatted !== err.message) {
+        err.message = formatted;
+      }
+      throw err;
+    }
+    recordRouteOutcome(modelId, { kind: 'success' });
+
+    if (options?.sessionManager) {
+      options.sessionManager.addMessage('user', message, {
+        input: imageResult.usage?.prompt_tokens,
+      });
+      // Persist a compact summary so the session log records what was
+      // generated without embedding raw base64 blobs. URLs are safe to
+      // store verbatim; base64 entries are collapsed to a marker with the
+      // MIME type and byte length (when derivable from the base64 length).
+      const summary = imageResult.images
+        .map((img) => {
+          if (img.kind === 'url') {
+            return `[image url ${img.mimeType ?? ''} ${img.url}]`.replace(/\s+/g, ' ').trim();
+          }
+          const bytes = Math.floor((img.base64.length * 3) / 4);
+          return `[image base64 ${img.mimeType ?? ''} ${bytes} bytes]`.replace(/\s+/g, ' ').trim();
+        })
+        .join('\n');
+      options.sessionManager.addMessage('assistant', summary, {
+        output: imageResult.usage?.completion_tokens,
+      });
+    }
+
+    if (imageResult.usage?.prompt_tokens || imageResult.usage?.completion_tokens) {
+      const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+      getCostTracker().recordUsage(
+        modelId,
+        imageResult.usage.prompt_tokens ?? 0,
+        imageResult.usage.completion_tokens ?? 0,
+        sessionId,
+        {
+          read: imageResult.usage.cache_read_input_tokens,
+          write: imageResult.usage.cache_creation_input_tokens,
+        }
+      );
+    }
+
+    return {
+      text: '',
+      images: imageResult.images,
+      usage: imageResult.usage,
+      modelUsed: modelId,
+      routingReason,
+    };
   }
 
   // Use SAP Orchestration complete() method.
@@ -214,3 +296,9 @@ export async function sendChat(
     routingReason,
   };
 }
+
+/**
+ * Public result shape re-exported so callers (CLI, TUI) can narrow on
+ * the optional `images` field without re-importing the provider types.
+ */
+export type SendChatResult = Awaited<ReturnType<typeof sendChat>>;
