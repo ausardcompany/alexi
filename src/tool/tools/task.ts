@@ -479,7 +479,20 @@ Usage:
     // In a full implementation, this would call the LLM with the agent's system prompt
     // and pass subagentConfig.autoMode to maintain automation behavior
     taskData.status = 'completed';
-    const response = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
+    const candidateResponse = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
+
+    // kilocode_change - preserve last non-empty subagent answer (#13469, #13493)
+    // When an extended/resumed run yields an empty response, do not clobber
+    // the previously captured answer. Fall back to the last non-empty message
+    // captured in the transcript so callers never observe an empty regression.
+    const trimmed = candidateResponse.trim();
+    let response = candidateResponse;
+    if (!trimmed) {
+      const priorAssistant = [...taskData.messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.content.trim().length > 0);
+      response = priorAssistant?.content ?? taskData.result ?? '';
+    }
 
     taskData.messages.push({
       role: 'assistant',
