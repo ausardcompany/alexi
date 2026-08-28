@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  filterUnreplayableBedrockReasoning,
   isOpenAIShapedModel,
   lowerMcpToolsForOpenAIShaped,
   sanitizeOpenAISchema,
@@ -461,5 +462,122 @@ describe('lowerMcpToolsForOpenAIShaped', () => {
     const tools = [mcpTool];
     expect(lowerMcpToolsForOpenAIShaped(tools, 'gpt-4o')).not.toBe(tools);
     expect(lowerMcpToolsForOpenAIShaped(tools, 'anthropic--claude-4.5-sonnet')).not.toBe(tools);
+  });
+});
+
+describe('filterUnreplayableBedrockReasoning', () => {
+  const signedReasoning = {
+    type: 'reasoning',
+    text: 'thinking...',
+    providerMetadata: { bedrock: { signature: 'sig-abc-123' } },
+  };
+  const unsignedReasoning = {
+    type: 'reasoning',
+    text: 'thinking (no sig)...',
+  };
+  const textPart = { type: 'text', text: 'Hello' };
+
+  it('passes messages through unchanged for non-Bedrock providers', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: '',
+        parts: [textPart, unsignedReasoning],
+      },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages, 'anthropic');
+    expect(result).toBe(messages);
+    expect(result[0].parts).toEqual([textPart, unsignedReasoning]);
+  });
+
+  it('passes messages through unchanged when providerID is undefined', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: '',
+        parts: [unsignedReasoning],
+      },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages);
+    expect(result).toBe(messages);
+  });
+
+  it('drops unsigned reasoning parts on assistant messages for bedrock providers', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: '',
+        parts: [textPart, unsignedReasoning, signedReasoning],
+      },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages, 'aws-bedrock');
+    expect(result[0].parts).toEqual([textPart, signedReasoning]);
+  });
+
+  it('recognises SAP AI Core deployments via `aicore` substring', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        content: '',
+        parts: [textPart, unsignedReasoning],
+      },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages, 'aicore-bedrock-claude');
+    expect(result[0].parts).toEqual([textPart]);
+  });
+
+  it('leaves user and system messages untouched even on bedrock', () => {
+    const messages = [
+      { role: 'system', content: 'sys', parts: [unsignedReasoning] },
+      { role: 'user', content: 'hi', parts: [unsignedReasoning] },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages, 'bedrock');
+    expect(result[0].parts).toEqual([unsignedReasoning]);
+    expect(result[1].parts).toEqual([unsignedReasoning]);
+  });
+
+  it('leaves assistant messages without a `parts` array untouched', () => {
+    const messages = [{ role: 'assistant', content: 'legacy content only' }];
+    const result = filterUnreplayableBedrockReasoning(messages, 'bedrock');
+    expect(result).toEqual(messages);
+    expect(result[0]).toBe(messages[0]);
+  });
+
+  it('does not mutate the input array or message objects', () => {
+    const parts = [textPart, unsignedReasoning];
+    const msg = { role: 'assistant', content: '', parts };
+    const snapshot = JSON.parse(JSON.stringify(msg));
+    const result = filterUnreplayableBedrockReasoning([msg], 'bedrock');
+    expect(msg).toEqual(snapshot);
+    expect(msg.parts).toBe(parts);
+    expect(result[0]).not.toBe(msg);
+    expect(result[0].parts).not.toBe(parts);
+  });
+
+  it('returns the same message reference when nothing is stripped', () => {
+    const msg = {
+      role: 'assistant',
+      content: '',
+      parts: [textPart, signedReasoning],
+    };
+    const result = filterUnreplayableBedrockReasoning([msg], 'bedrock');
+    expect(result[0]).toBe(msg);
+  });
+
+  it('treats an empty signature string as unsigned', () => {
+    const emptySigReasoning = {
+      type: 'reasoning',
+      text: 'x',
+      providerMetadata: { bedrock: { signature: '' } },
+    };
+    const messages = [
+      {
+        role: 'assistant',
+        content: '',
+        parts: [emptySigReasoning, textPart],
+      },
+    ];
+    const result = filterUnreplayableBedrockReasoning(messages, 'bedrock');
+    expect(result[0].parts).toEqual([textPart]);
   });
 });

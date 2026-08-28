@@ -1,5 +1,5 @@
 /**
- * Filesystem Watcher (VCS-guarded)
+ * Filesystem Watcher (VCS-guarded, root-safe)
  *
  * Ports kilocode upstream fix: only initialize the file watcher for
  * locations that have VCS metadata (e.g. a `.git/` directory). Watching
@@ -7,11 +7,17 @@
  * workspace or a scratch directory — the watcher either crashes on
  * missing metadata or falls back to polling and burns CPU.
  *
- * The guard is `location.vcs && experimentalFlag` (both must be true):
+ * The guard is `location.vcs && experimentalFlag && allowed(dir)` (all
+ * three must be true):
  *  - `location.vcs`: caller has already checked for a VCS root
  *    (`fs.stat('.git')` etc.) and set the flag on the location record.
  *  - `experimentalFlag`: opt-in `ALEXI_EXPERIMENTAL_FILEWATCHER=1`
  *    while the feature is behind a flag.
+ *  - `allowed(dir)`: the directory is not a filesystem root (`/`, `C:\`,
+ *    a UNC share root) and not the user's home directory. Watching those
+ *    locations causes runaway resource use and scans sensitive files.
+ *    See `src/core/kilocode/fff.ts` (ports kilocode `6e05f48fb`,
+ *    `08467dba4`, `b0dbd398a`).
  *
  * ## Instance scoping (kilocode b8984e468)
  *
@@ -25,6 +31,8 @@
  * preserved so callers that never touched the multi-instance surface
  * keep working unchanged.
  */
+
+import { allowed } from '../kilocode/fff.js';
 
 /**
  * Minimal shape of a workspace location the watcher accepts. `directory`
@@ -46,8 +54,9 @@ export function isExperimentalFileWatcherEnabled(): boolean {
 
 /**
  * Subscribe a filesystem watcher to `location.directory` — but ONLY when
- * the location has VCS metadata AND the experimental flag is on. Returns
- * a disposer, or null when the watcher was skipped for either reason.
+ * the location has VCS metadata AND the experimental flag is on AND the
+ * directory is not a filesystem root or the user's home dir. Returns
+ * a disposer, or null when the watcher was skipped for any reason.
  *
  * The `subscribe` callback is injected so this module stays independent
  * of the concrete watcher backend (chokidar, native fs.watch, or an
@@ -60,7 +69,12 @@ export function maybeStartFileWatcher(
   // Fix: prevents watcher initialization on locations without VCS
   // metadata, which causes crashes or excessive polling in SAP AI Core
   // sandboxed workspaces that may not be git repos.
-  if (location.vcs && isExperimentalFileWatcherEnabled()) {
+  //
+  // Additional guard (kilocode 6e05f48fb / 08467dba4 / b0dbd398a): refuse
+  // to watch a filesystem root (`/`, `C:\`, UNC root) or the user's home
+  // directory. Watching those causes runaway resource use and scans
+  // sensitive files.
+  if (location.vcs && isExperimentalFileWatcherEnabled() && allowed(location.directory)) {
     return subscribe(location.directory);
   }
   return null;

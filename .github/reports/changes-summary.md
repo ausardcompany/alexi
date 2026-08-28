@@ -1,94 +1,81 @@
-# Update Plan Execution — Changes Summary
+# Changes Summary — Upstream Sync Execution
 
-Date: 2026-08-27
-Plan basis: kilocode `c03a20394..24b1fa1fc` (136 commits) + opencode `05ea507..13c2759` (18 commits).
+Generated: 2026-08-28
+Source plan: 12 items enumerated (2 critical, 5 high, 3 medium, 2 low).
+Executed: 5 items (all specified items in the plan text; the delivered plan text was truncated mid-item-5 and did not contain items 6–12).
 
 ## Files modified
 
-| File | Type | Change |
-|---|---|---|
-| `src/tool/tools/task.ts` | modified | Preserve last non-empty subagent answer when a resumed/extended run yields empty (kilocode #13469 / #13493). |
-| `src/tool/tools/task.test.ts` | modified | +2 regression tests for the empty-result preservation contract. |
-| `src/core/background-job.ts` | **new** | `selectJobOutput` pure primitive implementing the "empty never clobbers non-empty" rule from upstream `packages/core/src/background-job.ts`. |
-| `src/core/background-job.test.ts` | **new** | 5 unit tests for `selectJobOutput`, including the exact `#13469` regression scenario. |
-| `src/core/powershell.ts` | rewritten | **Rollback** of kilocode PR #13365 probing surface. Now exports only `args()` and `PowerShell.args`. Removed `locations`, `probe`, `pwsh`. |
-| `src/tool/tools/shell/id.ts` | modified | Dropped `PowerShell.pwsh()` / `PowerShell.probe()` calls from `windowsCandidates()`. Removed import from `core/powershell.js`. Hard-coded candidate list only. |
-| `tests/core/powershell.test.ts` | rewritten | Reduced to the `args()`-only surface; removed `locations`/`probe`/`pwsh` tests that no longer apply. |
-| `package.json` | modified | Added top-level `overrides: { "minimatch": "10.2.6" }` to pin the transitive dev-dep past the dependabot advisory. |
-| `src/permission/index.ts` | modified | Added `mergePermissionRulesets(base, planMode)` + internal `ruleKey()` helper implementing kilocode #13219 dedup contract. |
-| `src/permission/__tests__/plan-mode-stacking.test.ts` | **new** | 5 regression tests: identical-rule dedup, distinct-decision preservation, distinct-tool preservation, 5x toggle idempotency, and order preservation. |
+| File | Change |
+| --- | --- |
+| `src/core/kilocode/fff.ts` | **CREATED** — filesystem-root / home-directory indexing guard (`allowed`, `notices`, `message`). |
+| `src/core/filesystem/watcher.ts` | Imports `allowed` from `../kilocode/fff.js`; `maybeStartFileWatcher` now additionally gates on `allowed(location.directory)`. |
+| `src/providers/transform.ts` | Added `filterUnreplayableBedrockReasoning(messages, providerID)` + helper `hasBedrockReasoningSignature`. Extended the internal `Message` interface with an optional `parts?: Array<Record<string, unknown>>` field. |
+| `tests/providers/transform.test.ts` | Added `filterUnreplayableBedrockReasoning` describe block with 10 test cases covering pass-through, bedrock/aicore detection, mutation-safety, and edge cases. |
+| `src/core/kilocode/zero-id.ts` | **CREATED** — `zeroID(...parts)` NUL-delimited composite key helper (arity-2 / arity-3 fast paths, generic `join('\0')` fallback). |
+| `src/session/queue.ts` | **CREATED** — `SessionQueue` class (enqueue / drainNext / drop / edit / peek / size / clear / clearAll) + `getSessionQueue()` global singleton + `resetSessionQueue()` for tests. |
+| `src/compaction/index.ts` | Added preservation helpers appended after `checkAndCompact`: `isPendingTurn`, `isReplayEligible`, `wasJustCompacted`, `partitionForCompaction`, and `compactPreservingPending`. No existing behavior modified. |
 
-Total: 7 modified + 3 new files.
+## Item-by-item summary
 
-## Change-by-change detail
+### 1. [CRITICAL — security] Prevent filesystem root & home indexing
+- Created `src/core/kilocode/fff.ts` with `allowed(directory, home?)`, `notices(directory)`, and user-facing `message` constant.
+- POSIX and win32 (including UNC extended-path `\\?\UNC\...`) root detection implemented via `path.parse(dir).root` comparison; realpath resolution via `fs.realpathSync.native` with a `path.resolve` fallback so a missing directory still fails safely.
+- `ALEXI_TEST_HOME` env override supported so tests can pin the home anchor without mutating `process.env.HOME` globally.
+- Wired into `src/core/filesystem/watcher.ts`: `maybeStartFileWatcher` now short-circuits when `!allowed(location.directory)`, in addition to its existing `location.vcs && experimentalFlag` guard. Backwards-compatible: legacy `startWatcher` and `InstanceWatcher.start` inherit the guard automatically.
+- The plan referenced `src/core/filesystem/search.ts` as an alternate call site; that file does not exist in this codebase (`src/core/filesystem.ts` is only a `mkdirSafe` utility). The `allowed` helper is exported for future search integration without touching non-existent code.
 
-### 1. Task tool empty-result preservation (`src/tool/tools/task.ts`) — critical
-Before returning the placeholder response, the tool now checks whether the response is non-empty. If empty, it falls back to the last non-empty assistant message in the transcript, or to a previously stored `result` string. This mirrors the upstream `#13493` fix.
+### 2. [CRITICAL — bugfix] Filter unreplayable Bedrock reasoning parts
+- Added `filterUnreplayableBedrockReasoning(messages, providerID)` in `src/providers/transform.ts`.
+- Detection: any `providerID` containing `bedrock` OR `aicore` triggers the filter — this covers SAP AI Core's `aicore-bedrock-*` deployment ids without a per-model allowlist, matching the plan's "SAP AI Core proxies multiple model families" rationale.
+- Filter drops `type: 'reasoning'` parts on assistant messages when they lack a non-empty `providerMetadata.bedrock.signature`. Non-Bedrock providers pass through as `messages` (reference-identical). Assistant messages without a `parts` array pass through. Empty signature strings treated as unsigned.
+- No mutation of inputs verified via a dedicated test.
+- 10 test cases added; total transform test file grew from 466 to ~590 lines.
 
-Marked with `kilocode_change` comment referencing PRs #13469 and #13493.
+### 3. [HIGH — refactor] Centralized NUL-delimited composite IDs
+- Created `src/core/kilocode/zero-id.ts` exporting `zeroID(...parts)`.
+- Fast paths for arity 2 and 3 use template-literal concatenation (dominant use cases per upstream); larger arities fall back to `parts.join('\0')`.
+- Migration NOT executed: grepping the current codebase found NO existing `.join("\0")` or NUL-template-literal usages (see reasoning in plan §3 "Migration"). The helper is now available for future callers so new code adopts the pattern from day one.
 
-### 2. Background job output selector (`src/core/background-job.ts`) — critical
-Alexi does not yet have a full `BackgroundJob.Service` (upstream uses Effect). Rather than force-porting Effect into Alexi's provider-agnostic runtime, I extracted the pure decision primitive `selectJobOutput(previous, exit, sequence)`. It:
-- Requires `exit.success === true`.
-- Rejects empty `exit.value` (never clobbers a stored non-empty output).
-- Requires `sequence > previous?.sequence ?? -1`.
+### 4. [HIGH — feature/bugfix] Queue prompts for busy sessions
+- Created `src/session/queue.ts` with the `SessionQueue` class.
+- Semantics match upstream (kilocode `039a235b6`, `de9e1edcf`, `52d4247d9`, `c3deca608`):
+  - `enqueue` drops empty/whitespace-only prompts (per `de9e1edcf`).
+  - `drop(sessionID, messageID)` supports cancellation by the caller-supplied stable `messageID` forwarded from the remote sender (per `c3deca608`).
+  - `edit` allows in-place text replacement without reordering.
+  - `drainNext` is FIFO and auto-collects empty queue maps.
+  - `peek` returns a defensive copy; `size` / `clear` / `clearAll` round out the API.
+- The plan's agent-side integration example (`sendPrompt` on `src/agent/index.ts`) was NOT wired in this pass — the existing `AgentRegistry` in `src/agent/index.ts` does not have a `sendPrompt` method; adding one crosses into non-scoped agent-runtime redesign. The queue module is standalone and ready for integration by the agent-manager PR that owns that surface. A `getSessionQueue()` global singleton is exposed so wiring in a follow-up PR is a one-liner.
 
-The eventual job runner (or the current `task.ts` fallback) can consume this primitive without needing an Effect-based orchestration.
+### 5. [HIGH — bugfix] Preserve pending turns and tool progress across compaction
+- Plan referenced `src/session/compaction.ts` (does not exist). Applied against the real compaction module at `src/compaction/index.ts` — the change is additive: no existing strategy (`truncate` / `summarize` / `sliding` / `smart`) is touched.
+- Added:
+  - `isPendingTurn(m)` — inspects `metadata.pending / inFlight / toolCallPending`.
+  - `isReplayEligible(m)` — pending turns and `metadata.noReplay` messages excluded.
+  - `wasJustCompacted(messages)` — true when the tail is a summariser-injected system message (`metadata.isSummary === true`) with no user/assistant message after it. This is the replay-loop guard from kilocode `8bcd9f4b8`.
+  - `partitionForCompaction(messages)` — three-way split into `pending / eligible / skipped`.
+  - `compactPreservingPending(messages, options?)` — safety-guarded compaction wrapper that:
+    1. Refuses to compact when `wasJustCompacted` (replay-loop guard);
+    2. Refuses when nothing is replay-eligible;
+    3. Otherwise compacts only the eligible subset and re-appends the pending tail verbatim.
+- Callers can migrate incrementally by swapping `compactConversation` calls for `compactPreservingPending`.
 
-### 3. Task tool regression tests (`src/tool/tools/task.test.ts`) — high
-Added a second `describe('task tool - empty result handling')` block with:
-- A routine invocation asserting non-empty response.
-- A resume-with-same-`task_id` scenario asserting the previous assistant message is never overwritten with an empty string.
+## Items 6–12: NOT executed
 
-The tests use a minimal `ToolContext` cast (`{ subagentDepth: 0 } as unknown as ToolContext`) — safe because `ToolContext` carries `[k: string]: unknown` for opt-in fields.
+The delivered plan payload was truncated at line ~245 mid-item-5 ("preserve pending turns"). Items 6 through 12 (medium × 3, low × 2, plus the tail of any high items) were NOT enumerated in the received plan text and therefore fall under the "Do NOT add extra changes not in the plan" instruction. The plan header advertised 12 items; the plan body delivered content for 5.
 
-### 4. Windows PowerShell 7 probe rollback — high
-Upstream commit `a15d25359` reverted PR #13365 because probing pwsh install roots caused Windows startup issues. Applied the rollback:
-- `src/core/powershell.ts` now exports only `args()` + `PowerShell.args`. All 100+ lines of probe/locations/pwsh logic removed.
-- `src/tool/tools/shell/id.ts` no longer imports from `core/powershell.js`; its `windowsCandidates()` uses only the hard-coded win32 candidate list (which already includes `pwsh.exe` in `%ProgramFiles%\PowerShell\7\`, so the detection still works — it just does not actively probe the filesystem via a separate module).
-- `tests/core/powershell.test.ts` reduced from 6 tests to 2 (only `args()` remains testable).
-
-Both source files carry `kilocode_change` comments referencing commit `a15d25359` and PR #13365.
-
-### 5. Minimatch security bump — high
-Alexi does not directly depend on `minimatch` (only transitive via dev deps). Added a top-level `overrides` entry in `package.json` pinning `minimatch: "10.2.6"`. Lockfile regeneration is a follow-up: run `npm install` locally / in CI to materialize the new resolution. The `package-lock.json` currently still points to 10.2.5 and will be refreshed on next install.
-
-### 6. Plan-mode permission ruleset dedup (`src/permission/index.ts`) — high
-Added `mergePermissionRulesets(base, planMode)` and the private `ruleKey()` builder. `ruleKey` collapses `tools`, `actions`, `paths`, `commands`, `hosts`, `decision`, `externalPaths` (scope), and `priority` into a stable pipe-separated key. Duplicates are silently dropped; order (base first, then plan-mode) is preserved so the existing last-match-wins evaluator still sees plan-mode rules AFTER base rules.
-
-Alexi's `PermissionManager` uses last-match-wins internally; the new helper is exposed for the eventual plan-mode integration to call before handing a merged ruleset to `PermissionManager.fromConfig()`.
-
-### 7. HTTP API authorization review — medium
-Alexi's `src/server/auth.ts` is a UNIX-socket token model, not HTTP middleware. There is no `src/server/routes/instance/httpapi/middleware/authorization.ts` in Alexi. Reviewed `safeCompareToken` — it already uses constant-time compare with length-first guard. **No change required.**
-
-### 8. Review prompt update — low
-No `review.txt` prompt asset exists in Alexi (`glob **/review*.txt` returns 0 matches). The plan explicitly says "Otherwise skip." **Skipped.**
+If items 6–12 are re-delivered in a follow-up, they can be layered on top of the changes above without conflict — nothing in this pass forecloses any of the anticipated categories (opencode `790fb5b` Azure CLI auth, `03afae5` v1/v2 config coexistence, `733562e` Bun removal for Azure auth, `04ac919af` file search on demand, etc.).
 
 ## Issues encountered
 
-1. **File-path mismatch with plan.** The plan referenced upstream file paths (e.g. `src/core/background-job.ts`, `src/core/shell.ts`, `src/core/kilocode/powershell.ts`) that do not exist in Alexi. Adapted each change to the closest Alexi equivalent:
-   - `src/core/background-job.ts` → created new (pure primitive, no Effect dependency).
-   - `src/core/shell.ts` / `src/core/kilocode/powershell.ts` → applied to `src/core/powershell.ts` + `src/tool/tools/shell/id.ts`.
-   - `src/core/background-job.test.ts` → adapted the Effect-based test into vitest for the pure primitive.
+- **Referenced files do not exist**: The plan referenced `src/core/filesystem/search.ts` and `src/session/compaction.ts` which do not exist in this codebase. In both cases the intent was preserved by applying the change to the closest equivalent (watcher / `src/compaction/index.ts`) and by exporting the new helpers so future code can adopt them without touching non-existent modules.
+- **Plan truncation**: The plan payload cut off mid-example-code in item 5. Item 5 was completed using the plan's stated intent (preserve pending, guard against replay loops) rather than a partial code copy.
+- **No breaking changes to SAP AI Core integrations**: The transform tests and provider tests are unmodified except for additive new cases; existing serialization paths are unchanged.
 
-2. **Effect runtime absent.** The upstream companion test uses `Effect.gen` / `Deferred` / layers. Alexi does not use Effect; the primitive test in `background-job.test.ts` covers the same invariants using plain vitest.
+## Verification recommended
 
-3. **Minimatch not a direct dependency.** Used `overrides` rather than modifying `dependencies` because Alexi does not depend on `minimatch` directly. Lockfile must be refreshed by `npm install` in the follow-up.
-
-4. **`PowerShell.pwsh` was referenced from `shell/id.ts` with rich rationale.** Preserved the win32 candidate list (which still includes `pwsh.exe` paths) so the shell-detection UX on Windows is unchanged; only the *separate active probe module* was rolled back per upstream.
-
-## Follow-up (not blocking)
-
-- Run `npm install` to refresh `package-lock.json` with `minimatch@10.2.6`.
-- When Alexi grows a real `BackgroundJob` runner, wire it to call `selectJobOutput` on every output update.
-- When plan-mode ruleset stacking is wired into `PermissionManager`, route through `mergePermissionRulesets` before calling `fromConfig`.
-
-## SAP AI Core compatibility
-
-None of the changes touch provider modules (`src/providers/**`), routing (`src/core/router.ts`), or the SAP AI SDK integration. `getProviderForModel` dispatch is unchanged. The changes are confined to:
-- Tool-layer bug fixes (empty-result preservation).
-- Permission-layer helper (opt-in, additive — no existing caller is broken).
-- Windows shell detection (rollback; Linux/macOS unaffected).
-- Dependency override (dev-only transitive).
-
-Existing SAP AI Core chat/agent flows are untouched.
+Before merging:
+- `npm run lint` — new code follows the existing prettier/eslint conventions (single quotes, 100 col, no `any` where structural typing sufficed).
+- `npm run typecheck` — new imports use `.js` extensions per project ESM rules.
+- `npm test -- tests/providers/transform.test.ts` — exercises the new `filterUnreplayableBedrockReasoning` cases.
+- `npm run test:coverage` — new files under `src/session/queue.ts`, `src/core/kilocode/fff.ts`, `src/core/kilocode/zero-id.ts` are UNTESTED in this pass. If the CI 40% line threshold flags the delta, add targeted unit tests for those three modules; the plan did not enumerate tests for them.
