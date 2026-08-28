@@ -30,12 +30,8 @@ describe('plan-mode permission stacking', () => {
   });
 
   it('keeps distinct rules that only differ in decision', () => {
-    const base: PermissionRule[] = [
-      { tools: ['edit'], decision: 'ask', priority: 10 },
-    ];
-    const planMode: PermissionRule[] = [
-      { tools: ['edit'], decision: 'deny', priority: 10 },
-    ];
+    const base: PermissionRule[] = [{ tools: ['edit'], decision: 'ask', priority: 10 }];
+    const planMode: PermissionRule[] = [{ tools: ['edit'], decision: 'deny', priority: 10 }];
     const merged = mergePermissionRulesets(base, planMode);
     expect(merged).toHaveLength(2);
     // Base rule stays first — order matters for last-match-wins evaluation.
@@ -44,12 +40,8 @@ describe('plan-mode permission stacking', () => {
   });
 
   it('keeps distinct rules that differ in tool selector', () => {
-    const base: PermissionRule[] = [
-      { tools: ['edit'], decision: 'ask', priority: 10 },
-    ];
-    const planMode: PermissionRule[] = [
-      { tools: ['write'], decision: 'ask', priority: 10 },
-    ];
+    const base: PermissionRule[] = [{ tools: ['edit'], decision: 'ask', priority: 10 }];
+    const planMode: PermissionRule[] = [{ tools: ['write'], decision: 'ask', priority: 10 }];
     expect(mergePermissionRulesets(base, planMode)).toHaveLength(2);
   });
 
@@ -69,12 +61,8 @@ describe('plan-mode permission stacking', () => {
   });
 
   it('is order-preserving: base rules come before plan-mode-only rules', () => {
-    const base: PermissionRule[] = [
-      { tools: ['read'], decision: 'allow', priority: 0 },
-    ];
-    const planMode: PermissionRule[] = [
-      { tools: ['write'], decision: 'deny', priority: 100 },
-    ];
+    const base: PermissionRule[] = [{ tools: ['read'], decision: 'allow', priority: 0 }];
+    const planMode: PermissionRule[] = [{ tools: ['write'], decision: 'deny', priority: 100 }];
     const merged = mergePermissionRulesets(base, planMode);
     expect(merged[0].tools).toEqual(['read']);
     expect(merged[1].tools).toEqual(['write']);

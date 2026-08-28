@@ -78,9 +78,7 @@ describe('task tool - empty result handling', () => {
   // most of the fields, so a partial object is enough. Cast is scoped to
   // this test file so any future ToolContext field addition surfaces as
   // a type error and forces a review.
-  const ctx = { subagentDepth: 0 } as unknown as Parameters<
-    typeof taskTool.execute
-  >[1];
+  const ctx = { subagentDepth: 0 } as unknown as Parameters<typeof taskTool.execute>[1];
 
   it('returns a non-empty response for a routine invocation', async () => {
     const result = await taskTool.execute(
@@ -93,10 +91,7 @@ describe('task tool - empty result handling', () => {
   });
 
   it('preserves prior non-empty result when a resumed run adds no new content', async () => {
-    const first = await taskTool.execute(
-      { description: 'first', prompt: 'first prompt' },
-      ctx
-    );
+    const first = await taskTool.execute({ description: 'first', prompt: 'first prompt' }, ctx);
     expect(first.success).toBe(true);
     const taskId = first.data?.taskId as string;
     expect(first.data?.response ?? '').not.toBe('');
@@ -117,9 +112,7 @@ describe('task tool - empty result handling', () => {
     );
     expect(second.success).toBe(true);
     const finalMessages = store.get(taskId)?.messages ?? [];
-    const lastAssistant = [...finalMessages]
-      .reverse()
-      .find((m) => m.role === 'assistant');
+    const lastAssistant = [...finalMessages].reverse().find((m) => m.role === 'assistant');
     expect(lastAssistant?.content ?? '').not.toBe('');
   });
 });
