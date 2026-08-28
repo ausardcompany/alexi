@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import os from 'os';
 import matter from 'gray-matter';
 import { readUtf8FileSyncStripBom } from '../utils/frontmatter.js';
+import { parseFileMentions, quoteFilePath } from '../utils/file-mention.js';
 
 // ============ Schema Definitions ============
 
@@ -118,50 +119,64 @@ async function processTemplate(template: string, context: TemplateContext): Prom
   // Process $DATE - current date
   result = result.replace(/\$DATE/g, new Date().toISOString().split('T')[0]);
 
+  // Process @$N BEFORE plain $N so the file-reference variant is
+  // detected first. If the resolved argument contains whitespace or
+  // shell-special characters, wrap it in double quotes so the
+  // subsequent mention parser treats it as a single token
+  // (issue #1547: paths with spaces).
+  result = result.replace(/@\$(\d+)/g, (_match, index) => {
+    const argIndex = parseInt(index, 10) - 1;
+    const filePath = context.args[argIndex];
+    if (!filePath) {
+      return '';
+    }
+    if (/[\s"'`$()[\]{}<>|&;*?!]/.test(filePath)) {
+      // Escape embedded double quotes so the wrapping remains parseable.
+      const escaped = filePath.replace(/"/g, '\\"');
+      return `@"${escaped}"`;
+    }
+    return `@${filePath}`;
+  });
+
   // Process positional arguments $1, $2, etc.
-  result = result.replace(/\$(\d+)/g, (match, index) => {
+  result = result.replace(/\$(\d+)/g, (_match, index) => {
     const argIndex = parseInt(index, 10) - 1;
     return context.args[argIndex] ?? '';
   });
 
-  // Process file references @file or @$1
-  // First, expand @$N patterns to @filepath
-  result = result.replace(/@\$(\d+)/g, (match, index) => {
-    const argIndex = parseInt(index, 10) - 1;
-    const filePath = context.args[argIndex];
-    if (!filePath) return '';
-    return `@${filePath}`;
-  });
-
-  // Then, expand @filepath to file contents
-  const fileRefPattern = /@([^\s]+)/g;
-  const fileMatches = [...result.matchAll(fileRefPattern)];
-
-  for (const match of fileMatches) {
-    const [fullMatch, filePath] = match;
-    // Skip if it looks like an email or already processed
-    if (filePath.includes('@') || filePath.startsWith('$')) continue;
+  // Then, expand @filepath to file contents. Uses the shared mention
+  // parser so quoted forms (`@"path with spaces"`, `@'draft (2).md'`) are
+  // recognised alongside the classic bareword form. Replacements are
+  // applied right-to-left on offsets so an earlier expansion does not
+  // shift the index of a later mention.
+  const mentions = parseFileMentions(result);
+  for (let m = mentions.length - 1; m >= 0; m--) {
+    const { fullMatch, path: filePath, index } = mentions[m];
 
     const resolvedPath = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(context.workdir, filePath);
 
+    let replacement: string;
     try {
       if (fs.existsSync(resolvedPath)) {
         const content = fs.readFileSync(resolvedPath, 'utf-8');
         const extension = path.extname(resolvedPath).slice(1) || 'txt';
         const fileName = path.basename(resolvedPath);
-
-        // Wrap in code block with file info
-        const replacement = `\`\`\`${extension}\n// File: ${fileName}\n${content}\n\`\`\``;
-        result = result.replace(fullMatch, replacement);
+        // Quote the filename in the injected header so downstream tools
+        // (bash, shell one-liners the LLM may derive from this hint) see
+        // a single token even when the file contains spaces or shell
+        // metacharacters.
+        const displayName = quoteFilePath(fileName);
+        replacement = `\`\`\`${extension}\n// File: ${displayName}\n${content}\n\`\`\``;
       } else {
-        // Leave a note that file was not found
-        result = result.replace(fullMatch, `[File not found: ${filePath}]`);
+        replacement = `[File not found: ${filePath}]`;
       }
     } catch {
-      result = result.replace(fullMatch, `[Error reading file: ${filePath}]`);
+      replacement = `[Error reading file: ${filePath}]`;
     }
+
+    result = result.slice(0, index) + replacement + result.slice(index + fullMatch.length);
   }
 
   // Process shell injection !`command`
