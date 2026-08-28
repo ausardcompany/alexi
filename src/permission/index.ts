@@ -177,6 +177,59 @@ export const PermissionRuleSchema = z
 
 export type PermissionRule = z.infer<typeof PermissionRuleSchema>;
 
+// ============ Ruleset merge / dedup (plan-mode stacking) ============
+
+/**
+ * Build a stable identity key for a `PermissionRule` used only for
+ * deduplication when stacking base rules with plan-mode rules. We collapse
+ * the fields the schema actually matches on into a single string so two
+ * rules that would evaluate identically compare equal for dedup purposes.
+ *
+ * kilocode_change - ports upstream fix #13219 (commit `62998965e`). Prior
+ * to that fix, toggling plan mode on/off would append the plan-mode
+ * ruleset again on top of the base each time, silently duplicating every
+ * rule and causing extra permission prompts.
+ */
+function ruleKey(rule: PermissionRule): string {
+  const tools = (rule.tools ?? ['*']).join(',');
+  const actions = (rule.actions ?? []).join(',');
+  const paths = (rule.paths ?? []).join(',');
+  const commands = (rule.commands ?? []).join(',');
+  const hosts = (rule.hosts ?? []).join(',');
+  const scope = rule.externalPaths === undefined ? '*' : String(rule.externalPaths);
+  return [tools, actions, paths, commands, hosts, rule.decision, scope, rule.priority ?? 0].join(
+    '|'
+  );
+}
+
+/**
+ * Merge a base ruleset with a plan-mode ruleset, dropping any duplicate
+ * rules. Order is preserved (base rules come first, then plan-mode rules
+ * that do not already appear in `base`), so the last-match-wins evaluator
+ * still sees plan-mode rules AFTER base rules when both exist.
+ *
+ * kilocode_change - upstream fix #13219: without dedup, repeatedly
+ * toggling plan mode would stack the same rules on top of themselves,
+ * producing spurious `ask` prompts (a duplicate `ask` rule at a higher
+ * effective priority overrides an earlier `allow`).
+ */
+export function mergePermissionRulesets(
+  base: PermissionRule[],
+  planMode: PermissionRule[]
+): PermissionRule[] {
+  const seen = new Set<string>();
+  const merged: PermissionRule[] = [];
+  for (const rule of [...base, ...planMode]) {
+    const key = ruleKey(rule);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(rule);
+  }
+  return merged;
+}
+
 // ============ New Permission Events ============
 
 export const DoomLoopDetected = defineEvent(

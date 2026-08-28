@@ -1,69 +1,94 @@
-# Changes Summary — Upstream Sync 2026-08-26
+# Update Plan Execution — Changes Summary
 
-Applied `.github/reports/update-plan.md` (kilocode `193a0b5e7..24b1fa1fc` + opencode `2f36ffe..13c2759`) against Alexi.
+Date: 2026-08-27
+Plan basis: kilocode `c03a20394..24b1fa1fc` (136 commits) + opencode `05ea507..13c2759` (18 commits).
 
 ## Files modified
 
-| File | Change |
-| --- | --- |
-| `src/tool/tools/webfetch.ts` | **critical** — Bun 1.4 stream cancellation guard |
-| `src/tool/tools/agent-manager.ts` | **high** — added optional `config.provider` field + validation |
-| `src/tool/tools/agent-manager.txt` | **medium** — description text updated for `provider` |
-| `src/tool/tools/agent-manager-models.ts` | **medium** — new stub (hint export for future paired tool) |
-| `src/tool/tools/agent-manager-models.txt` | **medium** — new stub (doc text for future paired tool) |
+| File | Type | Change |
+|---|---|---|
+| `src/tool/tools/task.ts` | modified | Preserve last non-empty subagent answer when a resumed/extended run yields empty (kilocode #13469 / #13493). |
+| `src/tool/tools/task.test.ts` | modified | +2 regression tests for the empty-result preservation contract. |
+| `src/core/background-job.ts` | **new** | `selectJobOutput` pure primitive implementing the "empty never clobbers non-empty" rule from upstream `packages/core/src/background-job.ts`. |
+| `src/core/background-job.test.ts` | **new** | 5 unit tests for `selectJobOutput`, including the exact `#13469` regression scenario. |
+| `src/core/powershell.ts` | rewritten | **Rollback** of kilocode PR #13365 probing surface. Now exports only `args()` and `PowerShell.args`. Removed `locations`, `probe`, `pwsh`. |
+| `src/tool/tools/shell/id.ts` | modified | Dropped `PowerShell.pwsh()` / `PowerShell.probe()` calls from `windowsCandidates()`. Removed import from `core/powershell.js`. Hard-coded candidate list only. |
+| `tests/core/powershell.test.ts` | rewritten | Reduced to the `args()`-only surface; removed `locations`/`probe`/`pwsh` tests that no longer apply. |
+| `package.json` | modified | Added top-level `overrides: { "minimatch": "10.2.6" }` to pin the transitive dev-dep past the dependabot advisory. |
+| `src/permission/index.ts` | modified | Added `mergePermissionRulesets(base, planMode)` + internal `ruleKey()` helper implementing kilocode #13219 dedup contract. |
+| `src/permission/__tests__/plan-mode-stacking.test.ts` | **new** | 5 regression tests: identical-rule dedup, distinct-decision preservation, distinct-tool preservation, 5x toggle idempotency, and order preservation. |
 
-## Per-change detail
+Total: 7 modified + 3 new files.
 
-### 1. `src/tool/tools/webfetch.ts` — Bun 1.4 SSE/stream cancel rejection (critical, bugfix)
+## Change-by-change detail
 
-Alexi does not have a `wrapSSE` helper in `aisdk.ts` (upstream's file), but the same Bun 1.4 behaviour — `ReadableStreamDefaultReader.cancel()` rejecting with the abort reason — affects the one bounded-body reader in `collectBoundedResponseBody`. Guarded the call so an oversize-response error can no longer be shadowed by an unhandled promise rejection under Bun 1.4+.
+### 1. Task tool empty-result preservation (`src/tool/tools/task.ts`) — critical
+Before returning the placeholder response, the tool now checks whether the response is non-empty. If empty, it falls back to the last non-empty assistant message in the transcript, or to a previously stored `result` string. This mirrors the upstream `#13493` fix.
 
-```diff
--        await reader.cancel();
-+        // Bun 1.4 rejects reader.cancel() with the abort reason ...
-+        await reader.cancel().catch(() => undefined);
-```
+Marked with `kilocode_change` comment referencing PRs #13469 and #13493.
 
-Verified there are no other `reader.cancel(` call sites in `src/**` (single grep hit).
+### 2. Background job output selector (`src/core/background-job.ts`) — critical
+Alexi does not yet have a full `BackgroundJob.Service` (upstream uses Effect). Rather than force-porting Effect into Alexi's provider-agnostic runtime, I extracted the pure decision primitive `selectJobOutput(previous, exit, sequence)`. It:
+- Requires `exit.success === true`.
+- Rejects empty `exit.value` (never clobbers a stored non-empty output).
+- Requires `sequence > previous?.sequence ?? -1`.
 
-### 2. `src/tool/tools/agent-manager.ts` — optional `provider` field (high, feature)
+The eventual job runner (or the current `task.ts` fallback) can consume this primitive without needing an Effect-based orchestration.
 
-Upstream's opencode `agent-manager` tool is Effect-Schema `Task.Struct`-based with a `select()` resolver. Alexi's tool is a Zod-based CRUD surface (`action: 'create' | 'list' | 'stop' | 'status' | 'answer'`) with a `config: { mode, model, excludeLocalState }` object. The closest architectural fit is adding `provider` to that config object — this preserves the *intent* of the upstream change (let the orchestrator pin a specific provider ID for the same model name) inside Alexi's existing shape, without introducing an Effect-Schema dependency.
+### 3. Task tool regression tests (`src/tool/tools/task.test.ts`) — high
+Added a second `describe('task tool - empty result handling')` block with:
+- A routine invocation asserting non-empty response.
+- A resume-with-same-`task_id` scenario asserting the previous assistant message is never overwritten with an empty string.
 
-- Added `config.provider: z.string().nullable().optional()` with the description text from the plan (`'anthropic', 'sap-ai-core'` examples).
-- Mirrored upstream's `"A task provider requires a model"` filter as a runtime guard in the `create` handler: returns `success: false` with `error: 'config.provider requires config.model to be set'` when `provider` is set but `model` is not. This is the direct Zod-side analog of the plan's `Schema.makeFilter` invariant.
-- Updated the tool's `description` to mention `provider` so LLM callers emit the new field.
+The tests use a minimal `ToolContext` cast (`{ subagentDepth: 0 } as unknown as ToolContext`) — safe because `ToolContext` carries `[k: string]: unknown` for opt-in fields.
 
-**SAP AI Core compatibility**: `provider` is `.nullable().optional()`, so any existing SAP AI Core strict-mode tool-call payload (which may emit `null` for omitted fields) continues to validate unchanged. No change to the tool's `permission.action` (still `admin`) or to `defineTool`'s signature.
+### 4. Windows PowerShell 7 probe rollback — high
+Upstream commit `a15d25359` reverted PR #13365 because probing pwsh install roots caused Windows startup issues. Applied the rollback:
+- `src/core/powershell.ts` now exports only `args()` + `PowerShell.args`. All 100+ lines of probe/locations/pwsh logic removed.
+- `src/tool/tools/shell/id.ts` no longer imports from `core/powershell.js`; its `windowsCandidates()` uses only the hard-coded win32 candidate list (which already includes `pwsh.exe` in `%ProgramFiles%\PowerShell\7\`, so the detection still works — it just does not actively probe the filesystem via a separate module).
+- `tests/core/powershell.test.ts` reduced from 6 tests to 2 (only `args()` remains testable).
 
-### 3. `src/tool/tools/agent-manager.txt` — doc text (medium, feature/docs)
+Both source files carry `kilocode_change` comments referencing commit `a15d25359` and PR #13365.
 
-Rewrote to include `provider` under `create` action config, matching the wording from the plan ("Specify `provider` with `model` to force a model-name match to one provider ID... A `provider` without a `model` is rejected. Never choose a different model merely because work is being fanned out.").
+### 5. Minimatch security bump — high
+Alexi does not directly depend on `minimatch` (only transitive via dev deps). Added a top-level `overrides` entry in `package.json` pinning `minimatch: "10.2.6"`. Lockfile regeneration is a follow-up: run `npm install` locally / in CI to materialize the new resolution. The `package-lock.json` currently still points to 10.2.5 and will be refreshed on next install.
 
-### 4 & 5. `src/tool/tools/agent-manager-models.{ts,txt}` — companion tool stubs (medium, feature/docs)
+### 6. Plan-mode permission ruleset dedup (`src/permission/index.ts`) — high
+Added `mergePermissionRulesets(base, planMode)` and the private `ruleKey()` builder. `ruleKey` collapses `tools`, `actions`, `paths`, `commands`, `hosts`, `decision`, `externalPaths` (scope), and `priority` into a stable pipe-separated key. Duplicates are silently dropped; order (base first, then plan-mode) is preserved so the existing last-match-wins evaluator still sees plan-mode rules AFTER base rules.
 
-Alexi has **no** `agent-manager-models` tool today (no model catalog surface). The plan's textual `hint` and doc content for that tool are still useful landing points for the future — they document the paired-tool contract and stay consistent with the new `provider` wording in `agent-manager`. Created:
+Alexi's `PermissionManager` uses last-match-wins internally; the new helper is exposed for the eventual plan-mode integration to call before handing a merged ruleset to `PermissionManager.fromConfig()`.
 
-- `agent-manager-models.ts` — exports `AGENT_MANAGER_MODELS_HINT` string; does **not** register a tool (registration would require a model catalog + tests, beyond this sync's scope).
-- `agent-manager-models.txt` — text description ready for use when the tool is registered.
+### 7. HTTP API authorization review — medium
+Alexi's `src/server/auth.ts` is a UNIX-socket token model, not HTTP middleware. There is no `src/server/routes/instance/httpapi/middleware/authorization.ts` in Alexi. Reviewed `safeCompareToken` — it already uses constant-time compare with length-first guard. **No change required.**
 
-Both files are import-free (aside from the .ts having no imports) so they cannot break lint / typecheck / build. They are not wired into `src/tool/registry.ts`.
-
-## Skipped items
-
-- **Plan item #5 sub-scope** — "wire `agent-manager-models` tool into registry" was not part of the plan's literal instructions; the plan only described description text updates. Full tool implementation (row generation, provider grouping, tests) is deferred and should be tracked as its own feature spec under `specs/`.
-- **Optional Drizzle DB migration recovery** — plan item labelled "only if Alexi uses opencode's DB migration layer". Alexi does not use Drizzle (no matches for `drizzle` in `src/**`). Nothing to do.
+### 8. Review prompt update — low
+No `review.txt` prompt asset exists in Alexi (`glob **/review*.txt` returns 0 matches). The plan explicitly says "Otherwise skip." **Skipped.**
 
 ## Issues encountered
 
-- Upstream `agent-manager` tool is a fundamentally different shape (Effect Schema `Task.Struct` fan-out) from Alexi's (Zod CRUD). The plan's literal `Schema.makeFilter` / `select()` diffs do not apply. Adapted the *intent* — an optional provider constraint that requires an accompanying model — into Alexi's Zod schema + the `create` handler.
-- Alexi's `src/core/agent-manager/` is a 4-line placeholder (`orchestrateAgentManagerSessions()` returns `void`). There is no live model-catalog `select()` function to update. The `create` action returns a placeholder `session-${Date.now()}` id, so the guard we added is currently the only user-visible effect of `provider` — this is faithful to the current "placeholder" state of the tool.
+1. **File-path mismatch with plan.** The plan referenced upstream file paths (e.g. `src/core/background-job.ts`, `src/core/shell.ts`, `src/core/kilocode/powershell.ts`) that do not exist in Alexi. Adapted each change to the closest Alexi equivalent:
+   - `src/core/background-job.ts` → created new (pure primitive, no Effect dependency).
+   - `src/core/shell.ts` / `src/core/kilocode/powershell.ts` → applied to `src/core/powershell.ts` + `src/tool/tools/shell/id.ts`.
+   - `src/core/background-job.test.ts` → adapted the Effect-based test into vitest for the pure primitive.
 
-## Verification checklist
+2. **Effect runtime absent.** The upstream companion test uses `Effect.gen` / `Deferred` / layers. Alexi does not use Effect; the primitive test in `background-job.test.ts` covers the same invariants using plain vitest.
 
-- [x] Only one `reader.cancel(` call site exists in `src/**` — patched.
-- [x] No existing tests assert on the `agent-manager` tool description string or `config` schema shape (grep verified across `tests/**` and `src/**/*.test.ts`).
-- [x] New `provider` field is `.nullable().optional()` — no breakage for existing callers or strict SAP AI Core payloads.
-- [x] Tool `permission.action` unchanged (`admin`); no permission surface change.
-- [x] No new runtime dependencies added.
-- [x] ESLint `no-unused-vars` respected (removed intermediate `modelHint` local).
+3. **Minimatch not a direct dependency.** Used `overrides` rather than modifying `dependencies` because Alexi does not depend on `minimatch` directly. Lockfile must be refreshed by `npm install` in the follow-up.
+
+4. **`PowerShell.pwsh` was referenced from `shell/id.ts` with rich rationale.** Preserved the win32 candidate list (which still includes `pwsh.exe` paths) so the shell-detection UX on Windows is unchanged; only the *separate active probe module* was rolled back per upstream.
+
+## Follow-up (not blocking)
+
+- Run `npm install` to refresh `package-lock.json` with `minimatch@10.2.6`.
+- When Alexi grows a real `BackgroundJob` runner, wire it to call `selectJobOutput` on every output update.
+- When plan-mode ruleset stacking is wired into `PermissionManager`, route through `mergePermissionRulesets` before calling `fromConfig`.
+
+## SAP AI Core compatibility
+
+None of the changes touch provider modules (`src/providers/**`), routing (`src/core/router.ts`), or the SAP AI SDK integration. `getProviderForModel` dispatch is unchanged. The changes are confined to:
+- Tool-layer bug fixes (empty-result preservation).
+- Permission-layer helper (opt-in, additive — no existing caller is broken).
+- Windows shell detection (rollback; Linux/macOS unaffected).
+- Dependency override (dev-only transitive).
+
+Existing SAP AI Core chat/agent flows are untouched.

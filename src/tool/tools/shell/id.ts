@@ -19,7 +19,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { PowerShell } from '../../../core/powershell.js';
+// kilocode_change - rollback of PR #13365: no longer probe pwsh install roots.
+// The upstream revert (commit `a15d25359`) removed the `PowerShell.pwsh()` /
+// `PowerShell.probe()` helpers because their filesystem probes caused
+// Windows startup regressions. Legacy candidate paths below still list
+// the well-known install locations, but we no longer actively resolve
+// pwsh via a separate probe.
 
 export type ShellType = 'bash' | 'zsh' | 'fish' | 'powershell' | 'cmd' | 'sh' | 'unknown';
 
@@ -80,18 +85,13 @@ function windowsCandidates(): string[] {
   const localAppData = process.env['LOCALAPPDATA'] || winJoin(os.homedir(), 'AppData', 'Local');
   const systemRoot = process.env['SystemRoot'] || 'C:\\Windows';
 
-  // Prefer PowerShell 7 (`pwsh.exe`) over legacy 5.1 (`powershell.exe`)
-  // per kilocode `98ea338c8`. `PowerShell.pwsh()` first checks PATH and
-  // then probes the known install roots, so pwsh installed off PATH
-  // still wins over the always-present legacy shell. Any hits are
-  // prepended to the hard-coded win32 candidate list below so behaviour
-  // matches the previous version when pwsh is not installed.
-  const pwshHits = [PowerShell.pwsh(), ...PowerShell.probe()].filter((item): item is string =>
-    Boolean(item)
-  );
+  // kilocode_change - rollback of PR #13365 (support-configurable-powershell-shell):
+  // the previous version prepended `PowerShell.pwsh()` + `PowerShell.probe()`
+  // hits to actively resolve pwsh 7 install roots. Upstream reverted the
+  // probing (commit `a15d25359`) because it caused Windows startup issues.
+  // We now rely solely on the hard-coded win32 candidate list below.
 
   return [
-    ...pwshHits,
     winJoin(programFiles, 'PowerShell', '7', 'pwsh.exe'),
     winJoin(programFilesX86, 'PowerShell', '7', 'pwsh.exe'),
     winJoin(localAppData, 'Microsoft', 'WindowsApps', 'pwsh.exe'),

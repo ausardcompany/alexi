@@ -1,6 +1,6 @@
 {
   "name": "alexi",
-  "version": "1.22.2",
+  "version": "1.22.3",
   "type": "module",
   "description": "Alexi - Intelligent LLM orchestrator with multi-provider support and auto-routing",
   "main": "dist/index.js",
@@ -123,6 +123,9 @@
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "overrides": {
+    "minimatch": "10.2.6"
   },
   "keywords": [
     "llm",
