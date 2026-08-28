@@ -874,3 +874,198 @@ export async function checkAndCompact(
 
   return { messages: compactedMessages, wasCompacted: true };
 }
+
+// ============================================================================
+// Pending-turn & tool-progress preservation (kilocode 76ea62098, b9f2a5972,
+// 831530265, 8bcd9f4b8, ae00c228d, 34d70fe6b)
+// ============================================================================
+//
+// Compaction MUST NOT drop:
+//   1. A user turn that has been submitted but whose assistant reply has
+//      not yet started ("pending turn"). Losing it means the user's
+//      message vanishes and the assistant replies to stale context.
+//   2. An assistant message that has issued a tool call whose result has
+//      not yet arrived ("in-flight tool call"). Provider APIs require the
+//      tool-call → tool-result pairing to be intact; dropping one half
+//      causes a schema error on the next request.
+//   3. A tool-progress marker for a long-running tool. Dropping progress
+//      causes the tool to appear stalled or restart from scratch.
+//
+// Compaction MUST ALSO guard against replay loops: if the newest message
+// is a `[CONVERSATION SUMMARY]` we just injected, do NOT immediately
+// re-compact — otherwise the summarizer summarises its own summary and
+// the session enters a loop consuming budget with no forward progress
+// (kilocode 8bcd9f4b8).
+//
+// These helpers are additive and side-effect-free: they inspect message
+// metadata and return booleans. Wire them into any compaction call site
+// that operates on live sessions (as opposed to fully-terminated
+// transcripts).
+
+/**
+ * Return true when a message represents an in-flight, not-yet-completed
+ * turn or tool call. Compaction MUST NOT drop these — losing them
+ * corrupts the conversation state (user message with no reply / tool
+ * call with no result / tool progress with no completion).
+ *
+ * Detection is metadata-driven so callers can mark their own messages
+ * without a schema change to `Message`:
+ *   - `metadata.pending === true`     — pending user turn
+ *   - `metadata.inFlight === true`    — in-flight tool call / progress
+ *   - `metadata.toolCallPending === true` — assistant awaiting tool result
+ */
+export function isPendingTurn(message: Message): boolean {
+  const md = message.metadata;
+  if (!md) {
+    return false;
+  }
+  return md.pending === true || md.inFlight === true || md.toolCallPending === true;
+}
+
+/**
+ * Return true when a message is safe to feed into the summariser. Pending
+ * turns and messages explicitly marked `metadata.noReplay === true`
+ * (e.g. a system message whose content is only meaningful in-context)
+ * are excluded. All other messages are eligible.
+ */
+export function isReplayEligible(message: Message): boolean {
+  if (isPendingTurn(message)) {
+    return false;
+  }
+  if (message.metadata?.noReplay === true) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Return true when the tail of the transcript is a compaction summary we
+ * just injected — a signal that the caller should NOT re-run compaction
+ * this turn to avoid a summary-of-summary replay loop (kilocode
+ * `8bcd9f4b8`).
+ *
+ * The check looks at the LAST system message (compaction summaries are
+ * injected as a system message with `metadata.isSummary === true`); if a
+ * user or assistant message has arrived since, the guard releases.
+ */
+export function wasJustCompacted(messages: Message[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'user' || m.role === 'assistant') {
+      return false;
+    }
+    if (m.role === 'system' && m.metadata?.isSummary === true) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Partition a message list into three disjoint buckets ahead of a
+ * compaction pass so callers can preserve the pending-and-in-flight
+ * subset verbatim:
+ *
+ *   - `pending`  — messages an in-flight turn / tool call depends on;
+ *                  MUST survive compaction untouched;
+ *   - `eligible` — messages safe to hand to the summariser;
+ *   - `skipped`  — messages that are neither pending nor replay-eligible
+ *                  (e.g. `noReplay` system notes); should be dropped from
+ *                  the summariser input but preserved in the final
+ *                  message list at the caller's discretion.
+ *
+ * The order of messages inside each bucket is preserved.
+ */
+export function partitionForCompaction(messages: Message[]): {
+  pending: Message[];
+  eligible: Message[];
+  skipped: Message[];
+} {
+  const pending: Message[] = [];
+  const eligible: Message[] = [];
+  const skipped: Message[] = [];
+  for (const m of messages) {
+    if (isPendingTurn(m)) {
+      pending.push(m);
+    } else if (isReplayEligible(m)) {
+      eligible.push(m);
+    } else {
+      skipped.push(m);
+    }
+  }
+  return { pending, eligible, skipped };
+}
+
+/**
+ * Safety-guarded compaction wrapper. Refuses to compact when:
+ *   1. `wasJustCompacted` returns true (replay-loop guard);
+ *   2. every message is a pending turn (nothing to summarise).
+ *
+ * Otherwise, invokes `compactConversation` on the *replay-eligible*
+ * subset and stitches the pending messages back onto the tail so the
+ * in-flight turn / tool call survives verbatim.
+ *
+ * Callers that own a session and want to compact defensively should
+ * prefer this helper over calling `compactConversation` directly.
+ */
+export async function compactPreservingPending(
+  messages: Message[],
+  options?: CompactionOptions
+): Promise<{ messages: Message[]; wasCompacted: boolean; skippedReason?: string }> {
+  if (wasJustCompacted(messages)) {
+    return {
+      messages,
+      wasCompacted: false,
+      skippedReason: 'just-compacted (replay-loop guard)',
+    };
+  }
+
+  const { pending, eligible } = partitionForCompaction(messages);
+
+  if (eligible.length === 0) {
+    return {
+      messages,
+      wasCompacted: false,
+      skippedReason: 'no replay-eligible messages',
+    };
+  }
+
+  const result = await compactConversation(eligible, options);
+  if (!result.success) {
+    return {
+      messages,
+      wasCompacted: false,
+      skippedReason: `compaction failed: ${result.error ?? 'unknown'}`,
+    };
+  }
+
+  // Rebuild the compacted list. The existing strategies return a
+  // CompactionResult but do NOT surface the final message array
+  // directly; we mirror the reconstruction that `checkAndCompact` uses
+  // so the pending tail can be re-appended after it.
+  const opts = options ?? { strategy: 'sliding' as const };
+  const preserveRecent = opts.preserveRecent ?? 4;
+  const preserveSystem = opts.preserveSystemPrompt !== false;
+
+  const systemMessages = preserveSystem ? eligible.filter((m) => m.role === 'system') : [];
+  const nonSystemMessages = eligible.filter((m) => m.role !== 'system');
+  const recentMessages = nonSystemMessages.slice(-preserveRecent);
+
+  const compacted: Message[] = result.summary
+    ? [
+        ...systemMessages,
+        {
+          role: 'system',
+          content: result.summary,
+          timestamp: Date.now(),
+          metadata: { isSummary: true },
+        },
+        ...recentMessages,
+      ]
+    : [...systemMessages, ...recentMessages];
+
+  return {
+    messages: [...compacted, ...pending],
+    wasCompacted: true,
+  };
+}

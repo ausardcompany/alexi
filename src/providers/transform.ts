@@ -7,6 +7,7 @@ interface Message {
   role: string;
   content: string;
   reasoning_content?: string;
+  parts?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 }
 
@@ -173,6 +174,99 @@ export function ensureDeepSeekReasoning(messages: Message[], model: string): Mes
       return { ...msg, reasoning_content: '' };
     }
     return msg;
+  });
+}
+
+// ============================================================================
+// Bedrock reasoning replay guard (opencode 517ee73)
+// ============================================================================
+//
+// AWS Bedrock (and any SAP AI Core deployment that ultimately routes to a
+// Bedrock endpoint — e.g. `aicore` proxying Anthropic-on-Bedrock) rejects
+// assistant messages whose reasoning parts are replayed WITHOUT the
+// `signature` that accompanied the original streaming response. If we
+// cache those reasoning parts and feed them back on the next turn, the
+// provider errors out with a schema violation.
+//
+// `filterUnreplayableBedrockReasoning` strips any reasoning part on an
+// assistant message that is missing its Bedrock `signature`. Non-Bedrock
+// providers pass through untouched — the reasoning parts are legal for
+// them (Anthropic native, OpenAI Responses, etc. either accept unsigned
+// reasoning or don't surface it at all).
+//
+// Detection is intentionally permissive: any `providerID` containing
+// `bedrock` OR `aicore` triggers the filter, so SAP AI Core's
+// `aicore-bedrock-*` deployment ids are covered without a per-model
+// allowlist.
+//
+// The transform NEVER mutates its input; it always returns a new array
+// with new message objects when filtering is needed. Callers wire this
+// in immediately before serialising the message list into the request
+// payload, and BEFORE caching the assistant turn for replay.
+
+/**
+ * Return true when the assistant reasoning part is "replayable" against
+ * Bedrock — i.e. it carries the `providerMetadata.bedrock.signature`
+ * that the original streaming response emitted. Parts without a signature
+ * cannot be replayed and MUST be dropped.
+ *
+ * Structural type: the caller passes anything shaped like a message part;
+ * we look only at `type === 'reasoning'` + `providerMetadata.bedrock.signature`.
+ */
+function hasBedrockReasoningSignature(part: Record<string, unknown>): boolean {
+  const meta = (part as { providerMetadata?: { bedrock?: { signature?: unknown } } })
+    .providerMetadata?.bedrock;
+  return typeof meta?.signature === 'string' && meta.signature.length > 0;
+}
+
+/**
+ * Strip unreplayable Bedrock reasoning parts from assistant messages so
+ * the cached message list is safe to feed back on the next turn.
+ *
+ * Rules:
+ *  - When `providerID` does NOT identify a Bedrock-shaped deployment
+ *    (no `bedrock` or `aicore` substring), the input array is returned
+ *    unchanged. Non-Bedrock providers do not have this replay
+ *    restriction and stripping their reasoning would lose useful context.
+ *  - On assistant messages, any part with `type: 'reasoning'` that
+ *    lacks a `providerMetadata.bedrock.signature` is removed. Parts of
+ *    other types (`text`, `tool-call`, `tool-result`, ...) pass through.
+ *  - Non-assistant messages pass through untouched.
+ *  - Messages that have no `parts` array (legacy `content`-only shape)
+ *    pass through untouched — nothing to filter.
+ *
+ * The function never mutates its input. When no part is stripped, the
+ * original message object is preserved by reference; when a part IS
+ * stripped, a new message object with a new `parts` array is emitted.
+ *
+ * @param messages - The message list about to be sent to / cached for the provider.
+ * @param providerID - The provider identifier from the routing config.
+ * @returns A message list safe for Bedrock replay.
+ */
+export function filterUnreplayableBedrockReasoning(
+  messages: Message[],
+  providerID?: string
+): Message[] {
+  const isBedrock =
+    typeof providerID === 'string' &&
+    (providerID.includes('bedrock') || providerID.includes('aicore'));
+  if (!isBedrock) {
+    return messages;
+  }
+  return messages.map((m) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.parts)) {
+      return m;
+    }
+    const filtered = m.parts.filter((p) => {
+      if ((p as { type?: unknown }).type !== 'reasoning') {
+        return true;
+      }
+      return hasBedrockReasoningSignature(p);
+    });
+    if (filtered.length === m.parts.length) {
+      return m;
+    }
+    return { ...m, parts: filtered };
   });
 }
 
