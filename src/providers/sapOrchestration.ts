@@ -1971,10 +1971,39 @@ export const ORCHESTRATION_MODELS = [
 export type OrchestrationModel = (typeof ORCHESTRATION_MODELS)[number];
 
 /**
- * Check if a model is available through orchestration
+ * Check if a model is available through orchestration.
+ *
+ * Delegates to the dynamic model catalog when it has loaded, so newly
+ * discovered SAP AI Core deployments are accepted without a code change.
+ * Falls back to the static ORCHESTRATION_MODELS list when the catalog is
+ * still loading or unavailable — guarantees the check is never stricter
+ * than the hardcoded catalog.
+ *
+ * The catalog module is accessed via a global registry key to avoid a
+ * circular ESM import cycle (modelCatalog imports ORCHESTRATION_MODELS
+ * from this file, so a top-level import here would be circular).
  */
+
+// Module-augmentation shim: modelCatalog registers itself here after load
+// so that isOrchestrationModel() can call it without a circular import.
+type IsAvailableModelFn = (id: string) => boolean;
+const _catalogRegistry = globalThis as unknown as {
+  __alexiCatalogIsAvailable?: IsAvailableModelFn;
+};
+
+/**
+ * Called by modelCatalog.ts at module load to register its guard function.
+ * @internal
+ */
+export function _registerCatalogGuard(fn: IsAvailableModelFn): void {
+  _catalogRegistry.__alexiCatalogIsAvailable = fn;
+}
+
 export function isOrchestrationModel(modelId: string): boolean {
-  return ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel);
+  // Fast static check first (no I/O, no async, always safe)
+  if (ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel)) return true;
+  // Delegate to the live catalog if it has registered itself
+  return _catalogRegistry.__alexiCatalogIsAvailable?.(modelId) ?? false;
 }
 
 // ============================================================================

@@ -167,6 +167,59 @@ npm run test:coverage
 open coverage/index.html
 ```
 
+### Testing the dynamic model catalog
+
+`src/providers/modelCatalog.ts` maintains a module-level cache and a background refresh timer. Tests MUST reset that state in `beforeEach` / `afterEach` to stay parallel-safe:
+
+```typescript
+import { invalidateCatalog, refreshModelCatalog, getCatalogStatus } from '../../src/providers/modelCatalog.js';
+import { vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('@sap-ai-sdk/ai-api', () => ({
+  DeploymentApi: {
+    deploymentQuery: vi.fn(() => ({
+      execute: vi.fn().mockResolvedValue({
+        resources: [{ id: 'dep-1', configurationName: 'gpt-4o' }],
+      }),
+    })),
+  },
+}));
+
+beforeEach(() => invalidateCatalog());
+afterEach(() => invalidateCatalog());
+
+it('transitions idle → loading → ready', async () => {
+  expect(getCatalogStatus()).toBe('idle');
+  await refreshModelCatalog();
+  expect(getCatalogStatus()).toBe('ready');
+});
+```
+
+`invalidateCatalog()` clears the pending refresh timer, aborts any in-flight fetch tracking flag, and resets `entries` to the static seed. Without it a test that flips the catalog to `ready` leaks state into subsequent tests via the module singleton. The refresh timer uses `.unref()` so Node exits cleanly even if a test forgets to call `invalidateCatalog()`, but the cache pollution will still cause assertion drift.
+
+### Testing quoted `@file` mentions
+
+`src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
+
+```typescript
+import { parseFileMentions, quoteFilePath } from '../../src/utils/file-mention.js';
+
+it('parses double-quoted paths with spaces', () => {
+  const mentions = parseFileMentions('See @"My Documents/report.txt" for details');
+  expect(mentions).toEqual([
+    { fullMatch: '@"My Documents/report.txt"', path: 'My Documents/report.txt', index: 4 },
+  ]);
+});
+
+it('quotes shell-special paths for downstream parsers', () => {
+  expect(quoteFilePath('src/foo.ts')).toBe('src/foo.ts');
+  expect(quoteFilePath('docs/user guide.md')).toBe('"docs/user guide.md"');
+  expect(quoteFilePath('path with "quote".ts')).toBe('"path with \\"quote\\".ts"');
+});
+```
+
+Reference tests: `tests/utils/file-mention.test.ts` and `tests/command/fileMention.test.ts`.
+
 ## Testing Tool System
 
 ### Tool Test Architecture

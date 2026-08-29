@@ -4,12 +4,18 @@
 
 import { select, Separator } from '@inquirer/prompts';
 import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
+import {
+  getCatalogEntries,
+  getCatalogStatus,
+  type CatalogEntry,
+} from '../../providers/modelCatalog.js';
 import { env } from '../../config/env.js';
 import { c } from './colors.js';
 
 interface ModelChoice {
   id: string;
-  source: 'local' | 'remote';
+  source: 'local' | 'remote' | 'live';
+  live?: boolean;
 }
 
 /**
@@ -39,10 +45,49 @@ export function getProviderGroup(modelId: string): string {
 }
 
 /**
+ * Build the combined, deduplicated, grouped model list.
+ *
+ * Prefers the live SAP AI Core catalog (populated at startup by
+ * refreshModelCatalog). Falls back to ORCHESTRATION_MODELS when the
+ * catalog has not loaded yet or credentials are missing.
+ */
+export async function getAvailableModels(): Promise<ModelChoice[]> {
+  const catalogReady = getCatalogStatus() === 'ready';
+
+  if (catalogReady) {
+    // Use the live catalog entries — richer data (live flag, deploymentId)
+    const entries: readonly CatalogEntry[] = getCatalogEntries();
+    return entries.map((e) => ({
+      id: e.id,
+      source: e.live ? 'live' : 'local',
+      live: e.live,
+    }));
+  }
+
+  // Catalog not yet loaded — use static list (same as before dynamic catalog)
+  const localModels = [...ORCHESTRATION_MODELS];
+
+  // Also try proxy fallback if configured
+  const remoteModels = await fetchRemoteModelsProxy();
+  const seen = new Set<string>(localModels);
+  const allModels: ModelChoice[] = localModels.map((id) => ({ id, source: 'local' as const }));
+
+  for (const id of remoteModels) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      allModels.push({ id, source: 'remote' as const });
+    }
+  }
+
+  return allModels;
+}
+
+/**
  * Fetch remote models from SAP proxy (if configured).
  * Returns empty array if not configured or fetch fails.
+ * @internal used as fallback when live catalog is unavailable
  */
-async function fetchRemoteModels(): Promise<string[]> {
+async function fetchRemoteModelsProxy(): Promise<string[]> {
   const baseURL = env('SAP_PROXY_BASE_URL');
   const apiKey = env('SAP_PROXY_API_KEY');
   if (!baseURL || !apiKey) {
@@ -66,28 +111,10 @@ async function fetchRemoteModels(): Promise<string[]> {
 }
 
 /**
- * Build the combined, deduplicated, grouped model list.
- */
-export async function getAvailableModels(): Promise<ModelChoice[]> {
-  const localModels = [...ORCHESTRATION_MODELS];
-  const remoteModels = await fetchRemoteModels();
-
-  // Merge: local first, then remote-only models
-  const seen = new Set<string>(localModels);
-  const allModels: ModelChoice[] = localModels.map((id) => ({ id, source: 'local' as const }));
-
-  for (const id of remoteModels) {
-    if (!seen.has(id)) {
-      seen.add(id);
-      allModels.push({ id, source: 'remote' as const });
-    }
-  }
-
-  return allModels;
-}
-
-/**
  * Group models by provider and build choices with separators.
+ *
+ * Live models (confirmed RUNNING in SAP AI Core) get a ● indicator.
+ * Static-only models (not yet deployed) get a dimmed ○ indicator.
  */
 export function buildGroupedChoices(
   models: ModelChoice[],
@@ -110,10 +137,14 @@ export function buildGroupedChoices(
     choices.push(new Separator(c('dim', `── ${groupName} ──`)));
     for (const model of groupModels) {
       const isCurrent = model.id === currentModel;
+      const liveIndicator = model.source === 'live' ? c('green', '●') : c('dim', '○');
+      const currentLabel = isCurrent ? ` ${c('green', '← current')}` : '';
+      const sourceLabel =
+        model.source === 'remote' ? '(proxy)' : model.source === 'live' ? '(live)' : undefined;
       choices.push({
-        name: isCurrent ? `${model.id} ${c('green', '← current')}` : model.id,
+        name: `${liveIndicator} ${model.id}${currentLabel}`,
         value: model.id,
-        description: model.source === 'remote' ? '(proxy)' : undefined,
+        description: sourceLabel,
       });
     }
   }

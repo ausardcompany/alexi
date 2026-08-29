@@ -10,6 +10,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
+import {
+  getAvailableModels as getCatalogModels,
+  getCatalogStatus,
+} from '../../providers/modelCatalog.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -293,14 +297,25 @@ export function completeSlashCommand(partial: string): CompletionResult {
 }
 
 /**
- * Complete a partial model name against `ORCHESTRATION_MODELS`.
+ * Complete a partial model name.
+ *
+ * Uses the live dynamic catalog when available (status = 'ready'), so
+ * newly deployed models appear in autocomplete without a restart.
+ * Falls back to the static ORCHESTRATION_MODELS list while the catalog
+ * is still loading or when credentials are absent.
  *
  * @param partial Text typed after `/model ` (e.g. `"gpt"`).
  */
 export function completeModelName(partial: string): CompletionResult {
+  // Prefer the live catalog; fall back to static list while loading
+  const modelList =
+    getCatalogStatus() === 'ready'
+      ? getCatalogModels()
+      : (ORCHESTRATION_MODELS as readonly string[]);
+
   const items: CompletionItem[] = [];
 
-  for (const model of ORCHESTRATION_MODELS) {
+  for (const model of modelList) {
     const result = fuzzyMatch(partial, model);
     if (result.match) {
       items.push({

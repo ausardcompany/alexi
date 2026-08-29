@@ -146,6 +146,28 @@ alexi models --status RUNNING --json
 alexi models --resource-group production
 ```
 
+#### Dynamic model catalog
+
+Since v1.22.4, the interactive TUI and the `/model` slash command consult a **live catalog** maintained by `src/providers/modelCatalog.ts`. The catalog is refreshed at startup and every 5 minutes; live models show a `●` prefix in the picker, static-only models show `○`. The status bar shows `● N live`, `⟳` (loading), or `○ offline` depending on the catalog state. Set `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` for the catalog to succeed; without credentials it falls back silently to the static list embedded in `ORCHESTRATION_MODELS`.
+
+Programmatic access:
+
+```typescript
+import {
+  getAvailableModels,
+  getLiveModels,
+  getCatalogStatus,
+  isAvailableModel,
+} from 'alexi/providers/modelCatalog.js';
+
+if (getCatalogStatus() === 'ready') {
+  console.log('Live deployments:', getLiveModels());
+}
+if (!isAvailableModel(userInput)) {
+  throw new Error(`Model not available: ${userInput}`);
+}
+```
+
 ### explain
 
 Analyze and explain routing decisions without executing the request.
@@ -595,8 +617,33 @@ The `/export` command uses the `DataExporter` service to serialize session data 
 
 The TUI provides Tab completion for:
 - **Slash commands**: Type `/` and press Tab to see suggestions
-- **Model names**: After `/model `, Tab completes available models
+- **Model names**: After `/model `, Tab completes against the **live catalog** (`src/providers/modelCatalog.ts`) when it has loaded, falling back to `ORCHESTRATION_MODELS` while the first refresh is still in flight. Autocomplete never blocks on network I/O.
 - **File paths**: After `/export ` or `/import `, Tab completes paths
+
+### File mentions (`@` references)
+
+Since v1.22.4, `@`-file mentions in user messages, custom command templates, and any other input that flows through `parseFileMentions()` support **three forms** (`src/utils/file-mention.ts:parseFileMentions`):
+
+| Form | Example | Notes |
+|------|---------|-------|
+| Bareword | `@src/foo.ts` | Terminated by whitespace; historical behaviour |
+| Double-quoted | `@"My Documents/report.txt"` | Allows spaces and shell-special characters |
+| Single-quoted | `@'draft (2)/notes.md'` | Same, with single quotes as the delimiter |
+
+Escape sequences inside quoted forms: `\"`, `\'`, `\\`. Mentions preceded by another `@` (email-address heuristic — `user@host@domain`) or by a word character are NOT matched.
+
+Custom command templates additionally support **positional file references** — `@$1`, `@$2`, ... — which resolve to the corresponding argument. If the resolved path contains whitespace or shell-special characters, the template processor now wraps it in double quotes so the subsequent mention parser treats the whole path as a single token (fixes issue #1547).
+
+```markdown
+# .kilo/command/review.md
+Review the changes in @$1 and summarize.
+```
+
+```bash
+# Both work, even with a path containing spaces
+/review src/tool/tools/read.ts
+/review "docs/user guide.md"
+```
 
 ## Environment Variables
 

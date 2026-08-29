@@ -13,6 +13,7 @@ import { loadRoutingConfig } from '../config/routingConfig.js';
 import { getConfigDefaultModel } from '../config/userConfig.js';
 import { installHarvestedCAs } from './ca.js';
 import { isOrchestrationModel, SapOrchestrationProvider } from './sapOrchestration.js';
+import { refreshModelCatalog } from './modelCatalog.js';
 
 // Auto-harvest CAs from the OS trust store and merge them into the HTTPS
 // global agent so provider requests transparently trust internal corporate
@@ -20,6 +21,16 @@ import { isOrchestrationModel, SapOrchestrationProvider } from './sapOrchestrati
 // cached on macOS, and no-op when `ALEXI_DISABLE_CA_HARVEST=1`. See
 // docs/PROVIDERS.md#auto-ca-harvesting.
 installHarvestedCAs();
+
+// Kick off a background refresh of the live model catalog from SAP AI Core.
+// Fire-and-forget: the static ORCHESTRATION_MODELS list remains available
+// immediately; the catalog upgrades itself once the API responds.
+// AICORE_SERVICE_KEY must be set for this to succeed; silently skipped
+// when credentials are absent (the catalog falls back to static data).
+if (env('AICORE_SERVICE_KEY')) {
+  const resourceGroup = env('AICORE_RESOURCE_GROUP') ?? 'default';
+  void refreshModelCatalog(resourceGroup);
+}
 
 // Re-export connectivity check
 export { checkConnectivity, type ConnectivityResult } from './connectivity.js';
