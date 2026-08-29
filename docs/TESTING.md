@@ -569,6 +569,98 @@ Key patterns:
 3. **`fs.realpathSync(fs.mkdtempSync(...))`.** On macOS the tmp directory is symlinked (`/var/folders/...` vs `/private/var/folders/...`); `realpathSync` resolves the symlink so path comparisons in the tool (e.g. `path.isAbsolute` checks and `resolve` calls) do not observe a different value than the one passed in.
 4. **Assert on `bytesWritten` too.** The tool's `WriteResult` reports the byte length of the encoded buffer, not the string length. In CRLF mode the byte count includes the extra `\r` bytes — asserting on it catches regressions where the tool would write CRLF but report the LF byte count.
 
+### Testing the apply_patch Line-Ending Preservation
+
+The `apply_patch` tool preserves the target file's dominant line-ending style across a patch application by detecting the style up front, normalizing both the file and the incoming patch to LF for the hunk parser, then re-encoding the output back to the original style before `fs.writeFile`. The public surface exported from `src/tool/tools/apply-patch.ts` — `detectLineEndingStyle`, `normalizeToLf`, and `applyLineEndingStyle` — is directly unit-testable, and the tool's `execute` method is covered by end-to-end integration cases in `tests/tool/tools/apply-patch.test.ts`.
+
+#### Pure-function tests (`describe('line ending helpers')`)
+
+```typescript
+import {
+  detectLineEndingStyle,
+  normalizeToLf,
+  applyLineEndingStyle,
+} from '../../../src/tool/tools/apply-patch.js';
+
+describe('line ending helpers', () => {
+  it('detects predominantly CRLF content as crlf', () => {
+    expect(detectLineEndingStyle('a\r\nb\r\nc\r\n')).toBe('crlf');
+  });
+
+  it('detects predominantly LF content as lf', () => {
+    expect(detectLineEndingStyle('a\nb\nc\n')).toBe('lf');
+  });
+
+  it('returns the majority style for mixed content (CRLF wins)', () => {
+    expect(detectLineEndingStyle('a\r\nb\r\nc\r\nd\n')).toBe('crlf');
+  });
+
+  it('normalizeToLf converts CRLF to LF and leaves LF alone', () => {
+    expect(normalizeToLf('a\r\nb\r\nc')).toBe('a\nb\nc');
+    expect(normalizeToLf('a\nb\nc')).toBe('a\nb\nc');
+  });
+
+  it('applyLineEndingStyle converts LF-only content to CRLF when requested', () => {
+    expect(applyLineEndingStyle('a\nb\nc', 'crlf')).toBe('a\r\nb\r\nc');
+    expect(applyLineEndingStyle('a\nb\nc', 'lf')).toBe('a\nb\nc');
+  });
+});
+```
+
+Key patterns:
+
+1. **Count-based majority, not first-match.** `detectLineEndingStyle` walks the string once and counts CRLF vs bare LF, then compares with strict `>`. A tie (equal counts, degenerate but possible for hand-crafted content) resolves to `'lf'` because `crlf > lf` is false. Tests should cover CRLF-majority, LF-majority, both mixed directions, and the empty / no-line-ending fallback that resolves to `os.EOL`.
+2. **Round-trip only, no I/O.** All three helpers are pure string transforms; no `fs.mkdtemp`, no mocks, and no dependence on the platform's `os.EOL` (except the empty-content edge case, which is unavoidable and worth an explicit note in the test comment).
+3. **Idempotence.** `normalizeToLf(normalizeToLf(x)) === normalizeToLf(x)` and `applyLineEndingStyle(x, 'lf') === x` for any LF-only `x`. These are the load-bearing properties that make the tool's pipeline (`normalizeToLf` → parse → `applyLineEndingStyle`) safe to re-run — do not remove the sanity assertions without a strong reason.
+
+#### Integration tests (`describe('line ending preservation')`)
+
+Each case creates a real file in a `fs.mkdtemp` temp directory, invokes `applyPatchTool.execute` with a plain-string patch, and reads the on-disk result:
+
+```typescript
+import { applyPatchTool } from '../../../src/tool/tools/apply-patch.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+describe('line ending preservation', () => {
+  let tempDir: string;
+  let context: ToolContext;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'apply-patch-'));
+    context = { workdir: tempDir };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('preserves CRLF line endings when applying an LF patch to a CRLF file', async () => {
+    const filePath = path.join(tempDir, 'crlf.txt');
+    const original = ['line one', 'line two', 'line three'].join('\r\n');
+    await fs.writeFile(filePath, original, 'utf-8');
+
+    const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+      '\n'
+    );
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(true);
+
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\r\n'));
+    // Sanity: no bare LF anywhere in the output.
+    expect(/(?:^|[^\r])\n/.test(updated)).toBe(false);
+  });
+});
+```
+
+Key patterns:
+
+1. **Feed the patch in the OPPOSITE style of the file.** A CRLF file receives an LF patch and vice versa; this exercises the `normalizeToLf(params.patch)` call directly and proves the parser never sees a stray `\r` on context or deletion lines. Without normalization the CRLF-file case would fail with a `PatchHunkError` (`expected "line two", got "line two\r"`) before the file is ever written.
+2. **Assert on the presence AND the absence of the other style.** The positive assertion (`.toBe([...].join('\r\n'))`) pins the exact output; the negative assertion (`/(?:^|[^\r])\n/.test(updated) === false` for CRLF, `updated.includes('\r\n') === false` for LF) catches regressions where the tool would emit a mixed-ending output that happens to contain the expected substring.
+3. **Cover the mixed-ending majority case.** The `preserves the majority style when the original file has mixed line endings (CRLF wins)` case constructs a `3 × CRLF + 1 × LF` file, applies a patch, and asserts the output is uniformly CRLF — this is the load-bearing behaviour that makes the tool's output stable under repeated round-trips (a partial-CRLF file does not degrade toward LF just because the model happened to emit LF).
+4. **Regex escaping in the negative assertion.** The `/(?:^|[^\r])\n/` regex looks for a `\n` NOT preceded by a `\r` (i.e. a bare LF anywhere in the output). The `(?:^|[^\r])` alternation handles the edge case where the file starts with an LF; a naive `/[^\r]\n/` would false-negative on that position.
+
 ### Testing Bash Streaming Output
 
 The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.

@@ -1037,6 +1037,23 @@ The canonical integration is `src/tool/tools/write.ts:84-103`. Contract for a ne
 
 Testing guidance: co-locate pure-function tests next to the module (`src/tool/eol-normalizer.test.ts` is the reference), and add end-to-end integration tests that drive the tool via `executeUnsafe` against a `fs.mkdtempSync` temp directory. Simulate the opposite platform by mocking `getPlatformEol` via `vi.doMock` + `vi.resetModules` + dynamic `await import(...)` — see `docs/TESTING.md#simulating-windows-on-a-linux-ci-runner` for the worked pattern.
 
+### Apply-patch tools use a detect/normalize/re-encode pipeline instead
+
+Tools that mutate an existing file via a unified-diff patch (canonical example: `apply_patch` at `src/tool/tools/apply-patch.ts`) do NOT go through `preserveExistingLineEndings`. The line-based hunk parser splits on `'\n'`, so a CRLF file leaves a stray `\r` on every context and deletion line and the patch fails to match. Effective the 2026-08-29 CRLF-preservation patch (commit `3adb7ec8`), the tool uses a three-step pipeline expressed via three exported helpers in `src/tool/tools/apply-patch.ts`:
+
+1. `detectLineEndingStyle(rawOriginalContent)` — count CRLF vs bare LF in the decoded file bytes BEFORE any normalization, and pick the majority style. Empty / no-line-ending content falls back to `os.EOL`.
+2. `normalizeToLf(...)` — applied to both the original file content AND `params.patch` before invoking the hunk parser. Both inputs must be LF-only for the parser's `.startsWith(' ')` / `.startsWith('-')` / `.startsWith('+')` checks to see the actual content byte.
+3. `applyLineEndingStyle(patchedContent, lineEndingStyle)` — applied AFTER the parser succeeds, BEFORE `encodeWithEncoding` and `fs.writeFile`. The `crlf` branch relies on the pipeline invariant that `patchedContent` is LF-only (guaranteed by the `normalizeToLf` pre-pass), so it can safely `.replace(/\n/g, '\r\n')` without emitting `\r\r\n`.
+
+Contract for any new patch-application or diff-application tool:
+
+- **Detect first, normalize second.** Do NOT sniff the line ending style from the LF-normalized copy — you will always get `'lf'`. Sniff from the raw decoded string BEFORE `normalizeToLf`.
+- **Normalize both sides of the parser.** The file content and the patch text must BOTH be LF-only when they reach a line-based parser. A CRLF patch applied to an LF file is just as broken as an LF patch applied to a CRLF file, in symmetric ways.
+- **Re-encode BEFORE `encodeWithEncoding`.** The buffer written to disk must reflect the final EOL choice. Re-encoding after `encodeWithEncoding` would flip already-encoded bytes and corrupt UTF-16 / legacy code page files.
+- **Never mix `eol-normalizer.ts` and `apply-patch.ts` helpers in the same pipeline.** The former is for whole-content writes (`normalizeNewFileLineEndings` / `preserveExistingLineEndings` decide the style and rewrite in one step), the latter is for a parse-then-re-encode round trip where the intermediate representation MUST be LF-only. Choose one pipeline per tool.
+
+Testing guidance mirrors the write-tool pattern: put pure-function tests in the same test file as the tool's other suites (see `tests/tool/tools/apply-patch.test.ts` `describe('line ending helpers')` and `describe('line ending preservation')`), drive the tool via a real `applyPatchTool.execute` call against a `fs.mkdtemp` temp directory, and assert on both the exact output and the absence of the opposite line-ending style (regex `/(?:^|[^\r])\n/` for a stray-LF check, `.includes('\r\n')` for a stray-CRLF check). See `docs/TESTING.md#testing-the-apply_patch-line-ending-preservation` for the worked pattern.
+
 ## `displayRole` for Hidden Instrumentation
 
 Effective 1.21.4 (issue #1466), messages that must reach the model but stay out of the user-facing transcript should be persisted with `displayRole: 'system'` on the `Message` interface. The provider still receives the message with its logical `role` (`'user'`, `'assistant'`, `'system'`); `displayRole` is a UI-only filter honoured by `MessageArea`, `SessionReplay`, and any future transcript surface.
