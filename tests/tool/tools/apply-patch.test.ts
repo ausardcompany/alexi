@@ -25,7 +25,13 @@ vi.mock('../../../src/tool/index.js', async () => {
   };
 });
 
-import { applyPatchTool, PatchHunkError } from '../../../src/tool/tools/apply-patch.js';
+import {
+  applyPatchTool,
+  PatchHunkError,
+  detectLineEndingStyle,
+  normalizeToLf,
+  applyLineEndingStyle,
+} from '../../../src/tool/tools/apply-patch.js';
 import type { ToolContext } from '../../../src/tool/index.js';
 
 describe('apply_patch tool', () => {
@@ -146,6 +152,96 @@ describe('apply_patch tool', () => {
 
       const onDisk = await fs.readFile(filePath, 'utf-8');
       expect(onDisk).toBe(original);
+    });
+  });
+
+  describe('line ending helpers', () => {
+    it('detects predominantly CRLF content as crlf', () => {
+      const s = 'a\r\nb\r\nc\r\n';
+      expect(detectLineEndingStyle(s)).toBe('crlf');
+    });
+
+    it('detects predominantly LF content as lf', () => {
+      const s = 'a\nb\nc\n';
+      expect(detectLineEndingStyle(s)).toBe('lf');
+    });
+
+    it('returns the majority style for mixed content (CRLF wins)', () => {
+      const s = 'a\r\nb\r\nc\r\nd\n';
+      expect(detectLineEndingStyle(s)).toBe('crlf');
+    });
+
+    it('returns the majority style for mixed content (LF wins)', () => {
+      const s = 'a\nb\nc\nd\r\n';
+      expect(detectLineEndingStyle(s)).toBe('lf');
+    });
+
+    it('normalizeToLf converts CRLF to LF and leaves LF alone', () => {
+      expect(normalizeToLf('a\r\nb\r\nc')).toBe('a\nb\nc');
+      expect(normalizeToLf('a\nb\nc')).toBe('a\nb\nc');
+    });
+
+    it('applyLineEndingStyle converts LF-only content to CRLF when requested', () => {
+      expect(applyLineEndingStyle('a\nb\nc', 'crlf')).toBe('a\r\nb\r\nc');
+      expect(applyLineEndingStyle('a\nb\nc', 'lf')).toBe('a\nb\nc');
+    });
+  });
+
+  describe('line ending preservation', () => {
+    it('preserves CRLF line endings when applying an LF patch to a CRLF file', async () => {
+      const filePath = path.join(tempDir, 'crlf.txt');
+      const original = ['line one', 'line two', 'line three'].join('\r\n');
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\r\n'));
+      // Sanity: no bare LF anywhere in the output.
+      expect(/(?:^|[^\r])\n/.test(updated)).toBe(false);
+    });
+
+    it('preserves LF line endings when applying a patch that contains CRLF hunks to an LF file', async () => {
+      const filePath = path.join(tempDir, 'lf.txt');
+      const original = ['line one', 'line two', 'line three'].join('\n');
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      // Patch hunks with CRLF should be normalized during parsing.
+      const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+        '\r\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\n'));
+      // Sanity: no CRLF anywhere in the output.
+      expect(updated.includes('\r\n')).toBe(false);
+    });
+
+    it('preserves the majority style when the original file has mixed line endings (CRLF wins)', async () => {
+      const filePath = path.join(tempDir, 'mixed-crlf.txt');
+      // 3 CRLF vs 1 LF -> CRLF wins.
+      const original = 'line one\r\nline two\r\nline three\r\ntrailing\n';
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      // Output should be uniformly CRLF (the majority style).
+      expect(updated).toContain('line one\r\nline TWO\r\nline three\r\n');
+      expect(/(?:^|[^\r])\n/.test(updated)).toBe(false);
     });
   });
 

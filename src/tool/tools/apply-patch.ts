@@ -5,8 +5,55 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
 import { defineTool, type ToolResult } from '../index.js';
 import { detectEncoding, decodeWithEncoding, encodeWithEncoding } from '../encoded-io.js';
+
+type LineEndingStyle = 'crlf' | 'lf';
+
+/**
+ * Detect the dominant line ending style for a string.
+ *
+ * Counts CRLF vs bare LF occurrences and returns the majority style.
+ * If the content has no line endings at all, falls back to the platform
+ * default (CRLF on Windows, LF elsewhere).
+ */
+export function detectLineEndingStyle(content: string): LineEndingStyle {
+  let crlf = 0;
+  let lf = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content.charCodeAt(i) === 0x0a) {
+      if (i > 0 && content.charCodeAt(i - 1) === 0x0d) {
+        crlf++;
+      } else {
+        lf++;
+      }
+    }
+  }
+
+  if (crlf === 0 && lf === 0) {
+    return os.EOL === '\r\n' ? 'crlf' : 'lf';
+  }
+  return crlf > lf ? 'crlf' : 'lf';
+}
+
+/**
+ * Normalize any CRLF sequences to LF for consistent parsing.
+ */
+export function normalizeToLf(content: string): string {
+  return content.replace(/\r\n/g, '\n');
+}
+
+/**
+ * Re-encode LF-only content to the given target style.
+ */
+export function applyLineEndingStyle(content: string, style: LineEndingStyle): string {
+  if (style === 'lf') {
+    return content;
+  }
+  // Replace bare LFs with CRLF; content is guaranteed to be LF-only here.
+  return content.replace(/\n/g, '\r\n');
+}
 
 const ApplyPatchParamsSchema = z.object({
   path: z.string().describe('Absolute path to the file to patch'),
@@ -242,12 +289,20 @@ Usage:
       const encoding = detectEncoding(buffer);
 
       // Decode with detected encoding
-      const originalContent = decodeWithEncoding(buffer, encoding);
+      const rawOriginalContent = decodeWithEncoding(buffer, encoding);
+
+      // Detect line ending style BEFORE normalizing so we can preserve it.
+      const lineEndingStyle = detectLineEndingStyle(rawOriginalContent);
+
+      // Normalize file + patch to LF for parsing. The patch parser is
+      // line-based on '\n' and would treat trailing '\r' as content.
+      const originalContent = normalizeToLf(rawOriginalContent);
+      const normalizedPatch = normalizeToLf(params.patch);
 
       // Apply patch (may throw PatchHunkError before any file write)
       let patchedContent: string;
       try {
-        patchedContent = applyPatchToContent(originalContent, params.patch, filePath);
+        patchedContent = applyPatchToContent(originalContent, normalizedPatch, filePath);
       } catch (err) {
         if (err instanceof PatchHunkError) {
           return {
@@ -260,8 +315,12 @@ Usage:
         throw err;
       }
 
+      // Re-encode line endings to the original style before writing so
+      // Windows files keep CRLF and Unix files keep LF.
+      const contentToWrite = applyLineEndingStyle(patchedContent, lineEndingStyle);
+
       // Encode back with original encoding
-      const encodedBuffer = encodeWithEncoding(patchedContent, encoding);
+      const encodedBuffer = encodeWithEncoding(contentToWrite, encoding);
 
       // Write back to file
       await fs.writeFile(filePath, encodedBuffer);
