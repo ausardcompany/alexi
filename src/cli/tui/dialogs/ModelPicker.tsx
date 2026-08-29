@@ -120,15 +120,21 @@ function CatalogBadge({
   );
 }
 
-export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Element {
+export function ModelPicker({
+  currentModel,
+  modelGroups,
+}: ModelPickerProps): React.JSX.Element {
   const dialog = useDialog();
   const {
     theme: { colors },
   } = useTheme();
 
-  // Live catalog state — updates whenever catalog refreshes
+  // Live catalog state — updates whenever catalog refreshes.
+  // Only consulted when the caller did not pass an explicit modelGroups list.
+  const propGroupsProvided = modelGroups !== undefined && modelGroups.length > 0;
+
   const [catalogStatus, setCatalogStatus] = React.useState<CatalogStatus>(getCatalogStatus);
-  const [groups, setGroups] = React.useState<ModelGroup[]>(() => {
+  const [catalogGroups, setCatalogGroups] = React.useState<ModelGroup[]>(() => {
     const status = getCatalogStatus();
     return status === 'ready'
       ? buildGroupsFromEntries(getCatalogEntries())
@@ -136,19 +142,22 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
   });
 
   React.useEffect(() => {
+    if (propGroupsProvided) return; // caller supplied groups; don't listen
     const unsub = subscribeCatalog(() => {
       const status = getCatalogStatus();
       setCatalogStatus(status);
-      setGroups(
+      setCatalogGroups(
         status === 'ready' ? buildGroupsFromEntries(getCatalogEntries()) : buildGroupsFromStatic()
       );
     });
     return unsub;
-  }, []);
+  }, [propGroupsProvided]);
 
   useInput((_input, key) => {
     if (key.escape) dialog.cancel();
   });
+
+  const groups: ModelGroup[] = propGroupsProvided ? (modelGroups ?? []) : catalogGroups;
 
   const liveCount = React.useMemo(
     () => getCatalogEntries().filter((e) => e.live).length,
@@ -156,9 +165,18 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
   );
   const totalCount = groups.reduce((n, g) => n + g.models.length, 0);
 
-  // Flatten to SelectInput items — live models get ● prefix
+  // Flatten to SelectInput items. When groups come from props, honour any
+  // `description` field on the option. When groups come from the live catalog,
+  // prefix with ●/○ to indicate live vs static.
   const items = groups.flatMap((group) =>
     group.models.map((model) => {
+      if (propGroupsProvided) {
+        const desc = model.description ? `  ${model.description}` : '';
+        return {
+          label: `[${group.provider}] ${model.label}${desc}`,
+          value: model.id,
+        };
+      }
       const isCurrent = model.id === currentModel;
       const liveIcon = model.live ? '● ' : '○ ';
       const currentSuffix = isCurrent ? '  ←' : '';
@@ -185,7 +203,7 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
       {/* Header */}
       <Box justifyContent="space-between">
         <Text color={colors.primary} bold>
-          Select Model
+          Model Picker
         </Text>
         <Text color={colors.dimText}>● live ○ static</Text>
       </Box>
@@ -195,8 +213,10 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
         Current: <Text color={colors.text}>{currentModel}</Text>
       </Text>
 
-      {/* Catalog status badge */}
-      <CatalogBadge status={catalogStatus} liveCount={liveCount} totalCount={totalCount} />
+      {/* Catalog status badge (only when using the live catalog) */}
+      {!propGroupsProvided && (
+        <CatalogBadge status={catalogStatus} liveCount={liveCount} totalCount={totalCount} />
+      )}
 
       {/* Divider */}
       <Text color={colors.borderDim}>{'─'.repeat(48)}</Text>
