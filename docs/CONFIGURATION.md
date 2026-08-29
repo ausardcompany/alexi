@@ -749,9 +749,54 @@ Global user preferences applied to all projects.
 
 ### 3. Project-Level Rules
 
-**Path**: `./.alexi/rules/*.md`
+**Default paths** (scanned in priority order — first match wins on conflict):
+
+1. `<workdir>/.alexi/rules/*.md`
+2. `<workdir>/.kilo/rules/*.md`
+3. `<workdir>/.kilocode/rules/*.md`
+4. `<workdir>/.opencode/rules/*.md`
+5. `<workdir>/.cline/rules/*.md`
+6. `<workdir>/rules/*.md`
+7. `~/.alexi/rules/*.md` (user-level, lowest precedence)
 
 Scoped rules for specific aspects (API design, security, database patterns).
+The extra `.kilo/`, `.kilocode/`, `.opencode/`, and `.cline/` directories are
+supported so teams migrating from other agent tools (Kilo Code, OpenCode,
+Cline) can drop their existing rule files in place without renaming.
+
+**Conflict resolution**: When two rule files share the same basename
+(e.g. `.alexi/rules/style.md` and `.kilo/rules/style.md`) the higher-priority
+copy is used and the shadowed file is logged as a warning at startup:
+
+```text
+Rule 'style' redefined in /workdir/.kilo/rules/style.md (using /workdir/.alexi/rules/style.md)
+```
+
+**Custom paths (`rulesPath`)**: Add a `rulesPath` field to either the
+project-local `<workdir>/.alexi/config.json` or the global
+`~/.alexi/config.json` to declare additional rule directories. Custom paths
+are scanned *before* the defaults and therefore win on conflict.
+
+```json
+{
+  "rulesPath": ["custom/rules", ".company/standards"]
+}
+```
+
+`rulesPath` accepts either a single string or an array of strings. Paths may
+be relative to the project (e.g. `custom/rules`), absolute, or start with
+`~/` to resolve against the user home directory. When both the project and
+global config declare `rulesPath`, project entries take precedence and
+global entries are appended.
+
+**Startup logging**: Every discovered rules file is logged at INFO level so
+operators can see exactly which rules the model receives:
+
+```text
+Loaded rules from /workdir/.alexi/rules/style.md (1234 bytes)
+Loaded rules from /workdir/.kilo/rules/security.md (876 bytes)
+Discovered 2 rules files
+```
 
 ### 4. Custom Agents with File Inclusion
 

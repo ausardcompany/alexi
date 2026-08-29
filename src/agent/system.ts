@@ -26,11 +26,27 @@ import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { stripUtf8Bom } from '../utils/frontmatter.js';
+import { discoverRules, logRulesDiscovery } from '../config/rulesDiscovery.js';
 import {
   getEnabledPluginRules,
   resolvePluginRulesForPrompt,
   type ResolvedPluginRule,
 } from '../plugin/index.js';
+
+// Session-scoped cache of workdirs whose rules discovery has already been
+// logged. The assembler runs on every message; we only want the "Loaded rules
+// from ..." + "Discovered N rules files" summary once per (workdir) per
+// process. Tests can call `resetRulesDiscoveryLogCache()` to reset.
+const loggedWorkdirs = new Set<string>();
+
+/**
+ * Clear the internal cache that suppresses repeated rules-discovery logging
+ * for the same workdir within a process. Intended for tests; production
+ * callers should never need this.
+ */
+export function resetRulesDiscoveryLogCache(): void {
+  loggedWorkdirs.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Prompt file loading
@@ -216,7 +232,10 @@ function findGlobalAgentsMd(excludeResolved: string | null): string | null {
  *   1. Project-level AGENTS.md  (workdir/AGENTS.md)
  *   2. Global AGENTS.md         ($XDG_CONFIG_HOME/AGENTS.md → ~/.config/AGENTS.md → ~/AGENTS.md)
  *   3. User-level ALEXI.md      (~/.alexi/ALEXI.md)
- *   4. Project-level rule files (workdir/.alexi/rules/*.md)
+ *   4. Rule files discovered by {@link discoverRules} — default paths
+ *      (`.alexi/rules/`, `.kilo/rules/`, `.kilocode/rules/`, `.opencode/rules/`,
+ *      `.cline/rules/`, `rules/`, `~/.alexi/rules/`) plus any `rulesPath`
+ *      entries from `.alexi/config.json` (project + global).
  */
 function loadInstructionFiles(workdir: string): string {
   const parts: string[] = [];
@@ -247,21 +266,19 @@ function loadInstructionFiles(workdir: string): string {
     parts.push(`<user-instructions>\n${userMd}\n</user-instructions>`);
   }
 
-  // 4. Project .alexi/rules/*.md
-  const rulesDir = path.join(workdir, '.alexi', 'rules');
-  try {
-    const ruleFiles = fs
-      .readdirSync(rulesDir)
-      .filter((f) => f.endsWith('.md'))
-      .sort();
-    for (const rf of ruleFiles) {
-      const content = loadTextFile(path.join(rulesDir, rf));
-      if (content) {
-        parts.push(`<rule file="${rf}">\n${content}\n</rule>`);
-      }
-    }
-  } catch {
-    // rules directory doesn't exist — that's fine
+  // 4. Rule files from every supported discovery path. We suppress the
+  //    per-workdir INFO logs after the first hit so message-turn assembly
+  //    doesn't spam the console; the first assemble in this process logs
+  //    the full summary.
+  const resolvedWorkdir = path.resolve(workdir);
+  const alreadyLogged = loggedWorkdirs.has(resolvedWorkdir);
+  const discovery = discoverRules({ workdir: resolvedWorkdir, silent: true });
+  if (!alreadyLogged) {
+    loggedWorkdirs.add(resolvedWorkdir);
+    logRulesDiscovery(discovery);
+  }
+  for (const rule of discovery.rules) {
+    parts.push(`<rule file="${rule.fileName}">\n${rule.content}\n</rule>`);
   }
 
   return parts.join('\n\n');

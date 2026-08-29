@@ -11,6 +11,7 @@ import {
   getSoulPrompt,
   getModelPromptKey,
   instructionsForPath,
+  resetRulesDiscoveryLogCache,
 } from './system.js';
 import {
   clearRuleCommandCache,
@@ -684,6 +685,120 @@ describe('Prompt System', () => {
       expect(matches.length).toBe(1);
       // No global block when it would point at the same file.
       expect(prompt).not.toContain('<global-agents-md');
+    });
+  });
+
+  describe('Rules discovery integration', () => {
+    let tmpRoot: string;
+    let tmpHome: string;
+    let tmpProject: string;
+    let originalHome: string | undefined;
+    let originalUserProfile: string | undefined;
+
+    beforeEach(() => {
+      tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-integ-'));
+      tmpHome = path.join(tmpRoot, 'home');
+      tmpProject = path.join(tmpRoot, 'project');
+      fs.mkdirSync(tmpHome, { recursive: true });
+      fs.mkdirSync(tmpProject, { recursive: true });
+
+      originalHome = process.env.HOME;
+      originalUserProfile = process.env.USERPROFILE;
+      process.env.HOME = tmpHome;
+      process.env.USERPROFILE = tmpHome;
+
+      resetRulesDiscoveryLogCache();
+    });
+
+    afterEach(() => {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    });
+
+    it('includes rules from `.alexi/rules/` via `<rule file="...">` block', () => {
+      const rulePath = path.join(tmpProject, '.alexi', 'rules', 'style.md');
+      fs.mkdirSync(path.dirname(rulePath), { recursive: true });
+      fs.writeFileSync(rulePath, 'ALEXI_STYLE_TOKEN');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      expect(prompt).toContain('<rule file="style.md">');
+      expect(prompt).toContain('ALEXI_STYLE_TOKEN');
+    });
+
+    it('also picks up rules from alternative paths (.kilo/, .kilocode/, .cline/, rules/)', () => {
+      const dirs = ['.kilo/rules', '.kilocode/rules', '.opencode/rules', '.cline/rules', 'rules'];
+      for (let i = 0; i < dirs.length; i++) {
+        const p = path.join(tmpProject, dirs[i], `d${i}.md`);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, `TOKEN_${i}`);
+      }
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      for (let i = 0; i < dirs.length; i++) {
+        expect(prompt).toContain(`TOKEN_${i}`);
+      }
+    });
+
+    it('honors rulesPath from project .alexi/config.json', () => {
+      fs.mkdirSync(path.join(tmpProject, '.alexi'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpProject, '.alexi', 'config.json'),
+        JSON.stringify({ rulesPath: ['team-rules'] })
+      );
+      const customRule = path.join(tmpProject, 'team-rules', 'company.md');
+      fs.mkdirSync(path.dirname(customRule), { recursive: true });
+      fs.writeFileSync(customRule, 'COMPANY_STANDARD_TOKEN');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      expect(prompt).toContain('<rule file="company.md">');
+      expect(prompt).toContain('COMPANY_STANDARD_TOKEN');
+    });
+
+    it('custom rulesPath wins over default .alexi/rules on conflict', () => {
+      fs.mkdirSync(path.join(tmpProject, '.alexi'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpProject, '.alexi', 'config.json'),
+        JSON.stringify({ rulesPath: 'custom' })
+      );
+      const customRule = path.join(tmpProject, 'custom', 'style.md');
+      const defaultRule = path.join(tmpProject, '.alexi', 'rules', 'style.md');
+      fs.mkdirSync(path.dirname(customRule), { recursive: true });
+      fs.mkdirSync(path.dirname(defaultRule), { recursive: true });
+      fs.writeFileSync(customRule, 'CUSTOM_STYLE_WINS');
+      fs.writeFileSync(defaultRule, 'DEFAULT_STYLE_LOSES');
+
+      const prompt = buildAssembledSystemPrompt({
+        workdir: tmpProject,
+        skipEnv: true,
+      });
+
+      expect(prompt).toContain('CUSTOM_STYLE_WINS');
+      expect(prompt).not.toContain('DEFAULT_STYLE_LOSES');
     });
   });
 
