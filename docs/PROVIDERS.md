@@ -229,6 +229,61 @@ interface CatalogEntry {
 
 Deployments are matched to model ids in two passes: (1) exact match against `ORCHESTRATION_MODELS`, (2) prefix heuristic (`gpt-`, `anthropic--`, `gemini-`, `amazon--`, `mistralai--`, `meta--`, `deepseek-`, `sap-`). Deployments whose `configurationName` does not match are ignored — Alexi assumes they are not LLM completions endpoints.
 
+#### Circular-import break: catalog guard registry
+
+`modelCatalog.ts` imports `ORCHESTRATION_MODELS`, `ORCHESTRATION_MODEL_METADATA`, and the `OrchestrationModelMetadata` type from `sapOrchestration.ts`. `sapOrchestration.ts`'s `isOrchestrationModel(modelId)` guard needs to consult the live catalog (`modelCatalog.isAvailableModel`) so that a newly deployed model id is accepted the moment the catalog transitions to `ready`. A direct top-level `import { isAvailableModel } from './modelCatalog.js'` would close a circular ESM import cycle — the two modules would reference each other's exports before either finished initializing, and depending on the load order one side would observe `undefined` for the imported symbol.
+
+The previous fix relied on an inline `require('./modelCatalog.js')` inside `isOrchestrationModel` (a synchronous CJS interop lookup deferred until the guard was actually called). That approach broke the cycle at load time but has two problems in a strict ESM package (`"type": "module"`, `module: NodeNext`): (1) `require` is not part of the ESM globals, so ESLint's `no-require-imports`, `@typescript-eslint/no-require-imports`, and TypeScript's ESM checker all flag it, and (2) `require` behavior varies across Node ESM loaders and future strict-ESM releases may remove the interop entirely.
+
+The current implementation replaces the `require` with an in-process global registry keyed by a unique property name on `globalThis`, wired up at module-load time by the importer (`modelCatalog.ts`) rather than pulled at call-time by the consumer (`sapOrchestration.ts`):
+
+```typescript
+// src/providers/sapOrchestration.ts (near ORCHESTRATION_MODELS)
+
+type IsAvailableModelFn = (id: string) => boolean;
+const _catalogRegistry = globalThis as unknown as {
+  __alexiCatalogIsAvailable?: IsAvailableModelFn;
+};
+
+/**
+ * Called by modelCatalog.ts at module load to register its guard function.
+ * @internal
+ */
+export function _registerCatalogGuard(fn: IsAvailableModelFn): void {
+  _catalogRegistry.__alexiCatalogIsAvailable = fn;
+}
+
+export function isOrchestrationModel(modelId: string): boolean {
+  // Fast static check first (no I/O, no async, always safe)
+  if (ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel)) return true;
+  // Delegate to the live catalog if it has registered itself
+  return _catalogRegistry.__alexiCatalogIsAvailable?.(modelId) ?? false;
+}
+```
+
+```typescript
+// src/providers/modelCatalog.ts (last lines of module)
+
+import { _registerCatalogGuard, /* ... */ } from './sapOrchestration.js';
+
+// ... isAvailableModel(id) defined above ...
+
+// Register isAvailableModel as the live-catalog guard in sapOrchestration.ts.
+// This runs at module load time (after both modules have initialized), wiring
+// up the reverse dependency without a circular import.
+_registerCatalogGuard(isAvailableModel);
+```
+
+Contract:
+
+- **Direction of dependency.** Only `modelCatalog.ts` imports from `sapOrchestration.ts`. `sapOrchestration.ts` never imports from `modelCatalog.ts`. The reverse edge (`sapOrchestration.ts` → live catalog) is expressed as a function-pointer lookup on `globalThis`, not as an `import` statement, so the ESM linker sees a strict DAG.
+- **Registration timing.** `_registerCatalogGuard(isAvailableModel)` runs as a top-level side effect of importing `modelCatalog.ts`. Any code path that has caused `modelCatalog.ts` to load — for example, `src/providers/index.ts:30-33` calling `refreshModelCatalog()` on first use — has already registered the guard. Code paths that never load `modelCatalog.ts` (e.g. a unit test that mocks the provider layer wholesale) see the fallback `?? false`, which correctly reduces `isOrchestrationModel` to the static `ORCHESTRATION_MODELS.includes(...)` check.
+- **Namespace hygiene.** The registry key `__alexiCatalogIsAvailable` is prefixed with `__alexi` and cast via `globalThis as unknown as { ... }` so a stray global write from a dependency cannot silently override it, and TypeScript still checks the function signature at the two use sites.
+- **Test isolation.** Tests that need to unwire the guard call `invalidateCatalog()` (already documented above) and, in the rare case that they need to null the pointer as well, can assign `(globalThis as any).__alexiCatalogIsAvailable = undefined`. In practice the existing `invalidateCatalog()` is sufficient because it resets `entries` to `buildStaticEntries()`, which makes the guard behave the same as the static-only fallback.
+- **Lint / typecheck.** No `require()` remains in `src/providers/sapOrchestration.ts`, so the file no longer needs an `// eslint-disable-next-line @typescript-eslint/no-var-requires` (or the successor `no-require-imports`) pragma above the guard. `tsc --noEmit` no longer needs `esModuleInterop`-shaped shims to type-check the module. Downstream: the ESLint auto-fix pass documented in `docs/CONTRIBUTING.md` no longer has to preserve the historical `require` line — it can now format-only pass over `sapOrchestration.ts`.
+
+When adding future reverse dependencies between modules that already form an ESM DAG, prefer this "registry key on `globalThis`, wired by the downstream module at load time" pattern over lazy `require` or dynamic `import()`. Dynamic `import()` returns a Promise, which forces every caller of the guard onto an async path — that would be a strict regression for `isOrchestrationModel`, which is a synchronous predicate used inside the router's hot loop.
+
 #### TUI integration
 
 - **Status bar** (`src/cli/tui/components/StatusBar.tsx`) shows a small indicator that reflects `catalogStatus`:
