@@ -51,6 +51,8 @@ Default model to use when no model is specified. Can be overridden by user confi
 export AICORE_MODEL=gpt-4o
 ```
 
+The value is validated against the dynamic model catalog (`src/providers/modelCatalog.ts`) on first use. If the id is not recognised, `getProviderForModelWithFallback` falls back to `preferences.fallbackModel` in the routing config (or hardcoded `gpt-4o`) and publishes a one-shot `ProviderModelFellBack` event so misconfiguration is visible at the first turn rather than silently masquerading as a working setup.
+
 #### ALEXI_MAX_IMAGE_SIZE_MB
 
 Maximum size in megabytes for image attachments. Defaults to 20MB if not specified.

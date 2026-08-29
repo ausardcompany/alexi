@@ -135,7 +135,8 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 |--------|------|-------------|
 | SAP Orchestration | `src/providers/sapOrchestration.ts` | Sole provider via `@sap-ai-sdk/orchestration` |
 | Auth | `src/providers/auth.ts` | OAuth token management for SAP AI Core |
-| Transform | `src/providers/transform.ts` | Message format transformation for SAP API |
+| Transform | `src/providers/transform.ts` | Message-format transforms (image chunks, reasoning replay, schema lowering) |
+| Model Catalog | `src/providers/modelCatalog.ts` | Live deployment discovery from SAP AI Core (5-minute TTL) |
 | Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
 | Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
 
@@ -153,6 +154,32 @@ function getProviderForModel(modelId: string): SapOrchestrationProvider {
   // Single provider handles all models via SAP AI Core
 }
 ```
+
+The provider index module also kicks off a fire-and-forget refresh of the dynamic model catalog when `AICORE_SERVICE_KEY` is set:
+
+```mermaid
+sequenceDiagram
+    participant Import as import providers
+    participant Index as providers/index.ts
+    participant Catalog as modelCatalog.ts
+    participant AICore as SAP AI Core DeploymentApi
+    participant TUI as StatusBar / ModelPicker
+
+    Import->>Index: module load
+    Index->>Index: installHarvestedCAs()
+    Index->>Catalog: refreshModelCatalog(resourceGroup)
+    Note over Catalog: state = 'loading'
+    Catalog->>TUI: notify subscribers
+    Catalog->>AICore: deploymentQuery({status:'RUNNING'})
+    AICore-->>Catalog: deployment list
+    Catalog->>Catalog: merge static + live entries
+    Note over Catalog: state = 'ready'
+    Catalog->>TUI: notify subscribers
+    Catalog->>Catalog: schedule next refresh (5 min)
+    Note over Import: getProviderForModel(id) safe from any state
+```
+
+Non-live callers (`getProviderForModel`, `isOrchestrationModel`) never block on the catalog — they read from the merged snapshot maintained by `modelCatalog.ts` or fall back to the hardcoded `ORCHESTRATION_MODELS` list when the catalog has not yet loaded. Full details in [`docs/PROVIDERS.md#dynamic-model-catalog`](./PROVIDERS.md#dynamic-model-catalog).
 
 ### Tool System
 

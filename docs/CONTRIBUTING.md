@@ -362,6 +362,8 @@ vi.mock('../src/providers/index.js', () => ({
 import { sendChat } from '../src/core/orchestrator.js';
 ```
 
+When testing anything that reads the dynamic model catalog (`src/providers/modelCatalog.ts`), mock `@sap-ai-sdk/ai-api` and call `invalidateCatalog()` in `beforeEach` — the module holds a process-wide cache that leaks across tests. See [`docs/TESTING.md#testing-the-dynamic-model-catalog`](./TESTING.md#testing-the-dynamic-model-catalog).
+
 ### Test import-path depth
 
 Test files under `tests/` walk up to the repository root before descending into `src/`. The number of `../` segments needed depends on where the test file lives, and it must always land in `src/` — never in a sibling under `tests/` itself. Concrete rules:

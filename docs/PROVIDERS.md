@@ -166,7 +166,77 @@ sequenceDiagram
 
 ## Supported Models
 
-Alexi supports all foundation models available through SAP AI Core Orchestration API.
+Alexi supports all foundation models available through SAP AI Core Orchestration API. The catalog is discovered dynamically at startup — see [Dynamic Model Catalog](#dynamic-model-catalog) — and falls back to the static list below when credentials are absent or the AI Core API is unreachable.
+
+### Dynamic Model Catalog
+
+Since 2026-08-28 the provider layer maintains a live view of deployments running in SAP AI Core. `src/providers/modelCatalog.ts` fetches the deployment list at process start (fire-and-forget on module load from `src/providers/index.ts:30-33`) and re-fetches every `CATALOG_TTL_MS` (5 minutes). The static `ORCHESTRATION_MODELS` list is always available as the fallback, so callers are never blocked by network latency.
+
+#### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle: import providers/modelCatalog
+    idle --> loading: refreshModelCatalog()
+    loading --> ready: deploymentQuery succeeds
+    loading --> error: deploymentQuery throws
+    ready --> loading: TTL timer fires (5 min)
+    error --> loading: TTL timer fires (5 min)
+    ready --> idle: invalidateCatalog()
+    error --> idle: invalidateCatalog()
+```
+
+- `idle` — no fetch has ever completed. `getAvailableModels()` returns the static list.
+- `loading` — a fetch is in flight. Concurrent calls to `refreshModelCatalog()` short-circuit.
+- `ready` — the last fetch succeeded. `entries` reflects the merged static + live catalog.
+- `error` — the last fetch failed. Existing entries are retained; `errorMessage` is populated. The next scheduled refresh may recover.
+
+#### Public API
+
+```typescript
+// Kick off a refresh (idempotent, fire-and-forget)
+refreshModelCatalog(resourceGroup?: string): Promise<void>;
+
+// Sync accessors — safe from any code path
+getAvailableModels(): readonly string[];             // static + live
+getLiveModels(): readonly string[];                  // RUNNING only
+getCatalogEntries(): readonly CatalogEntry[];        // full metadata
+getCatalogStatus(): 'idle' | 'loading' | 'ready' | 'error';
+
+// Validation helpers
+isAvailableModel(id: string): boolean;
+isModelLive(id: string): boolean;
+getModelMetadata(id: string): OrchestrationModelMetadata | undefined;
+
+// Reactive subscription (used by the Ink TUI)
+subscribeCatalog(fn: () => void): () => void;
+
+// Test-only cache-buster
+invalidateCatalog(): void;
+```
+
+Each entry carries provenance:
+
+```typescript
+interface CatalogEntry {
+  id: string;                  // model id used in OrchestrationConfig.modelName
+  deploymentId?: string;       // concrete AI Core deployment binding
+  source: 'static' | 'live' | 'both';
+  live: boolean;               // true when deployment is RUNNING
+  metadata?: OrchestrationModelMetadata; // capabilities, when known
+}
+```
+
+Deployments are matched to model ids in two passes: (1) exact match against `ORCHESTRATION_MODELS`, (2) prefix heuristic (`gpt-`, `anthropic--`, `gemini-`, `amazon--`, `mistralai--`, `meta--`, `deepseek-`, `sap-`). Deployments whose `configurationName` does not match are ignored — Alexi assumes they are not LLM completions endpoints.
+
+#### TUI integration
+
+- **Status bar** (`src/cli/tui/components/StatusBar.tsx`) shows a small indicator that reflects `catalogStatus`:
+  - `● N live` (green) — ready, N models confirmed running.
+  - `⟳` — idle or loading.
+  - `○ offline` (warning colour) — the last fetch failed; the static catalog is in use.
+- **Model picker** (`src/cli/tui/dialogs/ModelPicker.tsx`) prefixes each entry with `● ` (live) or `○ ` (static-only), groups by provider, marks the current selection with `←`, and shows a badge at the top summarising `N live · M total` or `⚠ AI Core unreachable — showing static catalog`.
+- **Slash completion** (`src/cli/utils/completer.ts:complete ModelName`) and the **inquirer picker** (`src/cli/utils/modelPicker.ts:getAvailableModels`) both call `getCatalogStatus()` and prefer the live list once it reaches `ready`. Non-live models remain selectable so unreleased deployments can be tested behind the scenes.
 
 ### Model Categories
 
