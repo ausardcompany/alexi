@@ -858,6 +858,106 @@ describe('core/pty/termination.tree', () => {
 
 The test intentionally uses the current process as the ground-truth pid it expects to find in the returned list — this is portable across the Linux `/proc` fast path and the macOS `ps` fallback and does not require mocking either backend.
 
+### Testing rules file discovery
+
+`tests/rulesDiscovery.test.ts` and the `Rules discovery integration` describe block in `src/agent/system.test.ts` cover the expanded rules-file discovery module in `src/config/rulesDiscovery.ts`. The discovery module walks up to nine directories per invocation (six default project directories, the user-level `~/.alexi/rules`, plus zero-or-more custom `rulesPath` entries from project and global `.alexi/config.json`) and resolves basename conflicts with first-seen-wins semantics. Tests must isolate against the real user `HOME` and the real repository config to stay hermetic.
+
+Key patterns for the unit suite (`tests/rulesDiscovery.test.ts`):
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { discoverRules, normalizeRulesPathValue } from '../src/config/rulesDiscovery.js';
+
+describe('discoverRules precedence', () => {
+  let root: string;
+  let workdir: string;
+  let home: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-'));
+    workdir = path.join(root, 'project');
+    home = path.join(root, 'home');
+    fs.mkdirSync(workdir, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('custom rulesPath wins over default .alexi/rules on conflict', () => {
+    fs.mkdirSync(path.join(workdir, '.alexi'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workdir, '.alexi', 'config.json'),
+      JSON.stringify({ rulesPath: 'custom' })
+    );
+    fs.mkdirSync(path.join(workdir, 'custom'), { recursive: true });
+    fs.mkdirSync(path.join(workdir, '.alexi', 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'custom', 'style.md'), 'CUSTOM');
+    fs.writeFileSync(path.join(workdir, '.alexi', 'rules', 'style.md'), 'DEFAULT');
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].content).toBe('CUSTOM');
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].ruleKey).toBe('style');
+  });
+});
+```
+
+Key patterns:
+
+1. **Inject `workdir` and `homedir`.** `discoverRules` accepts explicit `workdir` and `homedir` in the options bag. Use them instead of mutating `process.cwd()` or `process.env.HOME` so parallel test workers do not race on the real user config. Both `resolveCustomRulesPaths` and `discoverRules` honor the injected values consistently.
+2. **Pass `silent: true` in unit tests.** The default code path emits INFO logs for every winning rule and WARN logs for every shadowed duplicate via `logger.info` / `logger.warn`. Suppress them in tests that do not specifically assert on log output.
+3. **Assert on both `rules` and `conflicts`.** A regression that silently dropped the conflict-detection path could still emit the correct winning file — assert on `conflicts` explicitly to pin the shadow-reporting contract.
+4. **Cover the malformed-config resilience.** `normalizeRulesPathValue` accepts a single string or an array of strings; every other JSON shape (number, `null`, object, empty string, whitespace-only) must yield `[]` so a broken user config never crashes prompt assembly. Test each branch.
+5. **Cover `~` expansion.** A `rulesPath` entry starting with `~/` (or `~` alone) must expand against the injected `homedir`, not the real user home. Write a test that sets `rulesPath: '~/team-rules'` and asserts the resolved directory lives under the test's `home` temp dir.
+
+Integration tests via `buildAssembledSystemPrompt` (in `src/agent/system.test.ts`) must additionally reset the module-level `loggedWorkdirs` cache between cases:
+
+```typescript
+import { buildAssembledSystemPrompt, resetRulesDiscoveryLogCache } from './system.js';
+
+beforeEach(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-integ-'));
+  tmpHome = path.join(tmpRoot, 'home');
+  tmpProject = path.join(tmpRoot, 'project');
+  fs.mkdirSync(tmpHome, { recursive: true });
+  fs.mkdirSync(tmpProject, { recursive: true });
+
+  originalHome = process.env.HOME;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
+
+  resetRulesDiscoveryLogCache();
+});
+
+it('honors rulesPath from project .alexi/config.json', () => {
+  fs.mkdirSync(path.join(tmpProject, '.alexi'), { recursive: true });
+  fs.writeFileSync(
+    path.join(tmpProject, '.alexi', 'config.json'),
+    JSON.stringify({ rulesPath: ['team-rules'] })
+  );
+  const customRule = path.join(tmpProject, 'team-rules', 'company.md');
+  fs.mkdirSync(path.dirname(customRule), { recursive: true });
+  fs.writeFileSync(customRule, 'COMPANY_STANDARD_TOKEN');
+
+  const prompt = buildAssembledSystemPrompt({ workdir: tmpProject, skipEnv: true });
+  expect(prompt).toContain('<rule file="company.md">');
+  expect(prompt).toContain('COMPANY_STANDARD_TOKEN');
+});
+```
+
+Additional integration-test invariants:
+
+1. **`resetRulesDiscoveryLogCache()` in `beforeEach`.** The prompt assembler suppresses repeat log output per workdir per process; without the reset, a test that asserts the log summary would only see it once across the whole file.
+2. **Redirect both `HOME` and `USERPROFILE`.** `os.homedir()` prefers `HOME` on POSIX and `USERPROFILE` on Windows; setting both keeps the test cross-platform. Restore both in `afterEach`, deleting when previously unset.
+3. **Assert on the `<rule file="...">` wrapper shape.** The prompt assembler emits `<rule file="<basename>">\n<content>\n</rule>` for every winning rule. Assert on both the wrapper and the content token so a regression that silently drops the wrapper (breaking downstream consumers that parse `<rule file>` blocks) is caught.
+4. **Cover multiple alternative directories in one prompt.** Write rules into all six default project directories with distinct tokens and assert every token appears — this pins the guarantee that the expanded discovery paths land in the same prompt without any single directory shadowing the others when basenames differ.
+
 ### Testing session response classifier and output budget
 
 `tests/session/upstream-ports.test.ts` (added in 1.22.1) covers the three pure helpers ported from upstream (`evaluateCompleteness`, `usableOutputBudget`, `preserveCompletionLimit`):

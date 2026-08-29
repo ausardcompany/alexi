@@ -493,6 +493,20 @@ writes into an unbounded `Map<string, PermissionProvenance>`, and
 call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
 and avoid cross-test leakage.
 
+### Filesystem-discovery modules (injectable `workdir` + `homedir`)
+
+Modules that walk the filesystem to discover configuration or rule files — the canonical example is `src/config/rulesDiscovery.ts` — MUST accept both `workdir` and `homedir` as explicit options rather than reading `process.cwd()` and `os.homedir()` directly at every call site. This keeps unit tests hermetic (no need to mutate `process.env.HOME` or `chdir` across parallel workers) and lets callers point discovery at synthetic trees for regression testing.
+
+Contract for a new discovery module:
+
+1. **Every I/O-touching entry point takes an options bag** with `workdir?`, `homedir?`, and a `silent?` flag for log-suppression. Defaults resolve to `process.cwd()` / `os.homedir()` at call time (not at module load) so a test that sets `process.env.HOME` before the first call still sees the redirect.
+2. **Never crash on missing directories, unreadable files, or malformed JSON.** All three degrade to safe defaults (empty result, empty array, or a synthesized `null` handle) and, when not `silent`, are surfaced through `logger.debug` / `logger.info` — never through a thrown exception. A broken user config MUST NOT break prompt assembly or session bootstrap.
+3. **Emit startup logs at most once per unique input.** A discovery function that runs on every message turn (like `discoverRules` invoked from `agent/system.ts:loadInstructionFiles`) MUST be paired with a caller-side cache (`Set<string>` keyed by resolved workdir) so operators see the discovery summary once per session, not once per turn. Expose a `resetXCacheForTests()` function for test isolation and NEVER call it from production code.
+4. **First-seen-wins for conflicts, with an explicit conflict record.** Return a discovery result bundle (`{ items, allItems, conflicts, scannedDirs }`) rather than raw items. Callers that only need the winners consume `items`; callers that need to audit the resolution (logs, health checks, `alexi doctor`) consume `allItems` and `conflicts`.
+5. **Test with injected paths, not global state.** In tests, always pass `workdir` and `homedir` in the options bag and use `fs.mkdtempSync` for the roots. Do not mutate `process.cwd()`; do not mutate `process.env.HOME` unless the code under test genuinely reads it (integration tests via `buildAssembledSystemPrompt` fall into this category — see `docs/TESTING.md#testing-rules-file-discovery`).
+
+The rules-discovery module (`src/config/rulesDiscovery.ts`) exemplifies the contract: `discoverRules({ workdir?, homedir?, customPaths?, silent? })` returns a `RulesDiscoveryResult` with `rules`, `allFiles`, `conflicts`, and `scannedDirs`; every branch that could throw is wrapped in a `try / catch` that degrades to `[]` or `null`; and `resetRulesDiscoveryLogCache()` in `src/agent/system.ts` is exposed only for tests.
+
 ### Environment-driven detection (snapshot-and-restore)
 
 Some detection modules read process-level environment variables directly and
