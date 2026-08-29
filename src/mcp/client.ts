@@ -8,7 +8,14 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
 import { logger } from '../utils/logger.js';
-import { loadMcpConfig, resolveEnvVars, type McpServerConfig } from './config.js';
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  loadMcpConfig,
+  MCP_CONNECT_TIMEOUT_MAX_MS,
+  MCP_CONNECT_TIMEOUT_MIN_MS,
+  resolveEnvVars,
+  type McpServerConfig,
+} from './config.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -277,6 +284,12 @@ const CONFIG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'ENOTDIR', 'EPERM']);
  *    class wastes the budget on the same broken input.
  */
 function classifyConnectError(error: unknown): 'transient' | 'config' {
+  // Explicit remote-transport connect timeouts are transient — the peer
+  // was unreachable within the bound, not misconfigured on our side.
+  if (error instanceof McpConnectTimeoutError) {
+    return 'transient';
+  }
+
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code === 'string') {
     if (CONFIG_ERROR_CODES.has(code)) {
@@ -291,6 +304,12 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
   // Startup-timeout errors emitted by this module are transient by
   // definition — the peer was slow, not misconfigured.
   if (/startup timeout for server/.test(message) && /timed out after/.test(message)) {
+    return 'transient';
+  }
+  // Remote connect-timeout errors (bounded connect for sse/http). Named
+  // in the message so log-line matchers can still recognise them even
+  // when the error class has been re-thrown across a boundary.
+  if (/remote transport connect timeout/.test(message)) {
     return 'transient';
   }
   // Missing env variable hint emitted by `checkMissingEnvVars`.
@@ -312,6 +331,13 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
 function formatConnectError(serverName: string, error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error ?? '');
   const code = (error as { code?: unknown } | null)?.code;
+
+  // Remote-transport connect timeouts already carry an actionable,
+  // named message pointing at the exact `connectTimeout` field to
+  // raise. Pass them through verbatim.
+  if (error instanceof McpConnectTimeoutError || /remote transport connect timeout/.test(raw)) {
+    return raw;
+  }
 
   if (typeof code === 'string' && CONFIG_ERROR_CODES.has(code)) {
     return (
@@ -423,6 +449,32 @@ function findMissingEnvVars(
 }
 
 /**
+ * Error thrown when a remote MCP transport (`sse`, `http`) fails to
+ * complete its connect handshake within the configured `connectTimeout`.
+ *
+ * Distinct from {@link formatTimeoutError} (which covers stdio startup
+ * and per-request timeouts) so callers can differentiate connect
+ * failures from runtime failures via `instanceof` or the `.name`
+ * property.
+ */
+export class McpConnectTimeoutError extends Error {
+  override readonly name = 'McpConnectTimeoutError';
+  readonly serverName: string;
+  readonly timeoutMs: number;
+
+  constructor(serverName: string, timeoutMs: number, cause?: unknown) {
+    super(
+      `Failed to connect to MCP server '${serverName}' within ${timeoutMs}ms ` +
+        `(remote transport connect timeout); increase 'connectTimeout' in ` +
+        `mcp-servers.json to raise this bound.`,
+      cause !== undefined ? { cause } : undefined
+    );
+    this.serverName = serverName;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
  * Which timeout budget was exceeded when an MCP request aborts.
  *
  * `startup` covers the stdio handshake / cold-spawn phase (`client.connect`).
@@ -512,6 +564,15 @@ export class McpClientManager {
     undefined;
 
   /**
+   * Cached global `connectTimeout` from {@link McpConfig.connectTimeout},
+   * used as the fallback layer between per-server config and the
+   * built-in default. Same `undefined` vs `null` distinction as
+   * `globalTimeout`: `undefined` means "unset" (fall through);
+   * `null` means "explicitly no global override".
+   */
+  private globalConnectTimeout: number | undefined | null = undefined;
+
+  /**
    * Explicitly set the global timeout override that will be used as the
    * second-precedence layer (after per-server config, before
    * `MCP_TOOL_TIMEOUT` env / built-in defaults). Passing `undefined`
@@ -519,6 +580,100 @@ export class McpClientManager {
    */
   setGlobalTimeout(timeout: number | { startup?: number; request?: number } | undefined): void {
     this.globalTimeout = timeout === undefined ? null : timeout;
+  }
+
+  /**
+   * Explicitly set the global `connectTimeout` override. Applied to
+   * remote (`sse`, `http`) transports only. Passing `undefined` clears
+   * the override.
+   */
+  setGlobalConnectTimeout(timeout: number | undefined): void {
+    this.globalConnectTimeout = timeout === undefined ? null : timeout;
+  }
+
+  /**
+   * Normalize a raw `connectTimeout` value into a positive integer in
+   * `[MCP_CONNECT_TIMEOUT_MIN_MS, MCP_CONNECT_TIMEOUT_MAX_MS]` or
+   * `undefined` if it is missing / invalid. Invalid values emit a
+   * `logger.warn` and fall through to the next precedence layer;
+   * config-load-time validation rejects them up-front so this only
+   * fires for values injected programmatically.
+   */
+  private normalizeConnectTimeout(raw: number | undefined | null): number | undefined {
+    if (raw === undefined || raw === null) {
+      return undefined;
+    }
+    if (typeof raw !== 'number' || !isFinite(raw) || raw <= 0) {
+      logger.warn(
+        `MCP connectTimeout ${raw}ms is non-positive; ignoring and falling through ` +
+          `to the next precedence layer. Valid range: ` +
+          `${MCP_CONNECT_TIMEOUT_MIN_MS}-${MCP_CONNECT_TIMEOUT_MAX_MS}ms.`
+      );
+      return undefined;
+    }
+    if (raw < MCP_CONNECT_TIMEOUT_MIN_MS || raw > MCP_CONNECT_TIMEOUT_MAX_MS) {
+      logger.warn(
+        `MCP connectTimeout ${raw}ms is outside the valid range ` +
+          `[${MCP_CONNECT_TIMEOUT_MIN_MS}, ${MCP_CONNECT_TIMEOUT_MAX_MS}]ms; ignoring and ` +
+          `falling through to the next precedence layer.`
+      );
+      return undefined;
+    }
+    return Math.floor(raw);
+  }
+
+  /**
+   * Resolve the effective connect timeout (in milliseconds) for a
+   * remote-transport server.
+   *
+   * Resolution order:
+   * 1. Per-server `McpServerConfig.connectTimeout`.
+   * 2. Global `McpConfig.connectTimeout` (cached on this manager).
+   * 3. Built-in {@link DEFAULT_CONNECT_TIMEOUT_MS} (10000ms).
+   *
+   * Exposed for tests and callers that want to log the effective budget
+   * before initiating a connect attempt.
+   */
+  getConnectTimeoutForServer(serverName: string): number {
+    const connection = this.connections.get(serverName);
+    const perServer = this.normalizeConnectTimeout(connection?.config.connectTimeout);
+    if (perServer !== undefined) {
+      return perServer;
+    }
+    const global = this.normalizeConnectTimeout(this.globalConnectTimeout);
+    if (global !== undefined) {
+      return global;
+    }
+    return DEFAULT_CONNECT_TIMEOUT_MS;
+  }
+
+  /**
+   * Run a remote-transport connect attempt under a bounded connect
+   * timeout budget. Creates an `AbortController` that fires after
+   * `timeoutMs`, hands the signal to the caller-provided `run`, and on
+   * abort throws an error whose message names the exceeded bound so
+   * connect timeouts are distinct from runtime / request timeouts.
+   *
+   * Non-timeout errors are rethrown unchanged so upstream
+   * classification (transient vs config) continues to work.
+   */
+  private async withConnectTimeout<T>(
+    serverName: string,
+    timeoutMs: number,
+    run: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await run(controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        throw new McpConnectTimeoutError(serverName, timeoutMs, error);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -687,6 +842,8 @@ export class McpClientManager {
 
     if (config.transport === 'stdio') {
       await this.connectStdio(connection, options);
+    } else if (config.transport === 'sse' || config.transport === 'http') {
+      await this.connectRemote(connection);
     } else {
       throw new Error(`Transport ${config.transport} not yet implemented`);
     }
@@ -962,6 +1119,73 @@ export class McpClientManager {
   }
 
   /**
+   * Connect to a remote MCP server (`sse` or `http` transport) under a
+   * bounded connect-timeout budget.
+   *
+   * The remote transports are not yet wired to the MCP SDK client in
+   * Alexi (opening the SSE / streamable HTTP session is a separate
+   * follow-up), but the connect-phase guard is implemented here so
+   * that:
+   *
+   * 1. Once the transport is wired, the `AbortController` signal is
+   *    already threaded through in the correct place.
+   * 2. Operators who set `transport: 'sse'|'http'` today get a clean,
+   *    actionable error within `connectTimeout` ms rather than an
+   *    indefinite hang on an unresponsive server.
+   *
+   * The current implementation performs a bounded reachability probe
+   * (`fetch` with `AbortController`) to the configured URL. When the
+   * probe completes within budget, we throw an explicit
+   * "not yet implemented" error so callers know the transport is
+   * available but not yet handshake-capable. When it exceeds budget,
+   * we throw an {@link McpConnectTimeoutError} whose message names the
+   * exceeded bound and points at the exact config field to raise.
+   *
+   * Non-timeout probe errors (DNS failure, TLS error, connection
+   * refused) fall through unchanged so upstream error classification
+   * (`classifyConnectError`) sees the raw underlying error.
+   */
+  private async connectRemote(connection: McpConnection): Promise<void> {
+    const { config } = connection;
+
+    if (!config.url) {
+      throw new Error(
+        `Remote MCP server '${config.name}' requires a 'url' field for transport '${config.transport}'`
+      );
+    }
+
+    const timeoutMs = this.getConnectTimeoutForServer(config.name);
+
+    await this.withConnectTimeout(config.name, timeoutMs, async (signal) => {
+      const headers: Record<string, string> = {};
+      if (config.apiKey) {
+        headers.Authorization = `Bearer ${config.apiKey}`;
+      }
+      // Probe the URL to surface connect failures within budget. HEAD
+      // is cheap and sufficient to verify reachability; SSE endpoints
+      // typically reject it with a 405 which still proves the peer
+      // responded within budget.
+      const response = await fetch(config.url!, {
+        method: 'HEAD',
+        headers,
+        signal,
+      });
+      // Drain / discard body if present so no socket lingers. `HEAD`
+      // responses are body-less per spec, but some servers still
+      // stream a hello frame back on the same connection.
+      if (response.body && typeof (response.body as ReadableStream).cancel === 'function') {
+        await (response.body as ReadableStream).cancel().catch(() => undefined);
+      }
+    });
+
+    // Once the reachability probe succeeds, delegate to the not-yet-
+    // implemented transport wiring. The transport client itself must
+    // be added in a follow-up PR — but the connect-phase timeout is
+    // now correctly bounded.
+    throw new Error(`Transport ${config.transport} not yet implemented`);
+  }
+
+  /**
    * Disconnect from an MCP server
    */
   async disconnect(name: string): Promise<void> {
@@ -1013,6 +1237,7 @@ export class McpClientManager {
     // can use it as the fallback layer (per-server > global > env > default).
     // A missing field clears any previously-set global override.
     this.setGlobalTimeout(config.timeout);
+    this.setGlobalConnectTimeout(config.connectTimeout);
 
     // Add graceful handling for server initialization failures
     const servers = config.servers.filter((s) => s.enabled && s.autoConnect);

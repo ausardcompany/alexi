@@ -23,6 +23,7 @@ the repository at [`mcp-servers.example.json`](../mcp-servers.example.json).
 {
   "version": "1.0",
   "timeout": 5000, // optional global default (see "Timeout configuration")
+  "connectTimeout": 10000, // optional global remote-connect timeout (see "Remote connect timeout")
   "servers": [
     {
       "name": "<unique-id>",
@@ -34,6 +35,7 @@ the repository at [`mcp-servers.example.json`](../mcp-servers.example.json).
       "enabled": true,
       "autoConnect": false,
       "timeout": 8000, // optional per-server override
+      "connectTimeout": 15000, // optional per-server remote connect timeout (sse / http only)
       "cwd": "/optional/working/dir",
       "retry": { "enabled": true, "maxAttempts": 3 }
     }
@@ -168,6 +170,61 @@ Zero, negative, and non-finite values are always rejected.
 MCP_TOOL_TIMEOUT=10000 alexi chat
 ```
 
+## Remote connect timeout
+
+Remote MCP transports (`sse` and `http`) have a separate `connectTimeout`
+budget that bounds the TCP/TLS/HTTP dial phase — i.e. the time between
+initiating the connect request and receiving a usable handshake
+response. Without this bound, an unresponsive remote MCP server can hang
+session startup indefinitely.
+
+Precedence (highest to lowest):
+
+1. Per-server `servers[i].connectTimeout`
+2. Global `connectTimeout` (top level)
+3. Built-in default: **10000ms** (10s)
+
+### Valid range
+
+`connectTimeout` must fall within **`[100ms, 300000ms]`**. Values
+outside this range are rejected at config-load time (write path) and
+warned about at runtime (values injected programmatically).
+
+### Behaviour
+
+- Ignored for `stdio` transports (which are guarded by `timeout.startup`).
+- On timeout, `McpClientManager.connect` throws an
+  `McpConnectTimeoutError` with a message of the form:
+  `Failed to connect to MCP server '<name>' within <ms>ms (remote transport connect timeout); increase 'connectTimeout' in mcp-servers.json to raise this bound.`
+- Connect-timeout errors are classified as **transient** and are
+  eligible for the `retry` policy (see below), so intermittently slow
+  remote servers benefit from automatic retry when
+  `retry.enabled: true`.
+- Distinct from `timeout.startup` (stdio handshake) and
+  `timeout.request` (per-tool call). Callers can differentiate connect
+  failures from runtime failures via
+  `error instanceof McpConnectTimeoutError` or by matching the
+  `remote transport connect timeout` substring.
+
+### Example
+
+```jsonc
+{
+  "version": "1.0",
+  "connectTimeout": 8000,
+  "servers": [
+    {
+      "name": "hosted-mcp",
+      "transport": "sse",
+      "url": "https://mcp.example.com/sse",
+      "enabled": true,
+      "connectTimeout": 15000,
+      "retry": { "enabled": true, "maxAttempts": 3 }
+    }
+  ]
+}
+```
+
 ## Validation
 
 `loadMcpConfig` runs the parsed JSON through the Zod schema
@@ -185,6 +242,8 @@ invalid values cannot be persisted to disk from within Alexi itself.
 | `timeout must be >= 1000ms`                                  | `"timeout": 500`             | Raise to at least `1000`      |
 | `timeout must be <= 300000ms`                                | `"timeout": 600000`          | Lower to at most `300000`     |
 | `timeout must be an integer number of milliseconds`          | `"timeout": 3.5`             | Use a whole millisecond value |
+| `connectTimeout must be >= 100ms`                            | `"connectTimeout": 50`       | Raise to at least `100`       |
+| `connectTimeout must be <= 300000ms`                         | `"connectTimeout": 400000`   | Lower to at most `300000`     |
 | `Expected number, received boolean` (or similar)             | Wrong type for a numeric key | Match the schema shape        |
 | `Unrecognized key(s) in object: "starup"` (typo of `startup`) | Misspelt object-form key     | Correct the key name          |
 

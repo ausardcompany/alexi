@@ -26,6 +26,34 @@ export const MCP_TIMEOUT_MIN_MS = 1000;
 export const MCP_TIMEOUT_MAX_MS = 300000;
 
 /**
+ * Bounds for the remote-transport `connectTimeout` field in milliseconds.
+ *
+ * `connectTimeout` bounds the initial connection establishment for
+ * remote transports (`sse`, `http`) — i.e. the time between issuing the
+ * connect request and receiving a usable handshake response. Unlike
+ * `timeout.startup` (which covers the JSON-RPC handshake AFTER the
+ * transport is open), `connectTimeout` guards the TCP/TLS/HTTP dial
+ * phase, where an unresponsive remote server can otherwise hang
+ * indefinitely with no signal.
+ *
+ * - Minimum: 100ms. Any remote handshake completing in less than this
+ *   is essentially free; anything below is a foot-gun (false positives).
+ * - Maximum: 300000ms (5min). Above this you should reconsider whether
+ *   MCP is the right transport for the workload.
+ */
+export const MCP_CONNECT_TIMEOUT_MIN_MS = 100;
+export const MCP_CONNECT_TIMEOUT_MAX_MS = 300000;
+
+/**
+ * Default connect timeout for remote MCP transports (SSE / streamable
+ * HTTP) in milliseconds. Applied when neither per-server nor global
+ * `connectTimeout` is set. 10 seconds is aggressive enough to surface
+ * unresponsive servers quickly while leaving headroom for a slow WAN
+ * TLS handshake.
+ */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 10000;
+
+/**
  * Zod schema for a single `timeout` field. Accepts either a bare number
  * (applied to both startup and request phases) or an object with per-phase
  * budgets. Values must fall within `[MCP_TIMEOUT_MIN_MS, MCP_TIMEOUT_MAX_MS]`.
@@ -53,6 +81,16 @@ const TimeoutSchema = z.union([
 ]);
 
 /**
+ * Zod schema for the remote-transport `connectTimeout` field. Bounded by
+ * `[MCP_CONNECT_TIMEOUT_MIN_MS, MCP_CONNECT_TIMEOUT_MAX_MS]`.
+ */
+const ConnectTimeoutSchema = z
+  .number()
+  .int('connectTimeout must be an integer number of milliseconds')
+  .min(MCP_CONNECT_TIMEOUT_MIN_MS, `connectTimeout must be >= ${MCP_CONNECT_TIMEOUT_MIN_MS}ms`)
+  .max(MCP_CONNECT_TIMEOUT_MAX_MS, `connectTimeout must be <= ${MCP_CONNECT_TIMEOUT_MAX_MS}ms`);
+
+/**
  * Zod schema for a single MCP server entry. Only the fields relevant to
  * validation are enforced strictly; extra keys are accepted so future
  * additions do not require a schema bump.
@@ -70,6 +108,7 @@ const McpServerConfigSchema = z
     enabled: z.boolean(),
     autoConnect: z.boolean().optional(),
     timeout: TimeoutSchema.optional(),
+    connectTimeout: ConnectTimeoutSchema.optional(),
     cwd: z.string().optional(),
     retry: z
       .object({
@@ -91,6 +130,7 @@ export const McpConfigSchema = z
     version: z.string(),
     servers: z.array(McpServerConfigSchema),
     timeout: TimeoutSchema.optional(),
+    connectTimeout: ConnectTimeoutSchema.optional(),
   })
   .passthrough();
 
@@ -142,6 +182,21 @@ export interface McpServerConfig {
    * `McpClientManager.getTimeoutsForServer` for the full precedence chain.
    */
   timeout?: number | { startup?: number; request?: number };
+  /**
+   * Bounded connect timeout for REMOTE transports (`sse`, `http`) in
+   * milliseconds. Guards the initial TCP/TLS/HTTP dial and handshake
+   * phase, preventing an unresponsive remote MCP server from hanging
+   * session startup indefinitely.
+   *
+   * Only meaningful for `sse` and `http` transports; ignored for
+   * `stdio` (which is guarded by `timeout.startup` instead).
+   *
+   * When absent, falls back to the config-file global `connectTimeout`,
+   * then to the built-in default (10000ms). Valid range:
+   * `[MCP_CONNECT_TIMEOUT_MIN_MS, MCP_CONNECT_TIMEOUT_MAX_MS]`
+   * (100ms - 300000ms).
+   */
+  connectTimeout?: number;
   /**
    * Working directory for the spawned stdio server. Relative paths are
    * resolved against `options.workdir` (or `process.cwd()` if no workdir
@@ -198,6 +253,19 @@ export interface McpConfig {
    * 4. Built-in defaults (3000ms startup, 60000ms request)
    */
   timeout?: number | { startup?: number; request?: number };
+  /**
+   * Global default connect timeout for remote transports in
+   * milliseconds. Applied to every server that does not declare its
+   * own {@link McpServerConfig.connectTimeout}.
+   *
+   * Only meaningful for `sse` and `http` transports; ignored for
+   * `stdio`. Valid range:
+   * `[MCP_CONNECT_TIMEOUT_MIN_MS, MCP_CONNECT_TIMEOUT_MAX_MS]`.
+   *
+   * When absent, the built-in default {@link DEFAULT_CONNECT_TIMEOUT_MS}
+   * (10000ms) applies.
+   */
+  connectTimeout?: number;
 }
 
 const CONFIG_DIR = path.join(os.homedir(), '.alexi');
