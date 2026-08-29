@@ -1979,22 +1979,31 @@ export type OrchestrationModel = (typeof ORCHESTRATION_MODELS)[number];
  * still loading or unavailable — guarantees the check is never stricter
  * than the hardcoded catalog.
  *
- * Import is lazy (dynamic require-style via a local inline import) to avoid
- * a circular-dependency cycle: modelCatalog imports from sapOrchestration,
- * so we cannot top-level import modelCatalog here.
+ * The catalog module is accessed via a global registry key to avoid a
+ * circular ESM import cycle (modelCatalog imports ORCHESTRATION_MODELS
+ * from this file, so a top-level import here would be circular).
  */
+
+// Module-augmentation shim: modelCatalog registers itself here after load
+// so that isOrchestrationModel() can call it without a circular import.
+type IsAvailableModelFn = (id: string) => boolean;
+const _catalogRegistry = globalThis as unknown as {
+  __alexiCatalogIsAvailable?: IsAvailableModelFn;
+};
+
+/**
+ * Called by modelCatalog.ts at module load to register its guard function.
+ * @internal
+ */
+export function _registerCatalogGuard(fn: IsAvailableModelFn): void {
+  _catalogRegistry.__alexiCatalogIsAvailable = fn;
+}
+
 export function isOrchestrationModel(modelId: string): boolean {
   // Fast static check first (no I/O, no async, always safe)
   if (ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel)) return true;
-  // Check live catalog if it has already loaded (sync read, no await needed)
-  try {
-    // Lazy import avoids circular dependency at module-load time
-
-    const catalog = require('./modelCatalog.js') as typeof import('./modelCatalog.js');
-    return catalog.isAvailableModel(modelId);
-  } catch {
-    return false;
-  }
+  // Delegate to the live catalog if it has registered itself
+  return _catalogRegistry.__alexiCatalogIsAvailable?.(modelId) ?? false;
 }
 
 // ============================================================================
