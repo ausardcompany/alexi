@@ -15,6 +15,11 @@ import {
 import { closeSession } from './sessionClose.js';
 import { clearRuleCommandCache } from '../plugin/index.js';
 import { stripInternalWrappers } from '../agent/stripInternalWrappers.js';
+import {
+  SessionSearchIndex,
+  type SessionSearchOptions,
+  type SessionSearchResult,
+} from '../session/search.js';
 
 /**
  * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
@@ -97,6 +102,7 @@ export class SessionManager {
   private activeSession: Session | null = null;
   private maxContextTokens: number;
   private autoCompact: boolean;
+  private searchIndex: SessionSearchIndex;
 
   constructor(options?: string | SessionManagerOptions) {
     const opts: SessionManagerOptions =
@@ -110,6 +116,12 @@ export class SessionManager {
     if (!fs.existsSync(this.sessionsDir)) {
       fs.mkdirSync(this.sessionsDir, { recursive: true });
     }
+
+    // The FTS index is lazily initialized: constructing the class does not
+    // open the SQLite handle. That way, callers that only want to
+    // `listSessions()` do not pay the native-binding cost, and CI runners
+    // without a working `better-sqlite3` build still function.
+    this.searchIndex = new SessionSearchIndex(this.sessionsDir);
   }
 
   /**
@@ -309,7 +321,13 @@ export class SessionManager {
   }
 
   /**
-   * Save session to disk
+   * Save session to disk and refresh the FTS index entry.
+   *
+   * The FTS upsert runs after a successful JSON write so a filesystem
+   * failure does not leave the index pointing at a session file that
+   * never existed on disk. Index failures are swallowed inside
+   * `upsertSession` — a broken index degrades to `listSessions` scans
+   * rather than blocking a save.
    */
   private saveSession(session: Session): void {
     const sessionPath = path.join(this.sessionsDir, `${session.metadata.id}.json`);
@@ -318,7 +336,10 @@ export class SessionManager {
       fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
     } catch (error) {
       console.error('Failed to save session:', error);
+      return;
     }
+
+    this.searchIndex.upsertSession(session.metadata);
   }
 
   /**
@@ -481,6 +502,11 @@ export class SessionManager {
         // Drop any plugin command-rule output cached against this session.
         clearRuleCommandCache(sessionId);
 
+        // Remove from the FTS index so `--search` no longer surfaces the
+        // deleted session. Safe when the index has not been initialized
+        // yet — the call short-circuits internally.
+        this.searchIndex.deleteSession(sessionId);
+
         return true;
       }
       return false;
@@ -488,6 +514,29 @@ export class SessionManager {
       console.error(`Failed to delete session ${sessionId}:`, error);
       return false;
     }
+  }
+
+  /**
+   * Search saved sessions by FTS5 MATCH query.
+   *
+   * Delegates to the {@link SessionSearchIndex} initialized in the
+   * constructor. Empty / whitespace-only queries fall back to
+   * chronological order (matching `listSessions`) so callers can drive a
+   * single UI code path. Options mirror {@link listSessions}: pass
+   * `{ workdir }` to filter to sessions created in a specific directory.
+   *
+   * Returns rows shaped like {@link SessionMetadata} with an optional
+   * `score` (lower is better). When the native SQLite binding is
+   * unavailable an empty array is returned; callers should surface a
+   * "no matches" message rather than a stacktrace.
+   */
+  searchSessions(query: string, options?: SessionSearchOptions): SessionSearchResult[] {
+    // Reconciliation ensures manual `rm ~/.alexi/sessions/<id>.json` and
+    // restores from backup both converge. Runs on every call because it
+    // is cheap when the index is already warm (a directory listing plus
+    // a diff against the meta table).
+    this.searchIndex.refreshIndex();
+    return this.searchIndex.search(query, options);
   }
 
   /**
