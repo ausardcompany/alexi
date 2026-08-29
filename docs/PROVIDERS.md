@@ -468,6 +468,167 @@ entry). This lets contributors distinguish models the team has
 audited (present in the map) from those that have not been reviewed
 (absent from the map).
 
+## Dynamic Model Catalog
+
+Alexi ships with a static list of known SAP AI Core model ids
+(`ORCHESTRATION_MODELS` in `src/providers/sapOrchestration.ts`) that the
+CLI can always fall back to. On top of that, a background catalog module
+(`src/providers/modelCatalog.ts`) queries the connected SAP AI Core
+tenant on startup and merges the RUNNING deployments into the same
+surface. Callers never block on the network — they see the static list
+until the first refresh completes, then transparently pick up newly
+discovered live models.
+
+### Contract
+
+```typescript
+// src/providers/modelCatalog.ts
+
+export type CatalogStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export interface CatalogEntry {
+  /** Model id as used in OrchestrationConfig.modelName */
+  id: string;
+  /** Deployment id in SAP AI Core (the concrete binding) */
+  deploymentId?: string;
+  /** Where this id came from */
+  source: 'static' | 'live' | 'both';
+  /** Whether the live deployment is currently RUNNING */
+  live: boolean;
+  /** Capabilities and metadata (from static catalog when known) */
+  metadata?: OrchestrationModelMetadata;
+}
+
+export function refreshModelCatalog(resourceGroup?: string): Promise<void>;
+export function subscribeCatalog(fn: () => void): () => void;
+export function getCatalogStatus(): CatalogStatus;
+export function getAvailableModels(): readonly string[];
+export function getLiveModels(): readonly string[];
+export function getCatalogEntries(): readonly CatalogEntry[];
+export function isAvailableModel(modelId: string): boolean;
+export function getModelMetadata(modelId: string): OrchestrationModelMetadata | undefined;
+export function isModelLive(modelId: string): boolean;
+export function invalidateCatalog(): void;
+```
+
+Key semantics:
+
+- `refreshModelCatalog(resourceGroup)` — idempotent, fire-and-forget.
+  A second invocation while a fetch is in flight is a no-op. On success
+  the state transitions `idle` / `loading` -> `ready`; on failure it
+  transitions to `error` while keeping the previous entries intact so
+  callers keep a usable list.
+- Refresh schedule — after every completed fetch, the module schedules
+  the next refresh `CATALOG_TTL_MS` (5 minutes) later using `setTimeout`.
+  The timer is `unref()`-ed so long-running sessions stay fresh without
+  blocking process exit.
+- `subscribeCatalog(fn)` — the TUI subscribes to catalog state changes
+  so the ModelPicker (`src/cli/tui/dialogs/ModelPicker.tsx`) can rebuild
+  its list without a full remount when the first live fetch completes.
+- `isAvailableModel(id)` — accepts either a purely static id or a live
+  id discovered on the tenant, so validation is never stricter than the
+  hardcoded catalog. Used by the router and by `SapOrchestrationProvider`
+  before instantiating a client.
+- Deployment identification — `configurationName` values are matched
+  either against `ORCHESTRATION_MODELS` exactly or against a fixed set of
+  provider prefixes (`gpt-`, `anthropic--`, `gemini-`, `amazon--`,
+  `mistralai--`, `meta--`, `deepseek-`, `sap-`). Deployments whose name
+  matches none of these are ignored.
+
+### Startup Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as alexi CLI
+    participant Prov as Provider module
+    participant Cat as modelCatalog
+    participant AICore as SAP AI Core
+
+    CLI->>Prov: import ./providers/index.js
+    Prov->>Cat: refreshModelCatalog('default')
+    Cat-->>Prov: returns immediately (fire-and-forget)
+    Prov-->>CLI: static list available now
+
+    Note over Cat,AICore: Async — does not block startup
+    Cat->>AICore: DeploymentApi.deploymentQuery({status: 'RUNNING'})
+    AICore-->>Cat: deployments[]
+    Cat->>Cat: extractModelId + merge with static
+    Cat-->>Cat: setState({ status: 'ready', entries })
+    Cat->>CLI: notify subscribers (ModelPicker refreshes)
+
+    loop every CATALOG_TTL_MS (5 min)
+        Cat->>AICore: background refresh
+    end
+```
+
+### TUI Model Picker Wiring
+
+The Ink model picker (`src/cli/tui/dialogs/ModelPicker.tsx`) reads the
+catalog synchronously on mount and subscribes for updates:
+
+```typescript
+// src/cli/tui/dialogs/ModelPicker.tsx
+const [catalogStatus, setCatalogStatus] = React.useState<CatalogStatus>(getCatalogStatus);
+const [groups, setGroups] = React.useState<ModelGroup[]>(() => {
+  const status = getCatalogStatus();
+  return status === 'ready'
+    ? buildGroupsFromEntries(getCatalogEntries())
+    : buildGroupsFromStatic();
+});
+
+React.useEffect(() => {
+  const unsub = subscribeCatalog(() => {
+    const status = getCatalogStatus();
+    setCatalogStatus(status);
+    setGroups(
+      status === 'ready' ? buildGroupsFromEntries(getCatalogEntries()) : buildGroupsFromStatic()
+    );
+  });
+  return unsub;
+}, []);
+```
+
+Each row is prefixed with `●` (live) or `○` (static) to make the
+provenance visible. The header shows a spinner while the first refresh
+is in flight, `⚠ AI Core unreachable — showing static catalog` on
+error, and `● N live · M total` once ready.
+
+### CLI Completion Wiring
+
+`src/cli/utils/completer.ts` prefers live entries when tab-completing
+model ids and falls back to the static list while the first refresh
+has not yet completed:
+
+```typescript
+// src/cli/utils/completer.ts
+export function completeModelName(partial: string): CompletionResult {
+  const modelList =
+    getCatalogStatus() === 'ready'
+      ? getCatalogModels()
+      : (ORCHESTRATION_MODELS as readonly string[]);
+  // ...
+}
+```
+
+### Router Guard Registration
+
+`isOrchestrationModel(id)` in `src/providers/sapOrchestration.ts` is the
+sync guard used by the router before dispatching a request. It performs
+a fast static check first and then delegates to
+`modelCatalog.isAvailableModel(id)` for live entries. Because
+`modelCatalog.ts` imports from `sapOrchestration.ts` for the static
+seed, the reverse dependency is wired lazily at module-load time and
+does not create a circular import.
+
+### Testing
+
+`refreshModelCatalog` accepts an explicit `resourceGroup` argument so
+tests can point it at a fixture without env-var manipulation.
+`invalidateCatalog()` resets the module state to `idle` with the static
+seed, which is the reset hook used in the `beforeEach` of catalog
+tests. `CATALOG_TTL_MS` is re-exported so tests can assert the
+schedule-next-refresh window without hard-coding the number.
+
 ## Configuration
 
 ### Environment Variables
