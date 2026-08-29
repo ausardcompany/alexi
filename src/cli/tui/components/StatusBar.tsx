@@ -9,6 +9,12 @@ import {
 import { useTheme } from '../context/ThemeContext.js';
 import { formatCwdShort } from '../utils/pathFormat.js';
 import { Spinner } from './Spinner.js';
+import {
+  getCatalogStatus,
+  getLiveModels,
+  subscribeCatalog,
+  type CatalogStatus,
+} from '../../../providers/modelCatalog.js';
 
 export interface StatusBarProps {
   agent: string;
@@ -111,6 +117,18 @@ export function StatusBar({
     };
   }, []);
 
+  // Live model catalog status — shown as a dot in the status bar
+  const [catalogStatus, setCatalogStatus] = React.useState<CatalogStatus>(getCatalogStatus);
+  const [liveModelCount, setLiveModelCount] = React.useState(() => getLiveModels().length);
+
+  React.useEffect(() => {
+    const unsub = subscribeCatalog(() => {
+      setCatalogStatus(getCatalogStatus());
+      setLiveModelCount(getLiveModels().length);
+    });
+    return unsub;
+  }, []);
+
   const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
   const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
   const topModelDisplay =
@@ -142,7 +160,7 @@ export function StatusBar({
         </Text>
       </Box>
 
-      {/* Segment 2: Context info (cost + tokens) */}
+      {/* Segment 2: Context info (cost + tokens + catalog dot) */}
       <Box backgroundColor={colors.backgroundDarker} paddingX={1} flexGrow={1}>
         <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
           {costStr}
@@ -169,6 +187,26 @@ export function StatusBar({
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
             {' · '}
             {formatCwdShort(cwd)}
+          </Text>
+        )}
+        {/* Live model catalog indicator: ● N live / ⟳ loading / ○ offline */}
+        {catalogStatus === 'ready' && liveModelCount > 0 && (
+          <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+            {' · '}
+            <Text color={colors.success}>●</Text>
+            {` ${liveModelCount} live`}
+          </Text>
+        )}
+        {(catalogStatus === 'idle' || catalogStatus === 'loading') && (
+          <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+            {' · '}⟳
+          </Text>
+        )}
+        {catalogStatus === 'error' && (
+          <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+            {' · '}
+            <Text color={colors.warning}>○</Text>
+            {' offline'}
           </Text>
         )}
       </Box>

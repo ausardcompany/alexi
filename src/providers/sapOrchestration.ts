@@ -1971,10 +1971,30 @@ export const ORCHESTRATION_MODELS = [
 export type OrchestrationModel = (typeof ORCHESTRATION_MODELS)[number];
 
 /**
- * Check if a model is available through orchestration
+ * Check if a model is available through orchestration.
+ *
+ * Delegates to the dynamic model catalog when it has loaded, so newly
+ * discovered SAP AI Core deployments are accepted without a code change.
+ * Falls back to the static ORCHESTRATION_MODELS list when the catalog is
+ * still loading or unavailable — guarantees the check is never stricter
+ * than the hardcoded catalog.
+ *
+ * Import is lazy (dynamic require-style via a local inline import) to avoid
+ * a circular-dependency cycle: modelCatalog imports from sapOrchestration,
+ * so we cannot top-level import modelCatalog here.
  */
 export function isOrchestrationModel(modelId: string): boolean {
-  return ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel);
+  // Fast static check first (no I/O, no async, always safe)
+  if (ORCHESTRATION_MODELS.includes(modelId as OrchestrationModel)) return true;
+  // Check live catalog if it has already loaded (sync read, no await needed)
+  try {
+    // Lazy import avoids circular dependency at module-load time
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const catalog = require('./modelCatalog.js') as typeof import('./modelCatalog.js');
+    return catalog.isAvailableModel(modelId);
+  } catch {
+    return false;
+  }
 }
 
 // ============================================================================
