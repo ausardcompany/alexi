@@ -20,6 +20,7 @@ import { DeploymentApi } from '@sap-ai-sdk/ai-api';
 import {
   ORCHESTRATION_MODELS,
   ORCHESTRATION_MODEL_METADATA,
+  _registerCatalogGuard,
   type OrchestrationModelMetadata,
 } from './sapOrchestration.js';
 
@@ -334,3 +335,8 @@ export function invalidateCatalog(): void {
 
 // Export catalog TTL for tests
 export { CATALOG_TTL_MS };
+
+// Register isAvailableModel as the live-catalog guard in sapOrchestration.ts.
+// This runs at module load time (after both modules have initialized), wiring
+// up the reverse dependency without a circular import.
+_registerCatalogGuard(isAvailableModel);

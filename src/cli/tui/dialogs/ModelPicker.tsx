@@ -130,7 +130,9 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
   const [catalogStatus, setCatalogStatus] = React.useState<CatalogStatus>(getCatalogStatus);
   const [groups, setGroups] = React.useState<ModelGroup[]>(() => {
     const status = getCatalogStatus();
-    return status === 'ready' ? buildGroupsFromEntries(getCatalogEntries()) : buildGroupsFromStatic();
+    return status === 'ready'
+      ? buildGroupsFromEntries(getCatalogEntries())
+      : buildGroupsFromStatic();
   });
 
   React.useEffect(() => {
@@ -138,9 +140,7 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
       const status = getCatalogStatus();
       setCatalogStatus(status);
       setGroups(
-        status === 'ready'
-          ? buildGroupsFromEntries(getCatalogEntries())
-          : buildGroupsFromStatic()
+        status === 'ready' ? buildGroupsFromEntries(getCatalogEntries()) : buildGroupsFromStatic()
       );
     });
     return unsub;
@@ -187,7 +187,7 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
         <Text color={colors.primary} bold>
           Select Model
         </Text>
-        <Text color={colors.dimText}>● live  ○ static</Text>
+        <Text color={colors.dimText}>● live ○ static</Text>
       </Box>
 
       {/* Current model */}
@@ -207,7 +207,7 @@ export function ModelPicker({ currentModel }: ModelPickerProps): React.JSX.Eleme
       </Box>
 
       {/* Footer hints */}
-      <Text color={colors.dimText}>[↑↓] Navigate  [Enter] Select  [Esc] Cancel</Text>
+      <Text color={colors.dimText}>[↑↓] Navigate [Enter] Select [Esc] Cancel</Text>
     </Box>
   );
 }

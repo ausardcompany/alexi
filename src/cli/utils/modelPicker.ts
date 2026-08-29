@@ -5,7 +5,6 @@
 import { select, Separator } from '@inquirer/prompts';
 import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
 import {
-  getAvailableModels as getCatalogModels,
   getCatalogEntries,
   getCatalogStatus,
   type CatalogEntry,
