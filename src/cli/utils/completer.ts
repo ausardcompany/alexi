@@ -10,7 +10,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
-import { getAvailableModels as getCatalogModels, getCatalogStatus } from '../../providers/modelCatalog.js';
+import {
+  getAvailableModels as getCatalogModels,
+  getCatalogStatus,
+} from '../../providers/modelCatalog.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -306,7 +309,9 @@ export function completeSlashCommand(partial: string): CompletionResult {
 export function completeModelName(partial: string): CompletionResult {
   // Prefer the live catalog; fall back to static list while loading
   const modelList =
-    getCatalogStatus() === 'ready' ? getCatalogModels() : (ORCHESTRATION_MODELS as readonly string[]);
+    getCatalogStatus() === 'ready'
+      ? getCatalogModels()
+      : (ORCHESTRATION_MODELS as readonly string[]);
 
   const items: CompletionItem[] = [];
 

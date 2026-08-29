@@ -1989,7 +1989,7 @@ export function isOrchestrationModel(modelId: string): boolean {
   // Check live catalog if it has already loaded (sync read, no await needed)
   try {
     // Lazy import avoids circular dependency at module-load time
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+
     const catalog = require('./modelCatalog.js') as typeof import('./modelCatalog.js');
     return catalog.isAvailableModel(modelId);
   } catch {
