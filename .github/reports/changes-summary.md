@@ -1,81 +1,69 @@
-# Changes Summary — Upstream Sync Execution
+# Changes Summary — Upstream Sync 2026-08-29
 
-Generated: 2026-08-28
-Source plan: 12 items enumerated (2 critical, 5 high, 3 medium, 2 low).
-Executed: 5 items (all specified items in the plan text; the delivered plan text was truncated mid-item-5 and did not contain items 6–12).
+## Plan Executed
 
-## Files modified
+Applied the "no-port" upstream sync tracking plan for review ranges:
+- kilocode: `e126cc3ca..5e02825c8` (26 commits — all JetBrains plugin scope)
+- opencode: `df35e84..dc4449d` (2 commits — console UI + nix hashes)
 
-| File | Change |
-| --- | --- |
-| `src/core/kilocode/fff.ts` | **CREATED** — filesystem-root / home-directory indexing guard (`allowed`, `notices`, `message`). |
-| `src/core/filesystem/watcher.ts` | Imports `allowed` from `../kilocode/fff.js`; `maybeStartFileWatcher` now additionally gates on `allowed(location.directory)`. |
-| `src/providers/transform.ts` | Added `filterUnreplayableBedrockReasoning(messages, providerID)` + helper `hasBedrockReasoningSignature`. Extended the internal `Message` interface with an optional `parts?: Array<Record<string, unknown>>` field. |
-| `tests/providers/transform.test.ts` | Added `filterUnreplayableBedrockReasoning` describe block with 10 test cases covering pass-through, bedrock/aicore detection, mutation-safety, and edge cases. |
-| `src/core/kilocode/zero-id.ts` | **CREATED** — `zeroID(...parts)` NUL-delimited composite key helper (arity-2 / arity-3 fast paths, generic `join('\0')` fallback). |
-| `src/session/queue.ts` | **CREATED** — `SessionQueue` class (enqueue / drainNext / drop / edit / peek / size / clear / clearAll) + `getSessionQueue()` global singleton + `resetSessionQueue()` for tests. |
-| `src/compaction/index.ts` | Added preservation helpers appended after `checkAndCompact`: `isPendingTurn`, `isReplayEligible`, `wasJustCompacted`, `partitionForCompaction`, and `compactPreservingPending`. No existing behavior modified. |
+Total planned code changes: **0**. Total planned tracking/doc changes: **3**.
+All three low-priority items were executed. No SAP AI Core surfaces
+were modified (nothing under `src/providers/`, `src/core/`, `src/tool/`,
+`src/agent/`, `src/permission/`, or `src/bus/` was touched).
 
-## Item-by-item summary
+## Files Modified / Created
 
-### 1. [CRITICAL — security] Prevent filesystem root & home indexing
-- Created `src/core/kilocode/fff.ts` with `allowed(directory, home?)`, `notices(directory)`, and user-facing `message` constant.
-- POSIX and win32 (including UNC extended-path `\\?\UNC\...`) root detection implemented via `path.parse(dir).root` comparison; realpath resolution via `fs.realpathSync.native` with a `path.resolve` fallback so a missing directory still fails safely.
-- `ALEXI_TEST_HOME` env override supported so tests can pin the home anchor without mutating `process.env.HOME` globally.
-- Wired into `src/core/filesystem/watcher.ts`: `maybeStartFileWatcher` now short-circuits when `!allowed(location.directory)`, in addition to its existing `location.vcs && experimentalFlag` guard. Backwards-compatible: legacy `startWatcher` and `InstanceWatcher.start` inherit the guard automatically.
-- The plan referenced `src/core/filesystem/search.ts` as an alternate call site; that file does not exist in this codebase (`src/core/filesystem.ts` is only a `mkdirSafe` utility). The `allowed` helper is exported for future search integration without touching non-existent code.
+| File | Type | Priority |
+| --- | --- | --- |
+| `docs/upstream-sync/2026-08-29.md` | created | low |
+| `.upstream-sync.json` | created | low |
+| `docs/upstream-sync/watchlist.md` | created | low |
 
-### 2. [CRITICAL — bugfix] Filter unreplayable Bedrock reasoning parts
-- Added `filterUnreplayableBedrockReasoning(messages, providerID)` in `src/providers/transform.ts`.
-- Detection: any `providerID` containing `bedrock` OR `aicore` triggers the filter — this covers SAP AI Core's `aicore-bedrock-*` deployment ids without a per-model allowlist, matching the plan's "SAP AI Core proxies multiple model families" rationale.
-- Filter drops `type: 'reasoning'` parts on assistant messages when they lack a non-empty `providerMetadata.bedrock.signature`. Non-Bedrock providers pass through as `messages` (reference-identical). Assistant messages without a `parts` array pass through. Empty signature strings treated as unsigned.
-- No mutation of inputs verified via a dedicated test.
-- 10 test cases added; total transform test file grew from 466 to ~590 lines.
+## Summary of Each Change
 
-### 3. [HIGH — refactor] Centralized NUL-delimited composite IDs
-- Created `src/core/kilocode/zero-id.ts` exporting `zeroID(...parts)`.
-- Fast paths for arity 2 and 3 use template-literal concatenation (dominant use cases per upstream); larger arities fall back to `parts.join('\0')`.
-- Migration NOT executed: grepping the current codebase found NO existing `.join("\0")` or NUL-template-literal usages (see reasoning in plan §3 "Migration"). The helper is now available for future callers so new code adopts the pattern from day one.
+### 1. `docs/upstream-sync/2026-08-29.md` (new)
+Audit-trail entry recording the "no port required" decision for the
+2026-08-29 sync pass. Documents which upstream commit ranges were
+reviewed and why each vertical (JetBrains plugin, OpenCode SolidJS
+console, Nix build metadata) is out-of-scope for Alexi. Also records
+the correct starting commits for the next sync so we do not re-analyze
+the same range: kilocode `5e02825c8`, opencode `dc4449d`.
 
-### 4. [HIGH — feature/bugfix] Queue prompts for busy sessions
-- Created `src/session/queue.ts` with the `SessionQueue` class.
-- Semantics match upstream (kilocode `039a235b6`, `de9e1edcf`, `52d4247d9`, `c3deca608`):
-  - `enqueue` drops empty/whitespace-only prompts (per `de9e1edcf`).
-  - `drop(sessionID, messageID)` supports cancellation by the caller-supplied stable `messageID` forwarded from the remote sender (per `c3deca608`).
-  - `edit` allows in-place text replacement without reordering.
-  - `drainNext` is FIFO and auto-collects empty queue maps.
-  - `peek` returns a defensive copy; `size` / `clear` / `clearAll` round out the API.
-- The plan's agent-side integration example (`sendPrompt` on `src/agent/index.ts`) was NOT wired in this pass — the existing `AgentRegistry` in `src/agent/index.ts` does not have a `sendPrompt` method; adding one crosses into non-scoped agent-runtime redesign. The queue module is standalone and ready for integration by the agent-manager PR that owns that surface. A `getSessionQueue()` global singleton is exposed so wiring in a follow-up PR is a one-liner.
+### 2. `.upstream-sync.json` (new)
+Machine-readable watermark tracker at the repo root. Records the last
+reviewed commit per upstream (kilocode, opencode), the review date, and
+a short human-readable note about the decision. This file did not
+previously exist in the repo — created fresh per the plan. Structure
+follows the plan's exact JSON schema; the two top-level keys
+(`kilocode`, `opencode`) match the two upstream sources tracked by
+`scripts/sync-upstream.sh` and `.github/workflows/sync-upstream.yml`.
 
-### 5. [HIGH — bugfix] Preserve pending turns and tool progress across compaction
-- Plan referenced `src/session/compaction.ts` (does not exist). Applied against the real compaction module at `src/compaction/index.ts` — the change is additive: no existing strategy (`truncate` / `summarize` / `sliding` / `smart`) is touched.
-- Added:
-  - `isPendingTurn(m)` — inspects `metadata.pending / inFlight / toolCallPending`.
-  - `isReplayEligible(m)` — pending turns and `metadata.noReplay` messages excluded.
-  - `wasJustCompacted(messages)` — true when the tail is a summariser-injected system message (`metadata.isSummary === true`) with no user/assistant message after it. This is the replay-loop guard from kilocode `8bcd9f4b8`.
-  - `partitionForCompaction(messages)` — three-way split into `pending / eligible / skipped`.
-  - `compactPreservingPending(messages, options?)` — safety-guarded compaction wrapper that:
-    1. Refuses to compact when `wasJustCompacted` (replay-loop guard);
-    2. Refuses when nothing is replay-eligible;
-    3. Otherwise compacts only the eligible subset and re-appends the pending tail verbatim.
-- Callers can migrate incrementally by swapping `compactConversation` calls for `compactPreservingPending`.
+### 3. `docs/upstream-sync/watchlist.md` (new)
+Flags three upstream concepts that are JetBrains-only today but could
+migrate into shared surfaces in future commits:
+- Session sharing state persistence (kilocode `d2fd73b10`)
+- Worktree run lifecycle race-condition fixes (kilocode `e43dd7f23`,
+  `1747e05a3`)
+- Prompt session actions menu action IDs (kilocode `8b711803b`)
 
-## Items 6–12: NOT executed
+The plan said "append", but the file did not yet exist in the repo, so
+it was created with the watchlist header + the plan's payload. Future
+sync runs should append additional sections under the existing
+"Watchlist (added ...)" pattern.
 
-The delivered plan payload was truncated at line ~245 mid-item-5 ("preserve pending turns"). Items 6 through 12 (medium × 3, low × 2, plus the tail of any high items) were NOT enumerated in the received plan text and therefore fall under the "Do NOT add extra changes not in the plan" instruction. The plan header advertised 12 items; the plan body delivered content for 5.
+## Issues Encountered
 
-If items 6–12 are re-delivered in a follow-up, they can be layered on top of the changes above without conflict — nothing in this pass forecloses any of the anticipated categories (opencode `790fb5b` Azure CLI auth, `03afae5` v1/v2 config coexistence, `733562e` Bun removal for Azure auth, `04ac919af` file search on demand, etc.).
-
-## Issues encountered
-
-- **Referenced files do not exist**: The plan referenced `src/core/filesystem/search.ts` and `src/session/compaction.ts` which do not exist in this codebase. In both cases the intent was preserved by applying the change to the closest equivalent (watcher / `src/compaction/index.ts`) and by exporting the new helpers so future code can adopt them without touching non-existent modules.
-- **Plan truncation**: The plan payload cut off mid-example-code in item 5. Item 5 was completed using the plan's stated intent (preserve pending, guard against replay loops) rather than a partial code copy.
-- **No breaking changes to SAP AI Core integrations**: The transform tests and provider tests are unmodified except for additive new cases; existing serialization paths are unchanged.
-
-## Verification recommended
-
-Before merging:
-- `npm run lint` — new code follows the existing prettier/eslint conventions (single quotes, 100 col, no `any` where structural typing sufficed).
-- `npm run typecheck` — new imports use `.js` extensions per project ESM rules.
-- `npm test -- tests/providers/transform.test.ts` — exercises the new `filterUnreplayableBedrockReasoning` cases.
-- `npm run test:coverage` — new files under `src/session/queue.ts`, `src/core/kilocode/fff.ts`, `src/core/kilocode/zero-id.ts` are UNTESTED in this pass. If the CI 40% line threshold flags the delta, add targeted unit tests for those three modules; the plan did not enumerate tests for them.
+- **Neither `docs/upstream-sync/` nor `.upstream-sync.json` existed**
+  before this run. Both were created from scratch, which matches the
+  plan's instruction ("create if absent"). No existing tooling in the
+  repo currently reads `.upstream-sync.json` (verified via ripgrep
+  across `scripts/`, `.github/workflows/`, `engine/`, and `src/`), so
+  creating it is purely informational for now — it will not break any
+  CI job. If/when a future sync tool starts consuming it, the schema in
+  the plan is the canonical shape.
+- No code, tests, providers, routers, or CLI behavior were changed.
+  `npm run lint`, `typecheck`, `test`, and `build` are unaffected by
+  this changeset (Markdown + a standalone JSON file only). ESLint
+  ignores `docs/`; the new JSON is valid and self-contained.
+- No SAP AI Core integration surfaces were touched. `src/providers/`,
+  `src/core/`, and routing configs are unchanged.

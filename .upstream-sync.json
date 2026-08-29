@@ -1,0 +1,12 @@
+{
+  "kilocode": {
+    "lastReviewed": "5e02825c8",
+    "reviewedAt": "2026-08-29",
+    "note": "JetBrains-only changes; no port required."
+  },
+  "opencode": {
+    "lastReviewed": "dc4449d",
+    "reviewedAt": "2026-08-29",
+    "note": "Console UI + nix hashes only; no port required."
+  }
+}
