@@ -9,6 +9,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Test Configuration](#test-configuration)
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
+- [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing Compaction](#testing-compaction)
 - [Testing TUI Commands](#testing-tui-commands)
@@ -1249,6 +1250,66 @@ to verify the placeholder strings are not reintroduced.
 > assertions adjusted accordingly) or `registry.ts` is updated to re-export a
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
+
+## Testing Minify-Safe Telemetry Detection
+
+The `src/utils/telemetry.ts` module exposes a structural detection surface (`isTelemetryService`, `telemetryInstance`, `TelemetryServiceLike`) designed to survive bundler minification. The regression suite at `tests/utils/telemetry-minify.test.ts` locks in the contract that class-name based checks (`obj.constructor.name === 'TelemetryService'`) must NEVER be relied on, and that the exported structural helpers keep working when the module is passed through a real minifier.
+
+See `docs/ARCHITECTURE.md` under **Minify-Safe Patterns** for the design rationale; this section covers the test mechanics.
+
+### Test file
+
+- `tests/utils/telemetry-minify.test.ts` — Loads `src/utils/telemetry.ts` through `esbuild.transform` with `minify: true`, imports the result via a `data:text/javascript` URL, and asserts on both the minified and the unminified surfaces.
+
+### Loading the minified module
+
+The test uses `esbuild` (already in the toolchain via Vitest's dev dependencies — no new dependency added) to produce a real minified ESM module, then imports it dynamically through a `data:` URL. This gives every assertion an actually-minified live module rather than just a source string to grep:
+
+```typescript
+import { transform } from 'esbuild';
+import { readFile } from 'node:fs/promises';
+
+async function loadMinifiedTelemetry(): Promise<{ mod: MinifiedModule; minifiedSource: string }> {
+  const source = await readFile(TELEMETRY_SRC, 'utf8');
+  const result = await transform(source, {
+    loader: 'ts',
+    format: 'esm',
+    minify: true,
+    target: 'es2022',
+    // Property names must NOT be mangled — the structural check depends on
+    // `setEnabled` / `track` / `getEvents` / `clear` being preserved. Only
+    // class *identifier* names should be lost, which is esbuild's default.
+  });
+  const dataUrl = `data:text/javascript;base64,${Buffer.from(result.code).toString('base64')}`;
+  const mod = (await import(dataUrl)) as MinifiedModule;
+  return { mod, minifiedSource: result.code };
+}
+```
+
+### Contract asserted by the suite
+
+Eight cases in the suite pin the following invariants:
+
+1. **The minifier actually renamed the local class.** The suite reads the raw minified source string and asserts `expect(minifiedSource).not.toMatch(/class\s+TelemetryService\b/)`. If esbuild ever changes defaults to preserve class names, the whole test is meaningless — this guard makes such a regression loud rather than silent.
+2. **`isTelemetryService` and `telemetryInstance` are still exported after minification.** A regression that renamed one of the two exports to a short internal identifier would break every consumer.
+3. **`isTelemetryService(telemetryInstance)` returns `true` against the minified singleton.** This is the core assertion: structural detection survives class-name mangling because it duck-types the object rather than reading `constructor.name`.
+4. **`isTelemetryService` rejects `null`, `undefined`, `{}`, strings, and partial shapes (`{ track: fn }` alone).** The guard requires the full four-method surface so unrelated event emitters carrying only `track` are not false-positives.
+5. **`isTelemetryService` accepts hand-rolled duck-typed shapes.** Any object with all four methods — regardless of prototype chain — must pass. This is the escape hatch consumers rely on to inject test doubles.
+6. **`constructor.name` of the minified instance is NOT `'TelemetryService'`.** This case documents *why* the structural approach is required. If it ever starts equalling `'TelemetryService'`, esbuild has changed behaviour and the whole minify-survival scenario needs re-evaluation.
+7. **The `Telemetry` facade round-trips `setEnabled` + `track` + `getEvents` + `clear` after minification.** Guards against minifier regressions that would break the facade's re-binding of the singleton's methods.
+8. **Cross-boundary duck-typing works both ways.** The unminified `isTelemetryService` imported by the test accepts an instance produced by the minified build, and the minified `isTelemetryService` accepts the unminified singleton. This is the realistic production scenario: a compiled consumer imports a minified vendor library, or vice versa.
+
+### Key patterns to reuse for future instrumentation modules
+
+When adding a new telemetry / instrumentation integration (OpenTelemetry, Sentry, Datadog, Langfuse), copy the structural pattern in `src/utils/telemetry.ts` and add a sibling `<module>-minify.test.ts` following this template:
+
+1. **Export a structural interface (`FooLike`)**, not the concrete class. Consumers type-check against method surface, not class identity.
+2. **Export an `isFoo(obj: unknown): obj is FooLike` guard** that duck-types on the full method surface. Never weaken it to a single-method probe — unrelated shapes will slip through.
+3. **Export the singleton reference (`fooInstance`)** so consumers that need identity-level detection can do `obj === fooInstance` instead of any name-based check.
+4. **Verify with esbuild.** Feed the module through `esbuild.transform` with `minify: true`, import the result via a `data:` URL, and assert the invariants above.
+5. **Assert on the negative case (`class Foo` gone from the minified source).** This is what proves the risk is real; without it, a passing test could just mean the minifier never ran.
+
+Never assert on `obj.constructor.name` in production code paths — this test exists precisely to prevent that pattern from being reintroduced.
 
 ## Testing Hooks
 
