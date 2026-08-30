@@ -364,6 +364,16 @@ import { sendChat } from '../src/core/orchestrator.js';
 
 When testing anything that reads the dynamic model catalog (`src/providers/modelCatalog.ts`), mock `@sap-ai-sdk/ai-api` and call `invalidateCatalog()` in `beforeEach` — the module holds a process-wide cache that leaks across tests. See [`docs/TESTING.md#testing-the-dynamic-model-catalog`](./TESTING.md#testing-the-dynamic-model-catalog).
 
+### Minify-safe class detection
+
+Production bundlers (esbuild, Bun, terser, swc) rename local class identifiers to single letters, silently breaking any control-flow gate that reads `obj.constructor.name === 'SomeClass'`. When contributing telemetry, instrumentation, or any code that needs to detect an object's class at runtime, follow the reference pattern established by `src/utils/telemetry.ts`:
+
+1. **Never use `constructor.name` as a control-flow gate.** It is safe for logging and error messages, but never for branch decisions. The rule is enforced by convention and by review — there is no ESLint rule for it because the bare pattern is legitimate in log strings.
+2. **Export a structural interface (`FooLike`), not the concrete class.** Consumers should type-check against the required method surface, not against class identity.
+3. **Export a duck-typed guard (`isFoo(obj: unknown): obj is FooLike`)** that checks every method on the required surface. Never weaken it to a single-method probe.
+4. **Export the singleton reference (`fooInstance`)** so consumers can perform identity checks (`obj === fooInstance`) — the cheapest and most robust minify-immune check.
+5. **Add a sibling `<module>-minify.test.ts`** that pipes the module through `esbuild.transform` with `minify: true` and asserts the structural helpers still work against the minified output. See [`docs/TESTING.md#testing-minify-safe-telemetry-detection`](./TESTING.md#testing-minify-safe-telemetry-detection) for the reference suite and [`docs/ARCHITECTURE.md#minify-safe-patterns`](./ARCHITECTURE.md#minify-safe-patterns) for the design rationale.
+
 ### Test import-path depth
 
 Test files under `tests/` walk up to the repository root before descending into `src/`. The number of `../` segments needed depends on where the test file lives, and it must always land in `src/` — never in a sibling under `tests/` itself. Concrete rules:

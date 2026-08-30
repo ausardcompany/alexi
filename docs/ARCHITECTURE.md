@@ -1732,6 +1732,101 @@ ADRs will backfill rationale for each newer top-level module. See
 `docs/adr/REVIEW-2026-08-24.md` for the current baseline snapshot and
 `docs/adr/REVIEW-*.md` more generally for the running architecture log.
 
+## Minify-Safe Patterns
+
+Production bundlers (esbuild, Bun, terser, swc) routinely rename local
+class and function identifiers to single letters. Any runtime code that
+relies on those names — most commonly through `obj.constructor.name` —
+breaks silently the moment a minified build ships. This section codifies
+the defensive patterns alexi uses (and expects every future telemetry /
+instrumentation integration such as OpenTelemetry, Sentry, Datadog, or
+Langfuse to adopt) so that class-detection logic keeps working after
+minification.
+
+### Rules
+
+1. **Never use `constructor.name` for class detection in production
+   code.** It is safe for logging, debug output, and error messages, but
+   never as a control-flow gate. A minifier will rename
+   `class TelemetryService {}` to `class t {}` and every
+   `obj.constructor.name === 'TelemetryService'` check silently starts
+   returning `false`.
+2. **Prefer structural checks.** In descending order of preference:
+   - **Object identity** (`obj === expectedSingleton`). Cheapest, most
+     robust, immune to any bundler transform.
+   - **Method existence** (`typeof obj.method === 'function'`). Requires
+     that property names survive minification, which is the default in
+     every major bundler unless the developer opts into
+     property-mangling (`mangleProps` / `--minify-syntax` with a filter).
+   - **Duck-typing on the full method surface**. Combine multiple method
+     checks so that unrelated shapes carrying a single common method
+     (e.g. any event emitter that exposes `track`) are not accepted.
+3. **Verify with a minified-build test before shipping.** Any new
+   telemetry / instrumentation module MUST come with a test that
+   round-trips its exports through a minifier and re-imports the result.
+   See `tests/utils/telemetry-minify.test.ts` for the reference pattern.
+
+### Reference implementation: `src/utils/telemetry.ts`
+
+The telemetry module exposes three surfaces designed for minify-safe
+consumer code:
+
+- `TelemetryServiceLike` — a structural interface listing the required
+  method surface. Consumers type-check against this, not against the
+  concrete `TelemetryService` class (which is not exported precisely
+  because its identity should not be part of the public contract).
+- `isTelemetryService(obj: unknown): obj is TelemetryServiceLike` — a
+  duck-typed guard. Returns `true` only when `obj` is a non-null object
+  carrying all four methods (`setEnabled`, `track`, `getEvents`,
+  `clear`). Deliberately does NOT accept a single-method match to avoid
+  false positives from unrelated event emitters.
+- `telemetryInstance` — an exported reference to the singleton, so
+  consumers that need identity-level detection can do
+  `obj === telemetryInstance` instead of any name-based check.
+
+```ts
+// BAD: breaks under any minifier that renames local classes.
+if (obj.constructor.name === 'TelemetryService') {
+  register(obj);
+}
+
+// GOOD: identity check, minify-immune.
+import { telemetryInstance } from '../utils/telemetry.js';
+if (obj === telemetryInstance) {
+  register(obj);
+}
+
+// ALSO GOOD: duck-typed, minify-safe as long as method names are not
+// property-mangled (opt-in, not the default).
+import { isTelemetryService } from '../utils/telemetry.js';
+if (isTelemetryService(obj)) {
+  obj.track('registered');
+}
+```
+
+### Reference test: `tests/utils/telemetry-minify.test.ts`
+
+The test loads `src/utils/telemetry.ts`, transforms it through esbuild
+with `minify: true` (esbuild is the minifier already in the toolchain;
+the same test can be run through Bun's `--minify` flag by pointing
+`bun build --minify` at the same source file), imports the minified
+output via a `data:text/javascript` URL, and then asserts:
+
+- The internal `class TelemetryService {}` declaration has been renamed
+  by the minifier (proving the risk is real).
+- `isTelemetryService(telemetryInstance)` still returns `true` against
+  the minified singleton — the structural check survives the transform.
+- Partial-shape objects (`{ track: fn }` alone) are correctly rejected.
+- The `Telemetry` facade round-trips `setEnabled` / `track` /
+  `getEvents` / `clear` after minification.
+- Cross-boundary duck-typing works both ways: the *unminified*
+  `isTelemetryService` accepts an instance from the *minified* module,
+  and vice versa.
+
+Any future telemetry integration that adds a new detection surface
+(class, factory, or singleton) MUST extend this test — or add a sibling
+test alongside its module — before landing.
+
 ## Key Design Decisions
 
 ### 1. Single Provider Architecture (SAP AI Core)

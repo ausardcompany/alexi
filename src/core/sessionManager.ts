@@ -339,7 +339,7 @@ export class SessionManager {
       return;
     }
 
-    this.searchIndex.upsertSession(session.metadata);
+    this.searchIndex.upsertSession(session.metadata, session.messages);
   }
 
   /**

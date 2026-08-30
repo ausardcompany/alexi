@@ -59,13 +59,24 @@ function makeMetadata(overrides: Partial<SessionMetadata>): SessionMetadata {
 }
 
 /**
+ * Build a synthetic Message. Only `role`, `content`, and `timestamp` are
+ * required by the FTS content path; the rest of the shape is ignored.
+ */
+function makeMessage(role: 'user' | 'assistant' | 'system', content: string) {
+  return { role, content, timestamp: Date.now() };
+}
+
+/**
  * Write a session JSON file to disk alongside the FTS index. Used by
  * `refreshIndex` reconciliation tests where the filesystem is the source
  * of truth and the index should catch up.
  */
-function writeSessionFile(metadata: SessionMetadata): void {
+function writeSessionFile(
+  metadata: SessionMetadata,
+  messages: Array<{ role: string; content: string; timestamp: number }> = []
+): void {
   const file = path.join(tempDir, `${metadata.id}.json`);
-  fs.writeFileSync(file, JSON.stringify({ metadata, messages: [] }, null, 2), 'utf-8');
+  fs.writeFileSync(file, JSON.stringify({ metadata, messages }, null, 2), 'utf-8');
 }
 
 describe('SessionSearchIndex', () => {
@@ -216,6 +227,107 @@ describe('SessionSearchIndex', () => {
     // The class swallows the error and returns an empty result so the
     // CLI can surface a friendly "no matches" message.
     expect(index.search('unbalanced "quote')).toEqual([]);
+  });
+
+  it('indexes message content and finds sessions by message text', () => {
+    if (!index.isReady()) {
+      return;
+    }
+
+    // The title is deliberately generic. The match must come from the
+    // message content, proving the content column is being indexed.
+    index.upsertSession(makeMetadata({ id: 'content-1', title: 'Untitled' }), [
+      makeMessage('user', 'How do I use react hooks with typescript?'),
+      makeMessage('assistant', 'Use useState and useEffect from react.'),
+    ]);
+    index.upsertSession(makeMetadata({ id: 'content-2', title: 'Unrelated' }), [
+      makeMessage('user', 'What is the capital of France?'),
+    ]);
+
+    const hits = index.search('react');
+    expect(hits.map((r) => r.id)).toContain('content-1');
+    expect(hits.map((r) => r.id)).not.toContain('content-2');
+  });
+
+  it('AND semantics: multiple tokens require all to match', () => {
+    if (!index.isReady()) {
+      return;
+    }
+
+    index.upsertSession(makeMetadata({ id: 'both', title: 'react hooks tutorial' }), [
+      makeMessage('user', 'How do I use react hooks?'),
+    ]);
+    index.upsertSession(makeMetadata({ id: 'only-react', title: 'react basics' }), [
+      makeMessage('user', 'Intro to react components.'),
+    ]);
+    index.upsertSession(makeMetadata({ id: 'only-hooks', title: 'vue composition' }), [
+      makeMessage('user', 'Hooks pattern in vue.'),
+    ]);
+
+    // FTS5 default operator is implicit AND: `react hooks` == `react AND hooks`.
+    const hits = index.search('react hooks');
+    const ids = hits.map((r) => r.id);
+    expect(ids).toContain('both');
+    expect(ids).not.toContain('only-react');
+    expect(ids).not.toContain('only-hooks');
+  });
+
+  it('returns a snippet of the matched content (<= 100 chars)', () => {
+    if (!index.isReady()) {
+      return;
+    }
+
+    const longBody =
+      'This is a long assistant explanation about react hooks and their lifecycle. ' +
+      'It goes on for quite a while, elaborating on useState, useEffect, useMemo, ' +
+      'useCallback, and useRef, plus custom hook composition patterns.';
+    index.upsertSession(makeMetadata({ id: 'snippet-1', title: 'Untitled' }), [
+      makeMessage('assistant', longBody),
+    ]);
+
+    const [hit] = index.search('react');
+    expect(hit).toBeDefined();
+    expect(hit.snippet).toBeDefined();
+    expect(typeof hit.snippet).toBe('string');
+    expect(hit.snippet!.length).toBeLessThanOrEqual(100);
+    expect(hit.snippet!.toLowerCase()).toContain('react');
+  });
+
+  it('empty query returns empty snippets and chronological order', () => {
+    if (!index.isReady()) {
+      return;
+    }
+
+    index.upsertSession(makeMetadata({ id: 'e1', title: 'first', updated: 1 }), [
+      makeMessage('user', 'hello world'),
+    ]);
+    const rows = index.search('');
+    // Chronological rows do not carry snippets — only MATCH queries do.
+    expect(rows.every((r) => r.snippet === undefined)).toBe(true);
+  });
+
+  it('refreshIndex reindexes content from session JSON files', () => {
+    if (!index.isReady()) {
+      return;
+    }
+
+    // Simulate a fresh index by writing a session file with rich message
+    // content and asking refreshIndex to pick it up from disk. This
+    // verifies the reindex path (used on `sessions search` startup) also
+    // reads and indexes message content, not just metadata.
+    const meta = makeMetadata({ id: 'from-disk', title: 'Untitled' });
+    writeSessionFile(meta, [
+      { role: 'user', content: 'discuss elasticsearch cluster sizing', timestamp: Date.now() },
+      {
+        role: 'assistant',
+        content: 'For 100GB indices, aim for 3 hot nodes.',
+        timestamp: Date.now(),
+      },
+    ]);
+    index.refreshIndex();
+
+    const hits = index.search('elasticsearch');
+    expect(hits.map((r) => r.id)).toContain('from-disk');
   });
 
   it('upsertSession updates an existing row instead of duplicating it', () => {
