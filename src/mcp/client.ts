@@ -290,6 +290,13 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
     return 'transient';
   }
 
+  // Explicit remote-transport auth failures (HTTP 401/403) are permanent.
+  // Retrying with the same credentials will always produce the same
+  // result; the operator must update `apiKey` in mcp-servers.json.
+  if (error instanceof McpConnectAuthError) {
+    return 'config';
+  }
+
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code === 'string') {
     if (CONFIG_ERROR_CODES.has(code)) {
@@ -336,6 +343,12 @@ function formatConnectError(serverName: string, error: unknown): string {
   // named message pointing at the exact `connectTimeout` field to
   // raise. Pass them through verbatim.
   if (error instanceof McpConnectTimeoutError || /remote transport connect timeout/.test(raw)) {
+    return raw;
+  }
+
+  // Remote-transport auth failures already carry an actionable message
+  // pointing at the `apiKey` field. Pass them through verbatim.
+  if (error instanceof McpConnectAuthError || /authentication\/authorization failure/.test(raw)) {
     return raw;
   }
 
@@ -471,6 +484,38 @@ export class McpConnectTimeoutError extends Error {
     );
     this.serverName = serverName;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Error thrown when a remote MCP transport probe returns an HTTP status
+ * that indicates the peer is reachable but rejects our credentials
+ * (`401 Unauthorized`, `403 Forbidden`).
+ *
+ * These are **permanent** failures from the connect layer's point of
+ * view: retrying with the same `apiKey` will always produce the same
+ * result. They must NOT be classified as transient — the retry budget
+ * should be spent on network blips (`ECONNRESET`, remote connect
+ * timeout, ...), not on a misconfigured token.
+ *
+ * The message names the exceeded bound (auth) and points at the exact
+ * `apiKey` field an operator needs to fix.
+ */
+export class McpConnectAuthError extends Error {
+  override readonly name = 'McpConnectAuthError';
+  readonly serverName: string;
+  readonly status: number;
+
+  constructor(serverName: string, status: number, cause?: unknown) {
+    super(
+      `Failed to connect to MCP server '${serverName}': remote transport ` +
+        `returned HTTP ${status} (authentication/authorization failure). ` +
+        `Check the 'apiKey' field in mcp-servers.json — this is a ` +
+        `permanent error and will NOT be retried.`,
+      cause !== undefined ? { cause } : undefined
+    );
+    this.serverName = serverName;
+    this.status = status;
   }
 }
 
@@ -1175,6 +1220,14 @@ export class McpClientManager {
       // stream a hello frame back on the same connection.
       if (response.body && typeof (response.body as ReadableStream).cancel === 'function') {
         await (response.body as ReadableStream).cancel().catch(() => undefined);
+      }
+      // Reject explicit auth failures up-front so the retry loop does
+      // not burn its budget on a permanent misconfiguration. Any other
+      // status (including 405 from an SSE endpoint that rejects HEAD)
+      // is treated as "peer responded within budget" — reachability
+      // is what we care about at this layer.
+      if (response.status === 401 || response.status === 403) {
+        throw new McpConnectAuthError(config.name, response.status);
       }
     });
 

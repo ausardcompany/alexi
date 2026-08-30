@@ -53,7 +53,11 @@ vi.mock('../../src/mcp/config.js', async () => {
   };
 });
 
-import { McpClientManager, McpConnectTimeoutError } from '../../src/mcp/client.js';
+import {
+  McpClientManager,
+  McpConnectAuthError,
+  McpConnectTimeoutError,
+} from '../../src/mcp/client.js';
 import type { McpServerConfig } from '../../src/mcp/config.js';
 
 describe('MCP remote connect timeout', () => {
@@ -221,6 +225,138 @@ describe('MCP remote connect timeout', () => {
       // via the mocked Client.connect().
       expect(connection.status).toBe('connected');
       expect(spyFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('retry semantics for remote connect', () => {
+    it('retries a connect timeout up to maxAttempts, then fails', async () => {
+      const attempts: number[] = [];
+      globalScope.fetch = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        attempts.push(Date.now());
+        return new Promise((_resolve, reject) => {
+          if (init?.signal) {
+            init.signal.addEventListener('abort', () => {
+              const error = new Error('The operation was aborted');
+              error.name = 'AbortError';
+              reject(error);
+            });
+          }
+        });
+      });
+
+      const withRetry: McpServerConfig = {
+        name: 'remote-retry',
+        transport: 'sse',
+        url: 'http://127.0.0.1:0/mcp',
+        enabled: true,
+        connectTimeout: 100,
+        retry: {
+          enabled: true,
+          maxAttempts: 3,
+          initialDelayMs: 0, // keep the test fast — backoff logic is covered elsewhere
+          maxDelayMs: 0,
+        },
+      };
+
+      const connection = await manager.connect(withRetry);
+      expect(connection.status).toBe('failed');
+      expect(connection.attemptCount).toBe(3);
+      expect(attempts.length).toBe(3);
+      // Final error still points at the connect-timeout bound so an
+      // operator knows which field to raise.
+      expect(connection.error).toContain('remote transport connect timeout');
+      expect(connection.error).toContain("increase 'connectTimeout' in mcp-servers.json");
+    });
+
+    it('does NOT retry a permanent auth failure (HTTP 401)', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+      globalScope.fetch = fetchMock;
+
+      const withRetry: McpServerConfig = {
+        name: 'remote-auth-401',
+        transport: 'http',
+        url: 'http://127.0.0.1:0/mcp',
+        enabled: true,
+        apiKey: 'bad-token',
+        connectTimeout: 500,
+        retry: {
+          enabled: true,
+          maxAttempts: 5, // deliberately large — permanent errors must bail out on the first try
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+        },
+      };
+
+      const connection = await manager.connect(withRetry);
+      expect(connection.status).toBe('failed');
+      // Exactly one probe: auth failures are permanent, retry budget
+      // MUST NOT be spent on them.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(connection.attemptCount).toBe(1);
+      expect(connection.error).toMatch(/HTTP 401/);
+      expect(connection.error).toContain('authentication/authorization failure');
+      expect(connection.error).toContain("'apiKey'");
+    });
+
+    it('does NOT retry a permanent auth failure (HTTP 403)', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 403 }));
+      globalScope.fetch = fetchMock;
+
+      const withRetry: McpServerConfig = {
+        name: 'remote-auth-403',
+        transport: 'http',
+        url: 'http://127.0.0.1:0/mcp',
+        enabled: true,
+        apiKey: 'forbidden-token',
+        connectTimeout: 500,
+        retry: {
+          enabled: true,
+          maxAttempts: 5,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+        },
+      };
+
+      const connection = await manager.connect(withRetry);
+      expect(connection.status).toBe('failed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(connection.attemptCount).toBe(1);
+      expect(connection.error).toMatch(/HTTP 403/);
+    });
+
+    it('exposes McpConnectAuthError with actionable metadata', () => {
+      const err = new McpConnectAuthError('srv', 401);
+      expect(err.name).toBe('McpConnectAuthError');
+      expect(err.serverName).toBe('srv');
+      expect(err.status).toBe(401);
+      expect(err.message).toContain("Check the 'apiKey' field");
+      expect(err.message).toContain('will NOT be retried');
+    });
+
+    it('treats non-auth non-2xx statuses (e.g. 405) as reachable', async () => {
+      // SSE endpoints commonly reject HEAD with 405 while being
+      // reachable and correctly configured. This must NOT be flagged
+      // as an auth failure; the connect layer only cares that the
+      // peer responded within the connect budget.
+      const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 405 }));
+      globalScope.fetch = fetchMock;
+
+      const cfg: McpServerConfig = {
+        name: 'remote-405',
+        transport: 'sse',
+        url: 'http://127.0.0.1:0/mcp',
+        enabled: true,
+        connectTimeout: 500,
+      };
+
+      const connection = await manager.connect(cfg);
+      expect(connection.status).toBe('failed');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // Falls through to the not-yet-implemented transport wiring; the
+      // failure MUST NOT be an auth error or a connect timeout.
+      expect(connection.error ?? '').not.toMatch(/HTTP 40[13]/);
+      expect(connection.error ?? '').not.toMatch(/remote transport connect timeout/);
+      expect(connection.error ?? '').toContain('not yet implemented');
     });
   });
 });
