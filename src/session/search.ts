@@ -26,7 +26,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
-import type { SessionMetadata, Session } from '../core/sessionManager.js';
+import type { Message, SessionMetadata, Session } from '../core/sessionManager.js';
 
 // `better-sqlite3` is a CommonJS-only native module. Bridge the ESM/CJS gap
 // through `createRequire` so a missing/broken native binding fails at
@@ -54,6 +54,14 @@ export interface SessionSearchResult extends SessionMetadata {
    * empty queries where the result is chronologically sorted instead.
    */
   score?: number;
+  /**
+   * First ~100 characters of the matched message content, drawn from the
+   * best-matching column via FTS5's `snippet()` auxiliary function.
+   * Present only for MATCH queries where the row hit an indexed column
+   * (title or content). Empty / whitespace-only queries return
+   * chronological results without a snippet.
+   */
+  snippet?: string;
 }
 
 export interface SessionSearchOptions {
@@ -150,19 +158,41 @@ export class SessionSearchIndex {
 
       // FTS5 virtual table for text search. `id`, `workdir`, and `modelId`
       // are declared UNINDEXED so they round-trip as stored columns
-      // without adding tokens to the inverted index. `title` is the only
-      // column the current implementation searches, but tokens from
-      // `modelId` are still filterable via a WHERE clause on the metadata
-      // table.
+      // without adding tokens to the inverted index. Both `title` and
+      // `content` (concatenated message text) are indexed so queries like
+      // `ax sessions search "react hooks"` find sessions whose messages
+      // discuss the term even if the title is generic ("Untitled").
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
           id UNINDEXED,
           title,
+          content,
           workdir UNINDEXED,
           modelId UNINDEXED,
           tokenize = 'unicode61 remove_diacritics 1'
         );
       `);
+
+      // Schema migration: databases created by Part 1 of the FTS work
+      // (issue #1584) declared the virtual table without the `content`
+      // column. Detect that shape and rebuild the table so `content`
+      // becomes searchable. The rebuild is destructive (FTS5 has no
+      // ALTER TABLE), so callers must reindex from `~/.alexi/sessions/*.json`
+      // afterwards via `refreshIndex`. That reindex is the same code path
+      // used on a fresh install, so it is well-exercised.
+      if (!this.hasContentColumn()) {
+        this.db.exec('DROP TABLE IF EXISTS sessions_fts');
+        this.db.exec(`
+          CREATE VIRTUAL TABLE sessions_fts USING fts5(
+            id UNINDEXED,
+            title,
+            content,
+            workdir UNINDEXED,
+            modelId UNINDEXED,
+            tokenize = 'unicode61 remove_diacritics 1'
+          );
+        `);
+      }
 
       // Companion table for structured, non-searchable metadata. Kept
       // outside the FTS virtual table so we can index/order by timestamp
@@ -217,15 +247,23 @@ export class SessionSearchIndex {
    * with a metadata object whose `id` already exists — both the FTS
    * virtual table and the meta table are updated in a single transaction.
    *
+   * When `messages` is provided, their `content` fields are concatenated
+   * (with whitespace separators, and truncated to a safe upper bound) and
+   * indexed under the `content` column. Callers that only have metadata
+   * on hand (e.g. legacy call sites) can omit `messages`; the row is
+   * still indexed for title search but `content` will be empty.
+   *
    * No-op when the index is disabled (native binding missing).
    */
-  upsertSession(metadata: SessionMetadata): void {
+  upsertSession(metadata: SessionMetadata, messages?: Message[]): void {
     if (!this.initialized) {
       this.initializeIndex();
     }
     if (this.disabled || !this.db) {
       return;
     }
+
+    const content = messages ? this.buildContent(messages) : '';
 
     try {
       // FTS5 does not support ON CONFLICT — delete-then-insert on the
@@ -235,8 +273,16 @@ export class SessionSearchIndex {
       this.db.exec('BEGIN');
       this.db.prepare('DELETE FROM sessions_fts WHERE id = ?').run(metadata.id);
       this.db
-        .prepare('INSERT INTO sessions_fts (id, title, workdir, modelId) VALUES (?, ?, ?, ?)')
-        .run(metadata.id, metadata.title ?? '', metadata.workdir ?? '', metadata.modelId ?? '');
+        .prepare(
+          'INSERT INTO sessions_fts (id, title, content, workdir, modelId) VALUES (?, ?, ?, ?, ?)'
+        )
+        .run(
+          metadata.id,
+          metadata.title ?? '',
+          content,
+          metadata.workdir ?? '',
+          metadata.modelId ?? ''
+        );
       this.db
         .prepare(
           `INSERT INTO sessions_meta
@@ -383,7 +429,7 @@ export class SessionSearchIndex {
           continue;
         }
         seen.add(parsed.metadata.id);
-        this.upsertSession(parsed.metadata);
+        this.upsertSession(parsed.metadata, parsed.messages);
       } catch {
         // Corrupted or partially-written session file: skip. The next
         // successful save will re-index it.
@@ -453,10 +499,17 @@ export class SessionSearchIndex {
     const workdirClause = workdir ? 'AND m.workdir = ?' : '';
     const normalized = workdir ? this.normalizeWorkdir(workdir) : undefined;
 
+    // `snippet(table, col, start, end, ellipsis, tokens)` extracts a
+    // context window from the matched column. `-1` for the column index
+    // asks FTS5 to pick the best-matching column automatically (title vs
+    // content), so we return the most relevant excerpt regardless of
+    // where the match landed. 15 tokens keeps the snippet close to the
+    // 100-character budget requested by the CLI.
     const sql = `
       SELECT m.id, m.created, m.updated, m.messageCount, m.totalTokens,
              m.workdir, m.modelId, m.parentSessionId, m.agent, m.title,
-             bm25(sessions_fts) as score
+             bm25(sessions_fts) as score,
+             snippet(sessions_fts, -1, '', '', '...', 15) as snippet
       FROM sessions_fts f
       JOIN sessions_meta m ON m.id = f.id
       WHERE sessions_fts MATCH ?
@@ -483,9 +536,10 @@ export class SessionSearchIndex {
       agent: string | null;
       title: string | null;
       score: number;
+      snippet: string | null;
     }>;
 
-    return rows.map((r) => this.toResult(r, r.score));
+    return rows.map((r) => this.toResult(r, r.score, this.truncateSnippet(r.snippet)));
   }
 
   private recentQuery(limit: number, workdir: string | undefined): SessionSearchResult[] {
@@ -534,7 +588,8 @@ export class SessionSearchIndex {
       agent: string | null;
       title: string | null;
     },
-    score?: number
+    score?: number,
+    snippet?: string
   ): SessionSearchResult {
     const result: SessionSearchResult = {
       id: row.id,
@@ -561,7 +616,76 @@ export class SessionSearchIndex {
     if (score !== undefined) {
       result.score = score;
     }
+    if (snippet !== undefined && snippet.length > 0) {
+      result.snippet = snippet;
+    }
     return result;
+  }
+
+  /**
+   * Detect whether the existing FTS virtual table already carries the
+   * `content` column. Older databases (created by Part 1 of the FTS
+   * work, issue #1584) declared only `title`; this predicate lets
+   * {@link initializeIndex} decide whether to migrate. Uses
+   * `PRAGMA table_info` on the virtual table, which SQLite happily
+   * services for FTS5 tables.
+   */
+  private hasContentColumn(): boolean {
+    if (!this.db) {
+      return false;
+    }
+    try {
+      const rows = this.db.prepare('PRAGMA table_info(sessions_fts)').all() as Array<{
+        name: string;
+      }>;
+      return rows.some((r) => r.name === 'content');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Concatenate message contents into a single string suitable for FTS5
+   * indexing. Truncated to 64 KiB to bound index size for long sessions
+   * (SQLite happily indexes larger blobs, but the 64 KiB cap is a
+   * pragmatic ceiling that keeps disk usage predictable and matches the
+   * upstream kilocode behaviour). System messages are included so hook
+   * context and constitution reminders remain searchable.
+   */
+  private buildContent(messages: Message[]): string {
+    const parts: string[] = [];
+    let total = 0;
+    const MAX = 64 * 1024;
+    for (const m of messages) {
+      if (typeof m.content !== 'string' || m.content.length === 0) {
+        continue;
+      }
+      parts.push(m.content);
+      total += m.content.length + 1;
+      if (total >= MAX) {
+        break;
+      }
+    }
+    const joined = parts.join('\n');
+    return joined.length > MAX ? joined.slice(0, MAX) : joined;
+  }
+
+  /**
+   * Clamp FTS5 `snippet()` output to the ~100-character contract that the
+   * CLI documents. FTS5 measures snippets in tokens, not characters, so a
+   * 15-token window can overshoot on languages with long words; a hard
+   * character cap keeps table rendering predictable. Preserves the
+   * trailing ellipsis emitted by FTS5.
+   */
+  private truncateSnippet(raw: string | null | undefined): string {
+    if (!raw) {
+      return '';
+    }
+    const collapsed = raw.replace(/\s+/g, ' ').trim();
+    if (collapsed.length <= 100) {
+      return collapsed;
+    }
+    return collapsed.slice(0, 97) + '...';
   }
 
   private escapePhrase(term: string): string {
