@@ -78,6 +78,7 @@ export function registerSessionCommands(program: Command): void {
               totalTokens: s.totalTokens,
               workdir: s.workdir ?? null,
               ...('score' in s && typeof s.score === 'number' ? { score: s.score } : {}),
+              ...('snippet' in s && typeof s.snippet === 'string' ? { snippet: s.snippet } : {}),
             }));
             console.log(JSON.stringify(out, null, 2));
             return;
@@ -100,6 +101,95 @@ export function registerSessionCommands(program: Command): void {
             console.log(`  Workdir: ${session.workdir || 'N/A'}`);
             if ('score' in session && typeof session.score === 'number') {
               console.log(`  Score: ${session.score.toFixed(3)}`);
+            }
+            if ('snippet' in session && typeof session.snippet === 'string') {
+              console.log(`  Snippet: ${session.snippet}`);
+            }
+            console.log();
+          });
+        } catch (e) {
+          console.error(String(e));
+          process.exit(1);
+        }
+      }
+    );
+
+  // Dedicated `sessions search <query>` subcommand. Mirrors the
+  // `sessions --search <query>` flag but reads more naturally in shell
+  // history and completion (`ax sessions search "react hooks"`). Both
+  // paths share the same FTS index and produce the same output shape.
+  program
+    .command('sessions-search <query>')
+    .description(
+      'Full-text search saved sessions by title and message content. ' +
+        'Results are ranked by FTS5 bm25 (most relevant first) and include a ' +
+        'short snippet of the matched text. Use --json for machine-readable ' +
+        'output identical to `sessions --search`.'
+    )
+    .option('--json', 'Output results as JSON array')
+    .option('--here', 'Only search sessions created in the current working directory')
+    .option('--workdir <dir>', 'Only search sessions created in the specified directory')
+    .option('--limit <n>', 'Maximum number of results to return', (v) => parseInt(v, 10))
+    .action(
+      async (
+        query: string,
+        opts: { json?: boolean; here?: boolean; workdir?: string; limit?: number }
+      ) => {
+        try {
+          if (opts.here && opts.workdir !== undefined) {
+            console.error('Error: --here and --workdir are mutually exclusive');
+            process.exit(1);
+          }
+
+          const filter: { workdir?: string; limit?: number } = {};
+          if (opts.here) {
+            filter.workdir = process.cwd();
+          } else if (opts.workdir !== undefined) {
+            filter.workdir = opts.workdir;
+          }
+          if (typeof opts.limit === 'number' && !Number.isNaN(opts.limit)) {
+            filter.limit = opts.limit;
+          }
+
+          const sessionManager = new SessionManager();
+          const sessions = sessionManager.searchSessions(query, filter);
+
+          if (opts.json) {
+            const out = sessions.map((s) => ({
+              id: s.id,
+              title: s.title || null,
+              model: s.modelId ?? null,
+              updatedAt: s.updated,
+              messageCount: s.messageCount,
+              totalTokens: s.totalTokens,
+              workdir: s.workdir ?? null,
+              ...('score' in s && typeof s.score === 'number' ? { score: s.score } : {}),
+              ...('snippet' in s && typeof s.snippet === 'string' ? { snippet: s.snippet } : {}),
+            }));
+            console.log(JSON.stringify(out, null, 2));
+            return;
+          }
+
+          if (sessions.length === 0) {
+            console.log(`No sessions match "${query}"`);
+            return;
+          }
+
+          console.log('\n=== Search Results ===\n');
+          sessions.forEach((session) => {
+            const date = new Date(session.updated).toLocaleString();
+            const title = session.title || 'Untitled';
+            console.log(`ID: ${session.id}`);
+            console.log(`  Title: ${title}`);
+            console.log(`  Updated: ${date}`);
+            console.log(`  Messages: ${session.messageCount}, Tokens: ${session.totalTokens}`);
+            console.log(`  Model: ${session.modelId || 'N/A'}`);
+            console.log(`  Workdir: ${session.workdir || 'N/A'}`);
+            if ('score' in session && typeof session.score === 'number') {
+              console.log(`  Score: ${session.score.toFixed(3)}`);
+            }
+            if ('snippet' in session && typeof session.snippet === 'string') {
+              console.log(`  Snippet: ${session.snippet}`);
             }
             console.log();
           });
