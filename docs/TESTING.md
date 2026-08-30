@@ -614,6 +614,76 @@ Key patterns:
 2. **Round-trip only, no I/O.** All three helpers are pure string transforms; no `fs.mkdtemp`, no mocks, and no dependence on the platform's `os.EOL` (except the empty-content edge case, which is unavoidable and worth an explicit note in the test comment).
 3. **Idempotence.** `normalizeToLf(normalizeToLf(x)) === normalizeToLf(x)` and `applyLineEndingStyle(x, 'lf') === x` for any LF-only `x`. These are the load-bearing properties that make the tool's pipeline (`normalizeToLf` → parse → `applyLineEndingStyle`) safe to re-run — do not remove the sanity assertions without a strong reason.
 
+#### Testing the shared `src/utils/line-ending.ts` helpers
+
+The 8 KiB sample fast path added in the `apply_patch` tool delegates to the shared, pure `detectLineEnding` / `detectLineEndingFromString` helpers exported from `src/utils/line-ending.ts`. Tests for the shared module live in `tests/utils/line-ending.test.ts` and cover both the pure-string helper and the file-path helper. The file-path helper is the only one that touches disk, so its suite follows the standard temp-directory pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+import {
+  detectLineEnding,
+  detectLineEndingFromString,
+  LINE_ENDING_SAMPLE_BYTES,
+} from '../../src/utils/line-ending.js';
+
+describe('detectLineEndingFromString', () => {
+  it('classifies pure CRLF content as CRLF', () => {
+    expect(detectLineEndingFromString('a\r\nb\r\nc\r\n')).toBe('CRLF');
+  });
+
+  it('classifies mixed CRLF + LF content as mixed', () => {
+    expect(detectLineEndingFromString('a\r\nb\nc\r\n')).toBe('mixed');
+  });
+
+  it('does not confuse a lone \\r with a line ending', () => {
+    // Bare CR (old Mac style) is treated as no line ending — the helper
+    // only reports LF/CRLF/mixed, and a bare `\r` is neither.
+    expect(detectLineEndingFromString('a\rb\rc')).toBe('LF');
+  });
+});
+
+describe('detectLineEnding (file path)', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'line-ending-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('only inspects the first 8 KiB of the file', async () => {
+    // Fill the first 8 KiB with pure LF content and place a CRLF block
+    // AFTER the sample window. The sample-based detector must report LF
+    // (it never reads the trailing region) — exactly the property the
+    // helper's docstring claims.
+    const filePath = path.join(tempDir, 'huge.txt');
+    const head = 'a\n'.repeat(Math.ceil(LINE_ENDING_SAMPLE_BYTES / 2) + 1);
+    const tail = '\r\n\r\n\r\n';
+    await fs.writeFile(filePath, head + tail, 'utf-8');
+    await expect(detectLineEnding(filePath)).resolves.toBe('LF');
+  });
+
+  it('rejects when the file does not exist', async () => {
+    const filePath = path.join(tempDir, 'missing.txt');
+    await expect(detectLineEnding(filePath)).rejects.toThrow(/ENOENT/);
+  });
+});
+```
+
+Key patterns:
+
+1. **Assert the three-value union, not a boolean.** The public API returns `'LF' | 'CRLF' | 'mixed'`. Tests must cover the `'mixed'` return explicitly (both `CRLF-first` and `LF-first` orderings) — a regression that collapses the `'mixed'` case to whichever style appears first would still pass a boolean-shaped assertion.
+2. **Cover the sample-window boundary explicitly.** The `LINE_ENDING_SAMPLE_BYTES` constant is exported precisely so tests can construct a file whose first 8 KiB is pure LF and whose tail is pure CRLF. The detector must return `LF` — asserting this pins the fast-path contract that callers (currently `apply_patch`) rely on to avoid reading gigabyte-scale files just to pick a re-encoding style.
+3. **Cover the lone `\r` case.** Old-MacOS-style bare CR files are treated as no line endings (return value `'LF'` per the safe-default rule). A regression that started counting bare `\r` as `CRLF` would flip every previously-classified LF file to `mixed`.
+4. **Assert `ENOENT` rejection, don't try/catch.** `detectLineEnding` opens the file via `fs.open` which rejects with an `ENOENT`-shaped error for missing files. Use `await expect(...).rejects.toThrow(/ENOENT/)` to pin the shape without swallowing unrelated failures.
+5. **No mocking.** Both helpers are self-contained: `detectLineEndingFromString` is pure, and `detectLineEnding` uses only `fs.open` + `handle.read` + `TextDecoder`. Tests should stay direct — mocking `fs` here would break the sample-boundary case (which depends on the real read semantics) without buying anything.
+
 #### Integration tests (`describe('line ending preservation')`)
 
 Each case creates a real file in a `fs.mkdtemp` temp directory, invokes `applyPatchTool.execute` with a plain-string patch, and reads the on-disk result:

@@ -1078,6 +1078,21 @@ Contract for any new patch-application or diff-application tool:
 
 Testing guidance mirrors the write-tool pattern: put pure-function tests in the same test file as the tool's other suites (see `tests/tool/tools/apply-patch.test.ts` `describe('line ending helpers')` and `describe('line ending preservation')`), drive the tool via a real `applyPatchTool.execute` call against a `fs.mkdtemp` temp directory, and assert on both the exact output and the absence of the opposite line-ending style (regex `/(?:^|[^\r])\n/` for a stray-LF check, `.includes('\r\n')` for a stray-CRLF check). See `docs/TESTING.md#testing-the-apply_patch-line-ending-preservation` for the worked pattern.
 
+### Shared line-ending detection: `src/utils/line-ending.ts`
+
+Effective 2026-08-30, generic line-ending classification lives in `src/utils/line-ending.ts` and is the preferred entry point for any new tool or module that needs to know a file's convention without loading it fully. Two exports, both pure and both safe to call from any layer:
+
+- `detectLineEndingFromString(content: string): 'LF' | 'CRLF' | 'mixed'` — for callers that already have the file content in memory (e.g. a tool that has just decoded a buffer through `decodeWithEncoding`). Returns `'mixed'` when both `\r\n` and bare `\n` occur, `'LF'` for the empty string or content with no line endings, and never treats a lone `\r` as a line ending.
+- `detectLineEnding(filePath: string): Promise<'LF' | 'CRLF' | 'mixed'>` — for callers that only have a path. Opens the file with `fs.open`, reads at most `LINE_ENDING_SAMPLE_BYTES` (8 KiB, also exported) from offset 0, decodes as UTF-8 with `fatal: false`, and delegates to `detectLineEndingFromString`. The file handle is always closed via `finally`.
+
+Contract for choosing between the shared module and the older `apply-patch.ts` helpers:
+
+- **Prefer `src/utils/line-ending.ts` for new code.** It returns the three-value `'LF' | 'CRLF' | 'mixed'` union so callers can branch explicitly on the `'mixed'` case, and its sample-based file-path variant keeps detection cheap on multi-megabyte files. The `apply_patch` tool now uses this helper as its fast path and only falls back to the majority-count logic when the sample returns `'mixed'`.
+- **Keep using `detectLineEndingStyle` from `apply-patch.ts` when you need the platform-default fallback.** The shared helper returns `'LF'` for content with no line endings at all (canonical for TypeScript / Node source); `detectLineEndingStyle` falls back to `os.EOL` in that case (`'crlf'` on Windows, `'lf'` elsewhere). If your tool is writing a brand-new file whose EOL style must match the platform, that fallback is the right one — but for existing files with a detectable convention, the shared helper is the fast path.
+- **Never treat a bare `\r` as a line ending.** Both helpers deliberately drop old-MacOS-style CR-only files into the `'LF'` bucket. If a future tool needs to handle CR-only content, add a fourth union member and update the helper in one place — do NOT count bare `\r` occurrences locally in a new tool.
+
+Testing guidance: pure-function tests for both helpers live in `tests/utils/line-ending.test.ts` and follow the standard `fs.mkdtemp` / `fs.rm` pattern for the file-path variant. The `LINE_ENDING_SAMPLE_BYTES` constant is exported specifically so tests can construct a file whose first 8 KiB is pure LF and whose tail is pure CRLF — the detector must return `'LF'`, which is the load-bearing guarantee that lets the fast path avoid full-file reads. See `docs/TESTING.md#testing-the-shared-srcutilsline-endingts-helpers` for the worked pattern.
+
 ## `displayRole` for Hidden Instrumentation
 
 Effective 1.21.4 (issue #1466), messages that must reach the model but stay out of the user-facing transcript should be persisted with `displayRole: 'system'` on the `Message` interface. The provider still receives the message with its logical `role` (`'user'`, `'assistant'`, `'system'`); `displayRole` is a UI-only filter honoured by `MessageArea`, `SessionReplay`, and any future transcript surface.

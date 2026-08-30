@@ -243,6 +243,45 @@ describe('apply_patch tool', () => {
       expect(updated).toContain('line one\r\nline TWO\r\nline three\r\n');
       expect(/(?:^|[^\r])\n/.test(updated)).toBe(false);
     });
+
+    it('preserves CRLF via the file-path sample detector on a pure CRLF file', async () => {
+      // Regression test for the 8 KiB sampled-detection code path in
+      // apply-patch: we specifically want a file where the disk sample
+      // classifies as CRLF (no bare LF anywhere in the head), so the
+      // in-memory majority-count fallback is NOT what preserves the
+      // convention.
+      const filePath = path.join(tempDir, 'pure-crlf.txt');
+      const original = ['line one', 'line two', 'line three'].join('\r\n') + '\r\n';
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\r\n') + '\r\n');
+      expect(/(?:^|[^\r])\n/.test(updated)).toBe(false);
+    });
+
+    it('preserves LF via the file-path sample detector on a pure LF file', async () => {
+      const filePath = path.join(tempDir, 'pure-lf.txt');
+      const original = ['line one', 'line two', 'line three'].join('\n') + '\n';
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      const patch = ['@@ -1,3 +1,3 @@', ' line one', '-line two', '+line TWO', ' line three'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\n') + '\n');
+      expect(updated.includes('\r\n')).toBe(false);
+    });
   });
 
   describe('tool metadata', () => {

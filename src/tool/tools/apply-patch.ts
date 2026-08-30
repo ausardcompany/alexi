@@ -8,15 +8,24 @@ import * as path from 'path';
 import * as os from 'os';
 import { defineTool, type ToolResult } from '../index.js';
 import { detectEncoding, decodeWithEncoding, encodeWithEncoding } from '../encoded-io.js';
+import { detectLineEnding } from '../../utils/line-ending.js';
 
 type LineEndingStyle = 'crlf' | 'lf';
 
 /**
  * Detect the dominant line ending style for a string.
  *
- * Counts CRLF vs bare LF occurrences and returns the majority style.
- * If the content has no line endings at all, falls back to the platform
- * default (CRLF on Windows, LF elsewhere).
+ * Counts CRLF vs bare LF occurrences and returns the majority style. When
+ * the content contains both conventions the majority wins; ties break to
+ * `lf`. If the content has no line endings at all, falls back to the
+ * platform default (CRLF on Windows, LF elsewhere).
+ *
+ * Kept in this module for backward compatibility with existing tests and
+ * because it applies a platform-default fallback that the pure
+ * string-detection helper in `src/utils/line-ending.ts` does not. New
+ * code that has a file path in hand should prefer {@link detectLineEnding}
+ * from `src/utils/line-ending.ts`, which reads only the first 8 KiB of
+ * the file and returns the uppercase `'LF' | 'CRLF' | 'mixed'` label.
  */
 export function detectLineEndingStyle(content: string): LineEndingStyle {
   let crlf = 0;
@@ -282,6 +291,12 @@ Usage:
         };
       }
 
+      // Fast path: sample the first 8 KiB to classify the file's line
+      // ending convention (LF / CRLF / mixed). This drives whether we
+      // preserve CRLF on write; the full-content detection below is the
+      // authoritative one for the majority-style decision.
+      const sampledLineEnding = await detectLineEnding(filePath);
+
       // Read the original file as buffer
       const buffer = await fs.readFile(filePath);
 
@@ -292,7 +307,18 @@ Usage:
       const rawOriginalContent = decodeWithEncoding(buffer, encoding);
 
       // Detect line ending style BEFORE normalizing so we can preserve it.
-      const lineEndingStyle = detectLineEndingStyle(rawOriginalContent);
+      // Prefer the sampled result for pure LF / CRLF files; only fall
+      // back to the majority-count logic when the sample says `mixed`,
+      // which is where a decision has to be made about how to write the
+      // file back out.
+      const lineEndingStyle: LineEndingStyle =
+        sampledLineEnding === 'CRLF'
+          ? 'crlf'
+          : sampledLineEnding === 'LF'
+            ? 'lf'
+            : // mixed: rely on the majority-of-file heuristic so we
+              // don't flip a CRLF-dominated file to LF or vice-versa.
+              detectLineEndingStyle(rawOriginalContent);
 
       // Normalize file + patch to LF for parsing. The patch parser is
       // line-based on '\n' and would treat trailing '\r' as content.
