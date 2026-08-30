@@ -1,69 +1,77 @@
-# Changes Summary — Upstream Sync 2026-08-29
+# Changes Summary — Upstream Sync 2026-08-30
 
 ## Plan Executed
 
-Applied the "no-port" upstream sync tracking plan for review ranges:
-- kilocode: `e126cc3ca..5e02825c8` (26 commits — all JetBrains plugin scope)
-- opencode: `df35e84..dc4449d` (2 commits — console UI + nix hashes)
+Applied the "no-op" upstream sync update plan (see
+`.github/reports/update-plan-2026-08-30.md`) for review ranges:
 
-Total planned code changes: **0**. Total planned tracking/doc changes: **3**.
-All three low-priority items were executed. No SAP AI Core surfaces
-were modified (nothing under `src/providers/`, `src/core/`, `src/tool/`,
-`src/agent/`, `src/permission/`, or `src/bus/` was touched).
+- **kilocode**: `5e02825c8..5e02825c8` (0 new commits since last sync)
+- **opencode**: `dc4449d..10765ff` (2 commits — marketing docs + console UI only)
+
+Total planned code changes: **0** (Critical: 0 | High: 0 | Medium: 0 | Low: 0).
+This sync cycle is a **no-op for Alexi**. No files were modified.
 
 ## Files Modified / Created
 
 | File | Type | Priority |
 | --- | --- | --- |
-| `docs/upstream-sync/2026-08-29.md` | created | low |
-| `.upstream-sync.json` | created | low |
-| `docs/upstream-sync/watchlist.md` | created | low |
+| _(none)_ | — | — |
+
+Only this `changes-summary.md` was (re)written to record the no-op
+outcome for the execution audit trail.
 
 ## Summary of Each Change
 
-### 1. `docs/upstream-sync/2026-08-29.md` (new)
-Audit-trail entry recording the "no port required" decision for the
-2026-08-29 sync pass. Documents which upstream commit ranges were
-reviewed and why each vertical (JetBrains plugin, OpenCode SolidJS
-console, Nix build metadata) is out-of-scope for Alexi. Also records
-the correct starting commits for the next sync so we do not re-analyze
-the same range: kilocode `5e02825c8`, opencode `dc4449d`.
+_No source, config, docs, or workflow files were modified._
 
-### 2. `.upstream-sync.json` (new)
-Machine-readable watermark tracker at the repo root. Records the last
-reviewed commit per upstream (kilocode, opencode), the review date, and
-a short human-readable note about the decision. This file did not
-previously exist in the repo — created fresh per the plan. Structure
-follows the plan's exact JSON schema; the two top-level keys
-(`kilocode`, `opencode`) match the two upstream sources tracked by
-`scripts/sync-upstream.sh` and `.github/workflows/sync-upstream.yml`.
+### Upstream commits reviewed and dismissed
 
-### 3. `docs/upstream-sync/watchlist.md` (new)
-Flags three upstream concepts that are JetBrains-only today but could
-migrate into shared surfaces in future commits:
-- Session sharing state persistence (kilocode `d2fd73b10`)
-- Worktree run lifecycle race-condition fixes (kilocode `e43dd7f23`,
-  `1747e05a3`)
-- Prompt session actions menu action IDs (kilocode `8b711803b`)
+1. **opencode `10765ff`** — "fix: remove Hy3 Free docs and correct Go
+   chart rendering"
+   - `packages/console/app/src/component/limits-graph.tsx` (+1, -1):
+     Solid/React chart rendering fix in OpenCode's hosted marketing
+     console. Alexi does not vendor `packages/console/app/` — no port
+     required.
+   - `packages/console/app/src/routes/go/index.css` (+8, -37): CSS-only
+     tweaks to OpenCode's `/go` landing page. Not applicable to Alexi
+     (no marketing surface).
 
-The plan said "append", but the file did not yet exist in the repo, so
-it was created with the watchlist header + the plan's payload. Future
-sync runs should append additional sections under the existing
-"Watchlist (added ...)" pattern.
+2. **opencode `be53e17`** — "docs(go): end Hy3 usage promotion"
+   - Removes a 4-line "Hy3 Free" promotional block from
+     `packages/web/src/content/docs/**/zen.mdx` across 19 locales.
+     Alexi does not vendor OpenCode's docs site — no port required.
+
+### Scope confirmation (per the plan's Scope Assessment)
+
+The following Alexi surfaces were **verified untouched by upstream**
+and therefore require no changes:
+
+- `src/tool/` — no upstream changes
+- `src/agent/` — no upstream changes
+- `src/permission/` — no upstream changes
+- `src/bus/` — no upstream changes
+- `src/core/` — no upstream changes
+- `src/providers/`, `src/core/router.ts`, `src/cli/` — no upstream changes
+
+SAP AI Core integration is unaffected because no provider, routing,
+tool, agent, permission, or bus code was touched upstream.
+
+## Testing Recommendations (from the plan)
+
+Not executed — no code changes to test. The plan explicitly states
+"No code changes → no additional tests required." CI on the next
+code-affecting sync will re-establish the clean baseline.
+
+## Follow-up (from the plan's "Potential Risks" section)
+
+- **Sync pointer drift**: The plan recommends advancing the opencode
+  HEAD marker to `10765ff` in the sync tooling so these two commits do
+  not re-appear as noise in the next diff report. This is a **sync
+  tooling configuration** action, not a code change, and is out of
+  scope for this execution task — it should be handled by the sync
+  workflow / operator when generating the next diff report.
 
 ## Issues Encountered
 
-- **Neither `docs/upstream-sync/` nor `.upstream-sync.json` existed**
-  before this run. Both were created from scratch, which matches the
-  plan's instruction ("create if absent"). No existing tooling in the
-  repo currently reads `.upstream-sync.json` (verified via ripgrep
-  across `scripts/`, `.github/workflows/`, `engine/`, and `src/`), so
-  creating it is purely informational for now — it will not break any
-  CI job. If/when a future sync tool starts consuming it, the schema in
-  the plan is the canonical shape.
-- No code, tests, providers, routers, or CLI behavior were changed.
-  `npm run lint`, `typecheck`, `test`, and `build` are unaffected by
-  this changeset (Markdown + a standalone JSON file only). ESLint
-  ignores `docs/`; the new JSON is valid and self-contained.
-- No SAP AI Core integration surfaces were touched. `src/providers/`,
-  `src/core/`, and routing configs are unchanged.
+None. The plan contained zero action items; execution consisted solely
+of recording the no-op outcome in this summary.
