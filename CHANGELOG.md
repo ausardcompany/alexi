@@ -7,26 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.22.7] - 2026-08-31
-
-### Changed
-
-- **Daily documentation updates** (commits `320aa7c6`, `ab85d8e0`, `3dcf4cdb`, 2026-08-31): Automated planning brief, architecture review, and consulting agent runs. Updates daily reference materials under `docs/`.
-
-### Maintenance
-
-- **Dependency updates** (2026-08-31):
-  - `@inquirer/prompts`: `8.6.0` → `8.7.0` (#1601)
-  - `puppeteer`: `25.8.0` → `25.9.0` (#1600)
-  - `@vitejs/plugin-react`: `6.1.0` → `6.1.1` (dev, #1597)
-  - `@typescript-eslint/eslint-plugin`: bumped (dev, #1595)
-  - `@testing-library/react`: `16.3.2` → `16.3.3` (dev, #1599)
-  - `lint-staged`: `17.3.0` → `17.4.1` (dev, #1594)
-  - `hono`: `4.13.3` → `4.13.5` (#1596)
-  - Dev dependencies group bump (#1593)
-
-## [Unreleased]
-
 ### Added
 
 - **Session search performance profile and regression suite (issue #1606)** (`scripts/profile-session-search.ts`, `tests/session/performance.test.ts`, `tsconfig.eslint.json`, commit `02894309` `test(core): profile session search performance (#1606)`): New ad-hoc profiling script and companion diagnostic test suite that quantify the two code paths a CLI user hits when listing or searching sessions — `SessionManager.listSessions()` (eager `fs.readdirSync` + `JSON.parse` scan sorted by `updated`) and `SessionManager.searchSessions()` (FTS5-indexed via `SessionSearchIndex` with `refreshIndex()` reconciliation on every call). Numbers are documented in `docs/session-search-performance.md`; the short version is that `listSessions()` is imperceptible at every measured session count (10-1000) and the FTS `searchSessions()` path is currently 10x-40x slower because `refreshIndex()` runs on every invocation. New surface:
@@ -134,6 +114,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `src/tool/tools/shell/id.ts:89-91` — `pwshHits` `.filter((item): item is string => Boolean(item))` reflowed so the arrow follows the type guard on the same line and the `Boolean(item)` body drops onto the next line. Same shell candidate list, same fallback ordering, same `pwsh > powershell > cmd` precedence on Windows.
 
   No provider, routing, tool-execution, session, or permission behaviour changes. `npm run typecheck` and `npm test` pass with byte-identical output; the only observable delta is that `npm run format:check` now succeeds on these four files.
+
+## [1.22.7] - 2026-08-31
+
+### Changed
+
+- **Daily documentation updates** (commits `320aa7c6`, `ab85d8e0`, `3dcf4cdb`, 2026-08-31): Automated planning brief, architecture review, and consulting agent runs. Updates daily reference materials under `docs/`.
+- **Master branch merge into session-search branch** (commit `e1f5944f`, 2026-08-31): Consolidated the 2026-08-31 upstream sync (v1.22.7, PR #1608) into the active session-search performance branch. No source changes beyond conflict resolution against the incoming per-task model selection surface (`src/tool/model-selection.ts`, `src/tool/tools/task.ts`, `src/tool/tools/agent-manager.ts`, `src/tool/tools/agent-manager-models.ts`, `src/config/userConfig.ts`, `src/cli/session/prompt.tsx`) and the new profiling script (`scripts/profile-session-search.ts`) and regression suite (`tests/session/performance.test.ts`, `tests/tui/smoke-render.test.tsx`). All in-tree entries for these files remain accurate; see the `## [Unreleased]` block above for the item-by-item breakdown.
+
+### Maintenance
+
+- **Dependency updates** (2026-08-31):
+  - `@inquirer/prompts`: `8.6.0` → `8.7.0` (#1601)
+  - `puppeteer`: `25.8.0` → `25.9.0` (#1600)
+  - `@vitejs/plugin-react`: `6.1.0` → `6.1.1` (dev, #1597)
+  - `@typescript-eslint/eslint-plugin`: bumped (dev, #1595)
+  - `@testing-library/react`: `16.3.2` → `16.3.3` (dev, #1599)
+  - `lint-staged`: `17.3.0` → `17.4.1` (dev, #1594)
+  - `hono`: `4.13.3` → `4.13.5` (#1596)
+  - Dev dependencies group bump (#1593)
 
 ## [1.22.0] - 2026-08-24
 
