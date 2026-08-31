@@ -1,7 +1,8 @@
 # Session history search performance
 
-Evaluation for issue #1606: is Alexi's session search implementation
-adequate for a CLI usage pattern, or does it need optimization?
+Evaluation for issues #1606 and #1610: is Alexi's session search
+implementation adequate for a CLI usage pattern, or does it need
+optimization?
 
 TL;DR: **The eager `fs.readdirSync + JSON.parse` scan performed by
 `SessionManager.listSessions()` is the fast path for CLI-scale session
@@ -12,42 +13,70 @@ plus per-session upsert). Recommendation: keep FTS available for full-
 text search inside message content, but reconsider whether `refreshIndex`
 should run on every call.
 
+Specifically for the #1610 thresholds table (50 / 100 / 200 sessions):
+`listSessions()` completes in under 3 ms and adds under 0.5 MB RSS at
+every tier, comfortably inside the "simple grep suffices" bucket. **No
+new FTS work or lazy-loading refactor is warranted below 500 sessions.**
+
 ## What we measured
 
 Script: `scripts/profile-session-search.ts` (invoke with
 `npx tsx scripts/profile-session-search.ts` from repo root). Machine:
 GitHub Actions ubuntu-latest runner (2-core / 7 GB), Node 22, native
-`better-sqlite3` build available. Numbers below are single-run wall time
-in milliseconds and will vary run-to-run; the shape of the curve is
-stable.
+`better-sqlite3` build available. Numbers below are single-run wall
+time in milliseconds and resident-set-size delta in megabytes; both
+vary run-to-run, but the shape of the curve is stable.
 
-| Scenario                                        | Sessions | Time (ms) |
-| ----------------------------------------------- | -------: | --------: |
-| `listSessions` (cold)                           |       10 |      0.38 |
-| `listSessions` + JS substring filter (cold)     |       10 |      0.33 |
-| `searchSessions "api"` (cold, builds FTS)       |       10 |     35.95 |
-| `listSessions` (warm)                           |       10 |      0.20 |
-| `searchSessions "api"` (warm)                   |       10 |      2.55 |
-| `listSessions` (cold)                           |       50 |      0.68 |
-| `listSessions` + JS substring filter (cold)     |       50 |      0.57 |
-| `searchSessions "api"` (cold, builds FTS)       |       50 |     44.48 |
-| `listSessions` (warm)                           |       50 |      0.72 |
-| `searchSessions "api"` (warm)                   |       50 |     15.70 |
-| `listSessions` (cold)                           |      100 |      1.44 |
-| `listSessions` + JS substring filter (cold)     |      100 |      1.20 |
-| `searchSessions "api"` (cold, builds FTS)       |      100 |     65.65 |
-| `listSessions` (warm)                           |      100 |      1.15 |
-| `searchSessions "api"` (warm)                   |      100 |     29.03 |
-| `listSessions` (cold)                           |      500 |      6.73 |
-| `listSessions` + JS substring filter (cold)     |      500 |      5.89 |
-| `searchSessions "api"` (cold, builds FTS)       |      500 |    343.43 |
-| `listSessions` (warm)                           |      500 |      5.04 |
-| `searchSessions "api"` (warm)                   |      500 |    183.49 |
-| `listSessions` (cold)                           |     1000 |     11.64 |
-| `listSessions` + JS substring filter (cold)     |     1000 |     10.52 |
-| `searchSessions "api"` (cold, builds FTS)       |     1000 |    835.20 |
-| `listSessions` (warm)                           |     1000 |     11.12 |
-| `searchSessions "api"` (warm)                   |     1000 |    492.40 |
+| Scenario                                    | Sessions | Time (ms) | RSS delta (MB) |
+| ------------------------------------------- | -------: | --------: | -------------: |
+| `listSessions` (cold)                       |       10 |      0.30 |           0.13 |
+| `listSessions` + JS substring filter (cold) |       10 |      0.40 |           0.13 |
+| `searchSessions "api"` (cold, builds FTS)   |       10 |     39.66 |           1.81 |
+| `listSessions` (warm)                       |       10 |      0.21 |           0.00 |
+| `searchSessions "api"` (warm)               |       10 |      2.83 |           0.00 |
+| `listSessions` (cold)                       |       50 |      0.73 |           0.00 |
+| `listSessions` + JS substring filter (cold) |       50 |      0.58 |           0.00 |
+| `searchSessions "api"` (cold, builds FTS)   |       50 |     42.17 |           2.13 |
+| `listSessions` (warm)                       |       50 |      0.77 |           0.13 |
+| `searchSessions "api"` (warm)               |       50 |     17.18 |           1.00 |
+| `listSessions` (cold)                       |      100 |      1.53 |           0.13 |
+| `listSessions` + JS substring filter (cold) |      100 |      1.27 |           0.25 |
+| `searchSessions "api"` (cold, builds FTS)   |      100 |     62.79 |           3.88 |
+| `listSessions` (warm)                       |      100 |      1.18 |           0.00 |
+| `searchSessions "api"` (warm)               |      100 |     29.39 |           1.38 |
+| `listSessions` (cold)                       |      200 |      2.80 |           0.50 |
+| `listSessions` + JS substring filter (cold) |      200 |      2.45 |           0.38 |
+| `searchSessions "api"` (cold, builds FTS)   |      200 |    123.68 |           8.13 |
+| `listSessions` (warm)                       |      200 |      2.51 |           0.00 |
+| `searchSessions "api"` (warm)               |      200 |     63.96 |           2.63 |
+| `listSessions` (cold)                       |      500 |      6.40 |           0.13 |
+| `listSessions` + JS substring filter (cold) |      500 |      6.82 |           0.63 |
+| `searchSessions "api"` (cold, builds FTS)   |      500 |    339.88 |          13.38 |
+| `listSessions` (warm)                       |      500 |      5.17 |           0.00 |
+| `searchSessions "api"` (warm)               |      500 |    184.37 |           6.38 |
+| `listSessions` (cold)                       |     1000 |     13.26 |           2.25 |
+| `listSessions` + JS substring filter (cold) |     1000 |     14.10 |           1.88 |
+| `searchSessions "api"` (cold, builds FTS)   |     1000 |    814.08 |          32.50 |
+| `listSessions` (warm)                       |     1000 |     10.16 |           0.13 |
+| `searchSessions "api"` (warm)               |     1000 |    466.00 |          13.20 |
+
+### #1610 thresholds table — direct comparison
+
+Issue #1610 proposed a fixed table mapping session count to recommended
+approach. Overlaid on the measured `listSessions` numbers:
+
+| Sessions | #1610 threshold (list time / memory) | Measured (list warm) | Measured RSS delta | Verdict            |
+| -------: | ------------------------------------ | -------------------: | -----------------: | ------------------ |
+|       50 | < 50 ms / < 50 MB -> simple grep     |             0.77 ms |            0.13 MB | Simple grep works  |
+|      100 | 50-200 ms / 50-100 MB -> lazy load   |             1.18 ms |            0.00 MB | Below "grep" band  |
+|      200 | 200-500 ms / 100-200 MB -> lazy + FTS |            2.51 ms |            0.00 MB | Below "grep" band  |
+|      500 | > 500 ms / > 200 MB -> full FTS      |             5.17 ms |            0.00 MB | Below "grep" band  |
+|     1000 | > 500 ms / > 200 MB -> full FTS      |            10.16 ms |            0.13 MB | Below "grep" band  |
+
+The measured numbers sit **two to three orders of magnitude below** the
+thresholds in the issue. The proposed lazy-load and FTS work is not
+justified by the current data — the existing eager scan already beats
+the "simple grep" bucket up to 1000 sessions.
 
 ## Observations
 
@@ -126,6 +155,29 @@ feel that the CLI is thinking. On these numbers:
 **No urgent optimization required for `listSessions()`.** The eager
 implementation is faster than every alternative we measured for
 title-only lookup at all CLI-relevant session counts (10-1000).
+
+### Answering issue #1610 directly
+
+- **Recommendation: DEFER any new FTS / lazy-load work.** The premise of
+  Cline #13420 (eagerly loading the entire session list is a bottleneck
+  in a persistent VS Code sidebar) does not translate to Alexi: the CLI
+  is process-per-invocation, list output is at most one screenful of
+  metadata, and terminal users do not keep the list open.
+- **Trigger condition to revisit:** open a new issue when either
+  (a) `SessionManager.listSessions()` warm exceeds 200 ms in the perf
+  regression tests, or (b) users report typical `~/.alexi/sessions/`
+  directories exceeding 2,000 files. Both are ~10x the current worst
+  measured scale and would move the operation from "imperceptible" to
+  "noticeable" per the latency budget above.
+- **FTS keeps its niche.** `searchSessions()` remains the only path that
+  looks inside message bodies (not just titles). We should NOT remove
+  it; we should stop paying the `refreshIndex()` cost on every call
+  (see follow-up in "Bottleneck analysis" above).
+- **Do NOT port Cline #13420 as-is.** The Cline PR is optimized for a
+  webview sidebar with hundreds of eagerly-hydrated session cards.
+  Alexi does not have that surface. Its recommendations (in-memory
+  index, `shouldFilter: false`, wildcard fallback) solve a problem we
+  do not have at this scale.
 
 **However, `searchSessions()` warrants a follow-up.** The
 `refreshIndex()`-on-every-call pattern actively defeats the FTS index.
