@@ -1863,6 +1863,221 @@ export function guessLanguageFromPath(filePath: string): string | undefined;
 
 `guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. Returns `undefined` for unknown extensions so callers can fall back to plain text.
 
+## Per-Task Model Selection API
+
+Introduced 2026-08-31 (ports upstream opencode/kilocode `ab143253a`). Shared model-resolution helpers reused by the `task` and `agent_manager` tools. Gated on `experimental.task_model_selection` in `~/.alexi/config.json` (default `false`).
+
+```typescript
+// src/tool/model-selection.ts
+
+export type Candidate = {
+  providerID: string;
+  model: { id: string; name: string };
+};
+
+export type Source = { model: string; variant?: string };
+
+export type SelectedModel = { providerID: string; modelID: string };
+
+export type SelectModelError = { error: string };
+
+/**
+ * Enumerate every (providerID, model) pair known to Alexi.
+ * Alexi ships one runtime provider (sap-ai-core), so every catalog
+ * entry is emitted with providerID = 'sap-ai-core'.
+ */
+export function candidates(): Candidate[];
+
+/**
+ * Resolve a free-form query to matching candidates.
+ * Precedence: exact providerID/modelID > exact model.name > fuzzy token match.
+ * Fuzzy match splits the query on whitespace and requires every token to
+ * appear in at least one haystack (order-independent, case-insensitive).
+ */
+export function lookup(
+  all: Candidate[],
+  value: string
+): { pool: Candidate[]; names: string[] };
+
+/**
+ * Resolve a model source to a concrete (providerID, modelID) pair.
+ * Provider preference order:
+ *   1. Explicit source.variant (e.g. 'sap-ai-core')
+ *   2. preferredProviderID (caller's current-turn provider)
+ *   3. First candidate in the resolved pool
+ *
+ * Returns SelectModelError on:
+ *   - empty pool: `No model matches "..."`
+ *   - multiple distinct names: `Ambiguous model "..." — candidates: a, b, c`
+ */
+export function selectModel(
+  source: Source,
+  preferredProviderID?: string
+): SelectedModel | SelectModelError;
+
+/** Type guard narrowing to the error branch. */
+export function isSelectModelError(
+  r: SelectedModel | SelectModelError
+): r is SelectModelError;
+```
+
+Config helpers in `src/config/userConfig.ts`:
+
+```typescript
+/**
+ * Read the experimental.task_model_selection flag. Non-boolean or
+ * missing values fall back to false.
+ */
+export function getConfigTaskModelSelection(): boolean;
+
+/**
+ * Persist the experimental.task_model_selection flag. Merges into
+ * the existing `experimental` object without clobbering other flags.
+ */
+export function setConfigTaskModelSelection(enabled: boolean): void;
+```
+
+### `task` tool parameters
+
+The `task` tool (`src/tool/tools/task.ts`) accepts three optional nullable fields alongside the existing `prompt`, `description`, `subagent_type`, `task_id`, and `background`:
+
+| Parameter          | Type                          | Description                                                                 |
+| ------------------ | ----------------------------- | --------------------------------------------------------------------------- |
+| `model`            | `string \| null`              | Model name or `provider/id`. Requires `experimental.task_model_selection`.  |
+| `provider`         | `string \| null`              | Provider ID to disambiguate. Requires `model` to be set.                    |
+| `reasoning_effort` | `'low' \| 'medium' \| 'high'` | Reasoning-effort hint for reasoning-capable models. Requires the flag.      |
+
+Error contract when the flag is off:
+
+```typescript
+{
+  success: false,
+  error: 'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.'
+}
+```
+
+Error contract when `provider` is supplied without `model`:
+
+```typescript
+{ success: false, error: 'task.provider requires task.model to be set' }
+```
+
+On success, `TaskResult` surfaces the resolved pair:
+
+```typescript
+interface TaskResult {
+  taskId: string;
+  agentId: string;
+  response: string;
+  completed: boolean;
+  status?: TaskStatus;
+  background?: boolean;
+  usage?: TaskUsageSummary;
+  /** Resolved provider-native model id when `params.model` was supplied. */
+  model?: string;
+  provider?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high';
+}
+```
+
+### `agent_manager` tool `config.provider`
+
+The `config` object in the `agent_manager` `create` action now accepts a `provider` field alongside `mode`, `model`, and `excludeLocalState`:
+
+```typescript
+{
+  action: 'create',
+  config: {
+    mode?: string | null,
+    model?: string | null,
+    provider?: string | null,  // requires model when set
+    excludeLocalState?: boolean | null,
+  }
+}
+```
+
+When `config.model` is set, resolution runs through `selectModel()` and the resolved pair is surfaced on the response:
+
+```typescript
+{
+  action: 'create',
+  session: {
+    id: 'session-<timestamp>',
+    status: 'created' | 'created-fresh',
+    model?: string,     // resolved provider-native modelID
+    provider?: string,  // resolved providerID
+  },
+  message: string,
+}
+```
+
+### `agent_manager_models` tool
+
+Discovery tool for enumerating models available to subagents. Registered in `src/tool/tools/index.ts` alongside `agent_manager`.
+
+**Parameters (all optional, all nullable):**
+
+| Parameter | Type              | Default | Description                                                                                    |
+| --------- | ----------------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `query`   | `string \| null`  | `''`    | Case-insensitive token match against `modelName`, providers, and `provider/id` strings.        |
+| `offset`  | `number \| null`  | `0`     | Pagination offset.                                                                             |
+| `limit`   | `number \| null`  | `50`    | Pagination limit (max 50).                                                                     |
+
+**Response when the flag is off:**
+
+```typescript
+{
+  enabled: false,
+  message: 'Model catalog listing is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to enable per-task model selection.'
+}
+```
+
+**Response when the flag is on:**
+
+```typescript
+{
+  enabled: true,
+  models: Array<{
+    modelName: string;
+    providers: string[];  // unique provider IDs offering this model
+    ids: string[];        // qualified provider/id strings
+  }>,
+  offset: number,
+  total: number,
+  nextOffset?: number,   // absent on the last page
+  hint: string,          // AGENT_MANAGER_MODELS_HINT
+}
+```
+
+## Session Prompt Facade API
+
+New helper module (`src/cli/session/prompt.tsx`) providing a lightweight normalization layer between the TUI and the streaming orchestrator. Introduced 2026-08-31 to match upstream opencode `packages/opencode/src/session/prompt.ts`.
+
+```typescript
+export interface SendPromptOptions {
+  /** The prompt text as entered by the user (post-trim). */
+  text: string;
+  /**
+   * Optional model override — when experimental.task_model_selection is
+   * enabled, subagent prompts can pin a specific model. Ignored otherwise.
+   */
+  model?: string;
+  /** Optional provider hint accompanying model. */
+  provider?: string;
+  /** Optional reasoning effort hint for reasoning-capable models. */
+  reasoning_effort?: 'low' | 'medium' | 'high';
+}
+
+/**
+ * Normalize a prompt payload for dispatch into the active session.
+ * Currently returns options unchanged (text is trimmed); the real
+ * dispatch is owned by src/core/streamingOrchestrator.ts.
+ */
+export function sendPrompt(options: SendPromptOptions): SendPromptOptions;
+```
+
+The facade exists so the TUI can hand off a normalized payload without importing the orchestrator directly, keeping the render layer testable in isolation.
+
 ## Agent Permission Expansion API
 
 Introduced in 1.20.2. Path in agent config files may use `~` / `~/foo` shorthand; this module normalizes them against `$HOME` before they reach the permission matcher.

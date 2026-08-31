@@ -1287,6 +1287,107 @@ Assertion invariants:
 2. `APPEND_TOOL_CALL_OUTPUT` only touches `activeToolCalls`; a chunk for a completed row is silently dropped.
 3. On `ToolExecutionCompleted`, the aggregated `result.data.stdout` / `result.data.stderr` replaces the streamed `output` — this is expected because the final payload may be truncated / normalised (carriage-return collapsing, head-and-tail elision) differently from raw chunks.
 
+### Testing TUI Boot with the Smoke-Render Harness
+
+The `tests/tui/smoke-render.test.tsx` module exports a `render()` helper that boots any Ink component under `ink-testing-library` and classifies the resulting frame against three regression modes: blank output, React error-boundary panic banners, and unresponsive command palette. Ports the upstream kilocode 2026-08 PTY smoke-test hardening (`5e02825c8..ab143253a`) — kilocode uses `node-pty` for a real raw-mode boot; Alexi's Ink surface is thin enough that ink-testing-library catches the same regressions with much lower flake.
+
+**Panic markers checked in every frame:**
+
+```typescript
+const PANIC_MARKERS = [
+  'Error boundary caught',
+  'The above error occurred',
+  'Consider adding an error boundary',
+  'Uncaught (in promise)',
+  'TypeError:',
+  'ReferenceError:',
+  'panic:',
+];
+```
+
+**Using the harness:**
+
+```typescript
+import { render } from './smoke-render.test.js';
+import { MyDialog } from '../../src/cli/tui/dialogs/MyDialog.js';
+
+it('boots without a blank screen or panic banner', async () => {
+  const report = await render(<MyDialog />, { settleMs: 50 });
+  expect(report.isBlank).toBe(false);
+  expect(report.panicMarker).toBeNull();
+});
+
+it('command palette responds to a keypress', async () => {
+  const report = await render(<MyPage />, { probeKey: '?' });
+  expect(report.paletteResponsive).toBe(true);
+});
+```
+
+**`RenderReport` shape:**
+
+```typescript
+export interface RenderReport {
+  frame: string;                       // final rendered frame
+  isBlank: boolean;                    // true when whitespace-only
+  panicMarker: string | null;          // first matching panic string
+  paletteResponsive: boolean | null;   // null when probeKey omitted
+}
+```
+
+The helper guarantees `unmount()` is called before returning so timers and effects do not leak between tests. Test environment is `node` (not `jsdom`) — Ink renders directly to a captured string, no DOM shim needed.
+
+### Testing Per-Task Model Selection
+
+The `experimental.task_model_selection` flag gates the `task`, `agent_manager`, and `agent_manager_models` tools. Tests that exercise resolution paths should snapshot the flag, mutate it, and restore afterwards so per-test state does not leak. The recommended pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as userConfig from '../../src/config/userConfig.js';
+
+describe('task tool per-task model selection', () => {
+  let flagSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    flagSpy = vi.spyOn(userConfig, 'getConfigTaskModelSelection');
+  });
+
+  afterEach(() => {
+    flagSpy.mockRestore();
+  });
+
+  it('rejects model when flag is off', async () => {
+    flagSpy.mockReturnValue(false);
+    const result = await taskTool.execute(
+      { prompt: 'p', description: 'd', model: 'gpt-4o' },
+      makeContext()
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/experimental\.task_model_selection/);
+  });
+
+  it('rejects provider without model when flag is on', async () => {
+    flagSpy.mockReturnValue(true);
+    const result = await taskTool.execute(
+      { prompt: 'p', description: 'd', provider: 'sap-ai-core' },
+      makeContext()
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('task.provider requires task.model to be set');
+  });
+});
+```
+
+Resolution helpers in `src/tool/model-selection.ts` are pure and can be tested without any config mocking:
+
+```typescript
+import { selectModel, isSelectModelError } from '../../src/tool/model-selection.js';
+
+it('returns SelectModelError for unknown model', () => {
+  const result = selectModel({ model: 'does-not-exist' });
+  expect(isSelectModelError(result)).toBe(true);
+});
+```
+
 ### Skill Tool Description Guard
 
 The skill tool exposes a description string to the LLM that is rendered into the

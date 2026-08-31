@@ -2340,6 +2340,110 @@ case 'answer': {
 
 The orchestrator LLM invokes this whenever a sub-agent's `status` shows a pending question. The Zod schema (`AgentManagerParamsSchema`) accepts both `undefined` and explicit `null` for every optional field, so strict providers (OpenAI structured output, SAP AI Core in strict mode) that emit `null` for absent fields validate cleanly without provider-specific pre-processing.
 
+## Per-Task Model Selection (`src/tool/model-selection.ts`)
+
+Alexi supports opt-in per-invocation model selection for subagents spawned by the `task` tool and sessions created by the `agent_manager` tool. The feature is gated behind a config flag (`experimental.task_model_selection`, default `false`) so the SAP AI Core default routing behaviour is preserved for operators who do not opt in.
+
+Model resolution logic lives in `src/tool/model-selection.ts` (ports upstream opencode/kilocode `packages/opencode/src/kilocode/tool/model-selection.ts`, commit `ab143253a`). The module was extracted so both `task` and `agent_manager` share identical resolution semantics — historically the logic was inline inside `agent-manager.ts` only.
+
+### Resolution flow
+
+```mermaid
+flowchart TD
+    Start["Tool call with model / provider / reasoning_effort"] --> Gate{"experimental.task_model_selection<br/>enabled?"}
+    Gate -->|no| Reject["return error:<br/>Per-task model selection disabled"]
+    Gate -->|yes| ProviderCheck{"provider set<br/>but no model?"}
+    ProviderCheck -->|yes| RejectProvider["return error:<br/>provider requires model"]
+    ProviderCheck -->|no| Candidates["candidates()<br/>enumerate every (providerID, model)<br/>from modelCatalog"]
+    Candidates --> Lookup["lookup(all, query)"]
+    Lookup --> ExactID{"exact<br/>providerID/modelID<br/>match?"}
+    ExactID -->|yes| Pool["pool = exactID matches"]
+    ExactID -->|no| ExactName{"exact model.name<br/>match?"}
+    ExactName -->|yes| Pool2["pool = name matches"]
+    ExactName -->|no| Fuzzy["fuzzy token match<br/>on name + providerID/id"]
+    Fuzzy --> Pool3["pool = fuzzy matches"]
+    Pool --> Names
+    Pool2 --> Names
+    Pool3 --> Names
+    Names["dedupe on model.name"] --> Empty{"pool empty?"}
+    Empty -->|yes| NoMatch["return error:<br/>No model matches"]
+    Empty -->|no| Ambig{"multiple distinct<br/>names?"}
+    Ambig -->|yes| Ambiguous["return error:<br/>Ambiguous model"]
+    Ambig -->|no| Prefer["provider preference:<br/>1. source.variant<br/>2. preferredProviderID<br/>3. first candidate"]
+    Prefer --> Success["return SelectedModel<br/>{ providerID, modelID }"]
+```
+
+### Public API
+
+```typescript
+// src/tool/model-selection.ts
+
+export type Candidate = {
+  providerID: string;
+  model: { id: string; name: string };
+};
+
+export type Source = { model: string; variant?: string };
+
+export type SelectedModel = { providerID: string; modelID: string };
+
+export type SelectModelError = { error: string };
+
+/** Enumerate every (providerID, model) pair known to Alexi. */
+export function candidates(): Candidate[];
+
+/**
+ * Resolve a free-form query to matching candidates + distinct names.
+ * Precedence: exact providerID/modelID > exact model.name > fuzzy token match.
+ */
+export function lookup(all: Candidate[], value: string): {
+  pool: Candidate[];
+  names: string[];
+};
+
+/**
+ * Resolve a model source to a concrete (providerID, modelID) pair.
+ * Provider preference: source.variant > preferredProviderID > first in pool.
+ */
+export function selectModel(
+  source: Source,
+  preferredProviderID?: string
+): SelectedModel | SelectModelError;
+
+/** Type guard narrowing to the error branch. */
+export function isSelectModelError(
+  r: SelectedModel | SelectModelError
+): r is SelectModelError;
+```
+
+Alexi ships a single runtime provider (`sap-ai-core`), so every catalog entry is emitted with `providerID = 'sap-ai-core'`. Upstream opencode returns the full cross-product across every registered provider — the shape (`Candidate`, `lookup`, `selectModel`) matches upstream exactly so callers port cleanly.
+
+### Gating at the tool boundary
+
+Both `task` and `agent_manager` gate on `getConfigTaskModelSelection()` before resolving:
+
+- `src/tool/tools/task.ts:361` — when any of `params.model`, `params.provider`, or `params.reasoning_effort` is supplied AND the flag is `false`, the tool returns `error: 'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.'`. The `provider` without `model` invariant is enforced identically to `agent_manager`.
+- `src/tool/tools/agent-manager.ts:123` — `config.provider` without `config.model` returns `error: 'config.provider requires config.model to be set'`. Resolution delegates to `selectModel()`; the `create` response surfaces the resolved `session.model` and `session.provider` after resolution.
+- `src/tool/tools/agent-manager-models.ts` — `agent_manager_models` discovery tool refuses to enumerate models when the flag is off and returns `{ enabled: false, message: '...' }` with a pointer to the flag. When on, returns paginated `{ modelName, providers, ids }` rows filtered by an optional `query`.
+
+The `TaskResult` interface surfaces the resolved pair back to the parent orchestrator so logs record which model actually ran, not the free-form request string:
+
+```typescript
+interface TaskResult {
+  taskId: string;
+  agentId: string;
+  response: string;
+  completed: boolean;
+  status?: TaskStatus;
+  background?: boolean;
+  usage?: TaskUsageSummary;
+  /** Resolved provider-native model id after selectModel(). */
+  model?: string;
+  provider?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high';
+}
+```
+
 ## PowerShell 7 Resolver (`src/core/powershell.ts`)
 
 New 1.22.1 module that detects `pwsh.exe` (PowerShell 7) so Windows tool invocation can prefer it over the legacy `powershell.exe` (Windows PowerShell 5.1). PS 5.1 has known UTF-8 / encoding bugs — redirected pipes lose non-ASCII characters, `Out-File` defaults to UTF-16 with BOM — which manifested in Alexi as broken diff and grep output on Windows hosts. Ports kilocode `98ea338c8`.
