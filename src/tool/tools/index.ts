@@ -38,6 +38,7 @@ import { storeMemoryTool, recallMemoryTool } from './memory.js';
 import { isWarpgrepAvailable } from './warpgrep.js';
 import { recallTool } from './recall.js';
 import { agentManagerTool } from './agent-manager.js';
+import { agentManagerModelsTool } from './agent-manager-models.js';
 import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
 import { imageGenTool } from './image-gen.js';
@@ -96,6 +97,7 @@ export const builtInTools = [
   // codebase_search (warpgrep) removed — provided by `alexi-mcp-warpgrep` MCP server
   recallTool,
   agentManagerTool,
+  agentManagerModelsTool,
   applyPatchTool,
   repoCloneTool,
   imageGenTool,
@@ -145,6 +147,7 @@ export {
   isWarpgrepAvailable,
   recallTool,
   agentManagerTool,
+  agentManagerModelsTool,
   applyPatchTool,
   repoCloneTool,
   imageGenTool,
