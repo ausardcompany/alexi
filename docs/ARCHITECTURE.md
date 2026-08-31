@@ -1725,11 +1725,11 @@ alexi/
 └── tsconfig.json
 ```
 
-The current top-level layout has grown to 34 modules (up from the
+The current top-level layout has grown to 35 modules (up from the
 original ~10). ADR 001 (`docs/adr/001-establish-adr-process.md`) records
 the layering rules these directories must respect; planned follow-up
 ADRs will backfill rationale for each newer top-level module. See
-`docs/adr/REVIEW-2026-08-24.md` for the current baseline snapshot and
+`docs/adr/REVIEW-2026-08-31.md` for the current baseline snapshot and
 `docs/adr/REVIEW-*.md` more generally for the running architecture log.
 
 ## Minify-Safe Patterns
