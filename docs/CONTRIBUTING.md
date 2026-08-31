@@ -401,6 +401,58 @@ callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
 new providers, tools, or hooks that touch external I/O. See
 `docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
 
+### Experimental flag gating (preferred over hard flag reads)
+
+New behaviour that ports upstream features should be gated behind an `experimental.*` flag when the feature changes tool contracts, override defaults, or introduces new resolution paths. The canonical pattern lives in `src/config/userConfig.ts` — `experimental.task_model_selection` (2026-08-31, ports upstream `ab143253a`) demonstrates the full shape:
+
+- Store the flag inside a top-level `experimental` object so new flags can coexist without schema migration.
+- Provide a `getConfig<Name>()` reader that returns `false` for missing, non-object, array, or non-boolean values (never throw).
+- Provide a `setConfig<Name>(enabled: boolean): void` writer that merges into the existing `experimental` object without clobbering peer flags.
+- Callers gate at the tool boundary and return a `success: false` error pointing at the flag when the feature is invoked without opt-in. Do NOT silently ignore the caller's intent — a buggy call with the flag off should be visible.
+
+Example from `src/config/userConfig.ts`:
+
+```typescript
+export function getConfigTaskModelSelection(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return false;
+  }
+  const value = (experimental as Record<string, unknown>).task_model_selection;
+  return value === true;
+}
+
+export function setConfigTaskModelSelection(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, task_model_selection: enabled };
+  saveFullConfig(config);
+}
+```
+
+And the tool-side gate from `src/tool/tools/task.ts`:
+
+```typescript
+if (requestedModel || requestedProvider || requestedReasoning) {
+  if (!getConfigTaskModelSelection()) {
+    return {
+      success: false,
+      error:
+        'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.',
+    };
+  }
+  // ... resolve model
+}
+```
+
+Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
+
 ### Pure-function helpers (preferred over stateful services)
 
 For helpers that transform data without I/O — e.g., prompt-shape transforms
