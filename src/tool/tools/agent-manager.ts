@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { getBlocker, answerQuestion } from '../../permission/agent-manager.js';
+import { selectModel, isSelectModelError } from '../model-selection.js';
 
 // Nullable-friendly schema: strict providers (OpenAI structured output,
 // SAP AI Core in strict mode) may omit optional fields entirely OR pass
@@ -64,6 +65,16 @@ interface AgentManagerResult {
   session?: {
     id: string;
     status: string;
+    /**
+     * Resolved model id after `selectModel()` when `config.model` was
+     * supplied on create. Ports upstream ab143253a: subagents that opt
+     * into per-task model selection surface the resolved (providerID,
+     * modelID) so the parent orchestrator can log which model actually
+     * ran instead of the free-form request string.
+     */
+    model?: string;
+    /** Resolved provider id when `config.model` was supplied on create. */
+    provider?: string;
   };
   answered?: string;
   message?: string;
@@ -117,6 +128,30 @@ Actions:
             };
           }
 
+          // Resolve the requested (model, provider) pair through the shared
+          // `selectModel()` helper — ports upstream ab143253a which
+          // extracted the resolution logic out of this file into
+          // `src/tool/model-selection.ts`. When no model is requested we
+          // fall through to Alexi's runtime default (SAP AI Core).
+          let resolvedModel: string | undefined;
+          let resolvedProvider: string | undefined;
+          if (config?.model?.trim()) {
+            const resolution = selectModel(
+              { model: config.model.trim(), variant: providerHint || undefined }
+              // No `preferredProviderID` yet — thread through when the
+              // orchestrator's current-turn provider becomes reachable
+              // from the tool context.
+            );
+            if (isSelectModelError(resolution)) {
+              return {
+                success: false,
+                error: resolution.error,
+              };
+            }
+            resolvedModel = resolution.modelID;
+            resolvedProvider = resolution.providerID;
+          }
+
           return {
             success: true,
             data: {
@@ -124,6 +159,8 @@ Actions:
               session: {
                 id: newSessionId,
                 status: excludeLocalState ? 'created-fresh' : 'created',
+                ...(resolvedModel ? { model: resolvedModel } : {}),
+                ...(resolvedProvider ? { provider: resolvedProvider } : {}),
               },
               message: excludeLocalState
                 ? `Created new agent session with fresh state: ${newSessionId}`
@@ -155,16 +192,24 @@ Actions:
             };
           }
 
-          // Stop the specified session
+          // Stop the specified session.
+          //
+          // Ports upstream kilocode 2026-08 sync: cancelled agent
+          // sessions must stay in the `idle` state (not `stopped` /
+          // `running`) so the TUI's activity indicator renders as
+          // idle-neutral instead of the "still running" spinner or
+          // the "terminated" error glyph. Callers that need to
+          // distinguish "user pressed cancel" from "never ran" can
+          // still inspect `message`.
           return {
             success: true,
             data: {
               action: 'stop',
               session: {
                 id: sessionId,
-                status: 'stopped',
+                status: 'idle',
               },
-              message: `Stopped session: ${sessionId}`,
+              message: `Cancelled session: ${sessionId}`,
             },
           };
         }

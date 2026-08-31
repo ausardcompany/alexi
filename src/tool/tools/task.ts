@@ -29,6 +29,8 @@ import { z } from 'zod';
 import { defineTool, type ToolResult, type ToolContext } from '../index.js';
 import { getAgentRegistry, type Agent } from '../../agent/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
+import { selectModel, isSelectModelError } from '../model-selection.js';
+import { getConfigTaskModelSelection } from '../../config/userConfig.js';
 
 /**
  * Default maximum subagent nesting depth. A top-level user session is
@@ -70,6 +72,32 @@ const TaskParamsSchema = z.object({
     .optional()
     .describe(
       'Run task in background (experimental, requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)'
+    ),
+  // Ports upstream opencode/kilocode task-model-selection (2026-08 sync).
+  // Requires `experimental.task_model_selection` to be set to `true` in
+  // `~/.alexi/config.json`; otherwise providing any of these fields
+  // aborts the task with a config-hint error so buggy calls never
+  // silently ignore the caller's intent.
+  model: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'Optional model name (or provider/id) for the subagent. Requires experimental.task_model_selection.'
+    ),
+  provider: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'Optional provider ID to disambiguate when the model is offered by multiple providers.'
+    ),
+  reasoning_effort: z
+    .enum(['low', 'medium', 'high'])
+    .nullable()
+    .optional()
+    .describe(
+      'Optional reasoning effort hint for reasoning-capable models. Requires experimental.task_model_selection.'
     ),
 });
 
@@ -201,6 +229,14 @@ interface TaskResult {
   status?: TaskStatus;
   background?: boolean;
   usage?: TaskUsageSummary;
+  /**
+   * Resolved (providerID, modelID) pair when the caller supplied
+   * `params.model` and `experimental.task_model_selection` is enabled.
+   * Absent when the subagent inherits Alexi's default routing.
+   */
+  model?: string;
+  provider?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high';
 }
 
 // Store for ongoing tasks
@@ -313,6 +349,51 @@ Usage:
         error:
           "Cannot spawn primary agents from task tool. Use 'general' or 'explore' agent types.",
       };
+    }
+
+    // Experimental per-task model selection (ports upstream 2026-08 sync).
+    // Only resolve when the caller actually asked for a model / provider /
+    // reasoning_effort AND the operator has opted in via
+    // `experimental.task_model_selection`. This preserves default
+    // behaviour for the vast majority of subagent calls: no config
+    // change means the subagent inherits Alexi's SAP AI Core routing.
+    let resolvedModelID: string | undefined;
+    let resolvedProviderID: string | undefined;
+    let resolvedReasoningEffort: 'low' | 'medium' | 'high' | undefined;
+    const requestedModel = params.model?.trim();
+    const requestedProvider = params.provider?.trim();
+    const requestedReasoning = params.reasoning_effort ?? undefined;
+    if (requestedModel || requestedProvider || requestedReasoning) {
+      if (!getConfigTaskModelSelection()) {
+        return {
+          success: false,
+          error:
+            'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.',
+        };
+      }
+      // Mirror agent-manager: `provider` requires `model` — otherwise the
+      // provider hint has nothing to bind to and would be silently dropped.
+      if (requestedProvider && !requestedModel) {
+        return {
+          success: false,
+          error: 'task.provider requires task.model to be set',
+        };
+      }
+      if (requestedModel) {
+        const resolution = selectModel({
+          model: requestedModel,
+          variant: requestedProvider || undefined,
+        });
+        if (isSelectModelError(resolution)) {
+          return {
+            success: false,
+            error: resolution.error,
+          };
+        }
+        resolvedModelID = resolution.modelID;
+        resolvedProviderID = resolution.providerID;
+      }
+      resolvedReasoningEffort = requestedReasoning ?? undefined;
     }
 
     // Determine which agent to use
@@ -467,6 +548,9 @@ Usage:
           status: 'queued',
           background: true,
           usage: bgUsage,
+          ...(resolvedModelID ? { model: resolvedModelID } : {}),
+          ...(resolvedProviderID ? { provider: resolvedProviderID } : {}),
+          ...(resolvedReasoningEffort ? { reasoning_effort: resolvedReasoningEffort } : {}),
         },
       };
     }
@@ -511,6 +595,9 @@ Usage:
         completed: true,
         status: 'completed',
         usage,
+        ...(resolvedModelID ? { model: resolvedModelID } : {}),
+        ...(resolvedProviderID ? { provider: resolvedProviderID } : {}),
+        ...(resolvedReasoningEffort ? { reasoning_effort: resolvedReasoningEffort } : {}),
       },
     };
   },

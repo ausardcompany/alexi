@@ -1263,6 +1263,59 @@ export ALEXI_EXPERIMENTAL_MCP_APPS=1
 
 See [ARCHITECTURE.md — MCP Apps (experimental)](ARCHITECTURE.md#mcp-apps-experimental) for design notes.
 
+## Experimental Per-Task Model Selection
+
+Introduced 2026-08-31 (`1.22.7`, ports upstream opencode/kilocode `ab143253a`). Allows the `task` and `agent_manager` tools to pin a specific model, provider, and reasoning effort per invocation instead of inheriting Alexi's default SAP AI Core routing. Default is `false` so no subagent behaviour changes unless the operator opts in.
+
+### Enabling
+
+Add the flag to `~/.alexi/config.json`:
+
+```json
+{
+  "experimental": {
+    "task_model_selection": true
+  }
+}
+```
+
+Or programmatically:
+
+```typescript
+import { setConfigTaskModelSelection } from './config/userConfig.js';
+
+setConfigTaskModelSelection(true);
+```
+
+The read helper `getConfigTaskModelSelection()` returns `false` for missing, non-object, array, or non-boolean values, so a corrupt config never accidentally enables the feature.
+
+### Behaviour
+
+When enabled:
+
+- The `task` tool accepts optional `model`, `provider`, and `reasoning_effort` parameters. Resolution runs through `selectModel()` in `src/tool/model-selection.ts`; the resolved `(providerID, modelID)` pair is surfaced on the response.
+- The `agent_manager` tool `create` action accepts a `config.provider` field alongside `config.model` and enforces the invariant `provider requires model`.
+- The `agent_manager_models` discovery tool enumerates the model catalog for the LLM caller.
+
+When disabled (default):
+
+- Any of `model`, `provider`, or `reasoning_effort` on the `task` tool aborts the call with `Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json ...`.
+- The `agent_manager_models` tool returns `{ enabled: false, message: 'Model catalog listing is disabled. ...' }` and no rows.
+- The `agent_manager` `create` action ignores model resolution and falls through to Alexi's default routing.
+
+The flag lives inside a top-level `experimental` object so future experimental flags can coexist without schema migration:
+
+```json
+{
+  "experimental": {
+    "task_model_selection": true,
+    "background_tasks": false
+  }
+}
+```
+
+See [ARCHITECTURE.md — Per-Task Model Selection](ARCHITECTURE.md#per-task-model-selection-srctoolmodel-selectionts) for the resolution flow diagram and public API.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

@@ -523,6 +523,51 @@ export function setConfigAdditionalExtensions(extensions: string[]): void {
   saveFullConfig(config);
 }
 
+// ============ Experimental flags ============
+
+/**
+ * Experimental feature flag: allow `task` subagents to select their own
+ * model / provider / reasoning_effort.
+ *
+ * Mirrors the upstream opencode/kilocode `experimental.task_model_selection`
+ * config flag (2026-08 sync). Default is `false` so Alexi's SAP AI Core
+ * defaults are preserved for every subagent unless the operator opts in.
+ *
+ * Stored as `experimental.task_model_selection` inside the top-level
+ * `experimental` object of `~/.alexi/config.json`, matching the upstream
+ * serialized shape:
+ *
+ * ```json
+ * { "experimental": { "task_model_selection": true } }
+ * ```
+ *
+ * Non-boolean or missing values fall back to `false`.
+ */
+export function getConfigTaskModelSelection(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return false;
+  }
+  const value = (experimental as Record<string, unknown>).task_model_selection;
+  return value === true;
+}
+
+/**
+ * Persist the `experimental.task_model_selection` flag.
+ */
+export function setConfigTaskModelSelection(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, task_model_selection: enabled };
+  saveFullConfig(config);
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {
