@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.7] - 2026-08-31
+
+### Changed
+
+- **Daily documentation updates** (commits `320aa7c6`, `ab85d8e0`, `3dcf4cdb`, 2026-08-31): Automated planning brief, architecture review, and consulting agent runs. Updates daily reference materials under `docs/`.
+
+### Maintenance
+
+- **Dependency updates** (2026-08-31):
+  - `@inquirer/prompts`: `8.6.0` → `8.7.0` (#1601)
+  - `puppeteer`: `25.8.0` → `25.9.0` (#1600)
+  - `@vitejs/plugin-react`: `6.1.0` → `6.1.1` (dev, #1597)
+  - `@typescript-eslint/eslint-plugin`: bumped (dev, #1595)
+  - `@testing-library/react`: `16.3.2` → `16.3.3` (dev, #1599)
+  - `lint-staged`: `17.3.0` → `17.4.1` (dev, #1594)
+  - `hono`: `4.13.3` → `4.13.5` (#1596)
+  - Dev dependencies group bump (#1593)
+
+## [Unreleased]
+
 ### Added
 
 - **Reusable line-ending detection helpers in `src/utils/line-ending.ts`** (`src/utils/line-ending.ts`, `tests/utils/line-ending.test.ts`, 2026-08-30): New shared utility module exposes two pure detection helpers plus a public constant so that any write path that round-trips a file through a normalized-to-LF intermediate representation (currently `apply_patch`, plausibly `write` / `edit` in the future) can classify the file's convention without duplicating the counting logic. Public surface:
