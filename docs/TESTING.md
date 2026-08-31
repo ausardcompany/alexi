@@ -2778,3 +2778,84 @@ The test complements — does not replace — the existing "model receives the p
 ### Headless permission auto-responder tests
 
 The `--yolo` / default-deny path in `src/cli/commands/agent.ts` can be exercised without spinning up a real provider: publish a synthetic `PermissionRequested` event on the bus and assert a `PermissionResponse` is published with the expected `granted` value. Unsubscribe on `process.once('exit', ...)` is the leak-prevention contract — a test that spawns two `agent` invocations back-to-back would otherwise see the earlier subscription answer the later invocation's request.
+
+### Session search / listing performance profile (issue #1606)
+
+`tests/session/performance.test.ts` and the companion `scripts/profile-session-search.ts` cover the two code paths a CLI user hits when listing or searching sessions:
+
+1. `SessionManager.listSessions()` — eager `fs.readdirSync` + `JSON.parse` scan of `~/.alexi/sessions/*.json`, sorted in-memory by `updated`.
+2. `SessionManager.searchSessions(query)` — FTS5-indexed lookup via `SessionSearchIndex` (`src/session/search.ts`), currently calling `refreshIndex()` on every invocation.
+
+The test suite is **diagnostic**, not perf-strict — every assertion is a loose upper bound set at roughly 100x-500x the measured baseline on a typical dev laptop. The point is not to pin exact millisecond values (that would produce endless CI flakes on shared runners); it is to catch the shape of the curve regressing — for example, quadratic scan in `listSessions`, or FTS refresh accidentally moved onto the hot path of `listSessions`.
+
+Reference pattern for a session-performance test case:
+
+```typescript
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SessionManager, type Session } from '../../src/core/sessionManager.js';
+
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-perf-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function seedSessions(n: number): void {
+  for (let i = 0; i < n; i++) {
+    const id = `perf-${i.toString().padStart(4, '0')}`;
+    const session: Session = {
+      metadata: {
+        id,
+        created: Date.now() - i * 1000,
+        updated: Date.now() - i * 1000,
+        modelId: 'sap-ai-core/anthropic--claude-4.7-opus',
+        totalTokens: 200,
+        messageCount: 2,
+        title: `perf session ${i}`,
+        workdir: tempDir,
+      },
+      messages: [
+        { role: 'user', content: `msg ${i}`, timestamp: Date.now() - i * 1000 },
+        { role: 'assistant', content: `reply ${i}`, timestamp: Date.now() - i * 1000 + 500 },
+      ],
+    };
+    fs.writeFileSync(path.join(tempDir, `${id}.json`), JSON.stringify(session, null, 2));
+  }
+}
+
+function timeMs(fn: () => unknown): number {
+  const start = process.hrtime.bigint();
+  fn();
+  return Number(process.hrtime.bigint() - start) / 1_000_000;
+}
+
+it('listSessions at 50 sessions stays below 200ms', () => {
+  seedSessions(50);
+  const mgr = new SessionManager({ sessionsDir: tempDir });
+  const ms = timeMs(() => mgr.listSessions());
+  expect(mgr.listSessions()).toHaveLength(50);
+  // Measured baseline ~0.7 ms; ceiling is loose for CI variance.
+  expect(ms).toBeLessThan(200);
+});
+```
+
+Key patterns:
+
+1. **Seed BEFORE constructing the `SessionManager`.** The manager scans the directory on first `listSessions()` call. Writing files inside the measured region contaminates the measurement with `fs.writeFileSync` cost that is unrelated to the listing / search code path.
+2. **Inject `sessionsDir` in the constructor.** `new SessionManager({ sessionsDir: tempDir })` bypasses the default `~/.alexi/sessions/` resolution so the test cannot race on the real user session store or on other test workers running in parallel.
+3. **Measure with `process.hrtime.bigint()`, not `Date.now()`.** `Date.now()` has millisecond resolution; a `listSessions` call at 10 sessions clocks in around 0.4 ms and would round to `0` on `Date.now()`, defeating the assertion.
+4. **Set ceilings at ~100x the measured baseline.** The measured baselines are documented in `docs/session-search-performance.md`. Setting the ceiling at ~100x leaves comfortable headroom for CI variance while still catching load-bearing regressions.
+5. **Handle FTS-unavailable environments gracefully.** The `searchSessions` cases should degrade to a shape check (`expect(list.length).toBeGreaterThan(0)`) rather than fail hard when `better-sqlite3` is unusable — some CI runners install natives lazily. Reference: the empty-query case in `tests/session/performance.test.ts` explicitly branches on `search.length === 0` and skips the ordering assertion in that mode.
+6. **Do not `vi.useFakeTimers()`.** The measurements are wall-clock time; fake timers would either produce zeros or defeat the FTS SQLite backend entirely.
+7. **Temp directory teardown must be in `afterEach`, not `afterAll`.** Every case needs a fresh directory so the FTS index and the on-disk session count are deterministic per case.
+
+The paired `scripts/profile-session-search.ts` script is intentionally **not** part of the vitest suite (it produces a Markdown table on stdout for pasting into `docs/session-search-performance.md`). Invoke it with `npx tsx scripts/profile-session-search.ts` from the repo root when you need fresh numbers. The script covers scenarios (10, 50, 100, 500, 1000 sessions) that would be too slow for the default `npm test` budget.
+
+This profile-and-test-then-document pattern is the recommended template for any future CLI performance concern: a `tsx` script for one-shot numbers, a `docs/*-performance.md` writeup for the analysis, and a matching `tests/**/performance.test.ts` for regression guards.

@@ -752,6 +752,34 @@ broader integration or scenario tests should live under `tests/`. When adding a
 co-located test, remember the ESM `.js` import rule still applies: imports of
 local TypeScript files must end in `.js` even when the file is `.ts`.
 
+### Ad-hoc profiling scripts (`scripts/*.ts`)
+
+One-shot performance profiling scripts live under `scripts/` and are invoked
+via `npx tsx scripts/<name>.ts` from the repo root. They are **not** part of
+the default `npm test` budget — they typically seed larger fixtures (hundreds
+or thousands of files) than a unit test would tolerate and emit results as a
+Markdown table on stdout for pasting into a `docs/*-performance.md` writeup.
+
+Rules for adding a new profiling script:
+
+1. **Extend `tsconfig.eslint.json`, not `tsconfig.json`.** The `include`
+   array in `tsconfig.eslint.json` already covers `scripts/**/*.ts` so the
+   script is linted with the same TypeScript-aware ESLint pass as `src/`.
+   The production `tsconfig.json` keeps `rootDir: src`, so scripts are never
+   compiled into `dist/`.
+2. **Clean up temp directories on exit.** Use `fs.mkdtempSync` +
+   `fs.rmSync(dir, { recursive: true, force: true })` in a `try / finally`
+   so re-runs are idempotent.
+3. **Pair the script with a docs writeup and a regression test.** Numbers
+   go in `docs/<topic>-performance.md`; loose regression bounds go in
+   `tests/**/performance.test.ts` (or an equivalent co-located file). The
+   test's assertions should be ~100x the measured baseline so CI variance
+   never causes a flake. Reference: `scripts/profile-session-search.ts` +
+   `docs/session-search-performance.md` + `tests/session/performance.test.ts`.
+4. **Do not import from `dist/`.** Use `.js`-suffixed relative imports into
+   `src/` exactly as the tests and CLI code do; `tsx` handles the on-the-fly
+   compilation.
+
 ## Pull Request Process
 
 ### Before Submitting
