@@ -116,10 +116,7 @@ function aggregate(): ModelRow[] {
   return [...byName.values()].sort((a, b) => a.modelName.localeCompare(b.modelName));
 }
 
-export const agentManagerModelsTool = defineTool<
-  typeof ParamsSchema,
-  AgentManagerModelsResult
->({
+export const agentManagerModelsTool = defineTool<typeof ParamsSchema, AgentManagerModelsResult>({
   name: 'agent_manager_models',
 
   description: `List models available for agent_manager task subagents to select.
@@ -149,17 +146,14 @@ ${AGENT_MANAGER_MODELS_HINT}`,
     const all = aggregate();
     const query = params.query?.trim() ?? '';
     const matches = query
-      ? all.filter((row) =>
-          matchesQuery([row.modelName, ...row.providers, ...row.ids], query)
-        )
+      ? all.filter((row) => matchesQuery([row.modelName, ...row.providers, ...row.ids], query))
       : all;
 
     const offset = params.offset ?? 0;
     const requestedLimit = params.limit ?? MAX_LIMIT;
     const limit = Math.min(requestedLimit, MAX_LIMIT);
     const page = matches.slice(offset, offset + limit);
-    const nextOffset =
-      offset + page.length < matches.length ? offset + page.length : undefined;
+    const nextOffset = offset + page.length < matches.length ? offset + page.length : undefined;
 
     return {
       success: true,

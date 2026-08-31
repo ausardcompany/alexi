@@ -78,9 +78,7 @@ export function candidates(): Candidate[] {
       // otherwise fall back to the raw id. `entry.metadata?.name` is
       // typed loosely because the catalog metadata shape varies with
       // provider revisions.
-      name:
-        (entry.metadata as { name?: string } | undefined)?.name ??
-        entry.id,
+      name: (entry.metadata as { name?: string } | undefined)?.name ?? entry.id,
     },
   }));
 }
@@ -99,10 +97,7 @@ export function candidates(): Candidate[] {
  * "ambiguous — multiple distinct models match" separately from
  * "one logical model is offered by multiple providers".
  */
-export function lookup(
-  all: Candidate[],
-  value: string
-): { pool: Candidate[]; names: string[] } {
+export function lookup(all: Candidate[], value: string): { pool: Candidate[]; names: string[] } {
   const query = value.trim().toLowerCase();
   if (query.length === 0) {
     return { pool: [], names: [] };
@@ -190,8 +185,6 @@ export function selectModel(
  * // r is SelectedModel here
  * ```
  */
-export function isSelectModelError(
-  r: SelectedModel | SelectModelError
-): r is SelectModelError {
+export function isSelectModelError(r: SelectedModel | SelectModelError): r is SelectModelError {
   return (r as SelectModelError).error !== undefined;
 }
