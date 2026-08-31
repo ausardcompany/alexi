@@ -7,28 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.22.7] - 2026-08-31
-
-### Changed
-
-- **Daily documentation updates** (commits `320aa7c6`, `ab85d8e0`, `3dcf4cdb`, 2026-08-31): Automated planning brief, architecture review, and consulting agent runs. Updates daily reference materials under `docs/`.
-
-### Maintenance
-
-- **Dependency updates** (2026-08-31):
-  - `@inquirer/prompts`: `8.6.0` → `8.7.0` (#1601)
-  - `puppeteer`: `25.8.0` → `25.9.0` (#1600)
-  - `@vitejs/plugin-react`: `6.1.0` → `6.1.1` (dev, #1597)
-  - `@typescript-eslint/eslint-plugin`: bumped (dev, #1595)
-  - `@testing-library/react`: `16.3.2` → `16.3.3` (dev, #1599)
-  - `lint-staged`: `17.3.0` → `17.4.1` (dev, #1594)
-  - `hono`: `4.13.3` → `4.13.5` (#1596)
-  - Dev dependencies group bump (#1593)
-
-## [Unreleased]
-
 ### Added
 
+- **Session search performance profile and regression suite (issue #1606)** (`scripts/profile-session-search.ts`, `tests/session/performance.test.ts`, `tsconfig.eslint.json`, commit `02894309` `test(core): profile session search performance (#1606)`): New ad-hoc profiling script and companion diagnostic test suite that quantify the two code paths a CLI user hits when listing or searching sessions — `SessionManager.listSessions()` (eager `fs.readdirSync` + `JSON.parse` scan sorted by `updated`) and `SessionManager.searchSessions()` (FTS5-indexed via `SessionSearchIndex` with `refreshIndex()` reconciliation on every call). Numbers are documented in `docs/session-search-performance.md`; the short version is that `listSessions()` is imperceptible at every measured session count (10-1000) and the FTS `searchSessions()` path is currently 10x-40x slower because `refreshIndex()` runs on every invocation. New surface:
+  - **`scripts/profile-session-search.ts`** — invoke with `npx tsx scripts/profile-session-search.ts` from the repo root. Seeds five temp directories (10, 50, 100, 500, 1000 sessions), measures each scenario cold and warm, and prints a Markdown table on stdout suitable for pasting into the docs. Not part of the vitest suite. Cleans up its temp directories on exit so re-runs are idempotent.
+  - **`tests/session/performance.test.ts`** — four Vitest cases that pin the *shape* of the curve rather than the exact numbers: `listSessions` under 100 ms at 10 sessions, `listSessions` under 200 ms at 50 sessions, a JS in-memory substring filter over `listSessions` under 500 ms at 100 sessions, and `searchSessions('')` matches the `listSessions` ordering when the query is empty (with a graceful-skip branch for environments where FTS is not usable). Bounds are set at roughly 100x-500x the measured baseline on a typical dev laptop so CI variance never causes a flake; the point of the assertions is that a load-bearing regression (for example, quadratic scan in `listSessions`, or FTS refresh landing in the hot path of `listSessions`) trips the ceiling immediately. The suite intentionally avoids the previously-considered `SIMULATE_LARGE_SESSION_STORE` env flag — every case measured today is fast enough for the default `npm test` budget.
+  - **`tsconfig.eslint.json`**: extended the `include` array to add `scripts/**/*.ts` so the profiling script is covered by the same TypeScript-aware ESLint pass as `src/` and `tests/`. No effect on the production build (`tsconfig.json` `rootDir` is still `src`) — the script is intentionally NOT compiled into `dist/` and is invoked via `tsx` at run time.
+
+  Rationale: the profile-and-test-then-document pattern established here is intended as a template for future CLI performance concerns. A one-off `tsx` script gathers the numbers, a `docs/*-performance.md` writeup pins the analysis and recommendations, and a matching `tests/**/performance.test.ts` file codifies the loose bounds so the doc cannot silently rot. Follow-up work on the `searchSessions()` `refreshIndex`-on-every-call regression is tracked as a separate issue per `docs/session-search-performance.md#follow-up-issue`. Diff statistics: `3 files changed, 265 insertions(+)`.
 - **Experimental per-task model selection for the `task` and `agent_manager` tools** (`src/tool/model-selection.ts`, `src/tool/tools/task.ts`, `src/tool/tools/agent-manager.ts`, `src/tool/tools/agent-manager-models.ts`, `src/config/userConfig.ts`, 2026-08-31): Ports the upstream opencode/kilocode 2026-08 `task_model_selection` feature (upstream commit `ab143253a`). Subagents spawned via the `task` tool and sessions created via the `agent_manager` tool can now optionally pin a `model`, `provider`, and `reasoning_effort` per invocation instead of inheriting Alexi's default SAP AI Core routing. The behaviour is gated on a new `experimental.task_model_selection` flag in `~/.alexi/config.json` (default `false`), so no subagent call sites change behaviour unless the operator explicitly opts in. Public surface added:
   - `src/tool/model-selection.ts` (new file, 197 lines) — shared model-resolution module extracted from `agent-manager.ts` so both tools reuse identical precedence rules. Exports: `type Candidate = { providerID; model: { id; name } }`, `type Source = { model; variant? }`, `type SelectedModel = { providerID; modelID }`, `type SelectModelError = { error }`, `candidates(): Candidate[]` (enumerates every `(providerID, model)` pair from `getCatalogEntries()`; Alexi returns every entry with `providerID = 'sap-ai-core'` since it ships one runtime provider), `lookup(all, value): { pool; names }` (precedence: exact `providerID/modelID` > exact `model.name` > fuzzy token match on both), `selectModel(source, preferredProviderID?): SelectedModel | SelectModelError` (returns `{ error: 'No model matches "..."'}` on zero matches, `{ error: 'Ambiguous model "..." — candidates: a, b' }` on multiple distinct names), and `isSelectModelError(r)` narrowing guard. Provider preference precedence: (1) explicit `source.variant`, (2) `preferredProviderID`, (3) first candidate in pool.
   - `src/config/userConfig.ts` — new experimental-flag helpers: `getConfigTaskModelSelection(): boolean` reads `experimental.task_model_selection` from `~/.alexi/config.json` (returns `false` on missing, non-object, array, or non-boolean values); `setConfigTaskModelSelection(enabled: boolean): void` merges the value into the existing `experimental` object without clobbering other experimental flags. Serialized shape mirrors upstream verbatim: `{ "experimental": { "task_model_selection": true } }`.
@@ -128,6 +114,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `src/tool/tools/shell/id.ts:89-91` — `pwshHits` `.filter((item): item is string => Boolean(item))` reflowed so the arrow follows the type guard on the same line and the `Boolean(item)` body drops onto the next line. Same shell candidate list, same fallback ordering, same `pwsh > powershell > cmd` precedence on Windows.
 
   No provider, routing, tool-execution, session, or permission behaviour changes. `npm run typecheck` and `npm test` pass with byte-identical output; the only observable delta is that `npm run format:check` now succeeds on these four files.
+
+## [1.22.7] - 2026-08-31
+
+### Changed
+
+- **Daily documentation updates** (commits `320aa7c6`, `ab85d8e0`, `3dcf4cdb`, 2026-08-31): Automated planning brief, architecture review, and consulting agent runs. Updates daily reference materials under `docs/`.
+- **Master branch merge into session-search branch** (commit `e1f5944f`, 2026-08-31): Consolidated the 2026-08-31 upstream sync (v1.22.7, PR #1608) into the active session-search performance branch. No source changes beyond conflict resolution against the incoming per-task model selection surface (`src/tool/model-selection.ts`, `src/tool/tools/task.ts`, `src/tool/tools/agent-manager.ts`, `src/tool/tools/agent-manager-models.ts`, `src/config/userConfig.ts`, `src/cli/session/prompt.tsx`) and the new profiling script (`scripts/profile-session-search.ts`) and regression suite (`tests/session/performance.test.ts`, `tests/tui/smoke-render.test.tsx`). All in-tree entries for these files remain accurate; see the `## [Unreleased]` block above for the item-by-item breakdown.
+
+### Maintenance
+
+- **Dependency updates** (2026-08-31):
+  - `@inquirer/prompts`: `8.6.0` → `8.7.0` (#1601)
+  - `puppeteer`: `25.8.0` → `25.9.0` (#1600)
+  - `@vitejs/plugin-react`: `6.1.0` → `6.1.1` (dev, #1597)
+  - `@typescript-eslint/eslint-plugin`: bumped (dev, #1595)
+  - `@testing-library/react`: `16.3.2` → `16.3.3` (dev, #1599)
+  - `lint-staged`: `17.3.0` → `17.4.1` (dev, #1594)
+  - `hono`: `4.13.3` → `4.13.5` (#1596)
+  - Dev dependencies group bump (#1593)
 
 ## [1.22.0] - 2026-08-24
 
