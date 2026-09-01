@@ -22,9 +22,7 @@ import { selectModel, isSelectModelError } from '../model-selection.js';
  * strings and non-string values pass through unchanged so the wrapped
  * schema can still emit a useful validation error.
  */
-function decodeJsonIfString<T extends z.ZodTypeAny>(
-  schema: T
-): z.ZodEffects<T, z.infer<T>, unknown> {
+function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T) {
   return z.preprocess((value) => {
     if (typeof value !== 'string') {
       return value;
