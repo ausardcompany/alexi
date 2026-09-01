@@ -10,7 +10,11 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { ToolExecutionStarted, ToolExecutionCompleted, ToolExecutionFailed } from '../bus/index.js';
-import { getPermissionManager, type PermissionAction } from '../permission/index.js';
+import {
+  getPermissionManager,
+  buildUserRejectedToolReason,
+  type PermissionAction,
+} from '../permission/index.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 
 // Tool execution context
@@ -468,7 +472,10 @@ export function defineTool<TParams extends z.ZodType, TResult>(
         if (!result.granted) {
           return {
             success: false,
-            error: `Permission denied: ${definition.permission.action} on ${resource}`,
+            error: buildUserRejectedToolReason(
+              definition.name,
+              `${definition.permission.action} on ${resource}`
+            ),
           };
         }
       }

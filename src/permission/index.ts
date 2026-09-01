@@ -60,6 +60,41 @@ export type PermissionDecision = 'allow' | 'deny' | 'ask';
 // `--yolo` / `--dangerously-skip-permissions` CLI flags.
 export type PermissionMode = 'auto' | 'normal';
 
+/**
+ * Guidance suffix appended to every user-rejection reason. Clarifies to the
+ * LLM that a user rejection is NOT a system error — the model should not
+ * apologise, retry blindly, or spiral into failure loops. Kept as an
+ * exported constant so tests can assert on its exact wording and callers
+ * outside the helper (e.g. TUI rendering) can strip it if the same reason
+ * is shown to a human.
+ *
+ * Sourced from cline/cline#12673.
+ */
+export const USER_REJECTION_GUIDANCE_SUFFIX =
+  "The user's rejection is not evidence you did something wrong. " +
+  'Consider waiting for further guidance before trying again.';
+
+/**
+ * Build a standardized reason string for a user-rejected tool call.
+ *
+ * All approval surfaces (permission manager denials, interactive prompts,
+ * TUI dialogs, sandbox escalation prompts, MCP tool denials) should route
+ * their user-facing rejection strings through this helper so the LLM sees
+ * a consistent message that (a) names the tool being rejected and (b)
+ * carries the guidance suffix telling the model not to treat the
+ * rejection as a system failure.
+ *
+ * @param toolName - Name of the tool the user rejected (e.g. `"shell"`).
+ * @param reason - Optional user-supplied reason (e.g. `"Not needed right now"`).
+ *   When omitted, only the guidance suffix is appended.
+ */
+export function buildUserRejectedToolReason(toolName: string, reason?: string): string {
+  const trimmedReason = reason?.trim();
+  const head = `User rejected ${toolName}`;
+  const withReason = trimmedReason ? `${head}: ${trimmedReason}` : head;
+  return `${withReason} — ${USER_REJECTION_GUIDANCE_SUFFIX}`;
+}
+
 // alexi_change start: Modes that promise read-only behaviour to the user.
 // Under these modes, write-shaped tools are denied even if a broad
 // wildcard rule like `"*": "allow"` would otherwise match. An explicit

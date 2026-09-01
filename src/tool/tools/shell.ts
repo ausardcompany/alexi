@@ -14,7 +14,7 @@ import { quoteFilePath } from '../../utils/file-mention.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
 import { auditCommand } from '../../permission/next.js';
-import { getPermissionManager } from '../../permission/index.js';
+import { getPermissionManager, buildUserRejectedToolReason } from '../../permission/index.js';
 import { requiresSandboxEscalation } from '../../kilocode/sandbox/git.js';
 import {
   BashDetachAvailable,
@@ -190,7 +190,7 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
       if (!result.granted) {
         return {
           success: false,
-          error: 'Sandboxed git write denied by permission prompt',
+          error: buildUserRejectedToolReason('shell', `sandboxed git write: ${params.command}`),
           data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
         };
       }
