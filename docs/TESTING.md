@@ -2570,6 +2570,39 @@ contributors do not re-introduce them by hand:
    line breaks around the `<>` delimiters change. Assertion semantics, mock
    scope, and the resolved type of `actual` are all identical.
 
+4. **Collapse short fixture-array `.join('\n')` literals onto a single line
+   when they fit under 100 columns.** Hand-authored diff-hunk fixtures and
+   other line-oriented text fixtures are commonly written as a multi-line
+   array literal followed by `.join('\n')` so the fixture reads like the
+   underlying wire format. Prettier will collapse such array literals onto a
+   single line whenever the resulting expression fits under `printWidth: 100`.
+   The canonical worked example from the 2026-09-01 auto-fix pass (commit
+   `755ce518`) is `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
+   which feeds a six-element unified-diff hunk into `applyPatchTool.executeUnsafe`:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (7 lines, only 30 columns wide)
+   const patch = [
+     '@@ -1,3 +1,3 @@',
+     ' line1',
+     '-line2',
+     '+lineTWO',
+     ' line3',
+     '',
+   ].join('\n');
+
+   // Canonical form after auto-fix (single line, 78 columns)
+   const patch = ['@@ -1,3 +1,3 @@', ' line1', '-line2', '+lineTWO', ' line3', ''].join('\n');
+   ```
+
+   The trailing empty-string element is preserved verbatim — it produces the
+   final `\n` at the end of the joined hunk, which is what a real unified
+   diff emits and what `applyPatchToContent` in `src/tool/tools/apply-patch.ts`
+   expects. Only reach for the multi-line form when the resulting single line
+   would exceed 100 columns; short fixtures (six or fewer short strings) should
+   be inlined so `npm run format:check` stays green without an auto-fix
+   follow-up commit.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has
