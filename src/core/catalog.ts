@@ -4,6 +4,8 @@
  */
 import { z } from 'zod';
 
+import { declaredCapability } from '../providers/capabilities.js';
+
 export const ModelCapability = z.enum([
   'text',
   'vision',
@@ -80,7 +82,13 @@ export function createCatalog(models: ModelInfo[]): ModelCatalog {
 
     hasCapability: (modelId: string, capability: ModelCapability) => {
       const model = modelMap.get(modelId);
-      return model?.capabilities.includes(capability) ?? false;
+      // Route through `declaredCapability` so a catalog entry with an
+      // empty `capabilities: []` is treated as "unspecified" (fail-open
+      // to `false` here, matching the historical safe default) rather
+      // than "definitely lacks every capability". A missing model still
+      // resolves to `false` because `declaredCapability` receives
+      // `undefined` for the capability list.
+      return declaredCapability(model?.capabilities, capability, false);
     },
   };
 }
