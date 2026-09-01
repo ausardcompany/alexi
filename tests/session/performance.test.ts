@@ -1,5 +1,5 @@
 /**
- * Session search performance profile (issue #1606).
+ * Session search performance profile (issues #1606 / #1610).
  *
  * These tests are diagnostic — they profile the two code paths a CLI user
  * hits when listing / searching sessions:
@@ -20,9 +20,10 @@
  * laptop (see docs/session-search-performance.md for the concrete
  * numbers). We prefer generous ceilings to flaky tests.
  *
- * The 100-session scenario is skipped when SIMULATE_LARGE_SESSION_STORE is
- * unset, purely to keep the default `npm test` fast; set the env var to
- * exercise it locally.
+ * The 200-session scenario codifies the specific threshold called out in
+ * issue #1610 ("100-200 sessions -> lazy load + incremental search"): we
+ * assert `listSessions()` remains under 500 ms and memory footprint under
+ * 50 MB at 200 sessions, so the "defer FTS" recommendation stays honest.
  */
 
 import fs from 'fs';
@@ -85,7 +86,7 @@ function timeMs(fn: () => unknown): number {
   return Number(process.hrtime.bigint() - start) / 1_000_000;
 }
 
-describe('SessionManager performance (issue #1606)', () => {
+describe('SessionManager performance (issues #1606 / #1610)', () => {
   it('listSessions is sub-linear-cost at 10 sessions (< 100ms)', () => {
     seedSessions(10);
     const mgr = new SessionManager({ sessionsDir: tempDir });
@@ -130,6 +131,31 @@ describe('SessionManager performance (issue #1606)', () => {
       .listSessions()
       .filter((s) => (s.title ?? '').toLowerCase().includes('api'));
     expect(filtered.length).toBeGreaterThan(0);
+  });
+
+  it('listSessions at 200 sessions stays below 500 ms and 50 MB RSS delta (issue #1610)', () => {
+    // Issue #1610 asks specifically for a 200-session data point (the
+    // upper edge of the "consider lazy load" band in the thresholds
+    // table). At this scale the eager scan is still expected to be
+    // imperceptible; if this bound starts firing we should genuinely
+    // reconsider lazy loading.
+    seedSessions(200);
+    const mgr = new SessionManager({ sessionsDir: tempDir });
+
+    const rssBefore = process.memoryUsage().rss;
+    const ms = timeMs(() => mgr.listSessions());
+    const rssAfter = process.memoryUsage().rss;
+    const rssDeltaMb = (rssAfter - rssBefore) / (1024 * 1024);
+
+    expect(mgr.listSessions()).toHaveLength(200);
+    // Measured baseline on dev laptop: ~3 ms. Ceiling is intentionally
+    // loose (~150x baseline) to survive CI variance.
+    expect(ms).toBeLessThan(500);
+    // Each seeded session file is ~400 bytes; 200 sessions therefore fit
+    // comfortably under 50 MB of RSS growth. If this bound trips it
+    // usually means we started retaining full message bodies in the
+    // metadata path.
+    expect(rssDeltaMb).toBeLessThan(50);
   });
 
   it('searchSessions matches listSessions ordering when query is empty', () => {

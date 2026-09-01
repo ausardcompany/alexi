@@ -2880,7 +2880,7 @@ The test complements — does not replace — the existing "model receives the p
 
 The `--yolo` / default-deny path in `src/cli/commands/agent.ts` can be exercised without spinning up a real provider: publish a synthetic `PermissionRequested` event on the bus and assert a `PermissionResponse` is published with the expected `granted` value. Unsubscribe on `process.once('exit', ...)` is the leak-prevention contract — a test that spawns two `agent` invocations back-to-back would otherwise see the earlier subscription answer the later invocation's request.
 
-### Session search / listing performance profile (issue #1606)
+### Session search / listing performance profile (issues #1606 / #1610)
 
 `tests/session/performance.test.ts` and the companion `scripts/profile-session-search.ts` cover the two code paths a CLI user hits when listing or searching sessions:
 
@@ -2888,6 +2888,8 @@ The `--yolo` / default-deny path in `src/cli/commands/agent.ts` can be exercised
 2. `SessionManager.searchSessions(query)` — FTS5-indexed lookup via `SessionSearchIndex` (`src/session/search.ts`), currently calling `refreshIndex()` on every invocation.
 
 The test suite is **diagnostic**, not perf-strict — every assertion is a loose upper bound set at roughly 100x-500x the measured baseline on a typical dev laptop. The point is not to pin exact millisecond values (that would produce endless CI flakes on shared runners); it is to catch the shape of the curve regressing — for example, quadratic scan in `listSessions`, or FTS refresh accidentally moved onto the hot path of `listSessions`.
+
+Issue #1610 extended the suite with a 200-session data point and a memory-footprint bound. The `listSessions at 200 sessions stays below 500 ms and 50 MB RSS delta (issue #1610)` case in `tests/session/performance.test.ts:136` codifies the upper edge of the "consider lazy load" band from the issue's thresholds table: at 200 sessions the eager scan is still expected to be imperceptible (measured ~3 ms) and add well under 50 MB of resident-set-size delta. The bounds are ~150x the measured baseline for wall time and ~100x for RSS so CI variance never flakes, but a real regression (for example, retaining full message bodies in the metadata path) trips the ceiling immediately.
 
 Reference pattern for a session-performance test case:
 
@@ -2945,6 +2947,25 @@ it('listSessions at 50 sessions stays below 200ms', () => {
   // Measured baseline ~0.7 ms; ceiling is loose for CI variance.
   expect(ms).toBeLessThan(200);
 });
+
+it('listSessions at 200 sessions stays below 500 ms and 50 MB RSS delta', () => {
+  // Codifies the #1610 threshold: the upper edge of the "consider lazy
+  // load" band. If this bound trips we should genuinely reconsider
+  // lazy loading.
+  seedSessions(200);
+  const mgr = new SessionManager({ sessionsDir: tempDir });
+
+  const rssBefore = process.memoryUsage().rss;
+  const ms = timeMs(() => mgr.listSessions());
+  const rssAfter = process.memoryUsage().rss;
+  const rssDeltaMb = (rssAfter - rssBefore) / (1024 * 1024);
+
+  expect(mgr.listSessions()).toHaveLength(200);
+  // Measured baseline ~3 ms on a dev laptop.
+  expect(ms).toBeLessThan(500);
+  // 200 seeded files at ~400 bytes each fit comfortably under 50 MB.
+  expect(rssDeltaMb).toBeLessThan(50);
+});
 ```
 
 Key patterns:
@@ -2956,7 +2977,8 @@ Key patterns:
 5. **Handle FTS-unavailable environments gracefully.** The `searchSessions` cases should degrade to a shape check (`expect(list.length).toBeGreaterThan(0)`) rather than fail hard when `better-sqlite3` is unusable — some CI runners install natives lazily. Reference: the empty-query case in `tests/session/performance.test.ts` explicitly branches on `search.length === 0` and skips the ordering assertion in that mode.
 6. **Do not `vi.useFakeTimers()`.** The measurements are wall-clock time; fake timers would either produce zeros or defeat the FTS SQLite backend entirely.
 7. **Temp directory teardown must be in `afterEach`, not `afterAll`.** Every case needs a fresh directory so the FTS index and the on-disk session count are deterministic per case.
+8. **Measure `process.memoryUsage().rss` deltas, not absolute values.** The RSS reading is dominated by shared V8 overhead and Vitest worker state; only the delta across the measured region is meaningful. Sample once immediately before and once immediately after the call, and always assert on `rssDeltaMb < ceiling` rather than `rssAfter < ceiling`. Bounds should still be generous (the RSS delta is a blunt instrument on Node — GC timing dominates at small allocation scales) but any dramatic jump (for example, retaining full message bodies in the metadata path) will still trip a ~100x-baseline ceiling.
 
-The paired `scripts/profile-session-search.ts` script is intentionally **not** part of the vitest suite (it produces a Markdown table on stdout for pasting into `docs/session-search-performance.md`). Invoke it with `npx tsx scripts/profile-session-search.ts` from the repo root when you need fresh numbers. The script covers scenarios (10, 50, 100, 500, 1000 sessions) that would be too slow for the default `npm test` budget.
+The paired `scripts/profile-session-search.ts` script is intentionally **not** part of the vitest suite (it produces a Markdown table on stdout for pasting into `docs/session-search-performance.md`). Invoke it with `npx tsx scripts/profile-session-search.ts` from the repo root when you need fresh numbers. The script covers scenarios at 10, 50, 100, 200, 500, and 1000 sessions (the 200 tier was added for issue #1610). Each scenario also captures an RSS delta alongside wall time, and — when Node is running with `--expose-gc` — issues a best-effort `global.gc()` call before sampling to reduce GC-timing noise.
 
 This profile-and-test-then-document pattern is the recommended template for any future CLI performance concern: a `tsx` script for one-shot numbers, a `docs/*-performance.md` writeup for the analysis, and a matching `tests/**/performance.test.ts` for regression guards.

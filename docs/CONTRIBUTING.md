@@ -831,6 +831,20 @@ Rules for adding a new profiling script:
 4. **Do not import from `dist/`.** Use `.js`-suffixed relative imports into
    `src/` exactly as the tests and CLI code do; `tsx` handles the on-the-fly
    compilation.
+5. **Measure memory as well as wall time when the concern is CLI
+   footprint.** The `measure()` helper in
+   `scripts/profile-session-search.ts` samples `process.memoryUsage().rss`
+   immediately before and after each timed region, issues a best-effort
+   `global.gc()` when Node is running with `--expose-gc` (to reduce
+   GC-timing noise), and emits the resident-set-size delta as
+   `rssDeltaMb` in the Markdown output. This is the shape any new
+   profiling script should copy when the underlying issue (like #1610)
+   asks about "memory footprint" as well as latency. Companion tests can
+   assert on `rssDeltaMb < ceiling` for regressions like
+   `tests/session/performance.test.ts:136` (`listSessions at 200 sessions
+   stays below 500 ms and 50 MB RSS delta`), which pins both the wall
+   time and the memory footprint at the upper edge of the #1610
+   thresholds table.
 
 ## Pull Request Process
 

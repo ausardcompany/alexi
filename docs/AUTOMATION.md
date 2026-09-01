@@ -332,8 +332,11 @@ sequenceDiagram
 | `src/providers/**` | PROVIDERS.md |
 | `*.json`, `.env*` | CONFIGURATION.md |
 | `*.test.ts`, `*.spec.ts` | TESTING.md |
+| `scripts/**/*.ts` (profiling / diagnostic) | TESTING.md, `docs/*-performance.md` |
 | `.github/workflows/**` | AUTOMATION.md |
 | All changes | CHANGELOG.md, CONTRIBUTING.md |
+
+The `scripts/**/*.ts` row was added when the session-search perf work landed (issues #1606 / #1610). Profiling scripts under `scripts/` are not compiled into `dist/` — they are invoked via `tsx` at run time — but they are covered by `tsconfig.eslint.json` and reviewed alongside their companion regression test in `tests/**/performance.test.ts` and their writeup in `docs/*-performance.md`. When the documentation-update workflow classifies a diff that touches such a script, TESTING.md is regenerated so its "Session search / listing performance profile" (and any future performance-profile section) stays in sync with the current script surface — including any new measurement columns such as `rssDeltaMb`.
 
 ### 4. Upstream Sync
 
