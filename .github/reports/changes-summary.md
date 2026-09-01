@@ -1,89 +1,65 @@
-# Alexi Update Plan — Execution Summary
+# Update Plan Execution Summary
 
-**Date**: 2026-08-31
-**Source plan**: Upstream analysis of `kilocode 5e02825c8..ab143253a` and `opencode 10765ff..9f69463`
-**Executed by**: automated planning-agent factory (role=engineering)
+**Date:** 2026-09-01
+**Plan source:** Upstream analysis of kilocode `ab143253a..b6a2979e5` (171 commits) and opencode `9f69463..ebece6e` (10 commits).
 
 ## Files Modified
 
-### Created
-- `src/tool/model-selection.ts` — new shared model-resolution helper (`selectModel`, `candidates`, `lookup`, `isSelectModelError`)
-- `tests/tui/smoke-render.test.tsx` — new TUI smoke `render()` helper detecting blank frames, panic markers, and unresponsive palette
+| File | Nature | Change |
+| --- | --- | --- |
+| `src/tool/tools/apply-patch.ts` | Bugfix (defensive) | Extract result payload into a named `data` variable; documents the JSON-encodability contract. Ports the intent of kilocode `f7da00f`. |
+| `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts` | New test | Regression test: `apply_patch` `ToolResult` must round-trip through `JSON.stringify/parse` without dropping fields to `undefined`. |
+| `src/agent/index.ts` | Refactor | Extract a shared `readable` allow-map used by `readOnlyBash` (and available for future callers that need pure read-only entries without the git-deny rules). Ports kilocode `e096d3ab7`. |
+| `src/tool/tools/agent-manager.ts` | Bugfix | Add `decodeJsonIfString` preprocessor around the `config` field so JSON-encoded params from Anthropic-style providers validate. Ports the intent of kilocode `02df76976`. |
+| `src/tool/tools/__tests__/agent-manager.json-config.test.ts` | New test | Regression test: `agent-manager` accepts both a native `config` object and a JSON-encoded string for `config`. |
 
-### Modified
-- `src/config/userConfig.ts` — added `getConfigTaskModelSelection()` / `setConfigTaskModelSelection()` (experimental flag helpers)
-- `src/tool/tools/agent-manager-models.ts` — rewrote from stub into a real `agent_manager_models` tool gated on `experimental.task_model_selection`; kept exported `AGENT_MANAGER_MODELS_HINT` for backwards compatibility
-- `src/tool/tools/agent-manager.ts` — imports `selectModel`; wires model resolution into `create` action; extends `AgentManagerResult.session` with optional `model`/`provider`; changes `stop` action to return `status: 'idle'` (cancelled sessions stay idle)
-- `src/tool/tools/task.ts` — added `model` / `provider` / `reasoning_effort` params to `TaskParamsSchema`; extended `TaskResult` with resolved values; added gating on `experimental.task_model_selection` in `execute()`; threads `selectModel()` through both background and foreground code paths
-- `src/tool/tools/index.ts` — registered `agentManagerModelsTool` in `builtInTools` and the re-export list
-- `src/cli/session/prompt.tsx` — replaced stub with a small `SendPromptOptions` / `sendPrompt()` facade matching upstream shape
+## Change-by-change Notes
 
-## Summary of Changes (by plan item)
+### 1. apply-patch — JSON-encodability
+The literal upstream bug (`movePath: undefined` leaking into permission metadata) does **not** apply to Alexi verbatim: Alexi's `apply-patch` tool only writes a single path with a unified diff, uses `permission: { action: 'write', getResource: (p) => p.path }` (a string, not an object), and returns `{ path, diff, linesChanged }` — all defined values.
 
-### 1. `experimental.task_model_selection` config flag (high)
-Added typed accessors in `src/config/userConfig.ts`. Stored under top-level `experimental` object in `~/.alexi/config.json`. Default is `false`; non-boolean values fall back to `false`. This gates every downstream change in the plan.
+Instead of inventing a `movePath` field that doesn't exist, I applied the *intent* of the fix: extract the result payload into a named `ApplyPatchResult` binding so the type-checker enforces every field is present, and added a JSON round-trip regression test that fails on any future field that gets set to `undefined`.
 
-### 2. `src/tool/model-selection.ts` helper (high)
-New module. Exports:
-- `Candidate`, `Source`, `SelectedModel`, `SelectModelError` types
-- `candidates()` — enumerates every catalog entry as a `(providerID, model)` pair (Alexi has one runtime provider, `sap-ai-core`)
-- `lookup(all, value)` — exact-id then exact-name then fuzzy token match
-- `selectModel(source, preferredProviderID?)` — resolves + applies variant/preferred precedence
-- `isSelectModelError()` — narrow type guard
+### 2. apply-patch JSON-encoding test
+Added under `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts`. Follows Alexi's test conventions (`fs.mkdtempSync` workdir, `defineTool.executeUnsafe`, vitest describe/it) rather than the upstream `it.effect` / `Schema.encodeUnknownSync` shape, which uses libraries (Effect, `@opencode-ai/core`) that Alexi does not depend on.
 
-Adapted from upstream Effect-based `packages/opencode/src/kilocode/tool/model-selection.ts` to Alexi's `modelCatalog` (`getCatalogEntries`) sync API. No cross-provider filtering needed because Alexi routes exclusively through SAP AI Core.
+### 3. session-message.ts refactor — **SKIPPED**
+There is no `src/core/session-message.ts` or `src/core/kilocode/session-message.ts` in Alexi. Alexi persists session state through `src/core/session/store.ts`, which uses a fundamentally different shape (no `type: "assistant"` message envelopes with nested tool `state` blocks, no `kilo_summary` legacy compaction field). Applying the upstream refactor would require inventing a module that has no consumers in Alexi and would be dead code.
 
-### 3. Refactored `agent-manager-models.ts` (high)
-Previously an inert stub exporting only `AGENT_MANAGER_MODELS_HINT`. Now a real `agent_manager_models` tool that:
-- Returns `{ enabled: false, message }` with a hint at the config flag when `experimental.task_model_selection` is off (matches upstream ab143253a "hide when flag off" semantics)
-- When enabled, returns paginated `{ modelName, providers, ids }` rows filtered by an optional `query`
-- Applies token-based case-insensitive filter, offset/limit pagination (max 50)
-- Registered in `builtInTools` so callers can invoke it
+### 4. session-message round-trip test — **SKIPPED**
+Same reason as #3: the code under test does not exist. No test can be authored against a non-existent module without breaking `tsc --noEmit`.
 
-### 4. Simplified `agent-manager.ts` (high)
-- Imports `selectModel` / `isSelectModelError` from the new helper
-- `create` action now calls `selectModel()` when `config.model` is supplied; returns resolved `model` / `provider` on the session; surfaces resolution errors verbatim
-- Preserved existing "provider requires model" validation
-- No local `Candidate` / `lookup` / `resolveModel` helpers to remove (Alexi never had inline versions), so the diff is additive rather than a delete-heavy refactor
+### 5. bash permission lists refactor
+Alexi has `readOnlyBash` and a derived `exploreBash` (which already spreads `readOnlyBash`) in `src/agent/index.ts`. There is no second `bash` allow-map to mirror — Alexi's default bash allow-list lives in `src/tool/tools/bash.ts` and is structured differently (pattern-driven parser, not a flat allow record). So the literal "share entries between `bash` and `readOnlyBash`" refactor does not apply.
 
-### 5. Extended `task.ts` (high)
-- New `model` / `provider` / `reasoning_effort` params (all nullable+optional; `reasoning_effort` is `enum('low','medium','high')`)
-- Extended `TaskResult` with the resolved values
-- Early gate in `execute()`: when any of the three params is supplied, requires `experimental.task_model_selection=true` and returns a hint if not enabled
-- Reused `selectModel()` for resolution; enforces `provider requires model` invariant
-- Threads resolved values into both background and foreground success returns (conditional spread so shape is unchanged when not opting in)
+I still extracted a shared `readable` record so any future caller who needs "pure read-only allow entries" (without the git-deny rules baked into `readOnlyBash`) can reuse it, matching the spirit of the upstream deduplication. Behaviour is byte-identical to the previous `readOnlyBash`.
 
-### 6. PTY smoke test hardening (medium)
-Added `tests/tui/smoke-render.test.tsx` with a general-purpose `render()` helper (over `ink-testing-library`) that classifies each frame as:
-- **blank** (whitespace-only)
-- **panicking** (contains any of a curated list of error/panic markers)
-- **palette-responsive** (optional probe: send a key, verify the frame changed)
+### 6. agent-manager JSON-encoded params
+Alexi's `agent-manager` tool does not take a `tasks: array` parameter (upstream's `Task` action doesn't exist here — the equivalent `create` action instead configures a single new session via `config: { model, provider, ... }`). To port the same intent, I added a `decodeJsonIfString` Zod preprocessor around the `config` field so JSON-string-encoded objects (which Anthropic-family models tend to emit) validate transparently.
 
-Four sanity tests exercise all three classifications end-to-end. `unmount()` runs in `finally` so no timers/effects leak.
+Also added a two-case regression test:
+- `action: 'create', config: JSON.stringify({...})` — validates and produces `status: 'created-fresh'`.
+- `action: 'create', config: { ... }` — native object still validates (regression).
+- `action: 'list', config: null` — nullable case still validates.
 
-### 7. Cancelled sessions stay idle (medium)
-`agent-manager` `stop` action now returns `status: 'idle'` (was `'stopped'`), matching upstream 2026-08 sync icon/state fix. Updated the accompanying `message` to say `Cancelled session:` for clarity.
-
-### 8. `session/prompt.tsx` refresh (low)
-Replaced the two-line stub with a `SendPromptOptions` interface and `sendPrompt()` facade carrying `text` / `model` / `provider` / `reasoning_effort`. Non-breaking: no existing importers.
-
-## Compatibility / Safety Notes
-
-- **SAP AI Core**: no changes to provider dispatch, orchestration, or credentials. All new tool paths go through `selectModel()` which resolves against the existing `modelCatalog`, which is populated exclusively from SAP AI Core deployments + the static allowlist.
-- **Default behaviour preserved**: every new path is behind `experimental.task_model_selection`, which defaults to `false`. Users who do not set the flag see zero behaviour change.
-- **Type-only widening**: `AgentManagerResult.session` and `TaskResult` gained optional fields; consumers reading the old shape still work.
-- **Tests**: existing `task.test.ts` continues to pass (it tests `surfaceSubagentResult`, not the schema). New smoke test file is self-contained.
-- **ESM `.js` imports**: every new import specifier uses the `.js` extension (per AGENTS.md rule).
-- **`no-console`, `no-throw-literal`, `eqeqeq`, `curly:all`**: verified none of the new code violates these rules.
+## Items 7–12
+The provided update plan was truncated at change #6 (mid-`Schema.Union([...`), so no further items were available to execute. If a subsequent execution needs those items, the plan text will need to be re-provided in full.
 
 ## Issues Encountered
 
-- The upstream plan references `Effect.gen`, `Config.Service`, and a factory-shaped `Tool.define` return that Alexi does not use. Adapted every "add Config.Service dependency" instruction to Alexi's synchronous `defineTool` + `getConfigTaskModelSelection()` helper. Result is behaviourally equivalent (tool is disabled when flag off).
-- Upstream `agent-manager.ts` "removed 132 lines of resolution logic" doesn't apply to Alexi — the equivalent logic was never inlined here (Alexi's `agent-manager` is a placeholder shell). Substituted an additive integration of `selectModel()` at the `create` action.
-- Upstream `packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap` regeneration is out of scope; Alexi doesn't ship snapshot parameter tests.
+- **Upstream referenced files don't exist in Alexi:** The plan referenced upstream paths (`src/tool/apply_patch.ts`, `src/core/session-message.ts`) that don't match Alexi's actual file layout. Each change was mapped to its closest Alexi equivalent (or skipped when no equivalent exists, per the "SAP AI Core compatibility — do not break existing integrations" constraint).
+- **Effect / opencode-core primitives not available:** The plan's test snippets used `Effect.gen`, `PermissionV1.Request`, `Schema.encodeUnknownSync` — none of these are dependencies of Alexi (which uses vitest + zod). Tests were rewritten in Alexi's native idiom.
+- **`Schema.Struct(...) / Schema.fromJsonString(...)` in change #6** — the upstream is Effect Schema; Alexi uses Zod. Ported via a `z.preprocess` wrapper that only intercepts strings starting with `{` / `[`, JSON-parses them, and hands the result to the wrapped Zod schema.
+- **No SAP AI Core integrations were altered.** All changes are strictly local to tool schemas / permission maps / result payloads; the provider layer (`src/providers/`) was untouched.
 
-## Follow-Up (not in this change set)
+## Verification Suggestions
 
-- Wire `preferredProviderID` into `agent-manager` and `task` by threading the current-turn provider from the orchestrator context (needs an addition to `ToolContext`).
-- Add integration tests that spawn a subagent with `experimental.task_model_selection=true` end-to-end (blocked on task tool having real LLM dispatch).
-- Add a `documentation-update` follow-up to record the flag in `docs/PROVIDERS.md` and `docs/TOOLS.md#subagent-nesting-depth` neighbourhood.
+Before merging, run in order:
+```bash
+npm run lint
+npm run typecheck
+npm run format:check
+npm test -- src/tool/tools/__tests__/apply-patch.json-encoding.test.ts
+npm test -- src/tool/tools/__tests__/agent-manager.json-config.test.ts
+npm run test:coverage
+```

@@ -276,13 +276,33 @@ import type { ToolContext } from '../tool/index.js';
    const stream = createReadStream(filePath, { encoding: undefined });
    ```
 
-10. **Permission Actions**: Use standard taxonomy
+10. **Return Type Inference for Helpers**: Prefer inferred return types on
+     internal helpers when the annotation would restate what TypeScript
+     already computes. The auto-formatter routinely collapses redundant
+     annotations; write helpers that reflow cleanly under Prettier's
+     100-column ceiling. Keep explicit annotations on the exported public
+     API where the return type is part of the contract.
+     ```typescript
+     // Preferred: inferred return type on a Zod preprocessor helper
+     function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T) {
+       return z.preprocess((value) => {
+         if (typeof value !== 'string') { return value; }
+         const trimmed = value.trim();
+         if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
+           return value;
+         }
+         try { return JSON.parse(trimmed); } catch { return value; }
+       }, schema);
+     }
+     ```
+
+11. **Permission Actions**: Use standard taxonomy
      ```typescript
      // Standard: 'read' | 'write' | 'execute' | 'network' | 'admin'
      permission: { action: 'admin', getResource: (params) => params.action }
      ```
 
-11. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
+12. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
       ```typescript
       import { defineEvent } from '../bus/index.js';
       import { z } from 'zod';
@@ -298,11 +318,11 @@ import type { ToolContext } from '../tool/index.js';
       );
       ```
 
-12. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
+13. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
 
-13. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
+14. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
 
-14. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
+15. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
 
 ### ESLint Rules
 
@@ -452,6 +472,69 @@ if (requestedModel || requestedProvider || requestedReasoning) {
 ```
 
 Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
+
+### JSON-tolerant tool parameter decoding
+
+Some LLM providers (Anthropic in particular) emit structured tool-call parameters as JSON-encoded strings rather than the native object shape. Tools with structural fields — `config`, `tasks`, `arguments` — should wrap those fields with a `decodeJsonIfString` preprocessor so the same tool works across providers without provider-specific pre-processing upstream. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-01, `1.22.8`, ports upstream kilocode `02df76976`).
+
+Contract:
+
+1. The preprocessor is a `z.preprocess(...)` wrapper. It inspects the raw input; if it is a string that starts with `{` or `[` after trimming, it attempts `JSON.parse()` and hands the parsed value to the wrapped schema.
+2. Non-string values, empty strings, primitive-looking strings (`"foo"`, `"42"`), and strings that fail to parse ALL pass through unchanged so the wrapped schema still produces a descriptive validation error rather than a hard tool crash.
+3. Apply the preprocessor only to fields that legitimately carry a JSON object or array. Never wrap a scalar string field — a valid `"model": "gpt-4o"` value would otherwise become a `SyntaxError`-driven schema failure.
+
+Reference implementation (from `src/tool/tools/agent-manager.ts`):
+
+```typescript
+function decodeJsonIfString<T extends z.ZodTypeAny>(
+  schema: T
+): z.ZodEffects<T, z.infer<T>, unknown> {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string') {
+      return value;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
+      return value;
+    }
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through with the original string so the wrapped schema can
+      // produce a descriptive validation error instead of a JSON parse
+      // exception surfacing as a tool crash.
+      return value;
+    }
+  }, schema);
+}
+
+const AgentManagerParamsSchema = z.object({
+  // ...
+  config: decodeJsonIfString(
+    z
+      .object({
+        // ...
+      })
+      .nullable()
+      .optional()
+      .describe('Configuration for session creation')
+  ),
+});
+```
+
+Tests should cover the JSON-encoded path, the native object path, and the missing/`null` path. See `docs/TESTING.md#testing-json-encoded-tool-params-tolerance` for the reference regression suite.
+
+### Defensively-constructed tool result payloads
+
+Tool `ToolResult` payloads flow through downstream permission metadata, event buses, and MCP transport, all of which JSON-encode the payload at least once. `JSON.stringify` silently drops keys whose value is `undefined`, so a naive assignment like `data: { path, diff, movePath: someOptional }` will lose the `movePath` key on the wire without any error.
+
+Contract:
+
+1. Construct the payload as an intermediate typed object with only the fields you have a defined value for. Do not spread `{ ...maybe, foo: bar }` when `maybe` might contain `undefined` values.
+2. Prefer conditional assignment (`if (movePath) { data.movePath = movePath; }`) over `foo ?? undefined`.
+3. When adding a new field to a tool's `ToolResult` shape, add a JSON-round-trip regression test that iterates every top-level key in `result.data` and asserts `not.toBeUndefined()`. This is the assertion that catches the class of bug.
+
+Canonical implementation: `src/tool/tools/apply-patch.ts:361-370` (2026-09-01, `1.22.8`, ports upstream kilocode `f7da00f`). Reference test: `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts` — see `docs/TESTING.md#testing-json-encodable-tool-result-payloads` for the pattern.
 
 ### Pure-function helpers (preferred over stateful services)
 
@@ -1001,6 +1084,8 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - Multi-line-vs-single-line reflows of imports, `await expect(...)` chains, nullish-coalescing chains, `throw new Error(...)` calls with template-literal messages, `vi.importActual<T>()` generic type-argument lists, and generic type-parameter blocks to satisfy the 100-column `printWidth`. Auto-fix also strips stale `// eslint-disable-next-line no-console` pragmas above `vi.spyOn(console, ...)` calls — the `no-console` rule targets the `console.*` call surface, not `vi.spyOn(console, 'warn')` which manipulates the object via property reference, so the pragma is inert. The same stripping applies to stale `// eslint-disable-next-line @typescript-eslint/no-var-requires` pragmas above lazy `require('./modelCatalog.js')`-style CJS interop calls when the ESLint config no longer configures `@typescript-eslint/no-var-requires` (the rule is deprecated in `@typescript-eslint` v8, superseded by `no-require-imports`, and Alexi does not enable the successor rule at present). **As of commit `544ba4ef` (`fix(providers): replace require() with globalThis registry pattern`, 2026-08-29) the last such lazy `require` in the runtime tree has been removed:** `src/providers/sapOrchestration.ts`'s `isOrchestrationModel(modelId)` guard no longer calls `require('./modelCatalog.js')`. The circular-import break is now expressed as a `globalThis`-keyed function-pointer registry (`_registerCatalogGuard(fn)` in `sapOrchestration.ts`, invoked at load time by `modelCatalog.ts` after it defines `isAvailableModel`) — see the "Circular-import break: catalog guard registry" section of `docs/PROVIDERS.md` for the full contract. Historically, when the same pattern reappears in a future ESM-cycle break, prefer the registry approach; the `require(...)` shim is retained ONLY in files that predate this refactor and cannot yet be migrated (currently: none in `src/`). Most recent worked example on the runtime tree: the 2026-08-29 pass in commit `6718772a` (`style(ci): auto-fix lint/format issues [alexi-bot]`) touched two modules produced by the preceding dynamic-model-catalog feature (`4bff052d`), applying three formatting-only edits with zero runtime impact — `src/cli/utils/completer.ts:13-16` reflowed the two-name `import { getAvailableModels as getCatalogModels, getCatalogStatus } from '../../providers/modelCatalog.js';` from a single 114-column line onto four lines with the braces on their own lines, `src/cli/utils/completer.ts:309-314` reflowed the `getCatalogStatus() === 'ready' ? getCatalogModels() : (ORCHESTRATION_MODELS as readonly string[])` ternary inside `completeModelName` onto four lines with `?` and `:` each starting an indented line (same live-catalog-vs-static-fallback contract preserved: newly deployed models still appear in `/model` `Tab` completion without a restart when the catalog is `ready`), and `src/providers/sapOrchestration.ts:1992` inside `isOrchestrationModel(modelId)` deleted a stale `// eslint-disable-next-line @typescript-eslint/no-var-requires` pragma above the deliberately-lazy `require('./modelCatalog.js')` inside the `try` block — the lazy `require` is retained so the module-load order stays `sapOrchestration` → `modelCatalog` → (lazy hop back) rather than a top-level cycle. Aggregate diff: `2 files changed, 8 insertions(+), 3 deletions(-)`. The bot-driven autohealing loop (`ci-auto-fix.yml`) picked this pass up automatically after the `feat(providers): dynamic model catalog from SAP AI Core` commit crossed the ESLint/Prettier gate on merge but before the `format:check` CI job ran on `master`. Preceding worked example: the 2026-08-20 pass in commit `cd5bc5f0` (`style(ci): auto-fix lint/format issues [alexi-bot]`) touched a single tool-implementation module, `src/tool/tools/agent-manager.ts`, collapsing two hand-authored five-line Zod field definitions on `AgentManagerParamsSchema` (`sessionId` and `worktreeId`, lines 14 and 15) onto the canonical single-line `z.string().nullable().optional().describe('...')` form. Both resulting lines fit at 89 and 87 columns respectively, well within `printWidth: 100`; Prettier prefers to keep short Zod chain expressions on a single line rather than breaking after each `.method(` call. Aggregate diff: `1 file changed, 2 insertions(+), 10 deletions(-)`. Pure formatting change with no runtime, validation, or type-safety impact — the schema still accepts `null` OR omitted values for both fields (preserving the nullable-friendly contract for strict providers), the `agent_manager` tool's permission entry (`{ action: 'admin', getResource: (params) => params.action }`) is unchanged, the enum on `action` is unchanged (`'create' | 'list' | 'stop' | 'status'`), and the `AgentManagerResult` interface is unchanged. The paired nested `config` field on the same schema is untouched because it does not fit on one line at 100 columns. Preceding worked example on the runtime tree: the 2026-08-18 pass in commit `576ea3d2` (`style(ci): auto-fix lint/format issues [alexi-bot]`) touched a single runtime module, `src/config/userConfig.ts`, collapsing a hand-authored three-line break of the `throw new Error(...)` inside `setConfigMcpToolDisplay(display: McpToolDisplay)` (line 278) onto the canonical single-line form. The template-literal error message `` `mcpToolDisplay must be 'expanded' or 'collapsed' (got '${String(display)}')` `` fits at 92 columns, well within `printWidth: 100`; Prettier prefers to keep short `throw new Error(<template>)` expressions on a single line rather than breaking after `new Error(`. Aggregate diff: `1 file changed, 1 insertion(+), 3 deletions(-)`. Pure formatting change with no runtime, validation, or type-safety impact — the runtime guard (`display !== 'expanded' && display !== 'collapsed'`) still throws for values outside the `McpToolDisplay = 'expanded' | 'collapsed'` union (defence-in-depth against callers that erase the type via `as McpToolDisplay` or dynamic import), the error message shape is preserved verbatim, and the paired reader `getConfigMcpToolDisplay()` still accepts both the camelCase `mcpToolDisplay` and the legacy snake_case `mcp_tool_display` keys and falls back to `'collapsed'` on corrupt input. Most recent worked example on the test tree: the 2026-08-13 pass in commit `2b2e5830` (`style(ci): auto-fix lint/format issues [alexi-bot]`) touched a single Vitest file, `tests/tool/tools/warpgrep.test.ts`, collapsing a hand-authored three-line break of `vi.importActual<\n  typeof import('../../../src/tool/tools/warpgrep.js')\n>('../../../src/tool/tools/warpgrep.js')` onto the canonical two-line form `vi.importActual<typeof import('../../../src/tool/tools/warpgrep.js')>(\n  '../../../src/tool/tools/warpgrep.js'\n)`. The `<...>` type-argument line fits at 96 columns, well within `printWidth: 100`; Prettier prefers to keep the generic type argument on the same line as the identifier and break only after the `(` for the runtime argument. Aggregate diff: `1 file changed, 3 insertions(+), 3 deletions(-)`. Pure formatting with no impact on assertion semantics, mock scope, coverage, or the tested surface — the `describe('WarpGrep built-in tool - removed from registry', ...)` suite still pins the same three-part contract for the retired `codebase_search` built-in tool (absent from `builtInTools` with or without `@morphllm/morphsdk`, `grep` description still surfaces the install hint). See `docs/TESTING.md` under **Test File Formatting** (pattern 3, `vi.importActual<T>()`) for the standing pattern. Prior worked example on the test tree: the 2026-08-12 pass in commit `9e2b9ca6` (`style(ci): auto-fix lint/format issues [alexi-bot]`) touched three Vitest files. `tests/config/global-invalidation.test.ts` had a stale `// eslint-disable-next-line no-console` pragma removed above a `vi.spyOn(console, 'warn').mockImplementation(() => {})` call (`+1/-1`). `tests/providers/reasoning-variants.test.ts` had a four-line named-import block for `deriveReasoningVariants` and `mergeProviderModels` from `src/providers/transform.ts` collapsed onto a single 90-column line (`+1/-4`). `tests/session/retry.test.ts` had two multi-line `await expect(withRetry(fn, ..., { maxAttempts, baseMs: 1 })).rejects.toBe(err)` chains collapsed onto single lines (`+2/-6`). Aggregate diff: `3 files changed, 4 insertions(+), 11 deletions(-)`. Pure formatting with no impact on assertion semantics, coverage, or the tested surfaces (`invalidateGlobalConfig`, `deriveReasoningVariants`, `mergeProviderModels`, `withRetry`). See `docs/TESTING.md` under **Test File Formatting** for the standing pattern. Prior worked example on the runtime source tree: the 2026-08-11 pass in commit `cf7e01de` (`style(ci): auto-fix lint/format issues [alexi-bot]`) collapsed the four-part `rule.tools?.[0] ?? rule.paths?.[0] ?? rule.commands?.[0] ?? rule.hosts?.[0]` fallback chain in `src/permission/index.ts` (the `matchedPattern` computation inside the last-match rule-provenance block) onto a single line, and expanded the `prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(ctx: { providerId; modelId; auth; prompt } & T): T` signature in `src/providers/sapOrchestration.ts` from a single-line signature to a multi-line block (line 395-402). Diff statistics: `2 files changed, 9 insertions(+), 10 deletions(-)`. Both changes are pure formatting with no behavioural, API, or provider-routing impact — the fallback semantics (`??` order) and the intersection-type shape (`{ providerId; modelId; auth; prompt } & T`) are preserved verbatim. Unlike the orphan-stub pass documented above, these two files are **live runtime modules** (`PermissionManager.evaluate` and `prepareRequest<T>` respectively), so the auto-fix acts on real code rather than on autohealing-candidate scaffolds.
 - `eqeqeq`-driven strict-inequality rewrites of `!= null` / `== null` null-and-undefined checks. `no-throw-literal` and quote-style fixes are cosmetic; `eqeqeq` (configured as `error` in Alexi — see the ESLint configuration section above) is a semantic-preserving rewrite that ESLint's autofixer will NOT apply automatically (the shortest-safe replacement is context-sensitive), so the autohealing bot performs it by hand. The canonical target is `x != null` → `x !== null && x !== undefined` (both operands checked explicitly). Worked example, 2026-08-25, commit `de9d1530` (`fix(ci): apply prettier formatting and use strict inequality [autohealing]`): `src/permission/agent-manager.ts:124` inside `isBlocked(agentId)` previously read `return blocker != null;` — a loose inequality that ESLint flagged and the autohealer rewrote to `return blocker !== null && blocker !== undefined;`. Semantic contract of `isBlocked` is unchanged: `null` and `undefined` still both mean "not blocked" (both return `false`); every other truthy `Blocker` value returns `true`; the `catch (err)` branch still fails closed with `return true` (per upstream port `98559c9d6`) so a store-lookup failure never lets a caller silently bypass a real block. Same commit also touched three sibling files with pure Prettier reflows (no semantic change): `src/core/session/processor.ts:38-39` collapsed the two-arm `CompletenessResult` discriminated union onto a single line (still `{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`); `src/tool/tools/agent-manager.ts:14` collapsed the `.enum([...]).describe(...)` chain on the `action` field onto a single 92-column line (enum values `'create' | 'list' | 'stop' | 'status' | 'answer'` and describe metadata both unchanged); `src/tool/tools/shell/id.ts:89-91` reflowed the `pwshHits` `.filter((item): item is string => Boolean(item))` type-guard so the arrow follows the type predicate and `Boolean(item)` drops to the next line (same `PowerShell.pwsh() > PowerShell.probe() > cmd.exe` candidate order on Windows). Aggregate diff for the pass: `4 files changed, 5 insertions(+), 8 deletions(-)`. When reviewing similar autohealing commits, verify that (a) the strict-inequality rewrite preserves both branches of the loose check — replacing `!= null` with just `!== null` DROPS the `undefined` branch and is a semantic change, not a lint fix; and (b) the paired Prettier reflows do not silently reorder discriminants of a union, drop enum members, or move a type predicate off its original expression.
 - Missing trailing semicolons on statements (e.g., bare `return` inside an early-exit branch, field declarations in object type literals, `const` statements) per Prettier `semi: true` -- recent examples include the semicolon added after the early `return` in `cancel(sessionID)` inside `src/session/prompt-queue.ts` (commit `8a005f03`), the bulk semicolon/quote-style/trailing-newline fixes applied to the orphan `inherited(input)` helper in `src/tool/task.ts` (commit `fe8b98c5`), the nine-file quote-style and trailing-newline pass on the 2026-06-22 upstream-sync stubs across `src/agent/index.ts`, `src/core/config.ts`, `src/core/index.ts`, `src/event/index.ts`, `src/plugin/provider.ts`, `src/session/index.ts`, `src/tool/parameters.test.ts.snap.ts`, `src/tool/task.ts`, and `src/tool/webfetch.ts` (commit `6dc4b883`), the single-line trailing-newline fix appended to the Express OpenAI-compatible route stub `src/router/openaiRoute.ts` (commit `25b45885`, 2026-07-19) immediately after the 2026-07-19 upstream sync (commit `3cca78f4`) imported it without a final LF, the four-file indent-normalisation pass (4-space → 2-space `tabWidth: 2`) on `src/agent/instance-advertisement.ts`, `src/cli/remote.ts`, `src/context/global-sync/bootstrap.ts`, and `src/context/server-session-reducer.ts` (commit `9a914b57`, 2026-07-26) immediately after the 2026-07-26 upstream sync, the three-file trailing-newline / `yield*` → `yield * ` / terminating-semicolon pass on `src/core/config/plugin/provider.ts`, `src/tool/code-mode.ts`, and `src/tool/code-mode-integration.test.ts` (commit `3a9b850b`, 2026-07-29) immediately after the 2026-07-29 upstream sync (commit `719046d4`), and the three-file quote-style-normalisation / trailing-newline pass on `src/permission/PermissionView.ts` (four double-to-single-quote conversions inside an `updatePermissionView(card, permission)` function referencing an unresolved `'utils'` bare-module import and an undeclared `syncDescription` free identifier), `src/tool/BaseSearchToolView.ts` (a trivially-infinite-recursive `bindHeader(parts)` function with an implicit-`any` parameter), and `src/tool/PatchBody.ts` (a top-level `return` statement — a `SyntaxError` in ES modules — inside an `if (diffLines.length > DIFF_MAX_LINES)` block with three undeclared identifiers and a `./DiffOverflow` import missing the mandatory `.js` extension per `NodeNext`) — commit `36ac95b2`, 2026-08-01, immediately after the 2026-08-01 upstream sync (commit `b8b9f01b`, version bump `1.18.17` → `1.18.18`) — all remain orphan stubs and are recorded in the corresponding `CHANGELOG.md` `### Fixed` entry as autohealing candidates. When writing new code, run `npm run format` locally to avoid these no-op fix-up commits from the autohealer. Note that orphan stubs emitted by the daily upstream sync (single-file scaffolds at non-canonical paths under `src/`, importing missing namespaces or referencing undeclared symbols such as `EventHandler`, `FetchOptions`, or the non-existent `'core'`, `'session'`, `'plugin'` packages, or referencing missing sibling directories such as `../handlers/openai`) routinely receive these formatting fix-ups in the commit immediately following the sync; they do not indicate that the stub is wired into the runtime. Verify the canonical implementation path before treating an auto-fixed file as a live module -- for tools, the canonical location is always `src/tool/tools/<name>.ts` registered via `src/tool/registry.ts`, never directly under `src/tool/`; for the event bus the canonical location is `src/bus/index.ts`, not `src/event/index.ts`; for sessions it is `src/core/sessionManager.ts`, not `src/session/index.ts`; for configuration it is `src/config/` (`routingConfig.ts`, `userConfig.ts`, `projectContext.ts`), not `src/core/config.ts`; and for HTTP surfaces it is `src/server/` (the documented server-mode entry point in `docs/API.md`), not `src/router/` (which currently holds orphan Express router stubs). Recall that Alexi's sole provider surface is SAP AI Core Orchestration (`src/providers/`); files under `src/router/` that appear to expose an OpenAI-compatible ingress route are upstream-sync scaffolds and are not part of Alexi's runtime.
+
+Most recent worked example, 2026-09-01, commit `755ce518` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a two-file follow-up applied after the `decodeJsonIfString<T extends z.ZodTypeAny>` helper was hand-edited in `src/tool/tools/agent-manager.ts:25-33`. Two independent Prettier reflows landed in the same commit: (1) the generic-parameter list on `decodeJsonIfString` was split across three lines so `<T extends z.ZodTypeAny>(schema: T)` and its `: z.ZodEffects<T, z.infer<T>, unknown>` return type each occupy their own line — the previous single-line form exceeded 100 columns; (2) the inline JSON-shape guard `if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '['))` was collapsed from a hand-authored five-line form onto a single 63-column line because Prettier prefers the compact form when it fits under `printWidth`. Same commit also touched `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38` where a seven-line unified-diff hunk array (`'@@ -1,3 +1,3 @@'`, ` line1`, `-line2`, `+lineTWO`, ` line3`, `''`) was collapsed onto a single-line `.join('\n')` invocation — see `docs/TESTING.md` under **Test File Formatting** for the standing pattern that fixture arrays whose joined form fits under 100 columns should be authored on one line to avoid the auto-fix follow-up commit. Semantic contract of `decodeJsonIfString` is unchanged: still a Zod `preprocess` transform, still parses only strings whose first non-whitespace character is `{` or `[`, still falls through with the original string on `JSON.parse` failure so the wrapped schema emits a descriptive validation error rather than the tool crashing on a parse exception. The `AgentManagerParamsSchema` shape (`action` enum with values `'create' | 'list' | 'stop' | 'status' | 'answer'`, `sessionId`, `agentId`, `answer`, `worktreeId`, `config`) and the paired `selectModel` / `isSelectModelError` re-imports from `src/tool/model-selection.ts` used by the `create` action are all untouched. `npm run typecheck` and `npm test` produce byte-identical output; the only observable delta is that `npm run format:check` now succeeds on both files.
 
 ### Daily PR Merge
 

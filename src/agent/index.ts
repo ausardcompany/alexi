@@ -549,12 +549,26 @@ export function parseAgentMention(message: string): {
 }
 
 /**
- * Read-only bash commands for the ask agent and plan mode.
- * Unlike the default bash allowlist, unknown commands are DENIED (not "ask")
- * because the ask agent must never modify the filesystem.
+ * Shared read-only bash allow entries.
+ *
+ * Ports upstream kilocode commit `e096d3ab7` (`refactor(cli): share common
+ * bash permission entries`), which deduplicated the read-only allow list
+ * between the default `bash` and `readOnlyBash` maps. Alexi only exposes
+ * `readOnlyBash` today, but extracting this constant means callers that
+ * need "just the pure read-only allow set" (without the git-deny rules
+ * baked into `readOnlyBash`) can reuse it directly, and any new
+ * read-only command is added in ONE place instead of drifting between
+ * mirrored maps.
+ *
+ * ONLY commands whose *default* mode reads from the filesystem / writes
+ * to stdout should live here. Some entries (`sed *`, `awk *`) DO have
+ * in-place-mutate flags (`sed -i`, `awk -i inplace`); these are inherited
+ * from the pre-existing `readOnlyBash` allow-list and are accepted
+ * because a downstream `bash` tool with a stricter deny-list (or an
+ * explicit user rule) still gates the actual invocation. Do not add
+ * genuinely destructive commands (`rm`, `mv`, `dd`) to this map.
  */
-const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
-  '*': 'deny',
+const readable: Record<string, 'allow'> = {
   // read-only / informational
   'cat *': 'allow',
   'head *': 'allow',
@@ -588,6 +602,16 @@ const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
   'tr *': 'allow',
   'jq *': 'allow',
   'yq *': 'allow',
+};
+
+/**
+ * Read-only bash commands for the ask agent and plan mode.
+ * Unlike the default bash allowlist, unknown commands are DENIED (not "ask")
+ * because the ask agent must never modify the filesystem.
+ */
+const readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'> = {
+  '*': 'deny',
+  ...readable,
   // git read-only commands
   'git status *': 'allow',
   'git log *': 'allow',

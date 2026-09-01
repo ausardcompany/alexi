@@ -7,6 +7,41 @@ import { defineTool, type ToolResult } from '../index.js';
 import { getBlocker, answerQuestion } from '../../permission/agent-manager.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
 
+/**
+ * Preprocessor that accepts either a structured object OR a JSON-encoded
+ * string and hands the parsed object back to Zod. Ports upstream kilocode
+ * commit `02df76976` (`fix(agent-manager): decode JSON-encoded task
+ * arrays`) — some models (Anthropic in particular) emit structured
+ * tool-call parameters as a JSON string rather than the native object
+ * shape, which then fails schema validation. Wrapping the config object
+ * (and other structural fields that models tend to over-encode) with
+ * this preprocessor lets the tool tolerate both shapes without provider-
+ * specific handling upstream.
+ *
+ * Only strings that look like JSON objects/arrays are parsed; primitive
+ * strings and non-string values pass through unchanged so the wrapped
+ * schema can still emit a useful validation error.
+ */
+function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string') {
+      return value;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
+      return value;
+    }
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through with the original string so the wrapped schema can
+      // produce a descriptive validation error instead of a JSON parse
+      // exception surfacing as a tool crash.
+      return value;
+    }
+  }, schema);
+}
+
 // Nullable-friendly schema: strict providers (OpenAI structured output,
 // SAP AI Core in strict mode) may omit optional fields entirely OR pass
 // explicit `null`. Accept both so tool-call payloads coming from any
@@ -27,31 +62,33 @@ const AgentManagerParamsSchema = z.object({
       'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
     ),
   worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
-  config: z
-    .object({
-      mode: z.string().nullable().optional().describe('Agent mode'),
-      model: z.string().nullable().optional().describe('Model to use'),
-      // Ports upstream opencode `agent-manager` task `provider` field
-      // (2026-08 upstream sync). Lets the orchestrator LLM constrain
-      // model resolution to a specific provider ID when the same model
-      // name is offered by multiple providers (e.g. `sap-ai-core`
-      // deployment vs. direct `anthropic`). Requires `model` to be set.
-      provider: z
-        .string()
-        .nullable()
-        .optional()
-        .describe(
-          "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
-        ),
-      excludeLocalState: z
-        .boolean()
-        .nullable()
-        .optional()
-        .describe('Exclude local state on startup for fresh session initialization'),
-    })
-    .nullable()
-    .optional()
-    .describe('Configuration for session creation'),
+  config: decodeJsonIfString(
+    z
+      .object({
+        mode: z.string().nullable().optional().describe('Agent mode'),
+        model: z.string().nullable().optional().describe('Model to use'),
+        // Ports upstream opencode `agent-manager` task `provider` field
+        // (2026-08 upstream sync). Lets the orchestrator LLM constrain
+        // model resolution to a specific provider ID when the same model
+        // name is offered by multiple providers (e.g. `sap-ai-core`
+        // deployment vs. direct `anthropic`). Requires `model` to be set.
+        provider: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
+          ),
+        excludeLocalState: z
+          .boolean()
+          .nullable()
+          .optional()
+          .describe('Exclude local state on startup for fresh session initialization'),
+      })
+      .nullable()
+      .optional()
+      .describe('Configuration for session creation')
+  ),
 });
 
 interface AgentManagerResult {

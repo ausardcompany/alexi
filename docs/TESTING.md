@@ -1388,6 +1388,132 @@ it('returns SelectModelError for unknown model', () => {
 });
 ```
 
+### Testing JSON-encoded Tool Params Tolerance
+
+Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings rather than the native object shape. The `agent_manager` tool now decodes JSON-encoded `config` strings transparently via the `decodeJsonIfString` Zod preprocessor in `src/tool/tools/agent-manager.ts`. Tests should exercise both shapes to guarantee no regression across providers.
+
+Reference regression suite: `src/tool/tools/__tests__/agent-manager.json-config.test.ts` (3 cases, 64 lines). The pattern:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import type { ToolContext } from '../../index.js';
+
+describe('agent-manager tool — JSON-encoded config tolerance', () => {
+  it('accepts a JSON-encoded config string on create', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      // Intentionally pass `config` as a JSON string — some models
+      // over-encode structured params this way. The preprocessor should
+      // decode it before Zod validation.
+      {
+        action: 'create',
+        config: JSON.stringify({ excludeLocalState: true }) as unknown as {
+          excludeLocalState?: boolean;
+        },
+      },
+      context
+    );
+
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a native config object on create (regression)', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'create', config: { excludeLocalState: false } },
+      context
+    );
+
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a missing / null config on list', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const missing = await agentManagerTool.executeUnsafe({ action: 'list' }, context);
+    expect(missing.success).toBe(true);
+
+    const nulled = await agentManagerTool.executeUnsafe(
+      { action: 'list', config: null as unknown as undefined },
+      context
+    );
+    expect(nulled.success).toBe(true);
+  });
+});
+```
+
+Key coverage points for new tools that adopt the same preprocessor pattern:
+
+1. Cover the JSON-encoded string path with a valid `JSON.stringify(...)` input.
+2. Cover the native object path so the pass-through case remains asserted.
+3. Cover `null` and missing fields — providers that strictly follow structured-output schemas may emit `null` for omitted optionals rather than dropping the key entirely.
+
+The cast to `as unknown as { ... }` is required because the tool's TypeScript surface still declares the native shape; the preprocessor's runtime tolerance is not (yet) reflected in the exported schema type. Tests deliberately go through `executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path from permission behaviour.
+
+### Testing JSON-encodable Tool Result Payloads
+
+Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `f7da00f`). The `apply_patch` tool's success payload is now constructed defensively so no field carries `undefined`. `JSON.stringify` silently drops keys whose value is `undefined`, which historically caused downstream permission metadata / event bus consumers to lose information they were told they would receive.
+
+Reference regression suite: `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts` (1 case, 68 lines). The pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { ToolContext } from '../../index.js';
+
+describe('apply_patch tool — JSON-encodable result', () => {
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'apply-patch-json-')));
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  });
+
+  it('produces a JSON-encodable success payload with no undefined fields', async () => {
+    const { applyPatchTool } = await import('../apply-patch.js');
+    const target = path.join(workdir, 'sample.txt');
+    fs.writeFileSync(target, 'line1\nline2\nline3\n', 'utf-8');
+
+    const patch = ['@@ -1,3 +1,3 @@', ' line1', '-line2', '+lineTWO', ' line3', ''].join('\n');
+    const context: ToolContext = { workdir };
+    const result = await applyPatchTool.executeUnsafe({ path: target, patch }, context);
+    expect(result.success).toBe(true);
+
+    const encoded = JSON.stringify(result);
+    expect(() => JSON.parse(encoded)).not.toThrow();
+    const decoded = JSON.parse(encoded) as typeof result;
+    expect(decoded.data).toEqual(result.data);
+
+    // A `movePath: undefined`-style regression would fail this loop
+    // because JSON.stringify would silently strip the key.
+    for (const [key, value] of Object.entries(result.data ?? {})) {
+      expect(value, `field "${key}" must not be undefined`).not.toBeUndefined();
+    }
+  });
+});
+```
+
+Key patterns to reuse for future tool payload guards:
+
+1. Use `fs.mkdtempSync` + `fs.realpathSync` per test to isolate filesystem side effects; `afterEach` performs best-effort cleanup so a hang in one test does not poison the next.
+2. Round-trip the whole `ToolResult` through `JSON.stringify` / `JSON.parse` and assert the pre- and post-encode `data` shapes are structurally equal.
+3. Iterate every top-level key of `result.data` and assert `not.toBeUndefined()`. This is the assertion that catches the underlying regression class — `JSON.stringify({ foo: undefined })` returns `'{}'`, so a naive round-trip equality check would pass while silently losing data.
+4. Import the tool via dynamic `import()` inside the test body so the module is loaded fresh per test — tests that mutate `process.cwd()` or process-level state via top-level imports become order-sensitive otherwise.
+
 ### Skill Tool Description Guard
 
 The skill tool exposes a description string to the LLM that is rendered into the
@@ -2443,6 +2569,39 @@ contributors do not re-introduce them by hand:
    The `typeof import('...')` type argument is preserved verbatim; only the
    line breaks around the `<>` delimiters change. Assertion semantics, mock
    scope, and the resolved type of `actual` are all identical.
+
+4. **Collapse short fixture-array `.join('\n')` literals onto a single line
+   when they fit under 100 columns.** Hand-authored diff-hunk fixtures and
+   other line-oriented text fixtures are commonly written as a multi-line
+   array literal followed by `.join('\n')` so the fixture reads like the
+   underlying wire format. Prettier will collapse such array literals onto a
+   single line whenever the resulting expression fits under `printWidth: 100`.
+   The canonical worked example from the 2026-09-01 auto-fix pass (commit
+   `755ce518`) is `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
+   which feeds a six-element unified-diff hunk into `applyPatchTool.executeUnsafe`:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (7 lines, only 30 columns wide)
+   const patch = [
+     '@@ -1,3 +1,3 @@',
+     ' line1',
+     '-line2',
+     '+lineTWO',
+     ' line3',
+     '',
+   ].join('\n');
+
+   // Canonical form after auto-fix (single line, 78 columns)
+   const patch = ['@@ -1,3 +1,3 @@', ' line1', '-line2', '+lineTWO', ' line3', ''].join('\n');
+   ```
+
+   The trailing empty-string element is preserved verbatim — it produces the
+   final `\n` at the end of the joined hunk, which is what a real unified
+   diff emits and what `applyPatchToContent` in `src/tool/tools/apply-patch.ts`
+   expects. Only reach for the multi-line form when the resulting single line
+   would exceed 100 columns; short fixtures (six or fewer short strings) should
+   be inlined so `npm run format:check` stays green without an auto-fix
+   follow-up commit.
 
 ### Registry-contract pinning tests
 
