@@ -35,14 +35,7 @@ describe('apply_patch tool — JSON-encodable result', () => {
     const target = path.join(workdir, 'sample.txt');
     fs.writeFileSync(target, 'line1\nline2\nline3\n', 'utf-8');
 
-    const patch = [
-      '@@ -1,3 +1,3 @@',
-      ' line1',
-      '-line2',
-      '+lineTWO',
-      ' line3',
-      '',
-    ].join('\n');
+    const patch = ['@@ -1,3 +1,3 @@', ' line1', '-line2', '+lineTWO', ' line3', ''].join('\n');
 
     const context: ToolContext = { workdir };
     const result = await applyPatchTool.executeUnsafe({ path: target, patch }, context);

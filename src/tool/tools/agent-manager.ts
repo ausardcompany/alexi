@@ -22,16 +22,15 @@ import { selectModel, isSelectModelError } from '../model-selection.js';
  * strings and non-string values pass through unchanged so the wrapped
  * schema can still emit a useful validation error.
  */
-function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T, z.infer<T>, unknown> {
+function decodeJsonIfString<T extends z.ZodTypeAny>(
+  schema: T
+): z.ZodEffects<T, z.infer<T>, unknown> {
   return z.preprocess((value) => {
     if (typeof value !== 'string') {
       return value;
     }
     const trimmed = value.trim();
-    if (
-      !trimmed ||
-      (trimmed[0] !== '{' && trimmed[0] !== '[')
-    ) {
+    if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
       return value;
     }
     try {
