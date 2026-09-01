@@ -276,13 +276,33 @@ import type { ToolContext } from '../tool/index.js';
    const stream = createReadStream(filePath, { encoding: undefined });
    ```
 
-10. **Permission Actions**: Use standard taxonomy
+10. **Return Type Inference for Helpers**: Prefer inferred return types on
+     internal helpers when the annotation would restate what TypeScript
+     already computes. The auto-formatter routinely collapses redundant
+     annotations; write helpers that reflow cleanly under Prettier's
+     100-column ceiling. Keep explicit annotations on the exported public
+     API where the return type is part of the contract.
+     ```typescript
+     // Preferred: inferred return type on a Zod preprocessor helper
+     function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T) {
+       return z.preprocess((value) => {
+         if (typeof value !== 'string') { return value; }
+         const trimmed = value.trim();
+         if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
+           return value;
+         }
+         try { return JSON.parse(trimmed); } catch { return value; }
+       }, schema);
+     }
+     ```
+
+11. **Permission Actions**: Use standard taxonomy
      ```typescript
      // Standard: 'read' | 'write' | 'execute' | 'network' | 'admin'
      permission: { action: 'admin', getResource: (params) => params.action }
      ```
 
-11. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
+12. **Event Definitions**: Use Zod schemas with the event bus (see `src/bus/index.ts`)
       ```typescript
       import { defineEvent } from '../bus/index.js';
       import { z } from 'zod';
@@ -298,11 +318,11 @@ import type { ToolContext } from '../tool/index.js';
       );
       ```
 
-12. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
+13. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
 
-13. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
+14. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
 
-14. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
+15. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
 
 ### ESLint Rules
 
