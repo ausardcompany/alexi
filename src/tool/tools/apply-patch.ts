@@ -358,13 +358,20 @@ Usage:
       const patchedLines = patchedContent.split('\n').length;
       const linesChanged = Math.abs(patchedLines - originalLines);
 
+      // Construct the result payload defensively — only include fields
+      // whose values are defined so the payload stays JSON-encodable and
+      // does not leak `undefined` into downstream permission / event
+      // buses. Ports upstream kilocode f7da00f (`apply_patch`: guard
+      // permission metadata against `movePath: undefined`).
+      const data: ApplyPatchResult = {
+        path: filePath,
+        diff,
+        linesChanged,
+      };
+
       return {
         success: true,
-        data: {
-          path: filePath,
-          diff,
-          linesChanged,
-        },
+        data,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
