@@ -115,6 +115,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   No provider, routing, tool-execution, session, or permission behaviour changes. `npm run typecheck` and `npm test` pass with byte-identical output; the only observable delta is that `npm run format:check` now succeeds on these four files.
 
+## [1.22.8] - 2026-09-01
+
+### Added
+
+- **JSON-encoded params tolerance in `agent_manager` tool** (`src/tool/tools/agent-manager.ts`, `src/tool/tools/__tests__/agent-manager.json-config.test.ts`, 2026-09-01, ports upstream kilocode `02df76976` `fix(agent-manager): decode JSON-encoded task arrays`): The `agent_manager` tool now accepts either a native `config` object or a JSON-encoded string for the same field, decoding transparently before Zod validation. Some LLM providers — Anthropic in particular — emit structured tool-call parameters as a JSON string rather than the native object shape, which previously failed schema validation. Public surface added:
+  - `decodeJsonIfString<T extends z.ZodTypeAny>(schema: T): z.ZodEffects<T, z.infer<T>, unknown>` — internal preprocessor that wraps a Zod schema. If the input is a string that begins with `{` or `[` after trimming, `JSON.parse()` is attempted and the parsed value is handed to the inner schema. Non-string values, empty strings, primitive-looking strings, and strings that fail to parse pass through unchanged so the inner schema can still produce a descriptive validation error. Currently applied to the `config` field of `AgentManagerParamsSchema`.
+
+  Test coverage (`src/tool/tools/__tests__/agent-manager.json-config.test.ts`, 64 lines, 3 cases): (1) `create` with `config` as a `JSON.stringify(...)` string succeeds and returns the expected `session.status`; (2) `create` with a native object regression case still succeeds; (3) `list` accepts both a missing `config` and an explicit `null`. No behaviour change for callers already passing native objects.
+
+- **JSON-encoding regression guard for `apply_patch` result payload** (`src/tool/tools/__tests__/apply-patch.json-encoding.test.ts`, 2026-09-01): New regression suite (`68` lines, 1 case) that pins the `apply_patch` tool's `ToolResult` payload as fully JSON-round-trippable. Constructs a temp workdir with `fs.mkdtempSync`, writes a sample file, applies a small hunk, then asserts `JSON.parse(JSON.stringify(result))` does not throw AND that no field in `result.data` is `undefined` (a `movePath: undefined` regression would be silently erased by `JSON.stringify` and would fail the `not.toBeUndefined()` loop). Ports the intent of upstream kilocode `f7da00f`, guarding against future regressions where the tool leaks `undefined` fields into permission metadata or downstream event buses.
+
+- **Shared read-only bash allow entries constant** (`src/agent/index.ts`, 2026-09-01, ports upstream kilocode `e096d3ab7` `refactor(cli): share common bash permission entries`): The read-only bash allowlist used by the `ask` agent and `plan` mode now lives in a separate `readable: Record<string, 'allow'>` constant that is spread into the wider `readOnlyBash: Record<string, 'allow' | 'ask' | 'deny'>` map. Callers that need "just the pure read-only allow set" (without the git-deny rules baked into `readOnlyBash`) can reuse `readable` directly, and any new read-only command is added in one place instead of drifting between mirrored maps. No public API surface change — `readable` is a module-local constant. The default deny (`'*': 'deny'`) invariant for the `ask` agent is preserved: unknown commands are still denied, not "ask"ed, so the read-only agent can never modify the filesystem.
+
+### Changed
+
+- **`agent_manager` tool `config` schema now uses the `decodeJsonIfString` preprocessor** (`src/tool/tools/agent-manager.ts`): The `config` field of `AgentManagerParamsSchema` is now wrapped in `decodeJsonIfString(...)`, giving it JSON-string tolerance without changing the accepted shape. The existing `mode`, `model`, `provider`, and `excludeLocalState` sub-fields keep their `nullable().optional()` semantics; the `config.provider` requires `config.model` invariant introduced in 1.22.7 remains enforced. The change is transparent to callers already emitting native objects — the preprocessor only reshapes the input when it is a string.
+
+- **`apply_patch` success payload is now constructed defensively** (`src/tool/tools/apply-patch.ts:361-370`): The tool now builds an intermediate `data: ApplyPatchResult` object (`{ path, diff, linesChanged }`) with only defined fields before returning `{ success: true, data }`, ports upstream kilocode `f7da00f`. Rationale: passing a shape with `undefined` values through downstream permission metadata / event buses breaks JSON schema encoding and confuses consumers that treat missing-vs-null as a semantically distinct signal. Alexi's `apply_patch` does not currently emit an optional `movePath` field, but this rewrite prevents that class of regression from being reintroduced silently.
+
+- **Package version bump to 1.22.8** (`package.json`): Patch release covering the daily upstream sync, JSON-encoding tolerance, and shared read-only bash constant.
+
+### Maintenance
+
+- **Upstream sync marker refreshed** (`.github/last-sync-commits.json`, 2026-09-01): Advances `kilocode` to `b6a2979e5911c2e6cf575fdc6efffb67dd5c94e7` and `opencode` to `ebece6efd7b11401cf1e7390b5a22991b6608cc4`; `claude-code` advances to `f275fa282e76c5e5456912268f2c367a7f4f4797`. Tracking metadata only; no source change beyond the ports listed above.
+
 ## [1.22.7] - 2026-08-31
 
 ### Changed

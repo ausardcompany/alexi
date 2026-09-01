@@ -453,6 +453,69 @@ if (requestedModel || requestedProvider || requestedReasoning) {
 
 Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
 
+### JSON-tolerant tool parameter decoding
+
+Some LLM providers (Anthropic in particular) emit structured tool-call parameters as JSON-encoded strings rather than the native object shape. Tools with structural fields — `config`, `tasks`, `arguments` — should wrap those fields with a `decodeJsonIfString` preprocessor so the same tool works across providers without provider-specific pre-processing upstream. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-01, `1.22.8`, ports upstream kilocode `02df76976`).
+
+Contract:
+
+1. The preprocessor is a `z.preprocess(...)` wrapper. It inspects the raw input; if it is a string that starts with `{` or `[` after trimming, it attempts `JSON.parse()` and hands the parsed value to the wrapped schema.
+2. Non-string values, empty strings, primitive-looking strings (`"foo"`, `"42"`), and strings that fail to parse ALL pass through unchanged so the wrapped schema still produces a descriptive validation error rather than a hard tool crash.
+3. Apply the preprocessor only to fields that legitimately carry a JSON object or array. Never wrap a scalar string field — a valid `"model": "gpt-4o"` value would otherwise become a `SyntaxError`-driven schema failure.
+
+Reference implementation (from `src/tool/tools/agent-manager.ts`):
+
+```typescript
+function decodeJsonIfString<T extends z.ZodTypeAny>(
+  schema: T
+): z.ZodEffects<T, z.infer<T>, unknown> {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string') {
+      return value;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) {
+      return value;
+    }
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through with the original string so the wrapped schema can
+      // produce a descriptive validation error instead of a JSON parse
+      // exception surfacing as a tool crash.
+      return value;
+    }
+  }, schema);
+}
+
+const AgentManagerParamsSchema = z.object({
+  // ...
+  config: decodeJsonIfString(
+    z
+      .object({
+        // ...
+      })
+      .nullable()
+      .optional()
+      .describe('Configuration for session creation')
+  ),
+});
+```
+
+Tests should cover the JSON-encoded path, the native object path, and the missing/`null` path. See `docs/TESTING.md#testing-json-encoded-tool-params-tolerance` for the reference regression suite.
+
+### Defensively-constructed tool result payloads
+
+Tool `ToolResult` payloads flow through downstream permission metadata, event buses, and MCP transport, all of which JSON-encode the payload at least once. `JSON.stringify` silently drops keys whose value is `undefined`, so a naive assignment like `data: { path, diff, movePath: someOptional }` will lose the `movePath` key on the wire without any error.
+
+Contract:
+
+1. Construct the payload as an intermediate typed object with only the fields you have a defined value for. Do not spread `{ ...maybe, foo: bar }` when `maybe` might contain `undefined` values.
+2. Prefer conditional assignment (`if (movePath) { data.movePath = movePath; }`) over `foo ?? undefined`.
+3. When adding a new field to a tool's `ToolResult` shape, add a JSON-round-trip regression test that iterates every top-level key in `result.data` and asserts `not.toBeUndefined()`. This is the assertion that catches the class of bug.
+
+Canonical implementation: `src/tool/tools/apply-patch.ts:361-370` (2026-09-01, `1.22.8`, ports upstream kilocode `f7da00f`). Reference test: `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts` — see `docs/TESTING.md#testing-json-encodable-tool-result-payloads` for the pattern.
+
 ### Pure-function helpers (preferred over stateful services)
 
 For helpers that transform data without I/O — e.g., prompt-shape transforms

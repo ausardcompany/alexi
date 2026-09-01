@@ -1316,10 +1316,32 @@ The flag lives inside a top-level `experimental` object so future experimental f
 
 See [ARCHITECTURE.md — Per-Task Model Selection](ARCHITECTURE.md#per-task-model-selection-srctoolmodel-selectionts) for the resolution flow diagram and public API.
 
+### JSON-encoded tool params tolerance (1.22.8)
+
+Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). The `agent_manager` tool's `config` field accepts either a native object or a JSON-encoded string:
+
+```json
+{
+  "action": "create",
+  "config": { "excludeLocalState": true }
+}
+```
+
+is equivalent to:
+
+```json
+{
+  "action": "create",
+  "config": "{\"excludeLocalState\": true}"
+}
+```
+
+Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings; the tool now decodes them transparently before Zod validation. Malformed JSON strings pass through unchanged so the wrapped schema still emits a useful validation error rather than a hard tool crash. There is no configuration flag for this behaviour — it is always on and transparent to callers that already emit native objects.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs
 - [Architecture](ARCHITECTURE.md) -- System architecture and design
 - [Testing Guide](TESTING.md) -- Testing configuration and environment setup
 - [Automation](AUTOMATION.md) -- CI/CD workflows and automation
-- [Changelog](../CHANGELOG.md) -- Version history in Keep a Changelog format. The 1.22.0 → 1.22.6 cycle is a sequence of daily-sync patch releases; the only configuration-surface addition in this window is the new `rulesPath` field in project (`<workdir>/.alexi/config.json`) and global (`~/.alexi/config.json`) config, which extends prompt-assembly rule discovery beyond the historical `<workdir>/.alexi/rules/*.md` scan (see [Instruction Files](#instruction-files) and commit `874caa58` `feat(config): expand rules file discovery to support custom paths`). The 1.22.6 `apply_patch` CRLF line-ending preservation fix (commit `3adb7ec8`) is a tool-behaviour change with no user-facing configuration surface — the tool auto-detects the target file's dominant style and does not accept an override. Previous configuration-surface additions were `ALEXI_EXPERIMENTAL_MCP_APPS`, `mcpToolDisplay` / `mcp_tool_display`, and the `InstanceWatcher` per-instance scoping described inline above, all shipped in 1.21.4.
+- [Changelog](../CHANGELOG.md) -- Version history in Keep a Changelog format. The 1.22.0 → 1.22.6 cycle is a sequence of daily-sync patch releases; the only configuration-surface addition in this window is the new `rulesPath` field in project (`<workdir>/.alexi/config.json`) and global (`~/.alexi/config.json`) config, which extends prompt-assembly rule discovery beyond the historical `<workdir>/.alexi/rules/*.md` scan (see [Instruction Files](#instruction-files) and commit `874caa58` `feat(config): expand rules file discovery to support custom paths`). The 1.22.6 `apply_patch` CRLF line-ending preservation fix (commit `3adb7ec8`) is a tool-behaviour change with no user-facing configuration surface — the tool auto-detects the target file's dominant style and does not accept an override. 1.22.7 shipped the `experimental.task_model_selection` flag documented above. 1.22.8 (2026-09-01) is a tool-schema hardening release — the `agent_manager` `config` field now tolerates JSON-encoded strings from over-encoding providers, and the `apply_patch` result payload is constructed defensively so `undefined` fields never leak into downstream permission metadata; neither introduces a new user-facing configuration surface. Previous configuration-surface additions were `ALEXI_EXPERIMENTAL_MCP_APPS`, `mcpToolDisplay` / `mcp_tool_display`, and the `InstanceWatcher` per-instance scoping described inline above, all shipped in 1.21.4.
