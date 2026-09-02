@@ -16,6 +16,7 @@ import {
   type PermissionAction,
 } from '../permission/index.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
+import type { SessionManager } from '../core/sessionManager.js';
 
 // Tool execution context
 export interface ToolContext {
@@ -24,6 +25,16 @@ export interface ToolContext {
   sessionId?: string;
   /** Optional git auto-commit manager — injected by agenticChat when enabled */
   gitManager?: AutoCommitManager;
+  /**
+   * Optional session manager — injected by agenticChat / orchestrators
+   * that maintain a persistent session store. Tools that spawn or
+   * cancel delegated subagent sessions (currently only `task`) reach
+   * through here to `beginSessionRun`, `abortSession`, and
+   * `releaseSession`. When absent, delegating tools MUST fall back to
+   * their existing stub behaviour rather than crash — nothing in the
+   * per-tool contract requires a session manager to be present.
+   */
+  sessionManager?: SessionManager;
   /**
    * Per-session set of realpath()ed AGENTS.md files that have already been
    * surfaced to the agent as system-reminders. File-touching tools use this

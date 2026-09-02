@@ -483,6 +483,9 @@ export async function agenticChat(
     sessionId: options?.sessionManager?.getCurrentSession()?.metadata.id,
     gitManager: options?.gitManager,
     agentsMdSeen,
+    // Threaded so delegating tools (`task`) can propagate cancellation
+    // to child subagent sessions via `sessionManager.abortSession`.
+    sessionManager: options?.sessionManager,
   };
 
   // Agent loop
@@ -503,8 +506,15 @@ export async function agenticChat(
       message: `Starting iteration ${iterations}`,
     });
 
-    // Check for abort
+    // Check for abort. When the parent signal is aborted, cascade to
+    // any delegated subagent sessions so their in-flight provider
+    // requests / tool loops stop immediately rather than continuing
+    // until they notice the parent signal on their own.
     if (options?.signal?.aborted) {
+      const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+      if (sessionId) {
+        options?.sessionManager?.abortSession(sessionId, options.signal.reason);
+      }
       throw new Error('Operation aborted');
     }
 
