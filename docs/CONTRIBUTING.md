@@ -638,6 +638,37 @@ writes into an unbounded `Map<string, PermissionProvenance>`, and
 call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
 and avoid cross-test leakage.
 
+### Abort propagation through delegating tools
+
+Tools that delegate work to a child session (currently only `task`) MUST wire the child's lifetime to the parent's `AbortSignal` so that a Ctrl+C at the CLI immediately stops every descendant subagent — otherwise a runaway subagent chain will keep consuming API quota after the user has given up.
+
+Contract for any new delegating tool:
+
+1. **Read `context.sessionManager` and `context.signal`.** Both are optional on `ToolContext`. When either is absent, fall back to the previous stub behaviour rather than crash — unit tests and one-shot CLI paths intentionally omit them.
+2. **Materialise a real child session.** Call `sessionManager.createSession(model, parentSessionId, { signal: context.signal })` so the child inherits parent-abort semantics from the moment it exists. Do NOT pass a plain child-created `AbortController` — parent-signal wiring is what makes cascade cancellation work across nesting depth.
+3. **Check `context.signal?.aborted` before paying for a provider round-trip.** If the parent was already aborted at spawn time, return a cancelled result immediately (`{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of wasting the cost tracker's budget on a request whose result no consumer will read.
+4. **Bracket the work with `try` + `finally` `releaseSession`.** `sessionManager.releaseSession(childId)` is `endSessionRun` + `deleteSession`. Skipping the `finally` leaks the parent-signal listener for the lifetime of the parent signal, which for a long CLI session can add up.
+5. **Do NOT re-implement abort classification.** `SessionManager.detectAbort(err)` recognises `DOMException{name:'AbortError'}`, `Error{name:'AbortError'}`, and Node's native `Error{code:'ABORT_ERR'}`. Use it in `catch` blocks.
+
+The canonical reference is `src/tool/tools/task.ts:574-677`; the regression suites in `tests/core/sessionManager-abort.test.ts` and `tests/tool/tools/task-abort-propagation.test.ts` (277 + 233 lines) pin the contract.
+
+### Headless-exit drain (always drain before `process.exit`)
+
+Every headless CLI entry point that calls `process.exit(...)` MUST first `await SessionDrain.drain({ timeoutMs: 30_000 })`. Without a drain, in-flight tool events / session writes / telemetry flushes can race the exit and corrupt persisted state (issue traced through upstream opencode's headless-exit fix chain).
+
+Rules:
+
+- Import `SessionDrain` from `../../session/drain.js` (or `../../tool/registry.js` for parity with upstream call sites).
+- 30 seconds is the standard budget. Only pass `0` (wait indefinitely) when a hard flush guarantee is required and you have another watchdog upstream.
+- On the error path, wrap the drain in a `try / catch` that swallows failures — the process is already exiting with a non-zero code, and a drain error must not mask the underlying failure:
+  ```typescript
+  try { await SessionDrain.drain({ timeoutMs: 30_000 }); } catch { /* about to exit(1) */ }
+  process.exit(1);
+  ```
+- Never call `SessionDrain.__resetForTests()` from production code. It is exposed only for the drain module's own test suite.
+
+The canonical reference is every `process.exit(...)` call site in `src/cli/commands/chat.ts`.
+
 ### Filesystem-discovery modules (injectable `workdir` + `homedir`)
 
 Modules that walk the filesystem to discover configuration or rule files — the canonical example is `src/config/rulesDiscovery.ts` — MUST accept both `workdir` and `homedir` as explicit options rather than reading `process.cwd()` and `os.homedir()` directly at every call site. This keeps unit tests hermetic (no need to mutate `process.env.HOME` or `chdir` across parallel workers) and lets callers point discovery at synthetic trees for regression testing.

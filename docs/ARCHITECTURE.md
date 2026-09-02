@@ -453,6 +453,129 @@ const { messages: compactedMessages } = await checkAndCompact(
 
 The `overflowTokens` parameter seeds the target summary length so the compacted context fits within limits.
 
+### Environment Details Fence
+
+The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.
+
+```typescript
+// src/core/agenticChat.ts:buildSystemPrompt
+const envParts: string[] = [];
+if (memoryContext) envParts.push(memoryContext);
+if (sessionContext) envParts.push(sessionContext);
+if (repoMapText) envParts.push(repoMapText);
+if (envParts.length > 0) {
+  parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+}
+```
+
+### Unknown-Tool Repair Hints
+
+When the model attempts to call a tool that is not registered, `executeToolCall` no longer returns a bare `Unknown tool: <name>` error. Instead it looks up the closest registered candidates via a case-insensitive substring match against `getAllToolNames()` and appends up to five suggestions:
+
+```typescript
+// src/core/agenticChat.ts:executeToolCall (excerpt)
+const similar = availableNames.filter(
+  (n) =>
+    n.toLowerCase().includes(requestedName.toLowerCase()) ||
+    requestedName.toLowerCase().includes(n.toLowerCase())
+).slice(0, 5);
+
+const hintParts: string[] = [`Unknown tool: ${requestedName}`];
+if (similar.length > 0) {
+  hintParts.push(`Did you mean one of: ${similar.join(', ')}?`);
+} else if (availableNames.length > 0) {
+  hintParts.push(`Available tools: ${availableNames.slice(0, 8).join(', ')}`);
+}
+```
+
+The enriched error is fed back to the model so it can self-correct on the next turn. The lookup degrades gracefully to the bare error when the registry is unavailable (test harnesses).
+
+## Session Lifecycle and Abort Propagation
+
+`SessionManager` (`src/core/sessionManager.ts`) tracks a per-session `AbortController` for every active run in an in-memory `Map<string, SessionRunState>`. The map is instance-scoped rather than module-scoped so tests can construct isolated managers without leaking abort state across cases.
+
+```mermaid
+sequenceDiagram
+    participant Parent as Parent Session Run
+    participant SM as SessionManager
+    participant Task as task Tool
+    participant Child as Child Session Run
+    participant Provider as SAP AI Core
+
+    Parent->>SM: beginSessionRun(parentId, cliSignal)
+    SM-->>Parent: parentSignal (AbortSignal)
+    Parent->>Task: execute({ prompt, ... }, ctx { signal: parentSignal, sessionManager })
+    Task->>SM: createSession(model, parentId, { signal: parentSignal })
+    SM->>SM: beginSessionRun(childId, parentSignal)<br/>attach parent abort listener
+    SM-->>Task: child session
+    Task->>Provider: request (childSignal)
+    Note over Parent,Provider: user Ctrl-C
+    Parent->>SM: abortSession(parentId, reason)
+    SM->>SM: BFS getSessionChildren -> [childId, ...]
+    SM->>Provider: controller.abort(reason)<br/>via childSignal
+    Provider-->>Task: AbortError
+    Task->>SM: releaseSession(childId)<br/>endSessionRun + deleteSession
+```
+
+Key contract points, all in `src/core/sessionManager.ts:100-410`:
+
+- `beginSessionRun(sessionId, parentSignal?)` is idempotent: a second call for the same id tears down the previous run (removing its parent-signal listener) and starts a fresh one, so listeners never accumulate.
+- If `parentSignal` is already aborted when `beginSessionRun` is called, the returned signal is aborted synchronously — this honours the standard `AbortSignal.any` contract so a delegated subagent that starts *after* the parent was cancelled never gets a live signal to run against.
+- `endSessionRun(sessionId)` MUST be called from a `finally` block after the run completes. It removes the parent-signal listener but does NOT abort the controller — normal completion should not surface as an abort.
+- `abortSession(sessionId, reason)` walks the persisted `parentSessionId` chain breadth-first via `getSessionChildren` and aborts every descendant with an active run. The walk uses a `visited: Set<string>` so a corrupted `A -> B -> A` store cannot spin forever.
+- `releaseSession(sessionId)` is `endSessionRun` + `deleteSession`. The `task` tool uses it so delegated subagent transcripts do not clutter `sessions list` after they finish.
+
+`agenticChat` threads the manager onto every `ToolContext` and, on its own parent-signal abort check, cascades to the current session:
+
+```typescript
+// src/core/agenticChat.ts (loop head)
+if (options?.signal?.aborted) {
+  const sessionId = options?.sessionManager?.getCurrentSession()?.metadata.id;
+  if (sessionId) {
+    options?.sessionManager?.abortSession(sessionId, options.signal.reason);
+  }
+  throw new Error('Operation aborted');
+}
+```
+
+The `task` tool wires the child session lifecycle in `src/tool/tools/task.ts:574-677`. If the parent is already aborted at spawn time it refuses to start the subagent (returning `{ status: 'cancelled' }`) instead of wasting the cost tracker's provider budget on a request whose result no consumer will read.
+
+## Headless Exit and Session Drain
+
+Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.
+
+`SessionDrain` (`src/session/drain.ts`) is a module-level singleton that tracks outstanding `Promise`s and waits for them to settle before the CLI returns. It is re-exported from `src/tool/registry.ts` so ported call sites can `import { SessionDrain } from '../tool/registry.js'`, mirroring the upstream opencode registry LayerNode surface without pulling in Effect-TS.
+
+```mermaid
+sequenceDiagram
+    participant CLI as alexi chat / agent
+    participant Chat as chat.ts command
+    participant Drain as SessionDrain
+    participant Bus as Event Bus
+    participant FS as Session Store
+
+    CLI->>Chat: run(opts)
+    Chat->>Drain: (subsystems register work via track(id, promise))
+    Note over Chat,Drain: e.g. session persistence, telemetry flush
+    Chat->>Chat: (error / non-zero exit code)
+    Chat->>Drain: await drain({ timeoutMs: 30_000 })
+    Drain->>Drain: snapshot pending set
+    par settle every tracked promise
+        Drain->>Bus: (bus handlers finish)
+        Drain->>FS: (session writes finish)
+    end
+    Drain-->>Chat: settle or 30s timeout
+    Chat->>CLI: process.exit(code)
+```
+
+Contract:
+
+- `SessionDrain.track(id, promise)` returns an untrack function; callers should call it from a `finally` block, but a settled promise auto-untracks itself so a forgotten handle cannot indefinitely block exit.
+- `SessionDrain.drain({ timeoutMs })` is one-shot per lifecycle. After the first drain resolves, further `track()` calls become no-ops. The default budget is 30s; pass `0` to wait indefinitely (used only when a hard flush guarantee is required).
+- The waiter set is snapshotted at the start of `drain()` so a handler that schedules follow-up work during its own settle cannot mutate the collection we are iterating (upstream `snapshot drain waiters before resuming them` fix).
+
+Every `process.exit(...)` call site in `src/cli/commands/chat.ts` — missing message argument, session-not-found error, custom-command non-zero exit, and the top-level `catch (e)` — now awaits `SessionDrain.drain({ timeoutMs: 30_000 })` first. The drain failure path is deliberately swallowed on the error branch because the process is already exiting with a non-zero code.
+
 ## Routing Decision Flow
 
 ```mermaid
@@ -574,6 +697,33 @@ const result = await waitForEvent(MyEvent, (p) => p.toolName === 'bash', 5000);
 ### Eager Subscription
 
 Subscriptions are acquired eagerly to prevent race conditions where events could be missed between the `subscribe()` call and the first `listen`. The handler is immediately added to the event handler set before the unsubscribe function is returned.
+
+### Batched Publish (`publishAll` / `publishAllAsync`)
+
+For call sites that emit many related events (draining a session fork, replaying a compacted transcript, flushing queued tool events) the bus exposes a batched publish primitive that mirrors the "commit all events in a single transaction before notifying subscribers" contract of the upstream kilocode `event-batch.ts` module — adapted to Alexi's synchronous, in-memory bus (no Effect-TS, no durable event store).
+
+The contract is two-phase:
+
+1. **Validate every payload up front.** Zod's `parse` runs across the whole batch before any handler is invoked. A validation failure propagates to the caller with no partial publish.
+2. **Fan out with a per-event handler snapshot.** For each entry a snapshot of the current subscriber set is taken before iteration, so a handler that unsubscribes another handler mid-batch cannot observe a mutating set. Individual handler errors are caught and logged per entry.
+
+```typescript
+import { publishAll, publishAllAsync, type BatchEntry } from '../bus/index.js';
+import { ToolExecutionStarted, ToolExecutionCompleted } from '../bus/index.js';
+
+const entries: BatchEntry[] = [
+  { event: ToolExecutionStarted, payload: { toolName: 'read', toolId: 'a', parameters: {}, timestamp: Date.now() } },
+  { event: ToolExecutionCompleted, payload: { toolName: 'read', toolId: 'a', result: {}, duration: 12, timestamp: Date.now() } },
+];
+
+// Sync — handlers run inline, callers do not await
+publishAll(entries);
+
+// Async — awaits every handler via Promise.all per entry
+await publishAllAsync(entries);
+```
+
+An `EventBatch` namespace is re-exported from `src/bus/event-batch.ts` so ported call sites (`EventBatch.publishAll(...)` / `EventBatch.publishAllAsync(...)`) work verbatim against the Alexi bus.
 
 ### Bash / Shell Output Streaming
 
