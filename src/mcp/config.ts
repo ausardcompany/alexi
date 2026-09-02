@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { z } from 'zod';
+import { sanitizeApiKey } from '../providers/auth.js';
 
 /**
  * Bounds for `timeout` fields (per-server or global) in milliseconds.
@@ -422,12 +423,32 @@ export function saveMcpConfig(config: McpConfig): void {
 export function addMcpServer(server: McpServerConfig): McpConfig {
   const config = loadMcpConfig();
 
+  // Sanitize the API key at the write boundary. Users routinely paste
+  // keys carrying invisible clipboard artefacts (BOM, zero-width
+  // spaces, trailing newlines) that later cause 401s indistinguishable
+  // from a wrong key. `sanitizeApiKey` strips those code points and
+  // trims surrounding whitespace; a whitespace-only value clears the
+  // field. See `sanitizeApiKey` doc in `src/providers/auth.ts`.
+  const normalized: McpServerConfig =
+    server.apiKey === undefined
+      ? server
+      : (() => {
+          const cleaned = sanitizeApiKey(server.apiKey);
+          const next: McpServerConfig = { ...server };
+          if (cleaned.length === 0) {
+            delete next.apiKey;
+          } else {
+            next.apiKey = cleaned;
+          }
+          return next;
+        })();
+
   // Check for duplicate name
-  const existing = config.servers.findIndex((s) => s.name === server.name);
+  const existing = config.servers.findIndex((s) => s.name === normalized.name);
   if (existing >= 0) {
-    config.servers[existing] = server;
+    config.servers[existing] = normalized;
   } else {
-    config.servers.push(server);
+    config.servers.push(normalized);
   }
 
   const result = validateMcpConfig(config);

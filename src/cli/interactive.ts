@@ -14,6 +14,7 @@ import {
   isAbortError,
   isStreamStalledError,
 } from '../core/streamingOrchestrator.js';
+import { classifyProviderError } from '../providers/format.js';
 import { isOrchestrationModel } from '../providers/sapOrchestration.js';
 import { SessionManager } from '../core/sessionManager.js';
 import { colors, c } from './utils/colors.js';
@@ -171,6 +172,26 @@ export function handleStreamingError(err: unknown): void {
     console.log(
       c('red', `\n  ${err.message} You can retry the request or switch models with /model.\n`)
     );
+    return;
+  }
+  // Auth-classified errors (HTTP 401/403) surface the raw provider JSON
+  // by default, which for BYOK users just reads `{"detail":"Invalid API
+  // Key"}` — unhelpful. Rewrite these into actionable guidance pointing
+  // at API key configuration, keeping the raw provider message as a
+  // diagnostic tail. Non-auth errors fall through to the generic path
+  // below unchanged. Mirrors Cline PR #13549.
+  if (classifyProviderError(err) === 'auth') {
+    const raw = err instanceof Error ? err.message : String(err);
+    console.log();
+    console.log(
+      c(
+        'red',
+        '\n  Authentication failed. Check your API key configuration ' +
+          '(AICORE_SERVICE_KEY / SAP_PROXY_API_KEY in .env, or the ' +
+          '`apiKey` field of the relevant server in mcp-servers.json).\n'
+      )
+    );
+    console.log(c('gray', `  Provider response: ${raw}\n`));
     return;
   }
   console.log();
