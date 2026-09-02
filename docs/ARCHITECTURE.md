@@ -1179,6 +1179,44 @@ owns local child-process and system-call error classification. Transient
 5xx / network failures at the provider layer are NOT recorded via
 `recordRouteOutcome` -- they remain owned by `ErrorBackoff`.
 
+### User-facing auth error rewriting (issue #1625)
+
+The interactive REPL (`src/cli/interactive.ts:handleStreamingError`) has
+an extra classification hop that runs *after* abort- and
+stream-stalled-error handling but *before* the generic `Error: ...`
+fallback. When `classifyProviderError(err) === 'auth'` (HTTP 401 or 403
+per the structural verdict in `src/providers/format.ts:411`), the REPL
+rewrites the error into actionable guidance that names the specific
+configuration surfaces where a key might live — `AICORE_SERVICE_KEY`,
+`SAP_PROXY_API_KEY`, or the `apiKey` field of an MCP server in
+`mcp-servers.json` — and appends the raw provider response as a gray
+diagnostic tail. This dispatches only for structural auth failures; a
+plain `Error` whose message merely mentions the word "unauthorized" in
+prose without a status code is NOT rewritten. Mirrors upstream Cline PR
+#13549. See `docs/PROVIDERS.md#authentication-errors` for the operator
+walkthrough and the sequence diagram.
+
+### Config write-boundary sanitization
+
+Complementing the auth-error rewrite is a preventive step at the config
+write boundary: `sanitizeApiKey` in `src/providers/auth.ts:68` strips
+Unicode control characters (`\p{Cc}`) and formatting characters
+(`\p{Cf}` — zero-width spaces, joiners, BOM, bidi marks) from any API
+key value before it is persisted, then trims surrounding whitespace.
+Whitespace-only or invisibles-only input yields the empty string so
+callers can treat the field as "cleared"; non-string input yields the
+empty string so the helper is safe to funnel arbitrary config values
+through. The current call site is `addMcpServer` in `src/mcp/config.ts`,
+which both normalizes the persisted `apiKey` on write AND drops the
+field entirely when the sanitized value is empty. This closes the class
+of failures where an invisible clipboard artefact (trailing newline,
+zero-width space, BOM) corrupts a pasted key and later surfaces as a
+401 indistinguishable from a genuinely wrong key. The helper is
+deliberately shared from `src/providers/auth.ts` (not `src/mcp/`) so
+future config surfaces (project-level `.alexi/config.json`, plugin
+credentials, connector-store writes) can adopt the same normalization
+without duplicating the regex.
+
 ### Exponential backoff formula
 
 Every retry site in Alexi uses the same formula:

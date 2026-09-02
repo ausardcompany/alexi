@@ -995,6 +995,9 @@ Test coverage (`tests/session/upstream-ports.test.ts`) pins down all four cases:
 
 #### Authentication Errors
 
+The provider layer returns a structured failure when SAP AI Core (or an
+upstream proxy / MCP server) rejects credentials:
+
 ```typescript
 {
   success: false,
@@ -1002,7 +1005,122 @@ Test coverage (`tests/session/upstream-ports.test.ts`) pins down all four cases:
 }
 ```
 
-**Solution**: Verify AICORE_SERVICE_KEY is correctly formatted
+**Solution**: Verify `AICORE_SERVICE_KEY` is correctly formatted (see
+[Service Key Format](#service-key-format)); check that the `clientid` /
+`clientsecret` pair is still valid; confirm that the target resource
+group exists and is reachable.
+
+##### Interactive REPL rewrite (issue #1625, mirrors Cline PR #13549)
+
+By default, an HTTP 401 or 403 from SAP AI Core or an MCP-fronted BYOK
+provider surfaces the raw upstream body, which for many providers reads
+just `{"detail":"Invalid API Key"}` — technically accurate but useless
+for a user who cannot tell whether the key is wrong, the environment
+variable is unset, the MCP `apiKey` field on the wrong server was
+updated, or a clipboard artefact corrupted the stored value.
+
+`src/cli/interactive.ts:handleStreamingError` intercepts the class of
+errors that `classifyProviderError` labels as `'auth'` (structural check
+on HTTP status 401 or 403 — see `src/providers/format.ts:411`) and
+rewrites them into actionable guidance while preserving the raw provider
+response as a diagnostic tail:
+
+```
+  Authentication failed. Check your API key configuration
+  (AICORE_SERVICE_KEY / SAP_PROXY_API_KEY in .env, or the
+  `apiKey` field of the relevant server in mcp-servers.json).
+
+  Provider response: {"detail":"Invalid API Key"}
+```
+
+Classification is **status-based, not string-based**. A plain `Error`
+whose message merely quotes the word "unauthorized" in prose without an
+attached `status` / `statusCode` does NOT trigger the auth rewrite — it
+falls through to the generic `Error: <message>` path. HTTP 500 and other
+non-auth failures are also unchanged.
+
+##### `sanitizeApiKey` — config write-boundary hygiene
+
+Users routinely paste API keys copied from a browser, a password
+manager, or another terminal into masked TUI inputs. Those clipboard
+sources frequently smuggle in additional characters that the masked
+field hides:
+
+- Trailing `\n` or `\r\n` (LF / CRLF)
+- U+FEFF byte-order mark
+- U+200B / U+200C / U+200D zero-width spaces and joiners
+- U+202A / U+202C bidirectional formatting marks
+- NUL bytes and other C0/C1 control code points
+- Leading / trailing whitespace
+
+A key contaminated by any of these will be rejected by the provider
+with a 401 that is indistinguishable from a genuinely wrong key. Alexi
+sanitizes at the config write boundary so the on-disk config is always
+canonical. The helper lives in `src/providers/auth.ts`:
+
+```typescript
+/**
+ * Sanitize an API key value at the config write boundary.
+ * Non-string inputs yield ''. Whitespace-only input yields '' so the
+ * caller can treat the field as "cleared". Idempotent.
+ */
+export function sanitizeApiKey(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  // \p{Cc} strips C0/C1 controls (NUL, CR, LF, TAB, ...)
+  // \p{Cf} strips zero-width spaces, joiners, BOM, bidi marks
+  const stripped = value.replace(/[\p{Cc}\p{Cf}]/gu, '');
+  return stripped.trim();
+}
+```
+
+Contract:
+
+1. **Non-string** (`null`, `undefined`, numbers, arrays, objects) → `''`
+2. **Whitespace-only or invisibles-only** input → `''` (the caller
+   MUST treat this as "clear the field")
+3. **Idempotent** — sanitizing a sanitized key returns the same value
+4. **Preserves Unicode letters** (`\p{L}`) so international keys like
+   `sk-éclair-42` survive
+
+Call site: `addMcpServer` in `src/mcp/config.ts` routes every
+`apiKey` write through `sanitizeApiKey`. When the sanitized value is
+empty, the `apiKey` field is `delete`d from the persisted server record
+entirely, so a whitespace-only paste clears the field rather than
+silently leaving a zero-length key on disk. Both the insert path (new
+server name) and the update path (existing server name) share the
+normalization step.
+
+> **Security note**: never log the input or the return value of
+> `sanitizeApiKey`. API keys are secrets, and the docblock in
+> `src/providers/auth.ts:38-67` explicitly forbids it.
+
+##### Auth error handling flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant REPL as interactive.ts
+    participant Stream as streamingOrchestrator
+    participant Prov as SAP Orchestration Provider
+    participant SAP as SAP AI Core
+
+    U->>REPL: /chat "hello"
+    REPL->>Stream: sendStreaming(...)
+    Stream->>Prov: streamComplete(messages)
+    Prov->>SAP: POST /orchestration
+    SAP-->>Prov: HTTP 401 {"detail":"Invalid API Key"}
+    Prov-->>Stream: throw Error (status=401)
+    Stream-->>REPL: rethrow
+
+    REPL->>REPL: isAbortError(err)? no
+    REPL->>REPL: isStreamStalledError(err)? no
+    REPL->>REPL: classifyProviderError(err) === 'auth'? YES
+
+    REPL-->>U: "Authentication failed. Check<br/>your API key configuration..."
+    REPL-->>U: gray: "Provider response: {..."
+```
 
 #### Model Not Found
 

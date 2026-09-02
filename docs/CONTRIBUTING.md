@@ -988,6 +988,53 @@ Reviewers check:
 - Performance implications
 - Security considerations (no secrets in code)
 
+### Handling secrets and pasted credentials
+
+Any code path that persists a user-supplied credential (API keys,
+bearer tokens, OAuth refresh tokens, MCP `apiKey` fields) MUST route
+the value through `sanitizeApiKey` from `src/providers/auth.ts` at the
+write boundary before serialization. The helper strips Unicode control
+characters (`\p{Cc}`) and formatting characters (`\p{Cf}`, including
+BOM, zero-width spaces, and bidi marks), trims surrounding whitespace,
+and returns `''` for both non-string input and whitespace-only /
+invisibles-only input. The current reference call site is
+`addMcpServer` in `src/mcp/config.ts`; when adding a new config
+surface that stores credentials, adopt the same pattern:
+
+```typescript
+import { sanitizeApiKey } from '../providers/auth.js';
+
+// At the write boundary — not the read boundary.
+const cleaned = sanitizeApiKey(input.apiKey);
+if (cleaned.length === 0) {
+  delete record.apiKey; // treat whitespace-only paste as "clear the field"
+} else {
+  record.apiKey = cleaned;
+}
+```
+
+Additional rules (see `docs/PROVIDERS.md#authentication-errors` for the
+operator-facing context and `docs/TESTING.md#testing-sanitizeapikey-and-auth-error-rewriting`
+for the test pattern):
+
+- **Never log credential values.** The `sanitizeApiKey` docblock in
+  `src/providers/auth.ts:65-66` explicitly forbids logging the input
+  or the return value. ESLint does not catch this — reviewers must.
+- **Never `throw new Error(credential)`.** A rejected fetch response
+  should surface an operator-friendly hint (see the auth-rewrite path
+  in `src/cli/interactive.ts:handleStreamingError`), not the raw key.
+- **Prefer the write boundary over the read boundary.** Normalizing
+  on read means every consumer needs to know about the invariant;
+  normalizing on write means the on-disk config is always canonical.
+- **Structural, status-based classification.** When surfacing
+  provider errors, use `classifyProviderError` from
+  `src/providers/format.ts` rather than string-matching the message
+  body. A regression that started grepping for `unauthorized` in
+  arbitrary error prose would incorrectly flag non-auth failures; the
+  test `does not treat a generic Error mentioning "unauthorized" in
+  prose as auth` in `tests/cli/interactive.abort.test.ts` locks this
+  down.
+
 ## Documentation
 
 ### Documentation Files

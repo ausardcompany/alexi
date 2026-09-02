@@ -1548,6 +1548,194 @@ to verify the placeholder strings are not reintroduced.
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
 
+## Testing `sanitizeApiKey` and auth-error rewriting
+
+Two paired suites cover the config write-boundary hygiene helper
+(`sanitizeApiKey`) and the interactive REPL's 401/403 rewrite path.
+Both were added under issue #1625 (upstream Cline PR #13549) in commit
+`6986454a`. See `docs/PROVIDERS.md#authentication-errors` for the
+operator-facing writeup.
+
+### Test files
+
+- `tests/config/sanitization.test.ts` — 19 cases in two describe blocks.
+  The first block pins the pure `sanitizeApiKey` contract; the second
+  block wires the helper through `addMcpServer` and asserts the on-disk
+  config shape via `loadMcpConfig`.
+- `tests/cli/interactive.abort.test.ts` — the pre-existing REPL abort
+  suite gained a new `auth error rewriting (issue #1625)` describe
+  block (4 cases) covering the 401/403 rewrite branch in
+  `handleStreamingError`.
+
+### Testing `sanitizeApiKey` (pure contract)
+
+`sanitizeApiKey` has four documented invariants: strip Unicode control
+characters (`\p{Cc}`), strip Unicode formatting characters (`\p{Cf}`),
+trim surrounding whitespace, and yield `''` for both non-string input
+and whitespace-only / invisibles-only input. The pure block asserts
+each invariant with a minimal fixture:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { sanitizeApiKey } from '../../src/providers/auth.js';
+
+describe('sanitizeApiKey', () => {
+  it('strips a trailing newline (LF)', () => {
+    expect(sanitizeApiKey('key\n')).toBe('key');
+  });
+
+  it('strips embedded zero-width space (U+200B)', () => {
+    expect(sanitizeApiKey('key\u200Bvalue')).toBe('keyvalue');
+  });
+
+  it('strips a leading BOM (U+FEFF)', () => {
+    expect(sanitizeApiKey('\uFEFFsk-abc')).toBe('sk-abc');
+  });
+
+  it('returns empty string for whitespace-only input', () => {
+    expect(sanitizeApiKey('   ')).toBe('');
+    expect(sanitizeApiKey('\n\n\n')).toBe('');
+  });
+
+  it('returns empty string for non-string input', () => {
+    expect(sanitizeApiKey(undefined)).toBe('');
+    expect(sanitizeApiKey(null)).toBe('');
+    expect(sanitizeApiKey(42 as unknown)).toBe('');
+  });
+
+  it('is idempotent — sanitizing a sanitized key returns the same value', () => {
+    const dirty = '  \uFEFF sk-abc \u200B \n ';
+    const once = sanitizeApiKey(dirty);
+    expect(sanitizeApiKey(once)).toBe(once);
+  });
+});
+```
+
+Notes:
+
+- Every documented code-point class gets at least one fixture — LF,
+  CRLF, U+200B, U+FEFF, U+200C / U+200D joiners, U+202A / U+202C bidi
+  marks, NUL bytes, tabs.
+- The Unicode-letter preservation case (`sk-éclair-42` unchanged)
+  guards against an over-broad regex change that would accidentally
+  strip `\p{L}` along with `\p{Cc}` / `\p{Cf}`.
+- Idempotence is asserted directly to catch a regression that would
+  make sanitization order-dependent.
+
+### Testing the `addMcpServer` write boundary
+
+The wiring block seeds a temp directory as the fake `$HOME` via
+`fs.mkdtempSync` + `vi.spyOn(os, 'homedir')`, saves an empty MCP
+config, exercises `addMcpServer` with three fixtures, and asserts the
+persisted shape via `loadMcpConfig`:
+
+```typescript
+import { addMcpServer, saveMcpConfig, loadMcpConfig } from '../../src/mcp/config.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { beforeEach, afterEach, vi } from 'vitest';
+
+describe('sanitizeApiKey wiring: addMcpServer write boundary', () => {
+  let mockHomeDir: string;
+
+  beforeEach(() => {
+    mockHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-mcp-test-'));
+    vi.spyOn(os, 'homedir').mockReturnValue(mockHomeDir);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(mockHomeDir, { recursive: true, force: true });
+  });
+
+  it('sanitizes apiKey on addMcpServer', () => {
+    saveMcpConfig({ version: '1.0.0', servers: [] });
+    addMcpServer({
+      name: 'test-server',
+      transport: 'http',
+      url: 'https://example.com',
+      apiKey: '  sk-abc\u200B\n',
+      enabled: true,
+    });
+    const cfg = loadMcpConfig();
+    expect(cfg.servers.find((s) => s.name === 'test-server')?.apiKey).toBe('sk-abc');
+  });
+
+  it('clears apiKey when the pasted value is whitespace-only', () => {
+    saveMcpConfig({ version: '1.0.0', servers: [] });
+    addMcpServer({
+      name: 'blank-key-server',
+      transport: 'http',
+      url: 'https://example.com',
+      apiKey: '   \u200B\uFEFF   ',
+      enabled: true,
+    });
+    // Whitespace-only cleared: the field is dropped entirely.
+    expect(loadMcpConfig().servers.find((s) => s.name === 'blank-key-server')?.apiKey).toBeUndefined();
+  });
+});
+```
+
+The temp-directory setup pattern (`fs.mkdtempSync` + `vi.spyOn(os,
+'homedir')` + teardown with `fs.rmSync({ recursive: true, force:
+true })`) is the same shape used by other config-layer tests in
+Alexi; follow it for any new config write-boundary tests to stay
+parallel-safe and CI-portable.
+
+### Testing the REPL 401/403 rewrite
+
+The auth-rewrite branch in `handleStreamingError` is exercised with
+four canonical shapes: a 401 whose message is a raw JSON body, a 403
+using the alternate `statusCode` field name, a 500 that must fall
+through to the generic fallback, and a plain `Error` whose message
+mentions the word "unauthorized" in prose but carries no HTTP status
+(must NOT be rewritten — classification is status-based). The test
+uses the pre-existing `logs` capture / `exitSpy` guard from the
+enclosing suite:
+
+```typescript
+describe('auth error rewriting (issue #1625)', () => {
+  it('rewrites a 401 into actionable guidance and keeps raw response as diagnostic tail', () => {
+    const err = Object.assign(new Error('{"detail":"Invalid API Key"}'), {
+      status: 401,
+    });
+
+    handleStreamingError(err);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.includes('Authentication failed'))).toBe(true);
+    expect(logs.some((l) => l.includes('API key'))).toBe(true);
+    // Raw provider message survives as a tail so operators can debug.
+    expect(logs.some((l) => l.includes('Invalid API Key'))).toBe(true);
+    // Must NOT render the generic "Error: ..." fallback for auth errors.
+    expect(logs.some((l) => /^\s*Error: /.test(l))).toBe(false);
+  });
+
+  it('leaves non-auth errors untouched (e.g. 500 generic failure)', () => {
+    const err = Object.assign(new Error('internal server error'), { status: 500 });
+    handleStreamingError(err);
+    expect(logs.some((l) => l.includes('Authentication failed'))).toBe(false);
+    expect(logs.some((l) => l.includes('Error: internal server error'))).toBe(true);
+  });
+
+  it('does not treat a generic Error mentioning "unauthorized" in prose as auth', () => {
+    const err = new Error('The operation is not unauthorized to run tools');
+    handleStreamingError(err);
+    expect(logs.some((l) => l.includes('Authentication failed'))).toBe(false);
+    expect(logs.some((l) => l.includes('Error:'))).toBe(true);
+  });
+});
+```
+
+The last case is the important one: it locks in the invariant that
+`classifyProviderError` is status-based, not string-based. A
+regression that started grepping error messages for `unauthorized`
+would trip this assertion. Both the `status` field name (used by most
+provider adapters) and the alternate `statusCode` name (used by node
+`undici` errors) are covered so a shape drift in either direction is
+caught.
+
 ## Testing Minify-Safe Telemetry Detection
 
 The `src/utils/telemetry.ts` module exposes a structural detection surface (`isTelemetryService`, `telemetryInstance`, `TelemetryServiceLike`) designed to survive bundler minification. The regression suite at `tests/utils/telemetry-minify.test.ts` locks in the contract that class-name based checks (`obj.constructor.name === 'TelemetryService'`) must NEVER be relied on, and that the exported structural helpers keep working when the module is passed through a real minifier.
