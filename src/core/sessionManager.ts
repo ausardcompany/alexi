@@ -97,12 +97,45 @@ export interface SessionManagerOptions {
   autoCompact?: boolean;
 }
 
+/**
+ * Runtime bookkeeping for a single active session run. Populated by
+ * {@link SessionManager.beginSessionRun} and cleared by
+ * {@link SessionManager.endSessionRun}.
+ *
+ * The `controller` is aborted by {@link SessionManager.abortSession} to
+ * signal cancellation to any consumer awaiting `controller.signal`.
+ * When the run was started under a parent `AbortSignal`, the listener
+ * is retained here so it can be removed on `endSessionRun` — preventing
+ * the memory leak where an ever-growing set of subagent listeners
+ * accumulates on a long-lived parent signal.
+ */
+interface SessionRunState {
+  controller: AbortController;
+  parentSignal?: AbortSignal;
+  parentSignalListener?: () => void;
+}
+
 export class SessionManager {
   private sessionsDir: string;
   private activeSession: Session | null = null;
   private maxContextTokens: number;
   private autoCompact: boolean;
   private searchIndex: SessionSearchIndex;
+
+  /**
+   * Per-session in-memory abort bookkeeping. A session is present in this
+   * map only while it has an active run (typically bracketed by
+   * `beginSessionRun` / `endSessionRun`). Cross-session abort propagation
+   * (parent -> children) walks the persisted `parentSessionId` chain but
+   * only signals sessions that appear here — a delegated child that
+   * already completed its run is a no-op, which is the correct behaviour
+   * (nothing to cancel).
+   *
+   * Instance-scoped rather than module-scoped so tests that construct
+   * isolated `SessionManager` instances do not leak abort state across
+   * cases.
+   */
+  private sessionRuns = new Map<string, SessionRunState>();
 
   constructor(options?: string | SessionManagerOptions) {
     const opts: SessionManagerOptions =
@@ -144,7 +177,7 @@ export class SessionManager {
   createSession(
     modelId?: string,
     parentSessionId?: string,
-    options?: { initialMessages?: Message[] }
+    options?: { initialMessages?: Message[]; signal?: AbortSignal }
   ): Session {
     const initialMessages = options?.initialMessages ?? [];
     const totalTokens = initialMessages.reduce(
@@ -179,7 +212,200 @@ export class SessionManager {
     // eager-persistence contract that existing callers rely on.
     this.saveSession(session);
 
+    // When the caller supplied an AbortSignal (typically the parent
+    // session's signal handed down by the `task` tool), immediately
+    // register a run for the new session and wire the parent signal so
+    // parent-abort propagates. Callers that do not pass a signal are
+    // unaffected — no run is registered, no listeners are attached, and
+    // the session behaves exactly as before.
+    if (options?.signal) {
+      this.beginSessionRun(session.metadata.id, options.signal);
+    }
+
     return session;
+  }
+
+  /**
+   * Register an active run for `sessionId` and return the run's
+   * {@link AbortSignal}. Idempotent: calling `beginSessionRun` twice for
+   * the same session ends the previous run (removing its parent-signal
+   * listener) and starts a fresh one, so re-entry never leaks listeners
+   * or leaves the previous controller referenced.
+   *
+   * When `parentSignal` is provided, an abort on the parent immediately
+   * aborts this session's controller. If `parentSignal` is already
+   * aborted when this method is called, the returned signal is aborted
+   * synchronously — matching the standard `AbortSignal.any` contract and
+   * ensuring a delegated subagent that starts *after* the parent was
+   * cancelled never gets a live signal to run against.
+   *
+   * The returned signal is stable across the run: `endSessionRun` MUST
+   * be called (typically from a `finally` block) to release the
+   * listener; otherwise the parent signal keeps a reference to this
+   * `SessionManager` for the parent's lifetime.
+   */
+  beginSessionRun(sessionId: string, parentSignal?: AbortSignal): AbortSignal {
+    // Tear down any previous run so listeners never accumulate.
+    this.endSessionRun(sessionId);
+
+    const controller = new AbortController();
+    const state: SessionRunState = { controller };
+
+    if (parentSignal) {
+      state.parentSignal = parentSignal;
+      if (parentSignal.aborted) {
+        // Synchronous propagation: honour the standard AbortSignal
+        // contract that a subscriber attached to an already-aborted
+        // signal is invoked immediately.
+        controller.abort(parentSignal.reason);
+      } else {
+        const listener = (): void => {
+          // Re-check the map: `endSessionRun` may have fired first (rare
+          // race between parent abort and normal completion). Aborting
+          // an already-completed controller is harmless but pointless.
+          if (this.sessionRuns.get(sessionId) === state) {
+            controller.abort(parentSignal.reason);
+          }
+        };
+        state.parentSignalListener = listener;
+        parentSignal.addEventListener('abort', listener, { once: true });
+      }
+    }
+
+    this.sessionRuns.set(sessionId, state);
+    return controller.signal;
+  }
+
+  /**
+   * End the active run for `sessionId`, removing any parent-signal
+   * listener attached by {@link beginSessionRun}. Does NOT abort the
+   * run's controller — a normal completion should not surface as an
+   * abort. Call this from a `finally` block after the subagent finishes
+   * (success or failure) so long-running parent signals do not retain
+   * references to completed child runs.
+   *
+   * No-ops when `sessionId` has no registered run.
+   */
+  endSessionRun(sessionId: string): void {
+    const state = this.sessionRuns.get(sessionId);
+    if (!state) {
+      return;
+    }
+    if (state.parentSignal && state.parentSignalListener) {
+      state.parentSignal.removeEventListener('abort', state.parentSignalListener);
+    }
+    this.sessionRuns.delete(sessionId);
+  }
+
+  /**
+   * Abort the active run for `sessionId` and cascade the abort to every
+   * descendant session that has an active run at the moment of the
+   * call. The cascade is a breadth-first walk of the persisted
+   * `parentSessionId` links (via {@link getSessionChildren}), so it
+   * catches multi-level nesting (grandchildren, great-grandchildren, ...).
+   *
+   * Sessions in the descendant set that have no active run are silently
+   * skipped — they either already completed or never started, and there
+   * is nothing to signal. Sessions that ARE running have their
+   * `AbortController` aborted with `reason`, which causes any consumer
+   * awaiting the signal (tool `execute`, provider `stream`, etc.) to
+   * surface an `AbortError`.
+   *
+   * Idempotent and cycle-safe: a corrupted session store that reports
+   * `A -> B -> A` will not spin forever thanks to the `visited` set.
+   */
+  abortSession(sessionId: string, reason?: unknown): void {
+    const visited = new Set<string>();
+    const queue: string[] = [sessionId];
+
+    while (queue.length > 0) {
+      const current = queue.shift() as string;
+      if (visited.has(current)) {
+        continue;
+      }
+      visited.add(current);
+
+      const state = this.sessionRuns.get(current);
+      if (state && !state.controller.signal.aborted) {
+        state.controller.abort(reason);
+      }
+
+      // Enqueue direct children regardless of whether the current
+      // session has an active run — a grandchild may be running even if
+      // its immediate parent already returned (unusual but possible).
+      for (const childId of this.getSessionChildren(current)) {
+        if (!visited.has(childId)) {
+          queue.push(childId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Return the {@link AbortSignal} for `sessionId`'s currently-active
+   * run, or `undefined` when there is no run. Useful for consumers that
+   * want to await cancellation without pulling in the underlying
+   * controller.
+   */
+  getSessionSignal(sessionId: string): AbortSignal | undefined {
+    return this.sessionRuns.get(sessionId)?.controller.signal;
+  }
+
+  /**
+   * Return `true` when `sessionId` has an active run currently tracked
+   * by the manager. Exposed for tests and diagnostics — production
+   * callers should generally rely on `getSessionSignal` and check
+   * `.aborted` on the returned signal.
+   */
+  hasActiveRun(sessionId: string): boolean {
+    return this.sessionRuns.has(sessionId);
+  }
+
+  /**
+   * Enumerate the direct children of `sessionId`, i.e. every session
+   * whose persisted `parentSessionId` equals `sessionId`. Reads the
+   * on-disk sessions directory; a corrupt or unreadable session file is
+   * skipped rather than crashing the walk. Order is unspecified.
+   */
+  getSessionChildren(sessionId: string): string[] {
+    let files: string[];
+    try {
+      files = fs.readdirSync(this.sessionsDir);
+    } catch {
+      return [];
+    }
+    const children: string[] = [];
+    for (const file of files) {
+      if (!file.endsWith('.json')) {
+        continue;
+      }
+      const sessionPath = path.join(this.sessionsDir, file);
+      let parsed: Session;
+      try {
+        parsed = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as Session;
+      } catch {
+        continue;
+      }
+      if (parsed.metadata.parentSessionId === sessionId) {
+        children.push(parsed.metadata.id);
+      }
+    }
+    return children;
+  }
+
+  /**
+   * Release a delegated session after its run completed. Ends the run
+   * (removing any parent-signal listener) and removes the persisted
+   * session file from disk, mirroring the `delete + endRun` semantics
+   * the task tool needs when a subagent finishes and its transcript
+   * should not clutter the top-level `sessions list`.
+   *
+   * Returns `true` when the session file was deleted, `false` when it
+   * did not exist. The run bookkeeping is always cleared regardless.
+   */
+  releaseSession(sessionId: string): boolean {
+    this.endSessionRun(sessionId);
+    return this.deleteSession(sessionId);
   }
 
   /**

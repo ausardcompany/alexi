@@ -31,6 +31,7 @@ import { getAgentRegistry, type Agent } from '../../agent/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
 import { getConfigTaskModelSelection } from '../../config/userConfig.js';
+import { SessionManager } from '../../core/sessionManager.js';
 
 /**
  * Default maximum subagent nesting depth. A top-level user session is
@@ -559,46 +560,120 @@ Usage:
     const costTracker = getCostTracker();
     costTracker.startTask(taskId!);
 
-    // For now, return a placeholder since actual execution requires LLM integration
-    // In a full implementation, this would call the LLM with the agent's system prompt
-    // and pass subagentConfig.autoMode to maintain automation behavior
-    taskData.status = 'completed';
-    const candidateResponse = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
+    // Abort propagation: when a `SessionManager` is available on the
+    // context we materialise a real child session so parent-abort
+    // cascades to any provider / tool calls the future full-integration
+    // patch drives on behalf of the subagent. Bracketed by begin/end so
+    // the parent-signal listener is released as soon as the run
+    // finishes — otherwise a long-lived parent signal would retain
+    // references to every subagent it ever spawned (memory leak).
+    //
+    // The absence of a session manager is expected in unit tests and in
+    // one-shot CLI paths; we fall back to the previous stub behaviour
+    // rather than crash.
+    const sessionManager = context.sessionManager;
+    const parentSessionId = context.sessionId;
+    let childSession: ReturnType<SessionManager['createSession']> | undefined;
+    let childSignal: AbortSignal | undefined;
 
-    // kilocode_change - preserve last non-empty subagent answer (#13469, #13493)
-    // When an extended/resumed run yields an empty response, do not clobber
-    // the previously captured answer. Fall back to the last non-empty message
-    // captured in the transcript so callers never observe an empty regression.
-    const trimmed = candidateResponse.trim();
-    let response = candidateResponse;
-    if (!trimmed) {
-      const priorAssistant = [...taskData.messages]
-        .reverse()
-        .find((m) => m.role === 'assistant' && m.content.trim().length > 0);
-      response = priorAssistant?.content ?? taskData.result ?? '';
+    if (sessionManager) {
+      // If the parent was already aborted, refuse to spawn a child. Doing
+      // otherwise wastes the cost tracker's provider budget on a request
+      // whose result no consumer will read.
+      if (context.signal?.aborted) {
+        costTracker.endTask(taskId!);
+        return {
+          success: false,
+          error: 'Operation aborted',
+          data: {
+            taskId: taskId!,
+            agentId: agent.id,
+            response: '',
+            completed: false,
+            status: 'cancelled' as const,
+          },
+        };
+      }
+      childSession = sessionManager.createSession(resolvedModelID, parentSessionId, {
+        signal: context.signal,
+      });
+      childSignal = sessionManager.getSessionSignal(childSession.metadata.id);
     }
 
-    taskData.messages.push({
-      role: 'assistant',
-      content: response,
-    });
+    try {
+      // For now, return a placeholder since actual execution requires LLM integration
+      // In a full implementation, this would call the LLM with the agent's system prompt
+      // and pass subagentConfig.autoMode to maintain automation behavior
+      taskData.status = 'completed';
+      const candidateResponse = `[Task ${taskId} queued for agent: ${agent.name}]\n\nPrompt: ${params.description}\n\nThis task will be executed by the ${agent.name} agent. In a full implementation, this would make an LLM call with the agent's system prompt and auto mode: ${subagentConfig.autoMode}.`;
 
-    // End per-task usage tracking and capture summary
-    const usage = costTracker.endTask(taskId!);
+      // kilocode_change - preserve last non-empty subagent answer (#13469, #13493)
+      // When an extended/resumed run yields an empty response, do not clobber
+      // the previously captured answer. Fall back to the last non-empty message
+      // captured in the transcript so callers never observe an empty regression.
+      const trimmed = candidateResponse.trim();
+      let response = candidateResponse;
+      if (!trimmed) {
+        const priorAssistant = [...taskData.messages]
+          .reverse()
+          .find((m) => m.role === 'assistant' && m.content.trim().length > 0);
+        response = priorAssistant?.content ?? taskData.result ?? '';
+      }
 
-    return {
-      success: true,
-      data: {
-        taskId: taskId!,
-        agentId: agent.id,
-        response,
-        completed: true,
-        status: 'completed',
-        usage,
-        ...(resolvedModelID ? { model: resolvedModelID } : {}),
-        ...(resolvedProviderID ? { provider: resolvedProviderID } : {}),
-        ...(resolvedReasoningEffort ? { reasoning_effort: resolvedReasoningEffort } : {}),
-      },
-    };
+      // If either the parent signal or the child's own run signal was
+      // aborted mid-execution, surface a cancelled result. Under the
+      // current stub the placeholder response is synthesised
+      // synchronously so this only triggers when the parent was aborted
+      // before the try block started or during construction of the
+      // response string; the full LLM integration will hit this on
+      // every provider round-trip.
+      if (context.signal?.aborted || childSignal?.aborted) {
+        taskData.status = 'cancelled';
+        const cancelledUsage = costTracker.endTask(taskId!);
+        return {
+          success: false,
+          error: 'Operation aborted',
+          data: {
+            taskId: taskId!,
+            agentId: agent.id,
+            response: '',
+            completed: false,
+            status: 'cancelled' as const,
+            usage: cancelledUsage,
+          },
+        };
+      }
+
+      taskData.messages.push({
+        role: 'assistant',
+        content: response,
+      });
+
+      // End per-task usage tracking and capture summary
+      const usage = costTracker.endTask(taskId!);
+
+      return {
+        success: true,
+        data: {
+          taskId: taskId!,
+          agentId: agent.id,
+          response,
+          completed: true,
+          status: 'completed',
+          usage,
+          ...(resolvedModelID ? { model: resolvedModelID } : {}),
+          ...(resolvedProviderID ? { provider: resolvedProviderID } : {}),
+          ...(resolvedReasoningEffort ? { reasoning_effort: resolvedReasoningEffort } : {}),
+        },
+      };
+    } finally {
+      // Release the delegated session and detach the parent-signal
+      // listener. `releaseSession` also removes the session file — the
+      // subagent transcript is not intended to appear in the top-level
+      // `sessions list` alongside the user's own sessions.
+      if (sessionManager && childSession) {
+        sessionManager.releaseSession(childSession.metadata.id);
+      }
+    }
   },
 });
