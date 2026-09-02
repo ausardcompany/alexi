@@ -17,6 +17,7 @@ import {
 import { getPermissionManager } from '../../permission/index.js';
 import { imageGenTool, type ImageGenResult } from '../../tool/tools/image-gen.js';
 import type { ToolResult } from '../../tool/index.js';
+import { SessionDrain } from '../../session/drain.js';
 
 /**
  * Result of running a custom command in non-interactive (chat) mode.
@@ -255,6 +256,9 @@ export function registerChatCommand(program: Command): void {
             console.error(line);
           }
           if (result.exitCode !== 0) {
+            // Alexi_change: drain background work before exit (kilocode
+            // fix(cli): drain background work before headless exit).
+            await SessionDrain.drain({ timeoutMs: 30_000 });
             process.exit(result.exitCode);
           }
           return;
@@ -271,6 +275,9 @@ export function registerChatCommand(program: Command): void {
           message = opts.message;
         } else {
           console.error('Error: Either --message or --message-file is required');
+          // Alexi_change: drain before headless exit so any partially
+          // scheduled tool events / persistence writes complete.
+          await SessionDrain.drain({ timeoutMs: 30_000 });
           process.exit(1);
         }
 
@@ -282,6 +289,8 @@ export function registerChatCommand(program: Command): void {
           const session = sessionManager.loadSession(opts.session);
           if (!session) {
             console.error(`Session ${opts.session} not found`);
+            // Alexi_change: drain before headless exit.
+            await SessionDrain.drain({ timeoutMs: 30_000 });
             process.exit(1);
           }
           console.log(`[Continuing session: ${session.metadata.title || opts.session}]`);
@@ -373,6 +382,17 @@ export function registerChatCommand(program: Command): void {
         }
       } catch (e) {
         console.error(String(e));
+        // Alexi_change: drain background work before exit so partially
+        // written session state / tool events flush cleanly (kilocode
+        // fix(cli): drain background work before headless exit). A 30s
+        // budget is generous enough for slow FS syncs but bounded so a
+        // hung task cannot wedge the CLI forever.
+        try {
+          await SessionDrain.drain({ timeoutMs: 30_000 });
+        } catch {
+          // Drain failures are non-fatal — we're already on the error
+          // path and about to exit(1).
+        }
         process.exit(1);
       }
     });

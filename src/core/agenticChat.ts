@@ -16,7 +16,12 @@ import { getCostTracker } from './costTracker.js';
 import { getCheckpointManager } from './checkpoints.js';
 import { recordSnapshot } from './snapshot.js';
 import { logger } from '../utils/logger.js';
-import { getToolRegistry, type ToolContext, type ToolResult } from '../tool/index.js';
+import {
+  getToolRegistry,
+  getAllToolNames,
+  type ToolContext,
+  type ToolResult,
+} from '../tool/index.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
 import { getPermissionManager } from '../permission/index.js';
 import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration.js';
@@ -165,13 +170,41 @@ async function executeToolCall(
   });
 
   if (!tool) {
+    // Alexi_change (kilocode f1330aceb - surface real tool name when
+    // tool-call repair fails). Preserve the exact name the model
+    // attempted so the resulting error is debuggable, and include a
+    // short list of registered tools so the model can self-correct on
+    // the next turn. Previously the error mentioned only the missing
+    // name with no repair signal; now we also expose the closest
+    // registered candidates by simple prefix / substring match.
+    const requestedName = toolCall.function.name;
+    let availableNames: string[] = [];
+    try {
+      availableNames = getAllToolNames();
+    } catch {
+      // Registry may be unavailable in some test harnesses — degrade
+      // gracefully to the bare error rather than throwing.
+    }
+    const similar = availableNames
+      .filter(
+        (n) =>
+          n.toLowerCase().includes(requestedName.toLowerCase()) ||
+          requestedName.toLowerCase().includes(n.toLowerCase())
+      )
+      .slice(0, 5);
+    const hintParts: string[] = [`Unknown tool: ${requestedName}`];
+    if (similar.length > 0) {
+      hintParts.push(`Did you mean one of: ${similar.join(', ')}?`);
+    } else if (availableNames.length > 0) {
+      hintParts.push(`Available tools: ${availableNames.slice(0, 8).join(', ')}`);
+    }
     const result: ToolResult = {
       success: false,
-      error: `Unknown tool: ${toolCall.function.name}`,
+      error: hintParts.join(' '),
     };
     onProgress?.({
       type: 'tool_end',
-      toolName: toolCall.function.name,
+      toolName: requestedName,
       toolId: toolCall.id,
       result,
     });
@@ -400,15 +433,27 @@ export async function agenticChat(
     if (assembled) {
       parts.push(assembled);
     }
-    // Volatile layers appended last so stable prefix is cache-friendly
+    // Alexi_change (kilocode 3fc9cb41f - fix(cli): separate environment
+    // details from user prompt text). Volatile blocks (memory, session
+    // context, repo map) are wrapped in an explicit
+    // `<environment_details>` fence so the model can cleanly delimit
+    // environment context from the stable prompt above and from the
+    // user turn that follows. Without a separator these blocks bleed
+    // into either the agent identity (cache-hostile) or the user text
+    // (token-bloat + confused authorship). The fence tags are cheap,
+    // provider-neutral, and matches upstream conventions.
+    const envParts: string[] = [];
     if (memoryContext) {
-      parts.push(memoryContext);
+      envParts.push(memoryContext);
     }
     if (sessionContext) {
-      parts.push(sessionContext);
+      envParts.push(sessionContext);
     }
     if (repoMapText) {
-      parts.push(repoMapText);
+      envParts.push(repoMapText);
+    }
+    if (envParts.length > 0) {
+      parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
     }
     return parts.join('\n\n');
   }

@@ -1548,6 +1548,42 @@ to verify the placeholder strings are not reintroduced.
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
 
+### Testing Session Abort Propagation
+
+`SessionManager` propagates a parent `AbortSignal` to every delegated child session so cancelling a parent task (typically via Ctrl+C at the CLI) immediately stops every descendant subagent — otherwise runaway subagents continue to consume API quota after the user has already given up. The regression suite lives in `tests/core/sessionManager-abort.test.ts` (277 lines) and covers the four public methods that make up the abort contract.
+
+**Fixture pattern.** Each case runs against a fresh `SessionManager` bound to a temp sessions directory:
+
+```typescript
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { beforeEach, afterEach } from 'vitest';
+import { SessionManager } from '../../src/core/sessionManager.js';
+
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-abort-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+```
+
+Compaction and `sessionClose` are stubbed via `vi.mock` so `addMessage`'s auto-compact path stays deterministic across abort assertions — the suite is intentionally scoped to abort semantics, not compaction behaviour.
+
+**Assertion shape.** The suite pins the contract points documented in `docs/API.md#session-manager-abort-api`:
+
+- `beginSessionRun` returns a fresh, un-aborted signal when no parent is supplied.
+- When the parent is already aborted at `beginSessionRun` time, the returned signal is aborted synchronously (matches `AbortSignal.any`).
+- A parent abort fires the child's controller exactly once — a second `parentSignal.dispatchEvent` cannot re-abort the child.
+- `abortSession` walks descendants breadth-first via `getSessionChildren` and aborts every session with an active run.
+- `endSessionRun` removes the parent-signal listener but leaves the controller intact (`signal.aborted === false`).
+
+A parallel suite in `tests/tool/tools/task-abort-propagation.test.ts` (233 lines) exercises the `task` tool's session-materialisation path: when the parent is already aborted at spawn time, the tool must refuse to start the subagent (returning `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of paying the cost of a provider request whose result no consumer will read. The `finally`-block `releaseSession` call is asserted for both the happy path and the cancellation path.
+
 ## Testing Minify-Safe Telemetry Detection
 
 The `src/utils/telemetry.ts` module exposes a structural detection surface (`isTelemetryService`, `telemetryInstance`, `TelemetryServiceLike`) designed to survive bundler minification. The regression suite at `tests/utils/telemetry-minify.test.ts` locks in the contract that class-name based checks (`obj.constructor.name === 'TelemetryService'`) must NEVER be relied on, and that the exported structural helpers keep working when the module is passed through a real minifier.

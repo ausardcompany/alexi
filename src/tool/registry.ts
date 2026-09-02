@@ -4,6 +4,14 @@
  */
 import type { Tool } from './index.js';
 
+// Alexi_change: re-export SessionDrain so ported call sites can import it
+// through the tool registry surface, mirroring upstream opencode where
+// `SessionDrain.node` is registered inside the tool registry LayerNode.
+// Alexi's runtime does not use Effect-TS LayerNodes, so the "registration"
+// here is a module-level singleton import (side effect: constructor runs).
+// See `src/session/drain.ts` for the drain lifecycle contract.
+export { SessionDrain } from '../session/drain.js';
+
 // Updated code based on changes in `packages/core/src/tool/registry.ts` and `packages/opencode/src/tool/registry.ts` from opencode
 // Re-export the registry-name accessor used by the permission system to
 // cross-check deny-rule tool entries against the actual registered tools.
