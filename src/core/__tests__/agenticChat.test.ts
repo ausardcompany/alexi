@@ -51,6 +51,11 @@ const mockToolRegistry = {
 vi.mock('../../tool/index.js', () => ({
   getToolRegistry: () => mockToolRegistry,
   registerTool: vi.fn(),
+  // Alexi_change (kilocode f1330aceb): agenticChat now calls
+  // getAllToolNames() when it hits an unknown tool to surface repair
+  // hints. Return an empty list here so the bare "Unknown tool: <name>"
+  // error remains the primary signal in these tests.
+  getAllToolNames: vi.fn(() => []),
 }));
 
 // Mock registerBuiltInTools
@@ -320,9 +325,15 @@ describe('agenticChat', () => {
 
       const result = await agenticChat('Use unknown tool');
 
-      expect(result.toolCallSummary).toMatchObject([
-        { name: 'unknown_tool', success: false, error: 'Unknown tool: unknown_tool' },
-      ]);
+      // Alexi_change (kilocode f1330aceb): error message now preserves
+      // the real tool name and may include a repair hint ("Available
+      // tools: ..." / "Did you mean ..."). We assert prefix + name so
+      // the test remains stable regardless of registry contents.
+      expect(result.toolCallSummary).toHaveLength(1);
+      const summary = result.toolCallSummary[0];
+      expect(summary.name).toBe('unknown_tool');
+      expect(summary.success).toBe(false);
+      expect(summary.error).toContain('Unknown tool: unknown_tool');
     });
 
     it('should handle invalid JSON in tool arguments', async () => {

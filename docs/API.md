@@ -883,6 +883,16 @@ interface ToolContext {
   sessionId?: string;
   gitManager?: AutoCommitManager;
   /**
+   * Optional session manager — injected by agenticChat / orchestrators
+   * that maintain a persistent session store. Tools that spawn or
+   * cancel delegated subagent sessions (currently only `task`) reach
+   * through here to `beginSessionRun`, `abortSession`, and
+   * `releaseSession`. When absent, delegating tools MUST fall back to
+   * their existing stub behaviour rather than crash — nothing in the
+   * per-tool contract requires a session manager to be present.
+   */
+  sessionManager?: SessionManager;
+  /**
    * Per-session set of realpath()ed AGENTS.md files that have already been
    * surfaced to the agent as system-reminders.
    */
@@ -1136,6 +1146,116 @@ if (!result.success) {
   console.error(result.error);
 }
 ```
+
+## Event Bus API — Batched Publish
+
+For call sites that need to emit many related events atomically, the bus exposes `publishAll` and `publishAllAsync`. Both validate every payload before ANY handler runs (fail-fast, no partial publish), then fan out to subscribers in publication order.
+
+```typescript
+import { publishAll, publishAllAsync, type BatchEntry } from '../bus/index.js';
+import { ToolExecutionStarted, ToolExecutionCompleted } from '../bus/index.js';
+
+interface BatchEntry<T = unknown> {
+  readonly event: BusEvent<T>;
+  readonly payload: T;
+}
+
+// Sync — handlers run inline
+publishAll([
+  { event: ToolExecutionStarted, payload: { toolName: 'read', toolId: 'a', parameters: {}, timestamp: Date.now() } },
+  { event: ToolExecutionCompleted, payload: { toolName: 'read', toolId: 'a', result: {}, duration: 12, timestamp: Date.now() } },
+] as const);
+
+// Async — awaits every handler per entry, entries processed in order
+await publishAllAsync([/* ... */]);
+```
+
+Alternatively use the `EventBatch` namespace re-exported from `src/bus/event-batch.ts`:
+
+```typescript
+import { EventBatch } from '../bus/event-batch.js';
+
+EventBatch.publishAll([/* ... */]);
+await EventBatch.publishAllAsync([/* ... */]);
+```
+
+Guarantees:
+
+- Zod validation runs across the whole batch first; a validation failure throws to the caller with no partial publish.
+- A per-event handler snapshot is taken before iteration, so a handler that unsubscribes another handler mid-batch cannot observe a mutating set.
+- Individual handler errors are caught and logged; a single bad subscriber cannot abort the rest of the batch.
+
+## Session Manager Abort API
+
+`SessionManager` exposes an abort-propagation surface so long-running subagent runs can be cancelled from a parent CLI signal.
+
+```typescript
+import { SessionManager } from '../core/sessionManager.js';
+
+const mgr = new SessionManager();
+
+// Create a session under a parent AbortSignal. When the parent aborts, this
+// session's run signal aborts too. If parentSignal is already aborted, the
+// returned signal is aborted synchronously.
+const session = mgr.createSession(modelId, parentId, { signal: parentSignal });
+
+// Or start a run explicitly on an existing session.
+const runSignal: AbortSignal = mgr.beginSessionRun(session.metadata.id, parentSignal);
+
+try {
+  await runProviderCall({ signal: runSignal });
+} finally {
+  // MUST be called from finally — releases the parent-signal listener.
+  // Does NOT abort the controller; normal completion is not an abort.
+  mgr.endSessionRun(session.metadata.id);
+}
+
+// Manually cascade an abort to a session and all its descendants
+// (BFS over persisted parentSessionId links). Idempotent; cycle-safe.
+mgr.abortSession(session.metadata.id, new Error('user cancelled'));
+
+// Inspect
+mgr.getSessionSignal(session.metadata.id); // AbortSignal | undefined
+mgr.hasActiveRun(session.metadata.id);     // boolean
+mgr.getSessionChildren(session.metadata.id); // string[]
+
+// end + delete (used by the `task` tool for delegated subagents)
+mgr.releaseSession(session.metadata.id);
+```
+
+Contract points:
+
+- `beginSessionRun` is idempotent: a second call tears down the previous run before starting a new one, so listeners never leak.
+- `endSessionRun` MUST be called from a `finally` block so long-lived parent signals do not retain references to completed children.
+- `abortSession` walks descendants breadth-first via `getSessionChildren` and uses a `visited` set so a corrupted `A -> B -> A` store cannot spin forever.
+
+## Session Drain API
+
+`SessionDrain` (`src/session/drain.ts`, re-exported from `src/tool/registry.ts`) is a module-level singleton that lets any subsystem register outstanding `Promise`s and wait for them to settle before `process.exit(...)`. Prevents headless CLI exits from racing pending session persistence and event fan-out.
+
+```typescript
+import { SessionDrain } from '../session/drain.js';
+// or, for parity with upstream call sites:
+import { SessionDrain } from '../tool/registry.js';
+
+// Register work. The returned handle untracks; a settled promise auto-untracks
+// so a forgotten handle cannot indefinitely block exit.
+const unregister = SessionDrain.track(sessionId, longRunningFlush());
+
+// Immediately before process.exit(...) in a headless entry point:
+await SessionDrain.drain({ timeoutMs: 30_000 });
+
+// One-shot per lifecycle. After the first drain resolves, further track()
+// calls become no-ops so late-arriving work cannot indefinitely block exit.
+```
+
+Options:
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `timeoutMs` | `number` | `30_000` | Upper bound on how long `drain()` will wait. `0` disables the timeout and waits indefinitely. |
+
+`SessionDrain.size()` returns the number of currently tracked entries (test/diagnostic only). `SessionDrain.__resetForTests()` resets the drain state; production code MUST NOT call it.
 
 ## Event Bus API — Bash Streaming
 

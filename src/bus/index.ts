@@ -101,6 +101,95 @@ export interface BusEvent<T> {
   once(handler: EventHandler<T>): UnsubscribeFn;
 }
 
+// Alexi_change start - batched publish (ported from kilocode upstream event-batch)
+/**
+ * A single entry in a `publishAll` batch. Each entry pairs a previously
+ * registered {@link BusEvent} with a matching payload. The payload is
+ * validated against the event's Zod schema before ANY handler is invoked,
+ * so a validation failure in the middle of the batch fails fast without
+ * a partial publish.
+ */
+export interface BatchEntry<T = unknown> {
+  readonly event: BusEvent<T>;
+  readonly payload: T;
+}
+
+/**
+ * Batched publish. Validates every payload against its event schema first
+ * (fail-fast, no partial publish), then invokes all handlers in publication
+ * order. Mirrors the "commit all events in a single transaction before
+ * notifying subscribers" semantics from the upstream kilocode
+ * `event-batch.ts` module without requiring Alexi to depend on Effect-TS
+ * or a durable event store — Alexi's bus is synchronous and in-memory.
+ *
+ * Preferred when a caller emits many related events (e.g. draining a
+ * session fork) because it avoids interleaving handler side effects
+ * between events and keeps subscriber observations consistent.
+ *
+ * Handler errors are caught per-entry and logged so a single bad
+ * subscriber cannot abort the rest of the batch.
+ */
+export function publishAll(entries: readonly BatchEntry[]): void {
+  // Phase 1: validate every entry up-front. Zod's `parse` throws on
+  // invalid payloads, which we intentionally propagate so callers see the
+  // failure before any handler has been invoked.
+  const validated: Array<{ event: BusEvent<unknown>; payload: unknown }> = [];
+  for (const entry of entries) {
+    const parsed = entry.event.schema.parse(entry.payload);
+    validated.push({ event: entry.event, payload: parsed });
+  }
+
+  // Phase 2: fan out to handlers. A snapshot is taken per event so a
+  // handler that unsubscribes another handler during iteration cannot
+  // observe a mutating set.
+  for (const { event, payload } of validated) {
+    const handlers = eventHandlers.get(event.name);
+    if (!handlers) {
+      continue;
+    }
+    const snapshot = Array.from(handlers);
+    for (const handler of snapshot) {
+      try {
+        handler(payload);
+      } catch (err) {
+        console.error(`Error in event handler for ${event.name}:`, err);
+      }
+    }
+  }
+}
+
+/**
+ * Async variant of {@link publishAll}. Same fail-fast validation, but
+ * awaits every handler so async subscribers finish before the caller
+ * continues. Handlers run sequentially per entry (Promise.all across
+ * subscribers) and entries are processed in publication order.
+ */
+export async function publishAllAsync(entries: readonly BatchEntry[]): Promise<void> {
+  const validated: Array<{ event: BusEvent<unknown>; payload: unknown }> = [];
+  for (const entry of entries) {
+    const parsed = entry.event.schema.parse(entry.payload);
+    validated.push({ event: entry.event, payload: parsed });
+  }
+
+  for (const { event, payload } of validated) {
+    const handlers = eventHandlers.get(event.name);
+    if (!handlers) {
+      continue;
+    }
+    const snapshot = Array.from(handlers);
+    await Promise.all(
+      snapshot.map(async (handler) => {
+        try {
+          await handler(payload);
+        } catch (err) {
+          console.error(`Error in async event handler for ${event.name}:`, err);
+        }
+      })
+    );
+  }
+}
+// Alexi_change end
+
 /**
  * Wait for an event with optional timeout
  */

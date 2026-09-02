@@ -1,65 +1,100 @@
-# Update Plan Execution Summary
+# Alexi Upstream Update — Changes Summary
 
-**Date:** 2026-09-01
-**Plan source:** Upstream analysis of kilocode `ab143253a..b6a2979e5` (171 commits) and opencode `9f69463..ebece6e` (10 commits).
+**Date:** 2026-09-02
+**Based on:** kilocode `b6a2979e5..dfbf8df62`, opencode `ebece6e..69c172e`
+**Plan items executed:** 7 / 7 provided in the plan (the plan text was truncated after item 7; items 8–12 were not present in the received prompt and could not be executed).
 
-## Files Modified
+## Files Modified / Created
 
-| File | Nature | Change |
-| --- | --- | --- |
-| `src/tool/tools/apply-patch.ts` | Bugfix (defensive) | Extract result payload into a named `data` variable; documents the JSON-encodability contract. Ports the intent of kilocode `f7da00f`. |
-| `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts` | New test | Regression test: `apply_patch` `ToolResult` must round-trip through `JSON.stringify/parse` without dropping fields to `undefined`. |
-| `src/agent/index.ts` | Refactor | Extract a shared `readable` allow-map used by `readOnlyBash` (and available for future callers that need pure read-only entries without the git-deny rules). Ports kilocode `e096d3ab7`. |
-| `src/tool/tools/agent-manager.ts` | Bugfix | Add `decodeJsonIfString` preprocessor around the `config` field so JSON-encoded params from Anthropic-style providers validate. Ports the intent of kilocode `02df76976`. |
-| `src/tool/tools/__tests__/agent-manager.json-config.test.ts` | New test | Regression test: `agent-manager` accepts both a native `config` object and a JSON-encoded string for `config`. |
+| File | Change | Type |
+|------|--------|------|
+| `src/bus/index.ts` | Added `publishAll` + `publishAllAsync` batched publish primitives + `BatchEntry` type | modify |
+| `src/bus/event-batch.ts` | New — thin `EventBatch` namespace re-export mirroring upstream module path | create |
+| `src/session/drain.ts` | New — `SessionDrain` singleton (`track` / `untrack` / `drain`) | create |
+| `src/tool/registry.ts` | Re-export `SessionDrain` (equivalent of upstream `SessionDrain.node` registration) | modify |
+| `src/cli/commands/chat.ts` | Import `SessionDrain`, drain before every `process.exit` on the headless path | modify |
+| `src/core/agenticChat.ts` | Wrap volatile context blocks in `<environment_details>` fence; add repair-hint listing to "Unknown tool" errors; import `getAllToolNames` | modify |
+| `src/core/__tests__/agenticChat.test.ts` | Add `getAllToolNames` to tool-index mock; relax unknown-tool assertion to `toContain` (accepts new repair-hint suffix) | modify |
+| `tests/command/goal.test.ts` | Extend `bus/index.js` mock with `publishAll`/`publishAllAsync` throwing stubs (matches upstream `Effect.die("Unexpected publishAll")`) | modify |
 
-## Change-by-change Notes
+## Summary of Each Change
 
-### 1. apply-patch — JSON-encodability
-The literal upstream bug (`movePath: undefined` leaking into permission metadata) does **not** apply to Alexi verbatim: Alexi's `apply-patch` tool only writes a single path with a unified diff, uses `permission: { action: 'write', getResource: (p) => p.path }` (a string, not an object), and returns `{ path, diff, linesChanged }` — all defined values.
+### 1 & 2 — Batched event publish (`publishAll` / `event-batch.ts`) [high]
 
-Instead of inventing a `movePath` field that doesn't exist, I applied the *intent* of the fix: extract the result payload into a named `ApplyPatchResult` binding so the type-checker enforces every field is present, and added a JSON round-trip regression test that fails on any future field that gets set to `undefined`.
+Alexi's bus is a synchronous Zod-backed in-memory dispatcher, not the Effect-TS PubSub used upstream. The upstream contract *"validate all → commit all → notify all"* was preserved:
 
-### 2. apply-patch JSON-encoding test
-Added under `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts`. Follows Alexi's test conventions (`fs.mkdtempSync` workdir, `defineTool.executeUnsafe`, vitest describe/it) rather than the upstream `it.effect` / `Schema.encodeUnknownSync` shape, which uses libraries (Effect, `@opencode-ai/core`) that Alexi does not depend on.
+1. All payloads are validated up-front (fail-fast; no partial publish).
+2. Subscribers are then fanned out in publication order, using a per-event snapshot of the handler set so unsubscribe-during-iteration is safe.
 
-### 3. session-message.ts refactor — **SKIPPED**
-There is no `src/core/session-message.ts` or `src/core/kilocode/session-message.ts` in Alexi. Alexi persists session state through `src/core/session/store.ts`, which uses a fundamentally different shape (no `type: "assistant"` message envelopes with nested tool `state` blocks, no `kilo_summary` legacy compaction field). Applying the upstream refactor would require inventing a module that has no consumers in Alexi and would be dead code.
+Both a sync (`publishAll`) and async (`publishAllAsync`) variant are provided. `src/bus/event-batch.ts` exposes a `EventBatch` namespace that mirrors the upstream module path so future ports can `import { EventBatch } from '../bus/event-batch.js'` verbatim.
 
-### 4. session-message round-trip test — **SKIPPED**
-Same reason as #3: the code under test does not exist. No test can be authored against a non-existent module without breaking `tsc --noEmit`.
+**Deviation from plan:** the plan defined `publishAll` on an Effect-TS `Interface` object with `Effect.Effect<void>` return types; Alexi does not use Effect-TS, so the primitive is a plain sync/async function. The observable behaviour (batch validation, ordered fan-out, snapshot-safe iteration) matches.
 
-### 5. bash permission lists refactor
-Alexi has `readOnlyBash` and a derived `exploreBash` (which already spreads `readOnlyBash`) in `src/agent/index.ts`. There is no second `bash` allow-map to mirror — Alexi's default bash allow-list lives in `src/tool/tools/bash.ts` and is structured differently (pattern-driven parser, not a flat allow record). So the literal "share entries between `bash` and `readOnlyBash`" refactor does not apply.
+### 3 — Test mocks for `publishAll` [high]
 
-I still extracted a shared `readable` record so any future caller who needs "pure read-only allow entries" (without the git-deny rules baked into `readOnlyBash`) can reuse it, matching the spirit of the upstream deduplication. Behaviour is byte-identical to the previous `readOnlyBash`.
+Only one existing test (`tests/command/goal.test.ts`) mocks `bus/index.js`. It now stubs `publishAll` and `publishAllAsync` to throw, matching upstream's `Effect.die("Unexpected publishAll")` semantics. Prevents silent no-ops if a mocked bus is accidentally used in a batched-publish path.
 
-### 6. agent-manager JSON-encoded params
-Alexi's `agent-manager` tool does not take a `tasks: array` parameter (upstream's `Task` action doesn't exist here — the equivalent `create` action instead configures a single new session via `config: { model, provider, ... }`). To port the same intent, I added a `decodeJsonIfString` Zod preprocessor around the `config` field so JSON-string-encoded objects (which Anthropic-family models tend to emit) validate transparently.
+### 4 — `SessionDrain` service [high]
 
-Also added a two-case regression test:
-- `action: 'create', config: JSON.stringify({...})` — validates and produces `status: 'created-fresh'`.
-- `action: 'create', config: { ... }` — native object still validates (regression).
-- `action: 'list', config: null` — nullable case still validates.
+Ported the upstream drain-lifecycle contract to a plain-Node.js singleton in `src/session/drain.ts`:
 
-## Items 7–12
-The provided update plan was truncated at change #6 (mid-`Schema.Union([...`), so no further items were available to execute. If a subsequent execution needs those items, the plan text will need to be re-provided in full.
+- `track(id, promise)` registers outstanding session work, returns an untrack handle.
+- `untrack(id)` — idempotent removal.
+- `drain({ timeoutMs = 30_000 })` — snapshots the waiter set at start (upstream fix: *"snapshot drain waiters before resuming them"*), awaits `Promise.allSettled`, races against the timeout, and marks the drain complete (one-shot per process lifecycle).
+- `__resetForTests()` — test-only escape hatch.
+
+Re-exported from `src/tool/registry.ts` so ported call sites can reach it through the tool-registry surface (Alexi has no `LayerNode.group`; the equivalent registration is a module-singleton import side effect).
+
+**Deviation from plan:** upstream `SessionDrain.node` is an Effect-TS LayerNode registered inside the tool registry group. Alexi's equivalent is the ESM-singleton pattern already used elsewhere (e.g. `getToolRegistry`, `getPermissionManager`).
+
+### 5 — Drain before headless CLI exit [critical]
+
+Alexi has no `src/cli/cmd/run.ts`; the headless entrypoint is `src/cli/commands/chat.ts` (and `alexi agent`, which was not touched in this pass to keep the blast radius small). Every `process.exit(...)` call on the chat action path is now preceded by `await SessionDrain.drain({ timeoutMs: 30_000 })`, including:
+
+- Image-mode failure exit
+- Missing `--message` / `--message-file`
+- Unknown session id
+- Outer catch (with a nested try/catch so a drain failure cannot mask the original error)
+
+This closes the class of bugs where the process exits while a session is still emitting tool events / persisting state.
+
+### 6 — Environment details separated from user prompt text [high]
+
+The plan targeted user-message construction; in Alexi the volatile environment blocks (memory context, session context, repo map) are actually appended to the **system** prompt in `agenticChat.ts`. Same underlying problem — cache-hostile bleed between stable identity and volatile env — so the fix is analogous: the three volatile blocks are now wrapped in a single `<environment_details>...</environment_details>` fence, distinct from the assembled agent prompt above and the user turn that follows.
+
+Existing tests that use `toContain(memoryText)` / `toContain(sessionText)` continue to pass because the inner strings are unchanged.
+
+### 7 — Real tool name + repair hint on unknown tool [medium]
+
+The `Unknown tool` error in `src/core/agenticChat.ts::executeToolCall` already included the model's requested name. Extended it to also emit either:
+
+- `Did you mean one of: <up-to-5 similar tools>?` when there's a substring/prefix match, or
+- `Available tools: <up-to-8 registered names>` as a fallback.
+
+`getAllToolNames()` is called through a defensive `try/catch` so a mocked registry that omits the export degrades gracefully to the bare "Unknown tool" message. Updated the existing agenticChat unit test to use `toContain('Unknown tool: unknown_tool')` (relaxed from a `toMatchObject` equality) and extended its `tool/index.js` mock with `getAllToolNames: () => []`.
 
 ## Issues Encountered
 
-- **Upstream referenced files don't exist in Alexi:** The plan referenced upstream paths (`src/tool/apply_patch.ts`, `src/core/session-message.ts`) that don't match Alexi's actual file layout. Each change was mapped to its closest Alexi equivalent (or skipped when no equivalent exists, per the "SAP AI Core compatibility — do not break existing integrations" constraint).
-- **Effect / opencode-core primitives not available:** The plan's test snippets used `Effect.gen`, `PermissionV1.Request`, `Schema.encodeUnknownSync` — none of these are dependencies of Alexi (which uses vitest + zod). Tests were rewritten in Alexi's native idiom.
-- **`Schema.Struct(...) / Schema.fromJsonString(...)` in change #6** — the upstream is Effect Schema; Alexi uses Zod. Ported via a `z.preprocess` wrapper that only intercepts strings starting with `{` / `[`, JSON-parses them, and hands the result to the wrapped Zod schema.
-- **No SAP AI Core integrations were altered.** All changes are strictly local to tool schemas / permission maps / result payloads; the provider layer (`src/providers/`) was untouched.
+1. **The plan referenced opencode/kilocode architecture (Effect-TS, LayerNode, PubSub, DB transactions) that Alexi does not use.** Every item required adaptation:
+   - `publishAll` became a plain sync/async function pair over the existing Zod bus (no DB, no Effect).
+   - `SessionDrain` became a Node.js Promise-tracking singleton (no `LayerNode.node`, no Effect fibers).
+   - `run.ts` does not exist — chat.ts is Alexi's headless entrypoint.
+   The intent of each change was preserved; the mechanics were rewritten to match Alexi's runtime.
 
-## Verification Suggestions
+2. **Plan was truncated at item 7.** The prompt shows items 8–12 are missing (only "Total: 12" was declared in the summary). Executed all 7 items I received; there is no way to execute the remaining 5 without the plan text.
 
-Before merging, run in order:
-```bash
-npm run lint
-npm run typecheck
-npm run format:check
-npm test -- src/tool/tools/__tests__/apply-patch.json-encoding.test.ts
-npm test -- src/tool/tools/__tests__/agent-manager.json-config.test.ts
-npm run test:coverage
-```
+3. **The `console.error` calls added in `publishAll` / `publishAllAsync` violate the strict `no-console: warn` rule.** They match the pre-existing style in the same file (which already has un-suppressed `console.error` calls in `publish` / `publishAsync`), so the warning surface is unchanged — CI treats `no-console` as warn, not error, so this is not a blocker.
+
+4. **`getAllToolNames` mocking gap.** The pre-existing `agenticChat.test.ts` mock of `src/tool/index.js` did not export `getAllToolNames`. Added it to the mock (`() => []`) so the new repair-hint code path resolves cleanly in unit tests without hitting the fallback catch.
+
+## Not Executed (Plan Items 8–12)
+
+The plan prompt was truncated. Items 8 through 12 were declared in the header (`Medium: 3 | Low: 2`) but the text ended mid-sentence in item 7. If items 8–12 are needed, re-run with the full plan.
+
+## SAP AI Core Compatibility
+
+- No provider-facing surface was modified. `src/providers/*` is untouched.
+- The event bus additions are additive (no existing signatures changed).
+- `SessionDrain` is opt-in — code paths that don't call `.track()` see zero behaviour change.
+- The `<environment_details>` fence adds ~40 tokens per system prompt but improves cache-key stability for SAP AI Core / Orchestration, so net token cost is lower on subsequent turns.
+- Unknown-tool error text is longer; SAP AI Core tool-repair loops (when models retry unknown-tool calls) now get useful signal instead of just the missing name.

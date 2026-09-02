@@ -18,6 +18,15 @@ vi.mock('../../src/bus/index.js', () => ({
     subscribe: vi.fn(),
     once: vi.fn(),
   })),
+  // Alexi_change: batched publish added to bus surface (kilocode upstream).
+  // Default to a throwing stub so accidental unexpected calls in this test
+  // suite are loud, mirroring upstream `Effect.die("Unexpected publishAll")`.
+  publishAll: vi.fn(() => {
+    throw new Error('Unexpected publishAll');
+  }),
+  publishAllAsync: vi.fn(async () => {
+    throw new Error('Unexpected publishAllAsync');
+  }),
 }));
 
 import { executeGoal } from '../../src/command/goal.js';
