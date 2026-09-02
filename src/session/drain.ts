@@ -122,9 +122,10 @@ class SessionDrainImpl {
 
     // Snapshot the waiter set BEFORE awaiting — otherwise a handler that
     // schedules follow-up work during its own settle would race with us.
-    const snapshot: TrackedWork[] = Array.from(this.pending.entries()).map(
-      ([id, promise]) => ({ id, promise })
-    );
+    const snapshot: TrackedWork[] = Array.from(this.pending.entries()).map(([id, promise]) => ({
+      id,
+      promise,
+    }));
 
     const settle = Promise.allSettled(snapshot.map((entry) => entry.promise));
 
