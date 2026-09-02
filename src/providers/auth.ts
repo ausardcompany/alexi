@@ -35,6 +35,48 @@ import { TokenRefreshed } from '../bus/index.js';
 import { saveToken } from '../utils/tokenStorage.js';
 import { getConfigPersistAuthTokens } from '../config/userConfig.js';
 
+/**
+ * Sanitize an API key value at the config write boundary.
+ *
+ * Users routinely paste API keys into masked input fields that copied
+ * additional characters from the clipboard: trailing newlines, BOM bytes
+ * (U+FEFF), zero-width spaces (U+200B..U+200D), other formatting or
+ * control code points, or surrounding whitespace. Providers then reject
+ * the corrupted key with a 401 that is indistinguishable from a genuinely
+ * wrong key, and the masked field hides the corruption from the user.
+ *
+ * This helper enforces the invariants the storage layer expects:
+ *
+ *   1. Strip all Unicode control characters (`\p{Cc}`) — includes CR/LF,
+ *      NUL, and every C0/C1 control code point.
+ *   2. Strip all Unicode formatting characters (`\p{Cf}`) — includes
+ *      zero-width spaces, joiners, BOM, and bidirectional marks.
+ *   3. Trim surrounding whitespace (spaces, tabs, thin spaces, etc.).
+ *   4. If the input was non-empty but the sanitized result is empty
+ *      (i.e. the user pasted only whitespace / invisibles), return an
+ *      empty string so the caller can treat the field as "cleared" —
+ *      preserving the "whitespace-only clears the key" contract that
+ *      matches the upstream Cline #13549 behaviour.
+ *
+ * Non-string inputs (`null`, `undefined`, numbers, arrays) yield `''`
+ * so callers can safely funnel arbitrary config values through this
+ * helper without a pre-check.
+ *
+ * Mirrors upstream Cline PR #13549. Do NOT log the input or the return
+ * value — API keys are secrets.
+ */
+export function sanitizeApiKey(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  // Strip control + formatting characters. `\p{Cc}` covers C0/C1
+  // controls (including NUL, CR, LF, TAB when at code-point level).
+  // `\p{Cf}` covers zero-width spaces, joiners, BOM, bidi marks.
+  const stripped = value.replace(/[\p{Cc}\p{Cf}]/gu, '');
+  const trimmed = stripped.trim();
+  return trimmed;
+}
+
 export class AuthError extends Error {
   constructor(
     message: string,

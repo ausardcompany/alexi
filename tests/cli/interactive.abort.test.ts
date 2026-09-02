@@ -102,4 +102,57 @@ describe('handleStreamingError (interactive REPL abort handling)', () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(logs.some((l) => l.includes('Error: boom'))).toBe(true);
   });
+
+  // Auth-classified errors (HTTP 401/403) should be rewritten into
+  // actionable guidance rather than surfacing the raw provider JSON.
+  // Mirrors Cline PR #13549. See `sanitizeApiKey` + `classifyProviderError`.
+  describe('auth error rewriting (issue #1625)', () => {
+    it('rewrites a 401 into actionable guidance and keeps raw response as diagnostic tail', () => {
+      const err = Object.assign(new Error('{"detail":"Invalid API Key"}'), {
+        status: 401,
+      });
+
+      handleStreamingError(err);
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      // Actionable guidance is emitted...
+      expect(logs.some((l) => l.includes('Authentication failed'))).toBe(true);
+      expect(logs.some((l) => l.includes('API key'))).toBe(true);
+      // ...and the raw provider message survives as a tail so operators
+      // can still debug.
+      expect(logs.some((l) => l.includes('Invalid API Key'))).toBe(true);
+      // Must NOT render the generic "Error: ..." fallback for auth errors.
+      expect(logs.some((l) => /^\s*Error: /.test(l))).toBe(false);
+    });
+
+    it('rewrites a 403 the same way as a 401', () => {
+      const err = Object.assign(new Error('Forbidden'), { statusCode: 403 });
+
+      handleStreamingError(err);
+
+      expect(logs.some((l) => l.includes('Authentication failed'))).toBe(true);
+      expect(logs.some((l) => l.includes('Forbidden'))).toBe(true);
+    });
+
+    it('leaves non-auth errors untouched (e.g. 500 generic failure)', () => {
+      const err = Object.assign(new Error('internal server error'), { status: 500 });
+
+      handleStreamingError(err);
+
+      expect(logs.some((l) => l.includes('Authentication failed'))).toBe(false);
+      expect(logs.some((l) => l.includes('Error: internal server error'))).toBe(true);
+    });
+
+    it('does not treat a generic Error mentioning "unauthorized" in prose as auth', () => {
+      // The classifier is status-based for auth, so a message that
+      // merely quotes the word without an HTTP status must not
+      // trigger the auth rewrite.
+      const err = new Error('The operation is not unauthorized to run tools');
+
+      handleStreamingError(err);
+
+      expect(logs.some((l) => l.includes('Authentication failed'))).toBe(false);
+      expect(logs.some((l) => l.includes('Error:'))).toBe(true);
+    });
+  });
 });
