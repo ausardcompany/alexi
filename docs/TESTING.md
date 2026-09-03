@@ -3337,6 +3337,71 @@ Reference patterns:
 
 The test complements — does not replace — the existing "model receives the payload verbatim" tests earlier in the file. Both paths must pass: the model still sees the payload via the in-memory `messages` array, and the session file records it with the display-role override.
 
+### Mocking `src/tool/index.js` in hook and agentic-chat suites
+
+Every suite that exercises `agenticChat`, an orchestrator hook, or a session-driven tool path also mocks `src/tool/index.js` so it can substitute a fake `ToolRegistry` and inspect `registerTool` calls without spinning up the real permission layer. The historical form of the mock was a plain replacement factory that returned only the two symbols the suite actually manipulated:
+
+```typescript
+// Anti-pattern — do NOT copy this into new tests
+vi.mock('../../src/tool/index.js', () => ({
+  getToolRegistry: () => mockToolRegistry,
+  registerTool: vi.fn(),
+}));
+```
+
+That shape is a landmine. `src/tool/index.ts` also exports `defineTool` (the `Tool.define()` factory every tool implementation uses, `src/tool/index.ts:454`), `getAllToolNames` (used by the unknown-tool repair-hint path in `src/core/agenticChat.ts`), `getTool`, `getAllToolSchemas`, `describeTools`, `truncateOutput`, `MAX_LINES`, `MAX_BYTES`, `persistLargeOutput`, `cleanupToolOutputs`, `TOOL_OUTPUT_DIR`, and the `ToolContext` / `ToolResult` / schema type re-exports. A replacement factory shadows all of them with `undefined`, so any module that imports `defineTool` from `../../src/tool/index.js` (for example every tool file registered transitively by `registerBuiltInTools`) resolves the identifier to `undefined` at import time and throws `TypeError: defineTool is not a function` the moment the module top-level `defineTool({...})` call runs. The failure is silent-until-invocation and cross-suite (one test file taints the module cache and later suites in the same worker inherit the poisoned `defineTool`), which was the failure mode fixed in commit `0e7d0b3c fix(tests): include defineTool in tool/index mocks [autohealing]` (2026-09-03).
+
+The canonical form is to `importActual` the real module and spread it, overriding only the two symbols the suite actually needs to stub:
+
+```typescript
+// tests/hooks/context-injection.test.ts:64
+// tests/hooks/continueOnBlock.test.ts:58
+// tests/hooks/markup-sanitization.test.ts:56
+// tests/orchestrator-hooks.test.ts:72
+// tests/core/agenticChat.permissionLeak.test.ts:52
+const mockToolRegistry = {
+  register: vi.fn(),
+  list: vi.fn(() => []),
+  get: vi.fn(),
+};
+
+vi.mock('../../src/tool/index.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../src/tool/index.js')>('../../src/tool/index.js');
+  return {
+    ...actual,
+    getToolRegistry: () => mockToolRegistry,
+    registerTool: vi.fn(),
+  };
+});
+```
+
+`src/core/__tests__/agenticChat.test.ts` additionally keeps a `getAllToolNames: vi.fn(() => [])` override because the unknown-tool repair-hint path (`f1330aceb` port, see `docs/ARCHITECTURE.md`) calls it to enumerate candidate tool names, and returning an empty list keeps the bare `Unknown tool: <name>` string as the primary assertion signal:
+
+```typescript
+// src/core/__tests__/agenticChat.test.ts:48
+vi.mock('../../tool/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../tool/index.js')>('../../tool/index.js');
+  return {
+    ...actual,
+    getToolRegistry: () => mockToolRegistry,
+    registerTool: vi.fn(),
+    // agenticChat calls getAllToolNames() to build the "Did you mean" hint;
+    // returning [] keeps the bare error string as the primary signal here.
+    getAllToolNames: vi.fn(() => []),
+  };
+});
+```
+
+Key patterns:
+
+1. **Always `importActual` and spread.** Never return a bare replacement object for `src/tool/index.js` — every hook, orchestrator, and agentic-chat suite in `tests/` now goes through this pattern. New suites that mock this module MUST follow suit.
+2. **Type the `importActual` generic.** `vi.importActual<typeof import('../../src/tool/index.js')>('../../src/tool/index.js')` gives the returned value the exact type of the real module, so TypeScript catches a stale override key (`registerTolo`, `getToolRegisrty`) the moment the source file renames or removes an export.
+3. **Override only what you inspect.** `getToolRegistry` (to hand back `mockToolRegistry`) and `registerTool` (to spy on registration) are the two the hook suites actually need. `defineTool`, `getAllToolNames`, and the truncation / persistence helpers stay real so transitively loaded tool modules initialize cleanly.
+4. **Pair with `vi.mock('../../src/tool/tools/index.js', ...)`.** Every suite that mocks `src/tool/index.js` also mocks the built-in tool registration module (`registerBuiltInTools: vi.fn()`) so `agenticChat` startup does not try to register the real 30-tool set against the fake registry. Both mocks live at file scope, right after the top-level imports, and Vitest hoists them.
+
+Regression contract: if any of the six suites listed above ever falls back to the bare replacement factory, the paired `tests/tool/tools/*.test.ts` suites that exercise tool implementations will fail with `TypeError: defineTool is not a function` on the second file loaded by the same Vitest worker. Reference tests: `src/core/__tests__/agenticChat.test.ts:48`, `tests/core/agenticChat.permissionLeak.test.ts:52`, `tests/hooks/context-injection.test.ts:64`, `tests/hooks/continueOnBlock.test.ts:58`, `tests/hooks/markup-sanitization.test.ts:56`, `tests/orchestrator-hooks.test.ts:72`.
+
 ### Headless permission auto-responder tests
 
 The `--yolo` / default-deny path in `src/cli/commands/agent.ts` can be exercised without spinning up a real provider: publish a synthetic `PermissionRequested` event on the bus and assert a `PermissionResponse` is published with the expected `granted` value. Unsubscribe on `process.once('exit', ...)` is the leak-prevention contract — a test that spawns two `agent` invocations back-to-back would otherwise see the earlier subscription answer the later invocation's request.

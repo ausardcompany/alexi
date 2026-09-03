@@ -63,6 +63,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `agenticChat` (`src/core/agenticChat.ts`) now threads `sessionManager` onto every `ToolContext` and calls `sessionManager.abortSession(currentSessionId, signal.reason)` when its own parent signal aborts, so child provider requests and tool loops stop immediately instead of continuing until they notice the parent signal on their own.
 
+### Fixed
+
+- **Hook and agentic-chat test mocks now preserve `defineTool` (`src/core/__tests__/agenticChat.test.ts`, `tests/core/agenticChat.permissionLeak.test.ts`, `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, `tests/orchestrator-hooks.test.ts`, commit `0e7d0b3c` `fix(tests): include defineTool in tool/index mocks [autohealing]`, 2026-09-03)**: Six suites that mock `src/tool/index.js` had been supplying full replacement factories that exported only `getToolRegistry` and `registerTool`, which shadowed the real `defineTool` export (`src/tool/index.ts:454`) and every other public re-export from the module (`getAllToolNames`, `getTool`, `describeTools`, `getAllToolSchemas`, `truncateOutput`, `MAX_LINES`, `MAX_BYTES`, `persistLargeOutput`, `cleanupToolOutputs`, `TOOL_OUTPUT_DIR`, the `ToolContext` / `ToolResult` type re-exports). Any test-touched module that imports `defineTool` from `../../src/tool/index.js` (for example, any tool implementation transitively loaded by `registerBuiltInTools`) was resolving `defineTool` to `undefined` at import time, which produced a `TypeError: defineTool is not a function` in follow-on cases and masked the actual assertion the suite was written to pin. The fix converts every occurrence from a plain replacement factory:
+
+  ```typescript
+  // Before — replacement factory shadows every other export
+  vi.mock('../../src/tool/index.js', () => ({
+    getToolRegistry: () => mockToolRegistry,
+    registerTool: vi.fn(),
+  }));
+  ```
+
+  into an `importActual`-and-spread pattern that only overrides the two symbols the suite actually needs to stub:
+
+  ```typescript
+  // After — real module preserved, only the registry accessor and the
+  // register hook are replaced
+  vi.mock('../../src/tool/index.js', async () => {
+    const actual =
+      await vi.importActual<typeof import('../../src/tool/index.js')>('../../src/tool/index.js');
+    return {
+      ...actual,
+      getToolRegistry: () => mockToolRegistry,
+      registerTool: vi.fn(),
+    };
+  });
+  ```
+
+  The typed generic on `vi.importActual<typeof import('../../src/tool/index.js')>` keeps TypeScript strict about the mock shape — if `src/tool/index.ts` ever renames or removes an export the mock factory still type-checks, and the compiler flags the override key as invalid the moment its target disappears. `agenticChat.test.ts` additionally keeps the `getAllToolNames: vi.fn(() => [])` override that pins the empty-registry hint contract for the unknown-tool error path (see `### Changed` above, `f1330aceb` port). Pure test-hygiene fix — no runtime code changed, `src/tool/index.ts` public surface is byte-identical, and the underlying suites still assert on the same tool-execution / hook-context behaviours. Diff statistics: 6 files changed, 58 insertions(+), 29 deletions(-). Reference pattern documented in `docs/TESTING.md` under **Mocking `src/tool/index.js` in hook and agentic-chat suites**.
+
 ### Changed
 
 - **`task` tool wires child sessions to the parent abort chain (`src/tool/tools/task.ts`)**: When a `SessionManager` is available on the `ToolContext`, `task.execute` now materialises a real child session via `sessionManager.createSession(resolvedModelID, parentSessionId, { signal: context.signal })` bracketed by `releaseSession` in a `finally` block. If the parent was already aborted at spawn time, the tool refuses to start the subagent (returns `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of wasting the cost tracker's provider budget on a request whose result no consumer will read. Mid-execution abort surfaces as `{ status: 'cancelled', usage }`. When no session manager is present (unit tests, one-shot CLI paths) the tool falls back to the previous stub behaviour rather than crash.
