@@ -473,6 +473,22 @@ if (requestedModel || requestedProvider || requestedReasoning) {
 
 Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
 
+**Additional worked example — `experimental.sharedAgentBoard` (2026-09-03, ports upstream kilocode `162e30d23`).** The same shape is applied to gate the `kilo_board_read` / `kilo_board_write` tools. The registration site sits in `src/tool/tools/index.ts:118` inside `registerBuiltInTools()`, which reads the flag once per process and registers the tools only when the flag is on:
+
+```typescript
+export function registerBuiltInTools(): void {
+  for (const tool of builtInTools) {
+    registerTool(tool as Tool<any, any>);
+  }
+  if (getConfigSharedAgentBoard()) {
+    registerTool(boardReadTool as Tool<any, any>);
+    registerTool(boardWriteTool as Tool<any, any>);
+  }
+}
+```
+
+Prefer gating at **registration time** (as above) when the tool should be invisible to the model when the flag is off — the model does not learn about `kilo_board_*` at all when the flag is `false`, so it cannot mistakenly call them. Prefer gating at the **tool boundary** (returning a `success: false` error) when the tool is always present but its behaviour changes with the flag (e.g. per-task model selection on the `task` tool). Both patterns share the same `experimental.*` config helper contract.
+
 ### JSON-tolerant tool parameter decoding
 
 Some LLM providers (Anthropic in particular) emit structured tool-call parameters as JSON-encoded strings rather than the native object shape. Tools with structural fields — `config`, `tasks`, `arguments` — should wrap those fields with a `decodeJsonIfString` preprocessor so the same tool works across providers without provider-specific pre-processing upstream. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-01, `1.22.8`, ports upstream kilocode `02df76976`).

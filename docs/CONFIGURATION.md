@@ -1338,6 +1338,74 @@ is equivalent to:
 
 Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings; the tool now decodes them transparently before Zod validation. Malformed JSON strings pass through unchanged so the wrapped schema still emits a useful validation error rather than a hard tool crash. There is no configuration flag for this behaviour — it is always on and transparent to callers that already emit native objects.
 
+## Experimental Shared Agent Board
+
+Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23` + accompanying store/migration commits). Adds two opt-in coordination tools — `kilo_board_read` and `kilo_board_write` — that let subagents spawned by the `task` tool broadcast messages to their swarm peers without round-tripping through the parent orchestrator. The default is `false` so subagent invocations retain Alexi's classical single-agent-per-task behaviour unless the operator opts in.
+
+### Enabling
+
+Add the flag to `~/.alexi/config.json`:
+
+```json
+{
+  "experimental": {
+    "sharedAgentBoard": true
+  }
+}
+```
+
+Or programmatically:
+
+```typescript
+import { setConfigSharedAgentBoard } from './config/userConfig.js';
+
+setConfigSharedAgentBoard(true);
+```
+
+The read helper `getConfigSharedAgentBoard()` returns `false` for missing, non-object, array, or non-boolean values, so a corrupt config never accidentally enables the feature. The flag lives inside the same `experimental` object as `task_model_selection`, so both can coexist:
+
+```json
+{
+  "experimental": {
+    "task_model_selection": true,
+    "sharedAgentBoard": true
+  }
+}
+```
+
+### Behaviour
+
+When enabled:
+
+- `registerBuiltInTools()` (`src/tool/tools/index.ts:118`) registers `boardReadTool` and `boardWriteTool` alongside the other built-ins. The flag is read once per process at registration time — a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn).
+- `kilo_board_read` reads new messages posted strictly after an optional ISO 8601 `since` timestamp, capped by `limit` (default 50, max 100). After reading, the tool acknowledges the returned message ids against `context.sessionId` so the same messages do not re-surface on subsequent turns. When no board is attached to the current session (e.g. the operator flipped the flag but is running outside a swarm), the tool returns `{ success: true, data: { messages: [] }, hint: 'No shared board is attached to this session.' }` — it never fails.
+- `kilo_board_write` posts a 1-4000 character message to the shared board. Author defaults to `'agent'`; when the orchestrator surfaces an explicit `agentName` on the `ToolContext`, that value is used instead. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+
+When disabled (default):
+
+- Neither `kilo_board_read` nor `kilo_board_write` is registered. The model does not see them in the tool schema and cannot call them.
+- No board database is created.
+
+### Storage
+
+Board data lives in a dedicated SQLite database at `~/.alexi/board.db` (separate from the sessions FTS index so a corrupted board cannot poison session search). Three tables:
+
+| Table                 | Purpose                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `kilo_board`          | One row per board (`id`, `task_id`, `created_at`).                                            |
+| `kilo_board_message`  | Message log (`id`, `board_id`, `session_id`, `author`, `content`, `created_at`).              |
+| `kilo_board_read`     | Read-acknowledgement rows (`board_id`, `session_id`, `message_id`) for stale-banner suppression. |
+
+The schema is applied eagerly on first access via idempotent `CREATE ... IF NOT EXISTS` statements defined in `src/core/database/migrations/20260828074139_kilocode_board.ts` and exported as `BOARD_SCHEMA_STATEMENTS`. When `better-sqlite3` is unavailable, `BoardStore` degrades gracefully: `read` returns `[]`, `write` returns the message shape without persisting, and `acknowledgeReads` is a no-op.
+
+To reset the board across a test run or a broken state, delete the file:
+
+```bash
+rm ~/.alexi/board.db
+```
+
+See [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the design notes and public TypeScript surface.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

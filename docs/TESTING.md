@@ -1388,6 +1388,84 @@ it('returns SelectModelError for unknown model', () => {
 });
 ```
 
+### Testing the Shared Agent Board
+
+Introduced 2026-09-03 (`1.22.10`). The `experimental.sharedAgentBoard` flag gates registration of `kilo_board_read` / `kilo_board_write`. Tests that exercise the board should follow three patterns:
+
+**Pattern 1 — Spy on the config flag and reset the store between cases.** The `BoardStore` module-level singleton persists to `~/.alexi/board.db`, so tests MUST call `BoardStore.__resetForTests()` and `BoardContext.__resetForTests()` in `beforeEach` to avoid cross-test contamination. Do not call these helpers from production code.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as userConfig from '../../src/config/userConfig.js';
+import { BoardStore } from '../../src/core/database/boardStore.js';
+import { BoardContext } from '../../src/core/database/boardContext.js';
+
+describe('shared agent board', () => {
+  let flagSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    BoardStore.__resetForTests();
+    BoardContext.__resetForTests();
+    flagSpy = vi.spyOn(userConfig, 'getConfigSharedAgentBoard');
+  });
+
+  afterEach(() => {
+    flagSpy.mockRestore();
+  });
+
+  it('read tool returns empty + hint when no board is attached', async () => {
+    flagSpy.mockReturnValue(true);
+    const result = await boardReadTool.execute({}, makeContext());
+    expect(result.success).toBe(true);
+    expect(result.data.messages).toEqual([]);
+    expect(result.hint).toMatch(/No shared board/);
+  });
+
+  it('write tool errors when no board is attached', async () => {
+    flagSpy.mockReturnValue(true);
+    const result = await boardWriteTool.execute({ content: 'hello' }, makeContext());
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/cannot post/);
+  });
+});
+```
+
+**Pattern 2 — Attach a board, then exercise the round-trip.** Attach `sessionID` → `boardId` via `BoardContext.attach`, ensure the board row exists via `BoardStore.ensure`, then round-trip through `write` / `read`.
+
+```typescript
+it('read after write returns the posted message', async () => {
+  const sessionID = 'sess-1';
+  const boardId = 'board-1';
+  BoardContext.attach(sessionID, boardId);
+  await BoardStore.ensure(boardId, 'task-1');
+  await BoardStore.write(boardId, { sessionID, author: 'agent-a', content: 'hi' });
+  const messages = await BoardStore.read(boardId);
+  expect(messages).toHaveLength(1);
+  expect(messages[0].content).toBe('hi');
+});
+```
+
+**Pattern 3 — Verify acknowledge suppresses re-reads.** Upstream fix `162e30d23` — the `kilo_board_read` tool acknowledges every returned message so the same content does not re-surface. Assert against `BoardStore.acknowledgeReads` behaviour directly rather than the tool wrapper when checking the acknowledgement contract.
+
+```typescript
+it('acknowledge is idempotent for duplicate message ids', async () => {
+  const boardId = 'b1';
+  await BoardStore.ensure(boardId, 't1');
+  const msg = await BoardStore.write(boardId, {
+    sessionID: 's1',
+    author: 'a',
+    content: 'x',
+  });
+  await BoardStore.acknowledgeReads(boardId, 's1', [msg.id]);
+  // Second call is a no-op via ON CONFLICT DO NOTHING — must not throw.
+  await expect(
+    BoardStore.acknowledgeReads(boardId, 's1', [msg.id])
+  ).resolves.toBeUndefined();
+});
+```
+
+Environments without a working `better-sqlite3` binding should exercise the graceful-degradation path: `read` returns `[]`, `write` returns the message shape without persistence, `acknowledgeReads` is a no-op. Tests that assert against persistence MUST skip on systems where `nodeRequire('better-sqlite3')` throws, or set up a fresh temp `HOME` via `vi.spyOn(os, 'homedir')` so the DB file is created inside the test's `mkdtempSync` directory.
+
 ### Testing JSON-encoded Tool Params Tolerance
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings rather than the native object shape. The `agent_manager` tool now decodes JSON-encoded `config` strings transparently via the `decodeJsonIfString` Zod preprocessor in `src/tool/tools/agent-manager.ts`. Tests should exercise both shapes to guarantee no regression across providers.

@@ -2632,6 +2632,100 @@ interface TaskResult {
 }
 ```
 
+## Shared Agent Board (`src/core/database/boardStore.ts`)
+
+New 1.22.10 module (2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits). Adds a task-scoped coordination channel for multi-agent swarms — a per-task chat room the model can use to broadcast status, questions, or intermediate results to peer subagents without round-tripping through the parent orchestrator. Gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json` (default `false`); when the flag is off the tools are not registered and the model never learns about them.
+
+### Registration flow
+
+```mermaid
+flowchart TD
+    Start[registerBuiltInTools called] --> BuiltIn[Register standard built-ins:<br/>read, write, edit, glob, grep, task, ...]
+    BuiltIn --> Flag{getConfigSharedAgentBoard&#40;&#41;?}
+    Flag -->|false| Done[Board tools NOT registered<br/>Model does not see them]
+    Flag -->|true| RegisterRead[Register kilo_board_read]
+    RegisterRead --> RegisterWrite[Register kilo_board_write]
+    RegisterWrite --> Done2[Board tools visible in schema]
+
+    subgraph runtime[At tool-call time]
+      ToolCall[Model calls kilo_board_read/write] --> Resolve[BoardContext.resolve&#40;sessionID&#41;]
+      Resolve --> Attached{boardId found?}
+      Attached -->|no| ReadHint[read: return empty + hint]
+      Attached -->|no| WriteErr[write: return error]
+      Attached -->|yes| Store[BoardStore.read / write<br/>~/.alexi/board.db]
+    end
+```
+
+### Public API
+
+```typescript
+// src/core/database/boardStore.ts
+
+export interface BoardMessage {
+  id: string;
+  boardId: string;
+  sessionID: string;
+  author: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface BoardWriteInput {
+  sessionID: string;
+  author: string;
+  content: string;
+}
+
+export interface BoardReadOptions {
+  /** ISO timestamp — only return messages strictly newer than this. */
+  since?: string;
+  /** Maximum number of messages to return. Defaults to 50. */
+  limit?: number;
+}
+
+export const BoardStore = {
+  ensure(boardId: string, taskId: string): Promise<void>;
+  write(boardId: string, input: BoardWriteInput): Promise<BoardMessage>;
+  read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
+  /** Upstream fix 162e30d23: suppress stale "new messages" banners. */
+  acknowledgeReads(boardId: string, sessionID: string, messageIds: readonly string[]): Promise<void>;
+  /** Test-only. Production code MUST NOT call. */
+  __resetForTests(): void;
+};
+```
+
+```typescript
+// src/core/database/boardContext.ts
+
+export const BoardContext = {
+  attach(sessionID: string, boardId: string): void;
+  resolve(sessionID: string | undefined): Promise<string | undefined>;
+  detach(sessionID: string): void;
+  __resetForTests(): void;
+};
+```
+
+### Storage and graceful degradation
+
+Board data lives at `~/.alexi/board.db` (separate from `~/.alexi/sessions.db` so a corrupted board cannot poison session search). The schema — `kilo_board`, `kilo_board_message`, `kilo_board_read` — is applied eagerly on first `BoardStore` access via idempotent `CREATE ... IF NOT EXISTS` statements exported as `BOARD_SCHEMA_STATEMENTS` from `src/core/database/migrations/20260828074139_kilocode_board.ts`. The three tables:
+
+- `kilo_board` — `id PRIMARY KEY`, `task_id NOT NULL`, `created_at NOT NULL`. One row per board.
+- `kilo_board_message` — `id PRIMARY KEY`, `board_id NOT NULL REFERENCES kilo_board(id) ON DELETE CASCADE`, `session_id`, `author`, `content`, `created_at`. Indexed by `(board_id, created_at)` for the chronological read query.
+- `kilo_board_read` — `(board_id, session_id, message_id)` composite PK. Written by `acknowledgeReads` so already-read messages do not re-surface on subsequent turns (upstream fix `162e30d23`).
+
+When `better-sqlite3` is unavailable (native binding missing), `BoardStore` degrades gracefully: `read` returns `[]`, `write` returns the message shape without persisting, and `acknowledgeReads` is a no-op. This mirrors the existing lazy-load pattern in `src/session/search.ts` and keeps the CLI usable on hosts where the native module cannot be built.
+
+### Tool wiring
+
+Two `defineTool` handlers in `src/tool/tools/board.ts`:
+
+- **`kilo_board_read`** — resolves the current session's `boardId` via `BoardContext.resolve(context.sessionId)`, reads via `BoardStore.read`, then calls `BoardStore.acknowledgeReads` on the returned message ids. When no board is attached, returns `{ success: true, data: { messages: [] }, hint: 'No shared board is attached to this session.' }` so the tool never fails outside a swarm context.
+- **`kilo_board_write`** — resolves the `boardId` the same way, then calls `BoardStore.write` with `context.sessionId` and either the explicit `agentName` on `ToolContext` (surfaced by the `task` tool's swarm-identity propagation) or the fallback `'agent'`. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+
+Both tools are re-exported from `src/tool/registry.ts` so external consumers can build a tool list identical to the upstream registry shape. Actual registration into the runtime `ToolRegistry` happens in `src/tool/tools/index.ts:118`, gated by `getConfigSharedAgentBoard()`.
+
+See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
+
 ## PowerShell 7 Resolver (`src/core/powershell.ts`)
 
 New 1.22.1 module that detects `pwsh.exe` (PowerShell 7) so Windows tool invocation can prefer it over the legacy `powershell.exe` (Windows PowerShell 5.1). PS 5.1 has known UTF-8 / encoding bugs — redirected pipes lose non-ASCII characters, `Out-File` defaults to UTF-16 with BOM — which manifested in Alexi as broken diff and grep output on Windows hosts. Ports kilocode `98ea338c8`.
