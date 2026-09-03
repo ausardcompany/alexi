@@ -48,15 +48,19 @@ const mockToolRegistry = {
   get: vi.fn(),
 };
 
-vi.mock('../../tool/index.js', () => ({
-  getToolRegistry: () => mockToolRegistry,
-  registerTool: vi.fn(),
-  // Alexi_change (kilocode f1330aceb): agenticChat now calls
-  // getAllToolNames() when it hits an unknown tool to surface repair
-  // hints. Return an empty list here so the bare "Unknown tool: <name>"
-  // error remains the primary signal in these tests.
-  getAllToolNames: vi.fn(() => []),
-}));
+vi.mock('../../tool/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../tool/index.js')>('../../tool/index.js');
+  return {
+    ...actual,
+    getToolRegistry: () => mockToolRegistry,
+    registerTool: vi.fn(),
+    // Alexi_change (kilocode f1330aceb): agenticChat now calls
+    // getAllToolNames() when it hits an unknown tool to surface repair
+    // hints. Return an empty list here so the bare "Unknown tool: <name>"
+    // error remains the primary signal in these tests.
+    getAllToolNames: vi.fn(() => []),
+  };
+});
 
 // Mock registerBuiltInTools
 vi.mock('../../tool/tools/index.js', () => ({

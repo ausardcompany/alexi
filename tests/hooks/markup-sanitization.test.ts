@@ -56,10 +56,15 @@ const mockToolRegistry = {
   get: vi.fn(),
 };
 
-vi.mock('../../src/tool/index.js', () => ({
-  getToolRegistry: () => mockToolRegistry,
-  registerTool: vi.fn(),
-}));
+vi.mock('../../src/tool/index.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../src/tool/index.js')>('../../src/tool/index.js');
+  return {
+    ...actual,
+    getToolRegistry: () => mockToolRegistry,
+    registerTool: vi.fn(),
+  };
+});
 
 vi.mock('../../src/tool/tools/index.js', () => ({
   registerBuiltInTools: vi.fn(),

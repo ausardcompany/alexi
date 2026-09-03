@@ -30,8 +30,10 @@ import { defineTool, type ToolResult, type ToolContext } from '../index.js';
 import { getAgentRegistry, type Agent } from '../../agent/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
-import { getConfigTaskModelSelection } from '../../config/userConfig.js';
+import { getConfigTaskModelSelection, getConfigSharedAgentBoard } from '../../config/userConfig.js';
 import { SessionManager } from '../../core/sessionManager.js';
+import { BoardStore } from '../../core/database/boardStore.js';
+import { BoardContext } from '../../core/database/boardContext.js';
 
 /**
  * Default maximum subagent nesting depth. A top-level user session is
@@ -253,6 +255,21 @@ const taskStore = new Map<
     error?: string;
     startedAt?: Date;
     completedAt?: Date;
+    /**
+     * Swarm agent identity exposed to peers via the shared board and to
+     * `task_status` callers. Ports upstream kilocode `beb84eb50`
+     * ("expose swarm agent identity and execution state"). Only
+     * populated when `experimental.sharedAgentBoard` is enabled — plain
+     * (non-swarm) subagents leave this undefined so `task_status` output
+     * stays byte-identical for existing users.
+     */
+    swarmIdentity?: {
+      name: string;
+      role: 'swarm-member';
+      parentTaskDescription: string;
+    };
+    /** Board id this subagent is attached to, when part of a swarm. */
+    boardId?: string;
   }
 >();
 
@@ -450,6 +467,39 @@ Usage:
         background: params.background && enableBackground,
       };
       taskStore.set(taskId, taskData);
+
+      // Ports kilocode `beb84eb50` — expose swarm agent identity/execution
+      // state and attach the child session to the parent's shared board
+      // (`2682dcb31`: keep shared-board content in explicit tool reads).
+      // Gated by `experimental.sharedAgentBoard` so vanilla SAP AI Core
+      // deployments see zero behavioural change until they opt in.
+      if (getConfigSharedAgentBoard()) {
+        taskData.swarmIdentity = {
+          name: params.subagent_type ?? 'general',
+          role: 'swarm-member',
+          parentTaskDescription: params.description,
+        };
+        // Resolve (or lazily create) the parent's board. When the parent
+        // has no board yet, mint a new one keyed on the parent session
+        // id so every peer this parent spawns joins the same room.
+        const parentSessionId = context.sessionId;
+        let boardId = await BoardContext.resolve(parentSessionId);
+        if (!boardId && parentSessionId) {
+          boardId = `board-${parentSessionId}`;
+          await BoardStore.ensure(boardId, taskId);
+          BoardContext.attach(parentSessionId, boardId);
+        }
+        if (boardId) {
+          taskData.boardId = boardId;
+          // Attach the child session AS SOON AS it has an id. The real
+          // child-session id comes from `sessionManager.createSession`
+          // further down; when a session manager is not wired (tests /
+          // one-shot CLI), we fall back to registering under the task
+          // id so `kilo_board_*` tools invoked from the subagent still
+          // resolve to a valid board.
+          BoardContext.attach(taskId, boardId);
+        }
+      }
     } else {
       // Existing task — keep the caller-supplied id so resumption works.
       taskId = params.task_id as string;
@@ -598,6 +648,12 @@ Usage:
         signal: context.signal,
       });
       childSignal = sessionManager.getSessionSignal(childSession.metadata.id);
+      // If this task participates in a swarm board, register the freshly
+      // minted child session id against the same board so tool calls
+      // executed with the child session's context resolve correctly.
+      if (taskData.boardId) {
+        BoardContext.attach(childSession.metadata.id, taskData.boardId);
+      }
     }
 
     try {

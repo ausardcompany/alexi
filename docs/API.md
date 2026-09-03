@@ -2407,3 +2407,167 @@ export function _instanceCacheCount(): number;
 ```
 
 `updateGlobal(updates, { dispose: true })` in `src/config/userConfig.ts` calls `invalidateGlobalConfig()` after writing the updated config to disk. Pass `dispose: false` to suppress the flush.
+
+## Shared Agent Board API
+
+Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23`). Task-scoped coordination channel for multi-agent swarms. Gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json` (default `false`); when the flag is off the tools are not registered.
+
+### Config helpers (`src/config/userConfig.ts`)
+
+```typescript
+/**
+ * Read the experimental.sharedAgentBoard flag. Returns false for
+ * missing, non-object, array, or non-boolean values so a corrupt
+ * config never accidentally enables the feature.
+ */
+export function getConfigSharedAgentBoard(): boolean;
+
+/**
+ * Persist experimental.sharedAgentBoard. Merges into the existing
+ * experimental object without clobbering other experimental flags.
+ */
+export function setConfigSharedAgentBoard(enabled: boolean): void;
+```
+
+### BoardStore (`src/core/database/boardStore.ts`)
+
+SQLite-backed persistence at `~/.alexi/board.db`. Degrades gracefully when the native `better-sqlite3` binding is unavailable (empty reads, no-op writes).
+
+```typescript
+export interface BoardMessage {
+  id: string;
+  boardId: string;
+  sessionID: string;
+  author: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface BoardWriteInput {
+  sessionID: string;
+  author: string;
+  content: string;
+}
+
+export interface BoardReadOptions {
+  /** ISO timestamp — only return messages strictly newer than this. */
+  since?: string;
+  /** Maximum number of messages to return. Defaults to 50. */
+  limit?: number;
+}
+
+export const BoardStore: {
+  /** Idempotent board creation. Safe to call on every access. */
+  ensure(boardId: string, taskId: string): Promise<void>;
+
+  /** Append a message. Returns the fully-formed row with a randomUUID id. */
+  write(boardId: string, input: BoardWriteInput): Promise<BoardMessage>;
+
+  /** Read messages in chronological order. Optional strict-greater-than since filter. */
+  read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
+
+  /**
+   * Mark messages as read by a specific session. Ports kilocode fix
+   * 162e30d23 — without this, agents keep seeing the same "new
+   * messages" banner on every turn.
+   */
+  acknowledgeReads(
+    boardId: string,
+    sessionID: string,
+    messageIds: readonly string[]
+  ): Promise<void>;
+
+  /** Test-only. Production code MUST NOT call. */
+  __resetForTests(): void;
+};
+```
+
+### BoardContext (`src/core/database/boardContext.ts`)
+
+In-memory `Map<sessionID, boardID>` resolver. Populated by the `task` tool when spawning a swarm; consumed by the board tools to look up which board they should write to.
+
+```typescript
+export const BoardContext: {
+  /** Attach a session to a board. Idempotent; overwrites existing mapping. */
+  attach(sessionID: string, boardId: string): void;
+
+  /** Resolve a session to its board id, or undefined if not in a swarm. */
+  resolve(sessionID: string | undefined): Promise<string | undefined>;
+
+  /** Detach on session close. Safe to call on unknown sessions. */
+  detach(sessionID: string): void;
+
+  /** Test-only. */
+  __resetForTests(): void;
+};
+```
+
+### Tools
+
+Both tools accept a Zod-validated params schema and follow the standard `defineTool` contract. Registered by `registerBuiltInTools()` in `src/tool/tools/index.ts` only when `getConfigSharedAgentBoard()` returns `true`.
+
+**`kilo_board_read`** — `src/tool/tools/board.ts:51`
+
+```typescript
+const BoardReadParamsSchema = z.object({
+  since: z.string().datetime().optional()
+    .describe('Read messages posted strictly after this ISO 8601 timestamp'),
+  limit: z.number().int().positive().max(100).optional()
+    .describe('Maximum number of messages to return (default 50, cap 100)'),
+});
+
+interface BoardReadResult {
+  messages: BoardMessage[];
+  boardId?: string;
+}
+```
+
+Behaviour:
+
+- Resolves `boardId` via `BoardContext.resolve(context.sessionId)`.
+- When no board is attached, returns `{ success: true, data: { messages: [] }, hint: 'No shared board is attached to this session.' }`.
+- Otherwise calls `BoardStore.read(boardId, { since, limit: params.limit ?? 50 })`, then `BoardStore.acknowledgeReads(boardId, context.sessionId, messages.map(m => m.id))` to suppress stale-banner re-surfacing.
+- Returns `{ success: true, data: { messages, boardId }, metadata: { count, boardId } }`.
+
+**`kilo_board_write`** — `src/tool/tools/board.ts:101`
+
+```typescript
+const BoardWriteParamsSchema = z.object({
+  content: z.string().min(1).max(4000)
+    .describe('Message body to post to the shared board (1-4000 chars)'),
+});
+
+interface BoardWriteResult {
+  messageId: string;
+  boardId: string;
+}
+```
+
+Behaviour:
+
+- Resolves `boardId` the same way.
+- When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+- Otherwise calls `BoardStore.write(boardId, { sessionID: context.sessionId ?? 'unknown', author: context.agentName ?? 'agent', content })`.
+- Returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId } }`.
+
+### Enabling the tools
+
+```typescript
+import { setConfigSharedAgentBoard } from './config/userConfig.js';
+
+setConfigSharedAgentBoard(true);
+// Next process restart: kilo_board_read / kilo_board_write appear in the
+// tool schema. Alexi does not hot-reload tools mid-turn.
+```
+
+Or edit `~/.alexi/config.json` directly:
+
+```json
+{
+  "experimental": {
+    "sharedAgentBoard": true
+  }
+}
+```
+
+See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator guide and [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) for the design notes and Mermaid diagram.
