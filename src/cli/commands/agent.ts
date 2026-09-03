@@ -22,6 +22,7 @@ import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
 import { getConfigDefaultAgent } from '../../config/userConfig.js';
 import { getPermissionManager } from '../../permission/index.js';
 import { PermissionRequested, PermissionResponse } from '../../bus/index.js';
+import { isAbortError } from '../../core/streamingOrchestrator.js';
 
 interface AgentOptions {
   message?: string;
@@ -89,6 +90,13 @@ export function registerAgentCommand(program: Command): void {
     .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: AgentOptions) => {
       let worktreeCleanup: (() => Promise<void>) | undefined;
+      // AbortController fired on first SIGINT (issue #1639) so a Ctrl+C
+      // during `agenticChat` propagates through to `provider.complete()`
+      // and stops the in-flight LLM request instead of waiting for the
+      // model to complete naturally. Hoisted so the catch block can
+      // reference it after the SIGINT handler is installed.
+      const abortController = new AbortController();
+      let restoreSigint: () => void = () => {};
       try {
         if (opts.yolo || opts.dangerouslySkipPermissions) {
           getPermissionManager().setPermissionMode('auto');
@@ -110,6 +118,33 @@ export function registerAgentCommand(program: Command): void {
           process.exit(1);
         }
 
+        // Wire Ctrl+C to abort the in-flight provider request (issue #1639).
+        // The one-shot handler in program.ts only calls `process.exit(0)`,
+        // which does not fire an AbortController and lets long provider
+        // calls run to completion after cancellation. Take ownership of
+        // SIGINT for the duration of this command; a second Ctrl+C
+        // escalates to a hard exit(130) via the exit path below (or via
+        // any worktree cleanup handler installed later in this action).
+        let sigintCount = 0;
+        const sigintHandler = () => {
+          sigintCount++;
+          if (sigintCount === 1) {
+            abortController.abort();
+            return;
+          }
+          // Second Ctrl+C: give up on graceful abort.
+          process.exit(130);
+        };
+        const previousSigintListeners = process.listeners('SIGINT');
+        process.removeAllListeners('SIGINT');
+        process.on('SIGINT', sigintHandler);
+        restoreSigint = () => {
+          process.removeListener('SIGINT', sigintHandler);
+          for (const l of previousSigintListeners) {
+            process.on('SIGINT', l as (...args: unknown[]) => void);
+          }
+        };
+
         let workdir = opts.workdir ?? process.cwd();
 
         // Create an isolated git worktree if requested
@@ -118,7 +153,12 @@ export function registerAgentCommand(program: Command): void {
           workdir = result.path;
           worktreeCleanup = result.cleanup;
 
-          // Register cleanup handlers
+          // Register cleanup handlers. On SIGINT we only run cleanup +
+          // hard-exit if the user has already pressed Ctrl+C once
+          // (sigintCount > 1) — the first press is owned by the
+          // abort-controller path above so the in-flight provider
+          // request cancels gracefully (issue #1639). SIGTERM is always
+          // terminal, so cleanup + exit unconditionally.
           const doCleanup = async () => {
             if (worktreeCleanup) {
               await worktreeCleanup();
@@ -126,6 +166,13 @@ export function registerAgentCommand(program: Command): void {
             }
           };
           process.on('SIGINT', async () => {
+            if (sigintCount <= 1) {
+              // First press was already consumed by sigintHandler above
+              // (which fired the AbortController). Leave the worktree
+              // intact so the graceful abort path can persist partial
+              // session state before exit.
+              return;
+            }
             await doCleanup();
             process.exit(130);
           });
@@ -287,6 +334,7 @@ export function registerAgentCommand(program: Command): void {
           repoMapManager,
           effort,
           agentId,
+          signal: abortController.signal,
         });
 
         // Flush any pending auto-commits
@@ -336,10 +384,18 @@ export function registerAgentCommand(program: Command): void {
         if (worktreeCleanup) {
           await worktreeCleanup();
         }
+        restoreSigint();
       } catch (e) {
         // Clean up worktree on error
         if (worktreeCleanup) {
           await worktreeCleanup();
+        }
+        restoreSigint();
+        // User-initiated abort (Ctrl+C): surface a clear cancellation
+        // message and exit with the standard SIGINT exit code (issue #1639).
+        if (isAbortError(e) || (e instanceof Error && /aborted/i.test(e.message))) {
+          console.error('Request cancelled by user');
+          process.exit(130);
         }
         // Log full error details for debugging (especially API errors)
         if (e instanceof Error) {

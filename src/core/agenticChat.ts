@@ -601,9 +601,17 @@ export async function agenticChat(
       // displayName, source, reference, resolved, mode, aliases, ...) must
       // never reach SAP AI Core / SAP Orchestration; see
       // `stripInternalOptions` in `src/agent/index.ts`.
+      //
+      // Forward `options.signal` (issue #1639) so a user-initiated Ctrl+C
+      // aborts the in-flight provider request instead of continuing to
+      // burn tokens until the model finishes. The top-of-loop
+      // `signal.aborted` check only catches cancellations that land
+      // between iterations; without threading the signal into
+      // `provider.complete()` a long single call can never be preempted.
       const merged = {
         maxTokens: effortConfig.maxTokens,
         tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
+        signal: options?.signal,
       };
       const providerOpts = stripInternalOptions(merged);
       result = await provider.complete(
@@ -644,9 +652,13 @@ export async function agenticChat(
           // Retry the completion
           try {
             // Same defense-in-depth strip as the primary dispatch above.
+            // The retry path must also honor `options.signal` (issue #1639)
+            // so a Ctrl+C during compaction+retry aborts the second
+            // provider call, not just the first.
             const mergedRetry = {
               maxTokens: effortConfig.maxTokens,
               tools: isFinalTurn ? undefined : toolSchemas.length > 0 ? toolSchemas : undefined,
+              signal: options?.signal,
             };
             const retryOpts = stripInternalOptions(mergedRetry);
             result = await provider.complete(
