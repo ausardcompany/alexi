@@ -17,6 +17,14 @@ export { SessionDrain } from '../session/drain.js';
 // cross-check deny-rule tool entries against the actual registered tools.
 export { getAllToolNames } from './index.js';
 
+// Ports kilocode `packages/opencode/src/kilocode/tool/registry.ts` (+36):
+// task-scoped shared agent board tools. Re-exported here so external
+// consumers can build a tool list identical to the upstream registry
+// shape without importing directly from `./tools/board.js`. Registration
+// into the runtime `ToolRegistry` still happens in `./tools/index.ts`
+// and is gated by `experimental.sharedAgentBoard`.
+export { boardReadTool, boardWriteTool } from './tools/board.js';
+
 /**
  * Feature flags that force-enable the websearch tool at request time regardless
  * of the calling provider. `exa` / `parallel` are the two upstream OpenCode

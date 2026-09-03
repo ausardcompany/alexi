@@ -42,6 +42,10 @@ import { agentManagerModelsTool } from './agent-manager-models.js';
 import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
 import { imageGenTool } from './image-gen.js';
+// Ports kilocode `packages/opencode/src/kilocode/tool/registry.ts` (+36):
+// shared agent board tools are gated behind `experimental.sharedAgentBoard`.
+import { boardReadTool, boardWriteTool } from './board.js';
+import { getConfigSharedAgentBoard } from '../../config/userConfig.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -104,12 +108,21 @@ export const builtInTools = [
 ];
 
 /**
- * Register all built-in tools
+ * Register all built-in tools.
+ *
+ * Ports kilocode: `experimental.sharedAgentBoard` gates the two board
+ * tools so the model never sees them unless the operator has opted in.
+ * The flag is read fresh on each call so a config change picks up on
+ * the next process restart (Alexi does not hot-reload tools mid-turn).
  */
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {
     // Cast needed because tools have different parameter schemas
     registerTool(tool as Tool<any, any>);
+  }
+  if (getConfigSharedAgentBoard()) {
+    registerTool(boardReadTool as Tool<any, any>);
+    registerTool(boardWriteTool as Tool<any, any>);
   }
 }
 
@@ -151,6 +164,8 @@ export {
   applyPatchTool,
   repoCloneTool,
   imageGenTool,
+  boardReadTool,
+  boardWriteTool,
 };
 
 // Re-export UI utilities from specific tools

@@ -568,6 +568,44 @@ export function setConfigTaskModelSelection(enabled: boolean): void {
   saveFullConfig(config);
 }
 
+/**
+ * Experimental feature flag: enable the task-scoped shared agent board.
+ *
+ * Ports upstream kilocode `experimental.sharedAgentBoard` (2026-08 sync,
+ * commit `162e30d23`). When enabled, subagents spawned by the `task`
+ * tool are attached to a shared board and gain access to
+ * `kilo_board_read` / `kilo_board_write` for lightweight peer-to-peer
+ * coordination. Default `false` — SAP AI Core deployments keep the
+ * classical single-agent-per-task behaviour unless the operator opts in.
+ *
+ * Stored under `experimental.sharedAgentBoard` in `~/.alexi/config.json`
+ * (camelCase to match the upstream JSON shape).
+ */
+export function getConfigSharedAgentBoard(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return false;
+  }
+  const value = (experimental as Record<string, unknown>).sharedAgentBoard;
+  return value === true;
+}
+
+/**
+ * Persist the `experimental.sharedAgentBoard` flag.
+ */
+export function setConfigSharedAgentBoard(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, sharedAgentBoard: enabled };
+  saveFullConfig(config);
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {
