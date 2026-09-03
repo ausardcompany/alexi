@@ -315,7 +315,7 @@ case dotted form. See `src/config/userConfig.ts` for details.
 | Permission | `src/permission/index.ts` | Last-match-wins rule evaluation with doom loop detection |
 | Sub-agent Blockers | `src/permission/agent-manager.ts` | Fail-closed blocker store (`isBlocked`, `getBlocker`, `answerQuestion`, `setBlocker`) for orchestrator-to-sub-agent unblock flow. Wired into the `agent_manager` tool's `answer` action. See [Sub-agent Blocker Store](#sub-agent-blocker-store-srcpermissionagent-managerts). |
 | Agent | `src/agent/index.ts` | Agent registry with built-in + custom agents (**pending autohealing revert as of 2026-07-24 — see [Agent System](#agent-system)**) |
-| Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap |
+| Hooks | `src/hooks/index.ts` | Lifecycle hooks (command, HTTP, script) with block cap — see [`docs/HOOKS.md`](./HOOKS.md) for the full event catalogue and a reference `.alexiignore` access-control example |
 | MCP | `src/mcp/index.ts` | Model Context Protocol client/server integration (qualified `${escapedServer}::${tool}` keys — see [MCP tool key composition](#mcp-tool-key-composition)) |
 | Skill | `src/skill/index.ts` | Specialized prompt injection for domain tasks |
 | Compaction | `src/compaction/index.ts` | Context window management with 4 strategies |
