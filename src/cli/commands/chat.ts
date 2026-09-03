@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { Option, type Command } from 'commander';
 import { sendChat } from '../../core/orchestrator.js';
+import { isAbortError } from '../../core/streamingOrchestrator.js';
 import { SessionManager } from '../../core/sessionManager.js';
 import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
 import { getConfigDefaultAgent } from '../../config/userConfig.js';
@@ -236,6 +237,9 @@ export function registerChatCommand(program: Command): void {
     .option('--image-size <spec>', 'Optional size hint for --image, e.g. "1024x1024"')
     .option('--image-output-path <dir>', 'Directory to save decoded base64 images from --image')
     .action(async (opts: ChatOptions) => {
+      // Hoisted so the catch block can call restoreSigint even when the
+      // failure happens after the SIGINT handler was installed (issue #1639).
+      let restoreSigint: () => void = () => {};
       try {
         // Image-generation short-circuit. When `--image` is provided the
         // command bypasses the text-chat pipeline entirely and delegates
@@ -280,6 +284,38 @@ export function registerChatCommand(program: Command): void {
           await SessionDrain.drain({ timeoutMs: 30_000 });
           process.exit(1);
         }
+
+        // Wire Ctrl+C to abort the in-flight provider request (issue #1639).
+        // Without this, `alexi chat -m "..."` keeps consuming tokens after
+        // the user pressed Ctrl+C because the one-shot SIGINT handler in
+        // program.ts only calls `process.exit(0)` — it does not fire an
+        // AbortController, so the provider fetch survives until it
+        // naturally completes.
+        //
+        // Take ownership of SIGINT for the duration of this command by
+        // removing the program-level listeners, wiring our own handler,
+        // and forwarding the signal to `sendChat` -> `provider.complete()`.
+        // A second Ctrl+C escalates to a hard exit(130).
+        const abortController = new AbortController();
+        let sigintCount = 0;
+        const sigintHandler = () => {
+          sigintCount++;
+          if (sigintCount === 1) {
+            abortController.abort();
+            return;
+          }
+          // Second Ctrl+C: give up on graceful abort and exit immediately.
+          process.exit(130);
+        };
+        const previousSigintListeners = process.listeners('SIGINT');
+        process.removeAllListeners('SIGINT');
+        process.on('SIGINT', sigintHandler);
+        restoreSigint = () => {
+          process.removeListener('SIGINT', sigintHandler);
+          for (const l of previousSigintListeners) {
+            process.on('SIGINT', l as (...args: unknown[]) => void);
+          }
+        };
 
         const sessionManager = new SessionManager();
 
@@ -331,6 +367,7 @@ export function registerChatCommand(program: Command): void {
           preferCheap: opts.preferCheap,
           sessionManager,
           systemPrompt: effectiveSystemPrompt,
+          signal: abortController.signal,
         });
 
         // When the orchestrator dispatched to an image-generation model
@@ -380,7 +417,21 @@ export function registerChatCommand(program: Command): void {
             `[Messages: ${currentSession.metadata.messageCount}, Tokens: ${currentSession.metadata.totalTokens}]`
           );
         }
+        restoreSigint();
       } catch (e) {
+        restoreSigint();
+        // User-initiated abort (Ctrl+C): surface a clear cancellation
+        // message and exit with the standard SIGINT exit code (128 + 2 = 130)
+        // instead of the generic error path below (issue #1639).
+        if (isAbortError(e) || (e instanceof Error && /aborted/i.test(e.message))) {
+          console.error('Request cancelled by user');
+          try {
+            await SessionDrain.drain({ timeoutMs: 30_000 });
+          } catch {
+            // Drain failures on the abort path are non-fatal.
+          }
+          process.exit(130);
+        }
         console.error(String(e));
         // Alexi_change: drain background work before exit so partially
         // written session state / tool events flush cleanly (kilocode
