@@ -52,6 +52,7 @@ const mockToolRegistry = {
 vi.mock('../../src/tool/index.js', () => ({
   getToolRegistry: () => mockToolRegistry,
   registerTool: vi.fn(),
+  defineTool: vi.fn(),
 }));
 
 vi.mock('../../src/tool/tools/index.js', () => ({

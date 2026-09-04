@@ -8,10 +8,14 @@ import type { SessionContext } from '../../src/providers/sessionHeaders.js';
 
 describe('sessionHeaders', () => {
   describe('buildSessionHeaders', () => {
-    it('returns session affinity header with only sessionID', () => {
+    it('returns session affinity + correlation headers with only sessionID', () => {
       const headers = buildSessionHeaders('session-123');
+      // X-Interaction-Id (opencode #47215) rides on every request that
+      // carries a session id — same value, different semantic (trace
+      // correlation vs routing hint).
       expect(headers).toEqual({
         'x-session-affinity': 'session-123',
+        'X-Interaction-Id': 'session-123',
       });
     });
 
@@ -19,6 +23,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeaders('session-123', 'parent-456');
       expect(headers).toEqual({
         'x-session-affinity': 'session-123',
+        'X-Interaction-Id': 'session-123',
         'x-parent-session-id': 'parent-456',
       });
     });
@@ -27,6 +32,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeaders('session-123', undefined, 'code-agent');
       expect(headers).toEqual({
         'x-session-affinity': 'session-123',
+        'X-Interaction-Id': 'session-123',
         'x-alexi-agent-id': 'code-agent',
       });
     });
@@ -35,6 +41,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeaders('session-123', undefined, undefined, 'main-agent');
       expect(headers).toEqual({
         'x-session-affinity': 'session-123',
+        'X-Interaction-Id': 'session-123',
         'x-alexi-parent-agent-id': 'main-agent',
       });
     });
@@ -43,6 +50,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeaders('session-123', 'parent-456', 'code-agent', 'main-agent');
       expect(headers).toEqual({
         'x-session-affinity': 'session-123',
+        'X-Interaction-Id': 'session-123',
         'x-parent-session-id': 'parent-456',
         'x-alexi-agent-id': 'code-agent',
         'x-alexi-parent-agent-id': 'main-agent',
@@ -62,6 +70,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeadersFromContext(context);
       expect(headers).toEqual({
         'x-session-affinity': 'ctx-session-1',
+        'X-Interaction-Id': 'ctx-session-1',
       });
     });
 
@@ -75,6 +84,7 @@ describe('sessionHeaders', () => {
       const headers = buildSessionHeadersFromContext(context);
       expect(headers).toEqual({
         'x-session-affinity': 'ctx-session-1',
+        'X-Interaction-Id': 'ctx-session-1',
         'x-parent-session-id': 'ctx-parent-1',
         'x-alexi-agent-id': 'explore',
         'x-alexi-parent-agent-id': 'orchestrator',
@@ -109,6 +119,7 @@ describe('sessionHeaders', () => {
       expect(result).toEqual({
         'content-type': 'application/json',
         'x-session-affinity': 'merge-session-1',
+        'X-Interaction-Id': 'merge-session-1',
         'x-parent-session-id': 'merge-parent-1',
       });
     });
@@ -124,6 +135,7 @@ describe('sessionHeaders', () => {
       expect(result).toEqual({
         'content-type': 'application/json',
         'x-session-affinity': 'merge-session-1',
+        'X-Interaction-Id': 'merge-session-1',
         'x-alexi-agent-id': 'code',
         'x-alexi-parent-agent-id': 'main',
       });

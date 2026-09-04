@@ -9,6 +9,15 @@ export interface SessionHeaders {
   'x-parent-session-id'?: string;
   'x-alexi-agent-id'?: string;
   'x-alexi-parent-agent-id'?: string;
+  /**
+   * Session-scoped request correlation header. Ports the opencode
+   * `X-Interaction-Id: <sessionID>` pattern (upstream feature #47215):
+   * useful for SAP AI Core telemetry / distributed-tracing so a request
+   * captured in server logs can be traced back to the originating Alexi
+   * session. Purely additive and non-breaking — servers that do not
+   * consume it simply ignore the header.
+   */
+  'X-Interaction-Id'?: string;
 }
 
 export interface SessionContext {
@@ -22,6 +31,11 @@ export interface SessionContext {
  * Build session headers for HTTP requests
  * These headers enable better session tracking and routing for load-balanced deployments,
  * as well as agent identity tracing for multi-agent observability.
+ *
+ * Also attaches the `X-Interaction-Id` correlation header (opencode
+ * #47215): downstream services that already understand the
+ * `X-Interaction-Id` convention can join their request logs to Alexi's
+ * session id without any extra plumbing.
  */
 export function buildSessionHeaders(
   sessionID: string,
@@ -31,6 +45,12 @@ export function buildSessionHeaders(
 ): SessionHeaders {
   const headers: SessionHeaders = {
     'x-session-affinity': sessionID,
+    // Correlation header — always emitted alongside `x-session-affinity`
+    // because the two carry the same value but different semantics
+    // (affinity is a routing hint; interaction id is a trace correlation
+    // key). Keeping both means SAP AI Core deployments that only look
+    // at one of them still get useful signal.
+    'X-Interaction-Id': sessionID,
   };
 
   if (parentSessionID) {
