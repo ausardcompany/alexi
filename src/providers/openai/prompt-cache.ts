@@ -58,22 +58,84 @@ export function isChatGPTSubscription(auth: { type?: string; source?: string }):
 }
 
 /**
+ * Returns true when the given message content string contains an
+ * `<environment_details>` block. Trims leading/trailing whitespace before
+ * matching so that blank lines or padding preceding the block do not
+ * defeat the check (Kilocode #13190).
+ *
+ * Exported so orchestrators can share the same predicate when deciding
+ * whether an env block has already been injected upstream.
+ */
+export function hasEnvironmentDetailsBlock(content: unknown): boolean {
+  if (typeof content !== 'string') {
+    return false;
+  }
+  return content.trim().includes('<environment_details>');
+}
+
+/**
+ * Extracts a plain-text view of a message's `content` for tag-detection
+ * purposes. Handles the Vercel AI SDK v2 shape where `content` may be a
+ * string OR an array of `{ type: 'text', text: string }` parts. Non-text
+ * parts are ignored — they cannot carry an env-details fence.
+ */
+function contentToText(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (part && typeof part === 'object' && 'text' in (part as Record<string, unknown>)) {
+          const text = (part as { text?: unknown }).text;
+          return typeof text === 'string' ? text : '';
+        }
+        return '';
+      })
+      .join('\n');
+  }
+  return '';
+}
+
+/**
  * Applies a cache breakpoint marker to the stable prefix of the prompt,
  * placed before trailing environment-details injection.
  *
  * Strategy: walk from the tail and mark the last `system` or `assistant`
- * message. The breakpoint says "everything up to and including this
- * message is stable and cacheable"; trailing user turns (which typically
- * carry per-call env details) intentionally sit outside the breakpoint.
+ * message that does NOT itself contain an `<environment_details>` block.
+ * The breakpoint says "everything up to and including this message is
+ * stable and cacheable"; env-details blocks vary per call (working dir,
+ * timestamp, file paths) and would poison the cache prefix if included.
+ * Trailing user turns (which typically carry per-call env details)
+ * intentionally sit outside the breakpoint.
+ *
+ * Falls back to the last system/assistant message unconditionally when
+ * every stable-role message carries an env block, so the caller still
+ * gets some caching benefit.
  */
 export function applyCacheBreakpoint(prompt: LanguageModelV2Prompt): LanguageModelV2Prompt {
-  // Find last stable content boundary (before env details / trailing user content).
+  // First pass: prefer the last system/assistant message that is free of
+  // env-details content. This maximises the cacheable prefix.
   let breakpointIndex = -1;
   for (let i = prompt.length - 1; i >= 0; i--) {
     const msg = prompt[i];
-    if (msg.role === 'system' || msg.role === 'assistant') {
+    if (msg.role !== 'system' && msg.role !== 'assistant') {
+      continue;
+    }
+    if (!hasEnvironmentDetailsBlock(contentToText(msg.content))) {
       breakpointIndex = i;
       break;
+    }
+  }
+  // Fallback: if every stable-role message carries an env block, mark the
+  // last one anyway so callers still get partial caching.
+  if (breakpointIndex < 0) {
+    for (let i = prompt.length - 1; i >= 0; i--) {
+      const msg = prompt[i];
+      if (msg.role === 'system' || msg.role === 'assistant') {
+        breakpointIndex = i;
+        break;
+      }
     }
   }
   if (breakpointIndex < 0) {

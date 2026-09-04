@@ -442,6 +442,14 @@ export async function agenticChat(
     // into either the agent identity (cache-hostile) or the user text
     // (token-bloat + confused authorship). The fence tags are cheap,
     // provider-neutral, and matches upstream conventions.
+    //
+    // Alexi_change (kilocode #13190 - duplicate-block prevention). If
+    // the assembled prompt above already carries an
+    // `<environment_details>` block (e.g. because a caller pre-baked
+    // one, or a plugin injected one via `customRules`), skip the
+    // second injection to preserve a single stable block per system
+    // message. Use `.trim().includes(...)` so leading whitespace does
+    // not defeat the check.
     const envParts: string[] = [];
     if (memoryContext) {
       envParts.push(memoryContext);
@@ -453,7 +461,10 @@ export async function agenticChat(
       envParts.push(repoMapText);
     }
     if (envParts.length > 0) {
-      parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+      const alreadyHasEnvBlock = parts.some((p) => p.trim().includes('<environment_details>'));
+      if (!alreadyHasEnvBlock) {
+        parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+      }
     }
     return parts.join('\n\n');
   }
