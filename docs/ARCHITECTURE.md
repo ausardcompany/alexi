@@ -134,7 +134,7 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 | Module | File | Description |
 |--------|------|-------------|
 | SAP Orchestration | `src/providers/sapOrchestration.ts` | Sole provider via `@sap-ai-sdk/orchestration` |
-| Auth | `src/providers/auth.ts` | OAuth token management for SAP AI Core |
+| Auth | `src/providers/auth.ts` | OAuth token management + typed auth error hierarchy for SAP AI Core (see [Authentication Error Classification](#authentication-error-classification)) |
 | Transform | `src/providers/transform.ts` | Message-format transforms (image chunks, reasoning replay, schema lowering) |
 | Model Catalog | `src/providers/modelCatalog.ts` | Live deployment discovery from SAP AI Core (5-minute TTL) |
 | Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
@@ -1292,6 +1292,11 @@ human operators can rely on this contract to diagnose why a connection
 attempt failed after 1 try (permanent) versus 3 tries (transient budget
 exhausted).
 
+Authentication failures are a sub-category of this contract with their
+own typed hierarchy and OAuth refresh flow; see
+[Authentication Error Classification](#authentication-error-classification)
+for the full table and refresh sequence.
+
 ### Error classification tables
 
 The following patterns are treated as transient (safe to retry) throughout
@@ -1366,6 +1371,176 @@ deliberately shared from `src/providers/auth.ts` (not `src/mcp/`) so
 future config surfaces (project-level `.alexi/config.json`, plugin
 credentials, connector-store writes) can adopt the same normalization
 without duplicating the regex.
+
+### Authentication Error Classification
+
+Alexi carries a typed auth-error hierarchy in `src/providers/auth.ts`.
+Every provider-side authentication failure is normalised into one of
+these classes by `parseAuthError(err, provider)` before it reaches the
+retry / UX layers. This lets `ErrorBackoff` (`src/core/error-backoff.ts`)
+and route health (`src/core/router.ts`) reason about the failure
+uniformly without re-parsing raw provider messages.
+
+The rule that ties this section back to the general Error Handling
+contract above: **auth failures are permanent by default**. The only
+transient-shaped auth failures are `TokenExpiredError` (rescuable by
+the OAuth refresh flow) and `RateLimitError` (rescuable by waiting out
+the exponential backoff). Everything else — invalid credentials, no
+refresh token stored, refresh token revoked — requires operator
+intervention and MUST NOT consume retry budget.
+
+#### Error type hierarchy
+
+All classes below extend `AuthError`, which itself extends `Error` and
+carries the offending `provider` id plus an optional `cause`. Sources:
+[`src/providers/auth.ts:80`](../src/providers/auth.ts) and following.
+
+| Error class                     | Thrown when                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `AuthError`                     | Base class. Also used for OAuth token-endpoint responses that are not-4xx but malformed (non-JSON body, missing fields). |
+| `InvalidCredentialsError`       | Provider returned an "invalid credentials" style rejection. Structural credential problem — the key itself is wrong.     |
+| `MissingCredentialsError`       | Required config fields (e.g. `AICORE_SERVICE_KEY`) are absent. Carries `missingFields: string[]`.                        |
+| `TokenExpiredError`             | Access token has expired. Refresh flow may still rescue it — see below.                                                  |
+| `NoRefreshTokenError`           | `refreshAccessToken` found no stored refresh token for the provider. No HTTP call is attempted.                          |
+| `ReauthenticationRequiredError` | OAuth server rejected the refresh (4xx on the token endpoint — invalid_grant, revoked token, wrong tenant).              |
+| `NetworkError`                  | Network-level failure (DNS, socket, connection reset) during an auth call.                                               |
+| `RateLimitError`                | Provider signalled a rate-limit condition. Carries `retryAfter?: number` when the header was present.                    |
+| `StartupTimeoutError`           | Connectivity check on process startup exceeded its budget for a specific provider.                                       |
+
+Provider-specific rate-limit variants — `FreeTierRateLimitError` and
+`ProviderRateLimitError` — live in `src/providers/sapOrchestration.ts`
+and match a duck-typed shape (`code` / `name` / `statusCode: 429`)
+rather than extending `AuthError`. They are documented here for
+completeness because `ErrorBackoff.isFatal(err)` uses them to
+distinguish the permanent free-tier variant (upgrade required) from
+the transient paid-tier variant (retry with backoff).
+
+#### Permanent vs transient errors
+
+`isPermanentAuthError(err)` in
+[`src/providers/auth.ts:191`](../src/providers/auth.ts) is the
+authoritative classifier used to short-circuit retries. The complement
+classifier for the broader (non-auth) transient set is
+`isRetryableError(err)` in
+[`src/core/error-backoff.ts:106`](../src/core/error-backoff.ts).
+
+| Error class                     | Permanent | Retryable | User action required                              |
+| ------------------------------- | --------- | --------- | ------------------------------------------------- |
+| `InvalidCredentialsError`       | Yes       | No        | Fix API key / re-login                            |
+| `MissingCredentialsError`       | Yes       | No        | Populate the named config fields                  |
+| `NoRefreshTokenError`           | Yes       | No        | Run `alexi login`                                 |
+| `ReauthenticationRequiredError` | Yes       | No        | Run `alexi login` (refresh token dead)            |
+| `FreeTierRateLimitError`        | Yes       | No        | Wait for quota window OR upgrade to paid tier     |
+| `TokenExpiredError`             | No        | Yes\*     | None — OAuth refresh is auto-attempted first      |
+| `RateLimitError`                | No        | Yes       | None — auto-retry with backoff (honours Retry-After) |
+| `ProviderRateLimitError`        | No        | Yes       | None — auto-retry with backoff                    |
+| `NetworkError`                  | No        | Yes       | None — auto-retry with backoff                    |
+| `StartupTimeoutError`           | No        | Yes       | None — connectivity retry with backoff            |
+| `AuthError` (base)              | Unknown   | Unknown   | Escalate — the classifier could not narrow it     |
+
+\* `TokenExpiredError` is not directly retried against the provider;
+the caller invokes `refreshAccessToken` first and then retries the
+original request exactly once with the new bearer. See the OAuth
+refresh flow below.
+
+#### Retry budget implications
+
+Auth error classification feeds three retry surfaces, each with an
+independent budget. Permanent errors must NOT consume budget on any
+of them.
+
+- **`ErrorBackoff` (provider layer)** — `recordError(statusCode?, err?)`
+  in [`src/core/error-backoff.ts:174`](../src/core/error-backoff.ts).
+  A `4xx` status flips `isFatal()` so the caller exits the retry loop.
+  `429` is treated as transient (rate-limit window will reset), except
+  when the underlying error is a `FreeTierRateLimitError` — that
+  variant is fatal because retrying against the same free-tier quota
+  cannot succeed until the window resets or the deployment is
+  upgraded. The default budget is `maxRetries: 5`, `initialDelayMs:
+  1000`, `maxDelayMs: 60000`, `multiplier: 2`.
+- **Route auto-disable (`src/core/router.ts`)** —
+  [`classifyRouteError`](../src/core/router.ts) narrows an error to
+  `permanent` (HTTP 401 / 403 / 404, `model_not_found`,
+  `deployment_not_found`) or `unknown`. Only `permanent` outcomes are
+  fed to `recordRouteOutcome`, which disables the route after
+  `routeFailureThreshold` (default `3`) consecutive permanent
+  failures. Transient auth errors (`TokenExpiredError`, generic 429)
+  never poison route health.
+- **CI retry loops** — the agent-factory / `kilo run` wrappers retry
+  only when the run log matches the transient regex
+  (`socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`).
+  Permanent auth failures surface immediately and open a
+  `factory-escalation` issue instead of being silently retried.
+
+`isPermanentAuthFailure(err)` in
+[`src/core/error-backoff.ts:281`](../src/core/error-backoff.ts) is the
+structural check used at the retry-loop entry point — it matches
+`NoRefreshTokenError` and `ReauthenticationRequiredError` by `name`
+rather than `instanceof` so multi-copy module loads (a common vitest
+worker artefact) do not silently downgrade a permanent failure to
+"unknown".
+
+#### OAuth refresh flow
+
+`refreshAccessToken(providerId, options?)` in
+[`src/providers/auth.ts:348`](../src/providers/auth.ts) implements the
+token-refresh path. The flow is:
+
+1. Load `ConnectorState` for `providerId` from the connector store.
+   If no entry exists, or the entry has no `refreshToken`, throw
+   `NoRefreshTokenError` immediately — no HTTP call is made.
+2. POST `grant_type=refresh_token&refresh_token=<token>` to the
+   stored `tokenEndpoint` with `application/x-www-form-urlencoded`.
+   Optional `client_id` / `client_secret` from the connector state
+   are included when present.
+3. On a 4xx response — invalid_grant, expired refresh token, tenant
+   mismatch, etc. — throw `ReauthenticationRequiredError`. This is
+   *permanent*: retrying with the same refresh token is guaranteed
+   to fail again, so the caller must not spend budget on it.
+4. On a non-4xx failure (5xx, malformed body, network reset), throw
+   `NetworkError` or a bare `AuthError` — both are *transient* and
+   the caller's `ErrorBackoff` layer decides whether to retry.
+5. On success, update the connector store with the new `accessToken`
+   and `expiry`, honour refresh-token rotation if the server issued
+   a new `refreshToken`, persist the token to
+   `~/.alexi/connectors.json` when
+   [`getConfigPersistAuthTokens()`](../src/config/userConfig.ts) is
+   true, emit `TokenRefreshed` on the event bus, and return the new
+   bearer.
+
+The refresh flow itself does NOT retry — the caller (typically
+`src/providers/sapOrchestration.ts`) retries the original request
+exactly once with the new token. Nesting a retry loop inside
+`refreshAccessToken` would risk multiplying budget across layers.
+
+`isTokenExpiredError(err)` in
+[`src/providers/auth.ts:476`](../src/providers/auth.ts) is the
+structural check callers use to decide whether to invoke the refresh
+flow at all. It matches `TokenExpiredError` instances and any error
+carrying HTTP `status === 401 || status === 403` (via `status`,
+`statusCode`, or `response.status`). Prose-only mentions of
+"unauthorized" without a status code do NOT trigger the refresh —
+that guard prevents a downstream hook message from spuriously
+consuming a refresh round-trip.
+
+Refresh-flow related events:
+
+- `TokenRefreshed` — published on `src/bus/index.ts` after a
+  successful refresh. Payload: `{ providerId, expiry, timestamp }`.
+  Consumers include the TUI status bar (shows "token refreshed" hint)
+  and the connector-state persistence layer.
+
+Cross-references:
+
+- Provider hierarchy and where these errors originate:
+  [Provider Layer](#provider-layer).
+- Auth-error UX rewriting in the interactive REPL:
+  [User-facing auth error rewriting (issue #1625)](#user-facing-auth-error-rewriting-issue-1625).
+- Input sanitisation at the config write boundary (defensive
+  pre-step that prevents corrupted keys from becoming 401s):
+  [Config write-boundary sanitization](#config-write-boundary-sanitization).
+- Operator walkthrough and sequence diagrams:
+  [`docs/PROVIDERS.md#authentication-errors`](./PROVIDERS.md#authentication-errors).
 
 ### Exponential backoff formula
 
