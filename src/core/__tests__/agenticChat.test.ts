@@ -888,6 +888,83 @@ describe('agenticChat', () => {
       });
     });
 
+    describe('environment_details duplicate-block prevention (kilocode #13190)', () => {
+      it('emits at most one <environment_details> block in the system message', async () => {
+        // Set both memory and session context so the volatile env block is generated.
+        vi.mocked(getMemoryManager).mockReturnValue({
+          getContextString: vi.fn().mockReturnValue('## Decisions & Facts\n- Use TypeScript'),
+        } as any);
+        vi.mocked(getSessionContextString).mockReturnValue(
+          '## Recent Session Context\n### Session: "Test" (2025-01-01)'
+        );
+
+        await agenticChat('Test message');
+
+        const messages = mockProvider.complete.mock.calls[0][0];
+        const systemMessage = messages.find((m: { role: string }) => m.role === 'system') as
+          { content: string } | undefined;
+        expect(systemMessage).toBeDefined();
+        const openTagCount = (systemMessage!.content.match(/<environment_details>/g) ?? []).length;
+        const closeTagCount = (systemMessage!.content.match(/<\/environment_details>/g) ?? [])
+          .length;
+        expect(openTagCount).toBe(1);
+        expect(closeTagCount).toBe(1);
+      });
+
+      it('does not add a second <environment_details> block when customRules already contains one', async () => {
+        // Force the volatile env content path so buildSystemPrompt attempts to
+        // inject its own fence.
+        vi.mocked(getMemoryManager).mockReturnValue({
+          getContextString: vi.fn().mockReturnValue('## Volatile memory line'),
+        } as any);
+        vi.mocked(getSessionContextString).mockReturnValue('## Volatile session line');
+
+        // The customRules string is threaded into buildAssembledSystemPromptAsync
+        // and returned as part of the assembled prompt. Include an env block
+        // there so the assembled output already carries one when
+        // buildSystemPrompt decides whether to append its own.
+        const preBakedRules =
+          '<environment_details>\n  pre-baked context from a plugin\n</environment_details>';
+
+        await agenticChat('Test message', { systemPrompt: preBakedRules });
+
+        const messages = mockProvider.complete.mock.calls[0][0];
+        const systemMessage = messages.find((m: { role: string }) => m.role === 'system') as
+          { content: string } | undefined;
+        expect(systemMessage).toBeDefined();
+        // Exactly one open and one close tag — the pre-baked one.
+        const openTagCount = (systemMessage!.content.match(/<environment_details>/g) ?? []).length;
+        expect(openTagCount).toBe(1);
+        // The pre-baked marker must still be present.
+        expect(systemMessage!.content).toContain('pre-baked context from a plugin');
+      });
+
+      it('emits a single env block across repeated agenticChat invocations with a shared session manager', async () => {
+        vi.mocked(getMemoryManager).mockReturnValue({
+          getContextString: vi.fn().mockReturnValue('## Persistent memory'),
+        } as any);
+        vi.mocked(getSessionContextString).mockReturnValue('## Persistent session');
+
+        mockProvider.complete.mockResolvedValue({
+          text: 'Ack.',
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        } satisfies CompletionResult);
+
+        await agenticChat('First turn');
+        await agenticChat('Second turn');
+
+        for (const call of mockProvider.complete.mock.calls) {
+          const messages = call[0] as Array<{ role: string; content: string }>;
+          const systemMessage = messages.find((m) => m.role === 'system');
+          if (!systemMessage) {
+            continue;
+          }
+          const openTagCount = (systemMessage.content.match(/<environment_details>/g) ?? []).length;
+          expect(openTagCount).toBe(1);
+        }
+      });
+    });
+
     describe('context failure resilience', () => {
       it('should succeed when memory module throws', async () => {
         vi.mocked(getMemoryManager).mockImplementation(() => {
