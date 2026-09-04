@@ -159,6 +159,7 @@ describe('Agent System', () => {
         'mode',
         'systemPrompt',
         'deprecated',
+        'native',
         'disabledTools',
         'aliases',
         'preferredModel',

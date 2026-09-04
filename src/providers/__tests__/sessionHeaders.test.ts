@@ -24,7 +24,7 @@ import {
   buildSessionHeaders,
   mergeSessionHeaders,
   type SessionContext,
-} from './sessionHeaders.js';
+} from '../sessionHeaders.js';
 
 describe('provider request headers survive session-header merge', () => {
   it('preserves Authorization and X-SAP-* headers', () => {
@@ -94,10 +94,7 @@ describe('provider request headers survive session-header merge', () => {
     // Regression pin for the opencode #47215 pattern: SAP AI Core / any
     // downstream that understands X-Interaction-Id can trace requests
     // back to the originating Alexi session without extra plumbing.
-    const merged = mergeSessionHeaders(
-      { Authorization: 'Bearer x' },
-      { sessionID: 'sess-42' }
-    );
+    const merged = mergeSessionHeaders({ Authorization: 'Bearer x' }, { sessionID: 'sess-42' });
     expect(merged['X-Interaction-Id']).toBe('sess-42');
     expect(merged['x-session-affinity']).toBe('sess-42');
     // Non-session headers still survive.
