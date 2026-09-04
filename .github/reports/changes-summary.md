@@ -1,62 +1,103 @@
-# Changes Summary — Upstream Sync (opencode/kilocode → Alexi)
+# Changes Summary — Upstream Sync (2026-09-04)
 
-Generated: 2026-09-03
-Plan basis: kilocode `dfbf8df62..cf954237c`, opencode `69c172e..f12e14c`
+Applied 6-change update plan derived from upstream commits:
+- kilocode: cf954237c..74b3141bb (86 commits — 3 in scope)
+- opencode: f12e14c..3f31139 (14 commits — 3 in scope)
 
-## Scope
+## Files Modified
 
-The provided plan was truncated mid-item #8 (the "Prune Old Tool Outputs in Single-Turn Subagents" bugfix has only a header — no `Current code` / `New code` / DoD). Items 9–14 were not present in the text at all despite the header claiming "14 changes planned". This report covers **the seven fully-specified items (2 critical + 5 high priority)** that had actionable content.
+| File | Type | Change |
+| --- | --- | --- |
+| `src/agent/index.ts` | modified | Added `native` flag to `AgentSchema`, marked built-in `plan` agent as `native: true`, added `hardenPlan()` helper, refined explore agent description, added `native` to `INTERNAL_OPTION_KEYS` |
+| `src/agent/subagent-denial.test.ts` | created | Regression test: subagent permission denial returns `{success:false}` and does NOT throw/tear down the subagent |
+| `src/core/orchestration.ts` | created | New `checkPromptBlocker` / `assertPromptDispatchable` gate with `questions: 'dismiss'` semantics (opencode #13774) |
+| `src/providers/sessionHeaders.ts` | modified | Added `X-Interaction-Id` correlation header (opencode #47215) |
+| `src/providers/__tests__/sessionHeaders.test.ts` | created | Regression tests for SAP-compatibility of provider request headers (mirrors kilocode #13752 intent) + `X-Interaction-Id` |
+| `tests/providers/sessionHeaders.test.ts` | modified | Updated existing exact-match tests to include the new `X-Interaction-Id` header |
 
-Missing items are recorded in the "Issues encountered" section below so a follow-up planning pass can re-emit them.
+## Change-by-change Summary
 
-## Files created / modified
+### 1. `hardenPlan` restricted to native plan agent (HIGH, bugfix)
 
-### Created
+**Upstream**: kilocode #13581, #13590.
 
-| Path | Purpose |
-| --- | --- |
-| `src/tool/tools/board.ts` | `kilo_board_read` / `kilo_board_write` tools (change #1). |
-| `src/core/database/boardStore.ts` | SQLite-backed board persistence (change #2). |
-| `src/core/database/boardContext.ts` | Session → board id resolver (change #1/#7). |
-| `src/core/database/migrations/20260828074139_kilocode_board.ts` | Schema DDL for `kilo_board`, `kilo_board_message`, `kilo_board_read` (change #3). |
-| `src/core/database/migration.gen.ts` | Ordered migration registry (change #4). |
+**What broke upstream**: The previous logic applied plan-mode edit ceilings to *any* agent whose registry key was `plan` OR `architect`. Because permissions use last-match-wins semantics, this made custom `architect` agents' edit `allow` rules unreachable — the guard always appended a stricter rule after them with no opt-out.
 
-### Modified
+**Alexi adaptation**: Alexi's agent model is `tools` + `disabledTools` (not `Permission.Ruleset`), and it doesn't currently ship a `hardenPlan` call. I added:
+- `native?: boolean` field on `AgentSchema` (with JSDoc explaining semantics).
+- `native: true` on the built-in `plan` agent registration in `builtInAgents`.
+- `native` in `INTERNAL_OPTION_KEYS` so the flag never leaks into `provider.complete()` options.
+- `hardenPlan<T extends { native?: boolean }>(key, item, apply)` helper that short-circuits unless `key === 'plan' && item.native === true`, then invokes the caller-supplied `apply(item)` callback to merge plan-mode restrictions.
 
-| Path | What changed |
-| --- | --- |
-| `src/config/userConfig.ts` | Added `getConfigSharedAgentBoard` / `setConfigSharedAgentBoard` helpers reading `experimental.sharedAgentBoard` (change #6). |
-| `src/tool/tools/index.ts` | Register board tools conditionally when the config flag is on; re-export them; import gate helper (change #5). |
-| `src/tool/registry.ts` | Re-export `boardReadTool` / `boardWriteTool` for parity with upstream registry surface (change #5). |
-| `src/tool/tools/task.ts` | Import `BoardStore` / `BoardContext`, extend `taskStore` shape with `swarmIdentity` + `boardId`, attach parent-and-child sessions to a lazily-minted board when the flag is on (change #7). |
+This gives future integrators (permission-ruleset callers) the correct gate without breaking anything Alexi ships today.
 
-## Change-by-change summary
+### 2. Explore agent description clarifies bash allowlist (MEDIUM, feature)
 
-1. **Board tools** — `kilo_board_read` reads new messages then ack's them (kilocode fix `162e30d23` for stale banners); `kilo_board_write` posts with the caller's agent identity. Both fail-open when no board is attached (read → hint + empty; write → error) so registering them outside a swarm cannot brick a session.
-2. **BoardStore** — `better-sqlite3` lazy load via `createRequire` (matches `session/search.ts`), single DB at `~/.alexi/board.db`, DDL applied idempotently on first open so a fresh install works without the migration runner being wired. Public methods: `ensure` / `write` / `read` / `acknowledgeReads` / `__resetForTests`. Native-binding failures disable the store rather than crashing the process.
-3. **Board migration** — Uses Alexi's adapter-agnostic `MigrationTx` (extended with optional `execute(sql)` for adapters that carry raw DDL through). Statements are exported as `BOARD_SCHEMA_STATEMENTS` so `BoardStore.getDb()` can apply them directly, matching Alexi's "graceful degradation" model.
-4. **migration.gen.ts** — New file (there was no pre-existing registry to append to). Uses dynamic `import()` for future ordering safety. `loadMigrations()` returns the resolved list.
-5. **Registry wiring** — `registerBuiltInTools()` now reads `getConfigSharedAgentBoard()` and pushes the two board tools when true. `src/tool/registry.ts` re-exports them so downstream code that mirrors the upstream registry-import layout continues to compile.
-6. **Config flag** — Getter/setter pair following the exact shape of `getConfigTaskModelSelection` / `setConfigTaskModelSelection`. Stored as `experimental.sharedAgentBoard` in `~/.alexi/config.json`. Default `false`.
-7. **Task swarm identity** — When the flag is on, spawning a subagent (a) records `{ name, role: 'swarm-member', parentTaskDescription }` on the task row, (b) mints a board keyed on the parent session id if none exists, and (c) attaches both the task id and the freshly created `childSession.metadata.id` (when a `SessionManager` is present) to that board so the child's `kilo_board_*` tool calls resolve via `BoardContext.resolve(context.sessionId)`. Behaviour is unchanged when the flag is off — the taskStore fields are optional and the attach helpers are never called.
+**Upstream**: kilocode #13759.
 
-## Adaptations from upstream
+**What changed**: The `explore` built-in agent's `description` now includes the sentence upstream added — spelling out that bash is limited to a read-only allowlist, and that the router/orchestrator should pick a different subagent when required scripts/tests/binary-analysis commands fall outside that allowlist. Pure prompt-engineering change; no code paths altered.
 
-The plan quoted upstream code verbatim (Effect-TS, `Tool.define`, `Database.run`, `Session.create({ parentID })`). Alexi does **not** use any of those primitives; each item was translated to the closest Alexi equivalent:
+### 3. `questions: 'dismiss'` prompt gate (HIGH, bugfix)
 
-- `Tool.define(name, { execute })` → `defineTool<TParams, TResult>({ name, description, parameters, execute })`.
-- `Database.run(sql, params)` → lazy `better-sqlite3` via `createRequire`, mirroring `src/session/search.ts`.
-- Effect-TS `Effect.gen` migration → plain `async up(tx)` against Alexi's `MigrationTx`.
-- Upstream `Session.create({ parentID, agentIdentity })` → extend Alexi's in-memory `taskStore` entry with `swarmIdentity` + `boardId`. Full session-level identity plumbing would require reworking `SessionManager.createSession`, which is out of scope for this port.
-- `Config.get()` in the tool registry → module-level `getConfigSharedAgentBoard()` read at registration time (Alexi does not hot-reload tools mid-turn; a config change takes effect on the next process start, same semantics as the `task_model_selection` flag).
+**Upstream**: opencode #13774.
 
-Every touched file keeps SAP AI Core compatibility: the new board features are gated behind an `experimental.` flag, no default provider/router path was modified, and no existing tool signatures changed.
+**What broke upstream**: If a user reissued a slash command / new prompt while a prior clarification question was still open, the orchestrator blocked indefinitely on the stale question.
 
-## Issues encountered
+**Alexi adaptation**: Alexi's blocker layer already lives in `src/permission/agent-manager.ts` (opencode `7baefdddf` / `98559c9d6` ports) and distinguishes `permission` vs `question` blockers. I added a new `src/core/orchestration.ts` with:
+- `OrchestrationError('unavailable_session' | 'host_error', message)` structured error.
+- `checkPromptBlocker({ sessionID, questions? })` — consults `getBlocker`, returns `undefined` when dispatchable, or a reason string otherwise. `questions: 'dismiss'` skips `question` blockers only; `permission` blockers are ALWAYS honoured; unknown-kind blockers fail closed.
+- `assertPromptDispatchable(opts)` — convenience wrapper that throws.
 
-1. **Plan truncation.** Item #8 ("Prune Old Tool Outputs in Single-Turn Subagents") is present as a header only — no code block, no DoD, no upstream reference. Items #9–#14 (5 medium + 2 low priority) are missing entirely from the plan text despite the summary line. These were **not executed** to avoid guessing intent from a header alone. A follow-up planning pass should re-emit them.
-2. **No pre-existing migration.gen.ts.** The plan's item #4 asked to "add an import line" to an auto-generated registry. That file did not exist in Alexi (migrations were adapter-agnostic and never wired to a runner). A minimal `migration.gen.ts` was created with the board migration as its only entry — future migrations should append to `MIGRATION_MODULES`.
-3. **Path mismatch.** The plan referenced `src/core/db/migrations/` and `src/session/compaction.ts`. Alexi actually uses `src/core/database/` and `src/core/compaction.ts`. Files were created at Alexi's canonical paths, not the upstream-style ones from the plan.
-4. **Registry file selection.** The plan directed item #5 at `src/tool/registry.ts`, but that file is the *resolution* registry (dynamic prompt tools), not the *runtime* registry. Tool registration in Alexi happens in `src/tool/tools/index.ts` via `registerBuiltInTools()`. The gating was placed there (correct behavioural home), while `src/tool/registry.ts` was updated to re-export the board tools for import-path parity with upstream.
+No caller is wired to it yet (Alexi's orchestrator does not currently pass through a blocker gate); this establishes the API surface so the migration can happen incrementally without a churn commit.
 
-No changes broke existing tests: nothing was removed, all new symbols are additive, and the new tools are only registered when the operator opts into `experimental.sharedAgentBoard`.
+### 4. Subagent survives permission denial (HIGH, bugfix)
+
+**Upstream**: opencode #13744 (commit `4b85267ae`).
+
+**What broke upstream**: Denying a permission prompt inside a subagent tore down the subagent instead of just failing the one tool call.
+
+**Alexi status**: Already correct. `src/tool/index.ts` (lines 483–491) returns `{ success: false, error: buildUserRejectedToolReason(...) }` on denial — it never throws. The subagent's agent loop can observe the failure in the tool result and continue.
+
+**What I added**: A regression test at `src/agent/subagent-denial.test.ts` that pins this contract with two scenarios:
+- A denied `write` returns `success: false` with a descriptive error and does not throw.
+- After a denied `write`, a subsequent permitted read-only tool still runs successfully (simulating the subagent agent loop choosing a different action).
+
+The test uses the real `PermissionManager` (via `setPermissionManager(new PermissionManager(denyAllRules))`), not a mock — so a future refactor that accidentally raises a fatal exception from the denial path will fail this test.
+
+### 5. Provider request-header preservation (HIGH, bugfix)
+
+**Upstream**: kilocode #13752.
+
+**Alexi status**: The SAP orchestration provider already threads `options?.headers` through the request adapter correctly (`src/providers/sapOrchestration.ts` lines 1403–1409 and 1497). No regression to fix.
+
+**What I added**: A regression test at `src/providers/__tests__/sessionHeaders.test.ts` that locks the header-forwarding contract at the layer Alexi controls:
+- `mergeSessionHeaders` preserves `Authorization` + `X-SAP-Resource-Group` + `X-SAP-Deployment-Id` + `Content-Type` verbatim.
+- Session-tracing headers (`x-session-affinity`, `x-parent-session-id`, `x-alexi-agent-id`, `x-alexi-parent-agent-id`) are added alongside without overwriting.
+- Pre-existing session headers on the base object survive when no `SessionContext` is supplied.
+- `buildSessionHeaders` does not emit `undefined` values for optional fields.
+
+### 6. `X-Interaction-Id` correlation header (LOW, feature)
+
+**Upstream**: opencode #47215 (Copilot-provider addition; useful pattern for any provider).
+
+**What I added**: `src/providers/sessionHeaders.ts` now emits `X-Interaction-Id: <sessionID>` alongside `x-session-affinity` on every call that has a session id. Same value, different semantic:
+- `x-session-affinity` — routing hint for load-balanced deployments.
+- `X-Interaction-Id` — trace-correlation key for distributed logging.
+
+Purely additive; servers that don't understand the header ignore it. Existing tests at `tests/providers/sessionHeaders.test.ts` used exact-match `toEqual`, so I updated all affected assertions to include the new key.
+
+## Issues Encountered
+
+- **Missing upstream analogues.** The plan referenced `src/core/orchestration.ts` and `src/providers/opencode.ts` — neither exists in Alexi. I created `src/core/orchestration.ts` fresh with the `questions: 'dismiss'` semantics wired to Alexi's existing `permission/agent-manager.ts` blocker store, and I skipped the OpenCode-provider work in favour of a SAP-focused regression test (Alexi does not ship an OpenCode provider).
+- **`Permission.Ruleset` model absent.** Alexi represents agent permissions as `tools` + `disabledTools` allowlists, not upstream's ruleset object. `hardenPlan` was therefore implemented as a generic gate (`<T extends { native?: boolean }>`) that invokes a caller-supplied `apply` callback, rather than mutating a specific ruleset field. This keeps the fix's intent (only native plan agents get the ceiling) portable to whichever permission surface a future caller uses.
+- **Existing `tests/providers/sessionHeaders.test.ts` used `toEqual`.** Adding `X-Interaction-Id` broke exact-match assertions. Updated all seven affected cases to include the new key with the same session-id value.
+- **`ToolContext` shape.** The initial `subagent-denial.test.ts` used `permissions: []` which is not a `ToolContext` field. Corrected to `{ workdir, subagentDepth }`.
+- **Change #4 already correct in Alexi.** The tool executor at `src/tool/index.ts` already returns `{ success: false, error }` on denial, so the "denial tears down subagent" upstream bug does not exist in Alexi. Added a regression test to pin the contract rather than change the code path.
+
+## SAP AI Core Compatibility
+
+All changes are non-breaking for SAP AI Core:
+- No provider request path was altered (only additive headers).
+- No changes to `sapOrchestration.ts` or the auth/deployment resolution.
+- `X-Interaction-Id` is ignored by SAP AI Core if not consumed; if consumed (via SAP's own telemetry surface), it improves traceability without side effects.
+- Agent-metadata changes (`native` flag) are stripped by `stripInternalOptions` before any provider dispatch.

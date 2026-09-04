@@ -22,6 +22,16 @@ export const AgentSchema = z.object({
   mode: z.enum(['primary', 'subagent', 'all']).default('all'),
   systemPrompt: z.string(),
   deprecated: z.boolean().optional(), // Mark agents as deprecated
+  /**
+   * True when this agent is the built-in shipped default (not a user override
+   * or a custom agent). Only built-in native agents receive plan-mode edit
+   * ceilings from `hardenPlan`; custom agents named `plan` or `architect` are
+   * governed by their own permission config. Ports upstream kilocode fix
+   * #13581 / #13590 — the previous name-only check made custom `architect`
+   * agents' edit permissions unreachable because the plan-guard was appended
+   * after their rules and last-match-wins swallowed their allows.
+   */
+  native: z.boolean().optional(),
   // Tool configuration
   tools: z.array(z.string()).optional(), // Tool IDs this agent can use
   disabledTools: z.array(z.string()).optional(), // Explicitly disabled tools
@@ -71,6 +81,7 @@ export const INTERNAL_OPTION_KEYS = [
   'mode',
   'systemPrompt',
   'deprecated',
+  'native',
   'disabledTools',
   'aliases',
   'preferredModel',
@@ -172,11 +183,24 @@ export const builtInAgents: AgentConfig[] = [
     systemPrompt: planAgentPrompt,
     aliases: ['p', 'architect'],
     tools: ['read', 'glob', 'grep', 'webfetch'], // Read-only tools
+    // Marks this as the built-in native plan agent. `hardenPlan` applies its
+    // read-only edit ceiling ONLY to native plan agents so custom user agents
+    // named `plan` or `architect` retain full control over their own edit
+    // permissions (ports upstream kilocode fixes #13581 / #13590).
+    native: true,
   },
   {
     id: 'explore',
     name: 'Explore Agent',
-    description: 'Fast codebase exploration and search',
+    // kilocode #13759 — spell out the bash allowlist restriction so the
+    // router/orchestrator picks a different subagent when a read-only task
+    // needs shell commands outside the allowlist, instead of dead-ending
+    // on `gh` / `find` / test-runner invocations the explore agent cannot run.
+    description:
+      'Fast codebase exploration and search. Bash is limited to an allowlist of ' +
+      'read-only commands. For required scripts, tests, or binary-analysis commands ' +
+      'outside that allowlist, select an available agent whose permissions allow ' +
+      'them while preserving the requested no-change scope.',
     mode: 'subagent',
     systemPrompt: exploreAgentPrompt,
     aliases: ['e', 'search'],
@@ -685,4 +709,48 @@ export function getExploreAgentBashRules(): Record<string, 'allow' | 'ask' | 'de
 export function isExploreAgent(idOrAlias: string): boolean {
   const agent = getAgentRegistry().get(idOrAlias);
   return agent?.id === 'explore';
+}
+
+/**
+ * Apply plan-mode edit ceilings to an agent's ruleset.
+ *
+ * Ports upstream kilocode fix #13581 / #13590 (commit context: plan-mode
+ * hardening restricted to native plan agent only). Previously, any agent
+ * named `plan` OR `architect` had plan-mode edit ceilings appended to its
+ * ruleset. Because permissions use last-match-wins semantics, this made
+ * custom `architect` agents' edit `allow` rules unreachable — the guard
+ * always appended a stricter rule after them with no opt-out.
+ *
+ * The fix restricts the ceiling to the built-in native plan agent only:
+ *
+ *   - `key !== 'plan'` — architect and other custom names are skipped.
+ *   - `item.native !== true` — a user override that reuses the `plan` key
+ *     but sets its own permissions is treated as a custom agent (its
+ *     `native` flag is not carried over from the built-in registration).
+ *   - A custom `agent.plan` config that reuses the built-in object keeps
+ *     `native: true` and the ceiling still applies — this matches the
+ *     upstream semantics for "plan agent config extends the built-in".
+ *
+ * @param key - Agent registry key (typically the agent id).
+ * @param item - Agent-like object; must expose `native?: boolean` and be
+ *   mutated in place by the caller when the ceiling should apply.
+ * @param apply - Callback invoked with `item` when the ceiling should be
+ *   applied. Callers use this to merge their plan-mode restriction rules
+ *   into `item.permission` / `item.disabledTools` / etc. When the guard
+ *   short-circuits (custom agent path), the callback is NOT invoked.
+ */
+export function hardenPlan<T extends { native?: boolean }>(
+  key: string,
+  item: T,
+  apply: (item: T) => void
+): void {
+  // Plan-mode edit restrictions are a ceiling for the built-in plan agent only.
+  // Custom agents named `architect` are governed by their own permission config;
+  // the previous name check appended the guard after their rules, so last-match-
+  // wins made their edit allows unreachable with no opt-out (#13581). A custom
+  // `agent.plan` config reuses the built-in object, so `native` stays true and
+  // the ceiling still applies there.
+  if (key !== 'plan') return;
+  if (item.native !== true) return;
+  apply(item);
 }
