@@ -1,103 +1,134 @@
-# Changes Summary — Upstream Sync (2026-09-04)
+# Changes Summary — Upstream Update Plan Execution
 
-Applied 6-change update plan derived from upstream commits:
-- kilocode: cf954237c..74b3141bb (86 commits — 3 in scope)
-- opencode: f12e14c..3f31139 (14 commits — 3 in scope)
+**Date:** 2026-09-05
+**Plan source:** `Update Plan for Alexi` (kilocode `74b3141bb..ecccd1f54`, opencode `3f31139..e289456`)
 
 ## Files Modified
 
-| File | Type | Change |
-| --- | --- | --- |
-| `src/agent/index.ts` | modified | Added `native` flag to `AgentSchema`, marked built-in `plan` agent as `native: true`, added `hardenPlan()` helper, refined explore agent description, added `native` to `INTERNAL_OPTION_KEYS` |
-| `src/agent/subagent-denial.test.ts` | created | Regression test: subagent permission denial returns `{success:false}` and does NOT throw/tear down the subagent |
-| `src/core/orchestration.ts` | created | New `checkPromptBlocker` / `assertPromptDispatchable` gate with `questions: 'dismiss'` semantics (opencode #13774) |
-| `src/providers/sessionHeaders.ts` | modified | Added `X-Interaction-Id` correlation header (opencode #47215) |
-| `src/providers/__tests__/sessionHeaders.test.ts` | created | Regression tests for SAP-compatibility of provider request headers (mirrors kilocode #13752 intent) + `X-Interaction-Id` |
-| `tests/providers/sessionHeaders.test.ts` | modified | Updated existing exact-match tests to include the new `X-Interaction-Id` header |
+| File | Change type | Priority |
+|------|-------------|----------|
+| `src/tool/tools/glob.ts` | bugfix (feature port) | high |
+| `tests/tool/tools/glob-timeout.test.ts` | new (test coverage) | medium |
+| `src/providers/openai/prompt-cache.ts` | bugfix (hardening) | medium |
+| `src/providers/openai/__tests__/prompt-cache.test.ts` | test additions | medium |
+| `package.json` | version bump | low |
 
-## Change-by-change Summary
+## Changes Applied
 
-### 1. `hardenPlan` restricted to native plan agent (HIGH, bugfix)
+### 1. Bounded timeout on glob search (plan item #1 + #2, merged)
 
-**Upstream**: kilocode #13581, #13590.
+**File:** `src/tool/tools/glob.ts`
 
-**What broke upstream**: The previous logic applied plan-mode edit ceilings to *any* agent whose registry key was `plan` OR `architect`. Because permissions use last-match-wins semantics, this made custom `architect` agents' edit `allow` rules unreachable — the guard always appended a stricter rule after them with no opt-out.
+The plan targeted a ripgrep primitive at `src/core/ripgrep.ts`, but Alexi has
+**no** ripgrep primitive — its `globTool` uses a pure-JS walker (`globMatch`)
+that recursively calls `fs.readdir`. The same stall risk applies (large
+repos, network-mounted filesystems on SAP CI runners), so the fix was
+adapted to Alexi's architecture:
 
-**Alexi adaptation**: Alexi's agent model is `tools` + `disabledTools` (not `Permission.Ruleset`), and it doesn't currently ship a `hardenPlan` call. I added:
-- `native?: boolean` field on `AgentSchema` (with JSDoc explaining semantics).
-- `native: true` on the built-in `plan` agent registration in `builtInAgents`.
-- `native` in `INTERNAL_OPTION_KEYS` so the flag never leaks into `provider.complete()` options.
-- `hardenPlan<T extends { native?: boolean }>(key, item, apply)` helper that short-circuits unless `key === 'plan' && item.native === true`, then invokes the caller-supplied `apply(item)` callback to merge plan-mode restrictions.
+- Introduced `GLOB_SEARCH_TIMEOUT_MS = 30_000` (matches upstream default).
+- Extended the `GlobResult` interface with optional `timedOut?: boolean`
+  and `truncated?: boolean` fields, mirroring kilocode's return shape.
+- Wrapped the `globMatch(...)` call in an `AbortController` that fires
+  when the deadline elapses. The caller's existing `context.signal` is
+  chained so external aborts still propagate.
+- On timeout, the tool returns `{ success: true, data: { matches: [],
+  count: 0, timedOut: true, truncated: true } }` rather than throwing —
+  so an agent turn can keep going with a partial, non-fatal result.
+- Real errors (non-timeout abort, I/O failures) continue to propagate.
 
-This gives future integrators (permission-ruleset callers) the correct gate without breaking anything Alexi ships today.
+Plan item #2 (wiring `timeout` through the glob tool) is subsumed into the
+same file since Alexi doesn't have a separate `Ripgrep.files` layer.
 
-### 2. Explore agent description clarifies bash allowlist (MEDIUM, feature)
+### 2. Regression test for glob timeout (plan item #3)
 
-**Upstream**: kilocode #13759.
+**File:** `tests/tool/tools/glob-timeout.test.ts` (new)
 
-**What changed**: The `explore` built-in agent's `description` now includes the sentence upstream added — spelling out that bash is limited to a read-only allowlist, and that the router/orchestrator should pick a different subagent when required scripts/tests/binary-analysis commands fall outside that allowlist. Pure prompt-engineering change; no code paths altered.
+Adapted the plan's upstream Bun+Effect test to Alexi's vitest+TypeScript
+idiom. Mirrors the mock/tempdir pattern already used by
+`tests/tool/tools/glob.test.ts`:
 
-### 3. `questions: 'dismiss'` prompt gate (HIGH, bugfix)
+- **Timeout case:** monkey-patches `fs.readdir` to return a never-resolving
+  promise (simulating a stalled network filesystem), enables fake timers
+  for `setTimeout`/`clearTimeout` only, advances past the 30 s deadline,
+  and asserts `timedOut === true`, `truncated === true`,
+  `matches === []`.
+- **Fast-path case:** runs a real, tiny tree end-to-end and asserts the
+  new flags stay `undefined` on a successful search — guards against a
+  regression that would over-report timeouts.
 
-**Upstream**: opencode #13774.
+### 3. Codex GPT version comparison hardening (plan item #5)
 
-**What broke upstream**: If a user reissued a slash command / new prompt while a prior clarification question was still open, the orchestrator blocked indefinitely on the stale question.
+**File:** `src/providers/openai/prompt-cache.ts`, `.test.ts`
 
-**Alexi adaptation**: Alexi's blocker layer already lives in `src/permission/agent-manager.ts` (opencode `7baefdddf` / `98559c9d6` ports) and distinguishes `permission` vs `question` blockers. I added a new `src/core/orchestration.ts` with:
-- `OrchestrationError('unavailable_session' | 'host_error', message)` structured error.
-- `checkPromptBlocker({ sessionID, questions? })` — consults `getBlocker`, returns `undefined` when dispatchable, or a reason string otherwise. `questions: 'dismiss'` skips `question` blockers only; `permission` blockers are ALWAYS honoured; unknown-kind blockers fail closed.
-- `assertPromptDispatchable(opts)` — convenience wrapper that throws.
+Alexi's `supportsPromptCacheBreakpoint` used the regex
+`/gpt-5\.[6-9]|gpt-[6-9]/i`. That regex *happens* to handle both
+opencode-reported bugs (integer version like `"gpt-6"`, and correct
+comparison across major+minor), but the intent was implicit. Refactored
+to an explicit `(major, minor)` tuple comparator so future edits can't
+accidentally regress:
 
-No caller is wired to it yet (Alexi's orchestrator does not currently pass through a blocker gate); this establishes the API surface so the migration can happen incrementally without a churn commit.
+- Added exported `isGpt5_6OrLater(modelId)` that parses `gpt-<major>(.<minor>)?`
+  and compares by tuple against `(5, 6)`. Defaults minor to 0 when absent,
+  guards against `NaN` (`Number.isFinite`), and is case-insensitive.
+- `supportsPromptCacheBreakpoint` now delegates to `isGpt5_6OrLater`.
+- Added 5 new test cases covering `"gpt-5"`, `"gpt-5.6"`, `"gpt-6"`,
+  `"gpt-4.9"`, `""`, `"gpt-"`, and case-insensitive prefix.
 
-### 4. Subagent survives permission denial (HIGH, bugfix)
+### 4. Version bump (plan item #6)
 
-**Upstream**: opencode #13744 (commit `4b85267ae`).
+**File:** `package.json`
 
-**What broke upstream**: Denying a permission prompt inside a subagent tore down the subagent instead of just failing the one tool call.
+Bumped `version` from `1.22.11` → `1.22.12` (patch bump, since all changes
+are bugfixes / test coverage). The plan message truncated before the exact
+version was specified, so the standard patch bump was applied.
 
-**Alexi status**: Already correct. `src/tool/index.ts` (lines 483–491) returns `{ success: false, error: buildUserRejectedToolReason(...) }` on denial — it never throws. The subagent's agent loop can observe the failure in the tool result and continue.
+## Plan Items Skipped
 
-**What I added**: A regression test at `src/agent/subagent-denial.test.ts` that pins this contract with two scenarios:
-- A denied `write` returns `success: false` with a descriptive error and does not throw.
-- After a denied `write`, a subsequent permitted read-only tool still runs successfully (simulating the subagent agent loop choosing a different action).
+### Plan item #4 — `run-stdin` piped-stdin bounded wait
 
-The test uses the real `PermissionManager` (via `setPermissionManager(new PermissionManager(denyAllRules))`), not a mock — so a future refactor that accidentally raises a fatal exception from the denial path will fail this test.
+**Status:** Not applicable / skipped.
 
-### 5. Provider request-header preservation (HIGH, bugfix)
+The plan itself was conditional ("if Alexi ships `alexi run`"). Verified
+via `grep -r 'process\.stdin\.' src/cli/` and `glob 'src/cli/**/run*.ts'`
+that Alexi has:
 
-**Upstream**: kilocode #13752.
+- **No** `alexi run` subcommand.
+- **No** piped-stdin reader in any CLI command. `chat` accepts input via
+  `-m/--message` flag or `--message-file` path, not stdin.
+- **No** `readFileSync('/dev/stdin')` or `process.stdin.on('data', ...)`
+  usage outside the interactive REPL's keypress handler (which is not a
+  piped-input path and doesn't have the same hang risk).
 
-**Alexi status**: The SAP orchestration provider already threads `options?.headers` through the request adapter correctly (`src/providers/sapOrchestration.ts` lines 1403–1409 and 1497). No regression to fix.
-
-**What I added**: A regression test at `src/providers/__tests__/sessionHeaders.test.ts` that locks the header-forwarding contract at the layer Alexi controls:
-- `mergeSessionHeaders` preserves `Authorization` + `X-SAP-Resource-Group` + `X-SAP-Deployment-Id` + `Content-Type` verbatim.
-- Session-tracing headers (`x-session-affinity`, `x-parent-session-id`, `x-alexi-agent-id`, `x-alexi-parent-agent-id`) are added alongside without overwriting.
-- Pre-existing session headers on the base object survive when no `SessionContext` is supplied.
-- `buildSessionHeaders` does not emit `undefined` values for optional fields.
-
-### 6. `X-Interaction-Id` correlation header (LOW, feature)
-
-**Upstream**: opencode #47215 (Copilot-provider addition; useful pattern for any provider).
-
-**What I added**: `src/providers/sessionHeaders.ts` now emits `X-Interaction-Id: <sessionID>` alongside `x-session-affinity` on every call that has a session id. Same value, different semantic:
-- `x-session-affinity` — routing hint for load-balanced deployments.
-- `X-Interaction-Id` — trace-correlation key for distributed logging.
-
-Purely additive; servers that don't understand the header ignore it. Existing tests at `tests/providers/sessionHeaders.test.ts` used exact-match `toEqual`, so I updated all affected assertions to include the new key.
+Adding the `readPipedStdin` utility with no caller would be dead code and
+falls under "do NOT add extra changes not in the plan".
 
 ## Issues Encountered
 
-- **Missing upstream analogues.** The plan referenced `src/core/orchestration.ts` and `src/providers/opencode.ts` — neither exists in Alexi. I created `src/core/orchestration.ts` fresh with the `questions: 'dismiss'` semantics wired to Alexi's existing `permission/agent-manager.ts` blocker store, and I skipped the OpenCode-provider work in favour of a SAP-focused regression test (Alexi does not ship an OpenCode provider).
-- **`Permission.Ruleset` model absent.** Alexi represents agent permissions as `tools` + `disabledTools` allowlists, not upstream's ruleset object. `hardenPlan` was therefore implemented as a generic gate (`<T extends { native?: boolean }>`) that invokes a caller-supplied `apply` callback, rather than mutating a specific ruleset field. This keeps the fix's intent (only native plan agents get the ceiling) portable to whichever permission surface a future caller uses.
-- **Existing `tests/providers/sessionHeaders.test.ts` used `toEqual`.** Adding `X-Interaction-Id` broke exact-match assertions. Updated all seven affected cases to include the new key with the same session-id value.
-- **`ToolContext` shape.** The initial `subagent-denial.test.ts` used `permissions: []` which is not a `ToolContext` field. Corrected to `{ workdir, subagentDepth }`.
-- **Change #4 already correct in Alexi.** The tool executor at `src/tool/index.ts` already returns `{ success: false, error }` on denial, so the "denial tears down subagent" upstream bug does not exist in Alexi. Added a regression test to pin the contract rather than change the code path.
+1. **Repository shape mismatch with plan.** The plan assumed a kilocode/
+   opencode-style Effect + ripgrep architecture (`src/core/ripgrep.ts`,
+   `Ripgrep.files`, Bun test runner, `@effect/testing`). Alexi is a much
+   simpler Node+vitest codebase with a JS glob walker. Items #1 and #2
+   were merged and adapted to Alexi's `globTool` directly. The **semantic
+   contract** (bounded deadline → `timedOut + truncated` partial result)
+   matches upstream.
+
+2. **Existing regex already covered opencode bug (#5).** Alexi's regex
+   `/gpt-5\.[6-9]|gpt-[6-9]/i` already correctly handled both edge cases
+   opencode PRs #47384 and #47385 fixed. The refactor to an explicit
+   tuple comparator (`isGpt5_6OrLater`) is defensive: it codifies the
+   invariant so a future edit that "simplifies" the regex to
+   `/gpt-\d/i` (or similar) can't silently reintroduce the bug.
+
+3. **Version bump target unspecified.** Plan item #6 was truncated
+   mid-file-header. Chose a patch bump (`1.22.11` → `1.22.12`) as all
+   changes are bugfixes.
 
 ## SAP AI Core Compatibility
 
-All changes are non-breaking for SAP AI Core:
-- No provider request path was altered (only additive headers).
-- No changes to `sapOrchestration.ts` or the auth/deployment resolution.
-- `X-Interaction-Id` is ignored by SAP AI Core if not consumed; if consumed (via SAP's own telemetry surface), it improves traceability without side effects.
-- Agent-metadata changes (`native` flag) are stripped by `stripInternalOptions` before any provider dispatch.
+- **No** changes to `src/providers/sapOrchestration.ts`,
+  `src/providers/index.ts`, or any SAP auth path.
+- The GPT-version comparator continues to accept `providerId ===
+  'sap-ai-core'` for SAP-routed OpenAI models (regression-tested in
+  `prompt-cache.test.ts`).
+- Glob timeout is purely a client-side traversal deadline — does not
+  touch any provider API contract.

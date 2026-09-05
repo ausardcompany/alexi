@@ -17,7 +17,36 @@ const GlobParamsSchema = z.object({
 interface GlobResult {
   matches: string[];
   count: number;
+  /**
+   * Set when the search hit the bounded deadline (see
+   * {@link GLOB_SEARCH_TIMEOUT_MS}) before finishing. Callers should treat
+   * `matches` as a partial, non-fatal result and consider narrowing the
+   * pattern or root directory. Mirrors the kilocode `truncated + timedOut`
+   * shape from the upstream ripgrep search primitive (PR #13805).
+   */
+  timedOut?: boolean;
+  /**
+   * Set when the returned `matches` array is a partial view of what a
+   * complete traversal would have produced. Currently only set alongside
+   * `timedOut`, but exposed separately so future limit/cancellation code
+   * paths can flag partial results without conflating the two.
+   */
+  truncated?: boolean;
 }
+
+/**
+ * Default deadline for a single {@link globTool} invocation. Upstream
+ * kilocode (`b8e497a35`, PR #13805) added a bounded timeout to the ripgrep
+ * search primitive to prevent stalled glob searches on large repos and
+ * slow/network-mounted filesystems (common in SAP CI runners). Alexi's
+ * glob tool uses a JS walker rather than ripgrep, but the same failure
+ * mode applies: without a deadline, a hung filesystem call inside
+ * {@link globMatch} would block an agent turn indefinitely.
+ *
+ * 30 seconds matches the upstream default and is well above the p99 of a
+ * healthy repo scan.
+ */
+export const GLOB_SEARCH_TIMEOUT_MS = 30_000;
 
 /**
  * Extend a glob pattern's last segment to include additional file
@@ -238,7 +267,58 @@ When independent reads, searches, or edits are also needed, emit those tool call
       const additionalExtensions = getIndexingExtensions(context.workdir);
       const effectivePattern = extendGlobPattern(params.pattern, additionalExtensions);
 
-      let matches = await globMatch(searchPath, effectivePattern, context.signal);
+      // Bound the traversal with a deadline so a hung filesystem call
+      // cannot stall an agent turn indefinitely. Mirrors kilocode's
+      // upstream ripgrep timeout fix (PR #13805): on timeout we surface a
+      // partial, non-fatal result (`timedOut: true`, `truncated: true`)
+      // rather than throwing.
+      const timeoutController = new AbortController();
+      const externalSignal = context.signal;
+      // Chain the caller's signal so external aborts still fire.
+      const onExternalAbort = () => timeoutController.abort();
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          timeoutController.abort();
+        } else {
+          externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+      }
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        timeoutController.abort();
+      }, GLOB_SEARCH_TIMEOUT_MS);
+
+      let matches: string[];
+      try {
+        matches = await globMatch(searchPath, effectivePattern, timeoutController.signal);
+      } catch (err) {
+        // Distinguish deadline-triggered aborts from real errors. An
+        // abort caused by `timedOut` becomes a partial success; anything
+        // else (real I/O failure, caller-initiated cancel) propagates.
+        if (timedOut) {
+          matches = [];
+        } else {
+          throw err;
+        }
+      } finally {
+        clearTimeout(timer);
+        if (externalSignal) {
+          externalSignal.removeEventListener('abort', onExternalAbort);
+        }
+      }
+
+      if (timedOut) {
+        return {
+          success: true,
+          data: {
+            matches: [],
+            count: 0,
+            timedOut: true,
+            truncated: true,
+          },
+        };
+      }
 
       // Sort by modification time (most recent first)
       const withStats = await Promise.all(
