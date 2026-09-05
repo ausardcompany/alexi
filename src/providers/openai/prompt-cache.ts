@@ -73,7 +73,7 @@ export function isGpt5_6OrLater(modelId: string): boolean {
     return false;
   }
   const major = Number(match[1]);
-  const minor = match[2] != null ? Number(match[2]) : 0;
+  const minor = match[2] !== undefined ? Number(match[2]) : 0;
   if (!Number.isFinite(major) || !Number.isFinite(minor)) {
     return false;
   }
