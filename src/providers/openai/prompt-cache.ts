@@ -44,7 +44,45 @@ export function supportsPromptCacheBreakpoint(opts: {
   // Match both direct OpenAI provider ids and SAP AI Core routes to
   // OpenAI-family models.
   if (opts.providerId === 'openai' || opts.providerId === 'sap-ai-core') {
-    return /gpt-5\.[6-9]|gpt-[6-9]/i.test(opts.modelId);
+    return isGpt5_6OrLater(opts.modelId);
+  }
+  return false;
+}
+
+/**
+ * Robust GPT version comparator (opencode PRs #47384, #47385).
+ *
+ * Two edge cases the plain `/gpt-5\.[6-9]|gpt-[6-9]/i` regex handles by
+ * accident but that we make explicit here to guard against future
+ * refactors:
+ *
+ *   1. Integer versions without a minor (`"gpt-6"`) must be accepted —
+ *      opencode's original code compared only against `major.minor`
+ *      strings and crashed on `NaN` when the minor was absent.
+ *   2. Comparison must be by `(major, minor)` tuple, not major alone —
+ *      otherwise `"gpt-5.4"` would incorrectly match a `major >= 5` check.
+ *
+ * Returns `true` when the parsed version is >= 5.6 (i.e. `major > 5`, OR
+ * `major === 5 && minor >= 6`). Returns `false` for unparseable ids.
+ */
+export function isGpt5_6OrLater(modelId: string): boolean {
+  // Accept both "gpt-5" and "gpt-5.6" style versions. The minor group is
+  // optional; when absent it defaults to 0.
+  const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+  if (!match) {
+    return false;
+  }
+  const major = Number(match[1]);
+  const minor = match[2] !== undefined ? Number(match[2]) : 0;
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) {
+    return false;
+  }
+  // Tuple comparison against (5, 6).
+  if (major > 5) {
+    return true;
+  }
+  if (major === 5 && minor >= 6) {
+    return true;
   }
   return false;
 }

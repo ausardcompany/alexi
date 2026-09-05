@@ -311,7 +311,7 @@ describe('Write Tool', () => {
 | `read` | `tests/tool/tools/read.test.ts` | 20+ cases |
 | `write` | `tests/tool/tools/write.test.ts` | 18+ cases |
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
-| `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
+| `glob` | `tests/tool/tools/glob.test.ts`, `tests/tool/tools/glob-timeout.test.ts` | 16+ cases + bounded-deadline regression suite |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 | `bash` | `tests/tool/tools/bash.test.ts` | 13+ cases (includes shell-type reporting) |
 | `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
@@ -3508,3 +3508,64 @@ Key patterns:
 The paired `scripts/profile-session-search.ts` script is intentionally **not** part of the vitest suite (it produces a Markdown table on stdout for pasting into `docs/session-search-performance.md`). Invoke it with `npx tsx scripts/profile-session-search.ts` from the repo root when you need fresh numbers. The script covers scenarios at 10, 50, 100, 200, 500, and 1000 sessions (the 200 tier was added for issue #1610). Each scenario also captures an RSS delta alongside wall time, and — when Node is running with `--expose-gc` — issues a best-effort `global.gc()` call before sampling to reduce GC-timing noise.
 
 This profile-and-test-then-document pattern is the recommended template for any future CLI performance concern: a `tsx` script for one-shot numbers, a `docs/*-performance.md` writeup for the analysis, and a matching `tests/**/performance.test.ts` for regression guards.
+
+### Testing `prompt-cache` breakpoint and env-block hardening (kilocode #13190, opencode #47384 / #47385)
+
+The prompt-cache module (`src/providers/openai/prompt-cache.ts`) exposes four small pure helpers plus one array transform. All five are trivially unit-testable without any provider mocking — the full suite lives in `src/providers/openai/__tests__/prompt-cache.test.ts`.
+
+- **`hasEnvironmentDetailsBlock(content)`** — pin the leading-whitespace case (`'\n\n  <environment_details>\n...'` MUST return `true`) alongside the plain-string and non-string branches. This is the regression guard for kilocode #13190: raw `startsWith('<environment_details>')` fails when blank lines precede the block, and `.trim().includes(...)` must handle it.
+- **`supportsPromptCacheBreakpoint`** — cover the GPT-5.6+ family on both `providerId: 'openai'` and `providerId: 'sap-ai-core'`, the ChatGPT-subscription exclusion, and unrelated providers.
+- **`isGpt5_6OrLater`** — cover integer-major (`'gpt-6'`), tuple comparison (`'gpt-5.4'` vs `'gpt-5.6'`), unparseable ids, and case-insensitivity. Two guards worth calling out explicitly because the regression cost is high:
+  1. **opencode #47384**: integer versions like `'gpt-6'` MUST parse without crashing (older code compared `major.minor` strings and blew up on `NaN`).
+  2. **opencode #47385**: `'gpt-5.4'` MUST return `false`. A `major >= 5` check alone misclassifies it as supported.
+- **`isChatGPTSubscription`** — trivial, but pin the exact `{ type: 'oauth', source: 'chatgpt' }` combination.
+- **`applyCacheBreakpoint`** — the meatiest cases. Cover: no stable-role message (return unchanged); a lone system message with no env block (mark it); two system messages where the second carries a volatile env block (mark the FIRST — this is the stable-vs-volatile discriminator); the leading-whitespace variant of the same case (must still mark the first); the degenerate fallback (every stable-role message carries an env block — still mark something so caller gets partial caching); the assistant-only fallback (no system message available); the providerOptions preservation invariant (existing hints under `openai` and `anthropic` bags MUST NOT be clobbered); and the Vercel AI SDK v2 content-as-parts shape (`content: [{ type: 'text', text: '...' }]` — the detector MUST see through the parts array).
+
+The suite uses no `vi.mock` calls — every case constructs a `LanguageModelV2Prompt` inline and asserts on the returned array. Cast the marked message via `as { providerOptions?: { openai?: { cacheBreakpoint?: boolean } } }` when reading the breakpoint flag; the readonly-array element type does not include the openai bag in its structural shape.
+
+### Testing the `<environment_details>` duplicate-block prevention in `agenticChat` (kilocode #13190)
+
+Three regression tests live in `src/core/__tests__/agenticChat.test.ts` under the `environment_details duplicate-block prevention (kilocode #13190)` describe block. The pattern for each case:
+
+1. **Force the volatile-content path.** Mock `getMemoryManager` to return `{ getContextString: () => '## Some memory' }` and mock `getSessionContextString` to return `'## Some session'` so `buildSystemPrompt` produces a non-empty `envParts` array — otherwise the injection branch is skipped and the invariant is trivially satisfied.
+2. **Invoke `agenticChat('Test message', options?)`.** For the pre-baked case, pass `{ systemPrompt: '<environment_details>\n  pre-baked ...\n</environment_details>' }` so the assembled prompt already carries a fence.
+3. **Assert on `mockProvider.complete.mock.calls[0][0]`.** Find the `role === 'system'` message, then count `<environment_details>` and `</environment_details>` occurrences with a global-regex match. Both counts MUST equal `1`.
+4. **For the multi-turn case**, invoke `agenticChat` twice with a shared session manager and iterate over `mockProvider.complete.mock.calls` — every system message MUST have exactly one open tag.
+
+Do NOT assert on the exact byte content of the system message — the surrounding stable-prefix content is subject to churn from other tests / plugins. The invariant is strictly a tag-count assertion.
+
+### Testing the bounded `glob` deadline (kilocode PR #13805 adaptation)
+
+`tests/tool/tools/glob-timeout.test.ts` covers the `GLOB_SEARCH_TIMEOUT_MS = 30_000` deadline in `src/tool/tools/glob.ts`. The suite follows the tool-test conventions in AGENTS.md — an `fs.mkdtemp` temp directory per case, an `afterEach` cleanup, and the standard `vi.mock('../../../src/tool/index.js')` shim that preserves `defineTool` while exposing `execute` / `executeUnsafe` directly.
+
+Current state (post-`400ccb7f`, 2026-09-05):
+
+- **Positive case (`does not set timedOut on a successful fast search`)** — real assertion, always runs. Writes two files into the temp directory, calls `globTool.execute({ pattern: '*.ts' }, context)`, and asserts `result.data.timedOut === undefined`, `result.data.truncated === undefined`, `result.data.count === 2`. This is the regression barrier for the happy-path branch: any change that spuriously sets `timedOut: true` on a normal search trips this assertion immediately.
+- **Negative case (`returns truncated+timedOut when the deadline elapses before results`)** — `it.skip`ped. The original implementation stubbed `fs.readdir` via `vi.spyOn(fs, 'readdir').mockImplementation(() => new Promise(() => {}))` to simulate a hung filesystem and paired it with `vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })` + `vi.advanceTimersByTimeAsync(30_500)` to trip the deadline. This does NOT work under Alexi's ESM configuration.
+
+Why the negative case is skipped (`vi.spyOn` on `fs/promises` fails in ESM):
+
+Under Node's native ESM loader (`"type": "module"` in `package.json` + `module: NodeNext` in `tsconfig.json`) every entry on the `fs/promises` namespace object is an own accessor whose property descriptor has `configurable: false`. `vi.spyOn(fs, 'readdir')` internally calls `Object.defineProperty(fs, 'readdir', { ... })`, which throws `TypeError: Cannot redefine property: readdir` at test load time. This is a Vitest ESM limitation, not an Alexi-specific bug — see the vitest docs at `https://vitest.dev/guide/browser/#limitations`. The same restriction applies to `vi.mock('fs/promises', ...)` when the mock factory tries to partially override a single export while spreading `vi.importActual(...)` — the spread copies the same non-configurable descriptors, and Vitest's module cache cannot install a writable replacement without the loader's cooperation.
+
+Contributors adding coverage for the deadline branch have three acceptable alternatives; **do NOT re-add `vi.spyOn(fs, ...)`**:
+
+1. **Dependency-inject the `readdir` reference into the walker.** Extract the `fs.readdir` call site in `src/tool/tools/glob.ts` behind a private `_readdir` parameter that defaults to `fs.readdir`, then pass a hung fake from the test. The walker's public signature (`globTool.execute(params, context)`) is unchanged; only the internal seam moves. This is the preferred approach for any future coverage attempt.
+2. **Run the case under `vitest --pool=vmThreads`.** The VM-thread pool boots a fresh Node context per worker in which module descriptors can be reset, so `vi.spyOn` on namespace exports becomes possible. Trade-off: `vmThreads` is materially slower than the default `threads` pool and is not the standard `npm test` configuration, so any test that requires it must be quarantined into its own file with an explicit `// @vitest-environment` comment and paired with a matching entry in `vitest.config.ts`. Alexi does not currently run any suite this way; adding one is a real per-CI-run cost, not a free workaround.
+3. **Rely on end-to-end coverage instead of a unit test.** The deadline branch is short (~10 lines of straightforward `AbortController` + `setTimeout` wiring in `src/tool/tools/glob.ts:275-290`) and its return shape is pinned by the exported `GlobResult` interface, so a code review of that block is a reasonable substitute for a targeted regression test. This is the current position of the codebase.
+
+Assertion shape for anyone reintroducing the negative case via option 1 or 2 above: a timed-out call MUST return `{ success: true, data: { matches: [], count: 0, timedOut: true, truncated: true } }`. A caller-initiated abort (via `context.signal.abort()` before the deadline) MUST still surface as `{ success: false, error: 'Operation aborted' }` — the deadline path is deliberately distinguished from the abort path by the local `timedOut` flag, so both assertions belong in the same suite.
+
+Anti-pattern to avoid, documented here so future auto-fix passes do not re-inline it verbatim from an older revision of this doc:
+
+```typescript
+// Anti-pattern — will throw TypeError: Cannot redefine property: readdir
+// under ESM + Node >= 22.12. Do NOT copy this into a new test.
+const readdirSpy = vi
+  .spyOn(fs, 'readdir')
+  .mockImplementation(() => new Promise(() => {}) as unknown as ReturnType<typeof fs.readdir>);
+vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+const promise = globTool.execute({ pattern: '**/*.ts' }, context);
+await vi.advanceTimersByTimeAsync(30_500);
+```
+
+The same caveat applies to any `fs/promises` export (`readdir`, `stat`, `readFile`, `writeFile`, ...) and to other Node builtin namespaces that expose non-configurable accessors (`node:child_process`, `node:os`, `node:path`). Route the stub through a caller-supplied seam whenever the test needs to intercept the call.
