@@ -7,7 +7,12 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { defineTool, type ToolResult } from '../index.js';
-import { detectEncoding, decodeWithEncoding, encodeWithEncoding } from '../encoded-io.js';
+import {
+  detectEncoding,
+  decodeWithEncoding,
+  encodeWithEncoding,
+  type EncodingInfo,
+} from '../encoded-io.js';
 import { detectLineEnding } from '../../utils/line-ending.js';
 
 type LineEndingStyle = 'crlf' | 'lf';
@@ -68,6 +73,76 @@ const ApplyPatchParamsSchema = z.object({
   path: z.string().describe('Absolute path to the file to patch'),
   patch: z.string().describe('Unified diff patch to apply'),
 });
+
+export type PatchOperation = 'ADD' | 'UPDATE';
+
+/**
+ * Detect whether a unified diff patch represents an ADD (file creation) or
+ * an UPDATE (in-place mutation).
+ *
+ * A patch is treated as ADD when its `---` (old file) header points to
+ * `/dev/null`, which is the standard convention used by `git diff`,
+ * `diff -u -N`, and OpenAI's apply_patch format to signal "no prior
+ * content". All other patches - including malformed ones with no `---`
+ * header at all - default to UPDATE so we preserve the existing
+ * strict-validation behaviour when a caller supplies an unusual patch.
+ *
+ * Only the first `---` header is inspected: multi-file patches are not
+ * supported by this tool, and mixing ADD + UPDATE hunks in a single
+ * invocation is rejected upstream.
+ */
+export function detectPatchOperation(patch: string): PatchOperation {
+  const lines = patch.split('\n');
+  for (const line of lines) {
+    if (line.startsWith('---')) {
+      // `--- /dev/null` (optionally followed by whitespace/timestamp)
+      // is the canonical marker for "no prior file".
+      if (/\/dev\/null(\s|$)/.test(line)) {
+        return 'ADD';
+      }
+      return 'UPDATE';
+    }
+  }
+  return 'UPDATE';
+}
+
+/**
+ * Strip unified-diff file headers (`diff --git`, `index`, `---`, `+++`)
+ * from a patch body so the hunk parser sees only hunk headers + hunk
+ * lines. Without this the parser would misread `--- a/foo` as a
+ * deletion line (it starts with `-`) and `+++ b/foo` as an addition
+ * line, corrupting the file.
+ *
+ * Only header lines that appear BEFORE the first `@@` hunk are removed;
+ * anything inside a hunk body is preserved verbatim (a line beginning
+ * with `---` inside a hunk is legitimately a deletion of a `--` prefix).
+ */
+export function stripPatchHeaders(patch: string): string {
+  const lines = patch.split('\n');
+  const out: string[] = [];
+  let inHunk = false;
+  for (const line of lines) {
+    if (line.startsWith('@@')) {
+      inHunk = true;
+      out.push(line);
+      continue;
+    }
+    if (
+      !inHunk &&
+      (line.startsWith('diff ') ||
+        line.startsWith('index ') ||
+        line.startsWith('--- ') ||
+        line.startsWith('+++ ') ||
+        line === '---' ||
+        line === '+++')
+    ) {
+      // Drop file-level header line.
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
 
 interface ApplyPatchResult {
   path: string;
@@ -281,49 +356,88 @@ Usage:
         };
       }
 
-      // Check if target file exists
+      // Classify the patch: ADD (file creation, `--- /dev/null`) vs
+      // UPDATE (in-place mutation). We branch file-existence handling
+      // on this so an ADD to an existing file fails fast rather than
+      // silently overwriting content (see Cline #13835).
+      const operation = detectPatchOperation(params.patch);
+
+      // Check target file existence up front. Both ADD and UPDATE need
+      // this signal but with opposite polarity.
+      let fileExists = true;
       try {
         await fs.access(filePath);
       } catch {
+        fileExists = false;
+      }
+
+      if (operation === 'ADD' && fileExists) {
+        return {
+          success: false,
+          error: `Cannot ADD: file already exists: ${filePath}`,
+        };
+      }
+      if (operation === 'UPDATE' && !fileExists) {
         return {
           success: false,
           error: `File not found: ${filePath}`,
         };
       }
 
-      // Fast path: sample the first 8 KiB to classify the file's line
-      // ending convention (LF / CRLF / mixed). This drives whether we
-      // preserve CRLF on write; the full-content detection below is the
-      // authoritative one for the majority-style decision.
-      const sampledLineEnding = await detectLineEnding(filePath);
+      // For UPDATE, read the existing file so we can preserve its
+      // encoding + line-ending convention. For ADD there is no prior
+      // content: treat original as empty UTF-8 and pick the platform
+      // default line ending style.
+      let originalContent: string;
+      let lineEndingStyle: LineEndingStyle;
+      let encoding: EncodingInfo = {
+        encoding: 'utf-8',
+        confidence: 1,
+        hasBOM: false,
+      };
 
-      // Read the original file as buffer
-      const buffer = await fs.readFile(filePath);
+      if (operation === 'ADD') {
+        originalContent = '';
+        lineEndingStyle = os.EOL === '\r\n' ? 'crlf' : 'lf';
+      } else {
+        // Fast path: sample the first 8 KiB to classify the file's line
+        // ending convention (LF / CRLF / mixed). This drives whether we
+        // preserve CRLF on write; the full-content detection below is
+        // the authoritative one for the majority-style decision.
+        const sampledLineEnding = await detectLineEnding(filePath);
 
-      // Detect original file encoding
-      const encoding = detectEncoding(buffer);
+        // Read the original file as buffer
+        const buffer = await fs.readFile(filePath);
 
-      // Decode with detected encoding
-      const rawOriginalContent = decodeWithEncoding(buffer, encoding);
+        // Detect original file encoding
+        encoding = detectEncoding(buffer);
 
-      // Detect line ending style BEFORE normalizing so we can preserve it.
-      // Prefer the sampled result for pure LF / CRLF files; only fall
-      // back to the majority-count logic when the sample says `mixed`,
-      // which is where a decision has to be made about how to write the
-      // file back out.
-      const lineEndingStyle: LineEndingStyle =
-        sampledLineEnding === 'CRLF'
-          ? 'crlf'
-          : sampledLineEnding === 'LF'
-            ? 'lf'
-            : // mixed: rely on the majority-of-file heuristic so we
-              // don't flip a CRLF-dominated file to LF or vice-versa.
-              detectLineEndingStyle(rawOriginalContent);
+        // Decode with detected encoding
+        const rawOriginalContent = decodeWithEncoding(buffer, encoding);
 
-      // Normalize file + patch to LF for parsing. The patch parser is
+        // Detect line ending style BEFORE normalizing so we can preserve
+        // it. Prefer the sampled result for pure LF / CRLF files; only
+        // fall back to the majority-count logic when the sample says
+        // `mixed`, which is where a decision has to be made about how
+        // to write the file back out.
+        lineEndingStyle =
+          sampledLineEnding === 'CRLF'
+            ? 'crlf'
+            : sampledLineEnding === 'LF'
+              ? 'lf'
+              : // mixed: rely on the majority-of-file heuristic so we
+                // don't flip a CRLF-dominated file to LF or vice-versa.
+                detectLineEndingStyle(rawOriginalContent);
+
+        originalContent = normalizeToLf(rawOriginalContent);
+      }
+
+      // Normalize the patch to LF for parsing. The patch parser is
       // line-based on '\n' and would treat trailing '\r' as content.
-      const originalContent = normalizeToLf(rawOriginalContent);
-      const normalizedPatch = normalizeToLf(params.patch);
+      // Also strip file-level headers (`diff --git`, `index`, `---`,
+      // `+++`) so the line-oriented parser does not confuse them with
+      // deletion / addition lines - `--- a/foo` starts with '-'.
+      const normalizedPatch = stripPatchHeaders(normalizeToLf(params.patch));
 
       // Apply patch (may throw PatchHunkError before any file write)
       let patchedContent: string;
@@ -347,6 +461,12 @@ Usage:
 
       // Encode back with original encoding
       const encodedBuffer = encodeWithEncoding(contentToWrite, encoding);
+
+      // For ADD, make sure the parent directory exists so writeFile
+      // doesn't fail with ENOENT on a fresh path.
+      if (operation === 'ADD') {
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+      }
 
       // Write back to file
       await fs.writeFile(filePath, encodedBuffer);
