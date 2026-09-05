@@ -9,6 +9,7 @@ import {
   hasEnvironmentDetailsBlock,
   supportsPromptCacheBreakpoint,
   isChatGPTSubscription,
+  isGpt5_6OrLater,
   type LanguageModelV2Prompt,
 } from '../prompt-cache.js';
 
@@ -80,6 +81,41 @@ describe('supportsPromptCacheBreakpoint', () => {
     expect(supportsPromptCacheBreakpoint({ providerId: 'anthropic', modelId: 'gpt-6' })).toBe(
       false
     );
+  });
+});
+
+describe('isGpt5_6OrLater (opencode #47384, #47385)', () => {
+  // Guards for the two Codex GPT-version bugs opencode fixed upstream:
+  //   #47384: integer versions like "gpt-6" crashing the parser.
+  //   #47385: comparing only by major would misclassify "gpt-5.4" as >= 5.6.
+  it('accepts integer major versions without a minor', () => {
+    expect(isGpt5_6OrLater('gpt-6')).toBe(true);
+    expect(isGpt5_6OrLater('gpt-7')).toBe(true);
+  });
+
+  it('compares by (major, minor) tuple, not major alone', () => {
+    expect(isGpt5_6OrLater('gpt-5.6')).toBe(true);
+    expect(isGpt5_6OrLater('gpt-5.7')).toBe(true);
+    expect(isGpt5_6OrLater('gpt-5.4')).toBe(false);
+    // "gpt-5" alone parses as (5, 0) which is < (5, 6).
+    expect(isGpt5_6OrLater('gpt-5')).toBe(false);
+  });
+
+  it('rejects older major versions regardless of minor', () => {
+    expect(isGpt5_6OrLater('gpt-4.9')).toBe(false);
+    expect(isGpt5_6OrLater('gpt-4o')).toBe(false);
+    expect(isGpt5_6OrLater('gpt-3.5')).toBe(false);
+  });
+
+  it('returns false for unparseable ids', () => {
+    expect(isGpt5_6OrLater('')).toBe(false);
+    expect(isGpt5_6OrLater('claude-3-opus')).toBe(false);
+    expect(isGpt5_6OrLater('gpt-')).toBe(false);
+  });
+
+  it('is case-insensitive on the "gpt-" prefix', () => {
+    expect(isGpt5_6OrLater('GPT-6')).toBe(true);
+    expect(isGpt5_6OrLater('Gpt-5.6')).toBe(true);
   });
 });
 
