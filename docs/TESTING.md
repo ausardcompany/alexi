@@ -732,6 +732,203 @@ Key patterns:
 3. **Cover the mixed-ending majority case.** The `preserves the majority style when the original file has mixed line endings (CRLF wins)` case constructs a `3 × CRLF + 1 × LF` file, applies a patch, and asserts the output is uniformly CRLF — this is the load-bearing behaviour that makes the tool's output stable under repeated round-trips (a partial-CRLF file does not degrade toward LF just because the model happened to emit LF).
 4. **Regex escaping in the negative assertion.** The `/(?:^|[^\r])\n/` regex looks for a `\n` NOT preceded by a `\r` (i.e. a bare LF anywhere in the output). The `(?:^|[^\r])` alternation handles the edge case where the file starts with an LF; a naive `/[^\r]\n/` would false-negative on that position.
 
+### Testing the apply_patch ADD operation
+
+Introduced by commit `00962f1c` (`feat(tools): support ADD operations in apply_patch [alexi-bot]`). The tool now classifies each incoming patch as `'ADD'` (file creation, marked by a `--- /dev/null` header) or `'UPDATE'` (in-place mutation, every other case) and branches file-existence handling on the classification. Two new exported helpers back the split — `detectPatchOperation(patch)` and `stripPatchHeaders(patch)` from `src/tool/tools/apply-patch.ts` — and both are directly unit-testable. The tool's `execute` method is covered by end-to-end integration cases in `tests/tool/tools/apply-patch.test.ts`.
+
+#### Pure-function tests (`describe('detectPatchOperation')` and `describe('stripPatchHeaders')`)
+
+```typescript
+import {
+  detectPatchOperation,
+  stripPatchHeaders,
+} from '../../../src/tool/tools/apply-patch.js';
+
+describe('detectPatchOperation', () => {
+  it('detects ADD when the old-file header is /dev/null', () => {
+    const patch = ['--- /dev/null', '+++ b/newfile.txt', '@@ -0,0 +1,1 @@', '+hello'].join('\n');
+    expect(detectPatchOperation(patch)).toBe('ADD');
+  });
+
+  it('detects ADD when /dev/null is followed by a timestamp', () => {
+    const patch = [
+      '--- /dev/null\t2026-09-05 10:00:00',
+      '+++ b/newfile.txt',
+      '@@ -0,0 +1,1 @@',
+      '+hello',
+    ].join('\n');
+    expect(detectPatchOperation(patch)).toBe('ADD');
+  });
+
+  it('detects UPDATE for a normal `--- a/foo` header', () => {
+    const patch = ['--- a/foo.txt', '+++ b/foo.txt', '@@ -1,1 +1,1 @@', '-old', '+new'].join('\n');
+    expect(detectPatchOperation(patch)).toBe('UPDATE');
+  });
+
+  it('defaults to UPDATE for hunk-only patches without a `---` header', () => {
+    const patch = ['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n');
+    expect(detectPatchOperation(patch)).toBe('UPDATE');
+  });
+
+  it('does NOT match a random line starting with `---` inside a hunk body', () => {
+    // The first `---`-prefixed line is the file header, not the hunk body,
+    // so classification is UPDATE even when a later hunk deletion line
+    // legitimately starts with `--`.
+    const patch = ['--- a/foo.md', '+++ b/foo.md', '@@ -1,1 +1,1 @@', '--- old', '+++ new'].join(
+      '\n'
+    );
+    expect(detectPatchOperation(patch)).toBe('UPDATE');
+  });
+});
+
+describe('stripPatchHeaders', () => {
+  it('removes pre-hunk `diff --git`, `index`, `---`, and `+++` headers', () => {
+    const patch = [
+      'diff --git a/foo b/foo',
+      'index 1234abc..5678def 100644',
+      '--- a/foo',
+      '+++ b/foo',
+      '@@ -1,1 +1,1 @@',
+      '-old',
+      '+new',
+    ].join('\n');
+    expect(stripPatchHeaders(patch)).toBe(['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n'));
+  });
+
+  it('preserves `-` or `+` lines inside a hunk body', () => {
+    const patch = [
+      '--- a/foo',
+      '+++ b/foo',
+      '@@ -1,2 +1,2 @@',
+      '-- dash line',
+      '++ plus line',
+    ].join('\n');
+    expect(stripPatchHeaders(patch)).toBe(
+      ['@@ -1,2 +1,2 @@', '-- dash line', '++ plus line'].join('\n')
+    );
+  });
+});
+```
+
+Key patterns:
+
+1. **Pin the five `detectPatchOperation` classification rules explicitly.** The `/dev/null` marker is detected via the regex `/\/dev\/null(\s|$)/` so it must tolerate a trailing timestamp (`--- /dev/null\t<date>`, some `diff` implementations emit that). A test that only covers the bare `--- /dev/null` form would false-negative on a real `diff -u -N` invocation.
+2. **Assert that only the FIRST `---` header drives classification.** The `does NOT match a random line starting with '---' inside a hunk body` case is the regression guard: a hunk deletion line whose payload begins with `--` (say a Markdown separator line being removed) must not be mistaken for a `/dev/null` marker. The current implementation short-circuits on the first `---`-prefixed line, which is enough for single-file patches; if multi-file patch support ever lands the invariant needs to be restated.
+3. **`stripPatchHeaders` must preserve `-` / `+` inside hunks.** The `-- dash line` / `++ plus line` case documents the boundary: file-level headers appear BEFORE the first `@@` hunk marker and are dropped, but everything after the first `@@` — including lines that begin with `-` or `+` — is a hunk body line and must be kept verbatim. Without this, deletion lines whose content starts with `-` would be swallowed and the file would be corrupted.
+
+#### Integration tests (`describe('ADD semantics')` and `describe('UPDATE semantics')`)
+
+Each case creates a real temp directory via `fs.mkdtemp`, invokes `applyPatchTool.execute` with a plain-string patch, and asserts on the file system state:
+
+```typescript
+import { applyPatchTool } from '../../../src/tool/tools/apply-patch.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+describe('ADD semantics', () => {
+  let tempDir: string;
+  let context: ToolContext;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'apply-patch-'));
+    context = { workdir: tempDir };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('ADD patch to a missing file creates the file with the patch content', async () => {
+    const filePath = path.join(tempDir, 'newfile.txt');
+    const patch = [
+      '--- /dev/null',
+      '+++ b/newfile.txt',
+      '@@ -0,0 +1,2 @@',
+      '+line 1',
+      '+line 2',
+    ].join('\n');
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(true);
+
+    const written = await fs.readFile(filePath, 'utf-8');
+    expect(written).toContain('line 1');
+    expect(written).toContain('line 2');
+    expect(written.startsWith('line 1')).toBe(true);
+  });
+
+  it('ADD patch to an existing file rejects with a clear "already exists" error', async () => {
+    const filePath = path.join(tempDir, 'existing.txt');
+    await fs.writeFile(filePath, 'existing content', 'utf-8');
+
+    const patch = ['--- /dev/null', '+++ b/existing.txt', '@@ -0,0 +1,1 @@', '+brand new'].join(
+      '\n'
+    );
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('already exists');
+
+    // The on-disk file must be preserved untouched.
+    const onDisk = await fs.readFile(filePath, 'utf-8');
+    expect(onDisk).toBe('existing content');
+  });
+
+  it('ADD patch to a missing file in a missing directory creates parent directories', async () => {
+    const filePath = path.join(tempDir, 'nested', 'deeply', 'newfile.txt');
+    const patch = [
+      '--- /dev/null',
+      '+++ b/nested/deeply/newfile.txt',
+      '@@ -0,0 +1,1 @@',
+      '+hello',
+    ].join('\n');
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(true);
+    const written = await fs.readFile(filePath, 'utf-8');
+    expect(written).toContain('hello');
+  });
+});
+
+describe('UPDATE semantics', () => {
+  it('UPDATE patch to a missing file rejects with "File not found"', async () => {
+    const filePath = path.join(tempDir, 'does-not-exist.txt');
+    const patch = ['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n');
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('File not found');
+  });
+
+  it('UPDATE patch with `---`/`+++` file headers strips them and applies correctly', async () => {
+    const filePath = path.join(tempDir, 'update-with-headers.txt');
+    await fs.writeFile(filePath, ['line one', 'line two', 'line three'].join('\n'), 'utf-8');
+
+    const patch = [
+      '--- a/update-with-headers.txt',
+      '+++ b/update-with-headers.txt',
+      '@@ -1,3 +1,3 @@',
+      ' line one',
+      '-line two',
+      '+line TWO',
+      ' line three',
+    ].join('\n');
+
+    const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+    expect(result.success).toBe(true);
+
+    const updated = await fs.readFile(filePath, 'utf-8');
+    expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\n'));
+  });
+});
+```
+
+Key patterns:
+
+1. **Assert BOTH the successful ADD path and the "already exists" collision path.** A regression that flipped the collision guard into a silent overwrite would still pass a happy-path-only suite (the collision case is exactly the Cline #13835 regression this feature guards against). The collision case must also assert that the pre-existing on-disk content is preserved — an implementation that returned `success: false` but had already truncated the file would pass a naive `error` assertion.
+2. **Exercise the `fs.mkdir(..., { recursive: true })` parent-creation path.** ADD to a nested path that does not yet exist is the observable difference between "the tool creates the file" and "the tool creates the file and its containing directory chain". A tool that only handles a flat path would `ENOENT` at `fs.writeFile` time on the nested case.
+3. **Test UPDATE with real `---`/`+++` headers, not just naked hunks.** LLM-emitted patches almost always include the `diff --git` / `index` / `--- a/foo` / `+++ b/foo` preamble. Historically this preamble broke the line-based hunk parser (it would treat `--- a/foo` as a deletion of `-- a/foo`), and this test pins the `stripPatchHeaders` call inside `execute` so a regression that dropped the strip step trips loudly.
+4. **Do NOT assert on encoding or line-ending fields in the ADD case.** ADD seeds the encoder with a canonical `{ encoding: 'utf-8', confidence: 1, hasBOM: false }` and picks the platform default line ending (`os.EOL === '\r\n' ? 'crlf' : 'lf'`), which means the exact byte-level output for ADD on a mixed-CI matrix (Linux + macOS + Windows) will differ. Assert on `.toContain('line 1')` / `startsWith('line 1')` rather than an exact `.toBe(...)` string so the case does not flake on Windows runners.
+
 ### Testing Bash Streaming Output
 
 The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.
