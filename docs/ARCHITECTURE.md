@@ -457,6 +457,8 @@ The `overflowTokens` parameter seeds the target summary length so the compacted 
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.
 
+Since 2026-09-05 (kilocode #13190) the fence injection is idempotent: `buildSystemPrompt` checks whether the assembled prompt already carries an `<environment_details>` block (e.g. because a caller pre-baked one via `options.systemPrompt` / `customRules`, or a plugin injected one through `buildAssembledSystemPromptAsync`) and skips the second injection when it does. The check uses `.trim().includes(...)` so leading whitespace does not defeat detection — matches `hasEnvironmentDetailsBlock` in `src/providers/openai/prompt-cache.ts` byte for byte, so the orchestrator and the prompt-cache breakpoint logic never disagree on whether a message carries an env block.
+
 ```typescript
 // src/core/agenticChat.ts:buildSystemPrompt
 const envParts: string[] = [];
@@ -464,9 +466,14 @@ if (memoryContext) envParts.push(memoryContext);
 if (sessionContext) envParts.push(sessionContext);
 if (repoMapText) envParts.push(repoMapText);
 if (envParts.length > 0) {
-  parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+  const alreadyHasEnvBlock = parts.some((p) => p.trim().includes('<environment_details>'));
+  if (!alreadyHasEnvBlock) {
+    parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+  }
 }
 ```
+
+The duplicate-block prevention matters most for the OpenAI GPT-5.6+ family: two env fences on the same system message would inject per-call working-directory and timestamp variation into the stable prompt-cache prefix twice per turn, and any downstream `applyCacheBreakpoint` pass would still land the breakpoint on a volatile message rather than a clean stable prefix. Regression coverage is in `src/core/__tests__/agenticChat.test.ts` under the `environment_details duplicate-block prevention (kilocode #13190)` describe block — three cases covering the default path, a pre-baked `customRules` block, and repeated invocations sharing a session manager.
 
 ### Unknown-Tool Repair Hints
 

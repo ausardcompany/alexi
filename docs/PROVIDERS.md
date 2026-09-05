@@ -1359,22 +1359,29 @@ const outgoing = prepareRequest({
 ```
 
 Under the hood, `applyCacheBreakpoint(prompt)` walks the prompt array from the
-tail and marks the last `system` or `assistant` message. The marker is written
-to `providerOptions.openai.cacheBreakpoint`. The `LanguageModelV2Prompt`
+tail in two passes:
+
+1. **First pass (preferred).** Mark the last `system` or `assistant` message whose text-view content does NOT contain an `<environment_details>` fence. This maximises the cacheable prefix — a stable soul-plus-rules system message can be cached across turns, and the volatile env-details wrapper that typically sits below it stays outside the breakpoint so per-call variation (working directory, git status, current timestamp) never poisons the prefix.
+2. **Fallback.** If every stable-role message carries an env block (degenerate case — no clean stable prefix), mark the last stable-role message anyway so the caller still gets partial caching benefit rather than none.
+
+The marker is written to `providerOptions.openai.cacheBreakpoint`. The `LanguageModelV2Prompt`
 structural type is kept local (not pulled in from `@ai-sdk/provider`) so the
 runtime dependency footprint stays minimal — the SAP AI SDK re-exports
 compatible shapes at runtime and callers can pass plain objects.
 
+The env-block detector normalises both content shapes the Vercel AI SDK v2 supports — a plain string OR an array of `{ type: 'text', text: string }` parts — before checking for the `<environment_details>` fence. Non-text parts (image, tool_call, tool_result) are ignored because they cannot carry an env-details fence. Without the parts-array normalisation, a content-as-parts message carrying an env block would be misclassified as opaque and the boundary would incorrectly fall through to the degenerate fallback path (kilocode #13190 companion fix, 2026-09-05).
+
 **Detection helpers** exported from `src/providers/openai/prompt-cache.ts`:
 
 - `supportsPromptCacheBreakpoint({ providerId, modelId, isChatGPTSubscription })`
-  — pure predicate returning `true` when the model matches the GPT-5.6+ regex
-  and the caller is not a ChatGPT subscriber.
+  — pure predicate returning `true` when the model is GPT-5.6+ and the caller is not a ChatGPT subscriber. Delegates model-version parsing to `isGpt5_6OrLater`.
+- `isGpt5_6OrLater(modelId: string): boolean` — robust `(major, minor)` tuple comparator (opencode PRs #47384, #47385). Parses `/^gpt-(\d+)(?:\.(\d+))?/i`; the minor group is optional and defaults to `0`. Returns `true` when the parsed version is `>= (5, 6)`. Accepts `'gpt-6'`, `'gpt-7'`, `'gpt-5.6'`, `'gpt-5.7'`, and is case-insensitive on the `gpt-` prefix. Rejects `'gpt-5'` (parses as `(5, 0)`), `'gpt-5.4'`, `'gpt-4o'`, `'claude-3-opus'`, `''`, `'gpt-'`. Replaces the inline `/gpt-5\.[6-9]|gpt-[6-9]/i` regex that previously handled these cases by accident.
 - `isChatGPTSubscription(auth)` — zero-cost heuristic returning `true` when
   `auth.type === 'oauth' && auth.source === 'chatgpt'`.
-- `applyCacheBreakpoint(prompt)` — the pure array transform.
+- `hasEnvironmentDetailsBlock(content: unknown): boolean` — shared predicate returning `true` when a message body carries an `<environment_details>` fence (kilocode #13190). Uses `.trim().includes(...)` so leading blank lines or padding do not defeat the check. Non-string inputs (`undefined`, `null`, numbers, arrays, plain objects) short-circuit to `false` so callers can funnel arbitrary content values through the helper without a pre-check. Exported so orchestrators (`src/core/agenticChat.ts:buildSystemPrompt`) can share the same predicate when deciding whether an env block has already been injected upstream — the orchestrator and the breakpoint boundary now agree byte-for-byte on the detection semantics.
+- `applyCacheBreakpoint(prompt)` — the pure array transform described above. Preserves existing `providerOptions` on the marked message (merges into the `openai` bag rather than replacing it) so provider-specific hints from other passes (e.g. Anthropic cache markers when a message carries multi-provider metadata) are not clobbered.
 
-Aligns with upstream kilocode `c554409080..a5aaef74a` (opencode v1.17.13 parity).
+Aligns with upstream kilocode `c554409080..a5aaef74a` (opencode v1.17.13 parity) plus opencode PRs #47384 / #47385 (GPT version comparator) and kilocode #13190 (env-block detection hardening).
 
 ## Security
 

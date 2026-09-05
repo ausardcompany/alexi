@@ -311,7 +311,7 @@ describe('Write Tool', () => {
 | `read` | `tests/tool/tools/read.test.ts` | 20+ cases |
 | `write` | `tests/tool/tools/write.test.ts` | 18+ cases |
 | `edit` | `tests/tool/tools/edit.test.ts` | 15+ cases |
-| `glob` | `tests/tool/tools/glob.test.ts` | 16+ cases |
+| `glob` | `tests/tool/tools/glob.test.ts`, `tests/tool/tools/glob-timeout.test.ts` | 16+ cases + bounded-deadline regression suite |
 | `grep` | `tests/tool/tools/grep.test.ts` | 20+ cases |
 | `bash` | `tests/tool/tools/bash.test.ts` | 13+ cases (includes shell-type reporting) |
 | `task` | `tests/tool/tools/background-tasks.test.ts` | 8+ cases |
@@ -3508,3 +3508,37 @@ Key patterns:
 The paired `scripts/profile-session-search.ts` script is intentionally **not** part of the vitest suite (it produces a Markdown table on stdout for pasting into `docs/session-search-performance.md`). Invoke it with `npx tsx scripts/profile-session-search.ts` from the repo root when you need fresh numbers. The script covers scenarios at 10, 50, 100, 200, 500, and 1000 sessions (the 200 tier was added for issue #1610). Each scenario also captures an RSS delta alongside wall time, and — when Node is running with `--expose-gc` — issues a best-effort `global.gc()` call before sampling to reduce GC-timing noise.
 
 This profile-and-test-then-document pattern is the recommended template for any future CLI performance concern: a `tsx` script for one-shot numbers, a `docs/*-performance.md` writeup for the analysis, and a matching `tests/**/performance.test.ts` for regression guards.
+
+### Testing `prompt-cache` breakpoint and env-block hardening (kilocode #13190, opencode #47384 / #47385)
+
+The prompt-cache module (`src/providers/openai/prompt-cache.ts`) exposes four small pure helpers plus one array transform. All five are trivially unit-testable without any provider mocking — the full suite lives in `src/providers/openai/__tests__/prompt-cache.test.ts`.
+
+- **`hasEnvironmentDetailsBlock(content)`** — pin the leading-whitespace case (`'\n\n  <environment_details>\n...'` MUST return `true`) alongside the plain-string and non-string branches. This is the regression guard for kilocode #13190: raw `startsWith('<environment_details>')` fails when blank lines precede the block, and `.trim().includes(...)` must handle it.
+- **`supportsPromptCacheBreakpoint`** — cover the GPT-5.6+ family on both `providerId: 'openai'` and `providerId: 'sap-ai-core'`, the ChatGPT-subscription exclusion, and unrelated providers.
+- **`isGpt5_6OrLater`** — cover integer-major (`'gpt-6'`), tuple comparison (`'gpt-5.4'` vs `'gpt-5.6'`), unparseable ids, and case-insensitivity. Two guards worth calling out explicitly because the regression cost is high:
+  1. **opencode #47384**: integer versions like `'gpt-6'` MUST parse without crashing (older code compared `major.minor` strings and blew up on `NaN`).
+  2. **opencode #47385**: `'gpt-5.4'` MUST return `false`. A `major >= 5` check alone misclassifies it as supported.
+- **`isChatGPTSubscription`** — trivial, but pin the exact `{ type: 'oauth', source: 'chatgpt' }` combination.
+- **`applyCacheBreakpoint`** — the meatiest cases. Cover: no stable-role message (return unchanged); a lone system message with no env block (mark it); two system messages where the second carries a volatile env block (mark the FIRST — this is the stable-vs-volatile discriminator); the leading-whitespace variant of the same case (must still mark the first); the degenerate fallback (every stable-role message carries an env block — still mark something so caller gets partial caching); the assistant-only fallback (no system message available); the providerOptions preservation invariant (existing hints under `openai` and `anthropic` bags MUST NOT be clobbered); and the Vercel AI SDK v2 content-as-parts shape (`content: [{ type: 'text', text: '...' }]` — the detector MUST see through the parts array).
+
+The suite uses no `vi.mock` calls — every case constructs a `LanguageModelV2Prompt` inline and asserts on the returned array. Cast the marked message via `as { providerOptions?: { openai?: { cacheBreakpoint?: boolean } } }` when reading the breakpoint flag; the readonly-array element type does not include the openai bag in its structural shape.
+
+### Testing the `<environment_details>` duplicate-block prevention in `agenticChat` (kilocode #13190)
+
+Three regression tests live in `src/core/__tests__/agenticChat.test.ts` under the `environment_details duplicate-block prevention (kilocode #13190)` describe block. The pattern for each case:
+
+1. **Force the volatile-content path.** Mock `getMemoryManager` to return `{ getContextString: () => '## Some memory' }` and mock `getSessionContextString` to return `'## Some session'` so `buildSystemPrompt` produces a non-empty `envParts` array — otherwise the injection branch is skipped and the invariant is trivially satisfied.
+2. **Invoke `agenticChat('Test message', options?)`.** For the pre-baked case, pass `{ systemPrompt: '<environment_details>\n  pre-baked ...\n</environment_details>' }` so the assembled prompt already carries a fence.
+3. **Assert on `mockProvider.complete.mock.calls[0][0]`.** Find the `role === 'system'` message, then count `<environment_details>` and `</environment_details>` occurrences with a global-regex match. Both counts MUST equal `1`.
+4. **For the multi-turn case**, invoke `agenticChat` twice with a shared session manager and iterate over `mockProvider.complete.mock.calls` — every system message MUST have exactly one open tag.
+
+Do NOT assert on the exact byte content of the system message — the surrounding stable-prefix content is subject to churn from other tests / plugins. The invariant is strictly a tag-count assertion.
+
+### Testing the bounded `glob` deadline (kilocode PR #13805 adaptation)
+
+`tests/tool/tools/glob-timeout.test.ts` covers the `GLOB_SEARCH_TIMEOUT_MS = 30_000` deadline in `src/tool/tools/glob.ts`. The suite follows the tool-test conventions in AGENTS.md — an `fs.mkdtemp` temp directory per case, an `afterEach` cleanup, and the standard `vi.mock('../../../src/tool/index.js')` shim that preserves `defineTool` while exposing `execute` / `executeUnsafe` directly.
+
+Two implementation notes for future contributors:
+
+1. **Use `vi.useFakeTimers()` to fast-forward the deadline.** Real 30-second timers would blow the test budget. Set `fakeTimers` on the module scope, advance time via `vi.advanceTimersByTimeAsync(GLOB_SEARCH_TIMEOUT_MS + 100)`, and pair the fake-timers session with `vi.mock('fs/promises', ...)` returning a `readdir` that never resolves so the deadline is the only way the promise settles.
+2. **Assert on the shape, not the byte count.** A timed-out call MUST return `{ success: true, data: { matches: [], count: 0, timedOut: true, truncated: true } }`. A caller-initiated abort (via `context.signal.abort()` before the deadline) MUST still surface as `{ success: false, error: 'Operation aborted' }` — the deadline path is deliberately distinguished from the abort path by the local `timedOut` flag.

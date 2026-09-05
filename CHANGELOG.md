@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hasEnvironmentDetailsBlock` shared predicate and content-parts-aware breakpoint detection** (`src/providers/openai/prompt-cache.ts`, `src/providers/openai/__tests__/prompt-cache.test.ts`, 2026-09-05): New exported helper `hasEnvironmentDetailsBlock(content: unknown): boolean` on the prompt-cache module returns `true` when a message body carries an `<environment_details>` fence, using `.trim().includes(...)` so leading blank lines or padding do not defeat the check (kilocode #13190). Exported so orchestrators (`src/core/agenticChat.ts`) can share the same predicate when deciding whether an env block has already been injected upstream. Non-string inputs (`undefined`, `null`, numbers, arrays without text parts, plain objects) short-circuit to `false` so callers can funnel arbitrary content values through the helper without a pre-check.
+
+  New internal helper `contentToText(content: unknown): string` (private to `prompt-cache.ts`) normalises the Vercel AI SDK v2 message-content shape — either a plain string or an array of `{ type: 'text', text: string }` parts — into a single string for tag-detection purposes. Non-text parts (image, tool_call, tool_result) are ignored because they cannot carry an env-details fence. `applyCacheBreakpoint` now runs `contentToText` before `hasEnvironmentDetailsBlock` so the stable-prefix boundary is correctly identified even when messages arrive as parts arrays.
+
+  Public surface stability: existing callers of `applyCacheBreakpoint(prompt)` continue to receive the previous behaviour — the pass still walks the prompt array from the tail, still prefers the last `system`/`assistant` message without an env block, and still falls back to the last stable-role message when every candidate carries an env block. What changed is that the fallback trigger is now `contentToText`-aware, so a prompt with content-as-parts is no longer incorrectly treated as opaque (previously would fall through to the degenerate fallback path even when a clean stable prefix existed).
+
+- **`isGpt5_6OrLater` explicit GPT version comparator** (`src/providers/openai/prompt-cache.ts`, 2026-09-05): New exported helper replacing the inline `/gpt-5\.[6-9]|gpt-[6-9]/i` regex that previously lived inside `supportsPromptCacheBreakpoint`. Ports opencode PRs #47384 (integer-major crash on `gpt-6`) and #47385 (comparing by major alone misclassifies `gpt-5.4` as `>= 5.6`). The helper parses model ids via `/^gpt-(\d+)(?:\.(\d+))?/i` — the minor group is optional and defaults to `0` — then performs a tuple comparison against `(5, 6)`:
+
+  ```typescript
+  export function isGpt5_6OrLater(modelId: string): boolean {
+    const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = match[2] != null ? Number(match[2]) : 0;
+    if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
+    if (major > 5) return true;
+    if (major === 5 && minor >= 6) return true;
+    return false;
+  }
+  ```
+
+  Accepts `'gpt-6'`, `'gpt-7'`, `'gpt-5.6'`, `'gpt-5.7'`, `'GPT-6'`, `'Gpt-5.6'`. Rejects `'gpt-5'` (parses as `(5, 0)`), `'gpt-5.4'`, `'gpt-4o'`, `'claude-3-opus'`, `''`, `'gpt-'`. `supportsPromptCacheBreakpoint` now delegates to this helper for the OpenAI and SAP AI Core provider branches.
+
+- **Bounded `glob` tool timeout with partial-result surface** (`src/tool/tools/glob.ts`, `tests/tool/tools/glob-timeout.test.ts`, 2026-09-05): The `globTool` now bounds every invocation with a 30-second deadline (`GLOB_SEARCH_TIMEOUT_MS = 30_000`, exported for tests) to prevent a hung filesystem call inside `globMatch` from stalling an agent turn indefinitely. Mirrors upstream kilocode PR #13805 (which added the same guard to the ripgrep search primitive) adapted for Alexi's JS walker. On timeout the tool returns a partial, non-fatal result rather than throwing:
+
+  ```typescript
+  interface GlobResult {
+    matches: string[];
+    count: number;
+    /** Set when the search hit the bounded deadline before finishing. */
+    timedOut?: boolean;
+    /** Set when the returned matches are a partial view of a complete traversal. */
+    truncated?: boolean;
+  }
+  ```
+
+  Implementation: an internal `AbortController` is chained to the caller's `context.signal` so external aborts still fire, then a `setTimeout(..., GLOB_SEARCH_TIMEOUT_MS)` flips a local `timedOut` flag and aborts the controller. A caller-initiated abort or real I/O failure still propagates as an error; only a deadline-triggered abort becomes `{ success: true, data: { matches: [], count: 0, timedOut: true, truncated: true } }`. The listener on the external signal is removed in a `finally` block so long-lived caller signals do not retain references to completed glob calls.
+
+### Fixed
+
+- **`agenticChat` no longer emits duplicate `<environment_details>` blocks (kilocode #13190)** (`src/core/agenticChat.ts`, `src/core/__tests__/agenticChat.test.ts`, 2026-09-05): The `buildSystemPrompt` helper in `agenticChat` previously appended a fresh `<environment_details>\n...\n</environment_details>` fence unconditionally whenever any of `memoryContext`, `sessionContext`, or `repoMapText` produced content. When a caller pre-baked an env block (via `options.systemPrompt` / `customRules`) or a plugin injected one via `buildAssembledSystemPromptAsync`, the assembled system message would carry two env fences — one from the plugin path and one from `buildSystemPrompt` — which produced token bloat, confused the model about which block was authoritative, and (on the OpenAI GPT-5.6+ family) poisoned the prompt-cache prefix by injecting per-call working-directory / timestamp variation into the stable prefix twice per turn.
+
+  The fix adds a single-line guard immediately before the injection:
+
+  ```typescript
+  if (envParts.length > 0) {
+    const alreadyHasEnvBlock = parts.some((p) => p.trim().includes('<environment_details>'));
+    if (!alreadyHasEnvBlock) {
+      parts.push(`<environment_details>\n${envParts.join('\n\n')}\n</environment_details>`);
+    }
+  }
+  ```
+
+  Uses `.trim().includes(...)` so leading whitespace does not defeat the check — matches `hasEnvironmentDetailsBlock` in `src/providers/openai/prompt-cache.ts` byte for byte. Three new regression tests in `src/core/__tests__/agenticChat.test.ts` under the `environment_details duplicate-block prevention (kilocode #13190)` describe block pin the invariant: (1) a normal agenticChat call with both memory and session context produces exactly one `<environment_details>` block and one closing tag; (2) when `customRules` (threaded via `options.systemPrompt`) already contains a pre-baked env block, `buildSystemPrompt` does NOT add a second one and the pre-baked content is preserved; (3) two back-to-back `agenticChat` invocations sharing the same session manager and memory each emit exactly one env block. Diff statistics: 2 files changed, 90 insertions(+), 3 deletions(-).
+
+- **`prompt-cache` breakpoint boundary now avoids env-block-carrying messages when a clean stable prefix exists** (`src/providers/openai/prompt-cache.ts`, `src/providers/openai/__tests__/prompt-cache.test.ts`, 2026-09-05): `applyCacheBreakpoint` previously walked the prompt tail and marked the last `system` or `assistant` message unconditionally, so when the prompt contained two system messages (a stable soul-plus-rules message followed by a volatile `<environment_details>` wrapper), the breakpoint would land on the volatile one and the per-call env variation would poison the cache prefix every turn. The new implementation is a two-pass walk:
+
+  1. **First pass (preferred):** walk from the tail and mark the last `system`/`assistant` message whose `contentToText` view does NOT contain `<environment_details>`. This maximises the cacheable prefix and correctly ignores any tail-side env-details wrapper.
+  2. **Fallback:** if every stable-role message carries an env block (degenerate case — no clean stable prefix), mark the last stable-role message anyway so the caller still gets partial caching benefit rather than none.
+
+  Also handles the Vercel AI SDK v2 content-as-parts shape (`content: [{ type: 'text', text: '...' }]`) via `contentToText` so a system message whose content is an array of parts is not misclassified as opaque. Nine new tests in `src/providers/openai/__tests__/prompt-cache.test.ts` under the `applyCacheBreakpoint` describe pin the boundary contract, including the multi-system stable-vs-volatile case, leading-whitespace-only prefixes, the degenerate all-env-blocks fallback, providerOptions preservation, and the content-as-parts array shape.
+
+- **Version bumped to `1.22.13`** (`package.json`): patch release aligned with the 2026-09-05 upstream sync cycle. Ships the `environment_details` duplicate-block prevention (kilocode #13190), the `isGpt5_6OrLater` and `hasEnvironmentDetailsBlock` exports on `prompt-cache.ts`, the content-as-parts-aware cache-breakpoint boundary, and the bounded `glob` tool timeout as a cumulative release.
+
 - **Task-scoped shared agent board (`experimental.sharedAgentBoard`)** (`src/tool/tools/board.ts`, `src/core/database/boardStore.ts`, `src/core/database/boardContext.ts`, `src/core/database/migrations/20260828074139_kilocode_board.ts`, `src/config/userConfig.ts`, `src/tool/tools/index.ts`, `src/tool/registry.ts`, 2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits): New opt-in coordination channel that lets subagents spawned by the `task` tool broadcast messages to their swarm peers without round-tripping through the parent. Gated behind a new `experimental.sharedAgentBoard` flag in `~/.alexi/config.json` (default `false`); when the flag is off the board tools are not registered and the model never learns about them.
 
   Public surface:
