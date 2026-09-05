@@ -29,6 +29,8 @@ import {
   applyPatchTool,
   PatchHunkError,
   detectLineEndingStyle,
+  detectPatchOperation,
+  stripPatchHeaders,
   normalizeToLf,
   applyLineEndingStyle,
 } from '../../../src/tool/tools/apply-patch.js';
@@ -287,6 +289,168 @@ describe('apply_patch tool', () => {
   describe('tool metadata', () => {
     it('has the expected name', () => {
       expect(applyPatchTool.name).toBe('apply_patch');
+    });
+  });
+
+  describe('detectPatchOperation', () => {
+    it('detects ADD when the old-file header is /dev/null', () => {
+      const patch = ['--- /dev/null', '+++ b/newfile.txt', '@@ -0,0 +1,1 @@', '+hello'].join('\n');
+      expect(detectPatchOperation(patch)).toBe('ADD');
+    });
+
+    it('detects ADD when /dev/null is followed by a timestamp', () => {
+      const patch = [
+        '--- /dev/null\t2026-09-05 10:00:00',
+        '+++ b/newfile.txt',
+        '@@ -0,0 +1,1 @@',
+        '+hello',
+      ].join('\n');
+      expect(detectPatchOperation(patch)).toBe('ADD');
+    });
+
+    it('detects UPDATE for a normal `--- a/foo` header', () => {
+      const patch = ['--- a/foo.txt', '+++ b/foo.txt', '@@ -1,1 +1,1 @@', '-old', '+new'].join(
+        '\n'
+      );
+      expect(detectPatchOperation(patch)).toBe('UPDATE');
+    });
+
+    it('defaults to UPDATE for hunk-only patches without a `---` header', () => {
+      const patch = ['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n');
+      expect(detectPatchOperation(patch)).toBe('UPDATE');
+    });
+
+    it('does NOT match a random line starting with `---` inside a hunk body', () => {
+      // Realistic UPDATE patch whose deletion line starts with `--- x`;
+      // the first `---`-prefixed line is the file header, not the hunk
+      // body, so classification is UPDATE.
+      const patch = ['--- a/foo.md', '+++ b/foo.md', '@@ -1,1 +1,1 @@', '--- old', '+++ new'].join(
+        '\n'
+      );
+      expect(detectPatchOperation(patch)).toBe('UPDATE');
+    });
+  });
+
+  describe('stripPatchHeaders', () => {
+    it('removes `diff --git`, `index`, `---` and `+++` header lines before the first hunk', () => {
+      const patch = [
+        'diff --git a/foo b/foo',
+        'index 1234abc..5678def 100644',
+        '--- a/foo',
+        '+++ b/foo',
+        '@@ -1,1 +1,1 @@',
+        '-old',
+        '+new',
+      ].join('\n');
+      const stripped = stripPatchHeaders(patch);
+      expect(stripped).toBe(['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n'));
+    });
+
+    it('preserves lines starting with `-` or `+` inside a hunk body', () => {
+      const patch = [
+        '--- a/foo',
+        '+++ b/foo',
+        '@@ -1,2 +1,2 @@',
+        '-- dash line',
+        '++ plus line',
+      ].join('\n');
+      const stripped = stripPatchHeaders(patch);
+      // File-level `---`/`+++` gone, hunk body intact.
+      expect(stripped).toBe(['@@ -1,2 +1,2 @@', '-- dash line', '++ plus line'].join('\n'));
+    });
+  });
+
+  describe('ADD semantics', () => {
+    it('ADD patch to a missing file creates the file with the patch content', async () => {
+      const filePath = path.join(tempDir, 'newfile.txt');
+      const patch = [
+        '--- /dev/null',
+        '+++ b/newfile.txt',
+        '@@ -0,0 +1,2 @@',
+        '+line 1',
+        '+line 2',
+      ].join('\n');
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.path).toBe(filePath);
+
+      const written = await fs.readFile(filePath, 'utf-8');
+      // Trailing newline is expected: patches on POSIX represent files
+      // that end with '\n', and the parser preserves that convention.
+      expect(written).toContain('line 1');
+      expect(written).toContain('line 2');
+      expect(written.startsWith('line 1')).toBe(true);
+    });
+
+    it('ADD patch to an existing file rejects with a clear "already exists" error', async () => {
+      const filePath = path.join(tempDir, 'existing.txt');
+      await fs.writeFile(filePath, 'existing content', 'utf-8');
+
+      const patch = ['--- /dev/null', '+++ b/existing.txt', '@@ -0,0 +1,1 @@', '+brand new'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('already exists');
+
+      // File must be preserved untouched.
+      const onDisk = await fs.readFile(filePath, 'utf-8');
+      expect(onDisk).toBe('existing content');
+    });
+
+    it('ADD patch to a missing file in a missing directory creates parent directories', async () => {
+      const filePath = path.join(tempDir, 'nested', 'deeply', 'newfile.txt');
+      const patch = [
+        '--- /dev/null',
+        '+++ b/nested/deeply/newfile.txt',
+        '@@ -0,0 +1,1 @@',
+        '+hello',
+      ].join('\n');
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+
+      expect(result.success).toBe(true);
+      const written = await fs.readFile(filePath, 'utf-8');
+      expect(written).toContain('hello');
+    });
+  });
+
+  describe('UPDATE semantics', () => {
+    it('UPDATE patch to a missing file rejects with "File not found"', async () => {
+      const filePath = path.join(tempDir, 'does-not-exist.txt');
+
+      const patch = ['@@ -1,1 +1,1 @@', '-old', '+new'].join('\n');
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('File not found');
+    });
+
+    it('UPDATE patch with `---`/`+++` file headers strips them and applies correctly', async () => {
+      const filePath = path.join(tempDir, 'update-with-headers.txt');
+      const original = ['line one', 'line two', 'line three'].join('\n');
+      await fs.writeFile(filePath, original, 'utf-8');
+
+      const patch = [
+        '--- a/update-with-headers.txt',
+        '+++ b/update-with-headers.txt',
+        '@@ -1,3 +1,3 @@',
+        ' line one',
+        '-line two',
+        '+line TWO',
+        ' line three',
+      ].join('\n');
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+      expect(result.success).toBe(true);
+
+      const updated = await fs.readFile(filePath, 'utf-8');
+      expect(updated).toBe(['line one', 'line TWO', 'line three'].join('\n'));
     });
   });
 });
