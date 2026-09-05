@@ -1378,8 +1378,31 @@ The env-block detector normalises both content shapes the Vercel AI SDK v2 suppo
 - `isGpt5_6OrLater(modelId: string): boolean` — robust `(major, minor)` tuple comparator (opencode PRs #47384, #47385). Parses `/^gpt-(\d+)(?:\.(\d+))?/i`; the minor group is optional and defaults to `0`. Returns `true` when the parsed version is `>= (5, 6)`. Accepts `'gpt-6'`, `'gpt-7'`, `'gpt-5.6'`, `'gpt-5.7'`, and is case-insensitive on the `gpt-` prefix. Rejects `'gpt-5'` (parses as `(5, 0)`), `'gpt-5.4'`, `'gpt-4o'`, `'claude-3-opus'`, `''`, `'gpt-'`. Replaces the inline `/gpt-5\.[6-9]|gpt-[6-9]/i` regex that previously handled these cases by accident.
 - `isChatGPTSubscription(auth)` — zero-cost heuristic returning `true` when
   `auth.type === 'oauth' && auth.source === 'chatgpt'`.
-- `hasEnvironmentDetailsBlock(content: unknown): boolean` — shared predicate returning `true` when a message body carries an `<environment_details>` fence (kilocode #13190). Uses `.trim().includes(...)` so leading blank lines or padding do not defeat the check. Non-string inputs (`undefined`, `null`, numbers, arrays, plain objects) short-circuit to `false` so callers can funnel arbitrary content values through the helper without a pre-check. Exported so orchestrators (`src/core/agenticChat.ts:buildSystemPrompt`) can share the same predicate when deciding whether an env block has already been injected upstream — the orchestrator and the breakpoint boundary now agree byte-for-byte on the detection semantics.
-- `applyCacheBreakpoint(prompt)` — the pure array transform described above. Preserves existing `providerOptions` on the marked message (merges into the `openai` bag rather than replacing it) so provider-specific hints from other passes (e.g. Anthropic cache markers when a message carries multi-provider metadata) are not clobbered.
+- `applyCacheBreakpoint(prompt)` — the pure array transform.
+- `isGpt5_6OrLater(modelId)` — robust GPT version comparator that parses
+  `gpt-<major>[.<minor>]` and returns `true` for tuple `(major, minor) >= (5, 6)`.
+  Accepts integer-only versions (`gpt-6`) by defaulting the missing minor to
+  `0`, and rejects unparseable ids with `false`.
+
+**Strict equality on the parsed minor version.** The minor-group presence
+check uses `match[2] !== undefined` rather than the looser `match[2] != null`.
+The two expressions are behaviourally equivalent on the output of
+`RegExp.exec` (an unmatched optional group is always `undefined`, never
+`null`), but the strict form satisfies ESLint's `eqeqeq` rule without
+requiring a local `no-eq-null` disable pragma and communicates the exact
+contract: the branch fires only when the regex captured an explicit minor
+component. This matches the project-wide convention for narrowing on
+`RegExpExecArray` optional groups.
+
+```typescript
+// src/providers/openai/prompt-cache.ts
+const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+if (!match) {
+  return false;
+}
+const major = Number(match[1]);
+const minor = match[2] !== undefined ? Number(match[2]) : 0;
+```
 
 Aligns with upstream kilocode `c554409080..a5aaef74a` (opencode v1.17.13 parity) plus opencode PRs #47384 / #47385 (GPT version comparator) and kilocode #13190 (env-block detection hardening).
 
