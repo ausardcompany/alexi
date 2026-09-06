@@ -10,6 +10,7 @@ import {
   supportsPromptCacheBreakpoint,
   isChatGPTSubscription,
   isGpt5_6OrLater,
+  isSupportedCodexModel,
   type LanguageModelV2Prompt,
 } from '../prompt-cache.js';
 
@@ -116,6 +117,46 @@ describe('isGpt5_6OrLater (opencode #47384, #47385)', () => {
   it('is case-insensitive on the "gpt-" prefix', () => {
     expect(isGpt5_6OrLater('GPT-6')).toBe(true);
     expect(isGpt5_6OrLater('Gpt-5.6')).toBe(true);
+  });
+});
+
+describe('isSupportedCodexModel (opencode #47384, #47385 combined)', () => {
+  // Guards the combined fix for the Codex GPT version filter. Threshold is
+  // (major, minor) = (5, 0). Both bugs are exercised: integer versions must
+  // be accepted, and comparison must be tuple-based, not major-only.
+  it('includes integer major versions at the threshold', () => {
+    expect(isSupportedCodexModel('gpt-5')).toBe(true);
+  });
+
+  it('includes explicit minor bumps at or above the threshold', () => {
+    expect(isSupportedCodexModel('gpt-5.0')).toBe(true);
+    expect(isSupportedCodexModel('gpt-5.1')).toBe(true);
+  });
+
+  it('includes newer major versions regardless of minor shape', () => {
+    expect(isSupportedCodexModel('gpt-6')).toBe(true);
+    expect(isSupportedCodexModel('gpt-6.3')).toBe(true);
+    expect(isSupportedCodexModel('gpt-7')).toBe(true);
+  });
+
+  it('excludes older major versions regardless of minor', () => {
+    expect(isSupportedCodexModel('gpt-4')).toBe(false);
+    expect(isSupportedCodexModel('gpt-4.9')).toBe(false);
+    expect(isSupportedCodexModel('gpt-4o')).toBe(false);
+    expect(isSupportedCodexModel('gpt-3.5')).toBe(false);
+  });
+
+  it('excludes non-gpt model families', () => {
+    expect(isSupportedCodexModel('o1-preview')).toBe(false);
+    expect(isSupportedCodexModel('claude-3-opus')).toBe(false);
+    expect(isSupportedCodexModel('anthropic--claude-3.7-sonnet')).toBe(false);
+    expect(isSupportedCodexModel('')).toBe(false);
+    expect(isSupportedCodexModel('gpt-')).toBe(false);
+  });
+
+  it('is case-insensitive on the "gpt-" prefix', () => {
+    expect(isSupportedCodexModel('GPT-5')).toBe(true);
+    expect(isSupportedCodexModel('Gpt-5.1')).toBe(true);
   });
 });
 
