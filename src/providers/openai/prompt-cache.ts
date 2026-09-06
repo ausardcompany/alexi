@@ -96,6 +96,64 @@ export function isChatGPTSubscription(auth: { type?: string; source?: string }):
 }
 
 /**
+ * Minimum supported Codex GPT major version. Models below this are filtered
+ * out of Codex-eligible provider lists.
+ */
+export const CODEX_MIN_MAJOR = 5;
+
+/**
+ * Minimum supported Codex GPT minor version at the boundary major. When the
+ * parsed major equals `CODEX_MIN_MAJOR`, the minor must be >= `CODEX_MIN_MINOR`.
+ */
+export const CODEX_MIN_MINOR = 0;
+
+/**
+ * Returns true when a model id is a Codex-eligible GPT version.
+ *
+ * Port of opencode PRs #47384 (integer-major crash on `gpt-6`) and #47385
+ * (comparing by major alone misclassifies minor bumps). Prior upstream code
+ * only accepted `gpt-<major>.<minor>` strings and compared major alone, which
+ *
+ *   1. Excluded valid minor bumps (`gpt-5.1` was filtered when threshold was
+ *      `>= 5.0` because the compare landed on major only, not on tuples).
+ *   2. Dropped integer-only versions (`gpt-5`) because the regex required a
+ *      decimal (`gpt-5.0`).
+ *
+ * This combined helper handles both:
+ *   - Accepts `gpt-5` (minor defaults to 0) AND `gpt-5.1`.
+ *   - Compares by `(major, minor)` tuple against `(CODEX_MIN_MAJOR, CODEX_MIN_MINOR)`.
+ *
+ * Returns `false` for unparseable ids (`o1-preview`, `claude-3`, empty string).
+ *
+ * @param modelId - Model id to test (e.g. `gpt-5`, `gpt-5.1`, `openai--gpt-6`)
+ * @returns true when the parsed version is `>= (CODEX_MIN_MAJOR, CODEX_MIN_MINOR)`
+ */
+export function isSupportedCodexModel(modelId: string): boolean {
+  // Accept both "gpt-5" and "gpt-5.1" style versions. The minor group is
+  // optional; when absent it defaults to 0 (integer-safe path, opencode #47384).
+  const match = /^gpt-(\d+)(?:\.(\d+))?/i.exec(modelId);
+  if (!match) {
+    return false;
+  }
+  const major = Number(match[1]);
+  const minor = match[2] !== undefined ? Number(match[2]) : 0;
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) {
+    return false;
+  }
+  // Tuple comparison against (CODEX_MIN_MAJOR, CODEX_MIN_MINOR) — opencode
+  // #47385 fix. Comparing major alone would let `gpt-4.9` slip through on
+  // a threshold of `>= 5`, or (for a higher `MIN_MINOR`) would incorrectly
+  // accept `gpt-5.0` when the floor is `gpt-5.6`.
+  if (major > CODEX_MIN_MAJOR) {
+    return true;
+  }
+  if (major < CODEX_MIN_MAJOR) {
+    return false;
+  }
+  return minor >= CODEX_MIN_MINOR;
+}
+
+/**
  * Returns true when the given message content string contains an
  * `<environment_details>` block. Trims leading/trailing whitespace before
  * matching so that blank lines or padding preceding the block do not

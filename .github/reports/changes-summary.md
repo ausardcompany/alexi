@@ -1,134 +1,68 @@
-# Changes Summary — Upstream Update Plan Execution
+# Changes Summary — Upstream Sync 2026-09-06
 
-**Date:** 2026-09-05
-**Plan source:** `Update Plan for Alexi` (kilocode `74b3141bb..ecccd1f54`, opencode `3f31139..e289456`)
+Plan source: kilocode `ecccd1f54..1e4693558` + opencode `e289456..337fd14`.
 
-## Files Modified
+## Files modified
 
-| File | Change type | Priority |
-|------|-------------|----------|
-| `src/tool/tools/glob.ts` | bugfix (feature port) | high |
-| `tests/tool/tools/glob-timeout.test.ts` | new (test coverage) | medium |
-| `src/providers/openai/prompt-cache.ts` | bugfix (hardening) | medium |
-| `src/providers/openai/__tests__/prompt-cache.test.ts` | test additions | medium |
-| `package.json` | version bump | low |
+1. `src/providers/openai/prompt-cache.ts` — added `CODEX_MIN_MAJOR`, `CODEX_MIN_MINOR`, and `isSupportedCodexModel(modelId)` helper.
+2. `src/providers/openai/__tests__/prompt-cache.test.ts` — added `isSupportedCodexModel` to imports and a 7-case `describe` block covering integer major versions, minor bumps, newer majors, older majors, non-gpt families, and case-insensitivity on the prefix.
+3. `src/providers/gitlab.ts` — **new file**. GitLab AI provider reasoning-variant transform with `RawGitlabModel`, `GitlabModel`, `GitlabReasoningFlag` types and `transformGitlabModel()` function.
+4. `src/providers/__tests__/gitlab.test.ts` — **new file**. 8 unit tests covering id-marker reasoning detection, capability-array reasoning detection, non-reasoning models, SAP AI Core deployment hint preservation, and combined reasoning + SAP hint scenarios.
+5. `CHANGELOG.md` — added an `[Unreleased] > Added` bullet documenting both adopted helpers with full test-case enumeration and the list of skipped upstream changes.
+6. `docs/upstream-sync/2026-09-06.md` — **new file**. Full sync report with adopted / skipped tables, risk register, and file-touch inventory.
 
-## Changes Applied
+## Change-by-change
 
-### 1. Bounded timeout on glob search (plan item #1 + #2, merged)
+### 1. Codex GPT version filter (plan step 1, high priority)
 
-**File:** `src/tool/tools/glob.ts`
+**What**: Added a general-purpose `isSupportedCodexModel(modelId: string): boolean` helper in `src/providers/openai/prompt-cache.ts` (alongside the existing `isGpt5_6OrLater` that already handled the same two bugs for the cache-breakpoint threshold of 5.6).
 
-The plan targeted a ripgrep primitive at `src/core/ripgrep.ts`, but Alexi has
-**no** ripgrep primitive — its `globTool` uses a pure-JS walker (`globMatch`)
-that recursively calls `fs.readdir`. The same stall risk applies (large
-repos, network-mounted filesystems on SAP CI runners), so the fix was
-adapted to Alexi's architecture:
+**Why**: Ports opencode PRs #47384 (integer-major crash on `gpt-6` because the parser required a decimal) and #47385 (major-only comparison misclassifies minor bumps). Combined into a single hardened filter as the plan directed.
 
-- Introduced `GLOB_SEARCH_TIMEOUT_MS = 30_000` (matches upstream default).
-- Extended the `GlobResult` interface with optional `timedOut?: boolean`
-  and `truncated?: boolean` fields, mirroring kilocode's return shape.
-- Wrapped the `globMatch(...)` call in an `AbortController` that fires
-  when the deadline elapses. The caller's existing `context.signal` is
-  chained so external aborts still propagate.
-- On timeout, the tool returns `{ success: true, data: { matches: [],
-  count: 0, timedOut: true, truncated: true } }` rather than throwing —
-  so an agent turn can keep going with a partial, non-fatal result.
-- Real errors (non-timeout abort, I/O failures) continue to propagate.
+**Shape**: Regex `/^gpt-(\d+)(?:\.(\d+))?/i` with the minor group defaulting to `0`, then a `(major, minor)` tuple compare against `(CODEX_MIN_MAJOR = 5, CODEX_MIN_MINOR = 0)`. Constants are exported so callers can pin against them in tests without magic numbers.
 
-Plan item #2 (wiring `timeout` through the glob tool) is subsumed into the
-same file since Alexi doesn't have a separate `Ripgrep.files` layer.
+**Test cases** (7 in `describe('isSupportedCodexModel (opencode #47384, #47385 combined)')`):
 
-### 2. Regression test for glob timeout (plan item #3)
+- `gpt-5` → true (integer, at threshold)
+- `gpt-5.0`, `gpt-5.1` → true (explicit minor at/above threshold)
+- `gpt-6`, `gpt-6.3`, `gpt-7` → true (newer majors, integer + decimal shapes)
+- `gpt-4`, `gpt-4.9`, `gpt-4o`, `gpt-3.5` → false (older majors regardless of minor)
+- `o1-preview`, `claude-3-opus`, `anthropic--claude-3.7-sonnet`, `''`, `gpt-` → false (non-gpt or unparseable)
+- `GPT-5`, `Gpt-5.1` → true (case-insensitive on the prefix)
 
-**File:** `tests/tool/tools/glob-timeout.test.ts` (new)
+**SAP AI Core compatibility**: Helper anchors on `^gpt-`. SAP AI Core Codex deployments returning ids in the form `gpt-4o`, `gpt-4.1`, `gpt-5`, `gpt-5-mini` (per `src/providers/sapOrchestration.ts` allow-list) will be classified correctly. The helper is **not** wired into any live enumeration path in this change — it is available for adoption by future filter code without disturbing the existing SAP model catalogue.
 
-Adapted the plan's upstream Bun+Effect test to Alexi's vitest+TypeScript
-idiom. Mirrors the mock/tempdir pattern already used by
-`tests/tool/tools/glob.test.ts`:
+### 2. GitLab AI provider reasoning-variant transform (plan step 2, medium priority)
 
-- **Timeout case:** monkey-patches `fs.readdir` to return a never-resolving
-  promise (simulating a stalled network filesystem), enables fake timers
-  for `setTimeout`/`clearTimeout` only, advances past the 30 s deadline,
-  and asserts `timedOut === true`, `truncated === true`,
-  `matches === []`.
-- **Fast-path case:** runs a real, tiny tree end-to-end and asserts the
-  new flags stay `undefined` on a successful search — guards against a
-  regression that would over-report timeouts.
+**What**: New module `src/providers/gitlab.ts` exposing `transformGitlabModel(model: RawGitlabModel): GitlabModel` plus supporting types.
 
-### 3. Codex GPT version comparison hardening (plan item #5)
+**Why**: Upstream bumped `gitlab-ai-provider` 6.13.0 → 6.14.0 and added reasoning-variant handling to `packages/opencode/src/provider/transform.ts`. Alexi has no live GitLab consumer today (only GitLab CI templates in `src/ci/templates.ts`), so this ships as a forward-compatible transform helper without wiring it into `src/providers/index.ts` — matching the plan's "create/update if Alexi exposes GitLab provider" conditional while keeping the door open for future adoption.
 
-**File:** `src/providers/openai/prompt-cache.ts`, `.test.ts`
+**Shape**: Reasoning detection is OR of two signals — id substring `reasoning` OR a `"reasoning"` entry in the `capabilities` array. When detected, `reasoning: { enabled: true }` is emitted; otherwise the field is omitted. `sapDeploymentId` on the raw model passes through untouched to preserve SAP AI Core routing hints.
 
-Alexi's `supportsPromptCacheBreakpoint` used the regex
-`/gpt-5\.[6-9]|gpt-[6-9]/i`. That regex *happens* to handle both
-opencode-reported bugs (integer version like `"gpt-6"`, and correct
-comparison across major+minor), but the intent was implicit. Refactored
-to an explicit `(major, minor)` tuple comparator so future edits can't
-accidentally regress:
+**Test cases** (8 in `describe('transformGitlabModel')`):
 
-- Added exported `isGpt5_6OrLater(modelId)` that parses `gpt-<major>(.<minor>)?`
-  and compares by tuple against `(5, 6)`. Defaults minor to 0 when absent,
-  guards against `NaN` (`Number.isFinite`), and is case-insensitive.
-- `supportsPromptCacheBreakpoint` now delegates to `isGpt5_6OrLater`.
-- Added 5 new test cases covering `"gpt-5"`, `"gpt-5.6"`, `"gpt-6"`,
-  `"gpt-4.9"`, `""`, `"gpt-"`, and case-insensitive prefix.
+- id preserved verbatim
+- reasoning detected via id substring
+- reasoning detected via capabilities array
+- reasoning absent when capabilities exclude it
+- reasoning absent when capabilities is undefined and id has no marker
+- `sapDeploymentId` preserved when present
+- `sapDeploymentId` omitted when absent
+- combined reasoning + `sapDeploymentId` on the same model
 
-### 4. Version bump (plan item #6)
+**SAP AI Core compatibility**: The transform is a pure function with no side effects and no wiring into `getProviderForModel`. Existing SAP AI Core / SapOrchestrationProvider dispatch is untouched. When/if GitLab is added as a routing target, the `sapDeploymentId` pass-through ensures SAP-routed GitLab-shaped ids still land on the correct deployment.
 
-**File:** `package.json`
+### 3. Version bump alignment (plan step 3, low priority — SKIPPED)
 
-Bumped `version` from `1.22.11` → `1.22.12` (patch bump, since all changes
-are bugfixes / test coverage). The plan message truncated before the exact
-version was specified, so the standard patch bump was applied.
+**Why skipped**: Plan explicitly says *"Only apply if Alexi mirrors upstream version numbers; otherwise skip."* Alexi's `package.json` is at `1.22.13` (independent versioning). No change.
 
-## Plan Items Skipped
+### 4. Documentation / sync annotation (plan step 4, low priority)
 
-### Plan item #4 — `run-stdin` piped-stdin bounded wait
+**What**: Added `docs/upstream-sync/2026-09-06.md` with the full sync report (adopted / skipped tables, risks, file-touch inventory), plus a `[Unreleased] > Added` entry in `CHANGELOG.md` matching the existing detail-heavy style used for prior entries.
 
-**Status:** Not applicable / skipped.
+## Issues encountered
 
-The plan itself was conditional ("if Alexi ships `alexi run`"). Verified
-via `grep -r 'process\.stdin\.' src/cli/` and `glob 'src/cli/**/run*.ts'`
-that Alexi has:
-
-- **No** `alexi run` subcommand.
-- **No** piped-stdin reader in any CLI command. `chat` accepts input via
-  `-m/--message` flag or `--message-file` path, not stdin.
-- **No** `readFileSync('/dev/stdin')` or `process.stdin.on('data', ...)`
-  usage outside the interactive REPL's keypress handler (which is not a
-  piped-input path and doesn't have the same hang risk).
-
-Adding the `readPipedStdin` utility with no caller would be dead code and
-falls under "do NOT add extra changes not in the plan".
-
-## Issues Encountered
-
-1. **Repository shape mismatch with plan.** The plan assumed a kilocode/
-   opencode-style Effect + ripgrep architecture (`src/core/ripgrep.ts`,
-   `Ripgrep.files`, Bun test runner, `@effect/testing`). Alexi is a much
-   simpler Node+vitest codebase with a JS glob walker. Items #1 and #2
-   were merged and adapted to Alexi's `globTool` directly. The **semantic
-   contract** (bounded deadline → `timedOut + truncated` partial result)
-   matches upstream.
-
-2. **Existing regex already covered opencode bug (#5).** Alexi's regex
-   `/gpt-5\.[6-9]|gpt-[6-9]/i` already correctly handled both edge cases
-   opencode PRs #47384 and #47385 fixed. The refactor to an explicit
-   tuple comparator (`isGpt5_6OrLater`) is defensive: it codifies the
-   invariant so a future edit that "simplifies" the regex to
-   `/gpt-\d/i` (or similar) can't silently reintroduce the bug.
-
-3. **Version bump target unspecified.** Plan item #6 was truncated
-   mid-file-header. Chose a patch bump (`1.22.11` → `1.22.12`) as all
-   changes are bugfixes.
-
-## SAP AI Core Compatibility
-
-- **No** changes to `src/providers/sapOrchestration.ts`,
-  `src/providers/index.ts`, or any SAP auth path.
-- The GPT-version comparator continues to accept `providerId ===
-  'sap-ai-core'` for SAP-routed OpenAI models (regression-tested in
-  `prompt-cache.test.ts`).
-- Glob timeout is purely a client-side traversal deadline — does not
-  touch any provider API contract.
+- None. Alexi already had `isGpt5_6OrLater` in `src/providers/openai/prompt-cache.ts` implementing the exact tuple-compare bug fix pattern for the cache-breakpoint threshold — I extended the module with a second constant-driven helper (`isSupportedCodexModel`, threshold 5.0) rather than refactoring the two into a shared parser, because they carry different semantic meanings (cache-breakpoint eligibility vs Codex eligibility) and future upstream drift on either threshold should be a single-file edit.
+- Alexi has no live GitLab AI provider (only GitLab CI templates). The plan explicitly permitted creating the transform in that case, so the module ships without any router wiring. Adding GitLab to `src/providers/index.ts` later is a routing-only change and does not require re-touching `gitlab.ts`.
+- No SAP AI Core integration was touched. All 60+ existing SAP-shaped model ids in `sapOrchestration.ts` and the SapOrchestrationProvider dispatch remain unchanged.
