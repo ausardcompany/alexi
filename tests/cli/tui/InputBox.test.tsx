@@ -292,4 +292,41 @@ describe('InputBox', () => {
       expect(onSubmit).not.toHaveBeenCalled();
     });
   });
+
+  describe('Home/End keyboard navigation', () => {
+    // Home/End work via the local ControlledTextInput fork (see
+    // src/cli/tui/components/ControlledTextInput.tsx and its tests). Here we
+    // verify only that pressing Home/End inside InputBox does not disturb
+    // the value or trigger a submit — i.e. the escape sequences are not
+    // silently inserted into the buffer, and the parent useInput handler
+    // is not confused by them.
+    it('Home/End keypresses do not submit or corrupt the value', async () => {
+      const onSubmit = vi.fn();
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => 1_000_000);
+      try {
+        const { stdin, lastFrame } = render(
+          <Wrapper>
+            <InputBox {...defaultProps} onSubmit={onSubmit} />
+          </Wrapper>
+        );
+        // Advance past debounce window.
+        nowSpy.mockImplementation(() => 1_000_000 + MOUNT_DEBOUNCE_MS + 1);
+        stdin.write('abc');
+        await new Promise((r) => setImmediate(r));
+        stdin.write('\u001B[H'); // Home
+        await new Promise((r) => setImmediate(r));
+        stdin.write('\u001B[F'); // End
+        await new Promise((r) => setImmediate(r));
+        // Strip ANSI and confirm 'abc' is still present and no escape chars
+        // leaked into the buffer.
+        const plain = (lastFrame() ?? '').replace(/\u001B\[[0-9;]*m/g, '');
+        expect(plain).toContain('abc');
+        expect(plain).not.toContain('[H');
+        expect(plain).not.toContain('[F');
+        expect(onSubmit).not.toHaveBeenCalled();
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+  });
 });
