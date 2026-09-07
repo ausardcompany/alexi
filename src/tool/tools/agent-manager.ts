@@ -74,7 +74,7 @@ const AgentManagerParamsSchema = z
       .string()
       .nullable()
       .optional()
-      .refine((value) => value == null || value.trim().length > 0, {
+      .refine((value) => value === null || value === undefined || value.trim().length > 0, {
         message: 'worktreeId must not be blank',
       })
       .describe(
@@ -112,10 +112,14 @@ const AgentManagerParamsSchema = z
   // only makes sense for a start (create) call. Reject the combination
   // early so we produce a descriptive Zod error instead of silently
   // ignoring the field deeper in the handler.
-  .refine((params) => params.worktreeId == null || params.action === 'create', {
-    message: 'worktreeId is only valid on action=create',
-    path: ['worktreeId'],
-  });
+  .refine(
+    (params) =>
+      params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
+    {
+      message: 'worktreeId is only valid on action=create',
+      path: ['worktreeId'],
+    }
+  );
 
 interface AgentManagerResult {
   action: string;
