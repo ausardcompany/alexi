@@ -3,6 +3,9 @@ Manage and orchestrate multiple agent sessions and workflows.
 Actions:
 - create: Create a new agent session with optional configuration.
   Optional params: worktreeId, config.
+  The optional `worktreeId` targets an existing managed worktree returned
+  by `action: "list"` in the caller's project. Omit or null to create the
+  session in the caller's directory. Never use a path or branch name.
   The optional `config` object accepts `mode`, `model`, an optional
   `provider` to constrain model resolution to one provider ID (e.g.
   `anthropic`, `sap-ai-core`), and `excludeLocalState`. Specify
