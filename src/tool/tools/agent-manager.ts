@@ -46,50 +46,80 @@ function decodeJsonIfString<T extends z.ZodTypeAny>(schema: T) {
 // SAP AI Core in strict mode) may omit optional fields entirely OR pass
 // explicit `null`. Accept both so tool-call payloads coming from any
 // provider validate without provider-specific pre-processing.
-const AgentManagerParamsSchema = z.object({
-  action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
-  sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
-  agentId: z
-    .string()
-    .nullable()
-    .optional()
-    .describe('Agent ID for answer action (the sub-agent blocked on a pending question)'),
-  answer: z
-    .string()
-    .nullable()
-    .optional()
-    .describe(
-      'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
-    ),
-  worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
-  config: decodeJsonIfString(
-    z
-      .object({
-        mode: z.string().nullable().optional().describe('Agent mode'),
-        model: z.string().nullable().optional().describe('Model to use'),
-        // Ports upstream opencode `agent-manager` task `provider` field
-        // (2026-08 upstream sync). Lets the orchestrator LLM constrain
-        // model resolution to a specific provider ID when the same model
-        // name is offered by multiple providers (e.g. `sap-ai-core`
-        // deployment vs. direct `anthropic`). Requires `model` to be set.
-        provider: z
-          .string()
-          .nullable()
-          .optional()
-          .describe(
-            "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
-          ),
-        excludeLocalState: z
-          .boolean()
-          .nullable()
-          .optional()
-          .describe('Exclude local state on startup for fresh session initialization'),
-      })
+const AgentManagerParamsSchema = z
+  .object({
+    action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
+    sessionId: z.string().nullable().optional().describe('Session ID for stop/status actions'),
+    agentId: z
+      .string()
       .nullable()
       .optional()
-      .describe('Configuration for session creation')
-  ),
-});
+      .describe('Agent ID for answer action (the sub-agent blocked on a pending question)'),
+    answer: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
+      ),
+    // Ports upstream opencode `worktreeID` parameter (2026-09 sync):
+    // lets the orchestrator LLM target an *existing* managed worktree
+    // previously returned by `action: "list"` instead of implicitly
+    // reusing the caller's working directory. Must be a non-blank
+    // string; a whitespace-only value is rejected so we don't silently
+    // fall through to "use caller's cwd" behaviour when the model
+    // supplied garbage. The cross-field rule below additionally rejects
+    // this field on any action other than `create`.
+    worktreeId: z
+      .string()
+      .nullable()
+      .optional()
+      .refine((value) => value === null || value === undefined || value.trim().length > 0, {
+        message: 'worktreeId must not be blank',
+      })
+      .describe(
+        "Create action only. Existing managed worktree ID returned by action=list in the caller's project. Omit or null to use the caller's directory. Never use a path or branch name."
+      ),
+    config: decodeJsonIfString(
+      z
+        .object({
+          mode: z.string().nullable().optional().describe('Agent mode'),
+          model: z.string().nullable().optional().describe('Model to use'),
+          // Ports upstream opencode `agent-manager` task `provider` field
+          // (2026-08 upstream sync). Lets the orchestrator LLM constrain
+          // model resolution to a specific provider ID when the same model
+          // name is offered by multiple providers (e.g. `sap-ai-core`
+          // deployment vs. direct `anthropic`). Requires `model` to be set.
+          provider: z
+            .string()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
+            ),
+          excludeLocalState: z
+            .boolean()
+            .nullable()
+            .optional()
+            .describe('Exclude local state on startup for fresh session initialization'),
+        })
+        .nullable()
+        .optional()
+        .describe('Configuration for session creation')
+    ),
+  })
+  // Cross-field validator ports upstream opencode's rule that `worktreeID`
+  // only makes sense for a start (create) call. Reject the combination
+  // early so we produce a descriptive Zod error instead of silently
+  // ignoring the field deeper in the handler.
+  .refine(
+    (params) =>
+      params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
+    {
+      message: 'worktreeId is only valid on action=create',
+      path: ['worktreeId'],
+    }
+  );
 
 interface AgentManagerResult {
   action: string;
@@ -126,6 +156,8 @@ Actions:
   The optional config accepts \`mode\`, \`model\`, an optional \`provider\` to
   constrain model resolution to one provider ID (requires \`model\`), and
   \`excludeLocalState\` for a fresh-state startup.
+  Optional \`worktreeId\`: existing managed worktree ID returned by
+  \`action: "list"\`. Omit to use the caller's directory.
 - list: List all active agent sessions
 - stop: Stop a specific agent session
 - status: Get the status of a specific agent session
@@ -137,11 +169,18 @@ Actions:
 
   permission: {
     action: 'admin',
-    getResource: (params) => params.action,
+    // Fold `worktreeId` into the permission resource string so approval
+    // prompts and audit logs can distinguish "create a session in a new
+    // worktree" from "resume in an existing managed worktree". Alexi's
+    // permission layer doesn't have upstream opencode's structured
+    // `metadata` field, so encoding the target into the resource is the
+    // portable equivalent.
+    getResource: (params) =>
+      params.worktreeId ? `${params.action}:${params.worktreeId}` : params.action,
   },
 
   async execute(params, _context): Promise<ToolResult<AgentManagerResult>> {
-    const { action, sessionId, agentId, answer, config } = params;
+    const { action, sessionId, agentId, answer, config, worktreeId } = params;
 
     try {
       switch (action) {
@@ -187,6 +226,20 @@ Actions:
             }
             resolvedModel = resolution.modelID;
             resolvedProvider = resolution.providerID;
+          }
+
+          // Ports upstream opencode `worktreeID` targeting (2026-09 sync).
+          // When the model supplies a `worktreeId`, we would normally
+          // look it up via a managed-worktree registry and resolve the
+          // target directory. Alexi does not yet track managed worktrees
+          // in-process, so surface a clear "not available" error rather
+          // than silently ignoring the field — matches the "gate behind a
+          // capability check" guidance in the upstream sync plan.
+          if (worktreeId) {
+            return {
+              success: false,
+              error: `Managed worktrees are not available in this build (worktreeId=${worktreeId}). Omit worktreeId to create a session in the caller's directory.`,
+            };
           }
 
           return {
