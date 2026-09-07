@@ -1,6 +1,5 @@
 import React, { useState, useCallback, useRef, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
 
 import type { InputBoxProps } from '../types/props.js';
 import { fuzzyMatch, completeModelName } from '../../utils/completer.js';
@@ -8,6 +7,10 @@ import { useClipboardImage } from '../hooks/useClipboardImage.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { AttachmentBar } from './AttachmentBar.js';
+// Local fork of `ink-text-input` with Home/End cursor navigation support.
+// See ControlledTextInput.tsx for the rationale (upstream v6.0.0 does not
+// expose a cursor setter, so we cannot patch Home/End from the outside).
+import { ControlledTextInput } from './ControlledTextInput.js';
 
 export type { InputBoxProps };
 
@@ -21,7 +24,18 @@ export type { InputBoxProps };
  * - Enter: submit + clear
  * - Up arrow: navigate history backwards (older entries)
  * - Down arrow: navigate history forwards (newer entries / back to current)
+ * - Home: jump cursor to start of input line
+ * - End: jump cursor to end of input line
  * - Disabled state during streaming
+ *
+ * Keyboard navigation notes:
+ *   Home/End are handled inside the local `ControlledTextInput` fork (see
+ *   `ControlledTextInput.tsx`). Upstream `ink-text-input` v6.0.0 does NOT
+ *   move the cursor on Home/End — it silently swallows the keys — because
+ *   its internal cursor state has no external setter. Kilocode PR #13855
+ *   solved the same problem in their CLI by patching the input component;
+ *   we do the same here rather than adding sibling handlers, which cannot
+ *   reach the cursor state anyway.
  */
 const MAX_SUGGESTIONS = 6;
 
@@ -326,7 +340,7 @@ export function InputBox({
         <Text color={colors.primary} bold>
           {'> '}
         </Text>
-        <TextInput
+        <ControlledTextInput
           value={value}
           onChange={handleChange}
           onSubmit={handleSubmit}
