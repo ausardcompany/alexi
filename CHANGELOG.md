@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.15] - 2026-09-07
+
+### Documentation
+
+- Architecture review 2026-09-07 covering agent factory T-shape model, autonomy hardening, and workflow inventory
+- Planning brief 2026-09-07 documenting upcoming T-shape consolidation and role vertical alignment
+- Claude model catalog expansion documented in CHANGELOG (ports Aider PR #5173)
+
+### Maintenance
+
+- Factory consulting run executed via reusable workflow pattern
+
+### Dependencies
+
+- Bump puppeteer from 25.9.0 to 25.10.0
+- Bump zod from 4.4.3 to 4.5.4
+- Bump mammoth from 1.12.1 to 1.12.2
+- Bump @inquirer/prompts from 8.7.0 to 8.7.1
+- Bump @typescript-eslint/eslint-plugin (dev dependency)
+- Bump tsx from 4.23.12 to 4.23.13 (dev dependency)
+
 ### Added
 
 - **Claude model catalog expansion (Aider PR #5173 port)** (`src/providers/model-match.ts`, `src/providers/__tests__/model-match.test.ts`): Documents the addition of six recent Claude model IDs to the `ANTHROPIC_MODELS` catalog and the accompanying `isAnthropicModel` / `isClaudeOpus4` classifiers. New model IDs now recognised by the provider router and selectable via the `--model` CLI flag / TUI model picker:
