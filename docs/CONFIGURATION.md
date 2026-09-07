@@ -1338,6 +1338,29 @@ is equivalent to:
 
 Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings; the tool now decodes them transparently before Zod validation. Malformed JSON strings pass through unchanged so the wrapped schema still emits a useful validation error rather than a hard tool crash. There is no configuration flag for this behaviour — it is always on and transparent to callers that already emit native objects.
 
+### `agent_manager` `worktreeId` parameter (1.22.15)
+
+Introduced 2026-09-07 (`1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter). The `agent_manager` tool's `create` action now accepts an optional `worktreeId` string that targets an existing managed worktree previously returned by `action: "list"` rather than implicitly reusing the caller's directory:
+
+```json
+{
+  "action": "create",
+  "worktreeId": "wt-abc",
+  "config": { "excludeLocalState": false }
+}
+```
+
+**Schema contract** (`AgentManagerParamsSchema` in `src/tool/tools/agent-manager.ts`):
+
+- `worktreeId` is `.string().nullable().optional()` — omit, pass `null`, or pass a non-blank string.
+- A whitespace-only or empty string is rejected at the schema layer (`worktreeId must not be blank`).
+- A cross-field validator restricts the field to `action: "create"` — pairing it with `list`, `stop`, `status`, or `answer` produces `worktreeId is only valid on action=create`.
+- The permission `getResource` folds the ID into the resource string (`create:<worktreeId>`) so approval prompts and audit logs distinguish new-worktree creation from resume-in-existing-worktree operations. Callers that omit the field see the previous plain `create` resource.
+
+**Capability gating**: Alexi does not yet track managed worktrees in-process. When a valid `worktreeId` reaches the `create` handler the tool returns `{ success: false, error: 'Managed worktrees are not available in this build (worktreeId=<id>). Omit worktreeId to create a session in the caller\'s directory.' }`. This is a deliberate fail-loud contract rather than a silent fall-through to the caller's cwd; the model receives a clear signal to retry without the field.
+
+**Configuration surface**: none. The field is a per-tool-call parameter emitted by the LLM, not a config-file setting. There is no environment variable or `~/.alexi/config.json` flag that enables or disables the parameter. Once the managed-worktree registry lands in a future release, the capability error is expected to be replaced with an actual directory lookup without changing the parameter surface.
+
 ## Experimental Shared Agent Board
 
 Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23` + accompanying store/migration commits). Adds two opt-in coordination tools — `kilo_board_read` and `kilo_board_write` — that let subagents spawned by the `task` tool broadcast messages to their swarm peers without round-tripping through the parent orchestrator. The default is `false` so subagent invocations retain Alexi's classical single-agent-per-task behaviour unless the operator opts in.

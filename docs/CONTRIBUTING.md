@@ -542,6 +542,67 @@ const AgentManagerParamsSchema = z.object({
 
 Tests should cover the JSON-encoded path, the native object path, and the missing/`null` path. See `docs/TESTING.md#testing-json-encoded-tool-params-tolerance` for the reference regression suite.
 
+### Cross-field Zod validation for action-scoped parameters
+
+When a tool parameter is only meaningful for a subset of actions on a discriminated schema — e.g. `worktreeId` only applies when `action === 'create'` — enforce that constraint at the schema layer with a `.refine()` on the outer object, not inside the handler body. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-07, `1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter).
+
+Contract:
+
+1. Validate the shape of each field independently first (inner `.refine()` on the field itself for value-level constraints such as "must not be blank").
+2. Add the cross-field rule as a top-level `.refine()` on the object schema after every field is declared. Provide an explicit `path` on the error so the failure surfaces on the offending field, not the whole object.
+3. Provide a runtime capability check inside the handler ONLY when the schema-passing path is not yet fully implemented. Fail loudly with an error that echoes the offending value back to the caller, rather than silently ignoring the field. This gives the model a signal to retry without the field and gives operators a searchable log line.
+
+Reference implementation (from `src/tool/tools/agent-manager.ts`):
+
+```typescript
+const AgentManagerParamsSchema = z
+  .object({
+    action: z.enum(['create', 'list', 'stop', 'status', 'answer']).describe('Action to perform'),
+    // ...
+    worktreeId: z
+      .string()
+      .nullable()
+      .optional()
+      .refine((value) => value == null || value.trim().length > 0, {
+        message: 'worktreeId must not be blank',
+      })
+      .describe(
+        'Create action only. Existing managed worktree ID returned by action=list in the caller\'s project.'
+      ),
+    // ...
+  })
+  // Cross-field rule: `worktreeId` only makes sense for a start (create) call.
+  // Reject the combination early so we produce a descriptive Zod error instead
+  // of silently ignoring the field deeper in the handler.
+  .refine((params) => params.worktreeId == null || params.action === 'create', {
+    message: 'worktreeId is only valid on action=create',
+    path: ['worktreeId'],
+  });
+```
+
+Runtime capability gating pattern (same file):
+
+```typescript
+if (worktreeId) {
+  return {
+    success: false,
+    error: `Managed worktrees are not available in this build (worktreeId=${worktreeId}). Omit worktreeId to create a session in the caller's directory.`,
+  };
+}
+```
+
+When the tool also has permission metadata, fold the action-scoped field into `permission.getResource` so approval prompts and audit logs distinguish "create in new worktree" from "resume in existing worktree":
+
+```typescript
+permission: {
+  action: 'admin',
+  getResource: (params) =>
+    params.worktreeId ? `${params.action}:${params.worktreeId}` : params.action,
+},
+```
+
+Alexi's permission layer does not have upstream opencode's structured `metadata` field, so encoding the target into the resource string is the portable equivalent. Tests should cover the schema-level rejection (blank value, wrong action), the runtime capability path, AND the backward-compat baseline (`action: 'create'` with no `worktreeId` still succeeds). See `docs/TESTING.md#testing-agent_manager-worktreeid-schema-and-capability-gating` for the reference regression suite.
+
 ### Defensively-constructed tool result payloads
 
 Tool `ToolResult` payloads flow through downstream permission metadata, event buses, and MCP transport, all of which JSON-encode the payload at least once. `JSON.stringify` silently drops keys whose value is `undefined`, so a naive assignment like `data: { path, diff, movePath: someOptional }` will lose the `movePath` key on the wire without any error.

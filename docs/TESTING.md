@@ -1730,6 +1730,78 @@ Key coverage points for new tools that adopt the same preprocessor pattern:
 
 The cast to `as unknown as { ... }` is required because the tool's TypeScript surface still declares the native shape; the preprocessor's runtime tolerance is not (yet) reflected in the exported schema type. Tests deliberately go through `executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path from permission behaviour.
 
+### Testing `agent_manager` `worktreeId` schema and capability gating
+
+Introduced 2026-09-07 (`1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter). The `agent_manager` tool schema gained an optional `worktreeId` parameter that must be a non-blank string, is only valid on `action: "create"`, and — because Alexi does not yet track managed worktrees in-process — currently surfaces a "not available in this build" error rather than silently falling through to the caller's cwd. The regression suite locks in three orthogonal layers: schema-level validation, cross-field validation, and runtime capability gating.
+
+Reference regression suite: `src/tool/tools/__tests__/agent-manager.worktree-id.test.ts` (4 cases, 71 lines). The pattern:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import type { ToolContext } from '../../index.js';
+
+describe('agent-manager tool — worktreeId parameter', () => {
+  it('accepts create without worktreeId (backward compat)', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe({ action: 'create' }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.action).toBe('create');
+  });
+
+  it('rejects a blank worktreeId at the schema layer', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'create', worktreeId: '   ' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? '').toMatch(/Invalid parameters/i);
+  });
+
+  it('rejects worktreeId on non-create actions at the schema layer', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'list', worktreeId: 'wt-abc' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? '').toMatch(/Invalid parameters/i);
+  });
+
+  it('surfaces a capability error when create is called with a valid worktreeId', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'create', worktreeId: 'wt-abc' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? '').toMatch(/Managed worktrees are not available/i);
+    expect(result.error ?? '').toContain('wt-abc');
+  });
+});
+```
+
+Key coverage points for future changes to `worktreeId` handling:
+
+1. **Backward compatibility.** A `create` call with no `worktreeId` MUST still succeed. This case is the regression guard against a future schema change accidentally making the field required.
+2. **Schema-level rejection of blank strings.** A whitespace-only `worktreeId` MUST be caught by the inner `.refine()` (`worktreeId must not be blank`) so the handler never sees garbage input. Test with `'   '` — a single-space or multi-space string — to exercise the `trim().length > 0` check specifically.
+3. **Cross-field validation.** The outer `.refine()` restricts `worktreeId` to `action: 'create'`. Test at least one non-create action (`list`, `stop`, `status`, or `answer`) paired with a syntactically valid `worktreeId` to guarantee the cross-field rule fires; a schema-layer rejection surfaces as `Invalid parameters` in the tool result.
+4. **Runtime capability gating.** When the field passes both schema layers, the handler MUST fail with the exact `Managed worktrees are not available in this build (worktreeId=<id>)` message AND echo the supplied ID back so operators can correlate the error to the failing call. Assert BOTH the message pattern (`toMatch(/Managed worktrees are not available/i)`) AND the ID substring (`toContain('wt-abc')`).
+
+All cases route through `agentManagerTool.executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path and the handler's capability check from permission behaviour. When the managed-worktree registry lands in a future release, the fourth case should be split into a happy-path assertion (successful directory resolution) and a not-found assertion (unknown `worktreeId` still fails loudly).
+
 ### Testing JSON-encodable Tool Result Payloads
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `f7da00f`). The `apply_patch` tool's success payload is now constructed defensively so no field carries `undefined`. `JSON.stringify` silently drops keys whose value is `undefined`, which historically caused downstream permission metadata / event bus consumers to lose information they were told they would receive.
