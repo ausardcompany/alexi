@@ -78,7 +78,7 @@ const AgentManagerParamsSchema = z
         message: 'worktreeId must not be blank',
       })
       .describe(
-        'Create action only. Existing managed worktree ID returned by action=list in the caller\'s project. Omit or null to use the caller\'s directory. Never use a path or branch name.'
+        "Create action only. Existing managed worktree ID returned by action=list in the caller's project. Omit or null to use the caller's directory. Never use a path or branch name."
       ),
     config: decodeJsonIfString(
       z
