@@ -95,7 +95,7 @@
     }
   },
   "optionalDependencies": {
-    "puppeteer": "^25.9.0"
+    "puppeteer": "^25.10.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",
