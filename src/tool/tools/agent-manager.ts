@@ -74,7 +74,7 @@ const AgentManagerParamsSchema = z
       .nullable()
       .optional()
       .describe(
-        'Session that originated this message; the target agent\'s reply routes back here. Defaults to the caller\'s session when omitted.'
+        "Session that originated this message; the target agent's reply routes back here. Defaults to the caller's session when omitted."
       ),
     // Ports upstream opencode `worktreeID` parameter (2026-09 sync):
     // lets the orchestrator LLM target an *existing* managed worktree

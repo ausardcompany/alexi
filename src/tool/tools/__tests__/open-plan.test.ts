@@ -44,10 +44,7 @@ describe('openPlanTool', () => {
     const planPath = path.join(tempDir, 'nested-plan.md');
     await fs.writeFile(planPath, '# hello');
 
-    const result = await openPlanTool.executeUnsafe(
-      { path: planPath },
-      { workdir: tempDir }
-    );
+    const result = await openPlanTool.executeUnsafe({ path: planPath }, { workdir: tempDir });
 
     expect(result.success).toBe(true);
     expect(result.data?.title).toBe('nested-plan.md');
