@@ -320,6 +320,15 @@ import type { ToolContext } from '../tool/index.js';
 
 13. **Event Subscriptions**: Subscriptions are acquired eagerly; handlers are added immediately to the handler set to prevent race conditions between subscribe and first event emission.
 
+     Notification events published from tool `execute` methods (e.g. `PlanOpened` in `src/tool/tools/open-plan.ts`) MUST wrap `publish(...)` in `try/catch` because the notification is not a correctness dependency of the tool. A schema-mismatch or throwing subscriber must never crash the tool:
+     ```typescript
+     try {
+       PlanOpened.publish({ sessionId: context.sessionId, path: resolved, title, timestamp: Date.now() });
+     } catch {
+       // Non-fatal.
+     }
+     ```
+
 14. **Plugin Tool Compatibility**: When creating plugin tools, ensure `ask` returns a `Promise<string>` (not an Effect). Use `createPluginToolWrapper()` from `src/tool/plugin-tools.ts` to adapt plugin interfaces.
 
 15. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.

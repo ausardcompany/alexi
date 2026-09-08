@@ -789,6 +789,32 @@ Design invariants of the command-log registry (`src/tool/tools/bash-streaming.ts
 
 The TUI consumes the stream via `useToolEvents` (`src/cli/tui/hooks/useToolEvents.ts`), which subscribes to `BashOutputChunk` alongside `ToolExecutionStarted` / `Completed` / `Failed`. Chunks are dispatched into the `ChatContext` reducer as `APPEND_TOOL_CALL_OUTPUT`, which live-appends to the active row's `output` without moving the entry between the `activeToolCalls` and `completedToolCalls` buckets. On completion, the `ToolExecutionCompleted` handler replaces `output` with the final aggregated payload from the tool result — this may be truncated or normalised differently (carriage returns, head-and-tail elision) than the raw streamed chunks.
 
+### Plan Ready Signal (`plan.opened`)
+
+The `open_plan` tool (`src/tool/tools/open-plan.ts`) publishes a typed `plan.opened` event on the shared bus whenever an agent surfaces a plan markdown file for review. Ports upstream kilocode `6024a76db feat(vscode): open agent-created plans` and `325656483 fix(vscode): scope plan opens to active session`. Upstream the tool asks the VSCode host to open the file in an editor pane; Alexi has no VSCode webview, so the port adapts the semantics to a CLI/CI-safe notification instead of spawning an editor process (which would deadlock in headless CI runs).
+
+```typescript
+// src/tool/tools/open-plan.ts
+export const PlanOpened = defineEvent(
+  'plan.opened',
+  z.object({
+    sessionId: z.string().optional(),
+    path: z.string(),        // resolved absolute path
+    title: z.string().optional(),
+    timestamp: z.number(),   // Date.now() at publish time
+  })
+);
+```
+
+Emission contract:
+
+1. **Path resolution.** Relative paths are resolved against `context.workdir` (or `process.cwd()` when the context has no workdir). Absolute paths are used as-is.
+2. **Existence and extension check.** The target must exist as a file (not a directory) AND end in `.md`. Missing or non-markdown targets return an error and do NOT publish the event.
+3. **Title default.** When the caller omits `title`, the tool defaults it to `path.basename(resolved)`.
+4. **Publish failures are swallowed.** The `PlanOpened.publish(...)` call is wrapped in `try/catch` because the event is a notification, not a correctness dependency. A schema-mismatch on the subscriber side must not crash the tool.
+
+Typical consumers: the Ink TUI to render a plan-ready banner, SAP integration hooks to attach the plan to an issue, external CI listeners to gate a stage on plan review. Subscribers register via `PlanOpened.subscribe(handler)` and receive an `unsubscribe` function.
+
 ## Native OS Notifications
 
 Alexi surfaces desktop notifications when a streaming chat completes cleanly or when a long-running bash command finishes. The implementation lives in `src/core/notifications.ts` and is wired into `src/core/streamingOrchestrator.ts` and `src/tool/tools/bash.ts`.
@@ -2509,6 +2535,41 @@ Errors thrown by individual disposers are caught and logged via `console.warn` (
 
 The `MigrationDb` / `MigrationTx` interfaces are intentionally narrow so this module does not hard-couple to a specific SQL adapter (better-sqlite3, effect-sql, or raw pg). Callers implement `transactionImmediate` against the equivalent of `BEGIN IMMEDIATE` (SQLite) or a serialize isolation level (Postgres).
 
+### Raw-DDL migrations (`DdlMigrationTx`)
+
+Migrations that need to issue raw DDL statements (index creates, view definitions) extend the base `MigrationTx` shape with an optional `execute` method:
+
+```typescript
+// src/core/database/migrations/20260907102000_model_usage_index.ts
+export interface DdlMigrationTx extends MigrationTx {
+  execute?: (sql: string) => Promise<void> | void;
+}
+```
+
+Migrations MUST check for its presence before dispatching so the module stays safe to load in test harnesses that use the minimal `MigrationTx` contract without a SQL driver:
+
+```typescript
+async up(tx: DdlMigrationTx) {
+  if (typeof tx.execute !== 'function') {
+    return;
+  }
+  await tx.execute(MODEL_USAGE_INDEX_STATEMENT);
+}
+```
+
+### `20260907102000_model_usage_index` — cold session load speedup
+
+Ports kilocode `66053ef65 fix(session): speed up cold session loading`. Adds a SQLite partial index on `part(session_id)` filtered to rows whose JSON `data.type` is `'step-finish'`. Cold session loading and model-usage aggregation both hit this query pattern; without the index the reader scans every part row for a session, which dominates start-up cost on projects with long transcripts.
+
+```sql
+CREATE INDEX IF NOT EXISTS `part_session_step_finish_idx`
+  ON `part` (`session_id`)
+  WHERE json_valid("part"."data")
+    AND json_extract("part"."data", '$.type') = 'step-finish'
+```
+
+The DDL is exported as `MODEL_USAGE_INDEX_STATEMENT` from `src/core/database/migrations/20260907102000_model_usage_index.ts` so callers with a raw SQL connection can install it eagerly (e.g. before the migration runner is wired up in a fresh test database). `Alexi_change` vs upstream: no Effect-TS. The upstream migration is written in the effect-sql style (`yield* tx.run(...)`); Alexi's runner is plain `async / await`, so the DDL is translated into an ordered `execute` call.
+
 ## Filesystem Watcher (VCS-Guarded)
 
 `src/core/filesystem/watcher.ts` (introduced in 1.20.2) only initializes the filesystem watcher when the workspace location has VCS metadata AND the experimental flag `ALEXI_EXPERIMENTAL_FILEWATCHER=1` is set. This prevents crashes and excessive polling in SAP AI Core sandboxed workspaces that may not be git repositories.
@@ -2656,7 +2717,7 @@ Public API:
 
 - `getBlocker(agentId): Promise<Blocker | undefined>` — return the blocker or `undefined`. Lookup failures propagate as `undefined` from this helper; use `isBlocked` when you need fail-closed semantics.
 - `setBlocker(agentId, blocker): Promise<void>` — record a blocker against `agentId`.
-- `answerQuestion(agentId, answer): Promise<void>` — clear the blocker after the orchestrator delivered an answer.
+- `answerQuestion(agentId, answer, opts?: { sourceSessionId?: string }): Promise<void>` — clear the blocker after the orchestrator delivered an answer. The optional `opts.sourceSessionId` ports kilocode `a1c674ada feat(agent-manager): route peer replies to source sessions`; when set, downstream reply routing should target that session rather than the caller's default. Currently accepted for API parity and logged at `debug` level; concrete routing is wired in the orchestration layer as a follow-up.
 - `isBlocked(agentId): Promise<boolean>` — **fail-closed** lookup: returns `true` when the sub-agent is blocked OR when the store throws.
 - `setBlockerStore(next: BlockerStore): void` — swap the backing store. Intended for tests and for future persistent backends (Redis, filesystem journal).
 - `_resetBlockerStoreForTests(): void` — reset to a fresh `InMemoryBlockerStore`. Test hook only.
@@ -2689,6 +2750,12 @@ case 'answer': {
   if (!agentId || !answer) {
     return { success: false, error: 'agentId and answer are required for action=answer' };
   }
+  // Ports kilocode `4e2b7a035 fix(agent-manager): prevent swarm self-messaging`.
+  // Refuse when the caller's sessionId matches the agentId being answered —
+  // otherwise the orchestrator can trap itself in a self-reply loop.
+  if (_context.sessionId && _context.sessionId === agentId) {
+    return { success: false, error: 'Agent cannot message itself' };
+  }
   const blocker = await getBlocker(agentId);      // fail-closed lookup
   if (!blocker) {
     return { success: false, error: `No pending question for agent ${agentId}` };
@@ -2696,19 +2763,28 @@ case 'answer': {
   if (blocker.kind !== 'question') {
     return { success: false, error: `Agent ${agentId} is not blocked on a question` };
   }
-  await answerQuestion(agentId, answer);
+  // Route replies back to the originating session when the caller supplied one,
+  // otherwise fall back to the caller's session. Ports kilocode `a1c674ada`.
+  const resolvedSource = sourceSessionId || _context.sessionId;
+  await answerQuestion(agentId, answer, {
+    sourceSessionId: resolvedSource ?? undefined,
+  });
   return {
     success: true,
     data: {
       action: 'answer',
       answered: agentId,
-      message: `Answer delivered to agent ${agentId}`,
+      message: resolvedSource
+        ? `Answer delivered to agent ${agentId} (reply routes to session ${resolvedSource})`
+        : `Answer delivered to agent ${agentId}`,
     },
   };
 }
 ```
 
 The orchestrator LLM invokes this whenever a sub-agent's `status` shows a pending question. The Zod schema (`AgentManagerParamsSchema`) accepts both `undefined` and explicit `null` for every optional field, so strict providers (OpenAI structured output, SAP AI Core in strict mode) that emit `null` for absent fields validate cleanly without provider-specific pre-processing.
+
+The schema now includes an optional `sourceSessionId: z.string().nullable().optional()` field. When set, the sub-agent's reply is routed back to that originating session so multi-agent swarms preserve conversation locality instead of dumping every reply into the caller; when omitted, the field falls back to `_context.sessionId`, preserving the previous single-session behaviour. The resolved source id is echoed in the tool result message so callers can confirm the routing target without inspecting logs.
 
 ## Per-Task Model Selection (`src/tool/model-selection.ts`)
 
