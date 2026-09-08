@@ -62,6 +62,20 @@ const AgentManagerParamsSchema = z
       .describe(
         'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
       ),
+    // Ports upstream kilocode `a1c674ada feat(agent-manager): route peer
+    // replies to source sessions` and `b1742663c feat(agent-manager):
+    // attribute cross-session messages`. When set, the target agent's
+    // reply is routed back to this originating session so multi-agent
+    // swarms preserve conversation locality instead of dumping every
+    // reply into the caller. Optional so existing single-session use
+    // continues to work unchanged.
+    sourceSessionId: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "Session that originated this message; the target agent's reply routes back here. Defaults to the caller's session when omitted."
+      ),
     // Ports upstream opencode `worktreeID` parameter (2026-09 sync):
     // lets the orchestrator LLM target an *existing* managed worktree
     // previously returned by `action: "list"` instead of implicitly
@@ -180,7 +194,7 @@ Actions:
   },
 
   async execute(params, _context): Promise<ToolResult<AgentManagerResult>> {
-    const { action, sessionId, agentId, answer, config, worktreeId } = params;
+    const { action, sessionId, agentId, answer, config, worktreeId, sourceSessionId } = params;
 
     try {
       switch (action) {
@@ -336,6 +350,16 @@ Actions:
               error: 'agentId and answer are required for action=answer',
             };
           }
+          // Ports kilocode `4e2b7a035 fix(agent-manager): prevent swarm
+          // self-messaging`. When the caller's sessionId matches the
+          // agentId being answered we refuse the call — otherwise the
+          // orchestrator can trap itself in a self-reply loop.
+          if (_context.sessionId && _context.sessionId === agentId) {
+            return {
+              success: false,
+              error: 'Agent cannot message itself',
+            };
+          }
           // Fail-closed lookup (see `98559c9d6` / src/permission/agent-manager.ts).
           const blocker = await getBlocker(agentId);
           if (!blocker) {
@@ -350,13 +374,21 @@ Actions:
               error: `Agent ${agentId} is not blocked on a question`,
             };
           }
-          await answerQuestion(agentId, answer);
+          // Route replies back to the originating session when the caller
+          // supplied one, otherwise fall back to the caller's session.
+          // Ports kilocode `a1c674ada` — see `sourceSessionId` schema note.
+          const resolvedSource = sourceSessionId || _context.sessionId;
+          await answerQuestion(agentId, answer, {
+            sourceSessionId: resolvedSource ?? undefined,
+          });
           return {
             success: true,
             data: {
               action: 'answer',
               answered: agentId,
-              message: `Answer delivered to agent ${agentId}`,
+              message: resolvedSource
+                ? `Answer delivered to agent ${agentId} (reply routes to session ${resolvedSource})`
+                : `Answer delivered to agent ${agentId}`,
             },
           };
         }

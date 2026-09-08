@@ -42,6 +42,7 @@ import { agentManagerModelsTool } from './agent-manager-models.js';
 import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
 import { imageGenTool } from './image-gen.js';
+import { openPlanTool } from './open-plan.js';
 // Ports kilocode `packages/opencode/src/kilocode/tool/registry.ts` (+36):
 // shared agent board tools are gated behind `experimental.sharedAgentBoard`.
 import { boardReadTool, boardWriteTool } from './board.js';
@@ -105,6 +106,7 @@ export const builtInTools = [
   applyPatchTool,
   repoCloneTool,
   imageGenTool,
+  openPlanTool,
 ];
 
 /**
@@ -164,6 +166,7 @@ export {
   applyPatchTool,
   repoCloneTool,
   imageGenTool,
+  openPlanTool,
   boardReadTool,
   boardWriteTool,
 };

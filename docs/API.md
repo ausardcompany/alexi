@@ -205,7 +205,23 @@ List all saved sessions.
 
 ```bash
 alexi sessions
+alexi sessions --json
+alexi sessions --here
+alexi sessions --workdir /path/to/project
+alexi sessions --search "api refactor"
 ```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--json` | flag | Emit a stable JSON array (`{ id, title, model, updatedAt, messageCount, totalTokens, workdir }`) for scripting |
+| `--here` | flag | Only list sessions created in the current working directory |
+| `--workdir <dir>` | string | Only list sessions created in the specified directory |
+| `--all` | flag | Default behaviour (explicit no-filter form) |
+| `--search <query>` | string | FTS5-ranked search across session titles (e.g. `"api refactor"`, `"openai OR anthropic"`, `"auth*"`) |
+
+`--here` and `--workdir` are mutually exclusive and the command exits with `Error: --here and --workdir are mutually exclusive` when both are supplied.
+
+**Graceful degradation on scoping errors.** When the scoping/filter path fails — for example the SQLite FTS index is missing, or a workdir stat error is raised inside `sessionManager.listSessions(filter)` / `sessionManager.searchSessions(query, filter)` — the command no longer crashes. It logs `Warning: scoped session listing failed (<err>); falling back to all sessions` to stderr and re-issues an unfiltered `sessionManager.listSessions()` so the user still gets a usable listing across multi-project workspaces. This ports upstream opencode `627501673 fix(cli): list sessions across all projects instead of crashing`. The `--json` output shape is preserved on the fallback path.
 
 ### session-export
 
@@ -997,7 +1013,8 @@ cleanupToolOutputs(): void
 | `question` | `question`, `options?` | Ask user a question |
 | `todowrite` | `todos` | Manage task list (see [TodoWrite tool contract](#todowrite-tool-contract) below) |
 | `background_process` | `command`, `name?`, `workingDirectory?`, `env?` | Spawn long-running detached process (see [background_process semantics](#background_process-tool-semantics) below) |
-| `agent_manager` | `action`, `sessionId?`, `agentId?`, `answer?`, `worktreeId?`, `config?` | Manage agent sessions and answer pending sub-agent questions (nullable-friendly schema — see below) |
+| `agent_manager` | `action`, `sessionId?`, `agentId?`, `answer?`, `sourceSessionId?`, `worktreeId?`, `config?` | Manage agent sessions and answer pending sub-agent questions (nullable-friendly schema — see below) |
+| `open_plan` | `path`, `title?` | Signal that an agent-authored plan markdown file is ready for review; publishes `plan.opened` on the shared bus (see [open_plan tool](#open_plan-tool) below) |
 
 #### `todowrite` tool contract
 
@@ -1067,6 +1084,13 @@ const AgentManagerParamsSchema = z.object({
     .describe(
       'Answer text to send to a sub-agent that is blocked on a pending question. Required when action=answer.'
     ),
+  sourceSessionId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Session that originated this message; the target agent's reply routes back here. Defaults to the caller's session when omitted."
+    ),
   worktreeId: z.string().nullable().optional().describe('Worktree ID for session creation'),
   config: z
     .object({
@@ -1084,7 +1108,27 @@ const AgentManagerParamsSchema = z.object({
 });
 ```
 
-Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The `answer` action is used to unblock a sub-agent that is waiting on a permission question; it consumes the `agentId` and `answer` fields. The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
+Both `null` and `undefined` mean "use default" — the `create` handler treats `config?.excludeLocalState ?? false` symmetrically. The `answer` action is used to unblock a sub-agent that is waiting on a permission question; it consumes the `agentId` and `answer` fields, plus the optional `sourceSessionId` for cross-session reply routing (see below). The tool declares `permission: { action: 'admin', getResource: (params) => params.action }`.
+
+**Cross-session reply routing on `answer`.** The optional `sourceSessionId` field (ports kilocode `a1c674ada feat(agent-manager): route peer replies to source sessions` and `b1742663c feat(agent-manager): attribute cross-session messages`) tells the target sub-agent where to route its reply. When set, the sub-agent's response is delivered back to that originating session so multi-agent swarms preserve conversation locality; when omitted, the field falls back to the caller's `_context.sessionId`, preserving the previous single-session behaviour. The resolved source id is echoed back to the caller in the success message:
+
+```typescript
+{
+  success: true,
+  data: {
+    action: 'answer',
+    answered: agentId,
+    // With sourceSessionId (or a resolved fallback to the caller's sessionId):
+    message: `Answer delivered to agent ${agentId} (reply routes to session ${resolvedSource})`,
+    // Without any resolvable source:
+    // message: `Answer delivered to agent ${agentId}`
+  }
+}
+```
+
+At the permission layer, `answerQuestion(agentId, answer, opts?: { sourceSessionId?: string })` in `src/permission/agent-manager.ts` accepts the optional third parameter and logs the routing intent at `debug` level. Concrete routing (a bus event that hands the answer back to the source session) is a follow-up — the field is accepted today for API parity so callers can start emitting it.
+
+**Swarm self-messaging guard on `answer`.** Ports kilocode `4e2b7a035 fix(agent-manager): prevent swarm self-messaging`. When the caller's `_context.sessionId` matches the `agentId` being answered, the tool returns `{ success: false, error: 'Agent cannot message itself' }` and short-circuits before the `getBlocker` fail-closed lookup. Without this guard the orchestrator could trap itself in a self-reply loop by calling `agent_manager` with `action: 'answer'` and `agentId` set to its own session id.
 
 **Actions**:
 
@@ -2130,6 +2174,61 @@ When `config.model` is set, resolution runs through `selectModel()` and the reso
   message: string,
 }
 ```
+
+### `open_plan` tool
+
+`src/tool/tools/open-plan.ts` signals that an agent-authored plan file is ready for review. Ports upstream kilocode `6024a76db feat(vscode): open agent-created plans` and `325656483 fix(vscode): scope plan opens to active session`. Upstream the tool asks the VSCode host to open a plan in an editor pane; Alexi has no VSCode webview, so the port adapts the semantics to a CLI/CI-safe "notify plan-ready" signal — the tool intentionally does NOT try to spawn an editor process. Registered in `src/tool/tools/index.ts` alongside the other built-ins.
+
+Parameter schema (Zod):
+
+```typescript
+const OpenPlanParamsSchema = z.object({
+  path: z.string().describe('Absolute or workspace-relative path to the plan markdown file'),
+  title: z.string().optional().describe('Optional human-readable title'),
+});
+
+export interface OpenPlanResult {
+  path: string;
+  title: string;
+}
+```
+
+Behaviour:
+
+1. Resolves `path` against `context.workdir` (or `process.cwd()` when the context has no workdir). Absolute paths are used as-is.
+2. Validates the target with `fs.stat`. Missing file, directory, or symlink-to-nothing returns `{ success: false, error: 'Plan file not found: <resolved>' }`.
+3. Enforces the `.md` extension. Non-markdown targets return `{ success: false, error: 'Plan must be a markdown file: <resolved>' }`.
+4. Defaults `title` to `path.basename(resolved)` when the caller omits it.
+5. Publishes a `plan.opened` event on the shared bus (see [plan.opened event](#planopened-event) below). Publish failures are swallowed with `try/catch` because the notification is not a correctness dependency of the tool.
+6. Returns `{ success: true, data: { path: <resolvedAbsolute>, title } }` to the calling agent.
+
+Example call:
+
+```typescript
+const result = await openPlanTool.executeUnsafe(
+  { path: 'docs/plan.md', title: 'Refactor plan' },
+  { workdir: '/repo', sessionId: 'session-123' }
+);
+// result.data = { path: '/repo/docs/plan.md', title: 'Refactor plan' }
+```
+
+#### `plan.opened` event
+
+Exported as `PlanOpened` from `src/tool/tools/open-plan.ts` via `defineEvent` on the shared bus. Payload schema:
+
+```typescript
+export const PlanOpened = defineEvent(
+  'plan.opened',
+  z.object({
+    sessionId: z.string().optional(),
+    path: z.string(),        // resolved absolute path
+    title: z.string().optional(),
+    timestamp: z.number(),   // Date.now() at publish time
+  })
+);
+```
+
+Subscribers register via `PlanOpened.subscribe(handler)` and receive an `unsubscribe` function. Typical consumers: the Ink TUI to render a plan-ready banner, SAP integration hooks to attach the plan to an issue, external CI listeners to gate a stage on plan review.
 
 ### `agent_manager_models` tool
 

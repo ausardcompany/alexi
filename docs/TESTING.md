@@ -929,6 +929,62 @@ Key patterns:
 3. **Test UPDATE with real `---`/`+++` headers, not just naked hunks.** LLM-emitted patches almost always include the `diff --git` / `index` / `--- a/foo` / `+++ b/foo` preamble. Historically this preamble broke the line-based hunk parser (it would treat `--- a/foo` as a deletion of `-- a/foo`), and this test pins the `stripPatchHeaders` call inside `execute` so a regression that dropped the strip step trips loudly.
 4. **Do NOT assert on encoding or line-ending fields in the ADD case.** ADD seeds the encoder with a canonical `{ encoding: 'utf-8', confidence: 1, hasBOM: false }` and picks the platform default line ending (`os.EOL === '\r\n' ? 'crlf' : 'lf'`), which means the exact byte-level output for ADD on a mixed-CI matrix (Linux + macOS + Windows) will differ. Assert on `.toContain('line 1')` / `startsWith('line 1')` rather than an exact `.toBe(...)` string so the case does not flake on Windows runners.
 
+### Testing the `open_plan` tool
+
+`src/tool/tools/__tests__/open-plan.test.ts` pins four contract properties for `openPlanTool` (`src/tool/tools/open-plan.ts`): relative-path resolution against `context.workdir`, `plan.opened` event emission, `title` defaulting to the file basename, and the two error paths (missing file, non-markdown extension). Each case creates an isolated temp workdir via `fs.mkdtemp` in `beforeEach` and tears it down in `afterEach` so parallel test runs never collide on shared plan files.
+
+```typescript
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { openPlanTool, PlanOpened } from '../open-plan.js';
+
+describe('openPlanTool', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-plan-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('resolves relative paths against workdir and emits plan.opened', async () => {
+    const planPath = path.join(tempDir, 'plan.md');
+    await fs.writeFile(planPath, '# plan');
+
+    const events: unknown[] = [];
+    const unsubscribe = PlanOpened.subscribe((payload) => {
+      events.push(payload);
+    });
+
+    try {
+      const result = await openPlanTool.executeUnsafe(
+        { path: 'plan.md', title: 'Test' },
+        { workdir: tempDir, sessionId: 's1' }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data?.path).toBe(planPath);
+      expect(result.data?.title).toBe('Test');
+      expect(events.length).toBe(1);
+      expect(events[0]).toMatchObject({ sessionId: 's1', path: planPath, title: 'Test' });
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+```
+
+Key patterns:
+
+1. **Always call `unsubscribe()` inside a `try/finally`.** The `PlanOpened.subscribe(handler)` registration outlives the current test if it throws or fails an assertion, and a leaked subscriber will accumulate events from every subsequent test in the same file. Wrapping the assertions in `try/finally` around the returned `unsubscribe` reference is the load-bearing pattern for every `defineEvent` subscriber test in the repo.
+2. **Assert on the resolved absolute path, not the relative input.** The tool resolves relative paths against `context.workdir` and emits the absolute form on the bus. A test that asserts `result.data?.path === 'plan.md'` will pass locally on a workdir that happens to be `''` and fail on CI.
+3. **Cover both error paths with `toMatch(...)` on the error string.** The rejection messages are `Plan file not found: <resolved>` (missing / non-file target) and `Plan must be a markdown file: <resolved>` (wrong extension). Using `toMatch(/not found/)` / `toMatch(/markdown/)` keeps the assertions stable if the exact prefix ever changes but the classification stays.
+4. **Do NOT assert on event count across the whole suite.** `PlanOpened` is a module-level singleton — a shared subscribers Set — so counting events must happen inside a scoped `subscribe()` / `unsubscribe()` window per test. A global counter would double-count if two tests emit events with overlapping lifetimes.
+
 ### Testing Bash Streaming Output
 
 The bash tool publishes `BashOutputChunk` events on the event bus as `stdout` / `stderr` chunks arrive from the underlying process. Test suites at `tests/tool/tools/bash-streaming.test.ts` cover the command-log registry contract (PID-reuse defence, retention window, byte-cap eviction, chunk correlation) without spawning real long-running commands.
@@ -3173,6 +3229,34 @@ contributors do not re-introduce them by hand:
    would exceed 100 columns; short fixtures (six or fewer short strings) should
    be inlined so `npm run format:check` stays green without an auto-fix
    follow-up commit.
+
+5. **Collapse short `tool.executeUnsafe(params, context)` call sites onto a
+   single line when they fit under 100 columns.** Tool tests routinely invoke
+   `xxxTool.executeUnsafe(paramsObject, contextObject)` with two small object
+   literals. Hand-authored three-line forms are collapsed by the CI auto-fix
+   pass whenever the resulting single line fits under `printWidth: 100`. The
+   canonical worked example is `src/tool/tools/__tests__/open-plan.test.ts:47`
+   after the 2026-09-08 auto-fix pass in commit `834d1abf`:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (four lines, ~57 columns)
+   const result = await openPlanTool.executeUnsafe(
+     { path: planPath },
+     { workdir: tempDir }
+   );
+
+   // Canonical form after auto-fix (single line, 82 columns)
+   const result = await openPlanTool.executeUnsafe({ path: planPath }, { workdir: tempDir });
+   ```
+
+   Assertion semantics are unchanged: the tool receives the same `TParams`
+   payload and the same `ToolContext`, and the returned `ToolResult` is the
+   same reference. Only break onto multiple lines when either object literal
+   grows to the point that the combined line would exceed 100 columns — a
+   fixture that spans four lines just because the author preferred one-arg-per-
+   line will be re-collapsed on the next `prettier --write` pass and generate
+   a spurious `style(ci): auto-fix lint/format issues [alexi-bot]` commit.
+   Running `npm run format` before committing avoids the follow-up.
 
 ### Registry-contract pinning tests
 

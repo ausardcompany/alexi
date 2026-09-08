@@ -64,9 +64,23 @@ export function registerSessionCommands(program: Command): void {
           // When --search is provided, delegate to the FTS-indexed path.
           // Otherwise fall back to the eager filesystem scan so callers
           // without a working SQLite binding keep the historical behaviour.
-          const sessions = opts.search
-            ? sessionManager.searchSessions(opts.search, filter)
-            : sessionManager.listSessions(filter);
+          //
+          // Ports upstream opencode `627501673 fix(cli): list sessions across
+          // all projects instead of crashing`: when the scoping/filter path
+          // fails (e.g. FTS index missing, workdir stat error), fall back to
+          // an unfiltered listing so `alexi sessions` degrades gracefully
+          // across multi-project workspaces instead of crashing.
+          let sessions;
+          try {
+            sessions = opts.search
+              ? sessionManager.searchSessions(opts.search, filter)
+              : sessionManager.listSessions(filter);
+          } catch (scopeErr) {
+            console.error(
+              `Warning: scoped session listing failed (${String(scopeErr)}); falling back to all sessions`
+            );
+            sessions = sessionManager.listSessions();
+          }
 
           if (opts.json) {
             const out = sessions.map((s) => ({
