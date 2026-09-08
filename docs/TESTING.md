@@ -3174,6 +3174,34 @@ contributors do not re-introduce them by hand:
    be inlined so `npm run format:check` stays green without an auto-fix
    follow-up commit.
 
+5. **Collapse short `tool.executeUnsafe(params, context)` call sites onto a
+   single line when they fit under 100 columns.** Tool tests routinely invoke
+   `xxxTool.executeUnsafe(paramsObject, contextObject)` with two small object
+   literals. Hand-authored three-line forms are collapsed by the CI auto-fix
+   pass whenever the resulting single line fits under `printWidth: 100`. The
+   canonical worked example is `src/tool/tools/__tests__/open-plan.test.ts:47`
+   after the 2026-09-08 auto-fix pass in commit `834d1abf`:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (four lines, ~57 columns)
+   const result = await openPlanTool.executeUnsafe(
+     { path: planPath },
+     { workdir: tempDir }
+   );
+
+   // Canonical form after auto-fix (single line, 82 columns)
+   const result = await openPlanTool.executeUnsafe({ path: planPath }, { workdir: tempDir });
+   ```
+
+   Assertion semantics are unchanged: the tool receives the same `TParams`
+   payload and the same `ToolContext`, and the returned `ToolResult` is the
+   same reference. Only break onto multiple lines when either object literal
+   grows to the point that the combined line would exceed 100 columns — a
+   fixture that spans four lines just because the author preferred one-arg-per-
+   line will be re-collapsed on the next `prettier --write` pass and generate
+   a spurious `style(ci): auto-fix lint/format issues [alexi-bot]` commit.
+   Running `npm run format` before committing avoids the follow-up.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has

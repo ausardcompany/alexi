@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Prettier `avoidEscape` normalisation on `sourceSessionId` describe metadata** (`src/tool/tools/agent-manager.ts:77`, commit `834d1abf` `style(ci): auto-fix lint/format issues [alexi-bot]`, 2026-09-08): The `.describe(...)` argument on the `sourceSessionId` field of `AgentManagerParamsSchema` was rewritten from a single-quoted literal with two escaped apostrophes (`'... the target agent\'s reply ... the caller\'s session ...'`) to the equivalent double-quoted literal (`"... the target agent's reply ... the caller's session ..."`). Same rule as the 2026-09-07 `worktreeId` rewrite immediately preceding it — Prettier's default `avoidEscape` semantics prefer double quotes when a single-quoted literal would need one or more `\'` escapes to survive, `singleQuote: true` notwithstanding. The rendered string that the LLM sees is byte-identical, so the tool-description surface visible to the model is unchanged; only the source spelling of the string literal differs. See `docs/CONTRIBUTING.md` under the quote-style auto-fix section for the standing convention.
+- **Test-file reflow: single-line `openPlanTool.executeUnsafe(params, context)`** (`src/tool/tools/__tests__/open-plan.test.ts:47`, same commit `834d1abf`): The three-line invocation `await openPlanTool.executeUnsafe({ path: planPath }, { workdir: tempDir })` was collapsed onto a single 82-column line under Prettier's `printWidth: 100` reflow policy. Assertion semantics unchanged: the tool receives the same `{ path }` params object and the same `{ workdir }` `ToolContext`, and `result.success` / `result.data?.title` assertions on the next lines are byte-identical. See `docs/TESTING.md` under **Test File Formatting** point 5 for the standing pattern that short `tool.executeUnsafe(params, context)` call sites should be inlined when the resulting single line fits under 100 columns.
+
 ## [1.22.15] - 2026-09-07
 
 ### Documentation
