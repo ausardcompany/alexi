@@ -108,8 +108,24 @@ export async function setBlocker(agentId: string, blocker: Blocker): Promise<voi
  * the answer to the waiting session (wired via a bus event in the
  * orchestration layer). Alexi's minimal implementation just clears
  * the entry — future work will publish on the internal event bus.
+ *
+ * The optional `opts.sourceSessionId` ports upstream kilocode
+ * `a1c674ada feat(agent-manager): route peer replies to source sessions`
+ * — when set, downstream reply routing should target that session
+ * rather than the caller's default. Currently accepted for API parity
+ * and logged; concrete routing is wired in the orchestration layer.
  */
-export async function answerQuestion(agentId: string, _answer: string): Promise<void> {
+export async function answerQuestion(
+  agentId: string,
+  _answer: string,
+  opts?: { sourceSessionId?: string }
+): Promise<void> {
+  if (opts?.sourceSessionId) {
+    logger.debug('answerQuestion: reply will route to source session', {
+      agentId,
+      sourceSessionId: opts.sourceSessionId,
+    });
+  }
   await store.clear(agentId);
 }
 
