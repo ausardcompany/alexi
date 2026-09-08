@@ -402,6 +402,28 @@ describe('apply_patch tool', () => {
       expect(onDisk).toBe('existing content');
     });
 
+    it('ADD patch to an existing but empty file still rejects with "already exists"', async () => {
+      // Edge case from #1683: an ADD (--- /dev/null) targeting a file
+      // that exists on disk but is zero bytes must still fail. Otherwise
+      // an LLM-generated Add hunk could silently clobber a placeholder
+      // file the user intentionally created.
+      const filePath = path.join(tempDir, 'empty.txt');
+      await fs.writeFile(filePath, '', 'utf-8');
+
+      const patch = ['--- /dev/null', '+++ b/empty.txt', '@@ -0,0 +1,1 @@', '+new content'].join(
+        '\n'
+      );
+
+      const result = await applyPatchTool.execute({ path: filePath, patch }, context);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('already exists');
+
+      // File must remain empty (untouched).
+      const onDisk = await fs.readFile(filePath, 'utf-8');
+      expect(onDisk).toBe('');
+    });
+
     it('ADD patch to a missing file in a missing directory creates parent directories', async () => {
       const filePath = path.join(tempDir, 'nested', 'deeply', 'newfile.txt');
       const patch = [
