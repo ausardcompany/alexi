@@ -107,9 +107,9 @@ function getDb(): BetterSqliteDatabase | null {
     // the column is missing. This mirrors upstream kilocode's behaviour
     // where the generated `schema.gen.ts` shape is applied at first open.
     try {
-      const cols = db
-        .prepare(`SELECT name FROM pragma_table_info('kilo_board')`)
-        .all() as Array<{ name: string }>;
+      const cols = db.prepare(`SELECT name FROM pragma_table_info('kilo_board')`).all() as Array<{
+        name: string;
+      }>;
       if (!cols.some((c) => c.name === 'cleared_seq')) {
         db.exec(`ALTER TABLE kilo_board ADD COLUMN cleared_seq INTEGER NOT NULL DEFAULT 0`);
       }
@@ -240,7 +240,6 @@ export const BoardStore = {
       // failed. Swallow — reads will treat the board as never-reset.
     }
   },
-
 
   /**
    * Mark messages as read by a specific session. Ports kilocode fix
