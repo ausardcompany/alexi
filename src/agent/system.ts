@@ -72,6 +72,10 @@ const SOUL_PROMPT = readPromptFile('soul.txt');
 const MODEL_PROMPTS: Record<string, string> = {
   anthropic: readPromptFile('anthropic.txt'),
   openai: readPromptFile('openai.txt'),
+  // Alexi_change: port opencode `5cd8e68 feat(opencode): port Astra system
+  // prompt from v2` — specialized prompt for the GPT/Astra family. Selected
+  // when a model id contains `astra` (see `getModelPromptKey`).
+  'gpt-astra': readPromptFile('gpt-astra.txt'),
   gemini: readPromptFile('gemini.txt'),
   ling: readPromptFile('ling.txt'),
   default: readPromptFile('default.txt'),
@@ -105,6 +109,15 @@ export function getModelPromptKey(modelId: string): string {
 
   if (id.startsWith('anthropic--')) {
     return 'anthropic';
+  }
+  // Alexi_change: opencode `5cd8e68 feat(opencode): port Astra system prompt
+  // from v2`. The Astra prompt targets GPT-family "astra"-tagged models; we
+  // match on substring so both bare (`astra-*`) and prefixed
+  // (`gpt-4o-astra`, `azure/gpt-astra-2`) ids resolve to the same prompt.
+  // The check is intentionally BEFORE the plain `gpt-` fallthrough so the
+  // Astra prompt wins over the generic `openai.txt` prompt.
+  if (id.includes('astra')) {
+    return 'gpt-astra';
   }
   if (id.startsWith('gpt-')) {
     return 'openai';

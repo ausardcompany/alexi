@@ -99,6 +99,25 @@ function getDb(): BetterSqliteDatabase | null {
     for (const stmt of BOARD_SCHEMA_STATEMENTS) {
       db.exec(stmt);
     }
+    // Alexi_change: `cleared_seq` was added by
+    // `20260903104806_kilocode_board_reset`. Existing on-disk DBs created
+    // before that migration will not have the column, and SQLite's
+    // `CREATE TABLE IF NOT EXISTS` does NOT retro-add columns. Probe the
+    // schema with `pragma_table_info` and issue a one-shot ALTER TABLE if
+    // the column is missing. This mirrors upstream kilocode's behaviour
+    // where the generated `schema.gen.ts` shape is applied at first open.
+    try {
+      const cols = db
+        .prepare(`SELECT name FROM pragma_table_info('kilo_board')`)
+        .all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'cleared_seq')) {
+        db.exec(`ALTER TABLE kilo_board ADD COLUMN cleared_seq INTEGER NOT NULL DEFAULT 0`);
+      }
+    } catch {
+      // Ignore — worst case the ALTER re-runs on next open and fails
+      // there too; reads still work because `read()` treats a missing
+      // column as `cleared_seq = 0`.
+    }
     dbInstance = db;
     return dbInstance;
   } catch {
@@ -152,6 +171,12 @@ export const BoardStore = {
 
   /**
    * Read messages from a board in chronological order.
+   *
+   * Alexi_change: results are filtered against the board's `cleared_seq`
+   * (kilocode `feat(board): reset`). `cleared_seq` is stored as an
+   * epoch-ms integer written by `reset()`; any message with a
+   * `created_at` timestamp strictly less than or equal to it is hidden.
+   * A never-reset board has `cleared_seq = 0` and no rows are hidden.
    */
   async read(boardId: string, opts: BoardReadOptions = {}): Promise<BoardMessage[]> {
     const db = getDb();
@@ -159,24 +184,63 @@ export const BoardStore = {
       return [];
     }
     const limit = opts.limit ?? 50;
+    // Resolve the board's `cleared_seq` gate (epoch-ms). Missing rows or
+    // pre-reset DBs return `0`, i.e. "show everything".
+    let clearedIso = '1970-01-01T00:00:00.000Z';
+    try {
+      const row = db
+        .prepare(`SELECT cleared_seq AS clearedSeq FROM kilo_board WHERE id = ?`)
+        .get(boardId) as { clearedSeq?: number } | undefined;
+      const ms = row?.clearedSeq ?? 0;
+      if (ms > 0) {
+        clearedIso = new Date(ms).toISOString();
+      }
+    } catch {
+      // Column missing on a very old DB — treat as never-reset.
+    }
     const sql = opts.since
       ? `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
                 created_at AS createdAt
            FROM kilo_board_message
-           WHERE board_id = ? AND created_at > ?
+           WHERE board_id = ? AND created_at > ? AND created_at > ?
            ORDER BY created_at ASC
            LIMIT ?`
       : `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
                 created_at AS createdAt
            FROM kilo_board_message
-           WHERE board_id = ?
+           WHERE board_id = ? AND created_at > ?
            ORDER BY created_at ASC
            LIMIT ?`;
     const rows = opts.since
-      ? (db.prepare(sql).all(boardId, opts.since, limit) as BoardMessageRow[])
-      : (db.prepare(sql).all(boardId, limit) as BoardMessageRow[]);
+      ? (db.prepare(sql).all(boardId, opts.since, clearedIso, limit) as BoardMessageRow[])
+      : (db.prepare(sql).all(boardId, clearedIso, limit) as BoardMessageRow[]);
     return rows;
   },
+
+  /**
+   * Reset a board: hide every message currently on it without deleting
+   * the rows. Ports kilocode `feat(board): reset` — the board's
+   * `cleared_seq` is bumped to the current wall clock (epoch-ms), and
+   * subsequent `read()` calls filter out any message with a `created_at`
+   * timestamp at-or-before that cutoff.
+   *
+   * Idempotent for callers: repeat calls simply push the cutoff forward.
+   * No-op when the board store is disabled.
+   */
+  async reset(boardId: string): Promise<void> {
+    const db = getDb();
+    if (!db) {
+      return;
+    }
+    const now = Date.now();
+    try {
+      db.prepare(`UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`).run(now, boardId);
+    } catch {
+      // Column may be missing on very old DBs where the ALTER at open
+      // failed. Swallow — reads will treat the board as never-reset.
+    }
+  },
+
 
   /**
    * Mark messages as read by a specific session. Ports kilocode fix

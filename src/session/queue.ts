@@ -47,6 +47,17 @@ export interface QueuedPrompt {
   sessionID: string;
   /** Prompt text as typed by the user. */
   text: string;
+  /**
+   * Alexi_change: opaque attachment ids that were staged alongside the
+   * prompt (screenshots pasted into the TUI, drag-and-drop files, image
+   * URLs). Ports kilocode's attachment-admission handling on the prompt
+   * queue — attachments must ride the queue entry through edits and
+   * drop-on-cancel so a queued prompt is dispatched with the same
+   * attachments the user staged when they submitted it. `undefined`
+   * (rather than `[]`) preserves compatibility with call sites that pre-
+   * date the field.
+   */
+  attachments?: readonly string[];
   /** Enqueue timestamp (`Date.now()`), for age-based diagnostics. */
   createdAt: number;
 }
