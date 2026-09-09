@@ -33,9 +33,9 @@ export const BOARD_SCHEMA_STATEMENTS: readonly string[] = Object.freeze([
      id TEXT PRIMARY KEY,
      task_id TEXT NOT NULL,
      created_at TEXT NOT NULL,
-     -- Alexi_change: `cleared_seq` gates messages emitted before a board
+      -- Alexi_change: cleared_seq gates messages emitted before a board
      -- reset. Added here in the eager statements so a fresh DB created
-     -- before the `20260903104806_kilocode_board_reset` migration runs
+     -- before the 20260903104806_kilocode_board_reset migration runs
      -- already has the column. The migration is still registered so
      -- existing DBs that were created against the pre-reset schema get
      -- the column via ALTER TABLE.
