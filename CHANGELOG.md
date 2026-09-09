@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`boardStore.ts` internal formatting cleanup** (`src/core/database/boardStore.ts`): Auto-fix commit `c1a8057a` from the CI lint/format pipeline. Collapses a multi-line `db.prepare(...).all() as Array<{ name: string }>` cast to a single Prettier-preferred layout inside the `getDb()` schema-probe block, and removes a stray double blank line before the `acknowledgeReads` method definition on `BoardStore`. Purely cosmetic — no changes to the exported `BoardStore` surface (`ensure`, `write`, `read`, `reset`, `acknowledgeReads`, `__resetForTests`), no schema changes, no behaviour changes. Emitted by the `ci-auto-fix.yml` workflow after a prior PR left formatting drift that would otherwise have failed the `format:check` CI job.
+
 ## [1.22.16] - 2026-09-08
 
 ### Added
