@@ -547,6 +547,131 @@ if (options?.signal?.aborted) {
 
 The `task` tool wires the child session lifecycle in `src/tool/tools/task.ts:574-677`. If the parent is already aborted at spawn time it refuses to start the subagent (returning `{ status: 'cancelled' }`) instead of wasting the cost tracker's provider budget on a request whose result no consumer will read.
 
+## Session Goal State (`src/session/goal-state.ts`)
+
+New 1.22.17 module (ports the shape of upstream kilocode `feat(goal): add persistent session goals`, `packages/opencode/src/kilocode/session/goal/*`) at the minimum fidelity Alexi needs today. Persistent per-session goal state — one goal per session — with lifecycle transitions `running → paused → done`. This is the *foundation* for a future autonomous goal runner: full upstream fidelity (the ~486-line `runner.ts`, `policy.ts`, dedicated `tool.ts`, and prompt-queue admission hook) is deferred to a follow-up port.
+
+```mermaid
+stateDiagram-v2
+    [*] --> running: startGoal(sessionID, condition)
+    running --> paused: user or policy check suspends
+    running --> done: completeGoal(sessionID)<br/>condition met OR max-turns
+    paused --> running: resume
+    paused --> done: completeGoal
+    done --> [*]: clearGoal(sessionID)<br/>on session close
+    running --> [*]: clearGoal(sessionID)
+    paused --> [*]: clearGoal(sessionID)
+
+    note right of running
+        hasActiveGoal(sessionID) === true
+        only in this state
+    end note
+```
+
+### Public surface
+
+```typescript
+// src/session/goal-state.ts
+
+export interface SessionGoal {
+  /** Session this goal is scoped to. */
+  sessionID: string;
+  /** User-supplied completion condition (natural language). */
+  condition: string;
+  /** Wall-clock enqueue timestamp for diagnostics. */
+  createdAt: number;
+  /**
+   * Lifecycle state:
+   *   - `running`: the goal runner is (or should be) driving turns.
+   *   - `paused`:  user or policy check suspended it.
+   *   - `done`:    completion condition was met or max-turns reached;
+   *                retained only for the transcript.
+   */
+  status: 'running' | 'paused' | 'done';
+}
+
+/** True when the session has a goal currently in `running` state. */
+export function hasActiveGoal(sessionID: string): boolean;
+
+/** Defensive copy of the tracked goal, or `undefined` when none. */
+export function getGoal(sessionID: string): SessionGoal | undefined;
+
+/** Register a running goal; overwrites any existing goal on the session. */
+export function startGoal(sessionID: string, condition: string): SessionGoal;
+
+/** Transition to the terminal `done` state; row is retained. */
+export function completeGoal(sessionID: string): void;
+
+/** Discard the tracked goal (called on session close). */
+export function clearGoal(sessionID: string): void;
+
+/** Test-only. Production code MUST NOT call. */
+export function __resetSessionGoalsForTests(): void;
+```
+
+### Design decisions
+
+- **In-memory only for now.** A module-local `Map<string, SessionGoal>` (`activeGoals`) holds every tracked goal. Upstream kilocode persists goals in SQLite against the session row; when that side is ported, the map will be swapped for a DB read behind the same `hasActiveGoal` predicate — call sites do not need to change.
+- **One goal per session.** `startGoal` overwrites any existing goal on the same session (upstream policy). Idempotent when called with the same condition.
+- **`done` rows are retained, not deleted.** Retention lets subsequent `getGoal` calls surface the completion condition to the transcript. Only `clearGoal(sessionID)` (called on session close) actually removes the row.
+- **`getGoal` copies before returning.** Callers cannot mutate the store through the returned reference — the map is the single source of truth.
+- **Predicate-first API.** The primary consumer today is the future prompt-queue admission hook: `hasActiveGoal` decides whether an incoming user prompt should preempt an in-flight goal turn or be enqueued behind it. Threading this predicate through call sites *now* avoids churning them later when the runner lands.
+
+## Session Prompt Queue (`src/session/queue.ts`)
+
+Per-session FIFO of pending user prompts. Ports upstream kilocode commits `039a235b6`, `de9e1edcf`, `52d4247d9`, and `c3deca608`. When a session's agent is already running a turn, incoming user prompts are queued here instead of being dropped or racing against the in-flight turn. After each turn completes, the caller drains the next queued prompt and dispatches it.
+
+Before the queue, a user typing while the assistant was still streaming would either see their input silently dropped, get a `SessionBusy` error from `SessionBusyTracker`, or start a concurrent turn that mangled the transcript. The queue turns this into a natural "your message will be handled after the current one" flow.
+
+```typescript
+export interface QueuedPrompt {
+  /** Caller-supplied stable id (mirrors the message id emitted by the UI). */
+  messageID: string;
+  /** Session this prompt is queued against. */
+  sessionID: string;
+  /** Prompt text as typed by the user. */
+  text: string;
+  /**
+   * Opaque attachment ids staged alongside the prompt (screenshots pasted
+   * into the TUI, drag-and-drop files, image URLs). Added 1.22.17; ports
+   * kilocode's attachment-admission handling — attachments ride the queue
+   * entry through edits and drop-on-cancel so a queued prompt is
+   * dispatched with the same attachments the user staged when they
+   * submitted it. `undefined` preserves compatibility with pre-1.22.17
+   * call sites.
+   */
+  attachments?: readonly string[];
+  /** Enqueue timestamp (`Date.now()`), for age-based diagnostics. */
+  createdAt: number;
+}
+
+export class SessionQueue {
+  /** Drops empty / whitespace-only prompts (kilocode `de9e1edcf`). */
+  enqueue(sessionID: string, prompt: Omit<QueuedPrompt, 'createdAt'>): void;
+  /** Remove and return the next queued prompt, or `undefined` when empty. */
+  drainNext(sessionID: string): QueuedPrompt | undefined;
+  /** Cancel a queued prompt by `messageID` (kilocode `c3deca608`). */
+  drop(sessionID: string, messageID: string): boolean;
+  /** Update the text of a queued prompt in-place. */
+  edit(sessionID: string, messageID: string, text: string): boolean;
+  /** Copy of the queued prompts for a session. */
+  peek(sessionID: string): QueuedPrompt[];
+  size(sessionID: string): number;
+  clear(sessionID: string): void;
+  clearAll(): void;
+}
+
+export function getSessionQueue(): SessionQueue;
+export function resetSessionQueue(): void; // test-only
+```
+
+Guarantees:
+
+- FIFO per session; no cross-session ordering.
+- `messageID` is caller-supplied and stable — used to correlate the queued prompt with UI-side state (draft, edit, cancel). The queue itself does not generate ids.
+- Zero I/O; construction is cheap.
+- All mutating methods are O(n) in the queue length for that session (typically 0-3 in practice); the queue is not designed for thousands of pending prompts.
+
 ## Headless Exit and Session Drain
 
 Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.
@@ -953,6 +1078,23 @@ classDiagram
 | `debug` | Debug Agent | all | Debugging and fixing issues |
 | `plan` | Plan Agent | all | Architecture and planning (read-only tools) |
 | `explore` | Explore Agent | subagent | Fast codebase exploration |
+
+### Model-Family System Prompts (`src/agent/system.ts`)
+
+Alexi assembles the final system prompt by combining a stable soul prompt (`src/agent/prompts/soul.txt`) with a model-family-specific prompt selected by `getModelPromptKey(modelId)`. The registry `MODEL_PROMPTS` (`src/agent/system.ts:73`) maps each family key to a `readPromptFile('<key>.txt')` handle loaded once at module init:
+
+| Family key   | Prompt file   | Selection rule                                                                    |
+| ------------ | ------------- | --------------------------------------------------------------------------------- |
+| `anthropic`  | `anthropic.txt` | Model id starts with `anthropic--` OR contains `claude` (case-insensitive)      |
+| `gpt-astra`  | `gpt-astra.txt` | Model id contains `astra` (added 1.22.17, ports opencode `5cd8e68`)             |
+| `openai`     | `openai.txt`  | Model id starts with `gpt-` (post-Astra guard)                                    |
+| `gemini`     | `gemini.txt`  | Model id contains `gemini`                                                        |
+| `ling`       | `ling.txt`    | Model id contains `ling`                                                          |
+| `default`    | `default.txt` | Fallback for everything else                                                      |
+
+Ordering in `getModelPromptKey` is load-bearing: the Astra branch runs **before** the plain `gpt-` prefix fallthrough so an Astra id (`gpt-astra-2`, `azure/gpt-4o-astra`, bare `astra-*`) resolves to `gpt-astra.txt` rather than the generic `openai.txt`. Bare Anthropic ids still short-circuit earlier via the `anthropic--` prefix guard.
+
+The Astra prompt (60 lines, `src/agent/prompts/gpt-astra.txt`) enforces tool-use discipline, terse output, no fabrication, and repository-grounded edits — the same contract the built-in Anthropic/OpenAI/Gemini prompts document but tuned for the Astra family's tool-calling behaviour. Selection is transparent to callers: pinning an Astra deployment via `--model` or a routing rule picks up the new prompt automatically on the next turn, without a config or environment variable.
 
 ### Custom Agent Loading
 
@@ -2947,10 +3089,20 @@ export const BoardStore = {
   read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
   /** Upstream fix 162e30d23: suppress stale "new messages" banners. */
   acknowledgeReads(boardId: string, sessionID: string, messageIds: readonly string[]): Promise<void>;
+  /**
+   * Hide every message currently on a board without deleting rows. Added
+   * 1.22.17 (ports kilocode `feat(board): reset`). Sets
+   * `kilo_board.cleared_seq = Date.now()` (epoch-ms). Subsequent `read()`
+   * calls filter out any message with `created_at` at-or-before that
+   * cutoff. Idempotent — repeat calls push the cutoff forward.
+   */
+  reset(boardId: string): Promise<void>;
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
 ```
+
+Read gate: `BoardStore.read()` now resolves the board's `cleared_seq` and adds `AND created_at > ?` to both the with-`since` and no-`since` SELECT variants. A never-reset board has `cleared_seq = 0` (or the column is missing on very old DBs), so no rows are hidden and upgrades are non-destructive. The gate is applied *in addition to* an explicit `since` filter — reads always see the intersection of "newer than my last acked timestamp" and "newer than the board's reset cutoff".
 
 ```typescript
 // src/core/database/boardContext.ts
@@ -2967,7 +3119,7 @@ export const BoardContext = {
 
 Board data lives at `~/.alexi/board.db` (separate from `~/.alexi/sessions.db` so a corrupted board cannot poison session search). The schema — `kilo_board`, `kilo_board_message`, `kilo_board_read` — is applied eagerly on first `BoardStore` access via idempotent `CREATE ... IF NOT EXISTS` statements exported as `BOARD_SCHEMA_STATEMENTS` from `src/core/database/migrations/20260828074139_kilocode_board.ts`. The three tables:
 
-- `kilo_board` — `id PRIMARY KEY`, `task_id NOT NULL`, `created_at NOT NULL`. One row per board.
+- `kilo_board` — `id PRIMARY KEY`, `task_id NOT NULL`, `created_at NOT NULL`, `cleared_seq INTEGER NOT NULL DEFAULT 0` (added 1.22.17, ports kilocode `feat(board): reset`). One row per board.
 - `kilo_board_message` — `id PRIMARY KEY`, `board_id NOT NULL REFERENCES kilo_board(id) ON DELETE CASCADE`, `session_id`, `author`, `content`, `created_at`. Indexed by `(board_id, created_at)` for the chronological read query.
 - `kilo_board_read` — `(board_id, session_id, message_id)` composite PK. Written by `acknowledgeReads` so already-read messages do not re-surface on subsequent turns (upstream fix `162e30d23`).
 

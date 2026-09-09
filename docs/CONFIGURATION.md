@@ -1421,7 +1421,17 @@ Board data lives in a dedicated SQLite database at `~/.alexi/board.db` (separate
 
 The schema is applied eagerly on first access via idempotent `CREATE ... IF NOT EXISTS` statements defined in `src/core/database/migrations/20260828074139_kilocode_board.ts` and exported as `BOARD_SCHEMA_STATEMENTS`. When `better-sqlite3` is unavailable, `BoardStore` degrades gracefully: `read` returns `[]`, `write` returns the message shape without persisting, and `acknowledgeReads` is a no-op.
 
-To reset the board across a test run or a broken state, delete the file:
+### Non-destructive board reset (1.22.17)
+
+Since 1.22.17 (ports upstream kilocode `feat(board): reset`) the `kilo_board` table carries a `cleared_seq` gating column (epoch-ms integer, default `0`). Instead of dropping the on-disk DB, the operator or a future in-tool reset action can invoke `BoardStore.reset(boardId)` to bump `cleared_seq` to `Date.now()` — every existing message on that board is hidden from subsequent `read()` calls without deleting any row. Idempotent: repeat calls simply push the cutoff forward.
+
+Migration paths:
+
+- **Fresh DBs (created 1.22.17+):** the column is present at first access via the updated `BOARD_SCHEMA_STATEMENTS` in `20260828074139_kilocode_board.ts`.
+- **Pre-existing DBs (created before 1.22.17):** the `20260903104806_kilocode_board_reset` migration issues `ALTER TABLE kilo_board ADD COLUMN cleared_seq INTEGER NOT NULL DEFAULT 0`. `BoardStore.ensureSchema()` also probes `pragma_table_info('kilo_board')` on open and applies the same `ALTER TABLE` eagerly so the column lands even if the migration runner has not yet been wired against this DB.
+- **DBs where the column is still missing** (very old install where both paths failed): reads succeed and are treated as `cleared_seq = 0` (never reset). `BoardStore.reset()` is a silent no-op.
+
+To hard-wipe every board (test run, corrupt state) the file-level nuke is still the fastest option:
 
 ```bash
 rm ~/.alexi/board.db

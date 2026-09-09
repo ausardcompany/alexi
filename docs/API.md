@@ -2576,10 +2576,23 @@ export const BoardStore: {
     messageIds: readonly string[]
   ): Promise<void>;
 
+  /**
+   * Hide every message currently on a board without deleting rows.
+   * Added 1.22.17; ports kilocode `feat(board): reset`. Sets
+   * `kilo_board.cleared_seq = Date.now()` (epoch-ms); subsequent
+   * `read()` calls filter out any message with a `created_at`
+   * timestamp at-or-before that cutoff. Idempotent: repeat calls push
+   * the cutoff forward. No-op when the store is disabled or the
+   * column is missing on a very old DB.
+   */
+  reset(boardId: string): Promise<void>;
+
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
 ```
+
+Read filtering: `BoardStore.read` resolves the board's `cleared_seq` and adds `AND created_at > ?` to both the with-`since` and no-`since` SELECT variants. Never-reset boards (`cleared_seq = 0`) surface every message; boards on pre-1.22.17 DBs where the column is missing are treated as never-reset and reads succeed unchanged.
 
 ### BoardContext (`src/core/database/boardContext.ts`)
 
@@ -2670,3 +2683,109 @@ Or edit `~/.alexi/config.json` directly:
 ```
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator guide and [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) for the design notes and Mermaid diagram.
+
+## Session Goal State API
+
+Introduced 1.22.17 (2026-09-09). Persistent per-session goal state — foundation module for a future autonomous goal runner. Ports the shape of upstream kilocode `feat(goal): add persistent session goals` (`packages/opencode/src/kilocode/session/goal/*`) at the minimum fidelity Alexi consumes today. Storage is **in-memory only** for now; upstream persists goals in SQLite against the session row. When the SQL side is ported, the in-memory `activeGoals` map will be swapped for a DB read behind the same `hasActiveGoal` predicate — callers do not need to change.
+
+### Types (`src/session/goal-state.ts`)
+
+```typescript
+export interface SessionGoal {
+  /** Session this goal is scoped to. */
+  sessionID: string;
+  /** User-supplied completion condition (natural language). */
+  condition: string;
+  /** Wall-clock enqueue timestamp for diagnostics. */
+  createdAt: number;
+  /**
+   * Lifecycle state:
+   *   - `running`: the goal runner is (or should be) driving turns.
+   *   - `paused`:  user or policy check suspended it.
+   *   - `done`:    completion condition was met or max-turns reached;
+   *                retained only for the transcript.
+   */
+  status: 'running' | 'paused' | 'done';
+}
+```
+
+### Public helpers
+
+```typescript
+/**
+ * Return true when the given session has a goal in the `running` state.
+ * Used by the prompt queue to decide whether an incoming user prompt
+ * should preempt an in-flight goal turn or be enqueued behind it.
+ */
+export function hasActiveGoal(sessionID: string): boolean;
+
+/**
+ * Return the currently-tracked goal for a session, or `undefined` when
+ * the session has none. Copies the row so callers cannot mutate the
+ * store through the returned reference.
+ */
+export function getGoal(sessionID: string): SessionGoal | undefined;
+
+/**
+ * Register a running goal for a session. Overwrites any existing goal
+ * on the same session (upstream policy: one goal per session at a
+ * time). Idempotent when called with the same condition.
+ */
+export function startGoal(sessionID: string, condition: string): SessionGoal;
+
+/**
+ * Move the session's goal (if any) into the terminal `done` state.
+ * Retained in the map so subsequent `getGoal` calls can still surface
+ * the completion condition to the transcript.
+ */
+export function completeGoal(sessionID: string): void;
+
+/**
+ * Discard any tracked goal for the session. Called on session close.
+ */
+export function clearGoal(sessionID: string): void;
+
+/** Test-only helper: reset the in-memory store. */
+export function __resetSessionGoalsForTests(): void;
+```
+
+### Usage example
+
+```typescript
+import {
+  startGoal,
+  hasActiveGoal,
+  completeGoal,
+  clearGoal,
+} from './session/goal-state.js';
+
+// User invokes /goal "Green the failing test suite"
+const goal = startGoal(sessionID, 'Green the failing test suite');
+
+// Prompt-queue admission check (future runner will consume this):
+if (hasActiveGoal(sessionID)) {
+  // A goal turn is running — either enqueue or explicitly interrupt.
+}
+
+// Completion condition met by the runner or user:
+completeGoal(sessionID);
+
+// Session close (SessionManager teardown):
+clearGoal(sessionID);
+```
+
+### Session Prompt Queue
+
+Related module `src/session/queue.ts` gained an optional `attachments?: readonly string[]` field on the `QueuedPrompt` interface (1.22.17). Opaque attachment ids staged alongside a prompt (screenshots pasted into the TUI, drag-and-drop files, image URLs) now ride the queue entry through `edit` and `drop` operations so a queued prompt is dispatched with the same attachments the user staged when they submitted it. `undefined` (rather than `[]`) preserves compatibility with call sites that pre-date the field. The `SessionQueue` class methods (`enqueue`, `drainNext`, `drop`, `edit`, `peek`, `size`, `clear`, `clearAll`) are otherwise unchanged.
+
+```typescript
+export interface QueuedPrompt {
+  messageID: string;
+  sessionID: string;
+  text: string;
+  attachments?: readonly string[]; // added 1.22.17
+  createdAt: number;
+}
+```
+
+See [ARCHITECTURE.md — Session Goal State](ARCHITECTURE.md#session-goal-state-srcsessiongoal-statets) for the state-machine diagram and [ARCHITECTURE.md — Session Prompt Queue](ARCHITECTURE.md#session-prompt-queue-srcsessionqueuets) for the queue contract.
