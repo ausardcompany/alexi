@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Home-directory / filesystem-root indexing guard on `glob` and `codesearch` tools** (`src/utils/filesystem.ts`, `src/tool/tools/glob.ts`, `src/tool/tools/codesearch.ts`, `tests/utils/filesystem.test.ts`, `tests/tool/tools/glob.test.ts`, `tests/tool/tools/codesearch.guard.test.ts`): Ports the kilocode `#13960` / `#13930` / `#13905` mitigation. Walking `$HOME` or `/` from a `ax chat` session started in the home directory would eagerly enumerate every file under the root, freeze the terminal for minutes, and exhaust system memory (10+ GB RSS reported upstream). Both tools now guard on the *resolved* `searchPath` at the entry point of `execute` and refuse to run when the target is the user's home directory (in either the given or the symlink-resolved form) or a filesystem root (`/`, `C:\`, or a UNC share root on Windows), returning `{ success: false, error: UNSAFE_WORKSPACE_ROOT_MESSAGE }` before any recursive walker is spawned. The guard also blocks an explicit `path:` argument override so an LLM cannot bypass the check by cd'ing out of home and then passing home back as an explicit path.
+
+  Public surface added on `src/utils/filesystem.ts`:
+  - `isUnsafeWorkspaceRoot(workdir: string, home?: string): boolean` — inverse of `allowed()` from `src/core/kilocode/fff.ts`, exposed on the filesystem utility surface so tool call sites can read as `if (isUnsafeWorkspaceRoot(ctx.workdir)) return refuse(...)` without importing the deeper kilocode module directly. The optional `home` argument mirrors `allowed()`'s override — tests use it (or the `ALEXI_TEST_HOME` env var) to pin the home anchor without mutating `process.env.HOME` for the whole process.
+  - `UNSAFE_WORKSPACE_ROOT_MESSAGE` — canonical user-facing error string (`'Indexing the home directory or filesystem root is disabled to prevent OOM. Please cd into a project directory.'`) so callers surface identical copy and downstream tests can assert on it without duplication.
+
+  Test coverage: `tests/utils/filesystem.test.ts` (7 cases) pins the guard predicate — home rejection, POSIX filesystem-root rejection, allowing normal project directories, allowing subdirectories of home, respecting the explicit `home` argument override, and asserting the canonical error message contains `home directory`, `filesystem root`, `OOM`, and `cd into a project directory`. `tests/tool/tools/glob.test.ts` and `tests/tool/tools/codesearch.guard.test.ts` extend the standard tool-test pattern (temp workdir via `fs.mkdtemp`, teardown in `afterEach`) with an `ALEXI_TEST_HOME`-based fake-home fixture so the guard can be exercised without mutating the real `$HOME`. Windows-specific POSIX root cases skip on `process.platform === 'win32'`.
+
 ## [1.22.16] - 2026-09-08
 
 ### Added
