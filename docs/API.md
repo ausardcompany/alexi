@@ -2027,6 +2027,45 @@ export function guessLanguageFromPath(filePath: string): string | undefined;
 
 `guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. Returns `undefined` for unknown extensions so callers can fall back to plain text.
 
+### `linkify` helper (`src/cli/tui/utils/linkify.ts`)
+
+Pure string transform that auto-detects URLs and `path:line` references in raw tool output and wraps every match in an OSC-8 hyperlink escape sequence via the shared `hyperlink()` helper. Applied by `ToolRow` immediately before Ink renders the tool body (both the bash-output branch and the generic-output branch).
+
+```typescript
+export function linkify(text: string, cwd?: string): string;
+```
+
+Parameters:
+- `text` — raw tool output. Multiline input is supported; matches are detected line-by-line as part of the same pass.
+- `cwd` — base directory for resolving relative file paths in `path:line` matches. Defaults to `process.cwd()`. Pass an explicit `cwd` from a test or from a caller running in a non-cwd context (agent worktree, `--workdir` invocation) so the generated `file://` URIs point at the intended paths.
+
+Return value: a new string. When the terminal does not support OSC-8 hyperlinks (see `supportsHyperlinks()` below), the returned string is byte-identical to the input.
+
+Two match categories are recognised, in the following precedence order:
+
+1. **URL matches**: `/\b(https?:\/\/|file:\/\/)[^\s<>"']+/g`. Trailing sentence punctuation (`.,;:!?)]}>`) is stripped from the captured URL and re-appended as plain text after the OSC-8 wrap. Example: `See https://example.com.` linkifies `https://example.com` and leaves the period outside the escape.
+2. **`path:line[:column]` matches**: the path segment must contain a `/` OR a `.` followed by 1-6 word characters (a file extension). This filters out timestamps, `host:port`, version strings, and `key: value` shapes. Relative paths are resolved via `path.resolve(cwd, filePath)` and rendered as `file://<absolute>#<line>` (or `#<line>:<column>`).
+
+URL matches always win on overlap, so `https://example.com/foo/bar.ts:42` is treated as a single URL match and does not produce a nested `path:42` hyperlink.
+
+### `hyperlink` helper (`src/cli/tui/utils/hyperlink.ts`)
+
+OSC-8 escape sequence wrapper. Called by `linkify()` per match; consumers rarely need to call it directly.
+
+```typescript
+export function hyperlink(url: string, label?: string): string;
+export function supportsHyperlinks(stream?: NodeJS.WriteStream): boolean;
+```
+
+`supportsHyperlinks()` returns `true` when:
+- `FORCE_HYPERLINK=1` is set, OR
+- `NO_HYPERLINK=1` is NOT set, `stream.isTTY` is `true`, AND one of:
+  - `TERM_PROGRAM` is in the allow-list: `iTerm.app`, `WezTerm`, `ghostty`, `Apple_Terminal`, `vscode`, `cursor`, `Hyper`, `WarpTerminal`.
+  - `TERM` contains `kitty`.
+  - `WT_SESSION` is set (Windows Terminal).
+
+When `supportsHyperlinks()` returns `false`, `hyperlink(url)` returns `url` and `hyperlink(url, label)` returns `label (url)` (or just `url` when `label === url`). When `true`, the return value is `ESC]8;;<url>ESC\<label>ESC]8;;ESC\` — the standard OSC-8 wrap.
+
 ## Per-Task Model Selection API
 
 Introduced 2026-08-31 (ports upstream opencode/kilocode `ab143253a`). Shared model-resolution helpers reused by the `task` and `agent_manager` tools. Gated on `experimental.task_model_selection` in `~/.alexi/config.json` (default `false`).

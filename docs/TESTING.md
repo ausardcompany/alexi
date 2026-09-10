@@ -3502,6 +3502,51 @@ describe('formatBashCommand', () => {
 
 Rule of thumb: any time you have logic in a TUI component that does not consume Ink primitives, factor it out into `src/cli/tui/utils/*.ts` and test it there. Reserve the ink-testing-library / render-tree tests for component-level assertions only.
 
+### Testing `linkify` — deterministic OSC-8 assertions
+
+`src/cli/tui/utils/linkify.test.ts` covers the URL and `path:line` detection paths of `linkify()`. The critical trick is to force hyperlink output on so the OSC-8 escape bytes appear in the string under test regardless of the CI environment's TTY state — Vitest runs with `stdout.isTTY === false`, which would otherwise cause `hyperlink()` to fall back to plain text and hide the transformation the test wants to observe.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { linkify } from './linkify.js';
+
+const OSC = '\u001B]';
+const ST = '\u001B\\';
+
+// Build the OSC-8 wrapped form so assertions read like the on-wire bytes.
+function wrap(url: string, label: string = url): string {
+  return `${OSC}8;;${url}${ST}${label}${OSC}8;;${ST}`;
+}
+
+describe('linkify', () => {
+  beforeEach(() => {
+    vi.stubEnv('FORCE_HYPERLINK', '1');
+    vi.stubEnv('NO_HYPERLINK', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('wraps a bare https URL', () => {
+    expect(linkify('See https://example.com for docs.')).toBe(
+      `See ${wrap('https://example.com')} for docs.`,
+    );
+  });
+
+  it('does NOT linkify a bare timestamp `12:34`', () => {
+    expect(linkify('at 12:34 the job ran')).toBe('at 12:34 the job ran');
+  });
+});
+```
+
+Guidelines specific to `linkify` tests:
+
+1. Always stub both `FORCE_HYPERLINK` (to `'1'`) and `NO_HYPERLINK` (to `''`) in `beforeEach`. Setting only `FORCE_HYPERLINK` is enough for the current implementation but the paired stub documents the intent and guards against a future opt-out flag flipping the default.
+2. Undo the stubs in `afterEach` via `vi.unstubAllEnvs()` so tests do not leak env state across files (Vitest runs tests in the same process by default).
+3. For `path:line` assertions, always pass an explicit `cwd` argument to `linkify(text, cwd)`. Relying on `process.cwd()` makes assertions non-portable across worktrees and CI runners because the resulting `file://` URI embeds the absolute path.
+4. To exercise the non-supporting terminal fallback in the same file, flip the env stubs mid-test (`vi.stubEnv('FORCE_HYPERLINK', ''); vi.stubEnv('NO_HYPERLINK', '1');`) and re-invoke `linkify()` — the returned string should be byte-identical to the input for URL matches and should surface `label (url)` for `path:line` matches (because label !== url triggers the fallback branch in `hyperlink()`).
+
 ### Component-level tests with `ink-testing-library`
 
 `tests/cli/tui/ToolRow.test.tsx` renders `ToolRow` under `ink-testing-library` and asserts on the frame contents. This is the correct place to test row-level concerns:
@@ -3510,6 +3555,33 @@ Rule of thumb: any time you have logic in a TUI component that does not consume 
 - Terminal-style `$ command` prefix for bash output
 - Diff rendering with syntax highlighting
 - Status-driven colors
+- Linkification of URLs and `path:line` refs in the rendered frame (added 2026-09-10 in `tests/cli/tui/ToolRow.test.tsx`)
+
+For linkification, the same `FORCE_HYPERLINK=1` stub applies — the test renders `ToolRow` with an `output` string containing either a URL or a `src/foo.ts:42` ref, then asserts that the captured frame from `lastFrame()` contains the OSC-8 introducer (`\u001B]8;;`) followed by either the raw URL or the `file://` URI:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'ink-testing-library';
+
+describe('linkify integration', () => {
+  beforeEach(() => {
+    vi.stubEnv('FORCE_HYPERLINK', '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('wraps URLs in bash output with OSC-8 escape sequence', () => {
+    const { lastFrame } = renderRow({
+      toolName: 'bash',
+      params: { command: 'curl -I https://example.com' },
+      output: 'See https://example.com for docs',
+      isExpanded: true,
+    });
+    expect(lastFrame() ?? '').toContain('\u001B]8;;https://example.com\u001B\\');
+  });
+});
+```
 
 ### `withRetry` backoff assertions
 

@@ -2484,6 +2484,47 @@ flowchart LR
 
 The `CompletenessResult` type is a single flat discriminated union (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`) — Prettier collapses this onto one line as of `de9d1530`, 2026-08-25; no semantic change.
 
+## TUI Output Linkification
+
+Since 2026-09-10 (`7af9be2a`) the TUI runs every tool output through a small linkifier before rendering, so URLs and `path:line` references become clickable in supporting terminals. The transform lives in two paired modules:
+
+- `src/cli/tui/utils/hyperlink.ts` — low-level OSC-8 wrapper. `supportsHyperlinks()` gates the wrap on TTY + a small allow-list of `TERM_PROGRAM` values (`iTerm.app`, `WezTerm`, `ghostty`, `Apple_Terminal`, `vscode`, `cursor`, `Hyper`, `WarpTerminal`), the `TERM` string containing `kitty`, or a non-empty `WT_SESSION` (Windows Terminal). `FORCE_HYPERLINK=1` overrides to on, `NO_HYPERLINK=1` overrides to off. When unsupported, `hyperlink(url, label?)` returns plain text (or `label (url)` when the label differs) — the byte sequence stays clean on non-TTY, CI, and pipe/redirect destinations.
+- `src/cli/tui/utils/linkify.ts` — pattern detector. Scans input text for two match categories, resolves each to a URL suitable for OSC-8 wrapping, and splices the matches back into the string in a single pass.
+
+`ToolRow` (`src/cli/tui/components/ToolRow.tsx:186` for the bash branch, `:196` for the generic branch) applies `linkify()` to the truncated body text produced by `truncateOutput()`. The linkifier is the LAST transform applied to tool output before Ink renders it, which keeps the truncation contract intact — `... (N more lines)` counts are still computed on the raw text, and the OSC-8 escapes are added on top.
+
+```mermaid
+flowchart LR
+    Raw[Raw tool output]
+    Trunc[truncateOutput<br/>maxLines=20, keepLines=15]
+    Linkify[linkify<br/>URL + path:line detection]
+    Hyperlink[hyperlink<br/>OSC-8 wrap or plain fallback]
+    Ink[Ink Text renderer]
+    Terminal[Terminal output]
+
+    Raw --> Trunc
+    Trunc --> Linkify
+    Linkify -->|for each match| Hyperlink
+    Hyperlink -->|supported TTY| Ink
+    Hyperlink -->|unsupported| Ink
+    Ink --> Terminal
+```
+
+### Match categories
+
+Two disjoint patterns are recognised. URL matches always take precedence on overlap so a URL that happens to contain a `:42` tail is never double-wrapped.
+
+| Category | Regex | Notes |
+|----------|-------|-------|
+| URL | `/\b(https?:\/\/\|file:\/\/)[^\s<>"']+/g` | Trailing sentence punctuation (`.,;:!?)]}>`) is stripped from the captured URL and re-appended as plain text after the OSC-8 wrap — avoids sending users to `https://example.com.` (which typically 404s). |
+| `path:line[:column]` | `/(?<![\w/.-])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z]{1,10}\|(?:\.{0,2}\/)(?:[\w.-]+\/)*[\w.-]+):(\d+)(?::(\d+))?\b/g` | Path segment must contain at least one `/` OR a `.` followed by 1-6 word characters (a file extension). Filters out `12:34`, `localhost:3000`, `1.2.3`, `token: 12345`. |
+
+Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line>` (or `#<line>:<column>` when the column group matched). Relative paths are resolved against the `cwd` argument (default `process.cwd()`); Windows backslashes are normalised to forward slashes before URI construction so `file:///C:/Users/...` is well-formed.
+
+### Non-supporting terminals
+
+`hyperlink()` short-circuits to plain text when `supportsHyperlinks()` returns false, so the linkifier is safe to apply unconditionally. On CI, when stdout is piped, or on a terminal without OSC-8 support, tool output is byte-identical to the pre-linkify text — the transform is invisible.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
