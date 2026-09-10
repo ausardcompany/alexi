@@ -1415,17 +1415,38 @@ Board data lives in a dedicated SQLite database at `~/.alexi/board.db` (separate
 
 | Table                 | Purpose                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------- |
-| `kilo_board`          | One row per board (`id`, `task_id`, `created_at`).                                            |
+| `kilo_board`          | One row per board (`id`, `task_id`, `created_at`, `cleared_seq` — see [Board reset semantics](#board-reset-semantics)). |
 | `kilo_board_message`  | Message log (`id`, `board_id`, `session_id`, `author`, `content`, `created_at`).              |
 | `kilo_board_read`     | Read-acknowledgement rows (`board_id`, `session_id`, `message_id`) for stale-banner suppression. |
 
-The schema is applied eagerly on first access via idempotent `CREATE ... IF NOT EXISTS` statements defined in `src/core/database/migrations/20260828074139_kilocode_board.ts` and exported as `BOARD_SCHEMA_STATEMENTS`. When `better-sqlite3` is unavailable, `BoardStore` degrades gracefully: `read` returns `[]`, `write` returns the message shape without persisting, and `acknowledgeReads` is a no-op.
+The schema is applied eagerly on first access via idempotent `CREATE ... IF NOT EXISTS` statements defined in `src/core/database/migrations/20260828074139_kilocode_board.ts` and exported as `BOARD_SCHEMA_STATEMENTS`. The `cleared_seq` column on `kilo_board` is applied by the follow-up migration `20260903104806_kilocode_board_reset` (`BOARD_RESET_SCHEMA_STATEMENTS`); `BoardStore.ensureSchema()` introspects `PRAGMA table_info(kilo_board)` before applying so the eager path is idempotent on databases that already carry the column. When `better-sqlite3` is unavailable, `BoardStore` degrades gracefully: `read` returns `[]`, `write` returns the message shape without persisting, `acknowledgeReads` and `reset` are no-ops, and `getClearedSeq` returns the epoch.
+
+### Board reset semantics
+
+Introduced 2026-09-10 (`1.22.17`, ports upstream kilocode `migration/20260903104806_kilocode_board_reset.ts`). Callers can perform a logical clear of a board — e.g. between phases of a multi-phase task — without physically deleting rows:
+
+```typescript
+import { BoardStore } from './core/database/boardStore.js';
+
+// Reset the board. Returns the ISO 8601 boundary that was persisted
+// as `cleared_seq`. Physical rows in `kilo_board_message` are kept
+// for audit; subsequent reads filter to `created_at > cleared_seq`.
+const clearedAt = await BoardStore.reset(boardId);
+
+// Inspect the current boundary at any time. Boards that have never
+// been reset return `'1970-01-01T00:00:00.000Z'`.
+const seq = await BoardStore.getClearedSeq(boardId);
+```
+
+Because Alexi's board schema keys off ISO 8601 `created_at` timestamps rather than upstream's integer `seq`, `cleared_seq` is a `TEXT` column defaulting to the epoch. Lexicographic comparison of ISO 8601 strings is chronological, so `created_at > cleared_seq` unambiguously filters out any post-clear history. `BoardStore.read()` also honours the caller-supplied `since` option by taking `effectiveSince = max(opts.since ?? epoch, cleared_seq)`, so a `since` timestamp that is already past the reset boundary is preserved verbatim. See [ARCHITECTURE.md — Board reset semantics](ARCHITECTURE.md#board-reset-semantics-cleared_seq) for the full design notes and Mermaid sequence diagram.
 
 To reset the board across a test run or a broken state, delete the file:
 
 ```bash
 rm ~/.alexi/board.db
 ```
+
+(Deleting the file discards audit history and forces a fresh schema apply. Prefer `BoardStore.reset(boardId)` when you need a fresh conversation surface but want to keep audit history.)
 
 See [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the design notes and public TypeScript surface.
 

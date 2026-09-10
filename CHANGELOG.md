@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.17] - 2026-09-10
+
+### Added
+
+- **Shared Agent Board reset semantics** (`src/core/database/boardStore.ts`, `src/core/database/migrations/20260903104806_kilocode_board_reset.ts`, `src/core/database/migration.gen.ts`, `tests/database/boardStore.reset.test.ts`): Ports upstream kilocode `migration/20260903104806_kilocode_board_reset.ts`. Adds `cleared_seq` bookkeeping to the shared agent board so a swarm can perform a logical clear without physically deleting rows — subsequent reads filter to messages whose `created_at` is strictly greater than the board's `cleared_seq`, preserving audit history while giving the swarm a fresh conversation surface. New public surface on `BoardStore`:
+  - `BoardStore.reset(boardId: string): Promise<string>` — persists a new `cleared_seq` (current `Date.now().toISOString()`) and returns the timestamp so callers/tests can assert on the boundary. No-op when the native `better-sqlite3` binding is unavailable.
+  - `BoardStore.getClearedSeq(boardId: string): Promise<string>` — reads the current `cleared_seq`, or the epoch (`'1970-01-01T00:00:00.000Z'`) for boards that have never been reset.
+
+  Alexi-specific adaptation: upstream stores the sequence as a monotonically-increasing integer `seq`, but Alexi's board schema keys off the existing ISO 8601 `created_at` column. The migration therefore adds `cleared_seq TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'` so the value is comparable against `created_at` with a simple lexicographic `>` predicate. `BoardStore.read()` now looks up `cleared_seq` once per read, computes `effectiveSince = max(opts.since ?? epoch, cleared_seq)` (string max, safe because both are ISO 8601), and filters with `created_at > effectiveSince`. Existing `since` semantics are preserved when the caller-supplied lower bound is already after the reset boundary. Column-introspection guards on both the eager `BoardStore.ensureSchema` path (`PRAGMA table_info`) and the migration `up()` (`tx.hasColumn`) keep the DDL idempotent so replay of the migration on a fresh DB does not raise.
+
+  New adapter-agnostic type `DdlMigrationTx extends MigrationTx` documents the optional `execute?: (sql: string) => Promise<void> | void` and `hasColumn?: (table: string, column: string) => Promise<boolean> | boolean` hooks that raw-DDL migrations dispatch through. The migration's `up()` is a no-op when the adapter has not wired `execute` — this mirrors the sibling `20260828074139_kilocode_board.ts` shape so `BoardStore.ensureSchema()` can eagerly apply the DDL on fresh DBs where no migration journal exists yet, and the runner is safe to load in test harnesses that use the minimal `MigrationTx` contract.
+
+  Reset boundary DDL exported as `BOARD_RESET_SCHEMA_STATEMENTS` for direct use by `BoardStore.ensureSchema()`.
+
+  Test coverage (`tests/database/boardStore.reset.test.ts`, 3 cases, native-binding-gated via `nodeRequire.resolve('better-sqlite3')` with `describe.skip` when missing): (1) pre-reset writes disappear from reads and post-reset writes remain visible; (2) `getClearedSeq` returns a non-epoch value after `reset()`, proving the hidden reads are caused by the reset marker and not by a physical delete; (3) `getClearedSeq` returns the epoch for boards that have never been reset. Each case redirects `HOME`/`USERPROFILE` to a `fs.mkdtempSync` temp directory so the tests never touch `~/.alexi/board.db` on the developer machine, and inserts a `setTimeout(5)` between pre-reset writes and the `reset()` call so post-reset timestamps are unambiguously greater on sub-millisecond systems.
+
+- **`kilo_board_write` aborted-session warning** (`src/tool/tools/board.ts`): Ports upstream kilocode `board_post` warning fix. When the caller's own session is already aborted (e.g. the parent orchestrator cancelled this subagent mid-turn), the post is still recorded for audit but the tool result now surfaces a warning so the model can decide whether to give up or retry once un-aborted. Alexi does not maintain a per-subagent status registry, so the check approximates "recipient not running" with "this side already aborted" via `context.signal?.aborted === true`. When aborted, the tool returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId, aborted: true }, hint: 'Warning: this session is already aborted; the post was recorded but peer subagents may not observe it before they exit.' }`. The physical row is written unconditionally so audit history is preserved.
+
 ## [1.22.16] - 2026-09-08
 
 ### Added

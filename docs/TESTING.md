@@ -1717,7 +1717,101 @@ it('acknowledge is idempotent for duplicate message ids', async () => {
 });
 ```
 
-Environments without a working `better-sqlite3` binding should exercise the graceful-degradation path: `read` returns `[]`, `write` returns the message shape without persistence, `acknowledgeReads` is a no-op. Tests that assert against persistence MUST skip on systems where `nodeRequire('better-sqlite3')` throws, or set up a fresh temp `HOME` via `vi.spyOn(os, 'homedir')` so the DB file is created inside the test's `mkdtempSync` directory.
+Environments without a working `better-sqlite3` binding should exercise the graceful-degradation path: `read` returns `[]`, `write` returns the message shape without persistence, `acknowledgeReads` and `reset` are no-ops, `getClearedSeq` returns the epoch. Tests that assert against persistence MUST skip on systems where `nodeRequire('better-sqlite3')` throws, or set up a fresh temp `HOME` via `vi.spyOn(os, 'homedir')` (or by redirecting `process.env.HOME` / `process.env.USERPROFILE` to an `fs.mkdtempSync` directory) so the DB file is created inside the test's temp directory.
+
+**Pattern 4 — Verify reset hides pre-reset rows without deleting them.** Introduced 2026-09-10 (`1.22.17`, ports upstream kilocode `migration/20260903104806_kilocode_board_reset.ts`). `BoardStore.reset(boardId)` persists a new `cleared_seq` marker so subsequent reads filter to `created_at > cleared_seq`. Physical rows remain in `kilo_board_message` — assert against `BoardStore.getClearedSeq(boardId)` to prove the hidden reads are caused by the reset marker rather than a physical delete. Insert a small `setTimeout` between pre-reset writes and the `reset()` call so post-reset timestamps are unambiguously greater on sub-millisecond systems. Reference regression suite: `tests/database/boardStore.reset.test.ts` (3 cases, native-binding-gated via `nodeRequire.resolve('better-sqlite3')` with `describe.skip` when missing).
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { createRequire } from 'module';
+import { BoardStore } from '../../src/core/database/boardStore.js';
+
+const nodeRequire = createRequire(import.meta.url);
+let nativeAvailable = true;
+try {
+  nodeRequire.resolve('better-sqlite3');
+} catch {
+  nativeAvailable = false;
+}
+const describeIfNative = nativeAvailable ? describe : describe.skip;
+
+describeIfNative('BoardStore reset semantics', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-board-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+    BoardStore.__resetForTests();
+  });
+
+  afterEach(() => {
+    BoardStore.__resetForTests();
+    if (originalHome !== undefined) {
+      process.env.HOME = originalHome;
+    } else {
+      delete process.env.HOME;
+    }
+    try {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  });
+
+  it('hides pre-reset messages from subsequent reads', async () => {
+    const boardId = 'test-board-1';
+    await BoardStore.ensure(boardId, 'task-1');
+    await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'pre-1' });
+    await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'pre-2' });
+    expect(await BoardStore.read(boardId)).toHaveLength(2);
+
+    // Ensure a strictly greater timestamp for post-reset writes.
+    await new Promise((r) => setTimeout(r, 5));
+    const clearedAt = await BoardStore.reset(boardId);
+    expect(clearedAt).not.toBe('1970-01-01T00:00:00.000Z');
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(await BoardStore.read(boardId)).toHaveLength(0);
+
+    await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'post-1' });
+    const after = await BoardStore.read(boardId);
+    expect(after).toHaveLength(1);
+    expect(after[0]?.content).toBe('post-1');
+  });
+
+  it('getClearedSeq returns epoch for boards that have never been reset', async () => {
+    const boardId = 'test-board-2';
+    await BoardStore.ensure(boardId, 'task-2');
+    expect(await BoardStore.getClearedSeq(boardId)).toBe('1970-01-01T00:00:00.000Z');
+  });
+});
+```
+
+**Pattern 5 — Aborted-session warning on `kilo_board_write`** (added 1.22.17). When `context.signal?.aborted === true`, `boardWriteTool` still writes the row but returns a warning `hint` and `metadata.aborted === true`. Assert against both branches of the abort signal to guarantee no regression:
+
+```typescript
+it('surfaces an aborted warning when the calling session is already aborted', async () => {
+  BoardContext.attach('s1', 'b1');
+  await BoardStore.ensure('b1', 't1');
+  const controller = new AbortController();
+  controller.abort();
+  const result = await boardWriteTool.execute(
+    { content: 'still recorded' },
+    { sessionId: 's1', workdir: process.cwd(), signal: controller.signal }
+  );
+  expect(result.success).toBe(true);
+  expect(result.metadata?.aborted).toBe(true);
+  expect(result.hint).toMatch(/aborted/);
+  // Physical row is still written so audit history is preserved.
+  expect(await BoardStore.read('b1')).toHaveLength(1);
+});
+```
 
 ### Testing JSON-encoded Tool Params Tolerance
 

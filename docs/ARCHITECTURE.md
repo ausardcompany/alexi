@@ -2945,12 +2945,111 @@ export const BoardStore = {
   ensure(boardId: string, taskId: string): Promise<void>;
   write(boardId: string, input: BoardWriteInput): Promise<BoardMessage>;
   read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
+  /**
+   * Logical clear — persists a new `cleared_seq` marker so subsequent
+   * reads skip everything posted before now(). Physical rows remain
+   * (audit history is preserved). Ports upstream kilocode board-reset
+   * migration `20260903104806_kilocode_board_reset`.
+   */
+  reset(boardId: string): Promise<string>;
+  /** Read the current `cleared_seq`, or the epoch when never reset. */
+  getClearedSeq(boardId: string): Promise<string>;
   /** Upstream fix 162e30d23: suppress stale "new messages" banners. */
   acknowledgeReads(boardId: string, sessionID: string, messageIds: readonly string[]): Promise<void>;
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
 ```
+
+### Board reset semantics (`cleared_seq`)
+
+New in 1.22.17 (2026-09-10 upstream sync). A `BoardStore.reset(boardId)` marks every message posted so far as "cleared" so future reads skip them, without physically deleting rows. This gives swarms a fresh conversation surface between phases (e.g. planning → implementation) while preserving audit history — the physical rows remain in `kilo_board_message` and can still be recovered by dropping the `> cleared_seq` predicate.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Peer subagent
+    participant Tool as kilo_board_read / write
+    participant Store as BoardStore
+    participant DB as ~/.alexi/board.db
+
+    Agent->>Tool: write("phase 1 done")
+    Tool->>Store: write(boardId, msg)
+    Store->>DB: INSERT kilo_board_message (created_at=T1)
+
+    Note over Agent,DB: Orchestrator advances phase, calls BoardStore.reset(boardId)
+    Agent->>Store: reset(boardId)
+    Store->>DB: UPDATE kilo_board SET cleared_seq = T2 (T2 > T1)
+    Store-->>Agent: returns T2
+
+    Agent->>Tool: read()
+    Tool->>Store: read(boardId)
+    Store->>DB: SELECT cleared_seq WHERE id=boardId  -> T2
+    Store->>DB: SELECT * FROM kilo_board_message<br/>WHERE created_at > T2
+    DB-->>Store: [] (row at T1 filtered out)
+    Store-->>Tool: [] (pre-reset row hidden, still on disk)
+
+    Agent->>Tool: write("phase 2 starting")
+    Tool->>Store: write(boardId, msg)
+    Store->>DB: INSERT kilo_board_message (created_at=T3, T3 > T2)
+    Agent->>Tool: read()
+    Store->>DB: SELECT * WHERE created_at > T2
+    DB-->>Store: [row at T3]
+    Store-->>Tool: [phase 2 starting]
+```
+
+**Alexi-specific adaptation.** Upstream stores the sequence as a monotonically-increasing integer `seq`, but Alexi's board schema keys off the existing ISO 8601 `created_at` column. Migration `20260903104806_kilocode_board_reset` adds `cleared_seq TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'` so lexicographic comparison against `created_at` is chronological. `BoardStore.read()` computes `effectiveSince = max(opts.since ?? epoch, cleared_seq)` and filters `created_at > effectiveSince`, so a caller-supplied `since` that is already past the reset boundary is preserved verbatim.
+
+**Idempotency.** `ALTER TABLE ADD COLUMN` is NOT idempotent in SQLite, so `BoardStore.ensureSchema()` introspects `PRAGMA table_info(kilo_board)` before applying `BOARD_RESET_SCHEMA_STATEMENTS`. The migration `up()` mirrors this via the optional `tx.hasColumn` hook on `DdlMigrationTx`:
+
+```typescript
+// src/core/database/migrations/20260903104806_kilocode_board_reset.ts
+export interface DdlMigrationTx extends MigrationTx {
+  execute?: (sql: string) => Promise<void> | void;
+  hasColumn?: (table: string, column: string) => Promise<boolean> | boolean;
+}
+
+const migration: Migration = {
+  id: '20260903104806_kilocode_board_reset',
+  async up(tx: DdlMigrationTx) {
+    if (typeof tx.execute !== 'function') {
+      return; // adapter without execute — no-op is safe
+    }
+    if (typeof tx.hasColumn === 'function') {
+      const present = await tx.hasColumn('kilo_board', 'cleared_seq');
+      if (present) {
+        return; // column already applied out-of-band via ensureSchema
+      }
+    }
+    for (const stmt of BOARD_RESET_SCHEMA_STATEMENTS) {
+      await tx.execute(stmt);
+    }
+  },
+};
+```
+
+**Graceful degradation on older DBs.** `BoardStore.read()` and `BoardStore.getClearedSeq()` wrap the `cleared_seq` lookup in `try/catch` so a very old database that predates the migration (column missing) silently falls back to the epoch default, which is equivalent to "board was never reset". `BoardStore.reset()` similarly no-ops on the `UPDATE` when the column does not exist. New callers that depend on reset semantics exercise these paths only on schemas where the column has been applied.
+
+### Aborted-session warning on `kilo_board_write`
+
+New in 1.22.17. When the caller's `context.signal?.aborted === true` (e.g. the parent orchestrator cancelled this subagent mid-turn), the post is still persisted for audit but the tool result surfaces a warning so the model can decide whether to give up or retry:
+
+```typescript
+// src/tool/tools/board.ts
+const aborted = context.signal?.aborted === true;
+const message = await BoardStore.write(boardId, { ... });
+if (aborted) {
+  return {
+    success: true,
+    data: { messageId: message.id, boardId },
+    metadata: { messageId: message.id, boardId, aborted: true },
+    hint:
+      'Warning: this session is already aborted; the post was recorded ' +
+      'but peer subagents may not observe it before they exit.',
+  };
+}
+```
+
+Alexi does not maintain a per-subagent status registry, so this check approximates upstream's "recipient not running" signal with the local abort signal. Ports upstream kilocode `board_post` warning fix.
 
 ```typescript
 // src/core/database/boardContext.ts
@@ -2967,7 +3066,7 @@ export const BoardContext = {
 
 Board data lives at `~/.alexi/board.db` (separate from `~/.alexi/sessions.db` so a corrupted board cannot poison session search). The schema — `kilo_board`, `kilo_board_message`, `kilo_board_read` — is applied eagerly on first `BoardStore` access via idempotent `CREATE ... IF NOT EXISTS` statements exported as `BOARD_SCHEMA_STATEMENTS` from `src/core/database/migrations/20260828074139_kilocode_board.ts`. The three tables:
 
-- `kilo_board` — `id PRIMARY KEY`, `task_id NOT NULL`, `created_at NOT NULL`. One row per board.
+- `kilo_board` — `id PRIMARY KEY`, `task_id NOT NULL`, `created_at NOT NULL`, `cleared_seq TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'` (added by migration `20260903104806_kilocode_board_reset` — see [Board reset semantics](#board-reset-semantics-cleared_seq)). One row per board.
 - `kilo_board_message` — `id PRIMARY KEY`, `board_id NOT NULL REFERENCES kilo_board(id) ON DELETE CASCADE`, `session_id`, `author`, `content`, `created_at`. Indexed by `(board_id, created_at)` for the chronological read query.
 - `kilo_board_read` — `(board_id, session_id, message_id)` composite PK. Written by `acknowledgeReads` so already-read messages do not re-surface on subsequent turns (upstream fix `162e30d23`).
 

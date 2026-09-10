@@ -2576,10 +2576,64 @@ export const BoardStore: {
     messageIds: readonly string[]
   ): Promise<void>;
 
+  /**
+   * Reset a board — persist a new `cleared_seq` marker (current time
+   * as an ISO 8601 string) so subsequent `read()` calls filter out
+   * every message posted before now(). Physical rows remain in
+   * `kilo_board_message` (audit history is preserved). No-op when the
+   * store is disabled (missing native binding), but still returns a
+   * timestamp so callers can rely on the return contract. Ports
+   * upstream kilocode board-reset migration
+   * `20260903104806_kilocode_board_reset`.
+   */
+  reset(boardId: string): Promise<string>;
+
+  /**
+   * Return the current `cleared_seq` for a board, or the epoch
+   * (`'1970-01-01T00:00:00.000Z'`) for boards that have never been
+   * reset. Exposed so tools can surface the boundary to the model
+   * when helpful.
+   */
+  getClearedSeq(boardId: string): Promise<string>;
+
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
 ```
+
+#### Reset semantics
+
+`BoardStore.read()` looks up `cleared_seq` once per read and filters `created_at > effectiveSince`, where `effectiveSince = max(opts.since ?? epoch, cleared_seq)` (lexicographic max on ISO 8601 strings is chronological). Concretely:
+
+```typescript
+// Post two messages, reset, post one more.
+const boardId = 'board-1';
+await BoardStore.ensure(boardId, 'task-1');
+await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'pre-1' });
+await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'pre-2' });
+
+// Before reset: both messages are readable.
+expect(await BoardStore.read(boardId)).toHaveLength(2);
+
+// Reset. Returns the ISO 8601 boundary that was persisted.
+const clearedAt = await BoardStore.reset(boardId);
+expect(clearedAt).not.toBe('1970-01-01T00:00:00.000Z');
+
+// After reset: pre-reset rows are hidden.
+expect(await BoardStore.read(boardId)).toHaveLength(0);
+
+// New writes after reset ARE visible.
+await BoardStore.write(boardId, { sessionID: 's1', author: 'a', content: 'post-1' });
+const after = await BoardStore.read(boardId);
+expect(after).toHaveLength(1);
+expect(after[0].content).toBe('post-1');
+
+// The pre-reset rows remain physically present — `getClearedSeq`
+// reflects the boundary rather than a delete.
+expect(await BoardStore.getClearedSeq(boardId)).toBe(clearedAt);
+```
+
+`reset()` and `getClearedSeq()` degrade gracefully on databases predating migration `20260903104806_kilocode_board_reset`: the `cleared_seq` lookup and update are wrapped in `try/catch` so callers running against an old schema silently fall back to the epoch default (equivalent to "never reset"). The migration DDL is idempotent — `BoardStore.ensureSchema()` introspects `PRAGMA table_info(kilo_board)` before applying `BOARD_RESET_SCHEMA_STATEMENTS`, and the migration's `up()` mirrors this via the optional `DdlMigrationTx.hasColumn` hook.
 
 ### BoardContext (`src/core/database/boardContext.ts`)
 
@@ -2647,7 +2701,8 @@ Behaviour:
 - Resolves `boardId` the same way.
 - When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
 - Otherwise calls `BoardStore.write(boardId, { sessionID: context.sessionId ?? 'unknown', author: context.agentName ?? 'agent', content })`.
-- Returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId } }`.
+- **Aborted-session warning** (added 1.22.17, ports upstream kilocode `board_post` warning fix): when `context.signal?.aborted === true` at the time of the call (e.g. the parent orchestrator cancelled this subagent mid-turn), the physical row is still written to preserve audit history, and the tool returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId, aborted: true }, hint: 'Warning: this session is already aborted; the post was recorded but peer subagents may not observe it before they exit.' }`. Alexi does not maintain a per-subagent status registry, so this approximates the upstream "recipient not running" signal with the local abort signal.
+- Otherwise returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId } }`.
 
 ### Enabling the tools
 
