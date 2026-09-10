@@ -106,9 +106,7 @@ function getDb(): BetterSqliteDatabase | null {
     // re-application via its journal, but this eager path is used on
     // fresh DBs where no journal exists yet.
     try {
-      const cols = db
-        .prepare(`PRAGMA table_info(kilo_board)`)
-        .all() as Array<{ name: string }>;
+      const cols = db.prepare(`PRAGMA table_info(kilo_board)`).all() as Array<{ name: string }>;
       const hasClearedSeq = cols.some((c) => c.name === 'cleared_seq');
       if (!hasClearedSeq) {
         for (const stmt of BOARD_RESET_SCHEMA_STATEMENTS) {
@@ -204,17 +202,14 @@ export const BoardStore = {
     // When `opts.since` is also present, we tighten the lower bound to
     // `max(since, cleared_seq)` by taking the string max — both values
     // are ISO 8601 so lexicographic comparison is chronological.
-    const effectiveSince =
-      opts.since && opts.since > clearedSeq ? opts.since : clearedSeq;
+    const effectiveSince = opts.since && opts.since > clearedSeq ? opts.since : clearedSeq;
     const sql = `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
                         created_at AS createdAt
                    FROM kilo_board_message
                    WHERE board_id = ? AND created_at > ?
                    ORDER BY created_at ASC
                    LIMIT ?`;
-    const rows = db
-      .prepare(sql)
-      .all(boardId, effectiveSince, limit) as BoardMessageRow[];
+    const rows = db.prepare(sql).all(boardId, effectiveSince, limit) as BoardMessageRow[];
     return rows;
   },
 
@@ -237,10 +232,7 @@ export const BoardStore = {
       return clearedAt;
     }
     try {
-      db.prepare(`UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`).run(
-        clearedAt,
-        boardId
-      );
+      db.prepare(`UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`).run(clearedAt, boardId);
     } catch {
       // Column missing (migration not applied) — silently no-op so
       // older callers do not break. New callers that depend on reset
