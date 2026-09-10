@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 
 import { ToolRow, type ToolRowProps } from '../../../src/cli/tui/components/ToolRow.js';
@@ -127,5 +127,39 @@ describe('ToolRow', () => {
     const lines = Array.from({ length: 40 }, (_, i) => `row ${i + 1}`).join('\n');
     const { lastFrame } = renderRow({ output: lines, isExpanded: true });
     expect(lastFrame()).toContain('more lines');
+  });
+
+  describe('linkify integration', () => {
+    beforeEach(() => {
+      vi.stubEnv('FORCE_HYPERLINK', '1');
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('wraps URLs in bash output with OSC-8 escape sequence', () => {
+      const { lastFrame } = renderRow({
+        toolName: 'bash',
+        params: { command: 'curl -I https://example.com' },
+        output: 'See https://example.com for docs',
+        isExpanded: true,
+      });
+      const frame = lastFrame() ?? '';
+      // Full OSC-8 wrap: ESC ] 8 ; ; URL ESC \\ TEXT ESC ] 8 ; ; ESC \\
+      expect(frame).toContain('\u001B]8;;https://example.com\u001B\\');
+    });
+
+    it('wraps file:line references in generic tool output', () => {
+      const { lastFrame } = renderRow({
+        toolName: 'grep',
+        params: { pattern: 'foo' },
+        output: 'match at src/foo.ts:42',
+        isExpanded: true,
+      });
+      const frame = lastFrame() ?? '';
+      // The label ('src/foo.ts:42') is preserved; the file:// URI is inside the escape sequence.
+      expect(frame).toContain('src/foo.ts:42');
+      expect(frame).toContain('\u001B]8;;file://');
+    });
   });
 });
