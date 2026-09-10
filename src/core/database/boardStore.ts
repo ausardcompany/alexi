@@ -23,6 +23,7 @@ import path from 'path';
 import { createRequire } from 'module';
 import { randomUUID } from 'crypto';
 import { BOARD_SCHEMA_STATEMENTS } from './migrations/20260828074139_kilocode_board.js';
+import { BOARD_RESET_SCHEMA_STATEMENTS } from './migrations/20260903104806_kilocode_board_reset.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -99,6 +100,25 @@ function getDb(): BetterSqliteDatabase | null {
     for (const stmt of BOARD_SCHEMA_STATEMENTS) {
       db.exec(stmt);
     }
+    // Apply board-reset DDL (`cleared_seq` column). `ALTER TABLE ADD
+    // COLUMN` is NOT idempotent in SQLite, so we introspect
+    // `PRAGMA table_info` first — the migration runner also skips
+    // re-application via its journal, but this eager path is used on
+    // fresh DBs where no journal exists yet.
+    try {
+      const cols = db
+        .prepare(`PRAGMA table_info(kilo_board)`)
+        .all() as Array<{ name: string }>;
+      const hasClearedSeq = cols.some((c) => c.name === 'cleared_seq');
+      if (!hasClearedSeq) {
+        for (const stmt of BOARD_RESET_SCHEMA_STATEMENTS) {
+          db.exec(stmt);
+        }
+      }
+    } catch {
+      // Introspection failed — best-effort no-op; subsequent writes
+      // will surface a clearer error if the column is truly missing.
+    }
     dbInstance = db;
     return dbInstance;
   } catch {
@@ -152,6 +172,12 @@ export const BoardStore = {
 
   /**
    * Read messages from a board in chronological order.
+   *
+   * Filters out messages posted at or before the board's `cleared_seq`
+   * marker (see `reset()` below). This preserves the upstream
+   * board-reset contract: a `reset()` gives the swarm a fresh
+   * conversation surface without physically deleting audit history —
+   * older rows remain in the table but are hidden from reads.
    */
   async read(boardId: string, opts: BoardReadOptions = {}): Promise<BoardMessage[]> {
     const db = getDb();
@@ -159,23 +185,88 @@ export const BoardStore = {
       return [];
     }
     const limit = opts.limit ?? 50;
-    const sql = opts.since
-      ? `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
-                created_at AS createdAt
-           FROM kilo_board_message
-           WHERE board_id = ? AND created_at > ?
-           ORDER BY created_at ASC
-           LIMIT ?`
-      : `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
-                created_at AS createdAt
-           FROM kilo_board_message
-           WHERE board_id = ?
-           ORDER BY created_at ASC
-           LIMIT ?`;
-    const rows = opts.since
-      ? (db.prepare(sql).all(boardId, opts.since, limit) as BoardMessageRow[])
-      : (db.prepare(sql).all(boardId, limit) as BoardMessageRow[]);
+    // Look up `cleared_seq` once per read. Fresh boards default to the
+    // epoch ('1970-01-01T00:00:00.000Z') so the filter is a no-op.
+    let clearedSeq = '1970-01-01T00:00:00.000Z';
+    try {
+      const row = db
+        .prepare(`SELECT cleared_seq AS clearedSeq FROM kilo_board WHERE id = ?`)
+        .get(boardId) as { clearedSeq?: string } | undefined;
+      if (row?.clearedSeq) {
+        clearedSeq = row.clearedSeq;
+      }
+    } catch {
+      // Column may not exist on very old DBs where the reset migration
+      // has not yet been applied — degrade gracefully by skipping the
+      // filter (equivalent to `cleared_seq = epoch`).
+    }
+    // `created_at > cleared_seq` filters out any post-clear history.
+    // When `opts.since` is also present, we tighten the lower bound to
+    // `max(since, cleared_seq)` by taking the string max — both values
+    // are ISO 8601 so lexicographic comparison is chronological.
+    const effectiveSince =
+      opts.since && opts.since > clearedSeq ? opts.since : clearedSeq;
+    const sql = `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
+                        created_at AS createdAt
+                   FROM kilo_board_message
+                   WHERE board_id = ? AND created_at > ?
+                   ORDER BY created_at ASC
+                   LIMIT ?`;
+    const rows = db
+      .prepare(sql)
+      .all(boardId, effectiveSince, limit) as BoardMessageRow[];
     return rows;
+  },
+
+  /**
+   * Reset a board — mark every message posted so far as "cleared" so
+   * future reads skip them. Ports upstream kilocode board reset
+   * semantics (migration `20260903104806_kilocode_board_reset`): the
+   * physical rows stay in the table (audit history is preserved),
+   * but `read()` filters to messages whose `created_at` is strictly
+   * greater than the board's `cleared_seq`. No-op when the store is
+   * disabled (missing native binding).
+   *
+   * Returns the ISO 8601 timestamp that was persisted as the new
+   * `cleared_seq`, so callers/tests can assert on the boundary.
+   */
+  async reset(boardId: string): Promise<string> {
+    const clearedAt = new Date().toISOString();
+    const db = getDb();
+    if (!db) {
+      return clearedAt;
+    }
+    try {
+      db.prepare(`UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`).run(
+        clearedAt,
+        boardId
+      );
+    } catch {
+      // Column missing (migration not applied) — silently no-op so
+      // older callers do not break. New callers that depend on reset
+      // will exercise this on a schema that has the column.
+    }
+    return clearedAt;
+  },
+
+  /**
+   * Return the current `cleared_seq` timestamp for a board, or the
+   * epoch if the board has never been reset. Exposed so the read tool
+   * can surface the boundary to the model when helpful.
+   */
+  async getClearedSeq(boardId: string): Promise<string> {
+    const db = getDb();
+    if (!db) {
+      return '1970-01-01T00:00:00.000Z';
+    }
+    try {
+      const row = db
+        .prepare(`SELECT cleared_seq AS clearedSeq FROM kilo_board WHERE id = ?`)
+        .get(boardId) as { clearedSeq?: string } | undefined;
+      return row?.clearedSeq ?? '1970-01-01T00:00:00.000Z';
+    } catch {
+      return '1970-01-01T00:00:00.000Z';
+    }
   },
 
   /**

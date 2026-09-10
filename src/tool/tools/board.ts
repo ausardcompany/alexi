@@ -113,6 +113,15 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
         error: 'No shared board is attached to this session — cannot post.',
       };
     }
+    // Upstream fix (kilocode `board_post` warning): if the caller's own
+    // session is already aborted (e.g. the parent cancelled this subagent
+    // mid-turn), the post will still be recorded for audit but the
+    // recipient side will never see it — surface a warning so the model
+    // can decide whether to give up or retry once un-aborted. Alexi does
+    // not maintain a per-subagent status registry, so we approximate
+    // "recipient not running" with "this side already aborted"; the
+    // physical row is still written to preserve history.
+    const aborted = context.signal?.aborted === true;
     const message = await BoardStore.write(boardId, {
       sessionID: context.sessionId ?? 'unknown',
       // Prefer an explicit agent name if the orchestrator has surfaced
@@ -122,6 +131,16 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
       author: (context as ToolContext & { agentName?: string }).agentName ?? 'agent',
       content: params.content,
     });
+    if (aborted) {
+      return {
+        success: true,
+        data: { messageId: message.id, boardId },
+        metadata: { messageId: message.id, boardId, aborted: true },
+        hint:
+          'Warning: this session is already aborted; the post was recorded ' +
+          'but peer subagents may not observe it before they exit.',
+      };
+    }
     return {
       success: true,
       data: { messageId: message.id, boardId },

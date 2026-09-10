@@ -24,6 +24,10 @@ import type { Migration } from './migration.js';
 export const MIGRATION_MODULES: ReadonlyArray<Promise<{ default: Migration }>> = [
   // 2026-08-28: task-scoped shared agent board (kilocode 162e30d23).
   import('./migrations/20260828074139_kilocode_board.js'),
+  // 2026-09-03: board reset semantics — `cleared_seq` bookkeeping so a
+  // swarm can logically clear the board without deleting history
+  // (kilocode board_reset migration).
+  import('./migrations/20260903104806_kilocode_board_reset.js'),
   // 2026-09-07: partial index on `part(session_id)` filtered to
   // `step-finish` rows to speed up cold session loading and model-usage
   // aggregation (kilocode 66053ef65).

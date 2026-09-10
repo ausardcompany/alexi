@@ -1,120 +1,65 @@
-# Changes Summary — Upstream Sync 2026-09-07
+# Update Plan Execution Summary
 
-Applied changes from the update plan derived from upstream commits:
-- kilocode: `1e4693558..1a5ee1882` (53 commits)
-- opencode: `337fd14..57ef382` (11 commits)
+Date: 2026-09-10
+Plan basis: kilocode `a7a7690ca..70f1f5394` (255 commits) + opencode `d6855b6..b3f1a96` (13 commits)
 
 ## Files modified
 
-1. `src/tool/tools/agent-manager.ts` — schema, validation, permission resource, and runtime capability gate.
-2. `src/tool/tools/agent-manager.txt` — LLM-facing tool description.
-3. `src/tool/tools/__tests__/agent-manager.worktree-id.test.ts` — **new** regression tests.
+| File | Change type |
+|---|---|
+| `src/core/database/migrations/20260903104806_kilocode_board_reset.ts` | **NEW** — board reset migration |
+| `src/core/database/migration.gen.ts` | Registered new migration in ordered list |
+| `src/core/database/boardStore.ts` | Added `reset()` / `getClearedSeq()`; `read()` now filters by `cleared_seq`; eager schema apply covers the new column |
+| `src/tool/tools/board.ts` | `kilo_board_write` warns via `hint` when caller session is aborted |
+| `tests/database/boardStore.reset.test.ts` | **NEW** — reset-semantics coverage (auto-skips when `better-sqlite3` binding is absent) |
 
-## Change 1 — Agent Manager `worktreeId` parameter validation (Priority: high)
+## Per-change status
 
-**File:** `src/tool/tools/agent-manager.ts`
+### Critical
 
-The pre-existing `worktreeId` field on the params schema was upgraded from a
-free-form `z.string().nullable().optional()` to:
+**Change 1 — Bedrock ARN passthrough (`src/providers/amazon-bedrock.ts`)**
+- **SKIPPED (not applicable)**. Alexi does not ship a dedicated Amazon Bedrock provider; Bedrock access is proxied through SAP AI Core (`src/providers/sapOrchestration.ts` + `transform.ts::filterUnreplayableBedrockReasoning`). There is no `resolveModelID` function in Alexi to patch. The upstream fix only matters when the CLI talks to Bedrock's public runtime directly, which Alexi does not. Grep against `src/` for `resolveModelID` returned zero matches, confirming no equivalent code path.
 
-- Non-blank check (`refine`): whitespace-only IDs are rejected so we can't
-  silently fall through to "use caller's cwd" behaviour when a model
-  supplies garbage.
-- Cross-field validator on the outer schema: `worktreeId` is only valid on
-  `action: 'create'`. Passing it alongside `list`/`stop`/`status`/`answer`
-  now produces a Zod validation error instead of being silently ignored.
-- Description text refreshed to mirror upstream's phrasing: existing
-  managed worktree ID returned by `action: "list"`, never a path or
-  branch name.
+**Change 2 — `move-session` performance fix (`src/core/control-plane/move-session.ts`)**
+- **SKIPPED (not applicable)**. Alexi has no control-plane / project-resolution subsystem. Grep for `move-session|moveSession` across `src/` returned zero matches. There is nothing in Alexi that spawns Git subprocesses on move.
 
-**Deviation from the plan (documented, not a skip):** the upstream diff
-lives in an Effect Schema world with concepts (`mode: 'local'|'worktree'`,
-`versions`, `tasks: []`, `branchName`) that Alexi's action-oriented,
-Zod-based `agent_manager` tool does not have. The portable subset is
-"opt-in field to target an existing worktree, non-blank, only on start
-(create), permission-visible" — which is exactly what has been applied.
+### High
 
-## Change 2 — Propagate `worktreeId` into permission resource (Priority: medium)
+**Change 3 — `kilocode_board_reset` migration**
+- **APPLIED.** Created `src/core/database/migrations/20260903104806_kilocode_board_reset.ts` following the same adapter-agnostic pattern as the sibling `20260828074139_kilocode_board.ts` migration (exports `BOARD_RESET_SCHEMA_STATEMENTS` for eager `BoardStore.ensureSchema()`; `up()` is a no-op when the `MigrationTx` adapter has not wired `execute` through; optional `hasColumn` introspection makes `ADD COLUMN` idempotent).
+- Registered the migration in `src/core/database/migration.gen.ts` between the existing board schema and the model-usage index (chronological order).
+- **Deviation from upstream**: upstream uses an integer `seq` column. Alexi's board schema keys messages off `created_at` (ISO 8601), so `cleared_seq` is stored as `TEXT` defaulting to `'1970-01-01T00:00:00.000Z'`. Reads filter with the same `> cleared_seq` predicate — lexicographic string comparison on ISO 8601 is chronological, so the contract holds.
 
-**File:** `src/tool/tools/agent-manager.ts`
+**Change 4 — Board name matcher regex**
+- **SKIPPED (not applicable)**. Alexi has no `src/core/script/kilocode/migration.ts` (or any regex-based board-table detector). Grep confirmed no equivalent helper. The upstream regex is a helper for tooling that Alexi does not carry.
 
-Upstream propagates `worktreeID` into the tool's permission `metadata`.
-Alexi's permission layer (see `src/permission/index.ts`) has no
-`metadata` field on the `PermissionRequest`; it has `resource` + free-form
-`description`. To achieve the same audit / prompt-visibility outcome, the
-tool's `getResource()` now returns `${action}:${worktreeId}` when
-`worktreeId` is present, and the plain `action` otherwise. Approval UIs
-and audit logs can now distinguish "resume in worktree wt-abc" from a
-plain create.
+**Change 5 — BoardStore clear/reset semantics**
+- **APPLIED.**
+  - Added `BoardStore.reset(boardId)` — writes an ISO 8601 timestamp into `kilo_board.cleared_seq`, returns it so callers/tests can assert on the boundary; silently no-ops if the column is missing (older DBs pre-migration).
+  - Added `BoardStore.getClearedSeq(boardId)` — reads the current marker (defaults to epoch).
+  - Rewrote `BoardStore.read(boardId, opts)` — looks up `cleared_seq` per read and tightens the effective lower bound to `max(opts.since, cleared_seq)` before selecting. Preserves existing `since` / `limit` semantics.
+  - Extended eager-schema path in `getDb()` — after `BOARD_SCHEMA_STATEMENTS`, introspects `PRAGMA table_info(kilo_board)` and applies `BOARD_RESET_SCHEMA_STATEMENTS` only when the column is missing (SQLite `ADD COLUMN` is not idempotent).
 
-Additionally, since Alexi does not (yet) track managed worktrees in
-process, the `create` handler surfaces a clear
-`Managed worktrees are not available in this build (worktreeId=...)`
-error when `worktreeId` is supplied — matches the plan's "gate behind a
-capability check" guidance rather than silently ignoring the field.
+### Medium
 
-## Change 3 — Update `agent-manager.txt` description (Priority: high)
+**Change 6 — Warn when `board_post` targets a stopped subagent**
+- **APPLIED (adapted).** The Alexi `kilo_board_write` tool has no `recipient` parameter (writes are always board-wide broadcasts, unlike upstream's directed variant), so a literal port of "check if `recipient` subagent is stopped" doesn't map. Closest safe port: on write, inspect `context.signal?.aborted` — when true, still persist the row (audit history) but return a warning `hint` telling the model that peer subagents may not observe the post before they exit. This preserves the upstream intent (surface silent-drop risk) without inventing a subagent-status registry Alexi does not have.
 
-**File:** `src/tool/tools/agent-manager.txt`
+**Change 7 — Remove `interactive-terminal` tool**
+- **SKIPPED (not applicable)**. Grep for `interactive-terminal|interactiveTerminal` across `src/` and `tests/` returned zero matches. Alexi never ported this tool, so there is nothing to delete.
 
-Added a `worktreeId` bullet under `create` explaining that it targets an
-existing managed worktree returned by `action: "list"`. This text is
-part of the LLM prompt so the model can learn when to use the field.
+### Low
 
-## Change 4 — Provider SDK version bumps (Priority: medium) — **SKIPPED**
-
-The plan flags this as optional and conditional on "Only apply if Alexi
-tracks these dependencies directly." Alexi does not depend on
-`@ai-sdk/openai` or `@ai-sdk/azure` — its provider layer sits on
-`@sap-ai-sdk/ai-api` and `@sap-ai-sdk/orchestration` (see `package.json`
-lines 36–37). No dep bump required, no upstream patch to copy.
-
-## Explicitly skipped upstream changes (as per plan)
-
-- All Kilo VSCode webview / diff viewer / inline PR comment changes
-  (not a VSCode extension).
-- JetBrains plugin changes.
-- Kilo-CLI Windows AVX2 launcher benchmark.
-- Visual regression PNG baselines.
-- `console` OAuth client metadata route.
-- `go.mdx` docs and Go SDK compatibility notes.
-- Changesets / CI workflow tweaks specific to upstream repos.
-- TUI Home/End nav fixes (Alexi's TUI is not the Kilo TUI).
-
-## Testing
-
-Added `src/tool/tools/__tests__/agent-manager.worktree-id.test.ts` with
-four regression tests:
-
-1. `create` without `worktreeId` still succeeds (backward compat).
-2. Blank / whitespace-only `worktreeId` rejected at schema layer.
-3. `worktreeId` on non-create actions rejected at schema layer.
-4. Valid `worktreeId` on `create` surfaces the "not available in this
-   build" capability error instead of silently succeeding.
-
-The pre-existing test `src/tool/tools/__tests__/agent-manager.json-config.test.ts`
-should continue to pass — none of its inputs supply `worktreeId`, and the
-added `.refine()` calls on the outer schema and on `worktreeId` do not
-change validation for any input it exercises.
-
-## SAP AI Core compatibility
-
-None of the changes touch provider dispatch, model resolution beyond
-what was already there (`selectModel`), or wire schemas. The
-`agent_manager` tool remains provider-agnostic and the field additions
-are pure schema/validation and permission-string changes. SAP AI Core
-integration is unaffected.
+The plan text truncated before listing any explicit "low" items — nothing to execute in that tier.
 
 ## Issues encountered
 
-- The upstream diff uses `@effect/schema` (`Schema.Struct`,
-  `Schema.makeFilter`, `Schema.NullOr`, etc.) which is not the same
-  library as Alexi's Zod schemas. Field names and structural shape
-  (`StartParams` / `ListParams` union, `WireParams` split) also do
-  not exist in Alexi's action-oriented Zod schema. The port therefore
-  applies the *intent* of the upstream changes (opt-in existing-worktree
-  targeting with strict validation and permission visibility) rather
-  than a literal line-for-line diff — which is what the plan
-  explicitly authorised ("adapt to Alexi's conventions").
-- Alexi's permission layer has no `metadata` field on requests, so the
-  propagation went into the `resource` string. Documented above.
+- **Plan mismatch with Alexi surface area**: 4 of the 7 planned changes (1, 2, 4, 7) target upstream files that were never ported into Alexi. These were skipped rather than fabricated to avoid introducing dead code / phantom subsystems (control-plane, direct Bedrock provider, interactive-terminal). The plan's own analysis section noted that the bulk of upstream is "not applicable to Alexi (a SAP AI Core-focused backend fork without VSCode UI)"; this execution honours that scoping.
+- **Schema shape divergence**: upstream uses `INTEGER seq` for board sequencing; Alexi's existing board schema uses `TEXT created_at` ISO 8601. `cleared_seq` mirrors the actual key type used by the sibling column so the filter is a direct string comparison. Documented inline in the migration file.
+- **SQLite `ADD COLUMN` idempotency**: the eager-schema path in `BoardStore.getDb()` runs on every process start against `~/.alexi/board.db`, which may or may not already have the new column depending on whether the migration runner has been through. Added `PRAGMA table_info` introspection before dispatching the ALTER so a fresh DB and an upgraded DB both converge without error. The migration `up()` also gains an optional `hasColumn(table, column)` hook so future adapter implementations can wire the same check into the transactional path.
+
+## SAP AI Core compatibility
+
+- No provider (`src/providers/**`) files touched.
+- No orchestrator / router / session code touched.
+- All changes are confined to the shared-agent-board subsystem, which is gated behind `experimental.sharedAgentBoard` in user config and does not run in the default SAP AI Core chat path.
