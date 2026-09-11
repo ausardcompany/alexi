@@ -318,6 +318,144 @@ describe('Write Tool', () => {
 | `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
 | `skill` (description guard) | `src/tool/skill.test.ts` | 1 case |
 
+### Testing the home / filesystem-root indexing guard
+
+The `glob` and `codesearch` tools refuse to enumerate the user's home directory or a filesystem root (`/`, `C:\`, UNC share roots) — walking those roots is a documented OOM trigger (kilocode `#13960` / `#13930` / `#13905`). The guard lives in `src/utils/filesystem.ts` as `isUnsafeWorkspaceRoot(workdir, home?)` and shares the canonical error `UNSAFE_WORKSPACE_ROOT_MESSAGE`. Tests exercise the guard at three layers.
+
+#### 1. Predicate tests (`tests/utils/filesystem.test.ts`)
+
+Pure-function tests against `isUnsafeWorkspaceRoot`. The load-bearing invariant is that tests MUST pin the home anchor with the `ALEXI_TEST_HOME` env var (or the explicit `home` argument) rather than mutating `process.env.HOME`, because `HOME` is shared with unrelated modules (`notifications`, `rulesDiscovery`) and parallel workers.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+
+import {
+  isUnsafeWorkspaceRoot,
+  UNSAFE_WORKSPACE_ROOT_MESSAGE,
+} from '../../src/utils/filesystem.js';
+
+describe('isUnsafeWorkspaceRoot', () => {
+  let tempDir: string;
+  let fakeHome: string;
+  const originalTestHome = process.env.ALEXI_TEST_HOME;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fs-guard-test-'));
+    fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'fs-guard-home-'));
+    // Pin the home anchor via ALEXI_TEST_HOME so the guard's underlying
+    // `allowed()` predicate in src/core/kilocode/fff.ts sees our fake
+    // home without touching the real HOME.
+    process.env.ALEXI_TEST_HOME = fakeHome;
+  });
+
+  afterEach(async () => {
+    if (originalTestHome === undefined) {
+      delete process.env.ALEXI_TEST_HOME;
+    } else {
+      process.env.ALEXI_TEST_HOME = originalTestHome;
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
+    await fs.rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it('refuses the user home directory', () => {
+    expect(isUnsafeWorkspaceRoot(fakeHome)).toBe(true);
+  });
+
+  it('refuses the POSIX filesystem root', () => {
+    // Skip on Windows; the check is platform-aware and Windows roots use
+    // a different shape (`C:\`, `\\?\UNC\...`).
+    if (process.platform !== 'win32') {
+      expect(isUnsafeWorkspaceRoot('/')).toBe(true);
+    }
+  });
+
+  it('allows a subdirectory of the home directory', async () => {
+    const projectInsideHome = path.join(fakeHome, 'my-project');
+    await fs.mkdir(projectInsideHome);
+    expect(isUnsafeWorkspaceRoot(projectInsideHome)).toBe(false);
+  });
+
+  it('respects the explicit home override argument', () => {
+    expect(isUnsafeWorkspaceRoot(tempDir, tempDir)).toBe(true);
+    expect(isUnsafeWorkspaceRoot(tempDir, fakeHome)).toBe(false);
+  });
+
+  it('exposes a canonical, user-facing error message', () => {
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('home directory');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('filesystem root');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('OOM');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('cd into a project directory');
+  });
+});
+```
+
+#### 2. Tool guard tests (`tests/tool/tools/glob.test.ts`, `tests/tool/tools/codesearch.guard.test.ts`)
+
+End-to-end tests that drive `globTool.execute` / `codesearchTool.execute` and assert on `result.error`. The suite must cover four cases per tool:
+
+1. **`workdir` is `fakeHome`** — refuses with an error containing `home directory` and `OOM`.
+2. **`workdir` is `/`** — refuses with an error containing `filesystem root` (skip on Windows).
+3. **Explicit `path:` argument resolves to `fakeHome` even from a safe `workdir`** — the guard runs on the resolved `searchPath`, not on `context.workdir`, so an LLM cannot bypass by cd'ing out and passing home back through `path:`.
+4. **Normal project directory** — returns `success: true` and finds fixture files.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+import { globTool } from '../../../src/tool/tools/glob.js';
+
+describe('home-directory / filesystem-root guard', () => {
+  let fakeHome: string;
+  let tempDir: string;
+  const originalTestHome = process.env.ALEXI_TEST_HOME;
+
+  beforeEach(async () => {
+    fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-home-guard-'));
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-workdir-'));
+    process.env.ALEXI_TEST_HOME = fakeHome;
+  });
+
+  afterEach(async () => {
+    if (originalTestHome === undefined) {
+      delete process.env.ALEXI_TEST_HOME;
+    } else {
+      process.env.ALEXI_TEST_HOME = originalTestHome;
+    }
+    await fs.rm(fakeHome, { recursive: true, force: true });
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('refuses to enumerate when workdir is the user home directory', async () => {
+    const result = await globTool.execute({ pattern: '*.ts' }, { workdir: fakeHome });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('home directory');
+    expect(result.error).toContain('OOM');
+  });
+
+  it('refuses when an explicit `path:` argument resolves to home', async () => {
+    const result = await globTool.execute(
+      { pattern: '*.ts', path: fakeHome },
+      { workdir: tempDir }
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('home directory');
+  });
+});
+```
+
+Key patterns:
+
+1. **Fake home via `fs.mkdtemp`, not `process.env.HOME`.** Mutating `HOME` leaks to every other module that reads it (`~/.alexi/config.json`, rules discovery, notifications). `ALEXI_TEST_HOME` is a dedicated escape hatch checked only by `src/core/kilocode/fff.ts:allowed()`, so it isolates the guard's home anchor.
+2. **Always snapshot AND restore `ALEXI_TEST_HOME`.** The variable is normally unset in production; a test that assigns it without restoring will make every subsequent test in the same worker see the fake path. Delete when previously unset, otherwise reassign the original.
+3. **Assert on substrings from `UNSAFE_WORKSPACE_ROOT_MESSAGE`, not the exact string.** The canonical message may gain platform-specific hints over time; asserting on `home directory` / `filesystem root` / `OOM` pins the classification without coupling to the exact copy.
+4. **Skip the POSIX-root case on Windows.** The filesystem-root check is platform-aware — `/` is not a Windows root — so gate the `workdir: '/'` case with `if (process.platform === 'win32') { return; }`.
+5. **Cover the `path:` override, not just `workdir`.** The guard is applied to the *resolved* `searchPath` inside each tool, so a test that only exercises `context.workdir` will miss a regression where the guard is moved earlier in the pipeline and the `path:` override bypass reappears.
+
 ### Testing Bash Tool Shell-Type Reporting
 
 The `bash` tool records the detected shell type on every result via

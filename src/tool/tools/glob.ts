@@ -8,6 +8,7 @@ import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
 import { getReferenceService } from '../../reference/reference.js';
 import { getIndexingExtensions } from '../../config/userConfig.js';
+import { isUnsafeWorkspaceRoot, UNSAFE_WORKSPACE_ROOT_MESSAGE } from '../../utils/filesystem.js';
 
 const GlobParamsSchema = z.object({
   pattern: z.string().describe("Glob pattern to match files (e.g., '**/*.ts')"),
@@ -232,6 +233,20 @@ When independent reads, searches, or edits are also needed, emit those tool call
         return {
           success: false,
           error: 'Operation aborted',
+        };
+      }
+
+      // Refuse to enumerate the user's home directory or a filesystem
+      // root. Walking those roots is a documented OOM trigger (kilocode
+      // #13960 / #13930 / #13905): the file index lists every file under
+      // the workspace root, and indexing $HOME can freeze the terminal
+      // for minutes and exhaust system memory. We guard on the resolved
+      // `searchPath` (not just `context.workdir`) so an explicit `path:`
+      // override cannot bypass the check.
+      if (isUnsafeWorkspaceRoot(searchPath)) {
+        return {
+          success: false,
+          error: UNSAFE_WORKSPACE_ROOT_MESSAGE,
         };
       }
 
