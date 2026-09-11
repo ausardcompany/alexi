@@ -3993,3 +3993,80 @@ Regression barriers the suite pins explicitly:
 5. **A throwing callback is treated as `'stop'`** — `vi.fn().mockRejectedValue(new Error('user hung up'))` is passed as the callback; the test asserts `result.text` still matches `/Loop Detector/` and the run does not throw.
 
 When adding tests here, DO NOT instantiate `LoopDetector` / `MistakeTracker` directly inside the `agenticChat` suite — the whole point of the integration layer is that the detectors are per-call state owned by `agenticChat`. Drive them through the public `agenticChat(prompt, options)` surface and script the provider turns to reproduce the specific tool-call sequence you want to test.
+
+### CLI-side mistake-limit prompt (`tests/cli/utils/mistakeLimitPrompt.test.ts`)
+
+The `alexi agent` command wires the `agenticChat` `onConsecutiveMistakeLimitReached` callback through `createMistakeLimitPrompt(...)` (`src/cli/utils/mistakeLimitPrompt.ts`). The callback's decision matrix is a critical part of the user-visible behaviour, so it has its own 11-case suite that runs independently of the `agenticChat` integration tests. The suite must NOT touch the real `process.stdin` / `process.stdout` / `process.stderr` — doing so would leak between test workers and hang under CI where stdin is a closed pipe. Follow this pattern:
+
+```typescript
+import { EventEmitter } from 'node:events';
+import { createMistakeLimitPrompt, describeReason } from '../../../src/cli/utils/mistakeLimitPrompt.js';
+
+// Minimal writable that captures every write. readline attaches listeners
+// to its output stream, so the sink must be a real EventEmitter — a bare
+// object with `write` fails during `readline.createInterface(...)`.
+class Sink extends EventEmitter {
+  buffer: string[] = [];
+  isTTY?: boolean;
+  write(chunk: string | Uint8Array): boolean {
+    this.buffer.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  }
+  end(): this { return this; }
+}
+
+// Fake stdin readline can accept without a full Readable implementation.
+class FakeStdin extends EventEmitter {
+  isTTY = true;
+  readable = true;
+  setEncoding(): this { return this; }
+  pause(): this { return this; }
+  resume(): this { return this; }
+  push(): boolean { return true; }
+  read(): null { return null; }
+}
+```
+
+Wiring the fake I/O through `createMistakeLimitPrompt`:
+
+```typescript
+const stdin = new FakeStdin();
+const stdout = new Sink();
+const stderr = new Sink();
+stdin.isTTY = true;
+stdout.isTTY = true;
+
+const callback = createMistakeLimitPrompt({
+  yolo: false,
+  quiet: false,
+  signal: new AbortController().signal,
+  stdin: stdin as unknown as NodeJS.ReadableStream & { isTTY?: boolean },
+  stdout: stdout as unknown as NodeJS.WritableStream & { isTTY?: boolean },
+  stderr: stderr as unknown as NodeJS.WritableStream,
+  isTTY: true,
+});
+
+// Simulate a user response: defer with setImmediate so the callback has
+// time to attach its readline 'question' handler before data arrives.
+setImmediate(() => stdin.emit('data', Buffer.from('y\n')));
+
+const decision = await callback({
+  kind: 'loop',
+  consecutiveCount: 5,
+  toolName: 'read',
+});
+expect(decision).toBe('continue');
+expect(stderr.buffer.join('')).toContain('Continuing with steering guidance');
+```
+
+Regression barriers pinned by the suite (do not remove without adding an equivalent test elsewhere):
+
+1. **Yolo never opens readline.** `expect(stdin.listenerCount('data')).toBe(0)` after a yolo run — otherwise a headless CI run under `--yolo` could still hang on stdin if the branch order regressed.
+2. **Non-TTY and quiet paths must not prompt.** Both must exit with `'stop'` and print the explanation to stderr; asserting `stdin.listenerCount('data') === 0` catches an accidental fallthrough into the readline branch.
+3. **Empty input is `'stop'`.** The safer default when a user just presses Enter — pinned via `withFakeIO({ answer: '', isTTY: true })`.
+4. **Case- and whitespace-insensitive `y` matching.** `y`, `yes`, `YES`, ` y ` all resolve to `'continue'`; anything else (`n`, `quit`, empty, EOF) resolves to `'stop'`.
+5. **Pre-aborted signal short-circuits.** A signal that is already aborted when the callback is invoked returns `'stop'` immediately and never opens readline (`stdin.listenerCount('data') === 0`).
+6. **Signal fires mid-prompt.** The pending promise resolves to `'stop'` when `controller.abort()` fires after the readline handle is attached; the `abort` listener closes the interface so the surrounding run tears down cleanly.
+7. **`describeReason` covers both trip kinds.** The pure formatter's output is asserted for both `kind: 'loop'` (contains `"same tool ('<name>')"`, `"N times in a row"`, `"loop"`) and `kind: 'mistake'` (contains `"N consecutive tool failures"`, `"last: '<name>'"`, `"flailing"`).
+
+When extending this suite, keep every case restricted to the callback surface only. The `agenticChat` steering-message injection is covered by the integration suite above and should NOT be re-tested here — mixing the two layers is what the `mistakeLimitPrompt` module was extracted to prevent.

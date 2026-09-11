@@ -534,6 +534,72 @@ Returning `'stop'` (or omitting the callback entirely) ends the run with a statu
 
 A throwing callback is caught and treated as `'stop'` (`logger.warn(...callback threw... Stopping run.)`) so a hung TUI hook cannot crash a headless agent run. `ConsecutiveMistakeReason` is re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for callers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
 
+#### CLI-side callback wiring (`src/cli/utils/mistakeLimitPrompt.ts`)
+
+`agenticChat` owns detection, steering-message injection, and the callback contract. It does NOT own any user interaction — that surface lives in a separate CLI module so `agenticChat` remains reusable from the TUI, the HTTP server, and headless test harnesses.
+
+The non-interactive `alexi agent` command constructs its callback with `createMistakeLimitPrompt(...)` in `src/cli/commands/agent.ts:324-335`:
+
+```typescript
+// src/cli/commands/agent.ts
+const onConsecutiveMistakeLimitReached = createMistakeLimitPrompt({
+  yolo: Boolean(opts.yolo || opts.dangerouslySkipPermissions),
+  quiet: Boolean(opts.quiet),
+  signal: abortController.signal,
+});
+
+const res = await agenticChat(message, {
+  // ...other options...
+  onConsecutiveMistakeLimitReached,
+});
+```
+
+The factory returns a `MistakeLimitCallback` (`(reason: ConsecutiveMistakeReason) => Promise<'continue' | 'stop'>`) that applies a small decision matrix. The following sequence diagram covers all four terminal branches the callback can take:
+
+```mermaid
+sequenceDiagram
+    participant Agent as agenticChat loop
+    participant CB as createMistakeLimitPrompt callback
+    participant User as User (TTY)
+    participant Err as stderr
+
+    Agent->>CB: onConsecutiveMistakeLimitReached(reason)
+    Note over CB: describeReason(reason)<br/>builds one-line explanation
+
+    alt yolo=true
+        CB->>Err: [mistake-limit] <explanation> Auto-continuing (--yolo).
+        CB-->>Agent: 'continue'
+    else non-TTY (headless / CI)
+        CB->>Err: [mistake-limit] <explanation> Stopping (non-interactive; re-run with --yolo).
+        CB-->>Agent: 'stop'
+    else quiet + TTY
+        CB->>Err: [mistake-limit] <explanation> Stopping (quiet mode).
+        CB-->>Agent: 'stop'
+    else TTY (default)
+        CB->>Err: [mistake-limit] <explanation>
+        CB->>User: Try a different approach? (y/n)
+        alt answer starts with 'y'
+            User-->>CB: y | yes | YES | " y "
+            CB->>Err: Continuing with steering guidance.
+            CB-->>Agent: 'continue'
+        else any other answer or EOF or abort signal
+            User-->>CB: n | "" | quit | (abort)
+            CB->>Err: Stopping run.
+            CB-->>Agent: 'stop'
+        end
+    end
+```
+
+Design invariants pinned by `tests/cli/utils/mistakeLimitPrompt.test.ts`:
+
+- **No I/O in `describeReason`.** It is a pure formatter used by BOTH the interactive prompt and the headless stderr line so the two surfaces cannot drift.
+- **`readline` is only opened on the interactive branch.** Yolo, non-TTY, and quiet paths must not attach a `data` listener to `stdin` (asserted via `expect(stdin.listenerCount('data')).toBe(0)`). This keeps headless runs from silently blocking on stdin.
+- **Empty input defaults to `'stop'`.** A user who just presses Enter gets the safer answer; the `'continue'` decision requires an explicit affirmative.
+- **`AbortSignal` releases the readline handle.** The `abort` listener calls `rl.close()`; the `finally` block removes the listener and closes the handle so the callback never leaks event-loop resources even when the user hits Ctrl+C mid-prompt.
+- **Injectable I/O.** `MistakeLimitPromptOptions` accepts `stdin` / `stdout` / `stderr` / `isTTY` so the test harness never touches the real process handles. This also lets the TUI wire its own `Sink`-like writable if it ever needs the same decision matrix outside the plain CLI command.
+
+The end-to-end contract is: `agenticChat` decides *when* to ask, `createMistakeLimitPrompt` decides *how* to ask (or whether to skip the ask entirely and pick a deterministic default). Keeping detection, steering, and the UI in three separate layers means the TUI, the HTTP server, and future in-editor hosts can each supply their own `MistakeLimitCallback` without duplicating any part of the detector or the steering-message injection.
+
 ## Session Lifecycle and Abort Propagation
 
 `SessionManager` (`src/core/sessionManager.ts`) tracks a per-session `AbortController` for every active run in an in-memory `Map<string, SessionRunState>`. The map is instance-scoped rather than module-scoped so tests can construct isolated managers without leaking abort state across cases.

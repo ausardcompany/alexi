@@ -708,6 +708,65 @@ type. A throwing callback MUST be caught and treated as the conservative
 default (`'stop'` in this case, logged via `logger.warn`) so a hung UI
 hook cannot crash a headless agent run.
 
+### Keep detection, callback, and UI in three layers
+
+The mistake-limit surface is the canonical example of this repo's rule
+that detection, decision, and user interaction are three distinct
+concerns and MUST live in three distinct modules:
+
+1. **Detection** — `LoopDetector` / `MistakeTracker` (`src/core/loopDetector.ts`,
+   `src/core/mistakeTracker.ts`): pure state machines, no I/O, no
+   knowledge of `agenticChat`, unit-tested in isolation.
+2. **Orchestration** — `agenticChat` (`src/core/agenticChat.ts`): owns the
+   per-call instantiation of the detectors, the synchronisation point
+   after each iteration's tool results, the callback contract
+   (`onConsecutiveMistakeLimitReached`), and the actual
+   steering-message injection (`<system-reminder>...</system-reminder>` +
+   the fixed guidance string) when the callback returns `'continue'`.
+   Never runs interactive I/O.
+3. **User interaction** — `createMistakeLimitPrompt`
+   (`src/cli/utils/mistakeLimitPrompt.ts`): builds a
+   `MistakeLimitCallback` that decides whether to prompt the user, print
+   a headless explanation, or auto-continue under `--yolo`. Owns the
+   `readline` handle, the `AbortSignal` wiring, and the exact stderr
+   phrasing. Injectable I/O (`stdin` / `stdout` / `stderr` / `isTTY`) so
+   tests never touch the real process handles.
+
+When adding a new host (a TUI panel, an HTTP endpoint, an editor plugin),
+implement your own `MistakeLimitCallback` and pass it as
+`onConsecutiveMistakeLimitReached`. Do NOT import from
+`src/cli/utils/mistakeLimitPrompt.ts` and try to reuse its `readline`
+plumbing — the CLI module is deliberately CLI-only. The shared surface
+between layers is the `ConsecutiveMistakeReason` payload and the
+`'continue' | 'stop'` decision, nothing else.
+
+Rules that fell out of the mistake-limit implementation and generalise:
+
+- **The decision function must not open I/O it does not use.** The yolo
+  branch of `createMistakeLimitPrompt` returns before touching
+  `readline`, and the test suite asserts
+  `stdin.listenerCount('data') === 0` as a regression barrier. When
+  writing a new callback host, arrange the branches so cheap deterministic
+  outcomes (yolo, headless, quiet) short-circuit before any I/O handle is
+  opened.
+- **Empty input defaults to the safer answer.** `'stop'` is the safer
+  answer for a mistake-limit trip because it stops burning budget on a
+  clearly-broken run. For other callback surfaces, pick the conservative
+  default at the design stage and pin it with a test case whose input is
+  `''` (a bare Enter or EOF).
+- **`AbortSignal` MUST close the I/O handle.** Any callback that opens a
+  `readline` (or any long-lived resource) must attach an `abort` listener
+  that closes it, register the listener before awaiting user input, and
+  remove it in a `finally` block. This keeps a Ctrl+C from leaking event
+  loop resources and stops the callback from wedging the surrounding
+  `agenticChat` teardown.
+- **Injectable I/O is a testing requirement, not a nice-to-have.** Any
+  module that talks to `process.stdin` / `process.stdout` /
+  `process.stderr` in production MUST expose those handles as options so
+  tests can substitute a `Sink extends EventEmitter` writable and a fake
+  stdin without patching the real process — see
+  `tests/cli/utils/mistakeLimitPrompt.test.ts` for the canonical pattern.
+
 ### Breaking circular ESM imports (registry pattern preferred over `require`)
 
 When two modules need to reference each other and one direction has to run
