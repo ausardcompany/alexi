@@ -1505,6 +1505,16 @@ This split lets pure helpers be unit-tested without booting an Ink render harnes
 
 When a component's public prop shape is stable and external consumers import it by name, prefer a thin backwards-compatible wrapper over a rename. `ToolCallBlock.tsx` is the reference example — it re-exports `ToolRowProps` as `ToolCallBlockProps` and delegates to `ToolRow` in ~4 lines.
 
+### Environment-gated terminal features (OSC-8 hyperlinks and similar)
+
+Effective 2026-09-10, TUI features that emit terminal-specific escape sequences (OSC-8 hyperlinks, images, kitty graphics, sixel, etc.) MUST route through a capability probe with a well-defined fallback and MUST accept `FORCE_*` / `NO_*` environment overrides. The `src/cli/tui/utils/hyperlink.ts` + `src/cli/tui/utils/linkify.ts` pair is the reference:
+
+1. **Capability probe returns `false` off-TTY.** `supportsHyperlinks()` bails when `stream.isTTY` is falsy, which covers CI, pipes, and redirects. Any new probe MUST do the same — never emit escape sequences into a stream that will not consume them.
+2. **`FORCE_<FEATURE>=1` and `NO_<FEATURE>=1` overrides.** The probe consults env first so tests, headless agents, and operators debugging a terminal issue have deterministic control. Naming convention: `FORCE_HYPERLINK`, `NO_HYPERLINK`, `FORCE_IMAGES`, `NO_IMAGES`, etc.
+3. **Plain-text fallback is byte-identical when the label matches the value.** `hyperlink(url)` returns `url` verbatim when unsupported; `hyperlink(url, label)` returns `label (url)` only when `label !== url`. Match this shape so pipelines that grep tool output do not need to strip escapes conditionally.
+4. **Wrap-once, apply late.** `linkify()` is applied as the LAST transform on tool-output text (after `truncateOutput`) so truncation math still runs on the raw string. When adding a new wrapper, apply it after every truncation, redaction, and word-wrap step so those upstream steps never have to know about the escape bytes.
+5. **Tests stub the env with `vi.stubEnv` and undo in `afterEach`.** See `docs/TESTING.md#testing-linkify--deterministic-osc-8-assertions` for the pattern. Do NOT `process.env.FORCE_HYPERLINK = '1'` directly — that leaks state across tests.
+
 ## Introducing Retry-Aware Modules
 
 Any new module that calls out to SAP AI Core (or another network dependency) should:
