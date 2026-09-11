@@ -115,10 +115,7 @@ interface BoardWriteResult {
  * warning to the caller so silent-drop scenarios become visible in
  * tool output.
  */
-async function recipientLooksStopped(
-  boardId: string,
-  recipient: string
-): Promise<boolean> {
+async function recipientLooksStopped(boardId: string, recipient: string): Promise<boolean> {
   // Look for the recipient having ever posted to the board or acknowledged
   // reads on it. If we cannot see it at all, treat as "no recipient".
   // Bounded to the most recent 100 messages so this stays cheap.
