@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Auto-formatted `recipientLooksStopped` signature to single-line form** (`src/tool/tools/board.ts:118`, commit `31a9aa0f` `style(ci): auto-fix lint/format issues [alexi-bot]`, 2026-09-11): The internal helper `recipientLooksStopped(boardId: string, recipient: string): Promise<boolean>` was reflowed from the historical three-line parameter block to a single line under Prettier's 100-column ceiling. Semantics are unchanged: the helper still reads the most recent 100 messages via `BoardStore.read(boardId, { limit: 100 })` and returns `true` when the `recipient` session has never posted to (or acknowledged reads on) the board. Ports kilocode `7febec58f` (fix(cli): warn when board_post targets a stopped subagent) — the delivery-hint contract on `BoardWriteResult` (`deliveryStatus?: 'delivered' | 'no-recipient'`) is unaffected. Diff statistics: `1 file changed, 1 insertion(+), 4 deletions(-)`. This is a `style(ci)` auto-fix from the lint/format autohealing pass — no behavioural change and no schema change.
+
 ## [1.22.16] - 2026-09-08
 
 ### Added
