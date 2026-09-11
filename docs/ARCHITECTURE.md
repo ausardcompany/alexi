@@ -497,6 +497,43 @@ if (similar.length > 0) {
 
 The enriched error is fed back to the model so it can self-correct on the next turn. The lookup degrades gracefully to the bare error when the registry is unavailable (test harnesses).
 
+### Loop and Mistake Steering (issue #1692)
+
+The agentic loop instantiates two independent detectors per `agenticChat` invocation (they are per-call, not module-scoped, so a long-running TUI session does not carry counters across independent user turns):
+
+- **`LoopDetector`** (`src/core/loopDetector.ts`) fingerprints each observed tool call as `${toolName}:${stableStringify(parsedArgs)}`. Arguments are re-serialised with sorted keys so semantically equivalent calls (`{"path":"/a","content":"x"}` vs `{"content":"x","path":"/a"}`) fingerprint identically. Invalid JSON falls back to the raw string. Trips at 5 consecutive identical fingerprints by default (`AgenticChatOptions.loopLimit`, minimum 2).
+- **`MistakeTracker`** (`src/core/mistakeTracker.ts`) counts consecutive tool failures regardless of which tool failed or what arguments it received — a rapid burst of unrelated failures (bad file paths, wrong syntax, permission errors) usually means the model is flailing rather than looping on a single call. A single successful tool result resets the counter to zero. Trips at 6 consecutive failures by default (`AgenticChatOptions.mistakeLimit`, minimum 2).
+
+The `question` tool is deliberately excluded from loop fingerprinting (`src/core/agenticChat.ts:937`) because repeated user prompts are not a stuck loop.
+
+Both detectors are checked at a single synchronisation point after every iteration's tool results have been recorded. On a trip, the loop delegates to the optional `onConsecutiveMistakeLimitReached(reason)` callback with `{ kind: 'loop' | 'mistake', consecutiveCount, toolName }`:
+
+```mermaid
+flowchart TB
+    Iter([Iteration N: tool results recorded]) --> RecLoop[loopDetector.record for each tool call<br/>skips question tool]
+    RecLoop --> RecMistake[mistakeTracker.record success flag]
+    RecMistake --> Check{loop.hasTripped or<br/>mistake.hasTripped?}
+    Check -->|No| Continue([Continue to iteration N+1])
+    Check -->|Yes| BuildReason[Build ConsecutiveMistakeReason<br/>kind = loop or mistake<br/>consecutiveCount, toolName]
+    BuildReason --> HasCB{onConsecutiveMistakeLimit<br/>Reached provided?}
+    HasCB -->|No| StopSilent[decision = 'stop']
+    HasCB -->|Yes| InvokeCB[await callback with reason]
+    InvokeCB --> CBError{Callback threw?}
+    CBError -->|Yes| WarnStop[logger.warn + decision = 'stop']
+    CBError -->|No| Decision{decision}
+    StopSilent --> StopMsg[Push assistant status message:<br/>Loop Detector Stopped after N... or<br/>Mistake Tracker Stopped after N...]
+    WarnStop --> StopMsg
+    StopMsg --> End([Break loop, return result])
+    Decision -->|stop| StopMsg
+    Decision -->|continue| ResetBoth[loopDetector.reset<br/>mistakeTracker.reset]
+    ResetBoth --> InjectSteering[Push user message:<br/>system-reminder preamble<br/>+ steering guidance]
+    InjectSteering --> Continue
+```
+
+Returning `'stop'` (or omitting the callback entirely) ends the run with a status message and a synthetic assistant turn — either `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.`. Returning `'continue'` resets both detectors, injects a `<system-reminder>` preamble plus the steering guidance (`The previous approach is stuck. Try a different method, simpler steps, or ask me for help.`) as a synthetic user message, and resumes the loop so the model can try a different strategy on the next iteration.
+
+A throwing callback is caught and treated as `'stop'` (`logger.warn(...callback threw... Stopping run.)`) so a hung TUI hook cannot crash a headless agent run. `ConsecutiveMistakeReason` is re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for callers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
+
 ## Session Lifecycle and Abort Propagation
 
 `SessionManager` (`src/core/sessionManager.ts`) tracks a per-session `AbortController` for every active run in an in-memory `Map<string, SessionRunState>`. The map is instance-scoped rather than module-scoped so tests can construct isolated managers without leaking abort state across cases.

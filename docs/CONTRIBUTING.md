@@ -651,6 +651,63 @@ Follow the same shape when adding new transforms: keep the module pure,
 export both the callable and its input types, and avoid globals so parallel
 tests do not need setup/teardown.
 
+### Per-call detectors (preferred over module-scoped counters)
+
+When a feature needs to observe a rolling condition across an agent's tool
+loop (repeated identical calls, consecutive failures, hook rejections),
+instantiate the detector **inside** the loop function that owns the run,
+not at module scope. The canonical current example is issue #1692 (loop /
+mistake steering), added 2026-09-09:
+
+- `src/core/loopDetector.ts` — 102-line `LoopDetector` class with
+  `record(toolName, argumentsJson)`, `hasTripped()`, `reset()`,
+  `getConsecutiveCount()`, `getLimit()`. Fingerprints tool calls via a
+  stable JSON stringify with sorted keys so semantically identical calls
+  fingerprint the same; falls back to the raw string when the arguments
+  are not valid JSON.
+- `src/core/mistakeTracker.ts` — 65-line `MistakeTracker` class with the
+  same surface but a boolean `record(success)`: a single success resets
+  the counter, mirroring `ErrorBackoff.recordSuccess`.
+- Both classes reject `limit < 2` and non-integer limits in the
+  constructor with `limit must be an integer >= 2` — validate at
+  construction rather than in `record()` so the failure surfaces at the
+  call site.
+- Instantiation lives in `src/core/agenticChat.ts:592-593` inside the
+  main loop function, so long-running processes (a TUI session that
+  reuses the same `sessionManager`) do NOT carry counters across
+  independent user turns.
+
+Rules that make this pattern work:
+
+1. **The detector has no I/O.** It records observations and exposes trip
+   state. Deciding what to do on a trip belongs to the caller (in our
+   case, `agenticChat` delegating to `onConsecutiveMistakeLimitReached`).
+   This keeps the class trivially unit-testable — see
+   `src/core/__tests__/loopDetector.test.ts` and
+   `src/core/__tests__/mistakeTracker.test.ts` (17 pure cases combined,
+   no `vi.mock`, no test doubles).
+2. **State is per-instance, not module-scoped.** Do not lift a counter
+   to a module-level `let`; a stray unit test that forgets to reset it
+   will poison every following test in the same worker.
+3. **Expose a `reset()` method** even when the caller could re-instantiate
+   — after a `'continue'` steering decision the same detector should
+   pick up cleanly on the next iteration without re-triggering.
+4. **Skip observations that are semantically not part of the tracked
+   condition.** The loop detector deliberately does NOT fingerprint the
+   `question` tool (`src/core/agenticChat.ts:937`) because repeated user
+   prompts are not a stuck loop.
+
+When callers can decide what to do on a trip (continue with steering vs.
+stop the run), expose an optional callback with a discriminated-union
+payload rather than a boolean flag. `ConsecutiveMistakeReason` in
+`src/core/agenticChat.ts` (`{ kind: 'loop' | 'mistake', consecutiveCount,
+toolName }`) is the current canonical shape and is re-exported from
+`src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` so
+callers dispatching through those entry points can reference the same
+type. A throwing callback MUST be caught and treated as the conservative
+default (`'stop'` in this case, logged via `logger.warn`) so a hung UI
+hook cannot crash a headless agent run.
+
 ### Breaking circular ESM imports (registry pattern preferred over `require`)
 
 When two modules need to reference each other and one direction has to run

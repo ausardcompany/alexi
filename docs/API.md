@@ -445,8 +445,53 @@ interface AgenticChatOptions {
   repoMapManager?: RepoMapManager;
   effort?: EffortLevel;            // low | medium | high | max
   agentId?: string;                // Agent to use
+  // Loop / mistake steering (issue #1692)
+  onConsecutiveMistakeLimitReached?: (
+    reason: ConsecutiveMistakeReason
+  ) => 'continue' | 'stop' | Promise<'continue' | 'stop'>;
+  loopLimit?: number;              // Default: 5 (identical tool calls)
+  mistakeLimit?: number;           // Default: 6 (consecutive tool failures)
+}
+
+interface ConsecutiveMistakeReason {
+  kind: 'loop' | 'mistake';
+  consecutiveCount: number;
+  toolName: string;                // Tripping tool (loop) or most recent failing tool (mistake)
 }
 ```
+
+### Loop and Mistake Steering
+
+When the agent gets stuck (repeats the same tool call, or emits a rapid burst of failures) the loop invokes `onConsecutiveMistakeLimitReached` if supplied. The callback decides whether to stop the run or inject a steering message and continue:
+
+```typescript
+import { agenticChat } from './core/agenticChat.js';
+import type { ConsecutiveMistakeReason } from './core/agenticChat.js';
+
+const result = await agenticChat('refactor the auth module', {
+  maxIterations: 50,
+  loopLimit: 5,          // trip after 5 identical tool calls (default)
+  mistakeLimit: 6,       // trip after 6 consecutive failures (default)
+  onConsecutiveMistakeLimitReached: async (reason: ConsecutiveMistakeReason) => {
+    if (reason.kind === 'loop') {
+      // Same tool called with same args N times in a row.
+      return 'continue'; // inject steering, let the model try a different approach
+    }
+    // reason.kind === 'mistake' — N consecutive tool failures.
+    return 'stop';       // give up; caller should surface the failure to the user
+  },
+});
+```
+
+Semantics:
+
+- Omit the callback to get the default behaviour: on trip, stop with a synthetic `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.` assistant message.
+- Returning `'continue'` resets both detectors and appends a `<system-reminder>` preamble plus the guidance `The previous approach is stuck. Try a different method, simpler steps, or ask me for help.` as a user message before the next iteration.
+- A throwing callback is treated as `'stop'` and logged via `logger.warn`. The run does not crash.
+- `loopLimit` and `mistakeLimit` constructors reject non-integer or `< 2` values (`limit must be an integer >= 2`).
+- The `question` tool is excluded from loop fingerprinting so repeated user prompts do not trip the detector.
+
+`ConsecutiveMistakeReason` is also re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for consumers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
 
 ### Progress Events
 
