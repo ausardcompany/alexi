@@ -813,6 +813,20 @@ plus `fs.rmSync(tmpHome, { recursive: true, force: true })` in `afterEach`.
 This keeps parallel test workers from racing on the real user config and
 guarantees a test can never accidentally dispatch a real desktop notification.
 
+The home / filesystem-root indexing guard (`src/core/kilocode/fff.ts`,
+`src/utils/filesystem.ts`) uses a dedicated `ALEXI_TEST_HOME` env var
+rather than reusing `HOME`. Rationale: `HOME` is read by unrelated
+modules (notifications, rules discovery, `~/.alexi/config.json`), so
+mutating it globally to test the indexing guard would leak into every
+other subsystem that reads the same variable. `ALEXI_TEST_HOME` is
+checked only by `allowed()` in the indexing guard, so tests can pin the
+home anchor without touching real user state. Use the same
+snapshot-and-restore pattern as above, and pair the env var with a
+`fs.mkdtemp`-created fake-home directory so the fixture is fully
+disposable. See
+[`docs/TESTING.md#testing-the-home--filesystem-root-indexing-guard`](./TESTING.md#testing-the-home--filesystem-root-indexing-guard)
+for the reference regression suite.
+
 ### Binary-optional native dependencies (cached dynamic import)
 
 Modules that wrap a native-binary-backed npm package (e.g. `node-notifier`
