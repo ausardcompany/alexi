@@ -116,6 +116,18 @@ Enable the experimental MCP Apps HTTP surface (introduced in 1.21.4). When set t
 export ALEXI_EXPERIMENTAL_MCP_APPS=1
 ```
 
+#### KILOCODE_EXPERIMENTAL_SWARM_BOARD
+
+Introduced in 1.22.17 (2026-09-11, ports kilocode PR #14013). Env-flag override for the shared agent board. Truthy values `1|true|yes|on` (case-insensitive) force-enable the feature for the current process; falsy values `0|false|no|off` force-disable it. When unset, the default is derived from the installation channel — on for `dev`/`beta`/`local`, off for stable — via `unstableDefault('KILOCODE_EXPERIMENTAL_SWARM_BOARD')` in `src/flag/flag.ts`.
+
+An explicit falsy env value wins over the persisted `experimental.sharedAgentBoard` in `~/.alexi/config.json`, letting operators temporarily disable the board on a single run without editing the on-disk config:
+
+```bash
+KILOCODE_EXPERIMENTAL_SWARM_BOARD=0 alexi chat -m "..."
+```
+
+Callers should compose this env flag with the persisted config via `isBoardEnabled(experimentalConfigFlag)` in `src/kilocode/board/enabled.ts` — the function returns `true` if any of the three signals (env, channel default, persisted config) enables the feature, with the env flag winning on explicit falsy values. See [Experimental Shared Agent Board](#experimental-shared-agent-board) for the full enablement matrix.
+
 #### MAX_SUBAGENT_DEPTH
 
 Override the maximum subagent nesting depth for the `task` tool. A top-level user session has depth 0; each `task` invocation would spawn a subagent one level deeper. Spawning at depth greater than this value is rejected before any provider request is made. Defaults to `3`; values above `~10` are strongly discouraged because latency and cost multiply per level. Non-numeric or non-positive values fall back to the default.
@@ -1426,6 +1438,26 @@ To reset the board across a test run or a broken state, delete the file:
 ```bash
 rm ~/.alexi/board.db
 ```
+
+### Non-destructive reset (kilocode PR #13782, 1.22.17)
+
+`BoardStore.reset(boardId)` provides a non-destructive alternative to deleting the database. Calling it writes `Date.now()` (Unix milliseconds) into the board row's `cleared_seq` column; every subsequent `read()` on that board filters out messages whose `createdAt` predates the watermark. Rows are not deleted, so the audit trail is preserved and there is no race with peers still reading — every reader gets the same post-reset view. Repeat calls simply push the watermark forward — the operation is idempotent. The `cleared_seq` column is added by migration `20260903104806_kilocode_board_reset` and applied eagerly on first `BoardStore` open; SQLite's `duplicate column` error is silently swallowed on subsequent opens because `ALTER TABLE ADD COLUMN` is not guarded by `IF NOT EXISTS`.
+
+### `recipient` warning on `kilo_board_write` (kilocode `7febec58f`, 1.22.17)
+
+`kilo_board_write` now accepts an optional `recipient` parameter that identifies a specific peer subagent as the intended target. When set, the tool inspects the most recent 100 board messages for any activity from that session id — if none is found, the tool still writes the message but returns `deliveryStatus: 'no-recipient'` along with a hint (`Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`). When the recipient has any board activity, `deliveryStatus` is `'delivered'`. The write itself never fails on recipient checks — the field is a hint for the calling agent, not a hard gate.
+
+### Enablement precedence (kilocode PR #14013, 1.22.17)
+
+Three signals combine via `isBoardEnabled(experimentalConfigFlag)` in `src/kilocode/board/enabled.ts`:
+
+| Signal                                                | Precedence           | Notes                                                                       |
+| ----------------------------------------------------- | -------------------- | --------------------------------------------------------------------------- |
+| `KILOCODE_EXPERIMENTAL_SWARM_BOARD` env var           | Highest (when set)   | Truthy `1|true|yes|on` forces on; falsy `0|false|no|off` forces off.        |
+| `INSTALLATION_CHANNEL` = `dev|beta|local`             | Medium               | Default-on for these channels via `unstableDefault()`.                      |
+| `experimental.sharedAgentBoard` in `~/.alexi/config.json` | Lowest           | Alexi's existing persisted flag. Consulted when env var is unset.           |
+
+Any of the three enables the feature; an explicit falsy env value overrides both the channel default and the persisted config. This unification lets CI pipelines flip the feature on for a specific run without editing on-disk config, and lets operators keep the feature persistently on in `~/.alexi/config.json` for interactive use.
 
 See [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the design notes and public TypeScript surface.
 

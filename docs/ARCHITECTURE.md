@@ -3091,9 +3091,46 @@ export const BoardStore = {
   read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
   /** Upstream fix 162e30d23: suppress stale "new messages" banners. */
   acknowledgeReads(boardId: string, sessionID: string, messageIds: readonly string[]): Promise<void>;
+  /**
+   * Ports kilocode PR #13782. Hide every message currently on the board
+   * from future `read()` calls without deleting rows. Idempotent: repeat
+   * calls simply push the `cleared_seq` watermark forward.
+   */
+  reset(boardId: string): Promise<void>;
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
+```
+
+### `reset()` and the `cleared_seq` watermark (kilocode PR #13782)
+
+`BoardStore.reset(boardId)` writes `Date.now()` (Unix milliseconds) into the board row's `cleared_seq` column via `UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`. On subsequent `read()` calls, `BoardStore` pulls the current `cleared_seq` for the target board and, if it is greater than zero, filters out any row whose `Date.parse(createdAt)` predates the watermark. Rows with an unparseable `createdAt` are kept (fail-open) so a bad timestamp never permanently hides a message. Filtering is done in JavaScript rather than SQL to keep the read path adapter-agnostic — the row count per board is already bounded by `limit` upstream, so the extra pass is negligible.
+
+The column is added by migration `20260903104806_kilocode_board_reset` (`src/core/database/migrations/20260903104806_kilocode_board_reset.ts`) whose DDL is exported as `BOARD_RESET_SCHEMA_STATEMENTS` and applied eagerly by `BoardStore.ensureSchema` on every process start. Because SQLite's `ALTER TABLE ... ADD COLUMN` is not guarded by `IF NOT EXISTS`, the eager path wraps each statement in `try/catch` and silently swallows `duplicate column name` errors from the second open onwards; any other error is re-thrown. The migration runner path is a no-op when the transaction adapter does not expose `execute()`, which keeps the module safe to load in test harnesses that use the minimal `MigrationTx` contract without a SQL driver.
+
+`isBoardMigration(name)` in `src/core/database/migration.ts` classifies both `kilocode_board` and `kilocode_board_reset` (and their timestamped forms) as belonging to the shared agent board feature family so tooling that filters or gates the board feature by migration name treats them as one group.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Subagent
+    participant Tool as kilo_board_write
+    participant Store as BoardStore
+    participant DB as ~/.alexi/board.db
+
+    Note over Agent,DB: Reset flow (kilocode PR #13782)
+    Agent->>Store: reset(boardId)
+    Store->>DB: UPDATE kilo_board SET cleared_seq = Date.now()
+    DB-->>Store: ok
+
+    Note over Agent,DB: Later read
+    Agent->>Tool: kilo_board_read
+    Tool->>Store: read(boardId, { limit })
+    Store->>DB: SELECT cleared_seq FROM kilo_board WHERE id = ?
+    DB-->>Store: cleared_seq = T
+    Store->>DB: SELECT ... FROM kilo_board_message WHERE board_id = ?
+    DB-->>Store: rows
+    Store->>Store: filter rows where Date.parse(createdAt) > T
+    Store-->>Tool: filtered messages
 ```
 
 ```typescript
@@ -3122,11 +3159,53 @@ When `better-sqlite3` is unavailable (native binding missing), `BoardStore` degr
 Two `defineTool` handlers in `src/tool/tools/board.ts`:
 
 - **`kilo_board_read`** — resolves the current session's `boardId` via `BoardContext.resolve(context.sessionId)`, reads via `BoardStore.read`, then calls `BoardStore.acknowledgeReads` on the returned message ids. When no board is attached, returns `{ success: true, data: { messages: [] }, hint: 'No shared board is attached to this session.' }` so the tool never fails outside a swarm context.
-- **`kilo_board_write`** — resolves the `boardId` the same way, then calls `BoardStore.write` with `context.sessionId` and either the explicit `agentName` on `ToolContext` (surfaced by the `task` tool's swarm-identity propagation) or the fallback `'agent'`. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+- **`kilo_board_write`** — resolves the `boardId` the same way, then calls `BoardStore.write` with `context.sessionId` and either the explicit `agentName` on `ToolContext` (surfaced by the `task` tool's swarm-identity propagation) or the fallback `'agent'`. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`. Accepts an optional `recipient` parameter (kilocode `7febec58f`); when set, the tool scans the most recent 100 messages for any activity from that session id and, if none is found, returns `deliveryStatus: 'no-recipient'` with a hint (`Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`). The message is still written — the parent orchestrator decides how to react.
 
 Both tools are re-exported from `src/tool/registry.ts` so external consumers can build a tool list identical to the upstream registry shape. Actual registration into the runtime `ToolRegistry` happens in `src/tool/tools/index.ts:118`, gated by `getConfigSharedAgentBoard()`.
 
+### Unified enablement predicate (kilocode PR #14013)
+
+`src/kilocode/board/enabled.ts` exports `isBoardEnabled(experimentalConfigFlag?: boolean)`, a sync predicate that combines three signals so tools and code paths can call a single check:
+
+1. Environment flag `KILOCODE_EXPERIMENTAL_SWARM_BOARD` (upstream parity — set in CI or ad-hoc shells to opt in without touching the on-disk config). Truthy values `1|true|yes|on` force-enable; falsy values `0|false|no|off` force-disable.
+2. Installation-channel default via `unstableDefault('KILOCODE_EXPERIMENTAL_SWARM_BOARD')` in `src/flag/flag.ts` — on for `dev`/`beta`/`local`, off for stable. Exposed as `Flag.KILOCODE_EXPERIMENTAL_SWARM_BOARD` for anywhere that needs the resolved default without the on-disk config.
+3. The persisted `experimental.sharedAgentBoard` flag in `~/.alexi/config.json` — Alexi's existing surface, unchanged.
+
+Any of the three enables the feature; the env flag wins over the on-disk config when explicitly set to a falsy value. The function is side-effect-free and safe to call from tool registration.
+
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
+
+## PTY Latch (`src/core/kilocode/pty/latch.ts`)
+
+New 1.22.17 module (2026-09-11 upstream sync, ports kilocode `203f19f5d fix(cli): keep PTY output and exit emitted before listeners attach`). A dependency-free primitive that buffers emissions from a short-lived event source until a listener attaches, then flushes the buffer in FIFO order.
+
+### Problem
+
+`node-pty` (and analogous PTY libraries) can emit `data` and `exit` events synchronously inside `spawn()`. For very short-lived processes (e.g. `printf hello`) the child can exit before the caller has had a chance to attach `.onData` / `.onExit` listeners. Those events are then lost forever, causing the calling agent code to hang waiting for output that already fired.
+
+### Design
+
+```typescript
+export interface PtyLatch<T> {
+  /**
+   * Emit a value. If a listener is currently attached, the value is
+   * delivered synchronously. Otherwise the value is buffered in FIFO
+   * order and delivered on the next `attach()`.
+   */
+  emit(value: T): void;
+  /**
+   * Attach a listener. Any buffered values are flushed to it
+   * synchronously in emission order before this call returns.
+   * Returns a detach function that, when called, clears the current
+   * listener so subsequent emissions buffer again.
+   */
+  attach(listener: (value: T) => void): () => void;
+}
+
+export function createPtyLatch<T>(): PtyLatch<T>;
+```
+
+The flush loop halts early if the listener re-assigns itself to `undefined` mid-drain (`listener === next` check), so remaining buffered values stay for the next `attach()`. Detach clears the current listener, re-enabling buffering — late reattach is safe. Alexi does not ship a native PTY driver today, but the primitive is reusable wherever a short-lived event source races with async listener attachment (e.g. subprocess bash tool wrappers).
 
 ## PowerShell 7 Resolver (`src/core/powershell.ts`)
 

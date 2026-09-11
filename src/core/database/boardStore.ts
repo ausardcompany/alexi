@@ -23,6 +23,7 @@ import path from 'path';
 import { createRequire } from 'module';
 import { randomUUID } from 'crypto';
 import { BOARD_SCHEMA_STATEMENTS } from './migrations/20260828074139_kilocode_board.js';
+import { BOARD_RESET_SCHEMA_STATEMENTS } from './migrations/20260903104806_kilocode_board_reset.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -99,6 +100,19 @@ function getDb(): BetterSqliteDatabase | null {
     for (const stmt of BOARD_SCHEMA_STATEMENTS) {
       db.exec(stmt);
     }
+    // Apply the reset-support migration eagerly too. `ALTER TABLE ADD
+    // COLUMN` is not idempotent in SQLite (no `IF NOT EXISTS`), so
+    // swallow "duplicate column" errors from the second open onwards.
+    for (const stmt of BOARD_RESET_SCHEMA_STATEMENTS) {
+      try {
+        db.exec(stmt);
+      } catch (err) {
+        const msg = (err as Error).message ?? '';
+        if (!/duplicate column name/i.test(msg)) {
+          throw err;
+        }
+      }
+    }
     dbInstance = db;
     return dbInstance;
   } catch {
@@ -152,6 +166,12 @@ export const BoardStore = {
 
   /**
    * Read messages from a board in chronological order.
+   *
+   * Ports kilocode PR #13782: reads now filter out any message whose
+   * `created_at` predates the board's `cleared_seq` watermark, so a
+   * `reset()` call durably hides prior messages from every reader
+   * without deleting rows. `cleared_seq` is stored as Unix milliseconds
+   * (see `reset`).
    */
   async read(boardId: string, opts: BoardReadOptions = {}): Promise<BoardMessage[]> {
     const db = getDb();
@@ -159,6 +179,15 @@ export const BoardStore = {
       return [];
     }
     const limit = opts.limit ?? 50;
+    // Pull the cleared watermark for this board. Rows still hidden by
+    // the watermark are filtered in JS to keep the SQL simple and
+    // adapter-agnostic — the row count per board is bounded by
+    // `limit` upstream anyway.
+    const boardRow = db
+      .prepare(`SELECT cleared_seq AS clearedSeq FROM kilo_board WHERE id = ?`)
+      .get(boardId) as { clearedSeq?: number } | undefined;
+    const clearedSeq = boardRow?.clearedSeq ?? 0;
+
     const sql = opts.since
       ? `SELECT id, board_id AS boardId, session_id AS sessionID, author, content,
                 created_at AS createdAt
@@ -175,7 +204,28 @@ export const BoardStore = {
     const rows = opts.since
       ? (db.prepare(sql).all(boardId, opts.since, limit) as BoardMessageRow[])
       : (db.prepare(sql).all(boardId, limit) as BoardMessageRow[]);
-    return rows;
+    if (clearedSeq <= 0) {
+      return rows;
+    }
+    return rows.filter((r) => {
+      const ts = Date.parse(r.createdAt);
+      return Number.isFinite(ts) ? ts > clearedSeq : true;
+    });
+  },
+
+  /**
+   * Reset the board view — hide every message currently on the board
+   * from future `read()` calls without deleting rows. Ports kilocode
+   * PR #13782 (`cleared_seq` watermark). Idempotent: repeat calls
+   * simply push the watermark forward.
+   */
+  async reset(boardId: string): Promise<void> {
+    const db = getDb();
+    if (!db) {
+      return;
+    }
+    const now = Date.now();
+    db.prepare(`UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`).run(now, boardId);
   },
 
   /**

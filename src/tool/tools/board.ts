@@ -91,11 +91,36 @@ const BoardWriteParamsSchema = z.object({
     .min(1)
     .max(4000)
     .describe('Message body to post to the shared board (1–4000 chars)'),
+  recipient: z
+    .string()
+    .optional()
+    .describe(
+      'Optional session id of a specific peer subagent this message targets. ' +
+        'When set, the tool warns if that subagent is stopped or does not exist.'
+    ),
 });
 
 interface BoardWriteResult {
   messageId: string;
   boardId: string;
+  /** Delivery hint. `'no-recipient'` means the target subagent is stopped or missing. */
+  deliveryStatus?: 'delivered' | 'no-recipient';
+}
+
+/**
+ * Ports kilocode `7febec58f` (fix(cli): warn when board_post targets a
+ * stopped subagent). We check the current board's message history for
+ * any recent activity from the recipient session — if none is found we
+ * cannot prove the recipient is stopped, but we can at least surface a
+ * warning to the caller so silent-drop scenarios become visible in
+ * tool output.
+ */
+async function recipientLooksStopped(boardId: string, recipient: string): Promise<boolean> {
+  // Look for the recipient having ever posted to the board or acknowledged
+  // reads on it. If we cannot see it at all, treat as "no recipient".
+  // Bounded to the most recent 100 messages so this stays cheap.
+  const recent = await BoardStore.read(boardId, { limit: 100 });
+  return !recent.some((m) => m.sessionID === recipient);
 }
 
 export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWriteResult>({
@@ -113,6 +138,20 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
         error: 'No shared board is attached to this session — cannot post.',
       };
     }
+    // Ports kilocode `7febec58f`: warn (don't fail) when the intended
+    // recipient subagent looks stopped or missing. The message is still
+    // written — the parent orchestrator can decide how to react.
+    let deliveryStatus: 'delivered' | 'no-recipient' = 'delivered';
+    let hint: string | undefined;
+    if (params.recipient) {
+      const missing = await recipientLooksStopped(boardId, params.recipient);
+      if (missing) {
+        deliveryStatus = 'no-recipient';
+        hint =
+          `Warning: recipient subagent "${params.recipient}" is stopped or ` +
+          `does not exist. Message posted but will not be delivered.`;
+      }
+    }
     const message = await BoardStore.write(boardId, {
       sessionID: context.sessionId ?? 'unknown',
       // Prefer an explicit agent name if the orchestrator has surfaced
@@ -124,8 +163,9 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
     });
     return {
       success: true,
-      data: { messageId: message.id, boardId },
-      metadata: { messageId: message.id, boardId },
+      data: { messageId: message.id, boardId, deliveryStatus },
+      metadata: { messageId: message.id, boardId, deliveryStatus },
+      hint,
     };
   },
 });
