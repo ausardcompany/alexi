@@ -5,6 +5,43 @@
 
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { allowed } from '../core/kilocode/fff.js';
+
+/**
+ * User-facing error thrown by tools when they refuse to enumerate a
+ * workspace whose root is the user's home directory or a filesystem
+ * root. Kept as a single canonical string so callers (glob, codesearch,
+ * future indexers) surface the same message and downstream tests can
+ * assert on it without duplicating the copy.
+ *
+ * Origin: kilocode #13960 (do not build a file index for the home
+ * directory or filesystem root). Indexing $HOME or `/` can freeze the
+ * terminal for minutes and exhaust system memory (10+ GB RSS reported
+ * upstream in #13930 / #13905).
+ */
+export const UNSAFE_WORKSPACE_ROOT_MESSAGE =
+  'Indexing the home directory or filesystem root is disabled to prevent OOM. ' +
+  'Please cd into a project directory.';
+
+/**
+ * Return true when `workdir` should NOT be walked recursively because
+ * it is either a filesystem root (`/`, `C:\`, a UNC share root) or the
+ * user's home directory (in either the given or symlink-resolved form).
+ *
+ * This is the inverse of {@link import('../core/kilocode/fff.js').allowed}
+ * and exists so tool call sites (`glob`, `codesearch`, ...) can read as
+ * `if (isUnsafeWorkspaceRoot(ctx.workdir)) throw ...` without importing
+ * the deeper kilocode module directly. Both call sites intentionally go
+ * through this wrapper so the guard is discoverable from the filesystem
+ * utility surface.
+ *
+ * The optional `home` argument mirrors `allowed`'s override — tests use
+ * it (or the `ALEXI_TEST_HOME` env var) to pin the home anchor without
+ * mutating `process.env.HOME` for the whole process.
+ */
+export function isUnsafeWorkspaceRoot(workdir: string, home?: string): boolean {
+  return !allowed(workdir, home);
+}
 
 /**
  * Check if a path is contained within a parent directory

@@ -68,8 +68,9 @@ alexi agent -m <message> [options]
 | `--effort <level>` | string | Effort level: low, medium, high, max |
 | `--agent <id>` | string | Agent to use (code, debug, plan, explore) |
 | `--auto` | boolean | Run in fully autonomous mode (no permission prompts) |
-| `--yolo` | boolean | Grant every permission request without prompting (see "Headless permission handling" below) |
+| `--yolo` | boolean | Grant every permission request without prompting AND auto-continue on `onConsecutiveMistakeLimitReached` (see "Headless permission handling" and "Mistake-limit user steering" below) |
 | `--dangerously-skip-permissions` | boolean | Alias of `--yolo`; explicit opt-in for CI / non-interactive runs |
+| `-q, --quiet` | boolean | Only output the final response; suppresses the interactive mistake-limit prompt (still writes a one-line explanation to stderr on trip) |
 
 #### Examples
 
@@ -105,6 +106,70 @@ In agent mode, Alexi:
 The non-interactive `agent` command subscribes to `PermissionRequested` on the event bus and publishes a `PermissionResponse` for every request — `granted: true` when `--yolo` (or `--dangerously-skip-permissions`) was passed, `granted: false` otherwise. Without this, a `PermissionRequested` event from a subagent (spawned via the `task` tool) has no listener in headless mode and the agent loop hangs waiting for a response that never arrives. The subscription is unsubscribed on `process.exit` so it does not leak into subsequent invocations under tests. Reference: opencode `08faeb3`.
 
 A `subagentSessionIds: Set<string>` is populated (currently empty — the `task` tool does not yet spawn distinct sessions, so the wiring is reserved for a future real-subagent implementation that will gate the auto-response on sessionId membership without a second refactor).
+
+#### Mistake-limit user steering (issue #1692)
+
+The `alexi agent` command wires the `agenticChat` loop's `onConsecutiveMistakeLimitReached` callback through `createMistakeLimitPrompt(...)` (`src/cli/utils/mistakeLimitPrompt.ts`). Previously, tripping the `LoopDetector` / `MistakeTracker` stopped the run with only the synthetic `[Loop Detector] Stopped ...` / `[Mistake Tracker] Stopped ...` assistant message — the user saw the agent "randomly stop" mid-task. The callback now applies this decision matrix in order:
+
+| Mode | Trigger | Decision | stderr output |
+|------|---------|----------|---------------|
+| Yolo | `--yolo` or `--dangerously-skip-permissions` | `'continue'` (auto-recover) | `[mistake-limit] <explanation> Auto-continuing (--yolo).` (suppressed under `--quiet`) |
+| Headless | `stdin.isTTY === false` or `stdout.isTTY === false` | `'stop'` | `[mistake-limit] <explanation> Stopping (non-interactive; re-run with --yolo to auto-continue).` |
+| Quiet TTY | `--quiet` on an interactive terminal | `'stop'` | `[mistake-limit] <explanation> Stopping (quiet mode).` |
+| Interactive TTY (default) | Real terminal, no `--yolo`, no `--quiet` | Prompt `Try a different approach? (y/n)` | See below |
+
+Interactive answers:
+
+- Any answer whose trimmed, lowercased first character is `y` (`y`, `yes`, `YES`, ` y `) → `'continue'`, stderr prints `Continuing with steering guidance.`
+- Everything else including empty input (bare Enter), `n`, `quit`, or EOF → `'stop'`, stderr prints `Stopping run.`
+- `AbortSignal` fires mid-prompt (Ctrl+C) → `'stop'` immediately, the `readline` handle is released.
+
+The explanation string comes from the exported pure formatter `describeReason(reason: ConsecutiveMistakeReason): string`:
+
+- `kind: 'loop'` → `The model has called the same tool ('<toolName>') <consecutiveCount> times in a row with identical arguments — likely stuck in a loop.`
+- `kind: 'mistake'` → `<consecutiveCount> consecutive tool failures detected (last: '<toolName>') — the model may be flailing.`
+
+Returning `'continue'` from the callback resets both detectors and injects a `<system-reminder>` preamble plus the guidance `The previous approach is stuck. Try a different method, simpler steps, or ask me for help.` as a user message before the next iteration (this injection is owned by `agenticChat`, not the CLI callback).
+
+Programmatic use from custom CLI wrappers or third-party hosts:
+
+```typescript
+import { createMistakeLimitPrompt } from './cli/utils/mistakeLimitPrompt.js';
+import type {
+  MistakeLimitCallback,
+  MistakeLimitPromptOptions,
+} from './cli/utils/mistakeLimitPrompt.js';
+
+const callback: MistakeLimitCallback = createMistakeLimitPrompt({
+  yolo: false,
+  quiet: false,
+  signal: abortController.signal,
+  // Optional injectable I/O — omit to use process.stdin / process.stdout / process.stderr
+  // stdin, stdout, stderr, isTTY
+});
+
+await agenticChat(prompt, {
+  onConsecutiveMistakeLimitReached: callback,
+  // ...
+});
+```
+
+`MistakeLimitPromptOptions` (`src/cli/utils/mistakeLimitPrompt.ts`):
+
+```typescript
+export interface MistakeLimitPromptOptions {
+  yolo?: boolean;
+  quiet?: boolean;
+  signal?: AbortSignal;
+  // Injectable I/O for tests / non-CLI hosts
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
+  stdout?: NodeJS.WritableStream & { isTTY?: boolean };
+  stderr?: NodeJS.WritableStream;
+  isTTY?: boolean;                  // overrides stdin.isTTY && stdout.isTTY
+}
+```
+
+The CLI-side callback deliberately does NOT implement the steering-message injection itself — that concern stays in `agenticChat`. This keeps detection, steering-message content, and the "ask the user" surface in three separate layers so the TUI, HTTP server, and future editor hosts can each supply their own `MistakeLimitCallback` without duplicating any part of the detector or the steering payload.
 
 ### interactive / i
 
@@ -445,8 +510,53 @@ interface AgenticChatOptions {
   repoMapManager?: RepoMapManager;
   effort?: EffortLevel;            // low | medium | high | max
   agentId?: string;                // Agent to use
+  // Loop / mistake steering (issue #1692)
+  onConsecutiveMistakeLimitReached?: (
+    reason: ConsecutiveMistakeReason
+  ) => 'continue' | 'stop' | Promise<'continue' | 'stop'>;
+  loopLimit?: number;              // Default: 5 (identical tool calls)
+  mistakeLimit?: number;           // Default: 6 (consecutive tool failures)
+}
+
+interface ConsecutiveMistakeReason {
+  kind: 'loop' | 'mistake';
+  consecutiveCount: number;
+  toolName: string;                // Tripping tool (loop) or most recent failing tool (mistake)
 }
 ```
+
+### Loop and Mistake Steering
+
+When the agent gets stuck (repeats the same tool call, or emits a rapid burst of failures) the loop invokes `onConsecutiveMistakeLimitReached` if supplied. The callback decides whether to stop the run or inject a steering message and continue:
+
+```typescript
+import { agenticChat } from './core/agenticChat.js';
+import type { ConsecutiveMistakeReason } from './core/agenticChat.js';
+
+const result = await agenticChat('refactor the auth module', {
+  maxIterations: 50,
+  loopLimit: 5,          // trip after 5 identical tool calls (default)
+  mistakeLimit: 6,       // trip after 6 consecutive failures (default)
+  onConsecutiveMistakeLimitReached: async (reason: ConsecutiveMistakeReason) => {
+    if (reason.kind === 'loop') {
+      // Same tool called with same args N times in a row.
+      return 'continue'; // inject steering, let the model try a different approach
+    }
+    // reason.kind === 'mistake' — N consecutive tool failures.
+    return 'stop';       // give up; caller should surface the failure to the user
+  },
+});
+```
+
+Semantics:
+
+- Omit the callback to get the default behaviour: on trip, stop with a synthetic `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.` assistant message.
+- Returning `'continue'` resets both detectors and appends a `<system-reminder>` preamble plus the guidance `The previous approach is stuck. Try a different method, simpler steps, or ask me for help.` as a user message before the next iteration.
+- A throwing callback is treated as `'stop'` and logged via `logger.warn`. The run does not crash.
+- `loopLimit` and `mistakeLimit` constructors reject non-integer or `< 2` values (`limit must be an integer >= 2`).
+- The `question` tool is excluded from loop fingerprinting so repeated user prompts do not trip the detector.
+
+`ConsecutiveMistakeReason` is also re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for consumers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
 
 ### Progress Events
 

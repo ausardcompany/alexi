@@ -14,6 +14,7 @@ import * as path from 'path';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
 import { getIndexingExtensions } from '../../config/userConfig.js';
 import { mergeExtensionSet, mergeIncludePattern } from './includePattern.js';
+import { isUnsafeWorkspaceRoot, UNSAFE_WORKSPACE_ROOT_MESSAGE } from '../../utils/filesystem.js';
 
 // Hard cap on matches/symbols returned per query, to prevent context-window
 // blow-ups on broad queries over large repos. Aligns with grep.ts (1000) but
@@ -382,6 +383,18 @@ When independent reads, searches, or edits are also needed, emit those tool call
       : context.workdir;
 
     try {
+      // Refuse to enumerate the user's home directory or a filesystem
+      // root. Same rationale as `glob.ts`: walking $HOME or `/` triggers
+      // catastrophic memory exhaustion (kilocode #13960 / #13930 /
+      // #13905). Guarded on the resolved `searchPath` so an explicit
+      // `path:` override cannot bypass the check.
+      if (isUnsafeWorkspaceRoot(searchPath)) {
+        return {
+          success: false,
+          error: UNSAFE_WORKSPACE_ROOT_MESSAGE,
+        };
+      }
+
       // Merge configured indexing extensions (global user config plus
       // project-local `.alexi/config.json` and `.alexi/extensions`) into
       // both the built-in CODE_EXTENSIONS whitelist and the caller's

@@ -23,6 +23,7 @@ import { getConfigDefaultAgent } from '../../config/userConfig.js';
 import { getPermissionManager } from '../../permission/index.js';
 import { PermissionRequested, PermissionResponse } from '../../bus/index.js';
 import { isAbortError } from '../../core/streamingOrchestrator.js';
+import { createMistakeLimitPrompt } from '../utils/mistakeLimitPrompt.js';
 
 interface AgentOptions {
   message?: string;
@@ -320,6 +321,19 @@ export function registerAgentCommand(program: Command): void {
           workdir,
         });
 
+        // Wire the loop / mistake detector user-steering prompt (issue
+        // #1692). Previously, tripping the detector stopped the run
+        // silently with the SDK default; users saw the agent "randomly
+        // stop" mid-task with no explanation. The callback below routes
+        // the decision through a TTY prompt (interactive), auto-continues
+        // under --yolo, and prints an actionable stderr line + stops in
+        // headless / CI runs so scripts fail loudly instead of hanging.
+        const onConsecutiveMistakeLimitReached = createMistakeLimitPrompt({
+          yolo: Boolean(opts.yolo || opts.dangerouslySkipPermissions),
+          quiet: Boolean(opts.quiet),
+          signal: abortController.signal,
+        });
+
         const res = await agenticChat(message, {
           modelOverride: opts.model,
           autoRoute: opts.autoRoute,
@@ -335,6 +349,7 @@ export function registerAgentCommand(program: Command): void {
           effort,
           agentId,
           signal: abortController.signal,
+          onConsecutiveMistakeLimitReached,
         });
 
         // Flush any pending auto-commits

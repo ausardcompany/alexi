@@ -235,4 +235,58 @@ describe('Glob Tool', () => {
       expect(globTool.description.length).toBeGreaterThan(0);
     });
   });
+
+  describe('home-directory / filesystem-root guard', () => {
+    // Kilocode #13960: walking $HOME or `/` triggers catastrophic memory
+    // exhaustion. The guard must refuse those directories with a clear
+    // error rather than attempting to index.
+    let fakeHome: string;
+    const originalTestHome = process.env.ALEXI_TEST_HOME;
+
+    beforeEach(async () => {
+      fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-home-guard-'));
+      process.env.ALEXI_TEST_HOME = fakeHome;
+    });
+
+    afterEach(async () => {
+      if (originalTestHome === undefined) {
+        delete process.env.ALEXI_TEST_HOME;
+      } else {
+        process.env.ALEXI_TEST_HOME = originalTestHome;
+      }
+      await fs.rm(fakeHome, { recursive: true, force: true });
+    });
+
+    it('refuses to enumerate when workdir is the user home directory', async () => {
+      const result = await globTool.execute({ pattern: '*.ts' }, { workdir: fakeHome });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('home directory');
+      expect(result.error).toContain('OOM');
+    });
+
+    it('refuses to enumerate when workdir is the filesystem root', async () => {
+      if (process.platform === 'win32') {
+        return;
+      }
+      const result = await globTool.execute({ pattern: '*.ts' }, { workdir: '/' });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('filesystem root');
+    });
+
+    it('refuses when an explicit `path:` argument resolves to home', async () => {
+      const result = await globTool.execute(
+        { pattern: '*.ts', path: fakeHome },
+        { workdir: tempDir }
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('home directory');
+    });
+
+    it('allows normal project directories', async () => {
+      await fs.writeFile(path.join(tempDir, 'safe.ts'), 'content');
+      const result = await globTool.execute({ pattern: '*.ts' }, { workdir: tempDir });
+      expect(result.success).toBe(true);
+      expect(result.data?.matches).toContain('safe.ts');
+    });
+  });
 });

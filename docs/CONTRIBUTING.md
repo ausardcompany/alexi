@@ -651,6 +651,122 @@ Follow the same shape when adding new transforms: keep the module pure,
 export both the callable and its input types, and avoid globals so parallel
 tests do not need setup/teardown.
 
+### Per-call detectors (preferred over module-scoped counters)
+
+When a feature needs to observe a rolling condition across an agent's tool
+loop (repeated identical calls, consecutive failures, hook rejections),
+instantiate the detector **inside** the loop function that owns the run,
+not at module scope. The canonical current example is issue #1692 (loop /
+mistake steering), added 2026-09-09:
+
+- `src/core/loopDetector.ts` — 102-line `LoopDetector` class with
+  `record(toolName, argumentsJson)`, `hasTripped()`, `reset()`,
+  `getConsecutiveCount()`, `getLimit()`. Fingerprints tool calls via a
+  stable JSON stringify with sorted keys so semantically identical calls
+  fingerprint the same; falls back to the raw string when the arguments
+  are not valid JSON.
+- `src/core/mistakeTracker.ts` — 65-line `MistakeTracker` class with the
+  same surface but a boolean `record(success)`: a single success resets
+  the counter, mirroring `ErrorBackoff.recordSuccess`.
+- Both classes reject `limit < 2` and non-integer limits in the
+  constructor with `limit must be an integer >= 2` — validate at
+  construction rather than in `record()` so the failure surfaces at the
+  call site.
+- Instantiation lives in `src/core/agenticChat.ts:592-593` inside the
+  main loop function, so long-running processes (a TUI session that
+  reuses the same `sessionManager`) do NOT carry counters across
+  independent user turns.
+
+Rules that make this pattern work:
+
+1. **The detector has no I/O.** It records observations and exposes trip
+   state. Deciding what to do on a trip belongs to the caller (in our
+   case, `agenticChat` delegating to `onConsecutiveMistakeLimitReached`).
+   This keeps the class trivially unit-testable — see
+   `src/core/__tests__/loopDetector.test.ts` and
+   `src/core/__tests__/mistakeTracker.test.ts` (17 pure cases combined,
+   no `vi.mock`, no test doubles).
+2. **State is per-instance, not module-scoped.** Do not lift a counter
+   to a module-level `let`; a stray unit test that forgets to reset it
+   will poison every following test in the same worker.
+3. **Expose a `reset()` method** even when the caller could re-instantiate
+   — after a `'continue'` steering decision the same detector should
+   pick up cleanly on the next iteration without re-triggering.
+4. **Skip observations that are semantically not part of the tracked
+   condition.** The loop detector deliberately does NOT fingerprint the
+   `question` tool (`src/core/agenticChat.ts:937`) because repeated user
+   prompts are not a stuck loop.
+
+When callers can decide what to do on a trip (continue with steering vs.
+stop the run), expose an optional callback with a discriminated-union
+payload rather than a boolean flag. `ConsecutiveMistakeReason` in
+`src/core/agenticChat.ts` (`{ kind: 'loop' | 'mistake', consecutiveCount,
+toolName }`) is the current canonical shape and is re-exported from
+`src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` so
+callers dispatching through those entry points can reference the same
+type. A throwing callback MUST be caught and treated as the conservative
+default (`'stop'` in this case, logged via `logger.warn`) so a hung UI
+hook cannot crash a headless agent run.
+
+### Keep detection, callback, and UI in three layers
+
+The mistake-limit surface is the canonical example of this repo's rule
+that detection, decision, and user interaction are three distinct
+concerns and MUST live in three distinct modules:
+
+1. **Detection** — `LoopDetector` / `MistakeTracker` (`src/core/loopDetector.ts`,
+   `src/core/mistakeTracker.ts`): pure state machines, no I/O, no
+   knowledge of `agenticChat`, unit-tested in isolation.
+2. **Orchestration** — `agenticChat` (`src/core/agenticChat.ts`): owns the
+   per-call instantiation of the detectors, the synchronisation point
+   after each iteration's tool results, the callback contract
+   (`onConsecutiveMistakeLimitReached`), and the actual
+   steering-message injection (`<system-reminder>...</system-reminder>` +
+   the fixed guidance string) when the callback returns `'continue'`.
+   Never runs interactive I/O.
+3. **User interaction** — `createMistakeLimitPrompt`
+   (`src/cli/utils/mistakeLimitPrompt.ts`): builds a
+   `MistakeLimitCallback` that decides whether to prompt the user, print
+   a headless explanation, or auto-continue under `--yolo`. Owns the
+   `readline` handle, the `AbortSignal` wiring, and the exact stderr
+   phrasing. Injectable I/O (`stdin` / `stdout` / `stderr` / `isTTY`) so
+   tests never touch the real process handles.
+
+When adding a new host (a TUI panel, an HTTP endpoint, an editor plugin),
+implement your own `MistakeLimitCallback` and pass it as
+`onConsecutiveMistakeLimitReached`. Do NOT import from
+`src/cli/utils/mistakeLimitPrompt.ts` and try to reuse its `readline`
+plumbing — the CLI module is deliberately CLI-only. The shared surface
+between layers is the `ConsecutiveMistakeReason` payload and the
+`'continue' | 'stop'` decision, nothing else.
+
+Rules that fell out of the mistake-limit implementation and generalise:
+
+- **The decision function must not open I/O it does not use.** The yolo
+  branch of `createMistakeLimitPrompt` returns before touching
+  `readline`, and the test suite asserts
+  `stdin.listenerCount('data') === 0` as a regression barrier. When
+  writing a new callback host, arrange the branches so cheap deterministic
+  outcomes (yolo, headless, quiet) short-circuit before any I/O handle is
+  opened.
+- **Empty input defaults to the safer answer.** `'stop'` is the safer
+  answer for a mistake-limit trip because it stops burning budget on a
+  clearly-broken run. For other callback surfaces, pick the conservative
+  default at the design stage and pin it with a test case whose input is
+  `''` (a bare Enter or EOF).
+- **`AbortSignal` MUST close the I/O handle.** Any callback that opens a
+  `readline` (or any long-lived resource) must attach an `abort` listener
+  that closes it, register the listener before awaiting user input, and
+  remove it in a `finally` block. This keeps a Ctrl+C from leaking event
+  loop resources and stops the callback from wedging the surrounding
+  `agenticChat` teardown.
+- **Injectable I/O is a testing requirement, not a nice-to-have.** Any
+  module that talks to `process.stdin` / `process.stdout` /
+  `process.stderr` in production MUST expose those handles as options so
+  tests can substitute a `Sink extends EventEmitter` writable and a fake
+  stdin without patching the real process — see
+  `tests/cli/utils/mistakeLimitPrompt.test.ts` for the canonical pattern.
+
 ### Breaking circular ESM imports (registry pattern preferred over `require`)
 
 When two modules need to reference each other and one direction has to run
@@ -812,6 +928,20 @@ temp directory, and restores every variable (deleting when previously unset)
 plus `fs.rmSync(tmpHome, { recursive: true, force: true })` in `afterEach`.
 This keeps parallel test workers from racing on the real user config and
 guarantees a test can never accidentally dispatch a real desktop notification.
+
+The home / filesystem-root indexing guard (`src/core/kilocode/fff.ts`,
+`src/utils/filesystem.ts`) uses a dedicated `ALEXI_TEST_HOME` env var
+rather than reusing `HOME`. Rationale: `HOME` is read by unrelated
+modules (notifications, rules discovery, `~/.alexi/config.json`), so
+mutating it globally to test the indexing guard would leak into every
+other subsystem that reads the same variable. `ALEXI_TEST_HOME` is
+checked only by `allowed()` in the indexing guard, so tests can pin the
+home anchor without touching real user state. Use the same
+snapshot-and-restore pattern as above, and pair the env var with a
+`fs.mkdtemp`-created fake-home directory so the fixture is fully
+disposable. See
+[`docs/TESTING.md#testing-the-home--filesystem-root-indexing-guard`](./TESTING.md#testing-the-home--filesystem-root-indexing-guard)
+for the reference regression suite.
 
 ### Binary-optional native dependencies (cached dynamic import)
 

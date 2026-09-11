@@ -318,6 +318,144 @@ describe('Write Tool', () => {
 | `task_status` | `tests/tool/tools/background-tasks.test.ts` | 3+ cases |
 | `skill` (description guard) | `src/tool/skill.test.ts` | 1 case |
 
+### Testing the home / filesystem-root indexing guard
+
+The `glob` and `codesearch` tools refuse to enumerate the user's home directory or a filesystem root (`/`, `C:\`, UNC share roots) — walking those roots is a documented OOM trigger (kilocode `#13960` / `#13930` / `#13905`). The guard lives in `src/utils/filesystem.ts` as `isUnsafeWorkspaceRoot(workdir, home?)` and shares the canonical error `UNSAFE_WORKSPACE_ROOT_MESSAGE`. Tests exercise the guard at three layers.
+
+#### 1. Predicate tests (`tests/utils/filesystem.test.ts`)
+
+Pure-function tests against `isUnsafeWorkspaceRoot`. The load-bearing invariant is that tests MUST pin the home anchor with the `ALEXI_TEST_HOME` env var (or the explicit `home` argument) rather than mutating `process.env.HOME`, because `HOME` is shared with unrelated modules (`notifications`, `rulesDiscovery`) and parallel workers.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+
+import {
+  isUnsafeWorkspaceRoot,
+  UNSAFE_WORKSPACE_ROOT_MESSAGE,
+} from '../../src/utils/filesystem.js';
+
+describe('isUnsafeWorkspaceRoot', () => {
+  let tempDir: string;
+  let fakeHome: string;
+  const originalTestHome = process.env.ALEXI_TEST_HOME;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'fs-guard-test-'));
+    fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'fs-guard-home-'));
+    // Pin the home anchor via ALEXI_TEST_HOME so the guard's underlying
+    // `allowed()` predicate in src/core/kilocode/fff.ts sees our fake
+    // home without touching the real HOME.
+    process.env.ALEXI_TEST_HOME = fakeHome;
+  });
+
+  afterEach(async () => {
+    if (originalTestHome === undefined) {
+      delete process.env.ALEXI_TEST_HOME;
+    } else {
+      process.env.ALEXI_TEST_HOME = originalTestHome;
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
+    await fs.rm(fakeHome, { recursive: true, force: true });
+  });
+
+  it('refuses the user home directory', () => {
+    expect(isUnsafeWorkspaceRoot(fakeHome)).toBe(true);
+  });
+
+  it('refuses the POSIX filesystem root', () => {
+    // Skip on Windows; the check is platform-aware and Windows roots use
+    // a different shape (`C:\`, `\\?\UNC\...`).
+    if (process.platform !== 'win32') {
+      expect(isUnsafeWorkspaceRoot('/')).toBe(true);
+    }
+  });
+
+  it('allows a subdirectory of the home directory', async () => {
+    const projectInsideHome = path.join(fakeHome, 'my-project');
+    await fs.mkdir(projectInsideHome);
+    expect(isUnsafeWorkspaceRoot(projectInsideHome)).toBe(false);
+  });
+
+  it('respects the explicit home override argument', () => {
+    expect(isUnsafeWorkspaceRoot(tempDir, tempDir)).toBe(true);
+    expect(isUnsafeWorkspaceRoot(tempDir, fakeHome)).toBe(false);
+  });
+
+  it('exposes a canonical, user-facing error message', () => {
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('home directory');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('filesystem root');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('OOM');
+    expect(UNSAFE_WORKSPACE_ROOT_MESSAGE).toContain('cd into a project directory');
+  });
+});
+```
+
+#### 2. Tool guard tests (`tests/tool/tools/glob.test.ts`, `tests/tool/tools/codesearch.guard.test.ts`)
+
+End-to-end tests that drive `globTool.execute` / `codesearchTool.execute` and assert on `result.error`. The suite must cover four cases per tool:
+
+1. **`workdir` is `fakeHome`** — refuses with an error containing `home directory` and `OOM`.
+2. **`workdir` is `/`** — refuses with an error containing `filesystem root` (skip on Windows).
+3. **Explicit `path:` argument resolves to `fakeHome` even from a safe `workdir`** — the guard runs on the resolved `searchPath`, not on `context.workdir`, so an LLM cannot bypass by cd'ing out and passing home back through `path:`.
+4. **Normal project directory** — returns `success: true` and finds fixture files.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+import { globTool } from '../../../src/tool/tools/glob.js';
+
+describe('home-directory / filesystem-root guard', () => {
+  let fakeHome: string;
+  let tempDir: string;
+  const originalTestHome = process.env.ALEXI_TEST_HOME;
+
+  beforeEach(async () => {
+    fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-home-guard-'));
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-workdir-'));
+    process.env.ALEXI_TEST_HOME = fakeHome;
+  });
+
+  afterEach(async () => {
+    if (originalTestHome === undefined) {
+      delete process.env.ALEXI_TEST_HOME;
+    } else {
+      process.env.ALEXI_TEST_HOME = originalTestHome;
+    }
+    await fs.rm(fakeHome, { recursive: true, force: true });
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('refuses to enumerate when workdir is the user home directory', async () => {
+    const result = await globTool.execute({ pattern: '*.ts' }, { workdir: fakeHome });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('home directory');
+    expect(result.error).toContain('OOM');
+  });
+
+  it('refuses when an explicit `path:` argument resolves to home', async () => {
+    const result = await globTool.execute(
+      { pattern: '*.ts', path: fakeHome },
+      { workdir: tempDir }
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('home directory');
+  });
+});
+```
+
+Key patterns:
+
+1. **Fake home via `fs.mkdtemp`, not `process.env.HOME`.** Mutating `HOME` leaks to every other module that reads it (`~/.alexi/config.json`, rules discovery, notifications). `ALEXI_TEST_HOME` is a dedicated escape hatch checked only by `src/core/kilocode/fff.ts:allowed()`, so it isolates the guard's home anchor.
+2. **Always snapshot AND restore `ALEXI_TEST_HOME`.** The variable is normally unset in production; a test that assigns it without restoring will make every subsequent test in the same worker see the fake path. Delete when previously unset, otherwise reassign the original.
+3. **Assert on substrings from `UNSAFE_WORKSPACE_ROOT_MESSAGE`, not the exact string.** The canonical message may gain platform-specific hints over time; asserting on `home directory` / `filesystem root` / `OOM` pins the classification without coupling to the exact copy.
+4. **Skip the POSIX-root case on Windows.** The filesystem-root check is platform-aware — `/` is not a Windows root — so gate the `workdir: '/'` case with `if (process.platform === 'win32') { return; }`.
+5. **Cover the `path:` override, not just `workdir`.** The guard is applied to the *resolved* `searchPath` inside each tool, so a test that only exercises `context.workdir` will miss a regression where the guard is moved earlier in the pipeline and the `path:` override bypass reappears.
+
 ### Testing Bash Tool Shell-Type Reporting
 
 The `bash` tool records the detected shell type on every result via
@@ -3994,3 +4132,151 @@ await vi.advanceTimersByTimeAsync(30_500);
 ```
 
 The same caveat applies to any `fs/promises` export (`readdir`, `stat`, `readFile`, `writeFile`, ...) and to other Node builtin namespaces that expose non-configurable accessors (`node:child_process`, `node:os`, `node:path`). Route the stub through a caller-supplied seam whenever the test needs to intercept the call.
+
+### Testing the loop / mistake steering path in `agenticChat` (issue #1692)
+
+Coverage lives in three files:
+
+- `src/core/__tests__/loopDetector.test.ts` — pure unit tests for `LoopDetector` (10 cases). No `vi.mock`, no test doubles; each case constructs a detector inline, calls `record()` with hand-crafted `(toolName, argumentsJson)` tuples, and asserts on `hasTripped()` / `getConsecutiveCount()` / `getLimit()`. Cover: below-limit no-trip; trips exactly at the limit; default limit of 5; tool-name change resets the counter; argument change resets the counter; semantically equivalent JSON with reordered keys fingerprints identically; invalid JSON falls back to the raw-string fingerprint; `reset()` clears state so the next call starts fresh; `new LoopDetector({ limit: 1 })` throws `/limit must be an integer >= 2/`; a non-integer limit (`3.5`) throws the same message.
+- `src/core/__tests__/mistakeTracker.test.ts` — pure unit tests for `MistakeTracker` (7 cases). Same shape as above. Cover: below-limit no-trip; trips exactly at the limit; default limit of 6; a single `record(true)` resets the consecutive counter; `reset()` clears state; `limit: 1` and `limit: 2.5` both throw `/limit must be an integer >= 2/`.
+- `src/core/__tests__/agenticChat.test.ts` — integration tests under the `loop / mistake steering` describe block (8 cases). These reuse the suite's standard mocks: `mockProvider.complete` scripted with `mockResolvedValueOnce(...)` for each provider turn, `mockToolRegistry.list` and `mockToolRegistry.get` scripted with lightweight tool doubles built by the local `makeTool(name, executeFn)` helper, and `toolCallResponse(name, args, id)` for the `CompletionResult` shape carrying a single tool call.
+
+Pattern for a stop-path test (no callback, loop trips at 5 identical calls):
+
+```typescript
+// src/core/__tests__/agenticChat.test.ts (excerpt)
+const readTool = makeTool(
+  'read',
+  vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+);
+mockToolRegistry.list.mockReturnValue([readTool]);
+mockToolRegistry.get.mockImplementation((n) => (n === 'read' ? readTool : undefined));
+
+// Model insists on the same call over and over.
+for (let i = 0; i < 10; i++) {
+  mockProvider.complete.mockResolvedValueOnce(
+    toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+  );
+}
+
+const result = await agenticChat('go', { maxIterations: 20 });
+
+expect(result.text).toMatch(/Loop Detector/);
+expect(result.text).toContain("'read'");
+expect(readTool.execute).toHaveBeenCalledTimes(5); // trips at 5, not 6
+```
+
+Pattern for a `'continue'` steering test (callback returns `'continue'`, model gets the hint on turn 6):
+
+```typescript
+for (let i = 0; i < 5; i++) {
+  mockProvider.complete.mockResolvedValueOnce(
+    toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+  );
+}
+mockProvider.complete.mockResolvedValueOnce({
+  text: 'Different approach: done.',
+  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+});
+const callback = vi.fn().mockResolvedValue('continue' as const);
+
+const result = await agenticChat('go', {
+  maxIterations: 20,
+  onConsecutiveMistakeLimitReached: callback,
+});
+
+expect(result.text).toBe('Different approach: done.');
+// Steering message must be present as a user message on the FINAL provider call.
+const [messagesOnFinalCall] = mockProvider.complete.mock.calls[5];
+const steeringMsg = messagesOnFinalCall.find(
+  (m) => m.role === 'user' && m.content.includes('Loop detected')
+);
+expect(steeringMsg?.content).toContain('The previous approach is stuck');
+```
+
+Regression barriers the suite pins explicitly:
+
+1. **Loop trips at exactly `limit` calls**, not `limit + 1` — `expect(readTool.execute).toHaveBeenCalledTimes(5)` guards off-by-one.
+2. **Mistake detector must NOT overlap with loop detector** — the failure-burst test uses `{"cmd":"run-${i}"}` (unique args per call) so the loop fingerprint never repeats, and asserts `result.text` matches `/Mistake Tracker/` while explicitly asserting it does NOT match `/Loop Detector/`.
+3. **Counter reset on success** — the interleaved test scripts `fail, fail, fail, SUCCESS, fail, fail, fail, done` and asserts the callback was never invoked. This pins the `record(true) => this.consecutive = 0` contract.
+4. **Custom `loopLimit` is honoured end-to-end** — a run with `loopLimit: 3` trips on the 3rd identical call and passes `consecutiveCount: 3` to the callback.
+5. **A throwing callback is treated as `'stop'`** — `vi.fn().mockRejectedValue(new Error('user hung up'))` is passed as the callback; the test asserts `result.text` still matches `/Loop Detector/` and the run does not throw.
+
+When adding tests here, DO NOT instantiate `LoopDetector` / `MistakeTracker` directly inside the `agenticChat` suite — the whole point of the integration layer is that the detectors are per-call state owned by `agenticChat`. Drive them through the public `agenticChat(prompt, options)` surface and script the provider turns to reproduce the specific tool-call sequence you want to test.
+
+### CLI-side mistake-limit prompt (`tests/cli/utils/mistakeLimitPrompt.test.ts`)
+
+The `alexi agent` command wires the `agenticChat` `onConsecutiveMistakeLimitReached` callback through `createMistakeLimitPrompt(...)` (`src/cli/utils/mistakeLimitPrompt.ts`). The callback's decision matrix is a critical part of the user-visible behaviour, so it has its own 11-case suite that runs independently of the `agenticChat` integration tests. The suite must NOT touch the real `process.stdin` / `process.stdout` / `process.stderr` — doing so would leak between test workers and hang under CI where stdin is a closed pipe. Follow this pattern:
+
+```typescript
+import { EventEmitter } from 'node:events';
+import { createMistakeLimitPrompt, describeReason } from '../../../src/cli/utils/mistakeLimitPrompt.js';
+
+// Minimal writable that captures every write. readline attaches listeners
+// to its output stream, so the sink must be a real EventEmitter — a bare
+// object with `write` fails during `readline.createInterface(...)`.
+class Sink extends EventEmitter {
+  buffer: string[] = [];
+  isTTY?: boolean;
+  write(chunk: string | Uint8Array): boolean {
+    this.buffer.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  }
+  end(): this { return this; }
+}
+
+// Fake stdin readline can accept without a full Readable implementation.
+class FakeStdin extends EventEmitter {
+  isTTY = true;
+  readable = true;
+  setEncoding(): this { return this; }
+  pause(): this { return this; }
+  resume(): this { return this; }
+  push(): boolean { return true; }
+  read(): null { return null; }
+}
+```
+
+Wiring the fake I/O through `createMistakeLimitPrompt`:
+
+```typescript
+const stdin = new FakeStdin();
+const stdout = new Sink();
+const stderr = new Sink();
+stdin.isTTY = true;
+stdout.isTTY = true;
+
+const callback = createMistakeLimitPrompt({
+  yolo: false,
+  quiet: false,
+  signal: new AbortController().signal,
+  stdin: stdin as unknown as NodeJS.ReadableStream & { isTTY?: boolean },
+  stdout: stdout as unknown as NodeJS.WritableStream & { isTTY?: boolean },
+  stderr: stderr as unknown as NodeJS.WritableStream,
+  isTTY: true,
+});
+
+// Simulate a user response: defer with setImmediate so the callback has
+// time to attach its readline 'question' handler before data arrives.
+setImmediate(() => stdin.emit('data', Buffer.from('y\n')));
+
+const decision = await callback({
+  kind: 'loop',
+  consecutiveCount: 5,
+  toolName: 'read',
+});
+expect(decision).toBe('continue');
+expect(stderr.buffer.join('')).toContain('Continuing with steering guidance');
+```
+
+Regression barriers pinned by the suite (do not remove without adding an equivalent test elsewhere):
+
+1. **Yolo never opens readline.** `expect(stdin.listenerCount('data')).toBe(0)` after a yolo run — otherwise a headless CI run under `--yolo` could still hang on stdin if the branch order regressed.
+2. **Non-TTY and quiet paths must not prompt.** Both must exit with `'stop'` and print the explanation to stderr; asserting `stdin.listenerCount('data') === 0` catches an accidental fallthrough into the readline branch.
+3. **Empty input is `'stop'`.** The safer default when a user just presses Enter — pinned via `withFakeIO({ answer: '', isTTY: true })`.
+4. **Case- and whitespace-insensitive `y` matching.** `y`, `yes`, `YES`, ` y ` all resolve to `'continue'`; anything else (`n`, `quit`, empty, EOF) resolves to `'stop'`.
+5. **Pre-aborted signal short-circuits.** A signal that is already aborted when the callback is invoked returns `'stop'` immediately and never opens readline (`stdin.listenerCount('data') === 0`).
+6. **Signal fires mid-prompt.** The pending promise resolves to `'stop'` when `controller.abort()` fires after the readline handle is attached; the `abort` listener closes the interface so the surrounding run tears down cleanly.
+7. **`describeReason` covers both trip kinds.** The pure formatter's output is asserted for both `kind: 'loop'` (contains `"same tool ('<name>')"`, `"N times in a row"`, `"loop"`) and `kind: 'mistake'` (contains `"N consecutive tool failures"`, `"last: '<name>'"`, `"flailing"`).
+
+When extending this suite, keep every case restricted to the callback surface only. The `agenticChat` steering-message injection is covered by the integration suite above and should NOT be re-tested here — mixing the two layers is what the `mistakeLimitPrompt` module was extracted to prevent.
