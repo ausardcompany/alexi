@@ -67,6 +67,24 @@ export interface MigrationDb {
 }
 
 /**
+ * Classify a migration id as belonging to the shared agent board feature
+ * family.
+ *
+ * Ports upstream kilocode fix — the board-detector regex was widened so
+ * the new `kilocode_board_reset` migration (2026-09-03) is grouped with
+ * the original `kilocode_board` migration for tooling that filters or
+ * gates the board feature by migration name. Matches:
+ *
+ *   - `kilocode_board`
+ *   - `kilocode_board_reset`
+ *   - `<timestamp>_kilocode_board`
+ *   - `<timestamp>_kilocode_board_reset`
+ */
+export function isBoardMigration(name: string): boolean {
+  return /(?:^|_)kilocode_board(?:_reset)?$/.test(name);
+}
+
+/**
  * Apply the given migrations against `db` in order, skipping those already
  * recorded. Safe to run concurrently in multiple processes: each
  * migration is applied inside an IMMEDIATE transaction and re-checked
