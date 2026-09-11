@@ -1659,6 +1659,60 @@ export function mergeProviderModels<T>(
 
 The structural `ModelInfoLike` type is deliberately loose so callers using either the SAP orchestration model records or a custom `ModelInfo` shape can both use these helpers without a coercion.
 
+## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
+
+Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone helper that classifies Amazon Bedrock model IDs and applies the correct cross-region prefix policy. Alexi has no direct Bedrock provider — every LLM call still goes through SAP AI Core Orchestration — but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments (see the `aicore-bedrock-*` references in `src/providers/transform.ts`). This helper is exported so any future direct Bedrock integration or SAP AI Core deployment mapping code can use a single, tested classifier instead of re-deriving the prefix rules.
+
+### Signature
+
+```typescript
+export function resolveBedrockModelID(
+  modelID: string,
+  region: string | undefined
+): string;
+```
+
+- `modelID` — the requested Bedrock model id: short form (`anthropic.claude-3-5-sonnet-20241022-v2:0`), cross-region form (`us.anthropic.claude-3-5-sonnet-...`), or ARN (`arn:aws:bedrock:us-east-1:123456789012:inference-profile/...`).
+- `region` — AWS region such as `us-east-1`, `eu-west-1`. Defaults to `us-east-1` when `undefined`.
+
+The function is idempotent — passing an already-resolved id yields the same id back.
+
+### Resolution rules
+
+1. **ARN passthrough.** IDs starting with `arn:` are pre-resolved and returned verbatim. Injecting a `us.` / `eu.` / ... prefix in front of an ARN produces a malformed ARN string that Bedrock rejects.
+2. **Explicit prefix respected.** IDs already carrying a cross-region prefix (`global.`, `us.`, `eu.`, `jp.`, `apac.`, `au.`) are returned verbatim.
+3. **`us-*` (non-GovCloud) auto-prefixing.** In non-GovCloud US regions, the `us.` prefix is prepended when the ID contains any of these family bases:
+   - `nova-micro`, `nova-lite`, `nova-pro`, `nova-premier`, `nova-2` — Amazon Nova family.
+   - `claude` — Anthropic Claude models (Bedrock-hosted).
+   - `deepseek.r1` or `deepseek-r1` — DeepSeek R1 requires cross-region.
+   Note: `deepseek.v3.2` and other newer DeepSeek variants are region-local and MUST NOT be prefixed. The family-base substring match is chosen so we don't accidentally hit unrelated tokens.
+4. **`us-gov-*`.** No auto-prefixing — Bedrock GovCloud uses different inference-profile ARNs, so callers must handle those explicitly.
+5. **All other regions.** No auto-prefixing. Callers wanting cross-region inference must set the prefix explicitly (handled by rule 2).
+
+### Example
+
+```typescript
+import { resolveBedrockModelID } from './providers/bedrock-model-id.js';
+
+resolveBedrockModelID('anthropic.claude-3-5-sonnet-20241022-v2:0', 'us-east-1');
+// → 'us.anthropic.claude-3-5-sonnet-20241022-v2:0'
+
+resolveBedrockModelID('anthropic.claude-3-5-sonnet-20241022-v2:0', 'eu-west-1');
+// → 'anthropic.claude-3-5-sonnet-20241022-v2:0'
+
+resolveBedrockModelID('us.anthropic.claude-3-5-sonnet-20241022-v2:0', 'us-east-1');
+// → 'us.anthropic.claude-3-5-sonnet-20241022-v2:0' (idempotent)
+
+resolveBedrockModelID('deepseek.v3.2', 'us-east-1');
+// → 'deepseek.v3.2' (region-local, no prefix)
+
+resolveBedrockModelID('deepseek.r1', 'us-east-1');
+// → 'us.deepseek.r1' (r1 requires cross-region)
+
+resolveBedrockModelID('arn:aws:bedrock:us-east-1:123456789012:inference-profile/x', 'us-east-1');
+// → 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/x' (ARN passthrough)
+```
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

@@ -2628,17 +2628,25 @@ Behaviour:
 - Otherwise calls `BoardStore.read(boardId, { since, limit: params.limit ?? 50 })`, then `BoardStore.acknowledgeReads(boardId, context.sessionId, messages.map(m => m.id))` to suppress stale-banner re-surfacing.
 - Returns `{ success: true, data: { messages, boardId }, metadata: { count, boardId } }`.
 
-**`kilo_board_write`** — `src/tool/tools/board.ts:101`
+**`kilo_board_write`** — `src/tool/tools/board.ts:129`
 
 ```typescript
 const BoardWriteParamsSchema = z.object({
   content: z.string().min(1).max(4000)
     .describe('Message body to post to the shared board (1-4000 chars)'),
+  // Added 2026-09-11 (1.22.17, ports kilocode 7febec58f).
+  recipient: z.string().optional()
+    .describe(
+      'Optional session id of a specific peer subagent this message targets. ' +
+        'When set, the tool warns if that subagent is stopped or does not exist.'
+    ),
 });
 
 interface BoardWriteResult {
   messageId: string;
   boardId: string;
+  /** Delivery hint. `'no-recipient'` means the target subagent is stopped or missing. */
+  deliveryStatus?: 'delivered' | 'no-recipient';
 }
 ```
 
@@ -2646,8 +2654,44 @@ Behaviour:
 
 - Resolves `boardId` the same way.
 - When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+- When `recipient` is set, the tool scans the most recent 100 messages on the board for any activity from the target session id. If none is found, `deliveryStatus` is set to `'no-recipient'` and a `hint` is attached (`Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`). The message is still written — the parent orchestrator can decide how to react.
 - Otherwise calls `BoardStore.write(boardId, { sessionID: context.sessionId ?? 'unknown', author: context.agentName ?? 'agent', content })`.
-- Returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId } }`.
+- Returns `{ success: true, data: { messageId, boardId, deliveryStatus }, metadata: { messageId, boardId, deliveryStatus }, hint? }`.
+
+### `BoardStore.reset(boardId)` (kilocode PR #13782, 1.22.17)
+
+```typescript
+/**
+ * Hide every message currently on the board from future `read()` calls
+ * without deleting rows. Idempotent — repeat calls push the watermark
+ * forward. Stored as Unix milliseconds on `kilo_board.cleared_seq`.
+ */
+BoardStore.reset(boardId: string): Promise<void>;
+```
+
+`read(boardId, opts)` now consults `cleared_seq` and filters out rows whose `Date.parse(createdAt)` is `<=` the watermark. Rows with an unparseable `createdAt` are kept (fail-open) so a bad timestamp cannot permanently hide a message. When `cleared_seq <= 0` the filter path short-circuits with no per-row overhead.
+
+### Unified enablement predicate (kilocode PR #14013, 1.22.17)
+
+```typescript
+// src/kilocode/board/enabled.ts
+export function isBoardEnabled(experimentalConfigFlag?: boolean): boolean;
+```
+
+Returns `true` if ANY of:
+
+1. `process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD` matches `1|true|yes|on` (case-insensitive).
+2. The installation channel is `dev|beta|local` and the env variable is not explicitly set to a falsy value (`0|false|no|off`).
+3. The caller passes the persisted `experimental.sharedAgentBoard` config flag as `true`.
+
+An explicit falsy env value wins over the on-disk config. Callers can compose this with `getConfigSharedAgentBoard()` for a full three-signal check:
+
+```typescript
+import { isBoardEnabled } from './kilocode/board/enabled.js';
+import { getConfigSharedAgentBoard } from './config/userConfig.js';
+
+const enabled = isBoardEnabled(getConfigSharedAgentBoard());
+```
 
 ### Enabling the tools
 
@@ -2670,3 +2714,49 @@ Or edit `~/.alexi/config.json` directly:
 ```
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator guide and [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) for the design notes and Mermaid diagram.
+
+## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
+
+Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone Bedrock model-id classifier for future direct Bedrock integrations and SAP AI Core deployment mapping. Alexi does not ship a native Bedrock provider yet, but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments.
+
+```typescript
+/**
+ * Return the effective Bedrock model id given the caller's requested id
+ * and target region. Idempotent: passing an already-resolved id yields
+ * the same id back.
+ *
+ * @param modelID - Bedrock model id (short form, cross-region form, or ARN).
+ * @param region  - AWS region (`us-east-1`, `eu-west-1`, ...). Defaults to `us-east-1`.
+ */
+export function resolveBedrockModelID(
+  modelID: string,
+  region: string | undefined
+): string;
+```
+
+Resolution rules, in order:
+
+1. ARN model IDs (`arn:aws:bedrock:...`) are pre-resolved — pass through unchanged. Injecting a `us.` / `eu.` / ... prefix in front of an ARN produces a malformed string that Bedrock rejects.
+2. Explicit cross-region prefixes (`global.`, `us.`, `eu.`, `jp.`, `apac.`, `au.`) are respected — pass through unchanged.
+3. In `us-*` regions (excluding `us-gov-*`), the `us.` prefix is prepended when the id contains any of `nova-micro`, `nova-lite`, `nova-pro`, `nova-premier`, `nova-2`, `claude`, `deepseek.r1`, `deepseek-r1`. `deepseek.v3.2` and newer DeepSeek variants are region-local and MUST NOT be prefixed.
+4. All other regions: no automatic prefixing. Callers wanting cross-region inference must set the prefix explicitly.
+
+## PTY Latch (`src/core/kilocode/pty/latch.ts`)
+
+Introduced 2026-09-11 (`1.22.17`, ports kilocode `203f19f5d`). Dependency-free helper for buffering emissions from a short-lived event source until a listener attaches. See [ARCHITECTURE.md — PTY Latch](ARCHITECTURE.md#pty-latch-srccorekilocodeptylatchts) for design notes.
+
+```typescript
+export interface PtyLatch<T> {
+  emit(value: T): void;
+  attach(listener: (value: T) => void): () => void;
+}
+
+export function createPtyLatch<T>(): PtyLatch<T>;
+```
+
+Contract:
+
+- `emit(value)` delivers synchronously when a listener is attached; otherwise buffers in FIFO order.
+- `attach(listener)` flushes the buffer synchronously in emission order before returning. Returns a detach function.
+- Detaching re-enables buffering — late reattach receives values emitted while unattached.
+- The flush loop halts early if the listener re-assigns itself mid-drain; remaining buffered values stay for the next `attach()`.

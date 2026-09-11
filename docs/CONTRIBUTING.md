@@ -500,6 +500,43 @@ export function registerBuiltInTools(): void {
 
 Prefer gating at **registration time** (as above) when the tool should be invisible to the model when the flag is off — the model does not learn about `kilo_board_*` at all when the flag is `false`, so it cannot mistakenly call them. Prefer gating at the **tool boundary** (returning a `success: false` error) when the tool is always present but its behaviour changes with the flag (e.g. per-task model selection on the `task` tool). Both patterns share the same `experimental.*` config helper contract.
 
+**Env flag + persisted config unification (2026-09-11, ports kilocode PR #14013).** When upstream ships a feature gated by an env flag AND Alexi already has a persisted `experimental.*` counterpart, unify the two signals through a single `isBoardEnabled`-style predicate in the feature's own module instead of scattering `process.env.X ??` checks across call sites. The canonical shape lives in `src/kilocode/board/enabled.ts`:
+
+```typescript
+const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+const FALSY = new Set(['0', 'false', 'no', 'off']);
+
+export function isBoardEnabled(experimentalConfigFlag: boolean = false): boolean {
+  const raw = process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
+  if (raw !== undefined) {
+    const lowered = raw.toLowerCase();
+    if (TRUTHY.has(lowered)) return true;
+    if (FALSY.has(lowered)) return false;
+  }
+  return experimentalConfigFlag === true;
+}
+```
+
+Precedence contract to follow when adding new gates of this shape:
+
+1. Env var explicit truthy → force on.
+2. Env var explicit falsy → force off (overrides persisted config so operators can disable per-run).
+3. Env var unset → fall back to the persisted `experimental.*` config passed in as the argument. The channel-default derivation lives in `src/flag/flag.ts` via `unstableDefault()` — expose that as a sibling constant (e.g. `Flag.KILOCODE_EXPERIMENTAL_SWARM_BOARD`) rather than duplicating the resolution logic here.
+
+Callers compose the two:
+
+```typescript
+import { isBoardEnabled } from './kilocode/board/enabled.js';
+import { getConfigSharedAgentBoard } from './config/userConfig.js';
+
+if (isBoardEnabled(getConfigSharedAgentBoard())) {
+  registerTool(boardReadTool);
+  registerTool(boardWriteTool);
+}
+```
+
+Keep the predicate sync and side-effect-free so it is safe to call from tool registration (which runs before any async subsystem is initialised).
+
 ### JSON-tolerant tool parameter decoding
 
 Some LLM providers (Anthropic in particular) emit structured tool-call parameters as JSON-encoded strings rather than the native object shape. Tools with structural fields — `config`, `tasks`, `arguments` — should wrap those fields with a `decodeJsonIfString` preprocessor so the same tool works across providers without provider-specific pre-processing upstream. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-01, `1.22.8`, ports upstream kilocode `02df76976`).
