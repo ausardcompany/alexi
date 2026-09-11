@@ -38,6 +38,8 @@ import {
   type Message as CompactionMessage,
 } from '../compaction/index.js';
 import { detectContextOverflow } from './contextOverflow.js';
+import { LoopDetector } from './loopDetector.js';
+import { MistakeTracker } from './mistakeTracker.js';
 import {
   executeHooks,
   createHookContext,
@@ -97,6 +99,43 @@ export interface AgenticChatOptions {
    * Honors the upstream `disallowed-tools` frontmatter field on skill markdown.
    */
   activeSkill?: import('../skill/index.js').Skill;
+  /**
+   * Callback invoked when the loop detector observes 5 identical tool
+   * calls in a row, OR when the mistake tracker observes 6 consecutive
+   * tool failures. Returning `'continue'` injects a steering message and
+   * resumes the run; returning `'stop'` (or not providing the callback)
+   * ends the run immediately with a status message.
+   *
+   * Ports Kilocode #13969 (upstream user-steering prompt on stuck runs).
+   */
+  onConsecutiveMistakeLimitReached?: (
+    reason: ConsecutiveMistakeReason
+  ) => 'continue' | 'stop' | Promise<'continue' | 'stop'>;
+  /**
+   * Trip threshold for the loop detector (identical tool calls). Default 5.
+   * Exposed primarily for tests; production callers should keep the default.
+   */
+  loopLimit?: number;
+  /**
+   * Trip threshold for the mistake tracker (consecutive tool failures).
+   * Default 6. Exposed primarily for tests.
+   */
+  mistakeLimit?: number;
+}
+
+/**
+ * Reason payload passed to {@link AgenticChatOptions.onConsecutiveMistakeLimitReached}.
+ *
+ * - `loop`: the detector saw N identical tool calls in a row (default N=5).
+ * - `mistake`: the tracker saw N consecutive tool failures (default N=6).
+ * - `consecutiveCount`: how many identical calls / failures have been seen.
+ * - `toolName`: the tool that triggered the trip (loop) or the tool of the
+ *   most recent failure (mistake).
+ */
+export interface ConsecutiveMistakeReason {
+  kind: 'loop' | 'mistake';
+  consecutiveCount: number;
+  toolName: string;
 }
 
 export interface AgenticProgressEvent {
@@ -547,6 +586,15 @@ export async function agenticChat(
   // Agent loop
   let finalText = '';
 
+  // Loop / mistake detection state (issue #1692). Instantiated per call so
+  // long-running processes (TUI sessions) do not carry counters across
+  // independent user turns.
+  const loopDetector = new LoopDetector({ limit: options?.loopLimit });
+  const mistakeTracker = new MistakeTracker({ limit: options?.mistakeLimit });
+  const onLimit = options?.onConsecutiveMistakeLimitReached;
+  const STEERING_MESSAGE =
+    'The previous approach is stuck. Try a different method, simpler steps, or ask me for help.';
+
   while (iterations < maxIterations) {
     iterations++;
 
@@ -880,6 +928,17 @@ export async function agenticChat(
           arguments: toolCall.function.arguments,
         });
 
+        // Loop / mistake detection (issue #1692). Record BEFORE injecting
+        // any steering message so the trip check reflects the state that
+        // triggered it. The `question` tool is exempt from loop detection
+        // because it legitimately re-emits identical calls while waiting
+        // on the user, and would otherwise trip the detector immediately
+        // when we invoke it below as the steering prompt path.
+        if (toolCall.function.name !== 'question') {
+          loopDetector.record(toolCall.function.name, toolCall.function.arguments);
+        }
+        mistakeTracker.record(toolResult.success);
+
         // Add tool response to messages
         messages.push({
           role: 'tool',
@@ -1026,6 +1085,70 @@ export async function agenticChat(
         finalText = `[Hook Loop Guard] Stop hook blocked ${cap} consecutive times. Ending turn to prevent infinite loop.`;
         messages.push({ role: 'assistant', content: finalText });
         break;
+      }
+
+      // Loop / mistake detection trip check (issue #1692). Runs after
+      // every tool result in this iteration has been recorded so that
+      // both a same-call loop and a rapid-failure burst surface at the
+      // same well-defined synchronisation point. If either detector has
+      // tripped, delegate to `onConsecutiveMistakeLimitReached` (when
+      // provided) to let the caller decide: continue with steering, or
+      // stop the run. Without a callback, the run stops silently — same
+      // behaviour as if the model had returned an empty response.
+      const loopTripped = loopDetector.hasTripped();
+      const mistakeTripped = mistakeTracker.hasTripped();
+      if (loopTripped || mistakeTripped) {
+        const lastToolName = toolCallSummary[toolCallSummary.length - 1]?.name ?? 'unknown';
+        const reason: ConsecutiveMistakeReason = loopTripped
+          ? {
+              kind: 'loop',
+              consecutiveCount: loopDetector.getConsecutiveCount(),
+              toolName: lastToolName,
+            }
+          : {
+              kind: 'mistake',
+              consecutiveCount: mistakeTracker.getConsecutiveCount(),
+              toolName: lastToolName,
+            };
+
+        let decision: 'continue' | 'stop' = 'stop';
+        if (onLimit) {
+          try {
+            decision = await onLimit(reason);
+          } catch (err) {
+            logger.warn(
+              `onConsecutiveMistakeLimitReached callback threw: ${
+                err instanceof Error ? err.message : String(err)
+              }. Stopping run.`
+            );
+            decision = 'stop';
+          }
+        }
+
+        if (decision === 'stop') {
+          finalText =
+            reason.kind === 'loop'
+              ? `[Loop Detector] Stopped after ${reason.consecutiveCount} identical calls to '${reason.toolName}'.`
+              : `[Mistake Tracker] Stopped after ${reason.consecutiveCount} consecutive tool failures.`;
+          messages.push({ role: 'assistant', content: finalText });
+          break;
+        }
+
+        // Continue with steering: reset both detectors so we do not
+        // immediately re-trip on the next tool call, and inject a user
+        // message telling the model the previous approach is stuck.
+        // The steering message is stamped with the trip reason so the
+        // model can pick a different strategy rather than just retrying.
+        loopDetector.reset();
+        mistakeTracker.reset();
+        const steeringPreamble =
+          reason.kind === 'loop'
+            ? `<system-reminder>Loop detected: the '${reason.toolName}' tool was called ${reason.consecutiveCount} times in a row with identical arguments.</system-reminder>`
+            : `<system-reminder>${reason.consecutiveCount} consecutive tool failures detected.</system-reminder>`;
+        messages.push({
+          role: 'user',
+          content: `${steeringPreamble}\n\n${STEERING_MESSAGE}`,
+        });
       }
 
       // Continue loop to let LLM process tool results

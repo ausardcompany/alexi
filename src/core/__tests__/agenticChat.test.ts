@@ -1114,4 +1114,266 @@ describe('agenticChat', () => {
       expect(typeof optsObj['maxTokens']).toBe('number');
     });
   });
+
+  // ============ Loop / mistake steering (issue #1692) ============
+
+  describe('loop / mistake steering', () => {
+    function makeTool(name: string, execute: ReturnType<typeof vi.fn>) {
+      return {
+        name,
+        description: `${name} tool`,
+        toFunctionSchema: () => ({
+          name,
+          description: `${name} tool`,
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute,
+      };
+    }
+
+    function toolCallResponse(name: string, args: string, id: string): CompletionResult {
+      return {
+        text: '',
+        toolCalls: [{ id, type: 'function', function: { name, arguments: args } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult;
+    }
+
+    it('stops with a status message after 5 identical tool calls when no callback is provided', async () => {
+      const readTool = makeTool(
+        'read',
+        vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+      );
+      mockToolRegistry.list.mockReturnValue([readTool]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'read' ? readTool : undefined));
+
+      // Model insists on the same call over and over.
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+        );
+      }
+
+      const result = await agenticChat('go', { maxIterations: 20 });
+
+      // 5th identical call trips the detector — stop path.
+      expect(result.text).toMatch(/Loop Detector/);
+      expect(result.text).toContain("'read'");
+      expect(readTool.execute).toHaveBeenCalledTimes(5);
+    });
+
+    it('invokes onConsecutiveMistakeLimitReached with kind="loop" and stops when callback returns "stop"', async () => {
+      const readTool = makeTool(
+        'read',
+        vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+      );
+      mockToolRegistry.list.mockReturnValue([readTool]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'read' ? readTool : undefined));
+
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+        );
+      }
+
+      const callback = vi.fn().mockResolvedValue('stop' as const);
+
+      const result = await agenticChat('go', {
+        maxIterations: 20,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const reason = callback.mock.calls[0][0];
+      expect(reason.kind).toBe('loop');
+      expect(reason.consecutiveCount).toBe(5);
+      expect(reason.toolName).toBe('read');
+      expect(result.text).toMatch(/Loop Detector/);
+    });
+
+    it('injects steering guidance and resumes when callback returns "continue"', async () => {
+      const readTool = makeTool(
+        'read',
+        vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+      );
+      mockToolRegistry.list.mockReturnValue([readTool]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'read' ? readTool : undefined));
+
+      // 5 identical calls, then a final assistant text turn once the model
+      // "gets the hint" from the steering message.
+      for (let i = 0; i < 5; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+        );
+      }
+      mockProvider.complete.mockResolvedValueOnce({
+        text: 'Different approach: done.',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      const callback = vi.fn().mockResolvedValue('continue' as const);
+
+      const result = await agenticChat('go', {
+        maxIterations: 20,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(result.text).toBe('Different approach: done.');
+      // 6th provider call was invoked AFTER the steering message was injected.
+      expect(mockProvider.complete).toHaveBeenCalledTimes(6);
+
+      // Inspect messages sent on the FINAL provider call — the steering
+      // preamble + guidance should be present as a user message.
+      const [messagesOnFinalCall] = mockProvider.complete.mock.calls[5];
+      const steeringMsg = (messagesOnFinalCall as Array<{ role: string; content: string }>).find(
+        (m) => m.role === 'user' && m.content.includes('Loop detected')
+      );
+      expect(steeringMsg).toBeDefined();
+      expect(steeringMsg?.content).toContain('The previous approach is stuck');
+    });
+
+    it('stops after 6 consecutive failures when no callback is provided', async () => {
+      const flakyTool = makeTool(
+        'bash',
+        vi.fn().mockResolvedValue({ success: false, error: 'permission denied' })
+      );
+      mockToolRegistry.list.mockReturnValue([flakyTool]);
+      mockToolRegistry.get.mockImplementation((n: string) =>
+        n === 'bash' ? flakyTool : undefined
+      );
+
+      // Different arguments each call so the LOOP detector never trips.
+      // The MISTAKE tracker should trip at 6 consecutive failures.
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('bash', `{"cmd":"run-${i}"}`, `id_${i}`)
+        );
+      }
+
+      const result = await agenticChat('go', { maxIterations: 20 });
+
+      expect(result.text).toMatch(/Mistake Tracker/);
+      // Loop detector must NOT have tripped first — args are unique.
+      expect(result.text).not.toMatch(/Loop Detector/);
+      expect(flakyTool.execute).toHaveBeenCalledTimes(6);
+    });
+
+    it('invokes onConsecutiveMistakeLimitReached with kind="mistake" after 6 failures', async () => {
+      const flakyTool = makeTool(
+        'bash',
+        vi.fn().mockResolvedValue({ success: false, error: 'boom' })
+      );
+      mockToolRegistry.list.mockReturnValue([flakyTool]);
+      mockToolRegistry.get.mockImplementation((n: string) =>
+        n === 'bash' ? flakyTool : undefined
+      );
+
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('bash', `{"cmd":"run-${i}"}`, `id_${i}`)
+        );
+      }
+
+      const callback = vi.fn().mockResolvedValue('stop' as const);
+
+      await agenticChat('go', {
+        maxIterations: 20,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const reason = callback.mock.calls[0][0];
+      expect(reason.kind).toBe('mistake');
+      expect(reason.consecutiveCount).toBe(6);
+      expect(reason.toolName).toBe('bash');
+    });
+
+    it('a successful tool call resets the mistake counter', async () => {
+      const bash = makeTool('bash', vi.fn());
+      mockToolRegistry.list.mockReturnValue([bash]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'bash' ? bash : undefined));
+
+      // Sequence: fail, fail, fail, SUCCESS, fail, fail, fail, then done.
+      // Never reaches 6 consecutive failures.
+      bash.execute
+        .mockResolvedValueOnce({ success: false, error: 'x' })
+        .mockResolvedValueOnce({ success: false, error: 'x' })
+        .mockResolvedValueOnce({ success: false, error: 'x' })
+        .mockResolvedValueOnce({ success: true, data: {} })
+        .mockResolvedValueOnce({ success: false, error: 'x' })
+        .mockResolvedValueOnce({ success: false, error: 'x' })
+        .mockResolvedValueOnce({ success: false, error: 'x' });
+
+      for (let i = 0; i < 7; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('bash', `{"cmd":"c-${i}"}`, `id_${i}`)
+        );
+      }
+      mockProvider.complete.mockResolvedValueOnce({
+        text: 'wrapped up',
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      } satisfies CompletionResult);
+
+      const callback = vi.fn().mockResolvedValue('stop' as const);
+      const result = await agenticChat('go', {
+        maxIterations: 20,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(result.text).toBe('wrapped up');
+    });
+
+    it('honors custom loopLimit / mistakeLimit options', async () => {
+      const readTool = makeTool(
+        'read',
+        vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+      );
+      mockToolRegistry.list.mockReturnValue([readTool]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'read' ? readTool : undefined));
+
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+        );
+      }
+
+      const callback = vi.fn().mockResolvedValue('stop' as const);
+      await agenticChat('go', {
+        maxIterations: 20,
+        loopLimit: 3,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback.mock.calls[0][0].consecutiveCount).toBe(3);
+      expect(readTool.execute).toHaveBeenCalledTimes(3);
+    });
+
+    it('treats a throwing callback as "stop" and does not crash the run', async () => {
+      const readTool = makeTool(
+        'read',
+        vi.fn().mockResolvedValue({ success: true, data: { content: 'ok' } })
+      );
+      mockToolRegistry.list.mockReturnValue([readTool]);
+      mockToolRegistry.get.mockImplementation((n: string) => (n === 'read' ? readTool : undefined));
+
+      for (let i = 0; i < 10; i++) {
+        mockProvider.complete.mockResolvedValueOnce(
+          toolCallResponse('read', '{"path":"/a"}', `id_${i}`)
+        );
+      }
+
+      const callback = vi.fn().mockRejectedValue(new Error('user hung up'));
+
+      const result = await agenticChat('go', {
+        maxIterations: 20,
+        onConsecutiveMistakeLimitReached: callback,
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(result.text).toMatch(/Loop Detector/);
+    });
+  });
 });

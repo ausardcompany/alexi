@@ -497,6 +497,109 @@ if (similar.length > 0) {
 
 The enriched error is fed back to the model so it can self-correct on the next turn. The lookup degrades gracefully to the bare error when the registry is unavailable (test harnesses).
 
+### Loop and Mistake Steering (issue #1692)
+
+The agentic loop instantiates two independent detectors per `agenticChat` invocation (they are per-call, not module-scoped, so a long-running TUI session does not carry counters across independent user turns):
+
+- **`LoopDetector`** (`src/core/loopDetector.ts`) fingerprints each observed tool call as `${toolName}:${stableStringify(parsedArgs)}`. Arguments are re-serialised with sorted keys so semantically equivalent calls (`{"path":"/a","content":"x"}` vs `{"content":"x","path":"/a"}`) fingerprint identically. Invalid JSON falls back to the raw string. Trips at 5 consecutive identical fingerprints by default (`AgenticChatOptions.loopLimit`, minimum 2).
+- **`MistakeTracker`** (`src/core/mistakeTracker.ts`) counts consecutive tool failures regardless of which tool failed or what arguments it received — a rapid burst of unrelated failures (bad file paths, wrong syntax, permission errors) usually means the model is flailing rather than looping on a single call. A single successful tool result resets the counter to zero. Trips at 6 consecutive failures by default (`AgenticChatOptions.mistakeLimit`, minimum 2).
+
+The `question` tool is deliberately excluded from loop fingerprinting (`src/core/agenticChat.ts:937`) because repeated user prompts are not a stuck loop.
+
+Both detectors are checked at a single synchronisation point after every iteration's tool results have been recorded. On a trip, the loop delegates to the optional `onConsecutiveMistakeLimitReached(reason)` callback with `{ kind: 'loop' | 'mistake', consecutiveCount, toolName }`:
+
+```mermaid
+flowchart TB
+    Iter([Iteration N: tool results recorded]) --> RecLoop[loopDetector.record for each tool call<br/>skips question tool]
+    RecLoop --> RecMistake[mistakeTracker.record success flag]
+    RecMistake --> Check{loop.hasTripped or<br/>mistake.hasTripped?}
+    Check -->|No| Continue([Continue to iteration N+1])
+    Check -->|Yes| BuildReason[Build ConsecutiveMistakeReason<br/>kind = loop or mistake<br/>consecutiveCount, toolName]
+    BuildReason --> HasCB{onConsecutiveMistakeLimit<br/>Reached provided?}
+    HasCB -->|No| StopSilent[decision = 'stop']
+    HasCB -->|Yes| InvokeCB[await callback with reason]
+    InvokeCB --> CBError{Callback threw?}
+    CBError -->|Yes| WarnStop[logger.warn + decision = 'stop']
+    CBError -->|No| Decision{decision}
+    StopSilent --> StopMsg[Push assistant status message:<br/>Loop Detector Stopped after N... or<br/>Mistake Tracker Stopped after N...]
+    WarnStop --> StopMsg
+    StopMsg --> End([Break loop, return result])
+    Decision -->|stop| StopMsg
+    Decision -->|continue| ResetBoth[loopDetector.reset<br/>mistakeTracker.reset]
+    ResetBoth --> InjectSteering[Push user message:<br/>system-reminder preamble<br/>+ steering guidance]
+    InjectSteering --> Continue
+```
+
+Returning `'stop'` (or omitting the callback entirely) ends the run with a status message and a synthetic assistant turn — either `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.`. Returning `'continue'` resets both detectors, injects a `<system-reminder>` preamble plus the steering guidance (`The previous approach is stuck. Try a different method, simpler steps, or ask me for help.`) as a synthetic user message, and resumes the loop so the model can try a different strategy on the next iteration.
+
+A throwing callback is caught and treated as `'stop'` (`logger.warn(...callback threw... Stopping run.)`) so a hung TUI hook cannot crash a headless agent run. `ConsecutiveMistakeReason` is re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for callers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
+
+#### CLI-side callback wiring (`src/cli/utils/mistakeLimitPrompt.ts`)
+
+`agenticChat` owns detection, steering-message injection, and the callback contract. It does NOT own any user interaction — that surface lives in a separate CLI module so `agenticChat` remains reusable from the TUI, the HTTP server, and headless test harnesses.
+
+The non-interactive `alexi agent` command constructs its callback with `createMistakeLimitPrompt(...)` in `src/cli/commands/agent.ts:324-335`:
+
+```typescript
+// src/cli/commands/agent.ts
+const onConsecutiveMistakeLimitReached = createMistakeLimitPrompt({
+  yolo: Boolean(opts.yolo || opts.dangerouslySkipPermissions),
+  quiet: Boolean(opts.quiet),
+  signal: abortController.signal,
+});
+
+const res = await agenticChat(message, {
+  // ...other options...
+  onConsecutiveMistakeLimitReached,
+});
+```
+
+The factory returns a `MistakeLimitCallback` (`(reason: ConsecutiveMistakeReason) => Promise<'continue' | 'stop'>`) that applies a small decision matrix. The following sequence diagram covers all four terminal branches the callback can take:
+
+```mermaid
+sequenceDiagram
+    participant Agent as agenticChat loop
+    participant CB as createMistakeLimitPrompt callback
+    participant User as User (TTY)
+    participant Err as stderr
+
+    Agent->>CB: onConsecutiveMistakeLimitReached(reason)
+    Note over CB: describeReason(reason)<br/>builds one-line explanation
+
+    alt yolo=true
+        CB->>Err: [mistake-limit] <explanation> Auto-continuing (--yolo).
+        CB-->>Agent: 'continue'
+    else non-TTY (headless / CI)
+        CB->>Err: [mistake-limit] <explanation> Stopping (non-interactive; re-run with --yolo).
+        CB-->>Agent: 'stop'
+    else quiet + TTY
+        CB->>Err: [mistake-limit] <explanation> Stopping (quiet mode).
+        CB-->>Agent: 'stop'
+    else TTY (default)
+        CB->>Err: [mistake-limit] <explanation>
+        CB->>User: Try a different approach? (y/n)
+        alt answer starts with 'y'
+            User-->>CB: y | yes | YES | " y "
+            CB->>Err: Continuing with steering guidance.
+            CB-->>Agent: 'continue'
+        else any other answer or EOF or abort signal
+            User-->>CB: n | "" | quit | (abort)
+            CB->>Err: Stopping run.
+            CB-->>Agent: 'stop'
+        end
+    end
+```
+
+Design invariants pinned by `tests/cli/utils/mistakeLimitPrompt.test.ts`:
+
+- **No I/O in `describeReason`.** It is a pure formatter used by BOTH the interactive prompt and the headless stderr line so the two surfaces cannot drift.
+- **`readline` is only opened on the interactive branch.** Yolo, non-TTY, and quiet paths must not attach a `data` listener to `stdin` (asserted via `expect(stdin.listenerCount('data')).toBe(0)`). This keeps headless runs from silently blocking on stdin.
+- **Empty input defaults to `'stop'`.** A user who just presses Enter gets the safer answer; the `'continue'` decision requires an explicit affirmative.
+- **`AbortSignal` releases the readline handle.** The `abort` listener calls `rl.close()`; the `finally` block removes the listener and closes the handle so the callback never leaks event-loop resources even when the user hits Ctrl+C mid-prompt.
+- **Injectable I/O.** `MistakeLimitPromptOptions` accepts `stdin` / `stdout` / `stderr` / `isTTY` so the test harness never touches the real process handles. This also lets the TUI wire its own `Sink`-like writable if it ever needs the same decision matrix outside the plain CLI command.
+
+The end-to-end contract is: `agenticChat` decides *when* to ask, `createMistakeLimitPrompt` decides *how* to ask (or whether to skip the ask entirely and pick a deterministic default). Keeping detection, steering, and the UI in three separate layers means the TUI, the HTTP server, and future in-editor hosts can each supply their own `MistakeLimitCallback` without duplicating any part of the detector or the steering-message injection.
+
 ## Session Lifecycle and Abort Propagation
 
 `SessionManager` (`src/core/sessionManager.ts`) tracks a per-session `AbortController` for every active run in an in-memory `Map<string, SessionRunState>`. The map is instance-scoped rather than module-scoped so tests can construct isolated managers without leaking abort state across cases.
@@ -2483,6 +2586,47 @@ flowchart LR
 ```
 
 The `CompletenessResult` type is a single flat discriminated union (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`) — Prettier collapses this onto one line as of `de9d1530`, 2026-08-25; no semantic change.
+
+## TUI Output Linkification
+
+Since 2026-09-10 (`7af9be2a`) the TUI runs every tool output through a small linkifier before rendering, so URLs and `path:line` references become clickable in supporting terminals. The transform lives in two paired modules:
+
+- `src/cli/tui/utils/hyperlink.ts` — low-level OSC-8 wrapper. `supportsHyperlinks()` gates the wrap on TTY + a small allow-list of `TERM_PROGRAM` values (`iTerm.app`, `WezTerm`, `ghostty`, `Apple_Terminal`, `vscode`, `cursor`, `Hyper`, `WarpTerminal`), the `TERM` string containing `kitty`, or a non-empty `WT_SESSION` (Windows Terminal). `FORCE_HYPERLINK=1` overrides to on, `NO_HYPERLINK=1` overrides to off. When unsupported, `hyperlink(url, label?)` returns plain text (or `label (url)` when the label differs) — the byte sequence stays clean on non-TTY, CI, and pipe/redirect destinations.
+- `src/cli/tui/utils/linkify.ts` — pattern detector. Scans input text for two match categories, resolves each to a URL suitable for OSC-8 wrapping, and splices the matches back into the string in a single pass.
+
+`ToolRow` (`src/cli/tui/components/ToolRow.tsx:186` for the bash branch, `:196` for the generic branch) applies `linkify()` to the truncated body text produced by `truncateOutput()`. The linkifier is the LAST transform applied to tool output before Ink renders it, which keeps the truncation contract intact — `... (N more lines)` counts are still computed on the raw text, and the OSC-8 escapes are added on top.
+
+```mermaid
+flowchart LR
+    Raw[Raw tool output]
+    Trunc[truncateOutput<br/>maxLines=20, keepLines=15]
+    Linkify[linkify<br/>URL + path:line detection]
+    Hyperlink[hyperlink<br/>OSC-8 wrap or plain fallback]
+    Ink[Ink Text renderer]
+    Terminal[Terminal output]
+
+    Raw --> Trunc
+    Trunc --> Linkify
+    Linkify -->|for each match| Hyperlink
+    Hyperlink -->|supported TTY| Ink
+    Hyperlink -->|unsupported| Ink
+    Ink --> Terminal
+```
+
+### Match categories
+
+Two disjoint patterns are recognised. URL matches always take precedence on overlap so a URL that happens to contain a `:42` tail is never double-wrapped.
+
+| Category | Regex | Notes |
+|----------|-------|-------|
+| URL | `/\b(https?:\/\/\|file:\/\/)[^\s<>"']+/g` | Trailing sentence punctuation (`.,;:!?)]}>`) is stripped from the captured URL and re-appended as plain text after the OSC-8 wrap — avoids sending users to `https://example.com.` (which typically 404s). |
+| `path:line[:column]` | `/(?<![\w/.-])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z]{1,10}\|(?:\.{0,2}\/)(?:[\w.-]+\/)*[\w.-]+):(\d+)(?::(\d+))?\b/g` | Path segment must contain at least one `/` OR a `.` followed by 1-6 word characters (a file extension). Filters out `12:34`, `localhost:3000`, `1.2.3`, `token: 12345`. |
+
+Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line>` (or `#<line>:<column>` when the column group matched). Relative paths are resolved against the `cwd` argument (default `process.cwd()`); Windows backslashes are normalised to forward slashes before URI construction so `file:///C:/Users/...` is well-formed.
+
+### Non-supporting terminals
+
+`hyperlink()` short-circuits to plain text when `supportsHyperlinks()` returns false, so the linkifier is safe to apply unconditionally. On CI, when stdout is piped, or on a terminal without OSC-8 support, tool output is byte-identical to the pre-linkify text — the transform is invisible.
 
 ## Session Retry with Bounded Exponential Backoff
 

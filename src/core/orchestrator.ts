@@ -13,6 +13,16 @@ import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './context
 import { isRateLimitError } from './error-backoff.js';
 import { logger } from '../utils/logger.js';
 
+/**
+ * Re-export of the loop / mistake steering type so callers that dispatch
+ * through `sendChat` (which does NOT run tools) can still refer to the
+ * canonical callback payload shape when they later fan out to
+ * `agenticChat`. The tool loop lives in `agenticChat.ts`; this module
+ * only performs a single provider `complete()` so it cannot observe
+ * repeated tool calls. See issue #1692.
+ */
+export type { ConsecutiveMistakeReason } from './agenticChat.js';
+
 export async function sendChat(
   message: string,
   options?: {
