@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Environment-flag enable path for the shared agent board** (`src/config/userConfig.ts`, `src/tool/tools/index.ts`, `src/tool/tools/task.ts`, `tests/tool/tools/board.test.ts`): Ports upstream kilocode #14013 (`BoardEnabled.resolve`) — the `experimental.sharedAgentBoard` opt-in is now the union of three signals rather than a single config key. New exported helper `isBoardEnabled()` in `src/config/userConfig.ts:628` returns `true` when ANY of the following holds:
+  1. `experimental.sharedAgentBoard: true` is set in `~/.alexi/config.json` (the existing persistent opt-in via `getConfigSharedAgentBoard()`).
+  2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — the feature-specific env flag.
+  3. `process.env.KILO_EXPERIMENTAL === '1'` — the umbrella experimental flag that enables every experimental feature at once.
+
+  The rule is a boolean OR: an explicit config `false` does NOT override a set env flag. This lets operators flip the board on temporarily (CI runs, Docker containers, ad-hoc testing) without editing the persistent config file, while a permanent opt-in via config continues to work when no env vars are set. Env values are compared literally to the string `'1'` — any other value (`'0'`, `'true'`, empty, unset) is treated as unset so `KILO_EXPERIMENTAL=0` is never misread as an opt-in.
+
+  Two registration sites migrated from the direct `getConfigSharedAgentBoard()` read to the new resolver:
+  - `registerBuiltInTools()` in `src/tool/tools/index.ts:128` — the `kilo_board_read` / `kilo_board_write` tools are only exported to the model when `isBoardEnabled()` returns `true`. Reads the resolver fresh on each call so a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn).
+  - `src/tool/tools/task.ts:476` — the swarm-identity metadata attached to `task` payloads is only populated when the board is enabled. Vanilla SAP AI Core deployments see zero behavioural change until an operator opts in via any of the three signals.
+
+  Test coverage (`tests/tool/tools/board.test.ts`, 100 lines, 6 cases): (1) config key `true` alone enables; (2) specific env flag `'1'` alone enables even when config is `false`; (3) umbrella env flag `'1'` alone enables even when config is `false`; (4) all-off returns `false`; (5) non-`'1'` env values (`'0'`, `'true'`) do NOT enable; (6) the OR-semantics override — env flag `'1'` beats an explicit config `false`. Tests snapshot/restore both the real `~/.alexi/config.json` (via `fs.readFileSync` + `fs.writeFileSync` in `beforeEach` / `afterEach`) and the two env vars, because `isBoardEnabled()` and `getConfigSharedAgentBoard()` live in the same module and `vi.mock` cannot intercept intra-module calls.
+
 ## [1.22.16] - 2026-09-08
 
 ### Added

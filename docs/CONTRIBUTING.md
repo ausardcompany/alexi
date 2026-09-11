@@ -484,14 +484,14 @@ if (requestedModel || requestedProvider || requestedReasoning) {
 
 Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
 
-**Additional worked example — `experimental.sharedAgentBoard` (2026-09-03, ports upstream kilocode `162e30d23`).** The same shape is applied to gate the `kilo_board_read` / `kilo_board_write` tools. The registration site sits in `src/tool/tools/index.ts:118` inside `registerBuiltInTools()`, which reads the flag once per process and registers the tools only when the flag is on:
+**Additional worked example — `experimental.sharedAgentBoard` (2026-09-03, ports upstream kilocode `162e30d23`; env-flag enable path 2026-09-11, ports upstream kilocode #14013).** The same shape is applied to gate the `kilo_board_read` / `kilo_board_write` tools. The registration site sits in `src/tool/tools/index.ts:128` inside `registerBuiltInTools()`, which reads the resolver once per process and registers the tools only when the flag is on:
 
 ```typescript
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {
     registerTool(tool as Tool<any, any>);
   }
-  if (getConfigSharedAgentBoard()) {
+  if (isBoardEnabled()) {
     registerTool(boardReadTool as Tool<any, any>);
     registerTool(boardWriteTool as Tool<any, any>);
   }
@@ -499,6 +499,26 @@ export function registerBuiltInTools(): void {
 ```
 
 Prefer gating at **registration time** (as above) when the tool should be invisible to the model when the flag is off — the model does not learn about `kilo_board_*` at all when the flag is `false`, so it cannot mistakenly call them. Prefer gating at the **tool boundary** (returning a `success: false` error) when the tool is always present but its behaviour changes with the flag (e.g. per-task model selection on the `task` tool). Both patterns share the same `experimental.*` config helper contract.
+
+**Multi-signal enable paths (config + env flags).** For experimental features that operators need to flip on temporarily (CI runs, Docker containers, one-off sessions), extend the base config helper with an `isXEnabled()` resolver that unions the persistent config key with one or more env flags. The canonical shape is `isBoardEnabled()` in `src/config/userConfig.ts:628`:
+
+```typescript
+export function isBoardEnabled(): boolean {
+  return (
+    getConfigSharedAgentBoard() ||
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1' ||
+    process.env.KILO_EXPERIMENTAL === '1'
+  );
+}
+```
+
+Contract:
+
+1. **Boolean OR.** An explicit config `false` MUST NOT override a set env flag. This is what lets an operator flip a feature on without editing the persistent config file. If you need "env can only turn the feature OFF", introduce a separate `disable` flag — do not invert the OR semantics of the enable path.
+2. **Strict-equality against the literal string `'1'`.** Any other value (`'0'`, `'true'`, empty, unset) is treated as unset. This keeps the enable path unambiguous and prevents `KILO_EXPERIMENTAL=0` from being misread as an opt-in. Never `Boolean(process.env.FOO)` — that pattern would enable on `'0'`, `'false'`, and every other non-empty string.
+3. **Feature-specific flag first, umbrella flag second.** The specific flag (`KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1`) exists so operators can enable a single feature; the umbrella flag (`KILO_EXPERIMENTAL=1`) exists so CI configurations can enable every experimental feature at once. Both should be checked; order does not affect correctness (short-circuit `||`) but the feature-specific flag reads more naturally when it comes first.
+4. **All call sites go through the resolver, not the raw config reader.** Every registration site and every tool-boundary gate should call `isXEnabled()`, not `getConfigX()`. Otherwise an operator who set only the env flag would see the tool listed (via the raw config reader) but rejected at execution time (via the resolver), or vice versa. Migrated call sites for the board port: `src/tool/tools/index.ts:128` (registration gate) and `src/tool/tools/task.ts:476` (swarm-identity attachment).
+5. **Test the resolver through the real config file.** `isXEnabled()` and `getConfigX()` live in the same module, so `vi.mock` cannot intercept the intra-module call. Snapshot `~/.alexi/config.json` in `beforeEach` and restore in `afterEach`, and snapshot each env var at `describe` scope. See `docs/TESTING.md#testing-the-shared-agent-board-env-flag-enable-path` for the full 6-case reference suite.
 
 ### JSON-tolerant tool parameter decoding
 
