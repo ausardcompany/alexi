@@ -1857,6 +1857,105 @@ it('acknowledge is idempotent for duplicate message ids', async () => {
 
 Environments without a working `better-sqlite3` binding should exercise the graceful-degradation path: `read` returns `[]`, `write` returns the message shape without persistence, `acknowledgeReads` is a no-op. Tests that assert against persistence MUST skip on systems where `nodeRequire('better-sqlite3')` throws, or set up a fresh temp `HOME` via `vi.spyOn(os, 'homedir')` so the DB file is created inside the test's `mkdtempSync` directory.
 
+### Testing the shared-agent-board env-flag enable path
+
+Ports upstream kilocode #14013 (`BoardEnabled.resolve`). As of the port, the `experimental.sharedAgentBoard` opt-in is the union of THREE signals — persistent config key, feature-specific env flag, umbrella env flag — resolved by `isBoardEnabled()` in `src/config/userConfig.ts:628`. All three registration sites that gate board behaviour (`registerBuiltInTools` in `src/tool/tools/index.ts:128`, the swarm-identity attachment in `src/tool/tools/task.ts:476`) go through the resolver rather than reading the config key directly. The regression suite lives at `tests/tool/tools/board.test.ts` (100 lines, 6 cases).
+
+The load-bearing observation is that `isBoardEnabled()` and `getConfigSharedAgentBoard()` are declared in the same module (`src/config/userConfig.ts`), so `vi.mock('../src/config/userConfig.js', ...)` cannot intercept the intra-module call from `isBoardEnabled` into `getConfigSharedAgentBoard` — Vitest module mocks only rewrite the import binding at the call site, not the closure the exporter captured. The suite drives the config key through the real `~/.alexi/config.json`, snapshotting the file in `beforeEach` and restoring it in `afterEach`:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+
+import {
+  CONFIG_FILE,
+  isBoardEnabled,
+  setConfigSharedAgentBoard,
+} from '../../../src/config/userConfig.js';
+
+describe('isBoardEnabled', () => {
+  const savedSpecific = process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+  const savedUmbrella = process.env.KILO_EXPERIMENTAL;
+  let originalConfigContent: string | null = null;
+
+  beforeEach(() => {
+    // Snapshot the existing user config so we can restore it after the test.
+    try {
+      originalConfigContent = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    } catch {
+      originalConfigContent = null;
+    }
+    setConfigSharedAgentBoard(false);
+    delete process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+    delete process.env.KILO_EXPERIMENTAL;
+  });
+
+  afterEach(() => {
+    try {
+      if (originalConfigContent !== null) {
+        fs.writeFileSync(CONFIG_FILE, originalConfigContent, 'utf-8');
+      } else if (fs.existsSync(CONFIG_FILE)) {
+        fs.unlinkSync(CONFIG_FILE);
+      }
+    } catch {
+      // Best-effort restore
+    }
+    if (savedSpecific === undefined) {
+      delete process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+    } else {
+      process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = savedSpecific;
+    }
+    if (savedUmbrella === undefined) {
+      delete process.env.KILO_EXPERIMENTAL;
+    } else {
+      process.env.KILO_EXPERIMENTAL = savedUmbrella;
+    }
+  });
+
+  it('returns true when the config key is true', () => {
+    setConfigSharedAgentBoard(true);
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns true when the specific env flag is "1" and config is false', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns true when the umbrella env flag is "1" and config is false', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns false when config is false and no env flags are set', () => {
+    setConfigSharedAgentBoard(false);
+    expect(isBoardEnabled()).toBe(false);
+  });
+
+  it('returns false when env flag is set to a non-"1" value', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '0';
+    process.env.KILO_EXPERIMENTAL = 'true';
+    expect(isBoardEnabled()).toBe(false);
+  });
+
+  it('env flag overrides an explicit config false (OR semantics)', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+});
+```
+
+Key patterns:
+
+1. **Drive the config key through the real file, snapshot in `beforeEach`, restore in `afterEach`.** Same-module intra-file calls (here `isBoardEnabled` invoking `getConfigSharedAgentBoard`) cannot be intercepted by `vi.mock`. The save/restore pattern is copied verbatim from `tests/config/userConfig.test.ts` and is the only reliable way to test cross-signal resolution helpers that live in the same module as their inputs.
+2. **Snapshot BOTH env vars at `describe` scope, not `beforeEach`.** The `savedSpecific` / `savedUmbrella` constants are captured once when the test file is loaded so a case that reassigns them mid-run still sees the original value in `afterEach`. Deleting when the original was `undefined` (rather than reassigning `undefined`) matters — `process.env.FOO = undefined` writes the string `'undefined'`, which then satisfies `process.env.FOO !== undefined` on every subsequent read.
+3. **Assert the `'1'`-only string comparison explicitly.** Case 5 (`env flag set to a non-"1" value`) is the load-bearing regression guard: a naive `Boolean(process.env.KILO_EXPERIMENTAL)` implementation would enable the board on `KILO_EXPERIMENTAL=0`, which is the exact anti-behaviour the port is meant to prevent. Cover `'0'` AND `'true'` (a truthy string that is NOT literal `'1'`) so the assertion pins the strict-equality contract.
+4. **Assert the OR override once, explicitly.** Case 6 is redundant with case 2 at the truth-table level but pins the intent: an explicit config `false` does NOT override a set env flag. Keeping the case separate means a future change to the resolution rule (e.g. flipping to AND semantics, or adding an override precedence) trips a differently-named test than the plain "env flag alone enables" case, which makes the failure diagnosis faster.
+
 ### Testing JSON-encoded Tool Params Tolerance
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings rather than the native object shape. The `agent_manager` tool now decodes JSON-encoded `config` strings transparently via the `decodeJsonIfString` Zod preprocessor in `src/tool/tools/agent-manager.ts`. Tests should exercise both shapes to guarantee no regression across providers.

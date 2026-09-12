@@ -606,6 +606,33 @@ export function setConfigSharedAgentBoard(enabled: boolean): void {
   saveFullConfig(config);
 }
 
+/**
+ * Resolve whether the shared agent board is enabled for the current process.
+ *
+ * Ports upstream kilocode #14013 — the board can be enabled via any of:
+ *   1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json`
+ *   2. `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1` in the environment
+ *   3. `KILO_EXPERIMENTAL=1` umbrella flag in the environment
+ *
+ * The rule is a boolean OR: an explicit config `false` does NOT override a
+ * set env flag. This mirrors upstream `BoardEnabled.resolve` so operators
+ * can flip the board on temporarily (CI, Docker, ad-hoc testing) without
+ * editing the persistent config file, while a permanent opt-in via config
+ * continues to work when no env vars are set.
+ *
+ * Env flag values are compared literally to `'1'` — any other value
+ * (`'0'`, `'true'`, empty, unset) is treated as unset. This keeps the
+ * enable path unambiguous and prevents `KILO_EXPERIMENTAL=0` from being
+ * misread as an opt-in.
+ */
+export function isBoardEnabled(): boolean {
+  return (
+    getConfigSharedAgentBoard() ||
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1' ||
+    process.env.KILO_EXPERIMENTAL === '1'
+  );
+}
+
 // ============ Batch update with options ============
 
 export interface UpdateGlobalOptions {

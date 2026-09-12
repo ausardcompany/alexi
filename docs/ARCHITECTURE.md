@@ -3173,6 +3173,16 @@ Both tools are re-exported from `src/tool/registry.ts` so external consumers can
 
 Any of the three enables the feature; the env flag wins over the on-disk config when explicitly set to a falsy value. The function is side-effect-free and safe to call from tool registration.
 
+### Alexi-native enable path (`isBoardEnabled()` in `src/config/userConfig.ts`, issue #1698)
+
+A second resolver lives in `src/config/userConfig.ts:628` under the `KILO_*` namespace, complementing the `KILOCODE_*` upstream-parity resolver. It composes three signals with a boolean OR — an explicit config `false` does NOT override a set env flag:
+
+1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
+2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — feature-specific env flag matching the `KILO_FLAGS` / `KILO_RETRIES` convention used in the agent workflows.
+3. `process.env.KILO_EXPERIMENTAL === '1'` — umbrella flag that enables every experimental feature at once (CI, ad-hoc containers).
+
+Env comparisons are strict-string `=== '1'`; any other value (`'0'`, `'true'`, empty, unset) is treated as unset so `KILO_EXPERIMENTAL=0` is never misread as an opt-in. This resolver is the primary gate consulted by `registerBuiltInTools()` (`src/tool/tools/index.ts:129`) — the `kilo_board_read` / `kilo_board_write` tools are only exported to the model when it returns `true` — and by the swarm-identity metadata attached to `task` payloads (`src/tool/tools/task.ts:476`). The kilocode-namespaced `isBoardEnabled` in `src/kilocode/board/enabled.ts` is preserved for downstream tooling that expects upstream env-flag names; the two live in separate modules and target different env-var namespaces because they serve different audiences.
+
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
 
 ## PTY Latch (`src/core/kilocode/pty/latch.ts`)

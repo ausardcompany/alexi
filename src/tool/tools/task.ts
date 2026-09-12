@@ -30,7 +30,7 @@ import { defineTool, type ToolResult, type ToolContext } from '../index.js';
 import { getAgentRegistry, type Agent } from '../../agent/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
-import { getConfigTaskModelSelection, getConfigSharedAgentBoard } from '../../config/userConfig.js';
+import { getConfigTaskModelSelection, isBoardEnabled } from '../../config/userConfig.js';
 import { SessionManager } from '../../core/sessionManager.js';
 import { BoardStore } from '../../core/database/boardStore.js';
 import { BoardContext } from '../../core/database/boardContext.js';
@@ -473,7 +473,7 @@ Usage:
       // (`2682dcb31`: keep shared-board content in explicit tool reads).
       // Gated by `experimental.sharedAgentBoard` so vanilla SAP AI Core
       // deployments see zero behavioural change until they opt in.
-      if (getConfigSharedAgentBoard()) {
+      if (isBoardEnabled()) {
         taskData.swarmIdentity = {
           name: params.subagent_type ?? 'general',
           role: 'swarm-member',
