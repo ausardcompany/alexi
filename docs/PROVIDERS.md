@@ -1713,6 +1713,116 @@ resolveBedrockModelID('arn:aws:bedrock:us-east-1:123456789012:inference-profile/
 // → 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/x' (ARN passthrough)
 ```
 
+## Auxiliary-Task Model Selection
+
+Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3). Auxiliary background tasks — title generation, session summarisation, context compaction, and commit-message generation — resolve their target model through `selectModelForTask` in `src/providers/model-selection.ts` instead of the primary chat path.
+
+The load-bearing safety property: **auxiliary tasks MUST NOT fall back to a cheaper "small" model when the operator has not actually provisioned one.** Otherwise the compaction / title / summary paths fail with `deployment_not_found` / auth errors as soon as they fire, silently degrading a working chat into a broken agent turn.
+
+### Public surface
+
+Re-exported from `src/providers/index.ts`:
+
+```typescript
+export type TaskKind = 'primary' | 'auxiliary';
+
+export interface ProviderContext {
+  providerID: 'sap-ai-core' | 'kilo';
+  defaultModel: string;
+  smallModelDeployment?: string;
+  hasKiloCredentials: () => boolean | Promise<boolean>;
+  hasSapDeployment: (tier: 'small') => boolean | Promise<boolean>;
+}
+
+export interface ModelRef {
+  providerID: 'sap-ai-core' | 'kilo';
+  modelID: string;
+}
+
+export interface GetModelOptions {
+  auxiliary?: boolean;
+}
+
+export function resolveSmallModelDeployment(): string | undefined;
+export function buildContext(): ProviderContext;
+export function selectModelForTask(
+  task: TaskKind,
+  context: ProviderContext
+): Promise<ModelRef>;
+export function getModel(
+  modelID?: string,
+  opts?: GetModelOptions
+): Promise<ModelRef>;
+export function getAuxiliaryModelId(): Promise<string>;
+```
+
+Alexi is SAP-first — `buildContext()` fixes `providerID: 'sap-ai-core'` and `hasKiloCredentials` always returns `false`. The Kilo branch is kept for symmetry with the upstream shape so a future Kilo provider integration is a single-file change.
+
+### Decision flow
+
+```mermaid
+flowchart TD
+    Start[Caller: title / summary / compaction] --> Aux{task === 'auxiliary'?}
+    Aux -->|No| Primary[Return defaultModel]
+    Aux -->|Yes| Kilo{Kilo creds present?}
+    Kilo -->|Yes| KiloModel[Return kilo/kilo-auto]
+    Kilo -->|No| SapCheck{smallModelDeployment set<br/>AND hasSapDeployment 'small' === true?}
+    SapCheck -->|Yes| SmallModel[Return smallModelDeployment]
+    SapCheck -->|No| Fallback[Return defaultModel<br/>safe fallback: never issue<br/>a call to an unconfigured id]
+
+    Primary --> Out[ModelRef]
+    KiloModel --> Out
+    SmallModel --> Out
+    Fallback --> Out
+```
+
+### Resolving the small-model deployment
+
+`resolveSmallModelDeployment()` reads the operator's configured small-model deployment id in this order (first non-empty wins):
+
+1. `models.compaction` in `~/.alexi/config.json` — canonical location (see [Configuration → Auxiliary-Task Model Selection](CONFIGURATION.md#auxiliary-task-model-selection-modelscompaction)).
+2. `context.compactionModel` in `~/.alexi/config.json` — legacy location; kept for backward compatibility.
+3. `AICORE_SMALL_MODEL` environment variable — env-only setups (CI, ad-hoc shells).
+
+Returns `undefined` when none are configured; `selectModelForTask('auxiliary', ...)` then reuses the primary model.
+
+### Example: auxiliary compaction call
+
+```typescript
+import { getAuxiliaryModelId, getProviderForModel } from './providers/index.js';
+
+async function summariseTranscript(messages: ChatMessage[]) {
+  // Resolves models.compaction / legacy / env / defaultModel in order.
+  const modelId = await getAuxiliaryModelId();
+  const provider = getProviderForModel(modelId);
+
+  return provider.complete({
+    messages,
+    // ... summarisation params
+  });
+}
+```
+
+Callers with an explicit override use `getModel(modelId)` (returns the override verbatim as a `sap-ai-core` `ModelRef`). Callers wanting the current default primary model without any auxiliary logic use `getModel()` with no arguments — this is equivalent to `{ providerID: 'sap-ai-core', modelID: getDefaultModel() }`.
+
+### Testing hook
+
+Tests build a `ProviderContext` directly:
+
+```typescript
+const ctx: ProviderContext = {
+  providerID: 'sap-ai-core',
+  defaultModel: 'gpt-4o',
+  smallModelDeployment: 'gpt-4o-mini',
+  hasKiloCredentials: () => false,
+  hasSapDeployment: (tier) => tier === 'small',
+};
+const ref = await selectModelForTask('auxiliary', ctx);
+// { providerID: 'sap-ai-core', modelID: 'gpt-4o-mini' }
+```
+
+The `hasSapDeployment` callback is the capability gate — return `false` from it in a test to assert the "defensive fallback to primary" branch is exercised even when a small id is present. See `docs/TESTING.md#testing-auxiliary-task-model-selection` for the full test pattern.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
