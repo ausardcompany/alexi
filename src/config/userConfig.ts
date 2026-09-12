@@ -183,6 +183,101 @@ export function setConfigDefaultModel(modelId: string): void {
   setConfigValue('defaultModel', modelId);
 }
 
+// ============ Compaction model (auxiliary-task model) ============
+
+/**
+ * Get the user's persisted "compaction" (auxiliary-task) model id.
+ *
+ * Ports upstream kilocode commit `f64c6646d`, which moved the compaction
+ * model setting from the Context tab to the Models tab in the webview
+ * settings. In Alexi (terminal-first) the analogue is to prefer reading
+ * the value from `models.compaction` (grouped alongside `defaultModel`)
+ * over the legacy `context.compactionModel` key — improving
+ * discoverability via `alexi config` while remaining backward compatible.
+ *
+ * Resolution order (first non-empty wins):
+ *   1. `models.compaction` (new canonical location)
+ *   2. `context.compactionModel` (legacy — emits a one-shot deprecation
+ *      warning per process the first time it is read)
+ *
+ * Returns `undefined` when neither is set — the caller is expected to
+ * reuse the primary model in that case (see
+ * `src/providers/model-selection.ts::selectModelForTask`).
+ */
+let _warnedLegacyCompactionModel = false;
+
+export function getConfigCompactionModel(): string | undefined {
+  const config = loadFullConfig();
+
+  const models = config.models;
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const value = (models as Record<string, unknown>).compaction;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  const context = config.context;
+  if (context && typeof context === 'object' && !Array.isArray(context)) {
+    const legacy = (context as Record<string, unknown>).compactionModel;
+    if (typeof legacy === 'string' && legacy.trim().length > 0) {
+      if (!_warnedLegacyCompactionModel) {
+        _warnedLegacyCompactionModel = true;
+        // Deprecation notice — one-shot per process to avoid spam.
+        // Uses the logger indirectly via console.warn; kept minimal
+        // because this file cannot depend on utils/logger without
+        // creating an import cycle.
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[alexi] config: `context.compactionModel` is deprecated; use `models.compaction` instead.'
+        );
+      }
+      return legacy.trim();
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Persist the user's chosen compaction (auxiliary) model.
+ *
+ * Always writes to the new `models.compaction` location. If the legacy
+ * `context.compactionModel` key is present, it is cleared so subsequent
+ * reads don't fall back to a stale value.
+ */
+export function setConfigCompactionModel(modelId: string): void {
+  const trimmed = modelId.trim();
+  if (trimmed.length === 0) {
+    throw new Error('compaction model id must be a non-empty string');
+  }
+  const config = loadFullConfig();
+  const existingModels =
+    config.models && typeof config.models === 'object' && !Array.isArray(config.models)
+      ? (config.models as Record<string, unknown>)
+      : {};
+  config.models = { ...existingModels, compaction: trimmed };
+
+  // Clean up the legacy key so migration is one-way.
+  if (config.context && typeof config.context === 'object' && !Array.isArray(config.context)) {
+    const ctx = { ...(config.context as Record<string, unknown>) };
+    if ('compactionModel' in ctx) {
+      delete ctx.compactionModel;
+      config.context = ctx;
+    }
+  }
+
+  saveFullConfig(config);
+}
+
+/**
+ * Test-only hook: reset the one-shot legacy-key deprecation warning cache.
+ * @internal
+ */
+export function _resetLegacyCompactionModelWarning(): void {
+  _warnedLegacyCompactionModel = false;
+}
+
 /**
  * Get the user's persisted default agent slug, or undefined if not set.
  * Read from the `agent` top-level key in ~/.alexi/config.json.

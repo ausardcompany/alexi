@@ -60,6 +60,23 @@ export { StartupTimeoutError } from './auth.js';
 // Re-export image response transforms (issue #1389)
 export { extractImageChunk, extractImageChunks, type NormalizedImageChunk } from './transform.js';
 
+// Re-export auxiliary-task model selection (kilocode `1e73d3862` +
+// opencode provider.ts +14/-3). See `./model-selection.ts` for the full
+// rationale — auxiliary tasks (title, summary, compaction) must not fall
+// back to a cheap model that isn't provisioned in the operator's SAP AI
+// Core deployment.
+export {
+  selectModelForTask,
+  buildContext as buildProviderContext,
+  resolveSmallModelDeployment,
+  getModel as getModelRef,
+  getAuxiliaryModelId,
+  type TaskKind,
+  type ProviderContext,
+  type GetModelOptions,
+  type ModelRef,
+} from './model-selection.js';
+
 // Re-export everything from sapOrchestration
 export {
   SapOrchestrationProvider,
