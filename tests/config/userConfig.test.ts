@@ -25,6 +25,9 @@ import {
   readProjectExtensionsFile,
   getConfigMcpToolDisplay,
   setConfigMcpToolDisplay,
+  getConfigCompactionModel,
+  setConfigCompactionModel,
+  _resetLegacyCompactionModelWarning,
 } from '../../src/config/userConfig.js';
 
 describe('userConfig', () => {
@@ -600,6 +603,80 @@ describe('userConfig', () => {
 
     it('rejects invalid values in the setter', () => {
       expect(() => setConfigMcpToolDisplay('sideways' as 'expanded')).toThrow();
+    });
+  });
+
+  describe('getConfigCompactionModel / setConfigCompactionModel', () => {
+    beforeEach(() => {
+      _resetLegacyCompactionModelWarning();
+    });
+
+    it('returns undefined when nothing is configured', () => {
+      saveFullConfig({});
+      expect(getConfigCompactionModel()).toBeUndefined();
+    });
+
+    it('reads from models.compaction (new canonical location)', () => {
+      saveFullConfig({ models: { compaction: 'gpt-4o-mini' } });
+      expect(getConfigCompactionModel()).toBe('gpt-4o-mini');
+    });
+
+    it('falls back to legacy context.compactionModel with a deprecation warning', () => {
+      saveFullConfig({ context: { compactionModel: 'legacy-mini' } });
+      const originalWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (msg: string): void => {
+        warnings.push(msg);
+      };
+      try {
+        expect(getConfigCompactionModel()).toBe('legacy-mini');
+        expect(warnings.some((w) => w.includes('context.compactionModel'))).toBe(true);
+      } finally {
+        console.warn = originalWarn;
+      }
+    });
+
+    it('prefers models.compaction over legacy context.compactionModel', () => {
+      saveFullConfig({
+        models: { compaction: 'new-mini' },
+        context: { compactionModel: 'legacy-mini' },
+      });
+      expect(getConfigCompactionModel()).toBe('new-mini');
+    });
+
+    it('setConfigCompactionModel writes to models.compaction and clears the legacy key', () => {
+      saveFullConfig({
+        context: { compactionModel: 'legacy-mini', otherKey: 'kept' },
+      });
+      setConfigCompactionModel('canonical-mini');
+      const config = loadFullConfig();
+      const models = config.models as Record<string, unknown> | undefined;
+      const context = config.context as Record<string, unknown> | undefined;
+      expect(models?.compaction).toBe('canonical-mini');
+      // Legacy key is removed on migration
+      expect(context?.compactionModel).toBeUndefined();
+      // Unrelated context keys are preserved
+      expect(context?.otherKey).toBe('kept');
+    });
+
+    it('setConfigCompactionModel rejects empty strings', () => {
+      expect(() => setConfigCompactionModel('')).toThrow();
+      expect(() => setConfigCompactionModel('   ')).toThrow();
+    });
+
+    it('does not warn when only the new-style key is present', () => {
+      saveFullConfig({ models: { compaction: 'clean-mini' } });
+      const originalWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (msg: string): void => {
+        warnings.push(msg);
+      };
+      try {
+        expect(getConfigCompactionModel()).toBe('clean-mini');
+        expect(warnings.filter((w) => w.includes('deprecated'))).toHaveLength(0);
+      } finally {
+        console.warn = originalWarn;
+      }
     });
   });
 });

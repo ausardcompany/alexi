@@ -37,6 +37,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`SapOrchestrationProvider.chat` / `stream` return-path shape** (`src/providers/sapOrchestration.ts`): The public result contract is unchanged for callers, but the internal completion path now materialises `content`, `finishReason`, and a `usage` object BEFORE returning so the same values can be attached to the tracing span via `finishProviderSpan`. Refactor is behaviour-preserving; the only observable difference is that provider results and traced usage attributes are guaranteed to be in sync.
 
+- **Alexi-native env-flag enable path for the shared agent board** (`src/config/userConfig.ts`, `src/tool/tools/index.ts`, `src/tool/tools/task.ts`, `tests/tool/tools/board.test.ts`, issue #1698): Adds Alexi's own `KILO_*` env-flag enable path for `experimental.sharedAgentBoard`, complementing the upstream `KILOCODE_EXPERIMENTAL_SWARM_BOARD` port that landed in `1.22.17` (see below). New exported helper `isBoardEnabled()` in `src/config/userConfig.ts:628` returns `true` when ANY of the following holds:
+  1. `experimental.sharedAgentBoard: true` is set in `~/.alexi/config.json` (the existing persistent opt-in via `getConfigSharedAgentBoard()`).
+  2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — the feature-specific env flag, matching the `KILO_FLAGS` / `KILO_RETRIES` naming convention already in use in agent workflows.
+  3. `process.env.KILO_EXPERIMENTAL === '1'` — the umbrella experimental flag that enables every experimental feature at once.
+
+  The rule is a boolean OR: an explicit config `false` does NOT override a set env flag. This lets operators flip the board on temporarily (CI runs, Docker containers, ad-hoc testing) without editing the persistent config file, while a permanent opt-in via config continues to work when no env vars are set. Env values are compared literally to the string `'1'` — any other value (`'0'`, `'true'`, empty, unset) is treated as unset so `KILO_EXPERIMENTAL=0` is never misread as an opt-in.
+
+  Two registration sites migrated from the direct `getConfigSharedAgentBoard()` read to the new resolver:
+  - `registerBuiltInTools()` in `src/tool/tools/index.ts:129` — the `kilo_board_read` / `kilo_board_write` tools are only exported to the model when `isBoardEnabled()` returns `true`. Reads the resolver fresh on each call so a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn).
+  - `src/tool/tools/task.ts:476` — the swarm-identity metadata attached to `task` payloads is only populated when the board is enabled. Vanilla SAP AI Core deployments see zero behavioural change until an operator opts in via any of the three signals.
+
+  Note that this coexists with `src/kilocode/board/enabled.ts` (introduced in `1.22.17` as the direct kilocode PR #14013 port using `KILOCODE_EXPERIMENTAL_SWARM_BOARD`). The two live in separate modules, target different env-var namespaces (`KILO_*` vs `KILOCODE_*`), and are not currently unified because they serve different audiences: `isBoardEnabled()` in `userConfig.ts` is the primary gate used by tool registration and swarm-identity attach; the kilocode module preserves upstream parity for anyone porting downstream tooling that expects the upstream env-flag name.
+
+  Test coverage (`tests/tool/tools/board.test.ts`, 100 lines, 6 cases): (1) config key `true` alone enables; (2) specific env flag `'1'` alone enables even when config is `false`; (3) umbrella env flag `'1'` alone enables even when config is `false`; (4) all-off returns `false`; (5) non-`'1'` env values (`'0'`, `'true'`) do NOT enable; (6) the OR-semantics override — env flag `'1'` beats an explicit config `false`. Tests snapshot/restore both the real `~/.alexi/config.json` (via `fs.readFileSync` + `fs.writeFileSync` in `beforeEach` / `afterEach`) and the two env vars, because `isBoardEnabled()` and `getConfigSharedAgentBoard()` live in the same module and `vi.mock` cannot intercept intra-module calls.
+
+## [1.22.18] - 2026-09-12
+
+### Added
+
+- **Auxiliary-task model selection (`src/providers/model-selection.ts`, `src/providers/__tests__/model-selection.test.ts`, `src/providers/index.ts`)**: New module that decides which model to use for background / auxiliary tasks (title generation, session summarisation, context compaction, commit message generation, ...). Ports the intent of upstream kilocode `1e73d3862` (`small-model-fallback-requires-kilo-credentials`) and the accompanying opencode `provider.ts` change (`+14/-3`) to Alexi's SAP AI Core world.
+
+  The load-bearing safety property: auxiliary tasks MUST NOT fall back to a cheaper "small" model when the operator has not actually provisioned one — otherwise the compaction / title / summary paths fail with `deployment_not_found` / auth errors as soon as they fire. Historically, callers hard-coded `gpt-4o-mini` or a similar shortcut id; the new module makes the fallback conditional on `hasSapDeployment('small')` returning true, and reuses the primary `defaultModel` as the safe fallback otherwise.
+
+  Public surface (all exported from `src/providers/index.ts`):
+
+  - `type TaskKind = 'primary' | 'auxiliary'` — used to select the target model.
+  - `interface ProviderContext { providerID; defaultModel; smallModelDeployment?; hasKiloCredentials; hasSapDeployment; }` — decision inputs. Kept as a plain object (not a class) so tests can construct one directly without provider I/O.
+  - `interface ModelRef { providerID: 'sap-ai-core' | 'kilo'; modelID: string; }` — resolved model reference.
+  - `interface GetModelOptions { auxiliary?: boolean }` — additive options; a bare `getModel()` still returns the primary model.
+  - `resolveSmallModelDeployment(): string | undefined` — reads the configured small-model deployment id. Resolution order (first non-empty wins): `models.compaction` (new canonical location) → `context.compactionModel` (legacy) → `AICORE_SMALL_MODEL` env var.
+  - `buildContext(): ProviderContext` — builds the default context for the running process. Fixed to `providerID: 'sap-ai-core'`; `hasKiloCredentials` always returns `false` in Alexi.
+  - `selectModelForTask(task, context): Promise<ModelRef>` — decides the model. For `primary`, returns `context.defaultModel`. For `auxiliary`, returns the small deployment iff `hasSapDeployment('small')` is true AND `smallModelDeployment` is non-empty, otherwise reuses `defaultModel`. Kilo branch is present for symmetry with upstream but always false in Alexi.
+  - `getModel(modelID?, opts?): Promise<ModelRef>` — top-level resolver. Explicit `modelID` overrides always win; when omitted with `opts.auxiliary === true`, dispatches to `selectModelForTask('auxiliary', buildContext())`.
+  - `getAuxiliaryModelId(): Promise<string>` — convenience helper returning just the model id string, suitable for direct passing to `getProviderForModel` / `getProviderForModelWithFallback`.
+
+  These are re-exported from `src/providers/index.ts` as `selectModelForTask`, `buildProviderContext`, `resolveSmallModelDeployment`, `getModelRef`, `getAuxiliaryModelId`, and the four types (`TaskKind`, `ProviderContext`, `GetModelOptions`, `ModelRef`). Import site convention: `import { getAuxiliaryModelId } from '../providers/index.js'`.
+
+  Test coverage (`src/providers/__tests__/model-selection.test.ts`, 246 lines, 13+ cases): primary path returns default; auxiliary reuses default when nothing is configured; auxiliary uses the SAP small deployment when both the id AND the `hasSapDeployment('small')` capability check are true; auxiliary falls back defensively to default when `hasSapDeployment` returns false even if the id is set (never issue a call to an unconfigured deployment); `resolveSmallModelDeployment` honours the resolution order (`models.compaction` beats `context.compactionModel` beats `AICORE_SMALL_MODEL`); `getModel` returns explicit overrides verbatim; `getAuxiliaryModelId` shape.
+
+- **`getConfigCompactionModel()` / `setConfigCompactionModel()` (`src/config/userConfig.ts`, `tests/config/userConfig.test.ts`)**: New user-config helpers to read and persist the compaction (auxiliary-task) model. Ports upstream kilocode `f64c6646d`, which moved the compaction model setting from the Context tab to the Models tab in the webview settings. In Alexi (terminal-first) the analogue is to prefer reading the value from `models.compaction` (grouped alongside `defaultModel`) over the legacy `context.compactionModel` key, improving discoverability via `alexi config` while remaining backward compatible.
+
+  Read resolution order (first non-empty wins):
+
+  1. `models.compaction` — new canonical location.
+  2. `context.compactionModel` — legacy; emits a one-shot deprecation warning per process the first time it is read (`[alexi] config: \`context.compactionModel\` is deprecated; use \`models.compaction\` instead.`).
+
+  Returns `undefined` when neither is set — the caller is expected to reuse the primary model in that case (see `selectModelForTask` above).
+
+  Write behaviour: `setConfigCompactionModel(modelId)` always writes to the new `models.compaction` location. If the legacy `context.compactionModel` key is present, it is cleared so subsequent reads never fall back to a stale value. Empty / whitespace-only ids throw `Error('compaction model id must be a non-empty string')`.
+
+  Test-only surface: `_resetLegacyCompactionModelWarning()` — resets the one-shot warning cache so tests can re-observe the deprecation message. Marked `@internal`; production code must not call it.
+
+### Changed
+
+- **`src/core/__tests__/compaction.test.ts`**: The top-level `beforeEach` now calls `vi.restoreAllMocks()` in addition to resetting the global `LLMSummarizeFn` singleton. Ports kilocode `0f33a6673` ("Skip title generation in exact-call compaction tests"). Compaction paths in some codebases implicitly trigger a title-generation LLM call which pollutes exact call-count assertions; while Alexi does not currently ship a `Session.generateTitle` helper, restoring auxiliary spies between tests keeps `describe('compactConversation')` call-count assertions stable against future auxiliary-mock leakage.
+
+### Fixed
+
+- **Version bumped to `1.22.18`** (`package.json`): patch release covering the 2026-09-12 upstream sync — auxiliary-task model selection and the paired `models.compaction` config helpers.
+
 ## [1.22.17] - 2026-09-11
 
 ### Added
@@ -108,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `isUnsafeWorkspaceRoot(workdir: string, home?: string): boolean` — inverse of `allowed()` from `src/core/kilocode/fff.ts`, exposed on the filesystem utility surface so tool call sites can read as `if (isUnsafeWorkspaceRoot(ctx.workdir)) return refuse(...)` without importing the deeper kilocode module directly. The optional `home` argument mirrors `allowed()`'s override — tests use it (or the `ALEXI_TEST_HOME` env var) to pin the home anchor without mutating `process.env.HOME` for the whole process.
   - `UNSAFE_WORKSPACE_ROOT_MESSAGE` — canonical user-facing error string (`'Indexing the home directory or filesystem root is disabled to prevent OOM. Please cd into a project directory.'`) so callers surface identical copy and downstream tests can assert on it without duplication.
 
-   Test coverage: `tests/utils/filesystem.test.ts` (7 cases) pins the guard predicate — home rejection, POSIX filesystem-root rejection, allowing normal project directories, allowing subdirectories of home, respecting the explicit `home` argument override, and asserting the canonical error message contains `home directory`, `filesystem root`, `OOM`, and `cd into a project directory`. `tests/tool/tools/glob.test.ts` and `tests/tool/tools/codesearch.guard.test.ts` extend the standard tool-test pattern (temp workdir via `fs.mkdtemp`, teardown in `afterEach`) with an `ALEXI_TEST_HOME`-based fake-home fixture so the guard can be exercised without mutating the real `$HOME`. Windows-specific POSIX root cases skip on `process.platform === 'win32'`.
+    Test coverage: `tests/utils/filesystem.test.ts` (7 cases) pins the guard predicate — home rejection, POSIX filesystem-root rejection, allowing normal project directories, allowing subdirectories of home, respecting the explicit `home` argument override, and asserting the canonical error message contains `home directory`, `filesystem root`, `OOM`, and `cd into a project directory`. `tests/tool/tools/glob.test.ts` and `tests/tool/tools/codesearch.guard.test.ts` extend the standard tool-test pattern (temp workdir via `fs.mkdtemp`, teardown in `afterEach`) with an `ALEXI_TEST_HOME`-based fake-home fixture so the guard can be exercised without mutating the real `$HOME`. Windows-specific POSIX root cases skip on `process.platform === 'win32'`.
 
 ## [1.22.16] - 2026-09-08
 

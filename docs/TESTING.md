@@ -1779,6 +1779,85 @@ it('returns SelectModelError for unknown model', () => {
 });
 ```
 
+### Testing Auxiliary-Task Model Selection
+
+Introduced 2026-09-12 (`1.22.18`). The module under test is `src/providers/model-selection.ts` — pure logic that decides which model to hand to auxiliary background pipelines (title, summary, compaction, commit message). The important behavioural invariant: **the selector must NEVER return a small-model id whose deployment has not been provisioned**, otherwise auxiliary calls fail with `deployment_not_found` at runtime.
+
+The recommended pattern is to construct a `ProviderContext` directly — the interface is a plain object, so no provider I/O is needed:
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock the underlying default-model + env + config accessors BEFORE
+// importing the module under test — vitest hoists vi.mock, but explicit
+// ordering matches the AGENTS.md > Testing quirks convention.
+vi.mock('../index.js', () => ({
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+vi.mock('../../config/env.js', () => ({
+  env: vi.fn(() => undefined),
+}));
+vi.mock('../../config/userConfig.js', () => ({
+  getConfigValue: vi.fn(() => undefined),
+}));
+vi.mock('../sapOrchestration.js', () => ({
+  isOrchestrationModel: vi.fn(() => true),
+}));
+
+import {
+  selectModelForTask,
+  type ProviderContext,
+} from '../model-selection.js';
+
+function baseContext(overrides: Partial<ProviderContext> = {}): ProviderContext {
+  return {
+    providerID: 'sap-ai-core',
+    defaultModel: 'gpt-4o',
+    smallModelDeployment: undefined,
+    hasKiloCredentials: (): boolean => false,
+    hasSapDeployment: (): boolean => false,
+    ...overrides,
+  };
+}
+
+describe('selectModelForTask', () => {
+  it('reuses default model when no small deployment is configured', async () => {
+    const ref = await selectModelForTask('auxiliary', baseContext());
+    // Critical safety property: never issue a call to an unconfigured id.
+    expect(ref).toEqual({ providerID: 'sap-ai-core', modelID: 'gpt-4o' });
+  });
+
+  it('uses the SAP small deployment when both id AND capability are true', async () => {
+    const ctx = baseContext({
+      smallModelDeployment: 'gpt-4o-mini',
+      hasSapDeployment: (tier) => tier === 'small',
+    });
+    const ref = await selectModelForTask('auxiliary', ctx);
+    expect(ref).toEqual({ providerID: 'sap-ai-core', modelID: 'gpt-4o-mini' });
+  });
+
+  it('defensively falls back when hasSapDeployment returns false', async () => {
+    // The id being set is not enough — the capability gate is authoritative.
+    const ctx = baseContext({
+      smallModelDeployment: 'gpt-4o-mini',
+      hasSapDeployment: (): boolean => false,
+    });
+    const ref = await selectModelForTask('auxiliary', ctx);
+    expect(ref.modelID).toBe('gpt-4o');
+  });
+});
+```
+
+Guidelines specific to auxiliary-model tests:
+
+1. **Mock `getDefaultModel`, `env`, and `getConfigValue` before importing** `model-selection.js`. The module reads these at construction time via `buildContext()`; late `vi.mock` calls after the import land after the hoisting boundary and no longer apply.
+2. **Test `resolveSmallModelDeployment()` at the resolution-order boundary.** The first-non-empty-wins order is `models.compaction` → `context.compactionModel` → `AICORE_SMALL_MODEL`. Pin each layer separately by making higher-priority sources return `undefined`; do NOT rely on side-effects between test cases.
+3. **`getConfigCompactionModel()` emits a one-shot per-process deprecation warning** when it falls back to the legacy `context.compactionModel` key. Tests that need to re-observe the warning MUST call `_resetLegacyCompactionModelWarning()` in `beforeEach`. The helper is `@internal`; production code must not call it.
+4. **The Kilo branch is dead code in Alexi.** Do not add tests that assert the `kilo/kilo-auto` return path — `hasKiloCredentials` always returns `false` in `buildContext()`. Keep the coverage for that branch in the unit test that constructs a `ProviderContext` with an explicit `providerID: 'kilo'` and `hasKiloCredentials: () => true`.
+5. **Never fall through to a real `getConfigCompactionModel()` call** in a test that also stubs the environment — the helper touches `~/.alexi/config.json` and will read stale operator config on developer machines. Either mock `getConfigValue` (preferred) or seed a temp home directory with `os.homedir` shimmed via `vi.spyOn(os, 'homedir').mockReturnValue(tempHome)`.
+
+See `src/providers/__tests__/model-selection.test.ts` (246 lines, 13+ cases) for the full test surface.
+
 ### Testing the Shared Agent Board
 
 Introduced 2026-09-03 (`1.22.10`). The `experimental.sharedAgentBoard` flag gates registration of `kilo_board_read` / `kilo_board_write`. Tests that exercise the board should follow three patterns:
@@ -1856,6 +1935,105 @@ it('acknowledge is idempotent for duplicate message ids', async () => {
 ```
 
 Environments without a working `better-sqlite3` binding should exercise the graceful-degradation path: `read` returns `[]`, `write` returns the message shape without persistence, `acknowledgeReads` is a no-op. Tests that assert against persistence MUST skip on systems where `nodeRequire('better-sqlite3')` throws, or set up a fresh temp `HOME` via `vi.spyOn(os, 'homedir')` so the DB file is created inside the test's `mkdtempSync` directory.
+
+### Testing the shared-agent-board env-flag enable path
+
+Ports upstream kilocode #14013 (`BoardEnabled.resolve`). As of the port, the `experimental.sharedAgentBoard` opt-in is the union of THREE signals — persistent config key, feature-specific env flag, umbrella env flag — resolved by `isBoardEnabled()` in `src/config/userConfig.ts:628`. All three registration sites that gate board behaviour (`registerBuiltInTools` in `src/tool/tools/index.ts:128`, the swarm-identity attachment in `src/tool/tools/task.ts:476`) go through the resolver rather than reading the config key directly. The regression suite lives at `tests/tool/tools/board.test.ts` (100 lines, 6 cases).
+
+The load-bearing observation is that `isBoardEnabled()` and `getConfigSharedAgentBoard()` are declared in the same module (`src/config/userConfig.ts`), so `vi.mock('../src/config/userConfig.js', ...)` cannot intercept the intra-module call from `isBoardEnabled` into `getConfigSharedAgentBoard` — Vitest module mocks only rewrite the import binding at the call site, not the closure the exporter captured. The suite drives the config key through the real `~/.alexi/config.json`, snapshotting the file in `beforeEach` and restoring it in `afterEach`:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+
+import {
+  CONFIG_FILE,
+  isBoardEnabled,
+  setConfigSharedAgentBoard,
+} from '../../../src/config/userConfig.js';
+
+describe('isBoardEnabled', () => {
+  const savedSpecific = process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+  const savedUmbrella = process.env.KILO_EXPERIMENTAL;
+  let originalConfigContent: string | null = null;
+
+  beforeEach(() => {
+    // Snapshot the existing user config so we can restore it after the test.
+    try {
+      originalConfigContent = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    } catch {
+      originalConfigContent = null;
+    }
+    setConfigSharedAgentBoard(false);
+    delete process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+    delete process.env.KILO_EXPERIMENTAL;
+  });
+
+  afterEach(() => {
+    try {
+      if (originalConfigContent !== null) {
+        fs.writeFileSync(CONFIG_FILE, originalConfigContent, 'utf-8');
+      } else if (fs.existsSync(CONFIG_FILE)) {
+        fs.unlinkSync(CONFIG_FILE);
+      }
+    } catch {
+      // Best-effort restore
+    }
+    if (savedSpecific === undefined) {
+      delete process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
+    } else {
+      process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = savedSpecific;
+    }
+    if (savedUmbrella === undefined) {
+      delete process.env.KILO_EXPERIMENTAL;
+    } else {
+      process.env.KILO_EXPERIMENTAL = savedUmbrella;
+    }
+  });
+
+  it('returns true when the config key is true', () => {
+    setConfigSharedAgentBoard(true);
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns true when the specific env flag is "1" and config is false', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns true when the umbrella env flag is "1" and config is false', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+
+  it('returns false when config is false and no env flags are set', () => {
+    setConfigSharedAgentBoard(false);
+    expect(isBoardEnabled()).toBe(false);
+  });
+
+  it('returns false when env flag is set to a non-"1" value', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '0';
+    process.env.KILO_EXPERIMENTAL = 'true';
+    expect(isBoardEnabled()).toBe(false);
+  });
+
+  it('env flag overrides an explicit config false (OR semantics)', () => {
+    setConfigSharedAgentBoard(false);
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '1';
+    expect(isBoardEnabled()).toBe(true);
+  });
+});
+```
+
+Key patterns:
+
+1. **Drive the config key through the real file, snapshot in `beforeEach`, restore in `afterEach`.** Same-module intra-file calls (here `isBoardEnabled` invoking `getConfigSharedAgentBoard`) cannot be intercepted by `vi.mock`. The save/restore pattern is copied verbatim from `tests/config/userConfig.test.ts` and is the only reliable way to test cross-signal resolution helpers that live in the same module as their inputs.
+2. **Snapshot BOTH env vars at `describe` scope, not `beforeEach`.** The `savedSpecific` / `savedUmbrella` constants are captured once when the test file is loaded so a case that reassigns them mid-run still sees the original value in `afterEach`. Deleting when the original was `undefined` (rather than reassigning `undefined`) matters — `process.env.FOO = undefined` writes the string `'undefined'`, which then satisfies `process.env.FOO !== undefined` on every subsequent read.
+3. **Assert the `'1'`-only string comparison explicitly.** Case 5 (`env flag set to a non-"1" value`) is the load-bearing regression guard: a naive `Boolean(process.env.KILO_EXPERIMENTAL)` implementation would enable the board on `KILO_EXPERIMENTAL=0`, which is the exact anti-behaviour the port is meant to prevent. Cover `'0'` AND `'true'` (a truthy string that is NOT literal `'1'`) so the assertion pins the strict-equality contract.
+4. **Assert the OR override once, explicitly.** Case 6 is redundant with case 2 at the truth-table level but pins the intent: an explicit config `false` does NOT override a set env flag. Keeping the case separate means a future change to the resolution rule (e.g. flipping to AND semantics, or adding an override precedence) trips a differently-named test than the plain "env flag alone enables" case, which makes the failure diagnosis faster.
 
 ### Testing JSON-encoded Tool Params Tolerance
 

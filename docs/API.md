@@ -2914,3 +2914,71 @@ Contract:
 - `attach(listener)` flushes the buffer synchronously in emission order before returning. Returns a detach function.
 - Detaching re-enables buffering — late reattach receives values emitted while unattached.
 - The flush loop halts early if the listener re-assigns itself mid-drain; remaining buffered values stay for the next `attach()`.
+
+## Auxiliary-Task Model Selection (`src/providers/model-selection.ts`)
+
+Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` + opencode provider.ts `+14/-3`). Decides which model to use for background tasks (title, summary, compaction, commit-message). Re-exported from `src/providers/index.ts` so callers `import { getAuxiliaryModelId, selectModelForTask } from './providers/index.js'`.
+
+```typescript
+export type TaskKind = 'primary' | 'auxiliary';
+
+export interface ProviderContext {
+  providerID: 'sap-ai-core' | 'kilo';
+  defaultModel: string;
+  smallModelDeployment?: string;
+  hasKiloCredentials: () => boolean | Promise<boolean>;
+  hasSapDeployment: (tier: 'small') => boolean | Promise<boolean>;
+}
+
+export interface ModelRef {
+  providerID: 'sap-ai-core' | 'kilo';
+  modelID: string;
+}
+
+export interface GetModelOptions {
+  auxiliary?: boolean;
+}
+
+export function resolveSmallModelDeployment(): string | undefined;
+export function buildContext(): ProviderContext;
+export function selectModelForTask(
+  task: TaskKind,
+  context: ProviderContext
+): Promise<ModelRef>;
+export function getModel(
+  modelID?: string,
+  opts?: GetModelOptions
+): Promise<ModelRef>;
+export function getAuxiliaryModelId(): Promise<string>;
+```
+
+Behaviour, in order:
+
+1. `task === 'primary'` — always returns `{ providerID, modelID: defaultModel }`.
+2. `task === 'auxiliary'` AND `providerID === 'kilo'` AND `hasKiloCredentials()` truthy — returns `{ providerID: 'kilo', modelID: 'kilo-auto' }`. (Never fires in Alexi's SAP-first configuration.)
+3. `task === 'auxiliary'` AND `smallModelDeployment` non-empty AND `hasSapDeployment('small')` truthy — returns `{ providerID: 'sap-ai-core', modelID: smallModelDeployment }`.
+4. Otherwise — safe fallback: `{ providerID, modelID: defaultModel }`. Guarantees auxiliary calls NEVER fail with `deployment_not_found` on an unconfigured small deployment.
+
+Convenience helpers:
+
+- `getAuxiliaryModelId()` — returns just the string model id, ready to pass directly to `getProviderForModel` / `getProviderForModelWithFallback`.
+- `getModel(modelID)` — when `modelID` is a non-empty string, returns it verbatim as a `sap-ai-core` `ModelRef` (explicit overrides always win).
+- `getModel(undefined, { auxiliary: true })` — equivalent to `selectModelForTask('auxiliary', buildContext())`.
+
+## Compaction Model Config Helpers (`src/config/userConfig.ts`)
+
+Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `f64c6646d`). Config-file readers and writers for the auxiliary-task model id.
+
+```typescript
+export function getConfigCompactionModel(): string | undefined;
+export function setConfigCompactionModel(modelId: string): void;
+```
+
+- **Read resolution order** (first non-empty wins):
+  1. `models.compaction` in `~/.alexi/config.json` — canonical location.
+  2. `context.compactionModel` — legacy; emits a one-shot per-process deprecation warning the first time it fires:
+     `[alexi] config: \`context.compactionModel\` is deprecated; use \`models.compaction\` instead.`
+- **Write behaviour:** always writes to `models.compaction`; if `context.compactionModel` is set, it is removed from the persisted file so subsequent reads never fall back to a stale value. Empty / whitespace-only ids throw `Error('compaction model id must be a non-empty string')`.
+- **Test-only:** `_resetLegacyCompactionModelWarning()` — resets the one-shot warning cache so tests can re-observe the deprecation warning. Marked `@internal`; production code must not call it.
+
+See [Configuration → Auxiliary-Task Model Selection](CONFIGURATION.md#auxiliary-task-model-selection-modelscompaction) for the operator-facing writeup and [Providers → Auxiliary-Task Model Selection](PROVIDERS.md#auxiliary-task-model-selection) for the runtime flow.

@@ -484,14 +484,14 @@ if (requestedModel || requestedProvider || requestedReasoning) {
 
 Tests for experimentally-gated code should snapshot the flag with `vi.spyOn(userConfig, 'getConfigTaskModelSelection')`, mutate it per case, and restore in `afterEach` so per-test state does not leak. See `docs/TESTING.md#testing-per-task-model-selection` for the full pattern.
 
-**Additional worked example — `experimental.sharedAgentBoard` (2026-09-03, ports upstream kilocode `162e30d23`).** The same shape is applied to gate the `kilo_board_read` / `kilo_board_write` tools. The registration site sits in `src/tool/tools/index.ts:118` inside `registerBuiltInTools()`, which reads the flag once per process and registers the tools only when the flag is on:
+**Additional worked example — `experimental.sharedAgentBoard` (2026-09-03, ports upstream kilocode `162e30d23`; env-flag enable path 2026-09-11, ports upstream kilocode #14013).** The same shape is applied to gate the `kilo_board_read` / `kilo_board_write` tools. The registration site sits in `src/tool/tools/index.ts:128` inside `registerBuiltInTools()`, which reads the resolver once per process and registers the tools only when the flag is on:
 
 ```typescript
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {
     registerTool(tool as Tool<any, any>);
   }
-  if (getConfigSharedAgentBoard()) {
+  if (isBoardEnabled()) {
     registerTool(boardReadTool as Tool<any, any>);
     registerTool(boardWriteTool as Tool<any, any>);
   }
@@ -500,7 +500,29 @@ export function registerBuiltInTools(): void {
 
 Prefer gating at **registration time** (as above) when the tool should be invisible to the model when the flag is off — the model does not learn about `kilo_board_*` at all when the flag is `false`, so it cannot mistakenly call them. Prefer gating at the **tool boundary** (returning a `success: false` error) when the tool is always present but its behaviour changes with the flag (e.g. per-task model selection on the `task` tool). Both patterns share the same `experimental.*` config helper contract.
 
-**Env flag + persisted config unification (2026-09-11, ports kilocode PR #14013).** When upstream ships a feature gated by an env flag AND Alexi already has a persisted `experimental.*` counterpart, unify the two signals through a single `isBoardEnabled`-style predicate in the feature's own module instead of scattering `process.env.X ??` checks across call sites. The canonical shape lives in `src/kilocode/board/enabled.ts`:
+**Multi-signal enable paths (config + env flags).** For experimental features that operators need to flip on temporarily (CI runs, Docker containers, one-off sessions), extend the base config helper with an `isXEnabled()` resolver that unions the persistent config key with one or more env flags. Alexi currently has two coexisting resolvers for the shared agent board — one under Alexi's own `KILO_*` env-var namespace, and one preserving upstream kilocode's `KILOCODE_*` namespace.
+
+The Alexi-native shape (issue #1698) is `isBoardEnabled()` in `src/config/userConfig.ts:628`:
+
+```typescript
+export function isBoardEnabled(): boolean {
+  return (
+    getConfigSharedAgentBoard() ||
+    process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1' ||
+    process.env.KILO_EXPERIMENTAL === '1'
+  );
+}
+```
+
+Contract:
+
+1. **Boolean OR.** An explicit config `false` MUST NOT override a set env flag. This is what lets an operator flip a feature on without editing the persistent config file. If you need "env can only turn the feature OFF", introduce a separate `disable` flag — do not invert the OR semantics of the enable path.
+2. **Strict-equality against the literal string `'1'`.** Any other value (`'0'`, `'true'`, empty, unset) is treated as unset. This keeps the enable path unambiguous and prevents `KILO_EXPERIMENTAL=0` from being misread as an opt-in. Never `Boolean(process.env.FOO)` — that pattern would enable on `'0'`, `'false'`, and every other non-empty string.
+3. **Feature-specific flag first, umbrella flag second.** The specific flag (`KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1`) exists so operators can enable a single feature; the umbrella flag (`KILO_EXPERIMENTAL=1`) exists so CI configurations can enable every experimental feature at once. Both should be checked; order does not affect correctness (short-circuit `||`) but the feature-specific flag reads more naturally when it comes first.
+4. **All call sites go through the resolver, not the raw config reader.** Every registration site and every tool-boundary gate should call `isXEnabled()`, not `getConfigX()`. Otherwise an operator who set only the env flag would see the tool listed (via the raw config reader) but rejected at execution time (via the resolver), or vice versa. Migrated call sites for the board port: `src/tool/tools/index.ts:129` (registration gate) and `src/tool/tools/task.ts:476` (swarm-identity attachment).
+5. **Test the resolver through the real config file.** `isXEnabled()` and `getConfigX()` live in the same module, so `vi.mock` cannot intercept the intra-module call. Snapshot `~/.alexi/config.json` in `beforeEach` and restore in `afterEach`, and snapshot each env var at `describe` scope. See `docs/TESTING.md#testing-the-shared-agent-board-env-flag-enable-path` for the full 6-case reference suite.
+
+**Upstream kilocode env flag mirror (2026-09-11, ports kilocode PR #14013).** In parallel, the upstream `KILOCODE_EXPERIMENTAL_SWARM_BOARD` env flag is exposed in its own module at `src/kilocode/board/enabled.ts` so downstream tooling that ports from kilocode continues to see the upstream env-var name:
 
 ```typescript
 const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
@@ -517,25 +539,102 @@ export function isBoardEnabled(experimentalConfigFlag: boolean = false): boolean
 }
 ```
 
-Precedence contract to follow when adding new gates of this shape:
+Precedence contract (mirror-only; this module is not currently wired into tool registration — the `userConfig.ts` resolver above is the primary gate):
 
 1. Env var explicit truthy → force on.
 2. Env var explicit falsy → force off (overrides persisted config so operators can disable per-run).
 3. Env var unset → fall back to the persisted `experimental.*` config passed in as the argument. The channel-default derivation lives in `src/flag/flag.ts` via `unstableDefault()` — expose that as a sibling constant (e.g. `Flag.KILOCODE_EXPERIMENTAL_SWARM_BOARD`) rather than duplicating the resolution logic here.
 
-Callers compose the two:
+Keep both predicates sync and side-effect-free so they are safe to call from tool registration (which runs before any async subsystem is initialised).
+
+### One-way config key migration with a one-shot deprecation warning
+
+When a persisted-config key moves to a new canonical location (e.g. `context.compactionModel` → `models.compaction` in `1.22.18`, ports kilocode `f64c6646d`), the read/write helpers on `src/config/userConfig.ts` follow a fixed contract so the migration is safe against partial rollouts and stale operator configs.
+
+**Read side:** first-non-empty-wins across (new canonical key) → (legacy key). When the legacy branch fires, emit a **one-shot per-process deprecation warning** guarded by a module-level flag, then return the legacy value. This lets operators upgrade at their own pace and the noise is bounded to a single line per process regardless of how many times the helper is called.
 
 ```typescript
-import { isBoardEnabled } from './kilocode/board/enabled.js';
-import { getConfigSharedAgentBoard } from './config/userConfig.js';
+let _warnedLegacyCompactionModel = false;
 
-if (isBoardEnabled(getConfigSharedAgentBoard())) {
-  registerTool(boardReadTool);
-  registerTool(boardWriteTool);
+export function getConfigCompactionModel(): string | undefined {
+  const config = loadFullConfig();
+
+  // 1. New canonical location.
+  const models = config.models;
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const value = (models as Record<string, unknown>).compaction;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  // 2. Legacy location — emit ONE deprecation warning per process.
+  const context = config.context;
+  if (context && typeof context === 'object' && !Array.isArray(context)) {
+    const legacy = (context as Record<string, unknown>).compactionModel;
+    if (typeof legacy === 'string' && legacy.trim().length > 0) {
+      if (!_warnedLegacyCompactionModel) {
+        _warnedLegacyCompactionModel = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[alexi] config: `context.compactionModel` is deprecated; ' +
+            'use `models.compaction` instead.'
+        );
+      }
+      return legacy.trim();
+    }
+  }
+
+  return undefined;
 }
 ```
 
-Keep the predicate sync and side-effect-free so it is safe to call from tool registration (which runs before any async subsystem is initialised).
+**Write side:** always write to the NEW canonical key, AND clear the legacy key from the persisted file so subsequent reads never fall back to a stale value. The write is one-way — future reads will find the value at the new location only.
+
+```typescript
+export function setConfigCompactionModel(modelId: string): void {
+  const trimmed = modelId.trim();
+  if (trimmed.length === 0) {
+    throw new Error('compaction model id must be a non-empty string');
+  }
+  const config = loadFullConfig();
+  const existingModels =
+    config.models && typeof config.models === 'object' && !Array.isArray(config.models)
+      ? (config.models as Record<string, unknown>)
+      : {};
+  config.models = { ...existingModels, compaction: trimmed };
+
+  // Clean up the legacy key so migration is one-way.
+  if (config.context && typeof config.context === 'object' && !Array.isArray(config.context)) {
+    const ctx = { ...(config.context as Record<string, unknown>) };
+    if ('compactionModel' in ctx) {
+      delete ctx.compactionModel;
+      config.context = ctx;
+    }
+  }
+
+  saveFullConfig(config);
+}
+```
+
+**Test hook.** Expose a `@internal` helper that resets the one-shot warning flag so tests can re-observe the deprecation message across cases:
+
+```typescript
+/**
+ * Test-only hook: reset the one-shot legacy-key deprecation warning cache.
+ * @internal
+ */
+export function _resetLegacyCompactionModelWarning(): void {
+  _warnedLegacyCompactionModel = false;
+}
+```
+
+Guidelines for future config migrations following this convention:
+
+1. **`console.warn` is allowed here.** `src/config/userConfig.ts` is one of the modules that intentionally violates the `no-console: warn` project-wide ESLint rule with a targeted `eslint-disable-next-line`. Do not switch to `logger.warn` — it would create an import cycle (`userConfig` is imported by `logger`'s configuration branch).
+2. **Never remove the legacy key from the read helper in the same release that adds it to the write helper.** The migration must survive at least one minor version so operators upgrading across a version gap don't lose their setting. Remove the legacy branch in a documented deprecation cut later.
+3. **Never write to both locations.** The point of the migration is that the on-disk config is canonical — a tool inspecting `~/.alexi/config.json` should see the value at the new location only.
+4. **Test both the fresh-config and the migrating-config paths.** The regression suite MUST include (a) `models.compaction` present, legacy absent → new wins; (b) legacy present, new absent → legacy wins AND emits the warning; (c) both present → new wins AND no warning; (d) neither present → returns `undefined`; (e) `setConfigCompactionModel` with legacy present → new is written AND legacy is deleted.
 
 ### JSON-tolerant tool parameter decoding
 

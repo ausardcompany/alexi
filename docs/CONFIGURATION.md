@@ -128,6 +128,32 @@ KILOCODE_EXPERIMENTAL_SWARM_BOARD=0 alexi chat -m "..."
 
 Callers should compose this env flag with the persisted config via `isBoardEnabled(experimentalConfigFlag)` in `src/kilocode/board/enabled.ts` — the function returns `true` if any of the three signals (env, channel default, persisted config) enables the feature, with the env flag winning on explicit falsy values. See [Experimental Shared Agent Board](#experimental-shared-agent-board) for the full enablement matrix.
 
+#### KILO_EXPERIMENTAL_SHARED_AGENT_BOARD
+
+Alexi-native feature-specific env flag for the shared agent board, resolved by `isBoardEnabled()` in `src/config/userConfig.ts:628` (issue #1698). Complements the upstream-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag: `KILO_*` follows the same naming convention as `KILO_FLAGS` / `KILO_RETRIES` in Alexi's agent workflows, while `KILOCODE_*` preserves upstream kilocode compatibility. Set to the literal string `'1'` to enable — any other value (`'0'`, `'true'`, empty, unset) is treated as unset, so `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=0` is never misread as an opt-in.
+
+```bash
+KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1 alexi chat -m "..."
+```
+
+The resolver combines three signals with boolean OR — an explicit config `false` does NOT override a set env flag:
+
+1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
+2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` (this flag).
+3. `process.env.KILO_EXPERIMENTAL === '1'` (umbrella flag, see below).
+
+Read fresh on each call — a config change picks up on the next process restart. Alexi does not hot-reload tool registrations mid-turn.
+
+#### KILO_EXPERIMENTAL
+
+Umbrella experimental flag that enables every Alexi-native experimental feature at once. When set to `'1'`, `isBoardEnabled()` returns `true` regardless of the persisted config or feature-specific flag. Intended for CI runs and ad-hoc containers where flipping every experimental switch by name would be tedious. Same strict `=== '1'` comparison as `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD` — no truthy-string parsing, no case-insensitive fallback.
+
+```bash
+KILO_EXPERIMENTAL=1 alexi agent -m "explore repo"
+```
+
+This coexists with the kilocode-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag documented above. The two resolvers live in separate modules (`src/config/userConfig.ts` vs `src/kilocode/board/enabled.ts`) and target different env-var namespaces (`KILO_*` vs `KILOCODE_*`) — they are not unified because they serve different audiences: `isBoardEnabled()` in `userConfig.ts` is the primary gate used by tool registration and swarm-identity attach; the kilocode module preserves upstream parity for anyone porting downstream tooling that expects the upstream env-flag name.
+
 #### MAX_SUBAGENT_DEPTH
 
 Override the maximum subagent nesting depth for the `task` tool. A top-level user session has depth 0; each `task` invocation would spawn a subagent one level deeper. Spawning at depth greater than this value is rejected before any provider request is made. Defaults to `3`; values above `~10` are strongly discouraged because latency and cost multiply per level. Non-numeric or non-positive values fall back to the default.
@@ -274,6 +300,13 @@ interface UserConfig {
   defaultModel?: string;          // Persistent default model
   agent?: string;                 // Default agent slug for `alexi agent` / `alexi chat`
                                   //   (overridden per-invocation by `--agent <name>`)
+  models?: {                      // Task-scoped model overrides (grouped for
+                                  //   discoverability alongside `defaultModel`)
+    compaction?: string;          //   Auxiliary-task model (title, summary,
+                                  //     compaction, commit message). See
+                                  //     [Auxiliary-Task Model Selection] below.
+    [key: string]: unknown;
+  };
   soundEnabled?: boolean;         // Enable notification sounds
   autoRoute?: boolean;            // Auto-routing preference
   mcpToolDisplay?: 'expanded' | 'collapsed'; // TUI disclosure default for
@@ -330,6 +363,8 @@ import {
   setConfigValue,
   getConfigDefaultModel,
   setConfigDefaultModel,
+  getConfigCompactionModel,
+  setConfigCompactionModel,
   updateGlobal,
 } from './config/userConfig.js';
 
@@ -340,12 +375,69 @@ const config = loadFullConfig();
 const model = getConfigDefaultModel();
 setConfigDefaultModel('anthropic--claude-4-sonnet');
 
+// Auxiliary-task model (title, summary, compaction, commit message)
+const auxModel = getConfigCompactionModel();      // reads `models.compaction`
+setConfigCompactionModel('gpt-4o-mini');          // writes `models.compaction`
+
 // Batch update (atomic)
 updateGlobal({
   defaultModel: 'gpt-4o',
   soundEnabled: false,
   autoRoute: true,
 });
+```
+
+### Auxiliary-Task Model Selection (`models.compaction`)
+
+Alexi resolves a distinct "auxiliary" model for background tasks that must not
+consume the primary model's quota — title generation, session summarisation,
+context compaction, and commit-message generation. The value is stored under
+`models.compaction` in `~/.alexi/config.json` and is read by
+`getConfigCompactionModel()` (`src/config/userConfig.ts`) and by
+`resolveSmallModelDeployment()` (`src/providers/model-selection.ts`).
+
+Resolution order for the auxiliary model id (first non-empty wins):
+
+1. `models.compaction` — new canonical location. Preferred.
+2. `context.compactionModel` — legacy key, still read for backward
+   compatibility. A one-shot deprecation warning per process is emitted the
+   first time this fallback fires:
+   `[alexi] config: \`context.compactionModel\` is deprecated; use \`models.compaction\` instead.`
+3. `AICORE_SMALL_MODEL` environment variable — env-only setups.
+
+`setConfigCompactionModel(modelId)` always writes to `models.compaction` AND
+clears any legacy `context.compactionModel` value so subsequent reads never
+fall back to a stale key. Empty / whitespace-only ids are rejected with
+`Error('compaction model id must be a non-empty string')`.
+
+**Safety property.** The provider layer never issues an auxiliary call to an
+unconfigured deployment. `selectModelForTask('auxiliary', ctx)` returns the
+primary `defaultModel` when `hasSapDeployment('small')` is false OR
+`smallModelDeployment` is empty — so operators that have NOT provisioned a
+dedicated small deployment continue to see title/summary/compaction working
+end-to-end (they just cost the same as the primary model). See
+[docs/PROVIDERS.md#auxiliary-task-model-selection](./PROVIDERS.md#auxiliary-task-model-selection)
+for the full flow.
+
+Example `~/.alexi/config.json` snippet:
+
+```json
+{
+  "defaultModel": "anthropic--claude-4-sonnet",
+  "models": {
+    "compaction": "gpt-4o-mini"
+  }
+}
+```
+
+Migrating from the legacy `context.compactionModel`:
+
+```bash
+# Read the legacy value (emits one deprecation warning to stderr)
+alexi config show | jq -r '.context.compactionModel // empty'
+
+# Write to the new location — this also clears context.compactionModel
+alexi config set models.compaction gpt-4o-mini
 ```
 
 ### TUI Tool Call Display (`mcpToolDisplay`)
