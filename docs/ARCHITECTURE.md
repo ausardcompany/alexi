@@ -497,6 +497,109 @@ if (similar.length > 0) {
 
 The enriched error is fed back to the model so it can self-correct on the next turn. The lookup degrades gracefully to the bare error when the registry is unavailable (test harnesses).
 
+### Loop and Mistake Steering (issue #1692)
+
+The agentic loop instantiates two independent detectors per `agenticChat` invocation (they are per-call, not module-scoped, so a long-running TUI session does not carry counters across independent user turns):
+
+- **`LoopDetector`** (`src/core/loopDetector.ts`) fingerprints each observed tool call as `${toolName}:${stableStringify(parsedArgs)}`. Arguments are re-serialised with sorted keys so semantically equivalent calls (`{"path":"/a","content":"x"}` vs `{"content":"x","path":"/a"}`) fingerprint identically. Invalid JSON falls back to the raw string. Trips at 5 consecutive identical fingerprints by default (`AgenticChatOptions.loopLimit`, minimum 2).
+- **`MistakeTracker`** (`src/core/mistakeTracker.ts`) counts consecutive tool failures regardless of which tool failed or what arguments it received — a rapid burst of unrelated failures (bad file paths, wrong syntax, permission errors) usually means the model is flailing rather than looping on a single call. A single successful tool result resets the counter to zero. Trips at 6 consecutive failures by default (`AgenticChatOptions.mistakeLimit`, minimum 2).
+
+The `question` tool is deliberately excluded from loop fingerprinting (`src/core/agenticChat.ts:937`) because repeated user prompts are not a stuck loop.
+
+Both detectors are checked at a single synchronisation point after every iteration's tool results have been recorded. On a trip, the loop delegates to the optional `onConsecutiveMistakeLimitReached(reason)` callback with `{ kind: 'loop' | 'mistake', consecutiveCount, toolName }`:
+
+```mermaid
+flowchart TB
+    Iter([Iteration N: tool results recorded]) --> RecLoop[loopDetector.record for each tool call<br/>skips question tool]
+    RecLoop --> RecMistake[mistakeTracker.record success flag]
+    RecMistake --> Check{loop.hasTripped or<br/>mistake.hasTripped?}
+    Check -->|No| Continue([Continue to iteration N+1])
+    Check -->|Yes| BuildReason[Build ConsecutiveMistakeReason<br/>kind = loop or mistake<br/>consecutiveCount, toolName]
+    BuildReason --> HasCB{onConsecutiveMistakeLimit<br/>Reached provided?}
+    HasCB -->|No| StopSilent[decision = 'stop']
+    HasCB -->|Yes| InvokeCB[await callback with reason]
+    InvokeCB --> CBError{Callback threw?}
+    CBError -->|Yes| WarnStop[logger.warn + decision = 'stop']
+    CBError -->|No| Decision{decision}
+    StopSilent --> StopMsg[Push assistant status message:<br/>Loop Detector Stopped after N... or<br/>Mistake Tracker Stopped after N...]
+    WarnStop --> StopMsg
+    StopMsg --> End([Break loop, return result])
+    Decision -->|stop| StopMsg
+    Decision -->|continue| ResetBoth[loopDetector.reset<br/>mistakeTracker.reset]
+    ResetBoth --> InjectSteering[Push user message:<br/>system-reminder preamble<br/>+ steering guidance]
+    InjectSteering --> Continue
+```
+
+Returning `'stop'` (or omitting the callback entirely) ends the run with a status message and a synthetic assistant turn — either `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.`. Returning `'continue'` resets both detectors, injects a `<system-reminder>` preamble plus the steering guidance (`The previous approach is stuck. Try a different method, simpler steps, or ask me for help.`) as a synthetic user message, and resumes the loop so the model can try a different strategy on the next iteration.
+
+A throwing callback is caught and treated as `'stop'` (`logger.warn(...callback threw... Stopping run.)`) so a hung TUI hook cannot crash a headless agent run. `ConsecutiveMistakeReason` is re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for callers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
+
+#### CLI-side callback wiring (`src/cli/utils/mistakeLimitPrompt.ts`)
+
+`agenticChat` owns detection, steering-message injection, and the callback contract. It does NOT own any user interaction — that surface lives in a separate CLI module so `agenticChat` remains reusable from the TUI, the HTTP server, and headless test harnesses.
+
+The non-interactive `alexi agent` command constructs its callback with `createMistakeLimitPrompt(...)` in `src/cli/commands/agent.ts:324-335`:
+
+```typescript
+// src/cli/commands/agent.ts
+const onConsecutiveMistakeLimitReached = createMistakeLimitPrompt({
+  yolo: Boolean(opts.yolo || opts.dangerouslySkipPermissions),
+  quiet: Boolean(opts.quiet),
+  signal: abortController.signal,
+});
+
+const res = await agenticChat(message, {
+  // ...other options...
+  onConsecutiveMistakeLimitReached,
+});
+```
+
+The factory returns a `MistakeLimitCallback` (`(reason: ConsecutiveMistakeReason) => Promise<'continue' | 'stop'>`) that applies a small decision matrix. The following sequence diagram covers all four terminal branches the callback can take:
+
+```mermaid
+sequenceDiagram
+    participant Agent as agenticChat loop
+    participant CB as createMistakeLimitPrompt callback
+    participant User as User (TTY)
+    participant Err as stderr
+
+    Agent->>CB: onConsecutiveMistakeLimitReached(reason)
+    Note over CB: describeReason(reason)<br/>builds one-line explanation
+
+    alt yolo=true
+        CB->>Err: [mistake-limit] <explanation> Auto-continuing (--yolo).
+        CB-->>Agent: 'continue'
+    else non-TTY (headless / CI)
+        CB->>Err: [mistake-limit] <explanation> Stopping (non-interactive; re-run with --yolo).
+        CB-->>Agent: 'stop'
+    else quiet + TTY
+        CB->>Err: [mistake-limit] <explanation> Stopping (quiet mode).
+        CB-->>Agent: 'stop'
+    else TTY (default)
+        CB->>Err: [mistake-limit] <explanation>
+        CB->>User: Try a different approach? (y/n)
+        alt answer starts with 'y'
+            User-->>CB: y | yes | YES | " y "
+            CB->>Err: Continuing with steering guidance.
+            CB-->>Agent: 'continue'
+        else any other answer or EOF or abort signal
+            User-->>CB: n | "" | quit | (abort)
+            CB->>Err: Stopping run.
+            CB-->>Agent: 'stop'
+        end
+    end
+```
+
+Design invariants pinned by `tests/cli/utils/mistakeLimitPrompt.test.ts`:
+
+- **No I/O in `describeReason`.** It is a pure formatter used by BOTH the interactive prompt and the headless stderr line so the two surfaces cannot drift.
+- **`readline` is only opened on the interactive branch.** Yolo, non-TTY, and quiet paths must not attach a `data` listener to `stdin` (asserted via `expect(stdin.listenerCount('data')).toBe(0)`). This keeps headless runs from silently blocking on stdin.
+- **Empty input defaults to `'stop'`.** A user who just presses Enter gets the safer answer; the `'continue'` decision requires an explicit affirmative.
+- **`AbortSignal` releases the readline handle.** The `abort` listener calls `rl.close()`; the `finally` block removes the listener and closes the handle so the callback never leaks event-loop resources even when the user hits Ctrl+C mid-prompt.
+- **Injectable I/O.** `MistakeLimitPromptOptions` accepts `stdin` / `stdout` / `stderr` / `isTTY` so the test harness never touches the real process handles. This also lets the TUI wire its own `Sink`-like writable if it ever needs the same decision matrix outside the plain CLI command.
+
+The end-to-end contract is: `agenticChat` decides *when* to ask, `createMistakeLimitPrompt` decides *how* to ask (or whether to skip the ask entirely and pick a deterministic default). Keeping detection, steering, and the UI in three separate layers means the TUI, the HTTP server, and future in-editor hosts can each supply their own `MistakeLimitCallback` without duplicating any part of the detector or the steering-message injection.
+
 ## Session Lifecycle and Abort Propagation
 
 `SessionManager` (`src/core/sessionManager.ts`) tracks a per-session `AbortController` for every active run in an in-memory `Map<string, SessionRunState>`. The map is instance-scoped rather than module-scoped so tests can construct isolated managers without leaking abort state across cases.
@@ -2484,6 +2587,47 @@ flowchart LR
 
 The `CompletenessResult` type is a single flat discriminated union (`{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`) — Prettier collapses this onto one line as of `de9d1530`, 2026-08-25; no semantic change.
 
+## TUI Output Linkification
+
+Since 2026-09-10 (`7af9be2a`) the TUI runs every tool output through a small linkifier before rendering, so URLs and `path:line` references become clickable in supporting terminals. The transform lives in two paired modules:
+
+- `src/cli/tui/utils/hyperlink.ts` — low-level OSC-8 wrapper. `supportsHyperlinks()` gates the wrap on TTY + a small allow-list of `TERM_PROGRAM` values (`iTerm.app`, `WezTerm`, `ghostty`, `Apple_Terminal`, `vscode`, `cursor`, `Hyper`, `WarpTerminal`), the `TERM` string containing `kitty`, or a non-empty `WT_SESSION` (Windows Terminal). `FORCE_HYPERLINK=1` overrides to on, `NO_HYPERLINK=1` overrides to off. When unsupported, `hyperlink(url, label?)` returns plain text (or `label (url)` when the label differs) — the byte sequence stays clean on non-TTY, CI, and pipe/redirect destinations.
+- `src/cli/tui/utils/linkify.ts` — pattern detector. Scans input text for two match categories, resolves each to a URL suitable for OSC-8 wrapping, and splices the matches back into the string in a single pass.
+
+`ToolRow` (`src/cli/tui/components/ToolRow.tsx:186` for the bash branch, `:196` for the generic branch) applies `linkify()` to the truncated body text produced by `truncateOutput()`. The linkifier is the LAST transform applied to tool output before Ink renders it, which keeps the truncation contract intact — `... (N more lines)` counts are still computed on the raw text, and the OSC-8 escapes are added on top.
+
+```mermaid
+flowchart LR
+    Raw[Raw tool output]
+    Trunc[truncateOutput<br/>maxLines=20, keepLines=15]
+    Linkify[linkify<br/>URL + path:line detection]
+    Hyperlink[hyperlink<br/>OSC-8 wrap or plain fallback]
+    Ink[Ink Text renderer]
+    Terminal[Terminal output]
+
+    Raw --> Trunc
+    Trunc --> Linkify
+    Linkify -->|for each match| Hyperlink
+    Hyperlink -->|supported TTY| Ink
+    Hyperlink -->|unsupported| Ink
+    Ink --> Terminal
+```
+
+### Match categories
+
+Two disjoint patterns are recognised. URL matches always take precedence on overlap so a URL that happens to contain a `:42` tail is never double-wrapped.
+
+| Category | Regex | Notes |
+|----------|-------|-------|
+| URL | `/\b(https?:\/\/\|file:\/\/)[^\s<>"']+/g` | Trailing sentence punctuation (`.,;:!?)]}>`) is stripped from the captured URL and re-appended as plain text after the OSC-8 wrap — avoids sending users to `https://example.com.` (which typically 404s). |
+| `path:line[:column]` | `/(?<![\w/.-])((?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w.-]+\.[a-zA-Z]{1,10}\|(?:\.{0,2}\/)(?:[\w.-]+\/)*[\w.-]+):(\d+)(?::(\d+))?\b/g` | Path segment must contain at least one `/` OR a `.` followed by 1-6 word characters (a file extension). Filters out `12:34`, `localhost:3000`, `1.2.3`, `token: 12345`. |
+
+Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line>` (or `#<line>:<column>` when the column group matched). Relative paths are resolved against the `cwd` argument (default `process.cwd()`); Windows backslashes are normalised to forward slashes before URI construction so `file:///C:/Users/...` is well-formed.
+
+### Non-supporting terminals
+
+`hyperlink()` short-circuits to plain text when `supportsHyperlinks()` returns false, so the linkifier is safe to apply unconditionally. On CI, when stdout is piped, or on a terminal without OSC-8 support, tool output is byte-identical to the pre-linkify text — the transform is invisible.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
@@ -2947,9 +3091,46 @@ export const BoardStore = {
   read(boardId: string, opts?: BoardReadOptions): Promise<BoardMessage[]>;
   /** Upstream fix 162e30d23: suppress stale "new messages" banners. */
   acknowledgeReads(boardId: string, sessionID: string, messageIds: readonly string[]): Promise<void>;
+  /**
+   * Ports kilocode PR #13782. Hide every message currently on the board
+   * from future `read()` calls without deleting rows. Idempotent: repeat
+   * calls simply push the `cleared_seq` watermark forward.
+   */
+  reset(boardId: string): Promise<void>;
   /** Test-only. Production code MUST NOT call. */
   __resetForTests(): void;
 };
+```
+
+### `reset()` and the `cleared_seq` watermark (kilocode PR #13782)
+
+`BoardStore.reset(boardId)` writes `Date.now()` (Unix milliseconds) into the board row's `cleared_seq` column via `UPDATE kilo_board SET cleared_seq = ? WHERE id = ?`. On subsequent `read()` calls, `BoardStore` pulls the current `cleared_seq` for the target board and, if it is greater than zero, filters out any row whose `Date.parse(createdAt)` predates the watermark. Rows with an unparseable `createdAt` are kept (fail-open) so a bad timestamp never permanently hides a message. Filtering is done in JavaScript rather than SQL to keep the read path adapter-agnostic — the row count per board is already bounded by `limit` upstream, so the extra pass is negligible.
+
+The column is added by migration `20260903104806_kilocode_board_reset` (`src/core/database/migrations/20260903104806_kilocode_board_reset.ts`) whose DDL is exported as `BOARD_RESET_SCHEMA_STATEMENTS` and applied eagerly by `BoardStore.ensureSchema` on every process start. Because SQLite's `ALTER TABLE ... ADD COLUMN` is not guarded by `IF NOT EXISTS`, the eager path wraps each statement in `try/catch` and silently swallows `duplicate column name` errors from the second open onwards; any other error is re-thrown. The migration runner path is a no-op when the transaction adapter does not expose `execute()`, which keeps the module safe to load in test harnesses that use the minimal `MigrationTx` contract without a SQL driver.
+
+`isBoardMigration(name)` in `src/core/database/migration.ts` classifies both `kilocode_board` and `kilocode_board_reset` (and their timestamped forms) as belonging to the shared agent board feature family so tooling that filters or gates the board feature by migration name treats them as one group.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Subagent
+    participant Tool as kilo_board_write
+    participant Store as BoardStore
+    participant DB as ~/.alexi/board.db
+
+    Note over Agent,DB: Reset flow (kilocode PR #13782)
+    Agent->>Store: reset(boardId)
+    Store->>DB: UPDATE kilo_board SET cleared_seq = Date.now()
+    DB-->>Store: ok
+
+    Note over Agent,DB: Later read
+    Agent->>Tool: kilo_board_read
+    Tool->>Store: read(boardId, { limit })
+    Store->>DB: SELECT cleared_seq FROM kilo_board WHERE id = ?
+    DB-->>Store: cleared_seq = T
+    Store->>DB: SELECT ... FROM kilo_board_message WHERE board_id = ?
+    DB-->>Store: rows
+    Store->>Store: filter rows where Date.parse(createdAt) > T
+    Store-->>Tool: filtered messages
 ```
 
 ```typescript
@@ -2978,11 +3159,53 @@ When `better-sqlite3` is unavailable (native binding missing), `BoardStore` degr
 Two `defineTool` handlers in `src/tool/tools/board.ts`:
 
 - **`kilo_board_read`** — resolves the current session's `boardId` via `BoardContext.resolve(context.sessionId)`, reads via `BoardStore.read`, then calls `BoardStore.acknowledgeReads` on the returned message ids. When no board is attached, returns `{ success: true, data: { messages: [] }, hint: 'No shared board is attached to this session.' }` so the tool never fails outside a swarm context.
-- **`kilo_board_write`** — resolves the `boardId` the same way, then calls `BoardStore.write` with `context.sessionId` and either the explicit `agentName` on `ToolContext` (surfaced by the `task` tool's swarm-identity propagation) or the fallback `'agent'`. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+- **`kilo_board_write`** — resolves the `boardId` the same way, then calls `BoardStore.write` with `context.sessionId` and either the explicit `agentName` on `ToolContext` (surfaced by the `task` tool's swarm-identity propagation) or the fallback `'agent'`. When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`. Accepts an optional `recipient` parameter (kilocode `7febec58f`); when set, the tool scans the most recent 100 messages for any activity from that session id and, if none is found, returns `deliveryStatus: 'no-recipient'` with a hint (`Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`). The message is still written — the parent orchestrator decides how to react.
 
 Both tools are re-exported from `src/tool/registry.ts` so external consumers can build a tool list identical to the upstream registry shape. Actual registration into the runtime `ToolRegistry` happens in `src/tool/tools/index.ts:118`, gated by `getConfigSharedAgentBoard()`.
 
+### Unified enablement predicate (kilocode PR #14013)
+
+`src/kilocode/board/enabled.ts` exports `isBoardEnabled(experimentalConfigFlag?: boolean)`, a sync predicate that combines three signals so tools and code paths can call a single check:
+
+1. Environment flag `KILOCODE_EXPERIMENTAL_SWARM_BOARD` (upstream parity — set in CI or ad-hoc shells to opt in without touching the on-disk config). Truthy values `1|true|yes|on` force-enable; falsy values `0|false|no|off` force-disable.
+2. Installation-channel default via `unstableDefault('KILOCODE_EXPERIMENTAL_SWARM_BOARD')` in `src/flag/flag.ts` — on for `dev`/`beta`/`local`, off for stable. Exposed as `Flag.KILOCODE_EXPERIMENTAL_SWARM_BOARD` for anywhere that needs the resolved default without the on-disk config.
+3. The persisted `experimental.sharedAgentBoard` flag in `~/.alexi/config.json` — Alexi's existing surface, unchanged.
+
+Any of the three enables the feature; the env flag wins over the on-disk config when explicitly set to a falsy value. The function is side-effect-free and safe to call from tool registration.
+
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
+
+## PTY Latch (`src/core/kilocode/pty/latch.ts`)
+
+New 1.22.17 module (2026-09-11 upstream sync, ports kilocode `203f19f5d fix(cli): keep PTY output and exit emitted before listeners attach`). A dependency-free primitive that buffers emissions from a short-lived event source until a listener attaches, then flushes the buffer in FIFO order.
+
+### Problem
+
+`node-pty` (and analogous PTY libraries) can emit `data` and `exit` events synchronously inside `spawn()`. For very short-lived processes (e.g. `printf hello`) the child can exit before the caller has had a chance to attach `.onData` / `.onExit` listeners. Those events are then lost forever, causing the calling agent code to hang waiting for output that already fired.
+
+### Design
+
+```typescript
+export interface PtyLatch<T> {
+  /**
+   * Emit a value. If a listener is currently attached, the value is
+   * delivered synchronously. Otherwise the value is buffered in FIFO
+   * order and delivered on the next `attach()`.
+   */
+  emit(value: T): void;
+  /**
+   * Attach a listener. Any buffered values are flushed to it
+   * synchronously in emission order before this call returns.
+   * Returns a detach function that, when called, clears the current
+   * listener so subsequent emissions buffer again.
+   */
+  attach(listener: (value: T) => void): () => void;
+}
+
+export function createPtyLatch<T>(): PtyLatch<T>;
+```
+
+The flush loop halts early if the listener re-assigns itself to `undefined` mid-drain (`listener === next` check), so remaining buffered values stay for the next `attach()`. Detach clears the current listener, re-enabling buffering — late reattach is safe. Alexi does not ship a native PTY driver today, but the primitive is reusable wherever a short-lived event source races with async listener attachment (e.g. subprocess bash tool wrappers).
 
 ## PowerShell 7 Resolver (`src/core/powershell.ts`)
 

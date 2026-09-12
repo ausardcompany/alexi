@@ -500,7 +500,9 @@ export function registerBuiltInTools(): void {
 
 Prefer gating at **registration time** (as above) when the tool should be invisible to the model when the flag is off — the model does not learn about `kilo_board_*` at all when the flag is `false`, so it cannot mistakenly call them. Prefer gating at the **tool boundary** (returning a `success: false` error) when the tool is always present but its behaviour changes with the flag (e.g. per-task model selection on the `task` tool). Both patterns share the same `experimental.*` config helper contract.
 
-**Multi-signal enable paths (config + env flags).** For experimental features that operators need to flip on temporarily (CI runs, Docker containers, one-off sessions), extend the base config helper with an `isXEnabled()` resolver that unions the persistent config key with one or more env flags. The canonical shape is `isBoardEnabled()` in `src/config/userConfig.ts:628`:
+**Multi-signal enable paths (config + env flags).** For experimental features that operators need to flip on temporarily (CI runs, Docker containers, one-off sessions), extend the base config helper with an `isXEnabled()` resolver that unions the persistent config key with one or more env flags. Alexi currently has two coexisting resolvers for the shared agent board — one under Alexi's own `KILO_*` env-var namespace, and one preserving upstream kilocode's `KILOCODE_*` namespace.
+
+The Alexi-native shape (issue #1698) is `isBoardEnabled()` in `src/config/userConfig.ts:628`:
 
 ```typescript
 export function isBoardEnabled(): boolean {
@@ -517,8 +519,33 @@ Contract:
 1. **Boolean OR.** An explicit config `false` MUST NOT override a set env flag. This is what lets an operator flip a feature on without editing the persistent config file. If you need "env can only turn the feature OFF", introduce a separate `disable` flag — do not invert the OR semantics of the enable path.
 2. **Strict-equality against the literal string `'1'`.** Any other value (`'0'`, `'true'`, empty, unset) is treated as unset. This keeps the enable path unambiguous and prevents `KILO_EXPERIMENTAL=0` from being misread as an opt-in. Never `Boolean(process.env.FOO)` — that pattern would enable on `'0'`, `'false'`, and every other non-empty string.
 3. **Feature-specific flag first, umbrella flag second.** The specific flag (`KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1`) exists so operators can enable a single feature; the umbrella flag (`KILO_EXPERIMENTAL=1`) exists so CI configurations can enable every experimental feature at once. Both should be checked; order does not affect correctness (short-circuit `||`) but the feature-specific flag reads more naturally when it comes first.
-4. **All call sites go through the resolver, not the raw config reader.** Every registration site and every tool-boundary gate should call `isXEnabled()`, not `getConfigX()`. Otherwise an operator who set only the env flag would see the tool listed (via the raw config reader) but rejected at execution time (via the resolver), or vice versa. Migrated call sites for the board port: `src/tool/tools/index.ts:128` (registration gate) and `src/tool/tools/task.ts:476` (swarm-identity attachment).
+4. **All call sites go through the resolver, not the raw config reader.** Every registration site and every tool-boundary gate should call `isXEnabled()`, not `getConfigX()`. Otherwise an operator who set only the env flag would see the tool listed (via the raw config reader) but rejected at execution time (via the resolver), or vice versa. Migrated call sites for the board port: `src/tool/tools/index.ts:129` (registration gate) and `src/tool/tools/task.ts:476` (swarm-identity attachment).
 5. **Test the resolver through the real config file.** `isXEnabled()` and `getConfigX()` live in the same module, so `vi.mock` cannot intercept the intra-module call. Snapshot `~/.alexi/config.json` in `beforeEach` and restore in `afterEach`, and snapshot each env var at `describe` scope. See `docs/TESTING.md#testing-the-shared-agent-board-env-flag-enable-path` for the full 6-case reference suite.
+
+**Upstream kilocode env flag mirror (2026-09-11, ports kilocode PR #14013).** In parallel, the upstream `KILOCODE_EXPERIMENTAL_SWARM_BOARD` env flag is exposed in its own module at `src/kilocode/board/enabled.ts` so downstream tooling that ports from kilocode continues to see the upstream env-var name:
+
+```typescript
+const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+const FALSY = new Set(['0', 'false', 'no', 'off']);
+
+export function isBoardEnabled(experimentalConfigFlag: boolean = false): boolean {
+  const raw = process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
+  if (raw !== undefined) {
+    const lowered = raw.toLowerCase();
+    if (TRUTHY.has(lowered)) return true;
+    if (FALSY.has(lowered)) return false;
+  }
+  return experimentalConfigFlag === true;
+}
+```
+
+Precedence contract (mirror-only; this module is not currently wired into tool registration — the `userConfig.ts` resolver above is the primary gate):
+
+1. Env var explicit truthy → force on.
+2. Env var explicit falsy → force off (overrides persisted config so operators can disable per-run).
+3. Env var unset → fall back to the persisted `experimental.*` config passed in as the argument. The channel-default derivation lives in `src/flag/flag.ts` via `unstableDefault()` — expose that as a sibling constant (e.g. `Flag.KILOCODE_EXPERIMENTAL_SWARM_BOARD`) rather than duplicating the resolution logic here.
+
+Keep both predicates sync and side-effect-free so they are safe to call from tool registration (which runs before any async subsystem is initialised).
 
 ### JSON-tolerant tool parameter decoding
 
@@ -670,6 +697,122 @@ module and export a stable named surface. Two current canonical examples:
 Follow the same shape when adding new transforms: keep the module pure,
 export both the callable and its input types, and avoid globals so parallel
 tests do not need setup/teardown.
+
+### Per-call detectors (preferred over module-scoped counters)
+
+When a feature needs to observe a rolling condition across an agent's tool
+loop (repeated identical calls, consecutive failures, hook rejections),
+instantiate the detector **inside** the loop function that owns the run,
+not at module scope. The canonical current example is issue #1692 (loop /
+mistake steering), added 2026-09-09:
+
+- `src/core/loopDetector.ts` — 102-line `LoopDetector` class with
+  `record(toolName, argumentsJson)`, `hasTripped()`, `reset()`,
+  `getConsecutiveCount()`, `getLimit()`. Fingerprints tool calls via a
+  stable JSON stringify with sorted keys so semantically identical calls
+  fingerprint the same; falls back to the raw string when the arguments
+  are not valid JSON.
+- `src/core/mistakeTracker.ts` — 65-line `MistakeTracker` class with the
+  same surface but a boolean `record(success)`: a single success resets
+  the counter, mirroring `ErrorBackoff.recordSuccess`.
+- Both classes reject `limit < 2` and non-integer limits in the
+  constructor with `limit must be an integer >= 2` — validate at
+  construction rather than in `record()` so the failure surfaces at the
+  call site.
+- Instantiation lives in `src/core/agenticChat.ts:592-593` inside the
+  main loop function, so long-running processes (a TUI session that
+  reuses the same `sessionManager`) do NOT carry counters across
+  independent user turns.
+
+Rules that make this pattern work:
+
+1. **The detector has no I/O.** It records observations and exposes trip
+   state. Deciding what to do on a trip belongs to the caller (in our
+   case, `agenticChat` delegating to `onConsecutiveMistakeLimitReached`).
+   This keeps the class trivially unit-testable — see
+   `src/core/__tests__/loopDetector.test.ts` and
+   `src/core/__tests__/mistakeTracker.test.ts` (17 pure cases combined,
+   no `vi.mock`, no test doubles).
+2. **State is per-instance, not module-scoped.** Do not lift a counter
+   to a module-level `let`; a stray unit test that forgets to reset it
+   will poison every following test in the same worker.
+3. **Expose a `reset()` method** even when the caller could re-instantiate
+   — after a `'continue'` steering decision the same detector should
+   pick up cleanly on the next iteration without re-triggering.
+4. **Skip observations that are semantically not part of the tracked
+   condition.** The loop detector deliberately does NOT fingerprint the
+   `question` tool (`src/core/agenticChat.ts:937`) because repeated user
+   prompts are not a stuck loop.
+
+When callers can decide what to do on a trip (continue with steering vs.
+stop the run), expose an optional callback with a discriminated-union
+payload rather than a boolean flag. `ConsecutiveMistakeReason` in
+`src/core/agenticChat.ts` (`{ kind: 'loop' | 'mistake', consecutiveCount,
+toolName }`) is the current canonical shape and is re-exported from
+`src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` so
+callers dispatching through those entry points can reference the same
+type. A throwing callback MUST be caught and treated as the conservative
+default (`'stop'` in this case, logged via `logger.warn`) so a hung UI
+hook cannot crash a headless agent run.
+
+### Keep detection, callback, and UI in three layers
+
+The mistake-limit surface is the canonical example of this repo's rule
+that detection, decision, and user interaction are three distinct
+concerns and MUST live in three distinct modules:
+
+1. **Detection** — `LoopDetector` / `MistakeTracker` (`src/core/loopDetector.ts`,
+   `src/core/mistakeTracker.ts`): pure state machines, no I/O, no
+   knowledge of `agenticChat`, unit-tested in isolation.
+2. **Orchestration** — `agenticChat` (`src/core/agenticChat.ts`): owns the
+   per-call instantiation of the detectors, the synchronisation point
+   after each iteration's tool results, the callback contract
+   (`onConsecutiveMistakeLimitReached`), and the actual
+   steering-message injection (`<system-reminder>...</system-reminder>` +
+   the fixed guidance string) when the callback returns `'continue'`.
+   Never runs interactive I/O.
+3. **User interaction** — `createMistakeLimitPrompt`
+   (`src/cli/utils/mistakeLimitPrompt.ts`): builds a
+   `MistakeLimitCallback` that decides whether to prompt the user, print
+   a headless explanation, or auto-continue under `--yolo`. Owns the
+   `readline` handle, the `AbortSignal` wiring, and the exact stderr
+   phrasing. Injectable I/O (`stdin` / `stdout` / `stderr` / `isTTY`) so
+   tests never touch the real process handles.
+
+When adding a new host (a TUI panel, an HTTP endpoint, an editor plugin),
+implement your own `MistakeLimitCallback` and pass it as
+`onConsecutiveMistakeLimitReached`. Do NOT import from
+`src/cli/utils/mistakeLimitPrompt.ts` and try to reuse its `readline`
+plumbing — the CLI module is deliberately CLI-only. The shared surface
+between layers is the `ConsecutiveMistakeReason` payload and the
+`'continue' | 'stop'` decision, nothing else.
+
+Rules that fell out of the mistake-limit implementation and generalise:
+
+- **The decision function must not open I/O it does not use.** The yolo
+  branch of `createMistakeLimitPrompt` returns before touching
+  `readline`, and the test suite asserts
+  `stdin.listenerCount('data') === 0` as a regression barrier. When
+  writing a new callback host, arrange the branches so cheap deterministic
+  outcomes (yolo, headless, quiet) short-circuit before any I/O handle is
+  opened.
+- **Empty input defaults to the safer answer.** `'stop'` is the safer
+  answer for a mistake-limit trip because it stops burning budget on a
+  clearly-broken run. For other callback surfaces, pick the conservative
+  default at the design stage and pin it with a test case whose input is
+  `''` (a bare Enter or EOF).
+- **`AbortSignal` MUST close the I/O handle.** Any callback that opens a
+  `readline` (or any long-lived resource) must attach an `abort` listener
+  that closes it, register the listener before awaiting user input, and
+  remove it in a `finally` block. This keeps a Ctrl+C from leaking event
+  loop resources and stops the callback from wedging the surrounding
+  `agenticChat` teardown.
+- **Injectable I/O is a testing requirement, not a nice-to-have.** Any
+  module that talks to `process.stdin` / `process.stdout` /
+  `process.stderr` in production MUST expose those handles as options so
+  tests can substitute a `Sink extends EventEmitter` writable and a fake
+  stdin without patching the real process — see
+  `tests/cli/utils/mistakeLimitPrompt.test.ts` for the canonical pattern.
 
 ### Breaking circular ESM imports (registry pattern preferred over `require`)
 
@@ -832,6 +975,20 @@ temp directory, and restores every variable (deleting when previously unset)
 plus `fs.rmSync(tmpHome, { recursive: true, force: true })` in `afterEach`.
 This keeps parallel test workers from racing on the real user config and
 guarantees a test can never accidentally dispatch a real desktop notification.
+
+The home / filesystem-root indexing guard (`src/core/kilocode/fff.ts`,
+`src/utils/filesystem.ts`) uses a dedicated `ALEXI_TEST_HOME` env var
+rather than reusing `HOME`. Rationale: `HOME` is read by unrelated
+modules (notifications, rules discovery, `~/.alexi/config.json`), so
+mutating it globally to test the indexing guard would leak into every
+other subsystem that reads the same variable. `ALEXI_TEST_HOME` is
+checked only by `allowed()` in the indexing guard, so tests can pin the
+home anchor without touching real user state. Use the same
+snapshot-and-restore pattern as above, and pair the env var with a
+`fs.mkdtemp`-created fake-home directory so the fixture is fully
+disposable. See
+[`docs/TESTING.md#testing-the-home--filesystem-root-indexing-guard`](./TESTING.md#testing-the-home--filesystem-root-indexing-guard)
+for the reference regression suite.
 
 ### Binary-optional native dependencies (cached dynamic import)
 
@@ -1287,7 +1444,9 @@ Most recent worked example on the `eqeqeq` axis, 2026-09-07, commit `f33a09e5` (
 
 Worked example on the `eqeqeq` axis, 2026-09-05, commit `bbc845c5` (`fix(ci): auto-fix CI failures [alexi-bot]`): a one-line strict-equality rewrite inside `isGpt5_6OrLater` at `src/providers/openai/prompt-cache.ts:76`. The optional minor-version capture group in the GPT version parser (`/^gpt-(\d+)(?:\.(\d+))?/i`) was previously narrowed with `match[2] != null ? Number(match[2]) : 0` — a loose inequality that ESLint flagged. The autohealer rewrote it to `match[2] !== undefined ? Number(match[2]) : 0`. The two expressions are **behaviourally identical** on the output of `RegExp.exec`: an unmatched optional group is always `undefined`, never `null` (see ECMA-262 §22.2.7.2). The strict form satisfies `eqeqeq` without a local `// eslint-disable-next-line eqeqeq` disable pragma and communicates the exact narrowing contract at the call site — the branch fires only when the regex captured an explicit minor component. `isGpt5_6OrLater('gpt-6')` still returns `true` (missing minor defaults to `0`, tuple `(6, 0) >= (5, 6)`); `isGpt5_6OrLater('gpt-5.6')` still returns `true`; `isGpt5_6OrLater('gpt-5.5')`, `isGpt5_6OrLater('gpt-4o')`, and `isGpt5_6OrLater('gpt-x')` still return `false`. The paired `supportsPromptCacheBreakpoint`, `applyCacheBreakpoint`, `isChatGPTSubscription`, and the `prepareRequest` helper on the SAP orchestration provider observe the same boolean for every input. Convention going forward: when narrowing on a `RegExpExecArray` optional group, always use `match[N] !== undefined` — never `match[N] != null` — because `null` is not a value `RegExp.exec` ever emits for an unmatched group, so the `!== undefined` form encodes both the correct semantics and the correct type-narrowing. Diff statistics: `1 file changed, 1 insertion(+), 1 deletion(-)`.
 
-Most recent worked example, 2026-09-02, commit `89b23fa5` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a single-file Prettier reflow on `src/session/drain.ts` — the module-singleton `SessionDrainImpl` that guarantees background session work settles before a headless `alexi chat` or `alexi agent` process exits. Inside `drain(options: DrainOptions = {}): Promise<void>` at `src/session/drain.ts:125-128` the waiter-snapshot expression `const snapshot: TrackedWork[] = Array.from(this.pending.entries()).map(([id, promise]) => ({ id, promise }))` was reflowed from a hand-authored three-line form (with the `.map` argument list wrapped across two lines and the object literal on a single continuation) onto Prettier's preferred shape where `.map(([id, promise]) => ({` opens on the same line as the receiver and `id,` / `promise,` each occupy their own line before `}))` closes the call. The `TrackedWork` annotation and the immediately-following `Promise.allSettled(snapshot.map((entry) => entry.promise))` call are byte-identical. Semantic contract of `drain()` is unchanged: the drain remains one-shot per lifecycle (`this.drained` early return, terminal `this.drained = true; this.pending.clear();`), the waiter set is still snapshotted BEFORE awaiting so a handler that schedules follow-up work during its own settle cannot mutate the collection being iterated (upstream "snapshot drain waiters before resuming them" fix noted in the module header at lines 15-16), the 30-second default `timeoutMs` (`options.timeoutMs ?? 30_000`) is unchanged, the `timeoutMs > 0` branch still races `Promise.allSettled(...)` against a `setTimeout`-backed sentinel, the `timeoutMs === 0` branch still awaits `settle` indefinitely, and on timeout the drain still swallows late settle rejections via `settle.catch(...)` so unhandled rejections cannot fire after teardown. The companion `track(id, promise): () => void` no-op-when-drained early return, the auto-untrack `.catch(...).finally(() => this.pending.delete(id))` chain, the `untrack(id)`, `size()`, and test-only `__resetForTests()` methods, the `TrackedWork` and `DrainOptions` interfaces, and the exported `SessionDrain` module-level singleton (`export const SessionDrain = new SessionDrainImpl()`) are all untouched. Diff statistics: `1 file changed, 4 insertions(+), 3 deletions(-)`. `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm test`, and `npm run build` all remain green on the branch — the only observable delta is that `npm run format:check` now passes on this file where it previously reported a diff. This is the canonical worked example of the "reflow a `.map` callback whose object-literal argument spans two lines when the surrounding statement's return-type annotation forces the wrap" variant of the auto-fix pattern; when authoring similar `Array.from(...).map(([a, b]) => ({ a, b }))` idioms, prefer the Prettier-preferred continuation shape from the outset (`.map(([a, b]) => ({\n  a,\n  b,\n}))`) to avoid the auto-fix follow-up commit.
+Most recent worked example on the parameter-reflow axis, 2026-09-11, commit `31a9aa0f` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a one-file, one-hunk Prettier reflow on `src/tool/tools/board.ts:118`. The internal helper `recipientLooksStopped` previously declared its parameter list across three lines (`async function recipientLooksStopped(\n  boardId: string,\n  recipient: string\n): Promise<boolean> {`) — a hand-authored shape from the initial port of kilocode `7febec58f` (`fix(cli): warn when board_post targets a stopped subagent`). Both parameter types are 15-column identifiers plus the return type; the collapsed single-line form `async function recipientLooksStopped(boardId: string, recipient: string): Promise<boolean> {` measures 87 columns and fits under Prettier's `printWidth: 100` ceiling, so Prettier prefers the compact form. Diff statistics: `1 file changed, 1 insertion(+), 4 deletions(-)`. Semantic contract of `recipientLooksStopped` is byte-identical: still an `async` helper that reads the most recent 100 board messages via `BoardStore.read(boardId, { limit: 100 })` and returns `true` when the `recipient` session has never posted to (or acknowledged reads on) the board, so the caller (`boardWriteTool.execute` at `src/tool/tools/board.ts:126`) can emit the `deliveryStatus: 'no-recipient'` hint on `BoardWriteResult`. The paired `BoardWriteParamsSchema` shape, the `BoardContext.resolve(context.sessionId)` gate that returns `success: false` when no board is attached, and the module-level `experimental.sharedAgentBoard` config gate in `src/tool/tools/index.ts:118` are all untouched. Convention reminder: hand-authoring a two- or three-parameter function signature across multiple lines when it fits on one line under `printWidth: 100` will always produce a follow-up `style(ci)` auto-fix commit — write signatures on one line when they fit, and let Prettier wrap them only when they overflow (typically at four or more parameters, or two parameters where at least one has a complex generic type).
+
+Prior worked example, 2026-09-02, commit `89b23fa5` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a single-file Prettier reflow on `src/session/drain.ts` — the module-singleton `SessionDrainImpl` that guarantees background session work settles before a headless `alexi chat` or `alexi agent` process exits. Inside `drain(options: DrainOptions = {}): Promise<void>` at `src/session/drain.ts:125-128` the waiter-snapshot expression `const snapshot: TrackedWork[] = Array.from(this.pending.entries()).map(([id, promise]) => ({ id, promise }))` was reflowed from a hand-authored three-line form (with the `.map` argument list wrapped across two lines and the object literal on a single continuation) onto Prettier's preferred shape where `.map(([id, promise]) => ({` opens on the same line as the receiver and `id,` / `promise,` each occupy their own line before `}))` closes the call. The `TrackedWork` annotation and the immediately-following `Promise.allSettled(snapshot.map((entry) => entry.promise))` call are byte-identical. Semantic contract of `drain()` is unchanged: the drain remains one-shot per lifecycle (`this.drained` early return, terminal `this.drained = true; this.pending.clear();`), the waiter set is still snapshotted BEFORE awaiting so a handler that schedules follow-up work during its own settle cannot mutate the collection being iterated (upstream "snapshot drain waiters before resuming them" fix noted in the module header at lines 15-16), the 30-second default `timeoutMs` (`options.timeoutMs ?? 30_000`) is unchanged, the `timeoutMs > 0` branch still races `Promise.allSettled(...)` against a `setTimeout`-backed sentinel, the `timeoutMs === 0` branch still awaits `settle` indefinitely, and on timeout the drain still swallows late settle rejections via `settle.catch(...)` so unhandled rejections cannot fire after teardown. The companion `track(id, promise): () => void` no-op-when-drained early return, the auto-untrack `.catch(...).finally(() => this.pending.delete(id))` chain, the `untrack(id)`, `size()`, and test-only `__resetForTests()` methods, the `TrackedWork` and `DrainOptions` interfaces, and the exported `SessionDrain` module-level singleton (`export const SessionDrain = new SessionDrainImpl()`) are all untouched. Diff statistics: `1 file changed, 4 insertions(+), 3 deletions(-)`. `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm test`, and `npm run build` all remain green on the branch — the only observable delta is that `npm run format:check` now passes on this file where it previously reported a diff. This is the canonical worked example of the "reflow a `.map` callback whose object-literal argument spans two lines when the surrounding statement's return-type annotation forces the wrap" variant of the auto-fix pattern; when authoring similar `Array.from(...).map(([a, b]) => ({ a, b }))` idioms, prefer the Prettier-preferred continuation shape from the outset (`.map(([a, b]) => ({\n  a,\n  b,\n}))`) to avoid the auto-fix follow-up commit.
 
 ### Daily PR Merge
 
@@ -1394,6 +1553,16 @@ Effective 1.20.2, TUI components under `src/cli/tui/components/` should follow a
 This split lets pure helpers be unit-tested without booting an Ink render harness (see `docs/TESTING.md#pure-string-helpers-testable-without-ink`). If you find yourself writing complex string manipulation inside a component's render body, move it to `utils/` first.
 
 When a component's public prop shape is stable and external consumers import it by name, prefer a thin backwards-compatible wrapper over a rename. `ToolCallBlock.tsx` is the reference example — it re-exports `ToolRowProps` as `ToolCallBlockProps` and delegates to `ToolRow` in ~4 lines.
+
+### Environment-gated terminal features (OSC-8 hyperlinks and similar)
+
+Effective 2026-09-10, TUI features that emit terminal-specific escape sequences (OSC-8 hyperlinks, images, kitty graphics, sixel, etc.) MUST route through a capability probe with a well-defined fallback and MUST accept `FORCE_*` / `NO_*` environment overrides. The `src/cli/tui/utils/hyperlink.ts` + `src/cli/tui/utils/linkify.ts` pair is the reference:
+
+1. **Capability probe returns `false` off-TTY.** `supportsHyperlinks()` bails when `stream.isTTY` is falsy, which covers CI, pipes, and redirects. Any new probe MUST do the same — never emit escape sequences into a stream that will not consume them.
+2. **`FORCE_<FEATURE>=1` and `NO_<FEATURE>=1` overrides.** The probe consults env first so tests, headless agents, and operators debugging a terminal issue have deterministic control. Naming convention: `FORCE_HYPERLINK`, `NO_HYPERLINK`, `FORCE_IMAGES`, `NO_IMAGES`, etc.
+3. **Plain-text fallback is byte-identical when the label matches the value.** `hyperlink(url)` returns `url` verbatim when unsupported; `hyperlink(url, label)` returns `label (url)` only when `label !== url`. Match this shape so pipelines that grep tool output do not need to strip escapes conditionally.
+4. **Wrap-once, apply late.** `linkify()` is applied as the LAST transform on tool-output text (after `truncateOutput`) so truncation math still runs on the raw string. When adding a new wrapper, apply it after every truncation, redaction, and word-wrap step so those upstream steps never have to know about the escape bytes.
+5. **Tests stub the env with `vi.stubEnv` and undo in `afterEach`.** See `docs/TESTING.md#testing-linkify--deterministic-osc-8-assertions` for the pattern. Do NOT `process.env.FORCE_HYPERLINK = '1'` directly — that leaks state across tests.
 
 ## Introducing Retry-Aware Modules
 

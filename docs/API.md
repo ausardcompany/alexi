@@ -68,8 +68,9 @@ alexi agent -m <message> [options]
 | `--effort <level>` | string | Effort level: low, medium, high, max |
 | `--agent <id>` | string | Agent to use (code, debug, plan, explore) |
 | `--auto` | boolean | Run in fully autonomous mode (no permission prompts) |
-| `--yolo` | boolean | Grant every permission request without prompting (see "Headless permission handling" below) |
+| `--yolo` | boolean | Grant every permission request without prompting AND auto-continue on `onConsecutiveMistakeLimitReached` (see "Headless permission handling" and "Mistake-limit user steering" below) |
 | `--dangerously-skip-permissions` | boolean | Alias of `--yolo`; explicit opt-in for CI / non-interactive runs |
+| `-q, --quiet` | boolean | Only output the final response; suppresses the interactive mistake-limit prompt (still writes a one-line explanation to stderr on trip) |
 
 #### Examples
 
@@ -105,6 +106,70 @@ In agent mode, Alexi:
 The non-interactive `agent` command subscribes to `PermissionRequested` on the event bus and publishes a `PermissionResponse` for every request — `granted: true` when `--yolo` (or `--dangerously-skip-permissions`) was passed, `granted: false` otherwise. Without this, a `PermissionRequested` event from a subagent (spawned via the `task` tool) has no listener in headless mode and the agent loop hangs waiting for a response that never arrives. The subscription is unsubscribed on `process.exit` so it does not leak into subsequent invocations under tests. Reference: opencode `08faeb3`.
 
 A `subagentSessionIds: Set<string>` is populated (currently empty — the `task` tool does not yet spawn distinct sessions, so the wiring is reserved for a future real-subagent implementation that will gate the auto-response on sessionId membership without a second refactor).
+
+#### Mistake-limit user steering (issue #1692)
+
+The `alexi agent` command wires the `agenticChat` loop's `onConsecutiveMistakeLimitReached` callback through `createMistakeLimitPrompt(...)` (`src/cli/utils/mistakeLimitPrompt.ts`). Previously, tripping the `LoopDetector` / `MistakeTracker` stopped the run with only the synthetic `[Loop Detector] Stopped ...` / `[Mistake Tracker] Stopped ...` assistant message — the user saw the agent "randomly stop" mid-task. The callback now applies this decision matrix in order:
+
+| Mode | Trigger | Decision | stderr output |
+|------|---------|----------|---------------|
+| Yolo | `--yolo` or `--dangerously-skip-permissions` | `'continue'` (auto-recover) | `[mistake-limit] <explanation> Auto-continuing (--yolo).` (suppressed under `--quiet`) |
+| Headless | `stdin.isTTY === false` or `stdout.isTTY === false` | `'stop'` | `[mistake-limit] <explanation> Stopping (non-interactive; re-run with --yolo to auto-continue).` |
+| Quiet TTY | `--quiet` on an interactive terminal | `'stop'` | `[mistake-limit] <explanation> Stopping (quiet mode).` |
+| Interactive TTY (default) | Real terminal, no `--yolo`, no `--quiet` | Prompt `Try a different approach? (y/n)` | See below |
+
+Interactive answers:
+
+- Any answer whose trimmed, lowercased first character is `y` (`y`, `yes`, `YES`, ` y `) → `'continue'`, stderr prints `Continuing with steering guidance.`
+- Everything else including empty input (bare Enter), `n`, `quit`, or EOF → `'stop'`, stderr prints `Stopping run.`
+- `AbortSignal` fires mid-prompt (Ctrl+C) → `'stop'` immediately, the `readline` handle is released.
+
+The explanation string comes from the exported pure formatter `describeReason(reason: ConsecutiveMistakeReason): string`:
+
+- `kind: 'loop'` → `The model has called the same tool ('<toolName>') <consecutiveCount> times in a row with identical arguments — likely stuck in a loop.`
+- `kind: 'mistake'` → `<consecutiveCount> consecutive tool failures detected (last: '<toolName>') — the model may be flailing.`
+
+Returning `'continue'` from the callback resets both detectors and injects a `<system-reminder>` preamble plus the guidance `The previous approach is stuck. Try a different method, simpler steps, or ask me for help.` as a user message before the next iteration (this injection is owned by `agenticChat`, not the CLI callback).
+
+Programmatic use from custom CLI wrappers or third-party hosts:
+
+```typescript
+import { createMistakeLimitPrompt } from './cli/utils/mistakeLimitPrompt.js';
+import type {
+  MistakeLimitCallback,
+  MistakeLimitPromptOptions,
+} from './cli/utils/mistakeLimitPrompt.js';
+
+const callback: MistakeLimitCallback = createMistakeLimitPrompt({
+  yolo: false,
+  quiet: false,
+  signal: abortController.signal,
+  // Optional injectable I/O — omit to use process.stdin / process.stdout / process.stderr
+  // stdin, stdout, stderr, isTTY
+});
+
+await agenticChat(prompt, {
+  onConsecutiveMistakeLimitReached: callback,
+  // ...
+});
+```
+
+`MistakeLimitPromptOptions` (`src/cli/utils/mistakeLimitPrompt.ts`):
+
+```typescript
+export interface MistakeLimitPromptOptions {
+  yolo?: boolean;
+  quiet?: boolean;
+  signal?: AbortSignal;
+  // Injectable I/O for tests / non-CLI hosts
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
+  stdout?: NodeJS.WritableStream & { isTTY?: boolean };
+  stderr?: NodeJS.WritableStream;
+  isTTY?: boolean;                  // overrides stdin.isTTY && stdout.isTTY
+}
+```
+
+The CLI-side callback deliberately does NOT implement the steering-message injection itself — that concern stays in `agenticChat`. This keeps detection, steering-message content, and the "ask the user" surface in three separate layers so the TUI, HTTP server, and future editor hosts can each supply their own `MistakeLimitCallback` without duplicating any part of the detector or the steering payload.
 
 ### interactive / i
 
@@ -445,8 +510,53 @@ interface AgenticChatOptions {
   repoMapManager?: RepoMapManager;
   effort?: EffortLevel;            // low | medium | high | max
   agentId?: string;                // Agent to use
+  // Loop / mistake steering (issue #1692)
+  onConsecutiveMistakeLimitReached?: (
+    reason: ConsecutiveMistakeReason
+  ) => 'continue' | 'stop' | Promise<'continue' | 'stop'>;
+  loopLimit?: number;              // Default: 5 (identical tool calls)
+  mistakeLimit?: number;           // Default: 6 (consecutive tool failures)
+}
+
+interface ConsecutiveMistakeReason {
+  kind: 'loop' | 'mistake';
+  consecutiveCount: number;
+  toolName: string;                // Tripping tool (loop) or most recent failing tool (mistake)
 }
 ```
+
+### Loop and Mistake Steering
+
+When the agent gets stuck (repeats the same tool call, or emits a rapid burst of failures) the loop invokes `onConsecutiveMistakeLimitReached` if supplied. The callback decides whether to stop the run or inject a steering message and continue:
+
+```typescript
+import { agenticChat } from './core/agenticChat.js';
+import type { ConsecutiveMistakeReason } from './core/agenticChat.js';
+
+const result = await agenticChat('refactor the auth module', {
+  maxIterations: 50,
+  loopLimit: 5,          // trip after 5 identical tool calls (default)
+  mistakeLimit: 6,       // trip after 6 consecutive failures (default)
+  onConsecutiveMistakeLimitReached: async (reason: ConsecutiveMistakeReason) => {
+    if (reason.kind === 'loop') {
+      // Same tool called with same args N times in a row.
+      return 'continue'; // inject steering, let the model try a different approach
+    }
+    // reason.kind === 'mistake' — N consecutive tool failures.
+    return 'stop';       // give up; caller should surface the failure to the user
+  },
+});
+```
+
+Semantics:
+
+- Omit the callback to get the default behaviour: on trip, stop with a synthetic `[Loop Detector] Stopped after N identical calls to '<tool>'.` or `[Mistake Tracker] Stopped after N consecutive tool failures.` assistant message.
+- Returning `'continue'` resets both detectors and appends a `<system-reminder>` preamble plus the guidance `The previous approach is stuck. Try a different method, simpler steps, or ask me for help.` as a user message before the next iteration.
+- A throwing callback is treated as `'stop'` and logged via `logger.warn`. The run does not crash.
+- `loopLimit` and `mistakeLimit` constructors reject non-integer or `< 2` values (`limit must be an integer >= 2`).
+- The `question` tool is excluded from loop fingerprinting so repeated user prompts do not trip the detector.
+
+`ConsecutiveMistakeReason` is also re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for consumers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
 
 ### Progress Events
 
@@ -2027,6 +2137,45 @@ export function guessLanguageFromPath(filePath: string): string | undefined;
 
 `guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. Returns `undefined` for unknown extensions so callers can fall back to plain text.
 
+### `linkify` helper (`src/cli/tui/utils/linkify.ts`)
+
+Pure string transform that auto-detects URLs and `path:line` references in raw tool output and wraps every match in an OSC-8 hyperlink escape sequence via the shared `hyperlink()` helper. Applied by `ToolRow` immediately before Ink renders the tool body (both the bash-output branch and the generic-output branch).
+
+```typescript
+export function linkify(text: string, cwd?: string): string;
+```
+
+Parameters:
+- `text` — raw tool output. Multiline input is supported; matches are detected line-by-line as part of the same pass.
+- `cwd` — base directory for resolving relative file paths in `path:line` matches. Defaults to `process.cwd()`. Pass an explicit `cwd` from a test or from a caller running in a non-cwd context (agent worktree, `--workdir` invocation) so the generated `file://` URIs point at the intended paths.
+
+Return value: a new string. When the terminal does not support OSC-8 hyperlinks (see `supportsHyperlinks()` below), the returned string is byte-identical to the input.
+
+Two match categories are recognised, in the following precedence order:
+
+1. **URL matches**: `/\b(https?:\/\/|file:\/\/)[^\s<>"']+/g`. Trailing sentence punctuation (`.,;:!?)]}>`) is stripped from the captured URL and re-appended as plain text after the OSC-8 wrap. Example: `See https://example.com.` linkifies `https://example.com` and leaves the period outside the escape.
+2. **`path:line[:column]` matches**: the path segment must contain a `/` OR a `.` followed by 1-6 word characters (a file extension). This filters out timestamps, `host:port`, version strings, and `key: value` shapes. Relative paths are resolved via `path.resolve(cwd, filePath)` and rendered as `file://<absolute>#<line>` (or `#<line>:<column>`).
+
+URL matches always win on overlap, so `https://example.com/foo/bar.ts:42` is treated as a single URL match and does not produce a nested `path:42` hyperlink.
+
+### `hyperlink` helper (`src/cli/tui/utils/hyperlink.ts`)
+
+OSC-8 escape sequence wrapper. Called by `linkify()` per match; consumers rarely need to call it directly.
+
+```typescript
+export function hyperlink(url: string, label?: string): string;
+export function supportsHyperlinks(stream?: NodeJS.WriteStream): boolean;
+```
+
+`supportsHyperlinks()` returns `true` when:
+- `FORCE_HYPERLINK=1` is set, OR
+- `NO_HYPERLINK=1` is NOT set, `stream.isTTY` is `true`, AND one of:
+  - `TERM_PROGRAM` is in the allow-list: `iTerm.app`, `WezTerm`, `ghostty`, `Apple_Terminal`, `vscode`, `cursor`, `Hyper`, `WarpTerminal`.
+  - `TERM` contains `kitty`.
+  - `WT_SESSION` is set (Windows Terminal).
+
+When `supportsHyperlinks()` returns `false`, `hyperlink(url)` returns `url` and `hyperlink(url, label)` returns `label (url)` (or just `url` when `label === url`). When `true`, the return value is `ESC]8;;<url>ESC\<label>ESC]8;;ESC\` — the standard OSC-8 wrap.
+
 ## Per-Task Model Selection API
 
 Introduced 2026-08-31 (ports upstream opencode/kilocode `ab143253a`). Shared model-resolution helpers reused by the `task` and `agent_manager` tools. Gated on `experimental.task_model_selection` in `~/.alexi/config.json` (default `false`).
@@ -2628,17 +2777,25 @@ Behaviour:
 - Otherwise calls `BoardStore.read(boardId, { since, limit: params.limit ?? 50 })`, then `BoardStore.acknowledgeReads(boardId, context.sessionId, messages.map(m => m.id))` to suppress stale-banner re-surfacing.
 - Returns `{ success: true, data: { messages, boardId }, metadata: { count, boardId } }`.
 
-**`kilo_board_write`** — `src/tool/tools/board.ts:101`
+**`kilo_board_write`** — `src/tool/tools/board.ts:129`
 
 ```typescript
 const BoardWriteParamsSchema = z.object({
   content: z.string().min(1).max(4000)
     .describe('Message body to post to the shared board (1-4000 chars)'),
+  // Added 2026-09-11 (1.22.17, ports kilocode 7febec58f).
+  recipient: z.string().optional()
+    .describe(
+      'Optional session id of a specific peer subagent this message targets. ' +
+        'When set, the tool warns if that subagent is stopped or does not exist.'
+    ),
 });
 
 interface BoardWriteResult {
   messageId: string;
   boardId: string;
+  /** Delivery hint. `'no-recipient'` means the target subagent is stopped or missing. */
+  deliveryStatus?: 'delivered' | 'no-recipient';
 }
 ```
 
@@ -2646,8 +2803,44 @@ Behaviour:
 
 - Resolves `boardId` the same way.
 - When no board is attached, returns `{ success: false, error: 'No shared board is attached to this session — cannot post.' }`.
+- When `recipient` is set, the tool scans the most recent 100 messages on the board for any activity from the target session id. If none is found, `deliveryStatus` is set to `'no-recipient'` and a `hint` is attached (`Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`). The message is still written — the parent orchestrator can decide how to react.
 - Otherwise calls `BoardStore.write(boardId, { sessionID: context.sessionId ?? 'unknown', author: context.agentName ?? 'agent', content })`.
-- Returns `{ success: true, data: { messageId, boardId }, metadata: { messageId, boardId } }`.
+- Returns `{ success: true, data: { messageId, boardId, deliveryStatus }, metadata: { messageId, boardId, deliveryStatus }, hint? }`.
+
+### `BoardStore.reset(boardId)` (kilocode PR #13782, 1.22.17)
+
+```typescript
+/**
+ * Hide every message currently on the board from future `read()` calls
+ * without deleting rows. Idempotent — repeat calls push the watermark
+ * forward. Stored as Unix milliseconds on `kilo_board.cleared_seq`.
+ */
+BoardStore.reset(boardId: string): Promise<void>;
+```
+
+`read(boardId, opts)` now consults `cleared_seq` and filters out rows whose `Date.parse(createdAt)` is `<=` the watermark. Rows with an unparseable `createdAt` are kept (fail-open) so a bad timestamp cannot permanently hide a message. When `cleared_seq <= 0` the filter path short-circuits with no per-row overhead.
+
+### Unified enablement predicate (kilocode PR #14013, 1.22.17)
+
+```typescript
+// src/kilocode/board/enabled.ts
+export function isBoardEnabled(experimentalConfigFlag?: boolean): boolean;
+```
+
+Returns `true` if ANY of:
+
+1. `process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD` matches `1|true|yes|on` (case-insensitive).
+2. The installation channel is `dev|beta|local` and the env variable is not explicitly set to a falsy value (`0|false|no|off`).
+3. The caller passes the persisted `experimental.sharedAgentBoard` config flag as `true`.
+
+An explicit falsy env value wins over the on-disk config. Callers can compose this with `getConfigSharedAgentBoard()` for a full three-signal check:
+
+```typescript
+import { isBoardEnabled } from './kilocode/board/enabled.js';
+import { getConfigSharedAgentBoard } from './config/userConfig.js';
+
+const enabled = isBoardEnabled(getConfigSharedAgentBoard());
+```
 
 ### Enabling the tools
 
@@ -2670,3 +2863,49 @@ Or edit `~/.alexi/config.json` directly:
 ```
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator guide and [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) for the design notes and Mermaid diagram.
+
+## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
+
+Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone Bedrock model-id classifier for future direct Bedrock integrations and SAP AI Core deployment mapping. Alexi does not ship a native Bedrock provider yet, but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments.
+
+```typescript
+/**
+ * Return the effective Bedrock model id given the caller's requested id
+ * and target region. Idempotent: passing an already-resolved id yields
+ * the same id back.
+ *
+ * @param modelID - Bedrock model id (short form, cross-region form, or ARN).
+ * @param region  - AWS region (`us-east-1`, `eu-west-1`, ...). Defaults to `us-east-1`.
+ */
+export function resolveBedrockModelID(
+  modelID: string,
+  region: string | undefined
+): string;
+```
+
+Resolution rules, in order:
+
+1. ARN model IDs (`arn:aws:bedrock:...`) are pre-resolved — pass through unchanged. Injecting a `us.` / `eu.` / ... prefix in front of an ARN produces a malformed string that Bedrock rejects.
+2. Explicit cross-region prefixes (`global.`, `us.`, `eu.`, `jp.`, `apac.`, `au.`) are respected — pass through unchanged.
+3. In `us-*` regions (excluding `us-gov-*`), the `us.` prefix is prepended when the id contains any of `nova-micro`, `nova-lite`, `nova-pro`, `nova-premier`, `nova-2`, `claude`, `deepseek.r1`, `deepseek-r1`. `deepseek.v3.2` and newer DeepSeek variants are region-local and MUST NOT be prefixed.
+4. All other regions: no automatic prefixing. Callers wanting cross-region inference must set the prefix explicitly.
+
+## PTY Latch (`src/core/kilocode/pty/latch.ts`)
+
+Introduced 2026-09-11 (`1.22.17`, ports kilocode `203f19f5d`). Dependency-free helper for buffering emissions from a short-lived event source until a listener attaches. See [ARCHITECTURE.md — PTY Latch](ARCHITECTURE.md#pty-latch-srccorekilocodeptylatchts) for design notes.
+
+```typescript
+export interface PtyLatch<T> {
+  emit(value: T): void;
+  attach(listener: (value: T) => void): () => void;
+}
+
+export function createPtyLatch<T>(): PtyLatch<T>;
+```
+
+Contract:
+
+- `emit(value)` delivers synchronously when a listener is attached; otherwise buffers in FIFO order.
+- `attach(listener)` flushes the buffer synchronously in emission order before returning. Returns a detach function.
+- Detaching re-enables buffering — late reattach receives values emitted while unattached.
+- The flush loop halts early if the listener re-assigns itself mid-drain; remaining buffered values stay for the next `attach()`.

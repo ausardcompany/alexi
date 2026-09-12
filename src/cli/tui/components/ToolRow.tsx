@@ -12,6 +12,7 @@ import {
   formatParamsPreview,
   truncateOutput,
 } from '../utils/formatToolOutput.js';
+import { linkify } from '../utils/linkify.js';
 
 export type ToolStatus = 'pending' | 'running' | 'completed' | 'failed';
 
@@ -182,7 +183,7 @@ export function ToolRow({
           <Text color={colors.toolOutput}>
             <Text bold>{commandLine}</Text>
             {'\n'}
-            {truncatedText}
+            {linkify(truncatedText)}
           </Text>
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
@@ -192,7 +193,7 @@ export function ToolRow({
       const { text: truncatedText, truncated, remaining } = truncateOutput(output);
       return (
         <Box flexDirection="column">
-          <Text color={colors.toolOutput}>{truncatedText}</Text>
+          <Text color={colors.toolOutput}>{linkify(truncatedText)}</Text>
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
       );

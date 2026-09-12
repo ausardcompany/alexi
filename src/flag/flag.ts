@@ -61,6 +61,12 @@ const ALEXI_EXPERIMENTAL_HTTPAPI = unstableDefault('ALEXI_EXPERIMENTAL_HTTPAPI')
 
 const ALEXI_EXPERIMENTAL_EVENT_SYSTEM = unstableDefault('ALEXI_EXPERIMENTAL_EVENT_SYSTEM');
 
+// Ports kilocode PR #14013: gate the shared agent board behind an
+// experimental env flag. Defaults to on for dev/beta/local channels,
+// off for stable. See `src/kilocode/board/enabled.ts` for the combined
+// enablement predicate (env + persisted config).
+const KILOCODE_EXPERIMENTAL_SWARM_BOARD = unstableDefault('KILOCODE_EXPERIMENTAL_SWARM_BOARD');
+
 export const Flag = {
   set,
   get,
@@ -75,4 +81,7 @@ export const Flag = {
   ALEXI_EXPERIMENTAL,
   ALEXI_EXPERIMENTAL_HTTPAPI,
   ALEXI_EXPERIMENTAL_EVENT_SYSTEM,
+
+  // Kilocode experimental features
+  KILOCODE_EXPERIMENTAL_SWARM_BOARD,
 };

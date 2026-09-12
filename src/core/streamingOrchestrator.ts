@@ -93,6 +93,15 @@ export interface StreamingResult {
 // Re-export StreamChunk for consumers
 export type { StreamChunk };
 
+/**
+ * Re-export of the loop / mistake steering type so callers that dispatch
+ * through `streamChat` (which does NOT run tools directly) can still refer
+ * to the canonical callback payload shape when they later fan out to
+ * `agenticChat`. The tool execution loop with loop/mistake detection lives
+ * in `agenticChat.ts`. See issue #1692.
+ */
+export type { ConsecutiveMistakeReason } from './agenticChat.js';
+
 // Re-export the stall-error surface so CLI/TUI can `import { ... } from
 // '../core/streamingOrchestrator.js'` without reaching into the watchdog
 // module.
