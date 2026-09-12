@@ -128,6 +128,32 @@ KILOCODE_EXPERIMENTAL_SWARM_BOARD=0 alexi chat -m "..."
 
 Callers should compose this env flag with the persisted config via `isBoardEnabled(experimentalConfigFlag)` in `src/kilocode/board/enabled.ts` — the function returns `true` if any of the three signals (env, channel default, persisted config) enables the feature, with the env flag winning on explicit falsy values. See [Experimental Shared Agent Board](#experimental-shared-agent-board) for the full enablement matrix.
 
+#### KILO_EXPERIMENTAL_SHARED_AGENT_BOARD
+
+Alexi-native feature-specific env flag for the shared agent board, resolved by `isBoardEnabled()` in `src/config/userConfig.ts:628` (issue #1698). Complements the upstream-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag: `KILO_*` follows the same naming convention as `KILO_FLAGS` / `KILO_RETRIES` in Alexi's agent workflows, while `KILOCODE_*` preserves upstream kilocode compatibility. Set to the literal string `'1'` to enable — any other value (`'0'`, `'true'`, empty, unset) is treated as unset, so `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=0` is never misread as an opt-in.
+
+```bash
+KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1 alexi chat -m "..."
+```
+
+The resolver combines three signals with boolean OR — an explicit config `false` does NOT override a set env flag:
+
+1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
+2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` (this flag).
+3. `process.env.KILO_EXPERIMENTAL === '1'` (umbrella flag, see below).
+
+Read fresh on each call — a config change picks up on the next process restart. Alexi does not hot-reload tool registrations mid-turn.
+
+#### KILO_EXPERIMENTAL
+
+Umbrella experimental flag that enables every Alexi-native experimental feature at once. When set to `'1'`, `isBoardEnabled()` returns `true` regardless of the persisted config or feature-specific flag. Intended for CI runs and ad-hoc containers where flipping every experimental switch by name would be tedious. Same strict `=== '1'` comparison as `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD` — no truthy-string parsing, no case-insensitive fallback.
+
+```bash
+KILO_EXPERIMENTAL=1 alexi agent -m "explore repo"
+```
+
+This coexists with the kilocode-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag documented above. The two resolvers live in separate modules (`src/config/userConfig.ts` vs `src/kilocode/board/enabled.ts`) and target different env-var namespaces (`KILO_*` vs `KILOCODE_*`) — they are not unified because they serve different audiences: `isBoardEnabled()` in `userConfig.ts` is the primary gate used by tool registration and swarm-identity attach; the kilocode module preserves upstream parity for anyone porting downstream tooling that expects the upstream env-flag name.
+
 #### MAX_SUBAGENT_DEPTH
 
 Override the maximum subagent nesting depth for the `task` tool. A top-level user session has depth 0; each `task` invocation would spawn a subagent one level deeper. Spawning at depth greater than this value is rejected before any provider request is made. Defaults to `3`; values above `~10` are strongly discouraged because latency and cost multiply per level. Non-numeric or non-positive values fall back to the default.
