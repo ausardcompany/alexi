@@ -136,6 +136,49 @@ Override the maximum subagent nesting depth for the `task` tool. A top-level use
 export MAX_SUBAGENT_DEPTH=5
 ```
 
+#### ALEXI_OTEL_TRACES_EXPORTER
+
+Enable the privacy-preserving OTLP tracing relay for SAP AI Core provider calls. Introduced in 1.22.17 (ports Cline PR #13974). Must be set to one of `grpc`, `http/json`, or `http/protobuf` — any other value keeps tracing disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`. Unset (the default) keeps tracing off. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability) for the full contract.
+
+```bash
+export ALEXI_OTEL_TRACES_EXPORTER=http/protobuf
+```
+
+#### ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT
+
+OTLP collector endpoint URL. Defaults to `http://localhost:4317` for `grpc` and `http://localhost:4318` for `http/json` / `http/protobuf`.
+
+```bash
+export ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.internal:4318
+```
+
+#### ALEXI_OTEL_SERVICE_NAME
+
+`service.name` resource attribute attached to every emitted span. Defaults to `alexi`.
+
+```bash
+export ALEXI_OTEL_SERVICE_NAME=alexi-prod
+```
+
+#### ALEXI_TRACE_SAMPLE_PERCENT
+
+Session-level sampling percentage in `[0, 100]`. Default `0` (never sample). Values are clamped to the range and non-numeric strings fall back to `0`. Sampling is deterministic per `sessionId` (FNV-1a hash of the id modulo 100) so every provider call within one chat session is either sampled or not; partial traces cannot bias the sampled population.
+
+```bash
+# Sample roughly 25% of chat sessions
+export ALEXI_TRACE_SAMPLE_PERCENT=25
+```
+
+#### ALEXI_TRACE_RECORD_CONTENT
+
+Opt in to attaching truncated assistant response content (capped at 8 KiB) as the `gen_ai.response.content` span attribute. Only recognised when set to the literal string `true`. Any other value (including `1`, `yes`, `TRUE`) keeps content off. Metadata (tokens, timings, model, error status) is always attached when tracing is enabled — this variable ONLY governs whether prompt/completion content leaves the process.
+
+```bash
+export ALEXI_TRACE_RECORD_CONTENT=true
+```
+
+Users can also disable the entire tracing relay via `telemetryOptOut: true` in `~/.alexi/config.json`, or the macOS managed preference `disableTelemetry: true`. Both keys are honoured by `isTelemetryOptOut()` in `src/utils/tracing.ts`, and any exception while reading the config is caught and treated as opt-out (fail-closed).
+
 #### ALEXI_PROJECT_DIR
 
 Override the project directory for configuration resolution.
