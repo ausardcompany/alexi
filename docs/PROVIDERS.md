@@ -1713,6 +1713,133 @@ resolveBedrockModelID('arn:aws:bedrock:us-east-1:123456789012:inference-profile/
 // → 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/x' (ARN passthrough)
 ```
 
+## OTLP Tracing Relay (Observability)
+
+Alexi ships an optional OpenTelemetry OTLP relay that emits AI SDK-style spans around every SAP AI Core Orchestration provider call. The relay is implemented in `src/utils/tracing.ts` and wired into `src/providers/sapOrchestration.ts` via three exported helpers (`startProviderSpan`, `finishProviderSpan`, `failProviderSpan`). Ported from Cline PR #13974.
+
+### Design goals
+
+1. **Disabled by default.** No spans are emitted unless `ALEXI_OTEL_TRACES_EXPORTER` is set to a recognised protocol. No SDK code is loaded on the hot path either — the OpenTelemetry SDK is dynamic-imported inside `initTracing()` only when tracing is actually enabled.
+2. **Privacy first.** Metadata only. Prompt and completion content are NEVER attached to a span unless the operator explicitly sets `ALEXI_TRACE_RECORD_CONTENT=true`, at which point a truncated response preview capped at 8 KiB is attached as `gen_ai.response.content`.
+3. **Fail closed.** If the config file cannot be read or parsed, the relay disables itself rather than assume opt-in. Provider registration failures (bad endpoint, missing peer dep) are caught and reported as `disabledReason: 'tracer provider registration failed'`; they never crash the CLI.
+4. **Session-consistent sampling.** Sampling is applied per chat session, not per span, so a sampled session emits all spans and a non-sampled session emits none.
+
+### Enabling the relay
+
+Point Alexi at any OTLP-compatible collector by setting a protocol and (optionally) an endpoint:
+
+```bash
+# HTTP/protobuf exporter targeting a local collector
+export ALEXI_OTEL_TRACES_EXPORTER=http/protobuf
+export ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+
+# Sample 25% of chat sessions
+export ALEXI_TRACE_SAMPLE_PERCENT=25
+
+# Optional: override the service name attached to every span
+export ALEXI_OTEL_SERVICE_NAME=alexi-prod
+```
+
+Recognised protocols: `grpc` (default endpoint `http://localhost:4317`), `http/json`, `http/protobuf` (default endpoint `http://localhost:4318`). An invalid protocol string is treated as a configuration error and the relay stays disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`; no silent defaulting.
+
+The relay is also disabled when the user has opted out of telemetry:
+
+- `telemetryOptOut: true` in `~/.alexi/config.json`
+- `disableTelemetry: true` (macOS managed preference) which `loadFullConfig()` normalises to `telemetryEnabled: false`
+- Any exception while reading the config (corrupt JSON, permission error) — this fails closed to disabled
+
+### Span attributes
+
+Every span uses the AI SDK convention names so any collector configured for LLM observability (Langfuse, Phoenix, Datadog LLM Observability, OpenLLMetry) can parse them without a translation layer:
+
+| Attribute | Description |
+|-----------|-------------|
+| `gen_ai.system` | Always `sap-ai-core` |
+| `gen_ai.request.model` | Model id passed to the provider |
+| `gen_ai.operation.name` | `chat` or `stream` |
+| `gen_ai.request.messages.count` | Number of messages in the request |
+| `session.id` | Session id from the caller or the per-process fallback |
+| `gen_ai.usage.input_tokens` | Prompt token count |
+| `gen_ai.usage.output_tokens` | Completion token count |
+| `gen_ai.response.finish_reason` | `stop`, `length`, `tool_calls`, etc. |
+| `tokens.{prompt,completion,total}` | Provider-native usage totals |
+| `tokens.{cache_read,cache_creation}` | Prompt-cache attribution (OpenAI GPT-5.6+ family) |
+| `gen_ai.response.content` | Present ONLY when `ALEXI_TRACE_RECORD_CONTENT=true`, truncated to 8192 chars |
+| `provider` / `model` | Duplicates for collectors that expect flat names |
+
+Error paths call `span.recordException(error)` + `span.setStatus({ code: SpanStatusCode.ERROR, message })` before rethrowing the classified error unchanged.
+
+### Session-deterministic sampling
+
+`ALEXI_TRACE_SAMPLE_PERCENT` accepts a value in `[0, 100]` (default `0`). The sampling gate is:
+
+```ts
+// src/utils/tracing.ts
+export function shouldSampleSession(sessionId: string, samplePercent: number): boolean {
+  if (samplePercent <= 0) return false;
+  if (samplePercent >= 100) return true;
+  const bucket = fnv1a(sessionId) % 100;
+  return bucket < samplePercent;
+}
+```
+
+Because bucketing is deterministic in `sessionId`, every provider call within one chat session is either sampled or not — partial traces cannot bias the sampled population. When a caller does not pass `sessionId` via `CompletionOptions`, the provider falls back to a per-process id `proc-<pid>-<base36 ms>` (generated once at module load) so sampling stays deterministic within a single CLI invocation but does not collapse every one-shot command into the same bucket.
+
+### Provider call flow with tracing
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Provider as SapOrchestrationProvider
+    participant Tracer as OTel Tracer
+    participant SAP as SAP AI Core
+    participant Collector as OTLP Collector
+
+    Caller->>Provider: chat(messages, options)
+    Provider->>Tracer: startProviderSpan(operation, attributes)
+    alt tracing disabled OR session not sampled
+        Tracer-->>Provider: undefined
+    else sampled
+        Tracer-->>Provider: Span
+    end
+    Provider->>SAP: chatCompletion(messages, config)
+    alt success
+        SAP-->>Provider: response
+        Provider->>Tracer: finishProviderSpan(span, {usage, finishReason, contentPreview?})
+        Tracer->>Collector: export span (batch)
+    else error
+        SAP-->>Provider: throw
+        Provider->>Tracer: failProviderSpan(span, classifiedError)
+        Tracer->>Collector: export span with ERROR status
+        Provider-->>Caller: throw classifiedError
+    end
+    Provider-->>Caller: {text, toolCalls, finishReason, usage}
+```
+
+### Helper reference
+
+```typescript
+// src/providers/sapOrchestration.ts (excerpt)
+
+export function startProviderSpan(
+  operation: 'chat' | 'stream',
+  attributes: { model: string; sessionId?: string; messageCount?: number }
+): Span | undefined;
+
+export function finishProviderSpan(
+  span: Span | undefined,
+  data: { usage?: TokenUsage; finishReason?: string; contentPreview?: string }
+): void;
+
+export function failProviderSpan(span: Span | undefined, error: unknown): void;
+```
+
+All three helpers are `undefined`-safe so a provider integration can call them unconditionally.
+
+### Shutdown
+
+`initTracing()` is invoked eagerly from `src/cli/program.ts` and is idempotent. On shutdown the CLI's SIGINT/SIGTERM/beforeExit handlers all call `shutdownTracing()`, which flushes pending spans through the batch span processor before `process.exit(0)`. `shutdownTracing()` never throws — a broken exporter must not block process exit.
+
 ## Auxiliary-Task Model Selection
 
 Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3). Auxiliary background tasks — title generation, session summarisation, context compaction, and commit-message generation — resolve their target model through `selectModelForTask` in `src/providers/model-selection.ts` instead of the primary chat path.

@@ -2326,6 +2326,116 @@ Any future telemetry integration that adds a new detection surface
 (class, factory, or singleton) MUST extend this test — or add a sibling
 test alongside its module — before landing.
 
+## OTLP Tracing Relay (Observability Layer)
+
+Introduced in 1.22.17 (ports Cline PR #13974). A privacy-preserving OpenTelemetry OTLP relay attaches AI SDK-style spans to every SAP AI Core Orchestration provider call so operators can send provider-layer telemetry to any OTLP collector (Langfuse, Phoenix, Datadog LLM Observability, OpenLLMetry) without shipping content off-box. The relay is implemented in `src/utils/tracing.ts` (355 lines) with provider integration in `src/providers/sapOrchestration.ts` (`startProviderSpan` / `finishProviderSpan` / `failProviderSpan`).
+
+### Layering
+
+```mermaid
+graph TB
+    subgraph Boot["Boot / Shutdown"]
+        Program["src/cli/program.ts"]
+        InitCall["void initTracing()"]
+        Shutdown["shutdownTracing()<br/>on SIGINT/SIGTERM/beforeExit"]
+    end
+
+    subgraph Tracing["src/utils/tracing.ts"]
+        Config["resolveTracingConfig()"]
+        OptOut["isTelemetryOptOut()<br/>fail-closed"]
+        Sample["shouldSampleSession()<br/>FNV-1a"]
+        InitFn["initTracing()<br/>lazy SDK import"]
+    end
+
+    subgraph Provider["src/providers/sapOrchestration.ts"]
+        Chat["chat()"]
+        Stream["stream()"]
+        Start["startProviderSpan()"]
+        Finish["finishProviderSpan()"]
+        Fail["failProviderSpan()"]
+    end
+
+    subgraph Env["Environment / User Config"]
+        EnvVars["ALEXI_OTEL_*"]
+        UserCfg["~/.alexi/config.json<br/>telemetryOptOut"]
+    end
+
+    subgraph OTLP["OTLP Collector"]
+        Exporter["grpc / http/json / http/protobuf"]
+    end
+
+    Program --> InitCall
+    Program --> Shutdown
+    InitCall --> InitFn
+    InitFn --> Config
+    Config --> EnvVars
+    Config --> OptOut
+    OptOut --> UserCfg
+    InitFn --> Exporter
+    Chat --> Start
+    Stream --> Start
+    Start --> Sample
+    Chat --> Finish
+    Stream --> Finish
+    Chat --> Fail
+    Stream --> Fail
+    Finish --> Exporter
+    Fail --> Exporter
+
+    style OptOut fill:#c62828,color:#fff
+    style Sample fill:#1565c0,color:#fff
+    style Config fill:#2e7d32,color:#fff
+```
+
+### Design invariants
+
+1. **Disabled by default.** `resolveTracingConfig()` returns `{ enabled: false }` unless `ALEXI_OTEL_TRACES_EXPORTER` is set to one of `grpc`, `http/json`, `http/protobuf`. An invalid value produces `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'` — the relay never silently defaults.
+2. **Fail-closed opt-out.** `isTelemetryOptOut()` reads `telemetryOptOut` from `~/.alexi/config.json` and honours the macOS managed-preference `disableTelemetry`/`telemetryEnabled: false` keys. Any exception while reading the config (corrupt JSON, permission error) is caught and treated as opt-out.
+3. **Lazy SDK import.** The OpenTelemetry SDK (`@opentelemetry/sdk-trace-node`, `@opentelemetry/resources`, `@opentelemetry/semantic-conventions`, and the three OTLP exporters) is dynamic-imported inside `initTracing()` only when tracing is actually enabled, so the ~40ms cold-start cost is not paid on the default path.
+4. **Provider-registration failure is non-fatal.** If exporter construction or `provider.register()` throws, the caught error transitions the cached config to `{ enabled: false, disabledReason: 'tracer provider registration failed' }` for the rest of the process rather than crashing the CLI.
+5. **Metadata only by default.** Prompt and completion content are NEVER attached to a span unless `ALEXI_TRACE_RECORD_CONTENT=true`, and even then the response preview is truncated at 8 KiB.
+6. **Session-consistent sampling.** `shouldSampleSession(sessionId, samplePercent)` hashes the session id with a dependency-free FNV-1a 32-bit function and buckets it modulo 100. `0` never samples; `100` always samples; values in-between are deterministic per session so partial traces cannot bias the sampled population.
+
+### Provider integration shape
+
+`SapOrchestrationProvider.chat()` and `stream()` each open a span before dispatching the SDK call and attach usage/status on the return path:
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Provider as SapOrchestrationProvider
+    participant Span as OTel Span
+    participant SAP as SAP AI Core
+
+    Caller->>Provider: chat(messages, options)
+    Provider->>Span: startProviderSpan(chat, {model, sessionId, count})
+    Note over Span: undefined when disabled<br/>or not sampled
+    Provider->>SAP: chatCompletion(...)
+    alt Success
+        SAP-->>Provider: response
+        Provider->>Span: finishProviderSpan({usage, finishReason, contentPreview?})
+        Span-->>Provider: SpanStatusCode.OK
+    else Rate-limit / error
+        SAP-->>Provider: throw
+        Provider->>Span: failProviderSpan(classifiedError)
+        Span-->>Provider: SpanStatusCode.ERROR
+        Provider-->>Caller: throw classifiedError
+    end
+    Provider-->>Caller: {text, toolCalls, finishReason, usage}
+```
+
+Streaming mode aggregates the delta text into `aggregatedText` during iteration and passes it as `contentPreview` at finish time only when `recordContent` is enabled — the aggregation itself is skipped when the span is `undefined`, so there is no cost on the disabled path.
+
+### Boot and shutdown wiring
+
+`src/cli/program.ts` invokes `void initTracing()` eagerly at CLI boot so the first provider call already sees a registered TracerProvider. The call is idempotent and a no-op when tracing is disabled. Shutdown is handled in three places:
+
+- `SIGINT` / `SIGTERM` handlers run `Promise.allSettled([killAllTracked(), shutdownTracing()])` so pending OTLP spans flush alongside the background-process cleanup before `process.exit(0)`.
+- `process.on('beforeExit')` fires `shutdownTracing()` as a safety net for natural process exit when the TracerProvider has already gone idle. `beforeExit` only fires when the event loop is empty, so this is genuinely a safety net rather than a primary path.
+- `shutdownTracing()` never throws — a broken exporter must not block process exit.
+
+Configuration reference for env vars (`ALEXI_OTEL_TRACES_EXPORTER`, `ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT`, `ALEXI_OTEL_SERVICE_NAME`, `ALEXI_TRACE_SAMPLE_PERCENT`, `ALEXI_TRACE_RECORD_CONTENT`) lives in [`docs/CONFIGURATION.md`](CONFIGURATION.md#alexi_otel_traces_exporter). Full attribute schema and provider call flow live in [`docs/PROVIDERS.md`](PROVIDERS.md#otlp-tracing-relay-observability).
+
 ## Key Design Decisions
 
 ### 1. Single Provider Architecture (SAP AI Core)

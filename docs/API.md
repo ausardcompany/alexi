@@ -791,6 +791,11 @@ Review the changes in @$1 and summarize.
 | `MORPH_API_KEY` | -- | WarpGrep (`@morphllm/morphsdk`) semantic search API key. Consumed by the `alexi-mcp-warpgrep` MCP server (see [`docs/mcp-servers.md`](./mcp-servers.md)); Alexi's built-in tool surface no longer reads it. |
 | `ALEXI_EXPERIMENTAL_BACKGROUND_TASKS` | -- | Enable background task execution |
 | `KILO_DISABLE_EXTERNAL_SKILLS` | `false` | When set to `true` or `1` (case-insensitive), disables loading of external skills. Evaluated once at module load time via `src/core/flag.ts`. |
+| `ALEXI_OTEL_TRACES_EXPORTER` | -- | Enable OTLP tracing relay for provider calls. One of `grpc`, `http/json`, `http/protobuf`. Any other value keeps tracing disabled. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability). |
+| `ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (grpc) / `http://localhost:4318` (http) | OTLP collector endpoint URL. |
+| `ALEXI_OTEL_SERVICE_NAME` | `alexi` | `service.name` resource attribute on every emitted span. |
+| `ALEXI_TRACE_SAMPLE_PERCENT` | `0` | Session-level sampling percentage `[0, 100]`. Deterministic per `sessionId` via FNV-1a. |
+| `ALEXI_TRACE_RECORD_CONTENT` | -- | When exactly `true`, attach the (truncated, 8 KiB max) assistant response as `gen_ai.response.content`. Any other value keeps content off. |
 
 ### AICORE_SERVICE_KEY Format
 

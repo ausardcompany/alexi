@@ -58,6 +58,13 @@ import {
 } from './openai/prompt-cache.js';
 import { loadToken, clearToken } from '../utils/tokenStorage.js';
 import { getConfigPersistAuthTokens } from '../config/userConfig.js';
+import {
+  getTracer,
+  getTracingConfig,
+  isTracingEnabled,
+  shouldSampleSession,
+} from '../utils/tracing.js';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
 
 /**
  * Provider id used as the cache key for SAP AI Core access tokens.
@@ -476,6 +483,14 @@ export interface CompletionOptions {
   toolChoice?: OrchestrationConfig['toolChoice'];
   /** Extra HTTP headers to include in the request (e.g. agent observability headers) */
   headers?: Record<string, string>;
+  /**
+   * Optional session id used by the OTLP tracing relay to bucket
+   * sampling decisions deterministically per-session (see
+   * `src/utils/tracing.ts`). When absent, the provider falls back to a
+   * stable per-process id so sampling stays deterministic across the
+   * process lifetime but does not partition across sessions.
+   */
+  sessionId?: string;
   /**
    * Provider-specific reasoning parameters produced by
    * {@link import('./reasoning.js').resolveReasoning}.
@@ -1002,6 +1017,143 @@ function toOrchestrationMessages(
 }
 
 // ============================================================================
+// OTLP tracing helpers (issue #1707)
+// ============================================================================
+
+/**
+ * Fallback session id used when a caller does not pass one through
+ * {@link CompletionOptions}. Regenerated once per process so sampling
+ * decisions stay deterministic for the lifetime of the CLI invocation
+ * without collapsing every one-shot command into the same bucket.
+ */
+const PROCESS_SESSION_ID = `proc-${process.pid}-${Date.now().toString(36)}`;
+
+/**
+ * Start a metadata-only span around a provider call when tracing is
+ * enabled AND the session was selected by the sampling gate. Returns
+ * `undefined` when tracing is disabled or the session is not sampled;
+ * callers should treat that as "no-op" and skip span mutations.
+ *
+ * Prompt / completion CONTENT is NEVER attached here -- content emission
+ * lives at the call site behind `ALEXI_TRACE_RECORD_CONTENT=true` so an
+ * accidental refactor of this helper cannot leak content.
+ */
+export function startProviderSpan(
+  operation: 'chat' | 'stream',
+  attributes: {
+    model: string;
+    sessionId?: string;
+    messageCount?: number;
+  }
+): Span | undefined {
+  if (!isTracingEnabled()) {
+    return undefined;
+  }
+  const config = getTracingConfig();
+  if (!config) {
+    return undefined;
+  }
+  const sessionId = attributes.sessionId ?? PROCESS_SESSION_ID;
+  if (!shouldSampleSession(sessionId, config.samplePercent)) {
+    return undefined;
+  }
+  const tracer = getTracer('alexi.provider.sap-orchestration');
+  const span = tracer.startSpan(`sap-ai-core.${operation}`, {
+    attributes: {
+      'gen_ai.system': 'sap-ai-core',
+      'gen_ai.request.model': attributes.model,
+      'gen_ai.operation.name': operation,
+      provider: 'sap-ai-core',
+      model: attributes.model,
+      'session.id': sessionId,
+      ...(attributes.messageCount !== undefined
+        ? { 'gen_ai.request.messages.count': attributes.messageCount }
+        : {}),
+    },
+  });
+  return span;
+}
+
+/**
+ * Record usage metadata + status on a provider span, then end it. Safe to
+ * call with `span === undefined` (tracing disabled / not sampled).
+ *
+ * When `ALEXI_TRACE_RECORD_CONTENT=true` and `contentPreview` is provided,
+ * a truncated preview of the assistant response is attached. Content is
+ * capped at 8 KiB to keep exporter payloads bounded; operators who need
+ * full content should point the collector at their own storage.
+ */
+export function finishProviderSpan(
+  span: Span | undefined,
+  data: {
+    usage?: TokenUsage;
+    finishReason?: string;
+    contentPreview?: string;
+  }
+): void {
+  if (!span) {
+    return;
+  }
+  try {
+    if (data.usage) {
+      if (data.usage.prompt_tokens !== undefined) {
+        span.setAttribute('gen_ai.usage.input_tokens', data.usage.prompt_tokens);
+        span.setAttribute('tokens.prompt', data.usage.prompt_tokens);
+      }
+      if (data.usage.completion_tokens !== undefined) {
+        span.setAttribute('gen_ai.usage.output_tokens', data.usage.completion_tokens);
+        span.setAttribute('tokens.completion', data.usage.completion_tokens);
+      }
+      if (data.usage.total_tokens !== undefined) {
+        span.setAttribute('tokens.total', data.usage.total_tokens);
+      }
+      if (data.usage.cache_read_input_tokens !== undefined) {
+        span.setAttribute('tokens.cache_read', data.usage.cache_read_input_tokens);
+      }
+      if (data.usage.cache_creation_input_tokens !== undefined) {
+        span.setAttribute('tokens.cache_creation', data.usage.cache_creation_input_tokens);
+      }
+    }
+    if (data.finishReason) {
+      span.setAttribute('gen_ai.response.finish_reason', data.finishReason);
+    }
+    if (data.contentPreview !== undefined && getTracingConfig()?.recordContent) {
+      const truncated =
+        data.contentPreview.length > 8192
+          ? `${data.contentPreview.slice(0, 8192)}\u2026`
+          : data.contentPreview;
+      span.setAttribute('gen_ai.response.content', truncated);
+    }
+    span.setStatus({ code: SpanStatusCode.OK });
+  } finally {
+    span.end();
+  }
+}
+
+/**
+ * Record an exception on the span and end it. Safe with `span === undefined`.
+ * Never rethrows -- the caller is expected to propagate the underlying error.
+ */
+export function failProviderSpan(span: Span | undefined, error: unknown): void {
+  if (!span) {
+    return;
+  }
+  try {
+    if (error instanceof Error) {
+      span.recordException(error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: typeof error === 'string' ? error : 'unknown error',
+      });
+    }
+  } finally {
+    span.end();
+  }
+}
+
+// ============================================================================
 // OAuth token refresh wrapper (issue #1299)
 // ============================================================================
 
@@ -1408,29 +1560,46 @@ export class SapOrchestrationProvider {
           }
         : undefined;
 
+    const span = startProviderSpan('chat', {
+      model: this.config.modelName,
+      sessionId: options?.sessionId,
+      messageCount: orchestrationMessages.length,
+    });
+
     let response;
     try {
       response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
     } catch (err) {
-      throw classifyRateLimitError(err, this.config.modelName);
+      const classified = classifyRateLimitError(err, this.config.modelName);
+      failProviderSpan(span, classified);
+      throw classified;
     }
 
     const tokenUsage = response.getTokenUsage();
     const toolCalls = response.getToolCalls();
     const allMessages = response.getAllMessages();
+    const content = response.getContent() ?? '';
+    const finishReason = response.getFinishReason() ?? undefined;
+    const usage: TokenUsage | undefined = tokenUsage
+      ? {
+          prompt_tokens: tokenUsage.prompt_tokens,
+          completion_tokens: tokenUsage.completion_tokens,
+          total_tokens: tokenUsage.total_tokens,
+          ...extractCacheTokens(tokenUsage),
+        }
+      : undefined;
+
+    finishProviderSpan(span, {
+      usage,
+      finishReason,
+      contentPreview: content,
+    });
 
     return {
-      text: response.getContent() ?? '',
+      text: content,
       toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
-      finishReason: response.getFinishReason() ?? undefined,
-      usage: tokenUsage
-        ? {
-            prompt_tokens: tokenUsage.prompt_tokens,
-            completion_tokens: tokenUsage.completion_tokens,
-            total_tokens: tokenUsage.total_tokens,
-            ...extractCacheTokens(tokenUsage),
-          }
-        : undefined,
+      finishReason,
+      usage,
       allMessages: allMessages,
     };
   }
@@ -1495,6 +1664,11 @@ export class SapOrchestrationProvider {
     // See "Streaming Abort Semantics" in docs/PROVIDERS.md and the test
     // suite tests/providers/sapOrchestration-streamAbort.test.ts.
     const requestConfig = options?.headers ? { headers: options.headers } : undefined;
+    const span = startProviderSpan('stream', {
+      model: this.config.modelName,
+      sessionId: options?.sessionId,
+      messageCount: orchestrationMessages.length,
+    });
     let response;
     try {
       response = await client.stream(
@@ -1504,9 +1678,12 @@ export class SapOrchestrationProvider {
         requestConfig
       );
     } catch (err) {
-      throw classifyRateLimitError(err, this.config.modelName);
+      const classified = classifyRateLimitError(err, this.config.modelName);
+      failProviderSpan(span, classified);
+      throw classified;
     }
 
+    let aggregatedText = '';
     // Stream chunks using the iterator. Errors surfaced mid-stream are
     // also candidates for free-tier rate-limit classification — some
     // deployments accept the initial request and only surface a 429 on
@@ -1530,6 +1707,9 @@ export class SapOrchestrationProvider {
         const hasImages = images.length > 0;
 
         if (hasText || hasToolCalls || hasImages) {
+          if (hasText && span) {
+            aggregatedText += deltaContent as string;
+          }
           const streamChunk: StreamChunk = {
             text: hasText ? (deltaContent as string) : '',
           };
@@ -1556,25 +1736,34 @@ export class SapOrchestrationProvider {
         }
       }
     } catch (err) {
-      throw classifyRateLimitError(err, this.config.modelName);
+      const classified = classifyRateLimitError(err, this.config.modelName);
+      failProviderSpan(span, classified);
+      throw classified;
     }
 
     // After streaming completes, get final metadata
     const finishReason = response.getFinishReason();
     const tokenUsage = response.getTokenUsage();
+    const usage: TokenUsage | undefined = tokenUsage
+      ? {
+          prompt_tokens: tokenUsage.prompt_tokens,
+          completion_tokens: tokenUsage.completion_tokens,
+          total_tokens: tokenUsage.total_tokens,
+          ...extractCacheTokens(tokenUsage),
+        }
+      : undefined;
+
+    finishProviderSpan(span, {
+      usage,
+      finishReason: finishReason ?? undefined,
+      contentPreview: aggregatedText.length > 0 ? aggregatedText : undefined,
+    });
 
     // Yield final chunk with metadata
     yield {
       text: '',
       finishReason: finishReason ?? undefined,
-      usage: tokenUsage
-        ? {
-            prompt_tokens: tokenUsage.prompt_tokens,
-            completion_tokens: tokenUsage.completion_tokens,
-            total_tokens: tokenUsage.total_tokens,
-            ...extractCacheTokens(tokenUsage),
-          }
-        : undefined,
+      usage,
     };
   }
 

@@ -2551,6 +2551,61 @@ When adding a new telemetry / instrumentation integration (OpenTelemetry, Sentry
 
 Never assert on `obj.constructor.name` in production code paths — this test exists precisely to prevent that pattern from being reintroduced.
 
+## Testing the OTLP Tracing Relay
+
+The privacy-preserving OTLP tracing relay lives in `src/utils/tracing.ts` and its provider integration in `src/providers/sapOrchestration.ts`. Because the concrete OpenTelemetry SDK is dynamic-imported inside `initTracing()` and would need a live OTLP collector to end-to-end validate, the test strategy is to drive the pure config / sampling / helper surface directly and to assert on the observable helper behaviour without registering a real TracerProvider.
+
+### Test files
+
+- `tests/utils/tracing.test.ts` (294 lines) — exercises `resolveTracingConfig`, `isTelemetryOptOut`, `fnv1a`, `shouldSampleSession`, `initTracing`, `shutdownTracing`, `getTracer`, and `getTracingConfig`.
+- `tests/providers/sapOrchestration-tracing.test.ts` (122 lines) — exercises the provider-side helpers `startProviderSpan`, `finishProviderSpan`, `failProviderSpan`.
+
+### Environment isolation
+
+Both suites treat the runner's real environment as hostile:
+
+```typescript
+const ENV_KEYS = [
+  'ALEXI_OTEL_TRACES_EXPORTER',
+  'ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT',
+  'ALEXI_OTEL_SERVICE_NAME',
+  'ALEXI_TRACE_SAMPLE_PERCENT',
+  'ALEXI_TRACE_RECORD_CONTENT',
+];
+
+beforeEach(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-tracing-test-'));
+  savedEnv.HOME = process.env.HOME;
+  process.env.HOME = tmpHome;
+  for (const key of ENV_KEYS) {
+    savedEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+  _resetTracingForTests();
+});
+```
+
+`_resetTracingForTests()` is exported ONLY for this purpose — it clears the module-level `registeredConfig` / `_registeredProvider` / `providerShutdown` cache so consecutive tests do not observe each other's `initTracing()` calls. Pointing `HOME` at a fresh temp dir keeps `~/.alexi/config.json` reads deterministic.
+
+### Contract asserted by the suite
+
+1. **Disabled by default.** With no env vars, `resolveTracingConfig()` returns `{ enabled: false, disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER not set' }`.
+2. **Invalid protocol is a config error, not a silent default.** `ALEXI_OTEL_TRACES_EXPORTER=zipkin` returns `{ enabled: false, disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid' }`.
+3. **Opt-out is fail-closed.** Writing `{ "telemetryOptOut": true }` to the temp `~/.alexi/config.json` disables the relay even when a valid exporter is set. A `loadFullConfig` mock that throws also disables it — the `catch` block MUST NOT propagate.
+4. **Endpoint defaulting per protocol.** `grpc` → `http://localhost:4317`; `http/json` and `http/protobuf` → `http://localhost:4318`. Setting `ALEXI_OTEL_EXPORTER_OTLP_ENDPOINT` overrides both.
+5. **FNV-1a is deterministic.** `fnv1a('abc')` returns the same 32-bit unsigned value across calls; the suite pins the numeric value so a refactor of the hash silently changing buckets is caught.
+6. **Sampling boundaries.** `shouldSampleSession(id, 0) === false`, `shouldSampleSession(id, 100) === true`, values in-between are deterministic in `sessionId` (same id → same bucket).
+7. **`initTracing()` is idempotent.** Calling it twice returns the cached config and does not attempt a second SDK registration.
+8. **`shutdownTracing()` never throws** even when tracing was never enabled (safety net for shutdown handlers).
+9. **`getTracer()` is safe when disabled** — falls back to the OTel API's no-op tracer so `startSpan()` on the returned tracer is a silent no-op.
+10. **Provider helpers are `undefined`-safe.** `startProviderSpan` returns `undefined` when disabled AND when the session is not sampled at 0%; `finishProviderSpan(undefined, ...)` and `failProviderSpan(undefined, ...)` are no-ops that do not throw.
+
+### Key patterns to reuse
+
+- **Never require a live OTLP collector.** Drive the exported helpers directly and assert on the branches (`undefined` return vs `Span` return). The concrete SDK is transitively tested via `initTracing` returning a sensible cached config.
+- **Mock `getConfigValue` and `loadFullConfig` on `../../src/config/userConfig.js` per test.** This avoids depending on the runner's `~/.alexi/config.json` or on file-system race conditions.
+- **Fail-closed cases are as important as fail-open ones.** Explicitly write a case where the config layer throws and assert the relay disables itself — otherwise a future refactor could silently start assuming opt-in on parse errors.
+
 ## Testing Hooks
 
 ### Hook Test Files

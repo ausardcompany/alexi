@@ -12,6 +12,7 @@ import { ProviderModelFellBack } from '../bus/index.js';
 import { registerAllCommands } from './commands/index.js';
 import { killAllTracked } from '../tool/tools/background-process.js';
 import { installAbortGuard } from './utils/abortGuard.js';
+import { initTracing, shutdownTracing } from '../utils/tracing.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
@@ -30,12 +31,22 @@ installAbortGuard();
 // REPL removes these listeners on start-up and installs its own two-stage
 // (abort-then-exit) handler.
 const oneShotShutdown = () => {
-  killAllTracked()
-    .catch(() => undefined)
-    .finally(() => process.exit(0));
+  Promise.allSettled([killAllTracked(), shutdownTracing()]).finally(() => process.exit(0));
 };
 process.on('SIGINT', oneShotShutdown);
 process.on('SIGTERM', oneShotShutdown);
+// Best-effort flush of pending OTLP spans before natural process exit. Node's
+// `beforeExit` fires when the event loop is empty; a still-running TracerProvider
+// would keep it non-empty, so this handler is only a safety net for the case
+// where tracing was initialised but the provider has already gone idle.
+process.on('beforeExit', () => {
+  void shutdownTracing();
+});
+
+// Kick off tracing initialisation eagerly so the first provider call already
+// sees the registered TracerProvider. `initTracing` is idempotent and a no-op
+// when tracing is disabled by env/config.
+void initTracing();
 
 // Default fallback subscriber for non-TUI runs (CLI one-shots, scripts, tests).
 // The TUI subscribes its own handler in StatusBar.tsx and always renders,
