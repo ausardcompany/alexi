@@ -46,7 +46,7 @@ import { openPlanTool } from './open-plan.js';
 // Ports kilocode `packages/opencode/src/kilocode/tool/registry.ts` (+36):
 // shared agent board tools are gated behind `experimental.sharedAgentBoard`.
 import { boardReadTool, boardWriteTool } from './board.js';
-import { getConfigSharedAgentBoard } from '../../config/userConfig.js';
+import { isBoardEnabled } from '../../config/userConfig.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -116,13 +116,17 @@ export const builtInTools = [
  * tools so the model never sees them unless the operator has opted in.
  * The flag is read fresh on each call so a config change picks up on
  * the next process restart (Alexi does not hot-reload tools mid-turn).
+ *
+ * Ports kilocode #14013: the enable path also accepts the environment
+ * flags `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1` or the umbrella
+ * `KILO_EXPERIMENTAL=1`, via `isBoardEnabled()` in `userConfig.ts`.
  */
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {
     // Cast needed because tools have different parameter schemas
     registerTool(tool as Tool<any, any>);
   }
-  if (getConfigSharedAgentBoard()) {
+  if (isBoardEnabled()) {
     registerTool(boardReadTool as Tool<any, any>);
     registerTool(boardWriteTool as Tool<any, any>);
   }

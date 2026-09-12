@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Alexi-native env-flag enable path for the shared agent board** (`src/config/userConfig.ts`, `src/tool/tools/index.ts`, `src/tool/tools/task.ts`, `tests/tool/tools/board.test.ts`, issue #1698): Adds Alexi's own `KILO_*` env-flag enable path for `experimental.sharedAgentBoard`, complementing the upstream `KILOCODE_EXPERIMENTAL_SWARM_BOARD` port that landed in `1.22.17` (see below). New exported helper `isBoardEnabled()` in `src/config/userConfig.ts:628` returns `true` when ANY of the following holds:
+  1. `experimental.sharedAgentBoard: true` is set in `~/.alexi/config.json` (the existing persistent opt-in via `getConfigSharedAgentBoard()`).
+  2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — the feature-specific env flag, matching the `KILO_FLAGS` / `KILO_RETRIES` naming convention already in use in agent workflows.
+  3. `process.env.KILO_EXPERIMENTAL === '1'` — the umbrella experimental flag that enables every experimental feature at once.
+
+  The rule is a boolean OR: an explicit config `false` does NOT override a set env flag. This lets operators flip the board on temporarily (CI runs, Docker containers, ad-hoc testing) without editing the persistent config file, while a permanent opt-in via config continues to work when no env vars are set. Env values are compared literally to the string `'1'` — any other value (`'0'`, `'true'`, empty, unset) is treated as unset so `KILO_EXPERIMENTAL=0` is never misread as an opt-in.
+
+  Two registration sites migrated from the direct `getConfigSharedAgentBoard()` read to the new resolver:
+  - `registerBuiltInTools()` in `src/tool/tools/index.ts:129` — the `kilo_board_read` / `kilo_board_write` tools are only exported to the model when `isBoardEnabled()` returns `true`. Reads the resolver fresh on each call so a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn).
+  - `src/tool/tools/task.ts:476` — the swarm-identity metadata attached to `task` payloads is only populated when the board is enabled. Vanilla SAP AI Core deployments see zero behavioural change until an operator opts in via any of the three signals.
+
+  Note that this coexists with `src/kilocode/board/enabled.ts` (introduced in `1.22.17` as the direct kilocode PR #14013 port using `KILOCODE_EXPERIMENTAL_SWARM_BOARD`). The two live in separate modules, target different env-var namespaces (`KILO_*` vs `KILOCODE_*`), and are not currently unified because they serve different audiences: `isBoardEnabled()` in `userConfig.ts` is the primary gate used by tool registration and swarm-identity attach; the kilocode module preserves upstream parity for anyone porting downstream tooling that expects the upstream env-flag name.
+
+  Test coverage (`tests/tool/tools/board.test.ts`, 100 lines, 6 cases): (1) config key `true` alone enables; (2) specific env flag `'1'` alone enables even when config is `false`; (3) umbrella env flag `'1'` alone enables even when config is `false`; (4) all-off returns `false`; (5) non-`'1'` env values (`'0'`, `'true'`) do NOT enable; (6) the OR-semantics override — env flag `'1'` beats an explicit config `false`. Tests snapshot/restore both the real `~/.alexi/config.json` (via `fs.readFileSync` + `fs.writeFileSync` in `beforeEach` / `afterEach`) and the two env vars, because `isBoardEnabled()` and `getConfigSharedAgentBoard()` live in the same module and `vi.mock` cannot intercept intra-module calls.
+
 ## [1.22.18] - 2026-09-12
 
 ### Added
@@ -123,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `isUnsafeWorkspaceRoot(workdir: string, home?: string): boolean` — inverse of `allowed()` from `src/core/kilocode/fff.ts`, exposed on the filesystem utility surface so tool call sites can read as `if (isUnsafeWorkspaceRoot(ctx.workdir)) return refuse(...)` without importing the deeper kilocode module directly. The optional `home` argument mirrors `allowed()`'s override — tests use it (or the `ALEXI_TEST_HOME` env var) to pin the home anchor without mutating `process.env.HOME` for the whole process.
   - `UNSAFE_WORKSPACE_ROOT_MESSAGE` — canonical user-facing error string (`'Indexing the home directory or filesystem root is disabled to prevent OOM. Please cd into a project directory.'`) so callers surface identical copy and downstream tests can assert on it without duplication.
 
-   Test coverage: `tests/utils/filesystem.test.ts` (7 cases) pins the guard predicate — home rejection, POSIX filesystem-root rejection, allowing normal project directories, allowing subdirectories of home, respecting the explicit `home` argument override, and asserting the canonical error message contains `home directory`, `filesystem root`, `OOM`, and `cd into a project directory`. `tests/tool/tools/glob.test.ts` and `tests/tool/tools/codesearch.guard.test.ts` extend the standard tool-test pattern (temp workdir via `fs.mkdtemp`, teardown in `afterEach`) with an `ALEXI_TEST_HOME`-based fake-home fixture so the guard can be exercised without mutating the real `$HOME`. Windows-specific POSIX root cases skip on `process.platform === 'win32'`.
+    Test coverage: `tests/utils/filesystem.test.ts` (7 cases) pins the guard predicate — home rejection, POSIX filesystem-root rejection, allowing normal project directories, allowing subdirectories of home, respecting the explicit `home` argument override, and asserting the canonical error message contains `home directory`, `filesystem root`, `OOM`, and `cd into a project directory`. `tests/tool/tools/glob.test.ts` and `tests/tool/tools/codesearch.guard.test.ts` extend the standard tool-test pattern (temp workdir via `fs.mkdtemp`, teardown in `afterEach`) with an `ALEXI_TEST_HOME`-based fake-home fixture so the guard can be exercised without mutating the real `$HOME`. Windows-specific POSIX root cases skip on `process.platform === 'win32'`.
 
 ## [1.22.16] - 2026-09-08
 
