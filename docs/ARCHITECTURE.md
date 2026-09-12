@@ -2930,6 +2930,42 @@ The orchestrator LLM invokes this whenever a sub-agent's `status` shows a pendin
 
 The schema now includes an optional `sourceSessionId: z.string().nullable().optional()` field. When set, the sub-agent's reply is routed back to that originating session so multi-agent swarms preserve conversation locality instead of dumping every reply into the caller; when omitted, the field falls back to `_context.sessionId`, preserving the previous single-session behaviour. The resolved source id is echoed in the tool result message so callers can confirm the routing target without inspecting logs.
 
+## Auxiliary-Task Model Selection (`src/providers/model-selection.ts`)
+
+Distinct from the tool-scoped [Per-Task Model Selection](#per-task-model-selection-srctoolmodel-selectionts) below, the **auxiliary-task** selector chooses the model used by background pipelines that must run alongside a chat turn without consuming the primary model's budget — title generation, session summarisation, context compaction, and commit-message generation. Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3).
+
+The module lives at `src/providers/model-selection.ts` (215 lines) and is re-exported from `src/providers/index.ts`. Public surface is documented in [docs/API.md](API.md#auxiliary-task-model-selection-srcprovidersmodel-selectionts) and the flow diagram lives in [docs/PROVIDERS.md](PROVIDERS.md#auxiliary-task-model-selection); the summary here documents where the module fits in the overall provider layer.
+
+### Load-bearing invariant
+
+Auxiliary tasks MUST NOT issue a call to an unconfigured small deployment. The naive design ("prefer `gpt-4o-mini` for title generation") fails as soon as the operator has NOT provisioned a `gpt-4o-mini` deployment in their SAP AI Core tenant — the auxiliary call returns `deployment_not_found` and the chat turn silently loses its title / summary / compaction result while the primary user response still works, producing a confusing partial failure.
+
+`selectModelForTask('auxiliary', ctx)` guards on `hasSapDeployment('small')` being explicitly true AND `smallModelDeployment` being non-empty. When either is false, it reuses the primary `defaultModel` — auxiliary calls then cost the same as primary calls, but they never fail because of an unconfigured deployment.
+
+### Where the small-model id comes from
+
+`resolveSmallModelDeployment()` combines three signals in first-non-empty-wins order:
+
+```mermaid
+flowchart LR
+    Start[resolveSmallModelDeployment] --> M{models.compaction<br/>set in ~/.alexi/config.json?}
+    M -->|yes| ReturnM[Return models.compaction]
+    M -->|no| L{context.compactionModel<br/>legacy key present?}
+    L -->|yes| WarnL[One-shot deprecation<br/>warning to stderr]
+    WarnL --> ReturnL[Return context.compactionModel]
+    L -->|no| E{AICORE_SMALL_MODEL<br/>env var set?}
+    E -->|yes| ReturnE[Return env value]
+    E -->|no| Undef[Return undefined]
+```
+
+The one-shot deprecation warning is emitted at most once per process, guarded by a module-level `_warnedLegacyCompactionModel` boolean. Tests reset the flag via the internal `_resetLegacyCompactionModelWarning()` helper.
+
+### Interaction with the primary path
+
+The auxiliary selector is completely orthogonal to `getProviderForModel` / `getProviderForModelWithFallback`. Callers on the auxiliary path resolve their model id up front with `getAuxiliaryModelId()`, then feed that string into the same provider resolver used by the primary chat path — so all provider-layer machinery (auto-CA harvesting, prompt-cache breakpoints, streaming abort, retry backoff) applies identically to auxiliary calls. The only behavioural difference is which deployment id the SAP AI Core Orchestration API is asked to hit.
+
+The Kilo branch present in `selectModelForTask` (`kilo/kilo-auto` when `hasKiloCredentials()` is truthy) is dead code in Alexi's SAP-first configuration — `buildContext()` fixes `providerID: 'sap-ai-core'` and `hasKiloCredentials` always returns `false`. It is kept for symmetry with the upstream kilocode shape so a future Kilo provider integration is a single-file change.
+
 ## Per-Task Model Selection (`src/tool/model-selection.ts`)
 
 Alexi supports opt-in per-invocation model selection for subagents spawned by the `task` tool and sessions created by the `agent_manager` tool. The feature is gated behind a config flag (`experimental.task_model_selection`, default `false`) so the SAP AI Core default routing behaviour is preserved for operators who do not opt in.

@@ -37,6 +37,14 @@ describe('Context Compaction System', () => {
   beforeEach(() => {
     // Reset global LLM function before each test
     setLLMSummarizeFn(null as unknown as LLMSummarizeFn);
+    // Ports kilocode `0f33a6673` — "Skip title generation in exact-call
+    // compaction tests". Compaction paths in some codebases implicitly
+    // trigger a title-generation LLM call which pollutes exact call-count
+    // assertions. Alexi does not currently ship a `Session.generateTitle`
+    // helper, but restoring vi.restoreAllMocks() here keeps auxiliary
+    // spies from one test from leaking into the next when the count
+    // assertions in `describe('compactConversation')` matter.
+    vi.restoreAllMocks();
   });
 
   describe('estimateTokens', () => {

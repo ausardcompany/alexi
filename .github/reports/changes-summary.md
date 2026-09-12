@@ -1,110 +1,62 @@
-# Alexi Update Plan — Execution Report
+# Update Plan Execution Summary
 
-Generated: 2026-09-11
-Source plan: kilocode a7a7690ca..4304a8691 (290 commits) + opencode d6855b6..193de13 (16 commits)
+**Executed**: 2026-09-12
+**Plan source**: kilocode `4304a8691..c36e22634` + opencode `193de13..95daf90`
 
-## Files Modified
+## Files modified
 
-### Created
+| File | Type | Change |
+| --- | --- | --- |
+| `src/providers/model-selection.ts` | new | Auxiliary-task model selector with SAP AI Core + Kilo credential gating |
+| `src/providers/__tests__/model-selection.test.ts` | new | Unit tests for `selectModelForTask`, `getModel`, `resolveSmallModelDeployment`, `buildContext` |
+| `src/providers/index.ts` | modified | Re-export new model-selection API |
+| `src/core/__tests__/compaction.test.ts` | modified | Add `vi.restoreAllMocks()` in `beforeEach` to isolate auxiliary-call spies |
+| `src/config/userConfig.ts` | modified | Add `getConfigCompactionModel` / `setConfigCompactionModel` with legacy-key shim |
+| `tests/config/userConfig.test.ts` | modified | Add tests for compaction-model config migration |
 
-- `src/core/database/migrations/20260903104806_kilocode_board_reset.ts`
-  New migration adding `cleared_seq INTEGER NOT NULL DEFAULT 0` to `kilo_board`
-  (kilocode PR #13782). Exports `BOARD_RESET_SCHEMA_STATEMENTS` so `BoardStore`
-  can apply the DDL eagerly.
-- `src/kilocode/board/enabled.ts`
-  New `isBoardEnabled(experimentalConfigFlag)` predicate that unifies the
-  env flag `KILOCODE_EXPERIMENTAL_SWARM_BOARD` with Alexi's persisted
-  `experimental.sharedAgentBoard` config (kilocode PR #14013).
-- `src/core/kilocode/pty/latch.ts`
-  New `createPtyLatch<T>()` utility that buffers `emit`s until a
-  listener attaches, then flushes in FIFO order (kilocode `203f19f5d`).
-  Dependency-free, safe for reuse in any short-lived event source.
-- `src/providers/bedrock-model-id.ts`
-  New `resolveBedrockModelID(modelID, region)` helper. Passes `arn:` IDs
-  through verbatim and only prefixes `deepseek.r1` / `deepseek-r1`
-  (not `deepseek.v3.2+`) in `us-*` regions (opencode `ac1758c`).
+## Change-by-change
 
-### Modified
+### Change #1 & #3 — auxiliary-task model gating (**high priority**)
+**Status**: ✅ Applied
+**Files**: `src/providers/model-selection.ts` (new), `src/providers/__tests__/model-selection.test.ts` (new), `src/providers/index.ts` (re-export)
 
-- `src/core/database/migration.ts`
-  Added exported `isBoardMigration(name)` classifier using the wider
-  regex `/(?:^|_)kilocode_board(?:_reset)?$/` so the reset migration is
-  recognised alongside the parent board migration.
-- `src/core/database/migration.gen.ts`
-  Registered the new `20260903104806_kilocode_board_reset` migration in
-  chronological order (before the 2026-09-07 index migration).
-- `src/core/database/boardStore.ts`
-  - Import `BOARD_RESET_SCHEMA_STATEMENTS` and apply eagerly on DB open,
-    swallowing "duplicate column name" errors from the second open onwards.
-  - `read()` now fetches the board's `cleared_seq` watermark and filters
-    out messages whose `created_at` predates it.
-  - New `reset(boardId)` method sets `cleared_seq = Date.now()` so
-    future reads exclude everything currently on the board.
-- `src/tool/tools/board.ts`
-  `kilo_board_write` gained an optional `recipient` parameter. When set,
-  the tool checks whether that recipient session has any recent
-  activity on the board; if not, it still writes the message but sets
-  `deliveryStatus: 'no-recipient'` and returns a `hint` warning
-  (kilocode `7febec58f`).
-- `src/flag/flag.ts`
-  Registered `KILOCODE_EXPERIMENTAL_SWARM_BOARD` on the shared `Flag`
-  namespace using the existing `unstableDefault()` channel resolver so
-  dev/beta/local ship with the board on by default.
+Introduced a `selectModelForTask(task, context)` helper that only chooses a small-model fallback when the active provider actually supports it (SAP AI Core deployment configured *or* Kilo credentials present). When neither is available, auxiliary calls transparently reuse the primary model — the important safety property that prevents `deployment_not_found` / auth failures on operators who did not provision a dedicated small model.
 
-## Changes Summary (in plan order)
+Also added:
+- `GetModelOptions.auxiliary` flag threaded through the new `getModel(id?, opts?)` helper (mirrors upstream `packages/opencode/src/provider/provider.ts` +14/-3).
+- `resolveSmallModelDeployment()` — reads from `models.compaction` (new location), falling back to legacy `context.compactionModel`, then to `AICORE_SMALL_MODEL` env var.
+- `buildContext()` — pins `providerID` to `sap-ai-core` and reports `hasKiloCredentials() === false` (Kilo is not a live provider in Alexi; kept for symmetry with the upstream shape).
+- `getAuxiliaryModelId()` — convenience wrapper returning the raw model id string, ready to pass to `getProviderForModelWithFallback`.
 
-| # | Priority | Title | Status | Notes |
-|---|----------|-------|--------|-------|
-| 1 | high | Remove Interactive Terminal Tool | N/A | Alexi has never shipped `InteractiveTerminalTool`; nothing to remove. |
-| 2 | critical | Board migration regex | ✅ Done | Added `isBoardMigration()` helper (Alexi has no equivalent classifier function to modify, so this ships as a new export). |
-| 3 | high | Board `cleared_seq` reset migration | ✅ Done | New migration file + `migration.gen.ts` registration. |
-| 4 | high | Board Store reset / cleared_seq filtering | ✅ Done | `read()` filter + new `reset()` method. Alexi uses `created_at` ISO timestamps rather than a numeric `seq`, so `cleared_seq` holds Unix ms and filtering happens via `Date.parse` — semantically equivalent to upstream's `seq > cleared_seq`. |
-| 5 | medium | `board_post` stopped-subagent warning | ✅ Done | Added `recipient` param + `deliveryStatus` + `hint`. Alexi has no session-status tracker, so the "stopped" heuristic is "recipient has no recent activity on the board". |
-| 6 | medium | Board enabled flag + env gate | ✅ Done | New `isBoardEnabled()` helper + `KILOCODE_EXPERIMENTAL_SWARM_BOARD` on the shared `Flag` namespace. |
-| 7 | high | PTY latch | ✅ Done | Standalone `createPtyLatch<T>()` under `src/core/kilocode/pty/latch.ts`. Alexi does not ship a native PTY driver today, so no `pty.bun.ts` was touched; the latch is available for future wiring. |
-| 8 | medium | Move-session optimisation | N/A | Alexi has no `control-plane/move-session.ts` command. |
-| 9 | high | Bedrock ARN + DeepSeek prefix | ✅ Ported as util | Alexi has no direct Bedrock provider — implemented as `src/providers/bedrock-model-id.ts` for use by any future direct Bedrock integration or SAP AI Core deployment-mapping code. |
-| 10-14 | — | (Truncated in the input plan) | Not visible | The plan text passed in was cut off mid-Change 9 (Bedrock, at "`nova-pro`, `") and items 10–14 were not present in the received input. |
+Tests cover the matrix from the plan: `{kilo-creds, no-kilo-creds, sap-with-small, sap-no-small} × {primary, auxiliary}` plus edge cases (async credential probe, defensive `hasSapDeployment` gating).
 
-## Issues Encountered
+**Callers**: no production auxiliary-task callers use `getModel()` today (Alexi's `commitMessage.ts` uses `routePrompt({preferCheap:true})`, and `compaction.ts` has `LLMSummarizeFn` as a lazy injection point that is not wired at present). The API is in place for future wiring; existing paths are untouched to avoid unrelated regressions.
 
-1. **Plan truncation.** The task prompt was cut off mid-Change 9 and items
-   10–14 (Medium × 3, Low × 2) were not visible. I applied every change
-   that was present in the received text; the summary above marks the
-   truncated tail so a follow-up run can pick it up.
-2. **Missing upstream targets in Alexi.** Several plan items reference
-   files that do not exist in this repo (`src/tool/interactive-terminal.ts`,
-   `src/core/control-plane/move-session.ts`, `src/providers/amazon-bedrock.ts`,
-   `src/core/pty/pty.bun.ts`). For each of those I either:
-   - marked the item N/A when there is genuinely nothing to remove /
-     optimise (Changes 1, 8), or
-   - implemented the fix as a standalone helper that any future direct
-     integration can consume (Changes 7, 9). This keeps the codebase
-     linear with upstream logic without inventing a fake port target.
-3. **Schema shape mismatch (Change 4).** Upstream's board uses a numeric
-   `seq` column; Alexi's board is keyed by `created_at` ISO timestamps.
-   I preserved the upstream column name (`cleared_seq`) but store Unix
-   milliseconds and compare via `Date.parse` at read time. A future
-   sync that also adopts the numeric `seq` column can replace the
-   comparison without another migration.
-4. **No session-status tracker (Change 5).** Alexi's `SessionManager`
-   does not currently expose a `status: 'running' | 'stopped'` field
-   for subagents. Rather than plumb one through as part of this port,
-   the tool falls back to a bounded lookback over recent board
-   activity — pessimistic (may warn when the peer is fine but silent),
-   never optimistic. Wiring in a real status source can replace
-   `recipientLooksStopped()` without touching the tool schema.
+### Change #2 — compaction test hygiene (**medium priority**)
+**Status**: ✅ Applied
+**File**: `src/core/__tests__/compaction.test.ts`
 
-## SAP AI Core Compatibility
+Added `vi.restoreAllMocks()` in the top-level `beforeEach` alongside the existing `setLLMSummarizeFn(null)` reset. Alexi doesn't ship a `Session.generateTitle` helper today (upstream's flake trigger), but restoring mocks guarantees auxiliary spies from one test cannot leak into another test's exact-call-count assertions. Comment cites upstream `0f33a6673`.
 
-- No changes to `src/providers/sapOrchestration.ts` or the auth /
-  connectivity surface. The new Bedrock model-id helper is not wired
-  into any hot path — it is a standalone export.
-- Board changes are gated behind `experimental.sharedAgentBoard` (existing)
-  and `KILOCODE_EXPERIMENTAL_SWARM_BOARD` (new env flag). Stable channel
-  users see no behavioural change unless they opt in.
-- The PTY latch is a pure utility; nothing imports it yet.
-- The new migration is idempotent on the eager path
-  (`BoardStore.ensureSchema`) — duplicate-column errors on second open
-  are swallowed, so multiple parallel Alexi processes cannot brick each
-  other on schema apply.
+### Change #4 — compaction model config location (**medium priority**)
+**Status**: ✅ Applied
+**Files**: `src/config/userConfig.ts`, `tests/config/userConfig.test.ts`
+
+Added:
+- `getConfigCompactionModel()` — prefers `models.compaction`, falls back to legacy `context.compactionModel` with a one-shot deprecation warning per process.
+- `setConfigCompactionModel(id)` — always writes to `models.compaction` and clears the legacy `context.compactionModel` key (one-way migration) while preserving unrelated `context.*` keys.
+- `_resetLegacyCompactionModelWarning()` — `@internal` hook so tests start from a clean warning state.
+
+Tests verify precedence order, migration behaviour, deprecation warning firing exactly-once, empty-string rejection, and the no-warn path.
+
+### Change #5 — ACP session options / reasoning boundaries (**low priority**)
+**Status**: ⏭️ Skipped (per plan authorization)
+**Reason**: Alexi does not ship ACP (`src/acp/**` does not exist — verified via `glob`). The plan explicitly designates this as "defer / not applicable" for a SAP-focused terminal codebase.
+
+## Notes / issues encountered
+
+- **Circular import**: `model-selection.ts` imports `getDefaultModel` from `./index.js`, which now re-exports from `./model-selection.js`. This is safe because `getDefaultModel` is only referenced at call time inside function bodies (not at module init), so ESM's live-binding resolves it correctly after both modules finish loading. The pattern matches other similar circular re-exports elsewhere in the file (e.g. `sapOrchestration.js`).
+- **`no-console` lint**: The legacy-config deprecation warning in `userConfig.ts` uses `console.warn` with an `eslint-disable-next-line no-console` pragma. A single-shot deprecation warning does not warrant threading the full logger through `config/*`, and this file cannot import `utils/logger.ts` without a boot cycle (logger consumers depend on config).
+- **SAP AI Core compatibility**: no changes touch the SAP client, auth, deployment lookup, or `getProviderForModel` primitive. The new `model-selection` module is purely additive — existing callers continue to hit `getDefaultModel()` unchanged.
+- **Provider `getModel` naming**: The new export is aliased to `getModelRef` in `src/providers/index.ts` to avoid shadowing any future `getModel` re-export from `sapOrchestration.js`. Consumers get an unambiguous name.
+- **No formatter/lint run performed** in this execution (per environment constraints); files were authored against the repo's Prettier + ESLint conventions (100-col, single quotes, `trailingComma: es5`, `curly: all`, `eqeqeq`). Recommend `npm run lint && npm run format:check && npm test` before merge.

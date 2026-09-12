@@ -24,6 +24,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Test coverage (`tests/tool/tools/board.test.ts`, 100 lines, 6 cases): (1) config key `true` alone enables; (2) specific env flag `'1'` alone enables even when config is `false`; (3) umbrella env flag `'1'` alone enables even when config is `false`; (4) all-off returns `false`; (5) non-`'1'` env values (`'0'`, `'true'`) do NOT enable; (6) the OR-semantics override — env flag `'1'` beats an explicit config `false`. Tests snapshot/restore both the real `~/.alexi/config.json` (via `fs.readFileSync` + `fs.writeFileSync` in `beforeEach` / `afterEach`) and the two env vars, because `isBoardEnabled()` and `getConfigSharedAgentBoard()` live in the same module and `vi.mock` cannot intercept intra-module calls.
 
+## [1.22.18] - 2026-09-12
+
+### Added
+
+- **Auxiliary-task model selection (`src/providers/model-selection.ts`, `src/providers/__tests__/model-selection.test.ts`, `src/providers/index.ts`)**: New module that decides which model to use for background / auxiliary tasks (title generation, session summarisation, context compaction, commit message generation, ...). Ports the intent of upstream kilocode `1e73d3862` (`small-model-fallback-requires-kilo-credentials`) and the accompanying opencode `provider.ts` change (`+14/-3`) to Alexi's SAP AI Core world.
+
+  The load-bearing safety property: auxiliary tasks MUST NOT fall back to a cheaper "small" model when the operator has not actually provisioned one — otherwise the compaction / title / summary paths fail with `deployment_not_found` / auth errors as soon as they fire. Historically, callers hard-coded `gpt-4o-mini` or a similar shortcut id; the new module makes the fallback conditional on `hasSapDeployment('small')` returning true, and reuses the primary `defaultModel` as the safe fallback otherwise.
+
+  Public surface (all exported from `src/providers/index.ts`):
+
+  - `type TaskKind = 'primary' | 'auxiliary'` — used to select the target model.
+  - `interface ProviderContext { providerID; defaultModel; smallModelDeployment?; hasKiloCredentials; hasSapDeployment; }` — decision inputs. Kept as a plain object (not a class) so tests can construct one directly without provider I/O.
+  - `interface ModelRef { providerID: 'sap-ai-core' | 'kilo'; modelID: string; }` — resolved model reference.
+  - `interface GetModelOptions { auxiliary?: boolean }` — additive options; a bare `getModel()` still returns the primary model.
+  - `resolveSmallModelDeployment(): string | undefined` — reads the configured small-model deployment id. Resolution order (first non-empty wins): `models.compaction` (new canonical location) → `context.compactionModel` (legacy) → `AICORE_SMALL_MODEL` env var.
+  - `buildContext(): ProviderContext` — builds the default context for the running process. Fixed to `providerID: 'sap-ai-core'`; `hasKiloCredentials` always returns `false` in Alexi.
+  - `selectModelForTask(task, context): Promise<ModelRef>` — decides the model. For `primary`, returns `context.defaultModel`. For `auxiliary`, returns the small deployment iff `hasSapDeployment('small')` is true AND `smallModelDeployment` is non-empty, otherwise reuses `defaultModel`. Kilo branch is present for symmetry with upstream but always false in Alexi.
+  - `getModel(modelID?, opts?): Promise<ModelRef>` — top-level resolver. Explicit `modelID` overrides always win; when omitted with `opts.auxiliary === true`, dispatches to `selectModelForTask('auxiliary', buildContext())`.
+  - `getAuxiliaryModelId(): Promise<string>` — convenience helper returning just the model id string, suitable for direct passing to `getProviderForModel` / `getProviderForModelWithFallback`.
+
+  These are re-exported from `src/providers/index.ts` as `selectModelForTask`, `buildProviderContext`, `resolveSmallModelDeployment`, `getModelRef`, `getAuxiliaryModelId`, and the four types (`TaskKind`, `ProviderContext`, `GetModelOptions`, `ModelRef`). Import site convention: `import { getAuxiliaryModelId } from '../providers/index.js'`.
+
+  Test coverage (`src/providers/__tests__/model-selection.test.ts`, 246 lines, 13+ cases): primary path returns default; auxiliary reuses default when nothing is configured; auxiliary uses the SAP small deployment when both the id AND the `hasSapDeployment('small')` capability check are true; auxiliary falls back defensively to default when `hasSapDeployment` returns false even if the id is set (never issue a call to an unconfigured deployment); `resolveSmallModelDeployment` honours the resolution order (`models.compaction` beats `context.compactionModel` beats `AICORE_SMALL_MODEL`); `getModel` returns explicit overrides verbatim; `getAuxiliaryModelId` shape.
+
+- **`getConfigCompactionModel()` / `setConfigCompactionModel()` (`src/config/userConfig.ts`, `tests/config/userConfig.test.ts`)**: New user-config helpers to read and persist the compaction (auxiliary-task) model. Ports upstream kilocode `f64c6646d`, which moved the compaction model setting from the Context tab to the Models tab in the webview settings. In Alexi (terminal-first) the analogue is to prefer reading the value from `models.compaction` (grouped alongside `defaultModel`) over the legacy `context.compactionModel` key, improving discoverability via `alexi config` while remaining backward compatible.
+
+  Read resolution order (first non-empty wins):
+
+  1. `models.compaction` — new canonical location.
+  2. `context.compactionModel` — legacy; emits a one-shot deprecation warning per process the first time it is read (`[alexi] config: \`context.compactionModel\` is deprecated; use \`models.compaction\` instead.`).
+
+  Returns `undefined` when neither is set — the caller is expected to reuse the primary model in that case (see `selectModelForTask` above).
+
+  Write behaviour: `setConfigCompactionModel(modelId)` always writes to the new `models.compaction` location. If the legacy `context.compactionModel` key is present, it is cleared so subsequent reads never fall back to a stale value. Empty / whitespace-only ids throw `Error('compaction model id must be a non-empty string')`.
+
+  Test-only surface: `_resetLegacyCompactionModelWarning()` — resets the one-shot warning cache so tests can re-observe the deprecation message. Marked `@internal`; production code must not call it.
+
+### Changed
+
+- **`src/core/__tests__/compaction.test.ts`**: The top-level `beforeEach` now calls `vi.restoreAllMocks()` in addition to resetting the global `LLMSummarizeFn` singleton. Ports kilocode `0f33a6673` ("Skip title generation in exact-call compaction tests"). Compaction paths in some codebases implicitly trigger a title-generation LLM call which pollutes exact call-count assertions; while Alexi does not currently ship a `Session.generateTitle` helper, restoring auxiliary spies between tests keeps `describe('compactConversation')` call-count assertions stable against future auxiliary-mock leakage.
+
+### Fixed
+
+- **Version bumped to `1.22.18`** (`package.json`): patch release covering the 2026-09-12 upstream sync — auxiliary-task model selection and the paired `models.compaction` config helpers.
+
 ## [1.22.17] - 2026-09-11
 
 ### Added

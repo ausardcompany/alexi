@@ -1779,6 +1779,85 @@ it('returns SelectModelError for unknown model', () => {
 });
 ```
 
+### Testing Auxiliary-Task Model Selection
+
+Introduced 2026-09-12 (`1.22.18`). The module under test is `src/providers/model-selection.ts` — pure logic that decides which model to hand to auxiliary background pipelines (title, summary, compaction, commit message). The important behavioural invariant: **the selector must NEVER return a small-model id whose deployment has not been provisioned**, otherwise auxiliary calls fail with `deployment_not_found` at runtime.
+
+The recommended pattern is to construct a `ProviderContext` directly — the interface is a plain object, so no provider I/O is needed:
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock the underlying default-model + env + config accessors BEFORE
+// importing the module under test — vitest hoists vi.mock, but explicit
+// ordering matches the AGENTS.md > Testing quirks convention.
+vi.mock('../index.js', () => ({
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+vi.mock('../../config/env.js', () => ({
+  env: vi.fn(() => undefined),
+}));
+vi.mock('../../config/userConfig.js', () => ({
+  getConfigValue: vi.fn(() => undefined),
+}));
+vi.mock('../sapOrchestration.js', () => ({
+  isOrchestrationModel: vi.fn(() => true),
+}));
+
+import {
+  selectModelForTask,
+  type ProviderContext,
+} from '../model-selection.js';
+
+function baseContext(overrides: Partial<ProviderContext> = {}): ProviderContext {
+  return {
+    providerID: 'sap-ai-core',
+    defaultModel: 'gpt-4o',
+    smallModelDeployment: undefined,
+    hasKiloCredentials: (): boolean => false,
+    hasSapDeployment: (): boolean => false,
+    ...overrides,
+  };
+}
+
+describe('selectModelForTask', () => {
+  it('reuses default model when no small deployment is configured', async () => {
+    const ref = await selectModelForTask('auxiliary', baseContext());
+    // Critical safety property: never issue a call to an unconfigured id.
+    expect(ref).toEqual({ providerID: 'sap-ai-core', modelID: 'gpt-4o' });
+  });
+
+  it('uses the SAP small deployment when both id AND capability are true', async () => {
+    const ctx = baseContext({
+      smallModelDeployment: 'gpt-4o-mini',
+      hasSapDeployment: (tier) => tier === 'small',
+    });
+    const ref = await selectModelForTask('auxiliary', ctx);
+    expect(ref).toEqual({ providerID: 'sap-ai-core', modelID: 'gpt-4o-mini' });
+  });
+
+  it('defensively falls back when hasSapDeployment returns false', async () => {
+    // The id being set is not enough — the capability gate is authoritative.
+    const ctx = baseContext({
+      smallModelDeployment: 'gpt-4o-mini',
+      hasSapDeployment: (): boolean => false,
+    });
+    const ref = await selectModelForTask('auxiliary', ctx);
+    expect(ref.modelID).toBe('gpt-4o');
+  });
+});
+```
+
+Guidelines specific to auxiliary-model tests:
+
+1. **Mock `getDefaultModel`, `env`, and `getConfigValue` before importing** `model-selection.js`. The module reads these at construction time via `buildContext()`; late `vi.mock` calls after the import land after the hoisting boundary and no longer apply.
+2. **Test `resolveSmallModelDeployment()` at the resolution-order boundary.** The first-non-empty-wins order is `models.compaction` → `context.compactionModel` → `AICORE_SMALL_MODEL`. Pin each layer separately by making higher-priority sources return `undefined`; do NOT rely on side-effects between test cases.
+3. **`getConfigCompactionModel()` emits a one-shot per-process deprecation warning** when it falls back to the legacy `context.compactionModel` key. Tests that need to re-observe the warning MUST call `_resetLegacyCompactionModelWarning()` in `beforeEach`. The helper is `@internal`; production code must not call it.
+4. **The Kilo branch is dead code in Alexi.** Do not add tests that assert the `kilo/kilo-auto` return path — `hasKiloCredentials` always returns `false` in `buildContext()`. Keep the coverage for that branch in the unit test that constructs a `ProviderContext` with an explicit `providerID: 'kilo'` and `hasKiloCredentials: () => true`.
+5. **Never fall through to a real `getConfigCompactionModel()` call** in a test that also stubs the environment — the helper touches `~/.alexi/config.json` and will read stale operator config on developer machines. Either mock `getConfigValue` (preferred) or seed a temp home directory with `os.homedir` shimmed via `vi.spyOn(os, 'homedir').mockReturnValue(tempHome)`.
+
+See `src/providers/__tests__/model-selection.test.ts` (246 lines, 13+ cases) for the full test surface.
+
 ### Testing the Shared Agent Board
 
 Introduced 2026-09-03 (`1.22.10`). The `experimental.sharedAgentBoard` flag gates registration of `kilo_board_read` / `kilo_board_write`. Tests that exercise the board should follow three patterns:

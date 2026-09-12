@@ -547,6 +547,95 @@ Precedence contract (mirror-only; this module is not currently wired into tool r
 
 Keep both predicates sync and side-effect-free so they are safe to call from tool registration (which runs before any async subsystem is initialised).
 
+### One-way config key migration with a one-shot deprecation warning
+
+When a persisted-config key moves to a new canonical location (e.g. `context.compactionModel` → `models.compaction` in `1.22.18`, ports kilocode `f64c6646d`), the read/write helpers on `src/config/userConfig.ts` follow a fixed contract so the migration is safe against partial rollouts and stale operator configs.
+
+**Read side:** first-non-empty-wins across (new canonical key) → (legacy key). When the legacy branch fires, emit a **one-shot per-process deprecation warning** guarded by a module-level flag, then return the legacy value. This lets operators upgrade at their own pace and the noise is bounded to a single line per process regardless of how many times the helper is called.
+
+```typescript
+let _warnedLegacyCompactionModel = false;
+
+export function getConfigCompactionModel(): string | undefined {
+  const config = loadFullConfig();
+
+  // 1. New canonical location.
+  const models = config.models;
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const value = (models as Record<string, unknown>).compaction;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  // 2. Legacy location — emit ONE deprecation warning per process.
+  const context = config.context;
+  if (context && typeof context === 'object' && !Array.isArray(context)) {
+    const legacy = (context as Record<string, unknown>).compactionModel;
+    if (typeof legacy === 'string' && legacy.trim().length > 0) {
+      if (!_warnedLegacyCompactionModel) {
+        _warnedLegacyCompactionModel = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[alexi] config: `context.compactionModel` is deprecated; ' +
+            'use `models.compaction` instead.'
+        );
+      }
+      return legacy.trim();
+    }
+  }
+
+  return undefined;
+}
+```
+
+**Write side:** always write to the NEW canonical key, AND clear the legacy key from the persisted file so subsequent reads never fall back to a stale value. The write is one-way — future reads will find the value at the new location only.
+
+```typescript
+export function setConfigCompactionModel(modelId: string): void {
+  const trimmed = modelId.trim();
+  if (trimmed.length === 0) {
+    throw new Error('compaction model id must be a non-empty string');
+  }
+  const config = loadFullConfig();
+  const existingModels =
+    config.models && typeof config.models === 'object' && !Array.isArray(config.models)
+      ? (config.models as Record<string, unknown>)
+      : {};
+  config.models = { ...existingModels, compaction: trimmed };
+
+  // Clean up the legacy key so migration is one-way.
+  if (config.context && typeof config.context === 'object' && !Array.isArray(config.context)) {
+    const ctx = { ...(config.context as Record<string, unknown>) };
+    if ('compactionModel' in ctx) {
+      delete ctx.compactionModel;
+      config.context = ctx;
+    }
+  }
+
+  saveFullConfig(config);
+}
+```
+
+**Test hook.** Expose a `@internal` helper that resets the one-shot warning flag so tests can re-observe the deprecation message across cases:
+
+```typescript
+/**
+ * Test-only hook: reset the one-shot legacy-key deprecation warning cache.
+ * @internal
+ */
+export function _resetLegacyCompactionModelWarning(): void {
+  _warnedLegacyCompactionModel = false;
+}
+```
+
+Guidelines for future config migrations following this convention:
+
+1. **`console.warn` is allowed here.** `src/config/userConfig.ts` is one of the modules that intentionally violates the `no-console: warn` project-wide ESLint rule with a targeted `eslint-disable-next-line`. Do not switch to `logger.warn` — it would create an import cycle (`userConfig` is imported by `logger`'s configuration branch).
+2. **Never remove the legacy key from the read helper in the same release that adds it to the write helper.** The migration must survive at least one minor version so operators upgrading across a version gap don't lose their setting. Remove the legacy branch in a documented deprecation cut later.
+3. **Never write to both locations.** The point of the migration is that the on-disk config is canonical — a tool inspecting `~/.alexi/config.json` should see the value at the new location only.
+4. **Test both the fresh-config and the migrating-config paths.** The regression suite MUST include (a) `models.compaction` present, legacy absent → new wins; (b) legacy present, new absent → legacy wins AND emits the warning; (c) both present → new wins AND no warning; (d) neither present → returns `undefined`; (e) `setConfigCompactionModel` with legacy present → new is written AND legacy is deleted.
+
 ### JSON-tolerant tool parameter decoding
 
 Some LLM providers (Anthropic in particular) emit structured tool-call parameters as JSON-encoded strings rather than the native object shape. Tools with structural fields — `config`, `tasks`, `arguments` — should wrap those fields with a `decodeJsonIfString` preprocessor so the same tool works across providers without provider-specific pre-processing upstream. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-01, `1.22.8`, ports upstream kilocode `02df76976`).
