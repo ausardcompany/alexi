@@ -6,6 +6,7 @@ import {
 } from '../providers/index.js';
 import { formatProviderError } from '../providers/format.js';
 import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
+import { resolveInlineModelReference } from '../providers/modelCatalog.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -53,9 +54,45 @@ export async function sendChat(
   let routingReason: string | undefined;
   let routeReasoning: ReasoningConfig | undefined;
 
-  // Auto-routing enabled?
-  if (options?.autoRoute && !options?.modelOverride) {
-    const decision = routePrompt(message, { preferCheap: options.preferCheap });
+  // Inline `@provider/model` reference (issue #1708). Detected BEFORE
+  // routing and BEFORE the explicit modelOverride precedence so a user
+  // can quickly test another model for a single turn without touching
+  // session config. When a valid reference is found:
+  //   - Route this turn to the referenced model.
+  //   - Strip the `@provider/model` token from the outbound prompt so
+  //     it never leaks into the LLM input.
+  //   - Leave the session default (SessionManager) unchanged.
+  // An invalid pattern is surfaced as an info-level log and otherwise
+  // ignored (the turn proceeds with the session default).
+  let effectiveMessage = message;
+  const inline = resolveInlineModelReference(message);
+  let inlineOverride: string | undefined;
+  if (inline.kind === 'match') {
+    inlineOverride = inline.reference.modelId;
+    effectiveMessage = inline.strippedMessage;
+    logger.info(
+      `[Inline model] Using @${inline.reference.provider}/${inline.reference.model} -> ${inlineOverride} for this turn only`
+    );
+  } else if (inline.kind === 'invalid') {
+    logger.info(
+      `[Inline model] @${inline.provider}/${inline.model} not found in catalog; using session default for this turn`
+    );
+  }
+
+  // Precedence for this turn:
+  //   1. Explicit caller-supplied `modelOverride` (highest — persistent
+  //      chat/agent CLI flag).
+  //   2. Inline `@provider/model` reference in the user message
+  //      (turn-only ephemeral override).
+  //   3. Router when `autoRoute` is enabled and neither of the above
+  //      applies.
+  //   4. Session default via `getDefaultModel()`.
+  if (options?.modelOverride) {
+    modelId = options.modelOverride.trim();
+  } else if (inlineOverride) {
+    modelId = inlineOverride;
+  } else if (options?.autoRoute) {
+    const decision = routePrompt(effectiveMessage, { preferCheap: options.preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
     routeReasoning = decision.reasoning;
@@ -63,8 +100,7 @@ export async function sendChat(
       `[Router] Selected ${modelId}: ${decision.reason} (confidence: ${(decision.confidence * 100).toFixed(0)}%)`
     );
   } else {
-    // Use specified or default model
-    modelId = (options?.modelOverride ?? getDefaultModel()).trim();
+    modelId = getDefaultModel().trim();
   }
 
   // Improved orchestration logic with better error handling and processing
@@ -95,8 +131,9 @@ export async function sendChat(
     }
   }
 
-  // Add current user message
-  messages.push({ role: 'user', content: message });
+  // Add current user message (with any `@provider/model` inline
+  // reference stripped so the token does not leak into the prompt).
+  messages.push({ role: 'user', content: effectiveMessage });
 
   // Get SAP Orchestration provider for this model, automatically falling back
   // to the configured fallback model if the primary id is not recognized.
@@ -122,7 +159,7 @@ export async function sendChat(
     let imageResult: ImageGenerationResult;
     try {
       imageResult = await provider.generateImage({
-        prompt: message,
+        prompt: effectiveMessage,
         signal: options?.signal,
       });
     } catch (err) {
@@ -139,7 +176,7 @@ export async function sendChat(
     recordRouteOutcome(modelId, { kind: 'success' });
 
     if (options?.sessionManager) {
-      options.sessionManager.addMessage('user', message, {
+      options.sessionManager.addMessage('user', effectiveMessage, {
         input: imageResult.usage?.prompt_tokens,
       });
       // Persist a compact summary so the session log records what was
@@ -276,7 +313,7 @@ export async function sendChat(
 
   // Save messages to session if session manager provided
   if (options?.sessionManager) {
-    options.sessionManager.addMessage('user', message, {
+    options.sessionManager.addMessage('user', effectiveMessage, {
       input: usage?.prompt_tokens,
     });
     options.sessionManager.addMessage('assistant', responseText, {

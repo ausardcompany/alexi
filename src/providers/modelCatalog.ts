@@ -316,6 +316,121 @@ export function isModelLive(modelId: string): boolean {
 }
 
 /**
+ * Result of an inline `@provider/model` reference extracted from a user
+ * message. Populated only when the reference resolves to a valid model
+ * id in the (static + live) catalog.
+ */
+export interface InlineModelReference {
+  /**
+   * The catalog model id the reference resolved to (e.g.
+   * `anthropic--claude-4.7-opus` for `@anthropic/claude-4.7-opus`).
+   */
+  modelId: string;
+  /**
+   * The raw provider fragment matched by the regex (e.g. `anthropic`).
+   * Preserved so callers can surface diagnostics.
+   */
+  provider: string;
+  /**
+   * The raw model fragment matched by the regex (e.g. `claude-4.7-opus`).
+   */
+  model: string;
+  /** The exact substring that matched the `@provider/model` token. */
+  match: string;
+}
+
+/**
+ * Outcome of {@link resolveInlineModelReference}. When the message
+ * contains no `@provider/model` pattern, `kind` is `'none'`. When a
+ * pattern is found and resolves to a catalog model, `kind` is `'match'`.
+ * When the pattern is well-formed but the model is unknown, `kind` is
+ * `'invalid'` so the caller can surface a helpful diagnostic without
+ * blocking the turn.
+ */
+export type InlineModelResolution =
+  | { kind: 'none' }
+  | {
+      kind: 'match';
+      reference: InlineModelReference;
+      /** Original message with the `@provider/model` token stripped. */
+      strippedMessage: string;
+    }
+  | {
+      kind: 'invalid';
+      provider: string;
+      model: string;
+      match: string;
+    };
+
+/**
+ * Regex matching a `@provider/model` inline reference in a user message.
+ * The provider fragment allows lowercase letters, digits, and hyphens;
+ * the model fragment additionally allows dots and slashes so ids like
+ * `claude-4.7-opus` or `deepseek-r1/beta` are accepted verbatim.
+ *
+ * Anchored to a leading `@` and a word boundary on the left so mid-word
+ * matches like `email@anthropic/x` are ignored.
+ */
+const INLINE_MODEL_PATTERN = /(?:^|\s)@([a-z0-9-]+)\/([a-z0-9-./]+)/i;
+
+/**
+ * Extract a valid `@provider/model` inline reference from a user message.
+ *
+ * Resolution order:
+ *   1. Assembly: `${provider}--${model}` (SAP AI Core naming: e.g.
+ *      `@anthropic/claude-4.7-opus` -> `anthropic--claude-4.7-opus`).
+ *   2. Bare model id fallback: some providers use a flat id
+ *      (`gpt-4o`, `gemini-2.5-flash`). Users may write
+ *      `@openai/gpt-4o` and expect it to route to the bare `gpt-4o`
+ *      entry.
+ *
+ * When neither resolution matches a catalog entry the pattern is
+ * reported as `invalid` so the orchestrator can surface a hint like
+ * `Model @nonexistent/model not found in catalog`.
+ *
+ * The reference token is stripped from the returned message so it
+ * never leaks into the LLM prompt. Leading/trailing whitespace left
+ * by the strip is collapsed. This override applies to the current
+ * turn only -- callers must NOT persist it to session config.
+ */
+export function resolveInlineModelReference(message: string): InlineModelResolution {
+  if (!message || typeof message !== 'string') {
+    return { kind: 'none' };
+  }
+  const match = INLINE_MODEL_PATTERN.exec(message);
+  if (!match) {
+    return { kind: 'none' };
+  }
+  const [rawMatch, provider, model] = match;
+  const token = rawMatch.trimStart();
+  const assembled = `${provider}--${model}`.toLowerCase();
+  const modelOnly = model.toLowerCase();
+
+  const candidates = [assembled, modelOnly];
+  for (const candidate of candidates) {
+    if (isAvailableModel(candidate)) {
+      const strippedMessage = message.replace(rawMatch, ' ').replace(/\s+/g, ' ').trim();
+      return {
+        kind: 'match',
+        reference: {
+          modelId: candidate,
+          provider,
+          model,
+          match: token,
+        },
+        strippedMessage,
+      };
+    }
+  }
+  return {
+    kind: 'invalid',
+    provider,
+    model,
+    match: token,
+  };
+}
+
+/**
  * Invalidate the cache immediately. Triggers a fresh fetch on the next
  * `refreshModelCatalog()` call. Useful for testing and after config changes.
  */

@@ -10,6 +10,7 @@ import {
 } from '../providers/index.js';
 import { formatProviderError, classifyProviderError } from '../providers/format.js';
 import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
+import { resolveInlineModelReference } from '../providers/modelCatalog.js';
 import { NothingToCompactError } from './compaction.js';
 import { logger } from '../utils/logger.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
@@ -148,19 +149,56 @@ export function streamChat(
   const isMultimodal = Array.isArray(message);
   const messageText = isMultimodal ? '[multimodal message]' : message;
 
+  // Inline `@provider/model` reference (issue #1708). Only inspected for
+  // plain-text messages; multimodal payloads keep session/router
+  // defaults (users testing a different model mid-conversation can send
+  // a text turn instead).
+  //
+  // Precedence for this turn:
+  //   1. Explicit caller-supplied `modelOverride`.
+  //   2. Inline `@provider/model` reference in the user message.
+  //   3. Router when `autoRoute` is enabled.
+  //   4. Session default via `getDefaultModel()`.
+  //
+  // The `@provider/model` token is stripped from the outbound content
+  // so it never leaks into the LLM prompt. The session default is left
+  // unchanged -- the override is ephemeral, this turn only.
+  let inlineOverride: string | undefined;
+  let effectiveMessage: string | unknown[] = message;
+  let effectiveMessageText = messageText;
+  if (!isMultimodal && typeof message === 'string') {
+    const inline = resolveInlineModelReference(message);
+    if (inline.kind === 'match') {
+      inlineOverride = inline.reference.modelId;
+      effectiveMessage = inline.strippedMessage;
+      effectiveMessageText = inline.strippedMessage;
+      logger.info(
+        `[Inline model] Using @${inline.reference.provider}/${inline.reference.model} -> ${inlineOverride} for this turn only`
+      );
+    } else if (inline.kind === 'invalid') {
+      logger.info(
+        `[Inline model] @${inline.provider}/${inline.model} not found in catalog; using session default for this turn`
+      );
+    }
+  }
+
   // Mutable state shared across the setup phase and the streaming phase.
   // `modelId` may be reassigned by the fallback resolver or the router.
   let modelId: string;
   let routingReason: string | undefined;
   let routeReasoning: ReasoningConfig | undefined;
 
-  if (options?.autoRoute && !options?.modelOverride) {
-    const decision = routePrompt(messageText, { preferCheap });
+  if (options?.modelOverride) {
+    modelId = options.modelOverride.trim();
+  } else if (inlineOverride) {
+    modelId = inlineOverride;
+  } else if (options?.autoRoute) {
+    const decision = routePrompt(effectiveMessageText, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
     routeReasoning = decision.reasoning;
   } else {
-    modelId = (options?.modelOverride ?? getDefaultModel()).trim();
+    modelId = getDefaultModel().trim();
   }
 
   let fullText = '';
@@ -175,7 +213,7 @@ export function streamChat(
   // Cache the terminal result so repeat `next()` calls after `done: true`
   // return the same value without re-persisting the session/cost record.
   let cachedResult: StreamingResult | null = null;
-  let outboundTextForSession = messageText;
+  let outboundTextForSession = effectiveMessageText;
   // Context-overflow recovery is one-shot per streamChat() invocation.
   // Once we have compacted-and-retried, a second overflow is a terminal
   // state — the model still cannot fit the compacted transcript, so
@@ -227,12 +265,14 @@ export function streamChat(
     // If a `switchTo(...)` happened since the last outbound user turn,
     // stamp an `<agent_switch from="X" to="Y"/>` marker on this user
     // message so the destination agent's model can see the handover.
-    let outboundContent: string | unknown[] = message;
+    // Use the inline-stripped `effectiveMessage` so `@provider/model`
+    // tokens never leak into the outbound prompt or session history.
+    let outboundContent: string | unknown[] = effectiveMessage;
     try {
       const { getAgentRegistry } = await import('../agent/index.js');
       const marker = getAgentRegistry().consumePendingSwitchMarker();
-      if (marker && !isMultimodal && typeof message === 'string') {
-        const prefixed = `<agent_switch from="${marker.from}" to="${marker.to}"/>\n\n${message}`;
+      if (marker && !isMultimodal && typeof effectiveMessage === 'string') {
+        const prefixed = `<agent_switch from="${marker.from}" to="${marker.to}"/>\n\n${effectiveMessage}`;
         outboundContent = prefixed;
         outboundTextForSession = prefixed;
       }

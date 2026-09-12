@@ -113,6 +113,73 @@ describe('Orchestrator', () => {
         consoleSpy.mockRestore();
       });
 
+      it('should route a turn to an inline @provider/model reference', async () => {
+        const mockProvider = createMockProvider({
+          text: 'opus response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        const result = await sendChat('@anthropic/claude-4.7-opus explain bubble sort');
+
+        // Turn is routed to the referenced model, NOT the session default.
+        expect(result.modelUsed).toBe('anthropic--claude-4.7-opus');
+        expect(getProviderForModel).toHaveBeenCalledWith('anthropic--claude-4.7-opus');
+        // Prompt sent to the provider has the `@provider/model` token
+        // stripped so it does not leak into the LLM input.
+        const callArgs = mockProvider.complete.mock.calls[0][0];
+        expect(callArgs).toEqual([{ role: 'user', content: 'explain bubble sort' }]);
+      });
+
+      it('leaves session default unchanged after an inline turn', async () => {
+        const mockProvider = createMockProvider({
+          text: 'response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        // Session default is `gpt-4o` (from `beforeEach`).
+        // Turn 1: inline override to opus.
+        await sendChat('@anthropic/claude-4.7-opus turn one');
+        // Turn 2: no inline reference. Should fall back to default.
+        await sendChat('turn two');
+
+        expect(getProviderForModel).toHaveBeenNthCalledWith(1, 'anthropic--claude-4.7-opus');
+        expect(getProviderForModel).toHaveBeenNthCalledWith(2, 'gpt-4o');
+      });
+
+      it('ignores an invalid inline @provider/model reference gracefully', async () => {
+        const mockProvider = createMockProvider({
+          text: 'default response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        const result = await sendChat('@nonexistent/model-x hello');
+
+        // Falls back to the session default.
+        expect(result.modelUsed).toBe('gpt-4o');
+        // Invalid token is NOT stripped (only valid ones are), so the
+        // model still sees the original text — this matches the
+        // "graceful ignore" contract in the issue.
+        const callArgs = mockProvider.complete.mock.calls[0][0];
+        expect(callArgs).toEqual([{ role: 'user', content: '@nonexistent/model-x hello' }]);
+      });
+
+      it('explicit modelOverride wins over inline reference', async () => {
+        const mockProvider = createMockProvider({
+          text: 'response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+
+        await sendChat('@anthropic/claude-4.7-opus hi', {
+          modelOverride: 'gpt-4o',
+        });
+
+        expect(getProviderForModel).toHaveBeenCalledWith('gpt-4o');
+      });
+
       it('should ignore auto-routing when modelOverride is provided', async () => {
         const mockProvider = createMockProvider({
           text: 'Response',
