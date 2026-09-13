@@ -787,6 +787,36 @@ Follow the same shape when adding new transforms: keep the module pure,
 export both the callable and its input types, and avoid globals so parallel
 tests do not need setup/teardown.
 
+A more recent example (issue #1716, 2026-09-13) is
+`src/core/inlineModelOverride.ts`. It exports two symbols:
+
+- `INLINE_MODEL_PATTERN: RegExp` — the parser regex, exported so tooling
+  can detect mentions without triggering the catalog lookup.
+- `extractInlineModelOverride(message: string): string | undefined` — a
+  first-match-wins parser that additionally validates the candidate via
+  `isAvailableModel(candidateModel)` before returning it. Never throws.
+
+Its callers — `sendChat` (`src/core/orchestrator.ts`) and `streamChat`
+(`src/core/streamingOrchestrator.ts`) — do NOT reach into
+`isAvailableModel` themselves. All catalog-validation logic stays in one
+place so a future change to the validation contract (e.g. supporting
+alias resolution) has exactly one edit site. When adding similar
+"parse-and-validate" helpers, keep the shape:
+
+1. **One exported callable + optional regex constant.** Callers should
+   never re-implement the pattern.
+2. **The helper owns validation.** Do not return an unvalidated
+   candidate and expect the caller to check it — that duplicates the
+   guard across every call site.
+3. **Never throws.** Return `undefined` on any invalid or unknown input
+   so the caller's fallback path is a single `??` operator, not a
+   `try/catch`.
+4. **Log operator-visibility warnings inline.** Unknown candidates
+   should emit a `logger.warn` with the exact reason (`Model "<id>" not
+   found in catalog, ignoring`) so operators see why the override was
+   skipped, but tests must NOT assert on log output — the warning is
+   best-effort visibility, not a public contract.
+
 ### Per-call detectors (preferred over module-scoped counters)
 
 When a feature needs to observe a rolling condition across an agent's tool

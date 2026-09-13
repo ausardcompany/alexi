@@ -686,6 +686,96 @@ Contract:
 
 Every `process.exit(...)` call site in `src/cli/commands/chat.ts` — missing message argument, session-not-found error, custom-command non-zero exit, and the top-level `catch (e)` — now awaits `SessionDrain.drain({ timeoutMs: 30_000 })` first. The drain failure path is deliberately swallowed on the error branch because the process is already exiting with a non-zero code.
 
+## Inline Model Override (`@provider/model`)
+
+The `sendChat` (`src/core/orchestrator.ts`) and `streamChat` (`src/core/streamingOrchestrator.ts`) entry points scan the current user message for `@<provider>/<model>` mentions and switch the model for **that turn only** when the referenced id is present in the live-merged model catalog. The parser lives in `src/core/inlineModelOverride.ts` and is deliberately isolated so both entry points share one contract:
+
+```typescript
+// src/core/inlineModelOverride.ts
+export const INLINE_MODEL_PATTERN = /@([a-z0-9-]+)\/([a-z0-9-./]+)/i;
+
+export function extractInlineModelOverride(message: string): string | undefined {
+  if (typeof message !== 'string' || message.length === 0) return undefined;
+  const match = message.match(INLINE_MODEL_PATTERN);
+  if (!match) return undefined;
+  const candidateModel = `${match[1]}/${match[2]}`;
+  if (isAvailableModel(candidateModel)) {
+    logger.info(`[Inline Override] Using ${candidateModel} for this turn`);
+    return candidateModel;
+  }
+  logger.warn(`[Inline Override] Model "${candidateModel}" not found in catalog, ignoring`);
+  return undefined;
+}
+```
+
+Semantic properties, all pinned by `tests/orchestrator.test.ts` under `describe('inline model override (@provider/model)')`:
+
+- **Case-insensitive parse, verbatim catalog lookup.** `@Anthropic/Claude-Opus-4` matches the pattern, but the candidate string handed to `isAvailableModel` preserves the original casing so the catalog lookup does not need a case-folding step.
+- **First-match-wins.** Only the first `@provider/model` mention in a message drives the override. Additional mentions later in the same message are ignored.
+- **Never throws.** Empty / non-string input and unknown catalog entries both return `undefined`; the caller falls through to its normal model selection.
+- **Catalog-gated.** An unknown candidate is not silently used — a `[Inline Override] Model "<id>" not found in catalog, ignoring` warning is emitted so the operator sees why the override was skipped. This is what stops typos (`@anthropic/clude-opus-4`) from silently rerouting traffic.
+- **Per-turn scope.** The session's default model is not mutated. The next user turn without an inline reference reverts to the caller-supplied default.
+
+### Precedence contract
+
+Both `sendChat` and `streamChat` resolve the effective model in the same four-tier order:
+
+```mermaid
+flowchart TB
+    Msg([User message]) --> Explicit{options.modelOverride set?<br/>--model flag / agenticChat opt / code-review}
+    Explicit -->|Yes| UseExplicit[modelId = options.modelOverride<br/>routingReason = undefined]
+    Explicit -->|No| Parse[extractInlineModelOverride message]
+    Parse --> Inline{Valid inline candidate<br/>AND in catalog?}
+    Inline -->|Yes| UseInline[modelId = candidate<br/>routingReason = Inline override: @candidate]
+    Inline -->|No| Auto{options.autoRoute?}
+    Auto -->|Yes| Route[routePrompt classify + select<br/>modelId = decision.modelId<br/>routingReason = decision.reason]
+    Auto -->|No| Default[modelId = getDefaultModel<br/>routingReason = undefined]
+    UseExplicit --> Send[Send to provider]
+    UseInline --> Send
+    Route --> Send
+    Default --> Send
+```
+
+The corresponding code in `src/core/orchestrator.ts:53-86`:
+
+```typescript
+// Inline model override (issue #1716): `@<provider>/<model>` mentions
+// in the user message switch the model for THIS turn only. The
+// explicit `modelOverride` (CLI `--model` flag) still wins so power
+// users retain a hard opt-out.
+const turnModelOverride = options?.modelOverride
+  ? undefined
+  : extractInlineModelOverride(message);
+
+if (options?.autoRoute && !options?.modelOverride && !turnModelOverride) {
+  const decision = routePrompt(message, { preferCheap: options.preferCheap });
+  modelId = decision.modelId;
+  routingReason = decision.reason;
+} else {
+  // Precedence: explicit modelOverride > inline @provider/model > default
+  modelId = (options?.modelOverride ?? turnModelOverride ?? getDefaultModel()).trim();
+  if (turnModelOverride && !options?.modelOverride) {
+    routingReason = `Inline override: @${turnModelOverride}`;
+  }
+}
+```
+
+`streamChat` applies the same contract with one additional guard: inline parsing is skipped when the message payload is an array (multimodal content). A message containing image parts is not scanned for `@provider/model` mentions because the parser only makes sense for a plain text prompt.
+
+```typescript
+// src/core/streamingOrchestrator.ts:154-180
+const turnModelOverride =
+  !options?.modelOverride && typeof messageText === 'string'
+    ? extractInlineModelOverride(messageText)
+    : undefined;
+```
+
+Design boundaries:
+
+- The override does NOT persist across turns. This is deliberately not a hidden shortcut for `/model` — persistent model switches still require the CLI flag or an explicit config change.
+- `routingReason` is populated (`Inline override: @<model>`) so downstream telemetry, TUI status displays, and `session-export` can distinguish inline overrides from auto-router decisions and explicit `--model` flags.
+- The parser is a pure function of the message text; it does not touch the session manager, the router, or the provider layer. Adding a new provider that ships as `<new-provider>/<model>` requires no change to `inlineModelOverride.ts` — only the model catalog needs to know about the new id.
+
 ## Routing Decision Flow
 
 ```mermaid
