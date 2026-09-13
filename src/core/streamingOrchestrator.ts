@@ -27,6 +27,7 @@ import {
   resolveDefaultStreamIdleTimeoutMs,
 } from './streamWatchdog.js';
 import { notifyInBackground } from './notifications.js';
+import { extractInlineModelOverride } from './inlineModelOverride.js';
 
 export interface StreamingOptions {
   modelOverride?: string;
@@ -154,13 +155,29 @@ export function streamChat(
   let routingReason: string | undefined;
   let routeReasoning: ReasoningConfig | undefined;
 
-  if (options?.autoRoute && !options?.modelOverride) {
+  // Inline model override (issue #1716). Only meaningful for text
+  // prompts — multimodal messages carry an array payload and are not
+  // parsed for `@<provider>/<model>` mentions. Explicit `modelOverride`
+  // (CLI `--model` flag) always wins so power users can force a
+  // specific model. See `extractInlineModelOverride` for the parser +
+  // catalog-validation contract.
+  const turnModelOverride =
+    !options?.modelOverride && typeof messageText === 'string'
+      ? extractInlineModelOverride(messageText)
+      : undefined;
+
+  if (options?.autoRoute && !options?.modelOverride && !turnModelOverride) {
     const decision = routePrompt(messageText, { preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
     routeReasoning = decision.reasoning;
   } else {
-    modelId = (options?.modelOverride ?? getDefaultModel()).trim();
+    // Precedence: explicit CLI modelOverride > inline @provider/model
+    // reference > session default. Scoped to THIS stream call.
+    modelId = (options?.modelOverride ?? turnModelOverride ?? getDefaultModel()).trim();
+    if (turnModelOverride && !options?.modelOverride) {
+      routingReason = `Inline override: @${turnModelOverride}`;
+    }
   }
 
   let fullText = '';

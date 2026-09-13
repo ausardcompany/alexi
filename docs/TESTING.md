@@ -3167,6 +3167,77 @@ describe('Auto Router', () => {
 });
 ```
 
+### Testing Inline Model Override (issue #1716)
+
+`extractInlineModelOverride` validates candidate ids against the live-merged model catalog via `isAvailableModel` (`src/providers/modelCatalog.ts`). Tests that exercise the override contract MUST mock the catalog so the assertion set is deterministic and does not require a live SAP AI Core connection.
+
+```typescript
+// tests/orchestrator.test.ts
+vi.mock('../src/providers/index.js', () => ({
+  getProviderForModel: vi.fn(),
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+
+vi.mock('../src/providers/modelCatalog.js', () => ({
+  isAvailableModel: vi.fn(() => false),
+}));
+
+import { sendChat } from '../src/core/orchestrator.js';
+import { isAvailableModel } from '../src/providers/modelCatalog.js';
+
+describe('inline model override (@provider/model)', () => {
+  it('routes to the referenced model when it is in the catalog', async () => {
+    vi.mocked(isAvailableModel).mockImplementation(
+      (id: string) => id === 'anthropic/claude-opus-4'
+    );
+
+    const result = await sendChat('@anthropic/claude-opus-4 explain bubble sort');
+
+    expect(result.modelUsed).toBe('anthropic/claude-opus-4');
+    expect(result.routingReason).toBe('Inline override: @anthropic/claude-opus-4');
+  });
+
+  it('ignores an unknown inline reference and falls back to the default', async () => {
+    vi.mocked(isAvailableModel).mockReturnValue(false);
+
+    const result = await sendChat('@nonexistent/model test');
+
+    expect(result.modelUsed).toBe('gpt-4o');
+    expect(result.routingReason).toBeUndefined();
+  });
+
+  it('does not persist the override across turns', async () => {
+    vi.mocked(isAvailableModel).mockImplementation(
+      (id: string) => id === 'anthropic/claude-opus-4'
+    );
+    const sessionManager = new SessionManager();
+
+    const first = await sendChat('@anthropic/claude-opus-4 turn one', { sessionManager });
+    expect(first.modelUsed).toBe('anthropic/claude-opus-4');
+
+    // Turn 2 without a mention reverts to the caller-supplied default.
+    const second = await sendChat('turn two', { sessionManager });
+    expect(second.modelUsed).toBe('gpt-4o');
+  });
+});
+```
+
+Coverage matrix pinned in `tests/orchestrator.test.ts` under `describe('inline model override (@provider/model)')`:
+
+| Case | Assertion |
+|------|-----------|
+| Valid inline reference | `modelUsed === candidate`, `routingReason === 'Inline override: @<candidate>'` |
+| Unknown inline reference | `modelUsed === getDefaultModel()`, `routingReason === undefined` |
+| No persistence across turns | Second turn on the same `sessionManager` reverts to the default |
+| Explicit `modelOverride` wins | `modelUsed === options.modelOverride` even when an inline candidate is valid |
+| Overrides auto-routing | `routePrompt` is NOT called when a valid inline candidate is present with `autoRoute: true` |
+
+Guidelines when adding further coverage:
+
+- Do not import `extractInlineModelOverride` and call it in isolation from an orchestrator test — the contract worth pinning is the end-to-end precedence in `sendChat` / `streamChat`. Unit-testing the parser in a dedicated file is fine (`isAvailableModel` mock still required); mixing the two layers in one test creates ambiguous failure modes.
+- The pattern is case-insensitive, so `@Anthropic/Claude-Opus-4` also matches. If you assert on `modelUsed`, make sure the catalog mock accepts the exact-case candidate the parser produced.
+- Do NOT rely on `logger.warn` output as an assertion signal — the warning path (`Model "<id>" not found in catalog, ignoring`) is best-effort operator visibility, not a public contract.
+
 ## Testing with SAP AI Core
 
 ### Local Development Testing

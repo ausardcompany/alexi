@@ -12,6 +12,7 @@ import { getCostTracker } from './costTracker.js';
 import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './contextOverflow.js';
 import { isRateLimitError } from './error-backoff.js';
 import { logger } from '../utils/logger.js';
+import { extractInlineModelOverride } from './inlineModelOverride.js';
 
 /**
  * Re-export of the loop / mistake steering type so callers that dispatch
@@ -53,8 +54,19 @@ export async function sendChat(
   let routingReason: string | undefined;
   let routeReasoning: ReasoningConfig | undefined;
 
+  // Inline model override (issue #1716): `@<provider>/<model>` mentions
+  // in the user message switch the model for THIS turn only. The
+  // explicit `modelOverride` (CLI `--model` flag) still wins so power
+  // users retain a hard opt-out. Auto-routing and the session default
+  // are both superseded by a valid inline reference. An unknown
+  // candidate falls back through the normal selection path with a
+  // warning already logged inside `extractInlineModelOverride`.
+  const turnModelOverride = options?.modelOverride
+    ? undefined
+    : extractInlineModelOverride(message);
+
   // Auto-routing enabled?
-  if (options?.autoRoute && !options?.modelOverride) {
+  if (options?.autoRoute && !options?.modelOverride && !turnModelOverride) {
     const decision = routePrompt(message, { preferCheap: options.preferCheap });
     modelId = decision.modelId;
     routingReason = decision.reason;
@@ -63,8 +75,14 @@ export async function sendChat(
       `[Router] Selected ${modelId}: ${decision.reason} (confidence: ${(decision.confidence * 100).toFixed(0)}%)`
     );
   } else {
-    // Use specified or default model
-    modelId = (options?.modelOverride ?? getDefaultModel()).trim();
+    // Precedence: explicit CLI/agent modelOverride > inline @provider/model
+    // reference > session default. This is scoped to THIS call — the
+    // session's default model is not mutated, so the next turn without an
+    // inline reference reverts to the caller-supplied default.
+    modelId = (options?.modelOverride ?? turnModelOverride ?? getDefaultModel()).trim();
+    if (turnModelOverride && !options?.modelOverride) {
+      routingReason = `Inline override: @${turnModelOverride}`;
+    }
   }
 
   // Improved orchestration logic with better error handling and processing

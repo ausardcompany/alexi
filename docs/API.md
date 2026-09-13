@@ -46,6 +46,40 @@ alexi chat -m "What is AI?" --auto-route --prefer-cheap
 alexi chat -m "Tell me more" --session abc-123 --auto-route
 ```
 
+#### Inline model override (`@provider/model`, issue #1716)
+
+Any user message containing a `@<provider>/<model>` mention switches the model for **that turn only** when the referenced id is present in the live-merged model catalog. This works for `chat`, `agent`, and streaming (`interactive`) alike, and is implemented in `src/core/inlineModelOverride.ts`.
+
+```bash
+# One-off switch to Claude Opus 4 for this turn only.
+alexi chat -m "@anthropic/claude-opus-4 explain bubble sort"
+
+# Session default remains unchanged. The next turn without a mention
+# reverts to whatever the caller supplied (or the config default).
+alexi chat -m "now write it in TypeScript" --session abc-123
+```
+
+Precedence: `--model` (explicit `modelOverride`) beats an inline `@provider/model` reference, which in turn beats `--auto-route` and the session default. When the inline candidate is unknown, a `[Inline Override] Model "<id>" not found in catalog, ignoring` warning is logged and the caller falls back to its normal model selection — a typo never silently reroutes traffic.
+
+The pattern is case-insensitive (`@Anthropic/Claude-Opus-4` also matches) and the first mention in a message wins; subsequent mentions are ignored. Multimodal (array-payload) messages sent through `streamChat` are not parsed — a multimodal turn wanting a specific model must still use `--model`.
+
+Programmatic API:
+
+```typescript
+import { extractInlineModelOverride, INLINE_MODEL_PATTERN } from './core/inlineModelOverride.js';
+
+// Returns the candidate id when the message contains a match AND the id is
+// present in the catalog. Returns undefined otherwise (never throws).
+const model = extractInlineModelOverride('use @openai/gpt-4o please');
+// -> 'openai/gpt-4o' when in catalog, undefined otherwise
+
+// The underlying regex is exported for tooling that needs to detect
+// mentions without validating them against the catalog.
+INLINE_MODEL_PATTERN.test('@anthropic/claude-opus-4'); // true
+```
+
+When an inline reference is applied, `sendChat` / `streamChat` set `routingReason` on the result to `Inline override: @<model>` so telemetry, TUI status displays, and `session-export` can distinguish inline overrides from auto-router decisions and explicit `--model` flags. See [ARCHITECTURE.md — Inline Model Override](ARCHITECTURE.md#inline-model-override-providermodel) for the full precedence contract.
+
 ### agent
 
 Run agentic chat with autonomous tool execution for automated workflows.

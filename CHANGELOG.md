@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Inline model override via `@<provider>/<model>` mentions in user messages (issue #1716)** (`src/core/inlineModelOverride.ts`, `src/core/orchestrator.ts`, `src/core/streamingOrchestrator.ts`, `tests/orchestrator.test.ts`, commit `7c63d033` `feat(core): add inline model override with @provider/model syntax`): Ports Kilocode #14006. Recognises `@<provider>/<model>` mentions embedded in a user message so the caller can switch the model for a single turn without changing the session default. Validated against the live-merged model catalog via `isAvailableModel`; unknown candidates emit a `[Inline Override] Model "<id>" not found in catalog, ignoring` warning and fall through to the normal selection path so a typo never silently reroutes traffic.
+
+  Public surface:
+
+  - `INLINE_MODEL_PATTERN: RegExp` — `/@([a-z0-9-]+)\/([a-z0-9-./]+)/i`. `<provider>` is one or more ASCII lower-case letters / digits / dashes; `<model>` additionally allows `.` and `/` so ids like `anthropic/claude-opus-4` and `gemini-2.5-pro` parse correctly. Case-insensitive, so `@Anthropic/Claude-Opus-4` also matches — the extracted candidate is preserved verbatim for the catalog lookup.
+  - `extractInlineModelOverride(message: string): string | undefined` — first-match-wins parser; subsequent mentions in the same message are ignored. Returns the candidate id (`<provider>/<model>`) when the message contains a match AND `isAvailableModel(candidate) === true`. Never throws — an empty string, non-string input, or an unknown candidate all return `undefined`.
+
+  Precedence contract, enforced in both `sendChat` (`src/core/orchestrator.ts:53-86`) and `streamChat` (`src/core/streamingOrchestrator.ts:154-180`):
+
+  1. **Explicit `modelOverride`** (CLI `--model` flag, `agenticChat` option, `code-review` `modelOverride`) — hard opt-out; never inspected for inline mentions. When set, `extractInlineModelOverride` is not even called.
+  2. **Valid inline `@<provider>/<model>` reference** in the current message — supersedes auto-routing AND the session default for this turn only. `routingReason` is set to `Inline override: @<model>` so operators can see in the result why the model changed.
+  3. **Auto-routing** (`options.autoRoute`) — engaged only when no explicit override and no valid inline reference is present.
+  4. **Session / caller default** — via `getDefaultModel()` when none of the above apply.
+
+  Scope: the override is **strictly per-turn**. The session's default model is not mutated, so the next user turn without an inline reference reverts to the caller-supplied default. This is deliberately not a hidden shortcut for `/model` — persistent model switches still require the CLI flag or an explicit config change.
+
+  Streaming caveat (`src/core/streamingOrchestrator.ts:161-165`): inline parsing is skipped when the message payload is an array (multimodal content — image parts + text parts), because parsing is only meaningful for a plain text prompt. A multimodal turn wanting a specific model must still use `--model`.
+
+  Test coverage (`tests/orchestrator.test.ts` +105 lines, 5 cases under `describe('inline model override (@provider/model)')`): (1) routes to the referenced model when it is in the catalog (`getProviderForModel` is called with `anthropic/claude-opus-4`, `routingReason === 'Inline override: @anthropic/claude-opus-4'`); (2) ignores an unknown inline reference and falls back to the default (`gpt-4o`) with `routingReason === undefined`; (3) does NOT persist the override across turns — a second `sendChat('turn two', { sessionManager })` on the same session reverts to `gpt-4o`; (4) explicit `modelOverride: 'gpt-4o'` beats a valid inline `@anthropic/claude-opus-4`; (5) a valid inline candidate on an `autoRoute: true` call bypasses `routePrompt` entirely (`expect(routePrompt).not.toHaveBeenCalled()`). Tests mock `../src/providers/modelCatalog.js` so `isAvailableModel` returns a controlled boolean without touching SAP AI Core.
+
 - **Privacy-preserving OTLP tracing relay for SAP AI Core provider calls** (`src/utils/tracing.ts`, `src/providers/sapOrchestration.ts`, `src/cli/program.ts`, `tests/utils/tracing.test.ts`, `tests/providers/sapOrchestration-tracing.test.ts`, commit `486cbe03` `feat(providers): add AI SDK OTLP trace relay for privacy-preserving observability`): Ports the concept from Cline PR #13974. Emits AI SDK-style spans (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`) around every `SapOrchestrationProvider.chat()` and `stream()` call, then ships them via an OTLP exporter (`grpc`, `http/json`, or `http/protobuf`) to any collector the operator points Alexi at. The relay is metadata-only by default — prompt/completion content is NEVER attached to a span unless `ALEXI_TRACE_RECORD_CONTENT=true` is explicitly set, at which point a truncated response preview capped at 8 KiB is attached as `gen_ai.response.content`.
 
   Contract enforced by `src/utils/tracing.ts` (355 lines):
