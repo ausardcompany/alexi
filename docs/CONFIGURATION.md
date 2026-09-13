@@ -164,7 +164,7 @@ export MAX_SUBAGENT_DEPTH=5
 
 #### ALEXI_OTEL_TRACES_EXPORTER
 
-Enable the privacy-preserving OTLP tracing relay for SAP AI Core provider calls. Introduced in 1.22.17 (ports Cline PR #13974). Must be set to one of `grpc`, `http/json`, or `http/protobuf` — any other value keeps tracing disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`. Unset (the default) keeps tracing off. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability) for the full contract.
+Enable the privacy-preserving OTLP tracing relay for SAP AI Core provider calls. Introduced in 1.22.19 (2026-09-13, port of Cline PR #13974 landed via commit `486cbe03`). Must be set to one of `grpc`, `http/json`, or `http/protobuf` — any other value keeps tracing disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`. Unset (the default) keeps tracing off. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability) for the full contract.
 
 ```bash
 export ALEXI_OTEL_TRACES_EXPORTER=http/protobuf
