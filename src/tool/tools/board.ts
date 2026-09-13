@@ -114,6 +114,18 @@ interface BoardWriteResult {
  * cannot prove the recipient is stopped, but we can at least surface a
  * warning to the caller so silent-drop scenarios become visible in
  * tool output.
+ *
+ * Contract (locked in by `tests/tool/tools/board-write-recipient.test.ts`,
+ * issue #1713 verification):
+ *   - The probe scans at most the 100 most recent messages on the board.
+ *   - "Stopped or missing" means the recipient session id does not appear
+ *     as the author of ANY of those 100 messages.
+ *   - The message is STILL written when the recipient looks stopped —
+ *     `deliveryStatus: 'no-recipient'` and a human-readable `hint` are
+ *     surfaced instead of failing the tool call, so the parent
+ *     orchestrator (not this helper) decides how to react.
+ *   - When no `recipient` is supplied (broadcast), this probe is skipped
+ *     entirely and `deliveryStatus` stays `'delivered'`.
  */
 async function recipientLooksStopped(boardId: string, recipient: string): Promise<boolean> {
   // Look for the recipient having ever posted to the board or acknowledged
