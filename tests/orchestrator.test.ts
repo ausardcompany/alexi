@@ -26,10 +26,19 @@ vi.mock('../src/core/router.js', () => ({
   classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
 }));
 
+// Inline model override (issue #1716): the extractor validates candidate
+// ids against the live-merged model catalog. Mock the guard so tests can
+// control which ids the catalog considers "available" without touching
+// SAP AI Core.
+vi.mock('../src/providers/modelCatalog.js', () => ({
+  isAvailableModel: vi.fn(() => false),
+}));
+
 // Import after mocking
 import { sendChat } from '../src/core/orchestrator.js';
 import { getProviderForModel, getDefaultModel } from '../src/providers/index.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from '../src/core/router.js';
+import { isAvailableModel } from '../src/providers/modelCatalog.js';
 import { SessionManager } from '../src/core/sessionManager.js';
 
 // Helper to create mock provider
@@ -493,6 +502,102 @@ describe('Orchestrator', () => {
 
         const opts = mockProvider.complete.mock.calls[0][1];
         expect(opts.reasoning).toEqual({ reasoning_effort: 'high' });
+      });
+    });
+
+    describe('inline model override (@provider/model)', () => {
+      it('routes to the referenced model when it is in the catalog', async () => {
+        const mockProvider = createMockProvider({
+          text: 'opus response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(isAvailableModel).mockImplementation(
+          (id: string) => id === 'anthropic/claude-opus-4'
+        );
+
+        const result = await sendChat('@anthropic/claude-opus-4 explain bubble sort');
+
+        expect(result.modelUsed).toBe('anthropic/claude-opus-4');
+        expect(getProviderForModel).toHaveBeenCalledWith('anthropic/claude-opus-4');
+        expect(result.routingReason).toBe('Inline override: @anthropic/claude-opus-4');
+      });
+
+      it('ignores an unknown inline reference and falls back to the default', async () => {
+        const mockProvider = createMockProvider({
+          text: 'default response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(isAvailableModel).mockReturnValue(false);
+
+        const result = await sendChat('@nonexistent/model test');
+
+        expect(result.modelUsed).toBe('gpt-4o');
+        expect(getProviderForModel).toHaveBeenCalledWith('gpt-4o');
+        // No inline override was applied, so routingReason should be
+        // undefined (no auto-route, no valid inline reference).
+        expect(result.routingReason).toBeUndefined();
+      });
+
+      it('does not persist the override across turns (session default returns next turn)', async () => {
+        const mockProvider = createMockProvider({
+          text: 'opus response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(isAvailableModel).mockImplementation(
+          (id: string) => id === 'anthropic/claude-opus-4'
+        );
+
+        const sessionManager = new SessionManager();
+
+        // Turn 1: inline override in effect.
+        const first = await sendChat('@anthropic/claude-opus-4 turn one', { sessionManager });
+        expect(first.modelUsed).toBe('anthropic/claude-opus-4');
+
+        // Turn 2: no inline reference — must revert to the session default.
+        const second = await sendChat('turn two', { sessionManager });
+        expect(second.modelUsed).toBe('gpt-4o');
+      });
+
+      it('explicit --model flag (modelOverride) wins over an inline reference', async () => {
+        const mockProvider = createMockProvider({
+          text: 'flag response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(isAvailableModel).mockImplementation(
+          (id: string) => id === 'anthropic/claude-opus-4'
+        );
+
+        const result = await sendChat('@anthropic/claude-opus-4 test', {
+          modelOverride: 'gpt-4o',
+        });
+
+        // CLI flag must dominate even when the inline candidate is valid.
+        expect(result.modelUsed).toBe('gpt-4o');
+        expect(getProviderForModel).toHaveBeenCalledWith('gpt-4o');
+        // routingReason is only set for auto-route or inline overrides.
+        expect(result.routingReason).toBeUndefined();
+      });
+
+      it('overrides auto-routing when the inline candidate is valid', async () => {
+        const mockProvider = createMockProvider({
+          text: 'opus response',
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+        vi.mocked(getProviderForModel).mockReturnValue(mockProvider as any);
+        vi.mocked(isAvailableModel).mockImplementation(
+          (id: string) => id === 'anthropic/claude-opus-4'
+        );
+
+        const result = await sendChat('@anthropic/claude-opus-4 explain bubble sort', {
+          autoRoute: true,
+        });
+
+        expect(routePrompt).not.toHaveBeenCalled();
+        expect(result.modelUsed).toBe('anthropic/claude-opus-4');
       });
     });
   });
