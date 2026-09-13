@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.19] - 2026-09-13
+
+### Changed
+
+- **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `e367030a` `feat(sync): apply upstream changes (2026-09-13)`)**: Version bumped from `1.22.18` to `1.22.19`. Tracked upstream refs advanced for `claude-code` from `df52d04a4e65195c1621fe6222e0564bcccb1804` to `b5932767f3acbd07da25367064827e5cb81f43de`. `kilocode` (`c36e22634860e06e0aa63234fae37bbd83d3b182`) and `opencode` (`95daf90670b7c039c436c85537da5fbfe2205b41`) SHAs are unchanged — only the `last_synced_at` timestamps and the `workflow_run` id (`34687853403` → `34753856632`) were refreshed. Two-stage sync pipeline (Planning + Execution) both ran under `anthropic--claude-4.7-opus`. No source or test changes landed in this commit — the release captures the runtime feature work that had accumulated in `[Unreleased]` since `1.22.18`: the OTLP tracing relay (`486cbe03`), the Alexi-native `KILO_*` env-flag enable path for the shared agent board (`4c20df6b`, issue #1698), and the behaviour-preserving `SapOrchestrationProvider.chat` / `stream` return-path refactor that materialises `content` / `finishReason` / `usage` before returning so traced usage attributes stay in sync with caller-visible provider results.
+
 ### Added
 
 - **Privacy-preserving OTLP tracing relay for SAP AI Core provider calls** (`src/utils/tracing.ts`, `src/providers/sapOrchestration.ts`, `src/cli/program.ts`, `tests/utils/tracing.test.ts`, `tests/providers/sapOrchestration-tracing.test.ts`, commit `486cbe03` `feat(providers): add AI SDK OTLP trace relay for privacy-preserving observability`): Ports the concept from Cline PR #13974. Emits AI SDK-style spans (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.operation.name`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`) around every `SapOrchestrationProvider.chat()` and `stream()` call, then ships them via an OTLP exporter (`grpc`, `http/json`, or `http/protobuf`) to any collector the operator points Alexi at. The relay is metadata-only by default — prompt/completion content is NEVER attached to a span unless `ALEXI_TRACE_RECORD_CONTENT=true` is explicitly set, at which point a truncated response preview capped at 8 KiB is attached as `gen_ai.response.content`.
