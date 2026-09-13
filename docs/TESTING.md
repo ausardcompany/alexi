@@ -2035,6 +2035,118 @@ Key patterns:
 3. **Assert the `'1'`-only string comparison explicitly.** Case 5 (`env flag set to a non-"1" value`) is the load-bearing regression guard: a naive `Boolean(process.env.KILO_EXPERIMENTAL)` implementation would enable the board on `KILO_EXPERIMENTAL=0`, which is the exact anti-behaviour the port is meant to prevent. Cover `'0'` AND `'true'` (a truthy string that is NOT literal `'1'`) so the assertion pins the strict-equality contract.
 4. **Assert the OR override once, explicitly.** Case 6 is redundant with case 2 at the truth-table level but pins the intent: an explicit config `false` does NOT override a set env flag. Keeping the case separate means a future change to the resolution rule (e.g. flipping to AND semantics, or adding an override precedence) trips a differently-named test than the plain "env flag alone enables" case, which makes the failure diagnosis faster.
 
+### Testing the `kilo_board_write` recipient-state warning
+
+Verification-only coverage for the recipient-probe path in `boardWriteTool` (`src/tool/tools/board.ts`), added under issue #1713 to lock in the contract ported earlier in the `[Unreleased]` cycle from kilocode `7febec58f`. The regression suite lives at `tests/tool/tools/board-write-recipient.test.ts` (149 lines, 5 cases) and mocks `BoardStore` at the module boundary so it never touches the native `better-sqlite3` binding — the tool only calls `BoardStore.read` (the recent-history probe) and `BoardStore.write` (the actual append), both of which are driven by `vi.fn()` in the mock factory.
+
+The five contract properties the suite pins are:
+
+1. **Warn, don't fail, when the recipient looks stopped.** If the board's most recent 100 messages contain no message authored by the target session, `execute()` returns `success: true` with `data.deliveryStatus: 'no-recipient'` and a `hint` matching the recipient id AND the phrase `stopped or`. `BoardStore.write` is still called exactly once — the message is posted, and the caller (the parent orchestrator) is left to decide how to react.
+2. **`'delivered'` when the recipient is active.** If the recent-history probe returns at least one message authored by the target session, `deliveryStatus` is `'delivered'` and `hint` is `undefined`.
+3. **Broadcast skips the probe entirely.** When the `recipient` field is omitted, `BoardStore.read` is never invoked and `deliveryStatus` stays `'delivered'`. The tool must not spend a database round-trip on the probe when there is no target to check against.
+4. **Board-attachment check runs BEFORE the probe.** When `BoardContext` has no board attached to the current session, `execute()` returns `success: false` with an error matching `/no shared board/i`, and neither `BoardStore.read` nor `BoardStore.write` is called. A regression that reordered these two checks would leak a probe against an unattached board.
+5. **The probe is bounded to `limit: 100`.** `BoardStore.read` is invoked with the board id as the first argument and an options object matching `{ limit: 100 }` as the second. This is what prevents a compromise of the probe from escalating into an unbounded scan on a large board.
+
+Suite scaffolding pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// Mock the BoardStore module BEFORE importing code under test so vitest
+// hoists the mock factory ahead of the tool import. Even though `vi.mock`
+// is auto-hoisted, keeping the ordering explicit avoids surprises when a
+// future top-level import from the mocked module is added.
+vi.mock('../../../src/core/database/boardStore.js', () => ({
+  BoardStore: {
+    read: vi.fn(),
+    write: vi.fn(),
+    ensure: vi.fn(),
+    acknowledgeReads: vi.fn(),
+    reset: vi.fn(),
+    __resetForTests: vi.fn(),
+  },
+}));
+
+import { boardWriteTool } from '../../../src/tool/tools/board.js';
+import { BoardStore, type BoardMessage } from '../../../src/core/database/boardStore.js';
+import { BoardContext } from '../../../src/core/database/boardContext.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+const readMock = BoardStore.read as unknown as ReturnType<typeof vi.fn>;
+const writeMock = BoardStore.write as unknown as ReturnType<typeof vi.fn>;
+
+const BOARD_ID = 'board-under-test';
+const SELF_SESSION = 'self-session';
+
+function makeMessage(sessionID: string, id = 'm-' + sessionID): BoardMessage {
+  return {
+    id,
+    boardId: BOARD_ID,
+    sessionID,
+    author: 'agent',
+    content: 'hello',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function ctx(): ToolContext {
+  return { workdir: process.cwd(), sessionId: SELF_SESSION };
+}
+
+describe('boardWriteTool recipient state warnings', () => {
+  beforeEach(() => {
+    readMock.mockReset();
+    writeMock.mockReset();
+    BoardContext.__resetForTests();
+    BoardContext.attach(SELF_SESSION, BOARD_ID);
+    // Default: writes always succeed and echo back a minimal row.
+    writeMock.mockImplementation(async (_boardId: string) =>
+      makeMessage('written-by-self', 'written-msg-id')
+    );
+  });
+
+  it('warns when posting to a stopped recipient (recipient has no board activity)', async () => {
+    // Board history contains messages from other sessions only — the
+    // recipient never appears, so `recipientLooksStopped()` returns true.
+    readMock.mockResolvedValueOnce([makeMessage('some-other-peer'), makeMessage('yet-another')]);
+
+    const result = await boardWriteTool.execute(
+      { content: 'ping', recipient: 'stopped-session-id' },
+      ctx()
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data?.deliveryStatus).toBe('no-recipient');
+    expect(result.hint).toBeDefined();
+    expect(result.hint).toContain('stopped-session-id');
+    expect(result.hint).toContain('stopped or');
+    // The message is still written — this is a warning, not a hard error.
+    expect(writeMock).toHaveBeenCalledTimes(1);
+    expect(result.data?.messageId).toBeDefined();
+  });
+
+  it('bounds the recipient probe to the most recent 100 messages', async () => {
+    readMock.mockResolvedValueOnce([makeMessage('active-session-id')]);
+
+    await boardWriteTool.execute({ content: 'ping', recipient: 'active-session-id' }, ctx());
+
+    expect(readMock).toHaveBeenCalledTimes(1);
+    // First arg is the board id, second is the options bag with `limit: 100`.
+    const call = readMock.mock.calls[0];
+    expect(call[0]).toBe(BOARD_ID);
+    expect(call[1]).toMatchObject({ limit: 100 });
+  });
+});
+```
+
+Key patterns:
+
+1. **Mock `BoardStore` at the module boundary, not the tool.** The tool under test (`boardWriteTool`) is the code being verified, so mocking it would defeat the purpose. Mocking the store module gives the suite a stable, in-memory boundary that avoids needing `better-sqlite3` on the test runner AND lets each case set up a bespoke recent-history return via `readMock.mockResolvedValueOnce([...])`.
+2. **Cover the mock surface exhaustively.** The `BoardStore` mock must expose EVERY method the tool import chain touches (`read`, `write`, `ensure`, `acknowledgeReads`, `reset`, `__resetForTests`), even the ones a given test never exercises. Missing entries surface as `TypeError: BoardStore.__resetForTests is not a function` at test load time — see the `beforeEach` block, which calls `__resetForTests` before every case for hygiene.
+3. **Reset `BoardContext` and reattach in `beforeEach`.** `BoardContext` is a process-local `Map<sessionID, boardId>` (see `src/core/database/boardContext.ts`). Without the `__resetForTests()` + `attach()` sequence in `beforeEach`, the fourth case (board-not-attached) would fail nondeterministically depending on the case order because a previous test's attach would leak.
+4. **Assert on the `hint` substring, not the exact string.** The hint currently reads ``Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.`` but its exact wording is meant to be human-readable and may evolve. Asserting `.toContain('stopped-session-id')` (the offending id must be echoed back) and `.toContain('stopped or')` (the classification must be preserved) pins the load-bearing content without coupling to the copy.
+5. **Assert `writeMock.mock.calls[0][1]` shape, not the whole options bag.** Use `.toMatchObject({ limit: 100 })` rather than `.toEqual(...)` — the tool may grow additional read options later (e.g. an `after: <timestamp>` filter) and the current assertion should not trip on additive changes.
+
 ### Testing JSON-encoded Tool Params Tolerance
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). Some LLM providers (Anthropic in particular) over-encode structured tool-call parameters as JSON strings rather than the native object shape. The `agent_manager` tool now decodes JSON-encoded `config` strings transparently via the `decodeJsonIfString` Zod preprocessor in `src/tool/tools/agent-manager.ts`. Tests should exercise both shapes to guarantee no regression across providers.

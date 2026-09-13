@@ -1014,6 +1014,48 @@ writes into an unbounded `Map<string, PermissionProvenance>`, and
 call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
 and avoid cross-test leakage.
 
+### Verification-only regression suites (lock in a contract with tests + inline JSDoc)
+
+Some upstream ports and behaviour fixes ship the runtime change in one PR and then a **verification-only** follow-up PR that adds no new behaviour, just a dedicated regression suite plus a JSDoc block on the helper stating the contract inline. This is the standing pattern for issue-tagged "verify coverage" tasks (currently issue #1713 for the `kilo_board_write` recipient-warning path). The rules that make the pattern useful:
+
+1. **Ship no behaviour change in a verification-only PR.** The diff must be limited to (a) a new `tests/**/*.test.ts` file that exercises the existing implementation and (b) a JSDoc block on the target helper that restates the contract the tests now pin. If the reviewer catches a bug during authoring, split it into a separate `fix(...)` PR — the verification PR must remain reviewable as "these tests now enforce the current behaviour" without hidden behaviour drift.
+2. **Enumerate the contract as numbered invariants.** In both the JSDoc block on the helper and the `describe` block header, list the invariants as `1. …`, `2. …`, `3. …`. This makes it obvious which test case pins which invariant, and it lets a reviewer skim the helper's JSDoc against the test file without cross-referencing implementation lines. See `src/tool/tools/board.ts:110-129` for the reference JSDoc block (five invariants) and `tests/tool/tools/board-write-recipient.test.ts` for the paired five-case suite.
+3. **Cite the paired test file from the JSDoc.** The JSDoc block should end with a `Contract (locked in by tests/foo.test.ts, issue #NNNN verification):` header so a future reader knows the invariants are enforced, not aspirational. A regression that removes a test case will only be caught by CI if the docstring is not silently updated alongside — reviewers of the test-deletion PR must eyeball the docstring for mismatches.
+4. **Mock at the module boundary, not at the tool.** Verification suites should not require the same native dependencies as production runs. For the board suite, `BoardStore` (the SQLite-backed persistence layer) is `vi.mock`ed at the module boundary and driven by `vi.fn()`s. This keeps the suite runnable in every worker without a working `better-sqlite3` binding, and it isolates the contract under test (the tool's recipient-probe logic) from the store's own coverage.
+5. **Cover EVERY method the tool import chain touches, even the ones the tests never call.** A `vi.mock('.../boardStore.js', () => ({ BoardStore: { read: vi.fn(), write: vi.fn() } }))` factory that omits `__resetForTests` or `ensure` will explode with `TypeError: BoardStore.<method> is not a function` at test load time when any unrelated module imports the store expecting the full surface. Reference the current mock in `tests/tool/tools/board-write-recipient.test.ts:26-35`: it exposes `read`, `write`, `ensure`, `acknowledgeReads`, `reset`, `__resetForTests` — the union of every method reachable through the import chain, not just the two that the suite exercises.
+6. **Reset process-local state in `beforeEach`, not `beforeAll`.** `BoardContext.__resetForTests()` + `BoardContext.attach(...)` runs before every case so that a test which forgets to re-attach (case 4 in the reference suite) fails deterministically instead of depending on prior test order.
+
+Reference JSDoc block from `src/tool/tools/board.ts:110-129` that pairs with the suite:
+
+```typescript
+/**
+ * Ports kilocode `7febec58f` (fix(cli): warn when board_post targets a
+ * stopped subagent). We check the current board's message history for
+ * any recent activity from the recipient session — if none is found we
+ * cannot prove the recipient is stopped, but we can at least surface a
+ * warning to the caller so silent-drop scenarios become visible in
+ * tool output.
+ *
+ * Contract (locked in by `tests/tool/tools/board-write-recipient.test.ts`,
+ * issue #1713 verification):
+ *   - The probe scans at most the 100 most recent messages on the board.
+ *   - "Stopped or missing" means the recipient session id does not appear
+ *     as the author of ANY of those 100 messages.
+ *   - The message is STILL written when the recipient looks stopped —
+ *     `deliveryStatus: 'no-recipient'` and a human-readable `hint` are
+ *     surfaced instead of failing the tool call, so the parent
+ *     orchestrator (not this helper) decides how to react.
+ *   - When no `recipient` is supplied (broadcast), this probe is skipped
+ *     entirely and `deliveryStatus` stays `'delivered'`.
+ */
+async function recipientLooksStopped(boardId: string, recipient: string): Promise<boolean> {
+  const recent = await BoardStore.read(boardId, { limit: 100 });
+  return !recent.some((m) => m.sessionID === recipient);
+}
+```
+
+See `docs/TESTING.md#testing-the-kilo_board_write-recipient-state-warning` for the full suite walkthrough and the five patterns that generalise to any future verification-only suite (mock the store, cover the mock surface exhaustively, reset per-test, assert on `hint` substrings not exact strings, use `.toMatchObject` for options-bag assertions).
+
 ### Abort propagation through delegating tools
 
 Tools that delegate work to a child session (currently only `task`) MUST wire the child's lifetime to the parent's `AbortSignal` so that a Ctrl+C at the CLI immediately stops every descendant subagent — otherwise a runaway subagent chain will keep consuming API quota after the user has given up.
