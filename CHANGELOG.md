@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Prettier auto-fix for line-joining in five source files** (`src/cli/commands/reload.ts`, `src/core/promptQueue.ts`, `src/permission/index.ts`, `src/permission/prompt.ts`, `src/tool/tools/shell.ts`, commit `69d2dcb5` `style(ci): auto-fix lint/format issues [alexi-bot]`): No behaviour change. Prettier's 100-column formatter re-joined five multi-line expressions (a `Reload complete:` template concatenation, the `QueueLogger` type alias, a permission-manager `trimmedFeedback` ternary, a `console.log` call in the permission prompt renderer, and the sandboxed-git-write `detail` ternary in the shell tool) onto single lines because each fits comfortably under the 100-col cap. Emitted output, control flow, and public types are byte-identical to their pre-format equivalents — this is a pure style commit produced by the `ci-auto-fix` workflow after CI's `format:check` job flagged the diff. No API, routing, tool-execution, or permission-prompt semantics are affected; no tests were changed.
+
 ## [1.22.19] - 2026-09-13
 
 ### Changed
