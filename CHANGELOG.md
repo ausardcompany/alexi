@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`deepseek-v4.1-flash` in the static SAP AI Core orchestration catalog** (`src/providers/sapOrchestration.ts`, `src/providers/__tests__/modelCatalog.test.ts`, commit `531a15c1` `feat(providers): add deepseek-v4.1-flash to model catalog`): Adds the DeepSeek V4.1 Flash reasoning variant to the `ORCHESTRATION_MODELS` tuple and pins a matching `capabilities: []` entry in `ORCHESTRATION_MODEL_METADATA`, mirroring the existing `deepseek-ai--deepseek-r1` capability profile. Ports OpenCode #48270. The id ships in the OpenCode / upstream form (`deepseek-v4.1-flash` — no `deepseek-ai--` vendor prefix) which still matches the three string-based matchers callers rely on:
+
+  - the `deepseek-` prefix heuristic in `src/providers/modelCatalog.ts` (`extractModelId`) so a matching SAP AI Core deployment is recognised as a live entry once `refreshModelCatalog()` returns;
+  - the `deepseek` substring guard in `getModelFamily(modelId)` (`src/providers/model-match.ts:42`) so the reasoning-content transform is engaged;
+  - the `deepseek` substring guard in `modelSupportsReasoningEffort(modelId)` (`src/providers/model-match.ts:223`) which returns `'levels'` for the new id, so the CLI's `--reasoning-effort low|medium|high` flag round-trips into the SAP AI Core request as `reasoning_effort` (rather than being dropped or forcibly rewritten to `enable_thinking`).
+
+  Capability profile: no tool-calling advertised (`capabilities: []`), consistent with the other DeepSeek entry — `modelHasCapability('deepseek-v4.1-flash', 'tools')` returns `false`, so the agent loop's tool-registration gate will not send function-calling schemas for this id.
+
+  Test coverage (`src/providers/__tests__/modelCatalog.test.ts`, +55 lines, 8 cases): (1) presence in the `ORCHESTRATION_MODELS` tuple; (2) `isOrchestrationModel('deepseek-v4.1-flash') === true`; (3) exposure through `getAvailableModels()`; (4) `isAvailableModel('deepseek-v4.1-flash') === true`; (5) metadata entry deep-equals the `deepseek-ai--deepseek-r1` capability profile via `.toEqual(r1Meta?.capabilities)` — future family-wide updates propagate without duplicated literals; (6) `getModelMetadata('deepseek-v4.1-flash')?.capabilities` returns `[]`; (7) `modelHasCapability('deepseek-v4.1-flash', 'tools') === false`; (8) `modelSupportsReasoningEffort` returns `'levels'` for the bare id, the uppercase form (`DEEPSEEK-V4.1-FLASH`), and the provider-prefixed envelope (`sap-ai-core/deepseek-v4.1-flash`) — pinning the case-insensitive substring guard so a regression that tightened it to an exact-id lookup trips loudly. Diff statistics: `2 files changed, 67 insertions(+)`.
+
+  Runtime activation: no code change is required in downstream callers. `--model deepseek-v4.1-flash`, routing-config selection by exact id, and the inline `@sap-ai-core/deepseek-v4.1-flash` override syntax all work as soon as the SAP AI Core tenant surfaces a matching deployment. Until then, `isAvailableModel` still returns `true` (static list) but the provider call will fail at the edge with a `deployment_not_found` error, which per the error-classification contract in `AGENTS.md` is treated as a permanent (non-retried) failure and does NOT consume the `KILO_RETRIES` budget in agent workflows.
+
 ## [1.22.19] - 2026-09-13
 
 ### Changed
