@@ -14,7 +14,7 @@ import {
   IN_FLIGHT_MARKER,
   _resetRefreshersForTest,
   registeredSubsystems,
-} from '../../../src/cli/commands/reload.js';
+} from '../reload.js';
 
 describe('reload command primitive', () => {
   beforeEach(() => {
