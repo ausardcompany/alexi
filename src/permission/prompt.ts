@@ -178,9 +178,7 @@ function renderPermissionPrompt(data: {
 
   // Bottom border
   console.log(c('cyan', '╰' + '─'.repeat(boxWidth - 2) + '╯'));
-  console.log(
-    c('gray', 'Tip: after Deny (D) / Never (N) you can add an optional reason.')
-  );
+  console.log(c('gray', 'Tip: after Deny (D) / Never (N) you can add an optional reason.'));
   console.log();
 }
 

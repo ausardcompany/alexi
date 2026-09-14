@@ -192,9 +192,7 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
         // feedback", commit b30b2cf0d) when it was supplied via the
         // permission prompt; fall back to the generic sandboxed-git-write
         // descriptor otherwise.
-        const detail = result.feedback
-          ? result.feedback
-          : `sandboxed git write: ${params.command}`;
+        const detail = result.feedback ? result.feedback : `sandboxed git write: ${params.command}`;
         return {
           success: false,
           error: buildUserRejectedToolReason('shell', detail),

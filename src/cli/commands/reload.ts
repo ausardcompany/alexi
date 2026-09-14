@@ -200,8 +200,7 @@ export function formatReloadResult(result: ReloadResult): string {
   }
   lines.push('');
   lines.push(
-    `Reload complete: ${ok} ok, ${failed} failed, ${skipped} skipped ` +
-      `(${result.elapsedMs}ms).`
+    `Reload complete: ${ok} ok, ${failed} failed, ${skipped} skipped ` + `(${result.elapsedMs}ms).`
   );
   return lines.join('\n');
 }

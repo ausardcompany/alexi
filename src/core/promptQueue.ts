@@ -46,10 +46,7 @@ export interface ActiveGoalHandle {
  * `utils/logger` import path so this module has zero dependency on
  * the rest of the repo — the enqueue policy is pure.
  */
-export type QueueLogger = (
-  event: string,
-  fields?: Record<string, unknown>
-) => void;
+export type QueueLogger = (event: string, fields?: Record<string, unknown>) => void;
 
 export interface PromptQueueOptions {
   logger?: QueueLogger;

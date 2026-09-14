@@ -912,9 +912,7 @@ export class PermissionManager {
       // clean payload (or undefined) rather than whitespace. Only carried
       // through on denials — approvals never surface feedback.
       const trimmedFeedback =
-        !response.granted && typeof response.feedback === 'string'
-          ? response.feedback.trim()
-          : '';
+        !response.granted && typeof response.feedback === 'string' ? response.feedback.trim() : '';
 
       return {
         decision: response.granted ? 'allow' : 'deny',
