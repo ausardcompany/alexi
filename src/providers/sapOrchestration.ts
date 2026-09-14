@@ -2153,6 +2153,15 @@ export const ORCHESTRATION_MODELS = [
   'meta--llama3.1-70b-instruct',
   // DeepSeek models
   'deepseek-ai--deepseek-r1',
+  // DeepSeek V4.1 Flash: fast, low-cost reasoning variant. Ships with the
+  // same reasoning_effort levels API (low/medium/high) as the other DeepSeek
+  // ids. Naming uses the OpenCode / upstream form `deepseek-v4.1-flash` (no
+  // `deepseek-ai--` vendor prefix), which still matches the `deepseek-`
+  // prefix heuristic in modelCatalog.ts and the `deepseek` substring guard
+  // in model-match.ts (`modelSupportsReasoningEffort`). Added to the static
+  // catalog so `--model deepseek-v4.1-flash` and routing config selection
+  // work as soon as the SAP AI Core deployment is live (OpenCode #48270).
+  'deepseek-v4.1-flash',
   // SAP models
   'sap-abap-1',
 ] as const;
@@ -2302,6 +2311,9 @@ export const ORCHESTRATION_MODEL_METADATA: Readonly<
   'mistralai--mistral-small-instruct': { capabilities: [] },
   'meta--llama3.1-70b-instruct': { capabilities: [] },
   'deepseek-ai--deepseek-r1': { capabilities: [] },
+  // DeepSeek V4.1 Flash: reasoning variant, no tool calling advertised
+  // (matches deepseek-r1's SAP AI Core capability profile).
+  'deepseek-v4.1-flash': { capabilities: [] },
   'sap-abap-1': { capabilities: [] },
 };
 
