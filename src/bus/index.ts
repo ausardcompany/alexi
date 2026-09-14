@@ -281,6 +281,15 @@ export const PermissionResponse = defineEvent(
     granted: z.boolean(),
     remember: z.boolean().optional(),
     timestamp: z.number(),
+    /**
+     * Optional natural-language reason the user supplied when rejecting the
+     * tool invocation. Mirrors kilocode's "reject with feedback" flow — the
+     * agent loop is expected to forward this to the model as a follow-up
+     * user message so the model can adapt (see kilocode commit b30b2cf0d
+     * and 60bb54b0f). Absent / empty string when the user did not supply
+     * a reason.
+     */
+    feedback: z.string().optional(),
   })
 );
 

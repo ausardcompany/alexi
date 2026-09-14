@@ -178,7 +178,52 @@ function renderPermissionPrompt(data: {
 
   // Bottom border
   console.log(c('cyan', '╰' + '─'.repeat(boxWidth - 2) + '╯'));
+  console.log(
+    c('gray', 'Tip: after Deny (D) / Never (N) you can add an optional reason.')
+  );
   console.log();
+}
+
+/**
+ * Prompt the user for optional rejection feedback. Empty input (or a
+ * timeout) resolves to `undefined`. The rejection-shortcut for the model
+ * has already been decided by this point — feedback is a purely additive
+ * message that the agent loop forwards to the LLM as a follow-up user
+ * turn (mirrors kilocode's `feat: support permission rejection feedback`
+ * flow, commit b30b2cf0d).
+ *
+ * While this input is active the primary approval prompt is not shown,
+ * so there is no risk of the "approve shortcut" (A / R) firing on top of
+ * the feedback line (see kilocode commit 845565872).
+ */
+async function promptForRejectionFeedback(timeoutMs = 30_000): Promise<string | undefined> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      rl.close();
+      resolve(undefined);
+    }, timeoutMs);
+
+    rl.question(c('yellow', 'Optional reason (press Enter to skip): '), (answer) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      rl.close();
+      const trimmed = answer.trim();
+      resolve(trimmed.length > 0 ? trimmed : undefined);
+    });
+  });
 }
 
 /**
@@ -202,7 +247,7 @@ async function promptUser(
 
   return new Promise((resolve) => {
     const askQuestion = () => {
-      rl.question(c('cyan', 'Your choice: '), (answer) => {
+      rl.question(c('cyan', 'Your choice: '), async (answer) => {
         const choice = answer.trim().toLowerCase();
 
         switch (choice) {
@@ -220,17 +265,23 @@ async function promptUser(
             break;
 
           case 'd':
-          case 'deny':
+          case 'deny': {
+            // Close the primary prompt BEFORE opening the feedback prompt
+            // so the approval shortcut (A/R) cannot fire on top of the
+            // feedback input (parity with kilocode fix 845565872).
+            rl.close();
+            const feedback = await promptForRejectionFeedback();
             PermissionResponse.publish({
               id: requestId,
               granted: false,
               remember: false,
               timestamp: Date.now(),
+              feedback,
             });
             console.log(c('red', '✗ Permission denied\n'));
-            rl.close();
             resolve();
             break;
+          }
 
           case 'r':
           case 'remember':
@@ -246,17 +297,20 @@ async function promptUser(
             break;
 
           case 'n':
-          case 'never':
+          case 'never': {
+            rl.close();
+            const feedback = await promptForRejectionFeedback();
             PermissionResponse.publish({
               id: requestId,
               granted: false,
               remember: true,
               timestamp: Date.now(),
+              feedback,
             });
             console.log(c('red', '✗ Permission denied and remembered for this session\n'));
-            rl.close();
             resolve();
             break;
+          }
 
           default:
             console.log(c('yellow', 'Invalid choice. Please enter A, D, R, or N.'));

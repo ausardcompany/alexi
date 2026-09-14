@@ -188,9 +188,16 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
         description: `Sandboxed git write: ${params.command}`,
       });
       if (!result.granted) {
+        // Prefer the user's own rejection reason (kilocode "reject with
+        // feedback", commit b30b2cf0d) when it was supplied via the
+        // permission prompt; fall back to the generic sandboxed-git-write
+        // descriptor otherwise.
+        const detail = result.feedback
+          ? result.feedback
+          : `sandboxed git write: ${params.command}`;
         return {
           success: false,
-          error: buildUserRejectedToolReason('shell', `sandboxed git write: ${params.command}`),
+          error: buildUserRejectedToolReason('shell', detail),
           data: { stdout: '', stderr: '', exitCode: -1, timedOut: false },
         };
       }
