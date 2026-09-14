@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test import path for the `/reload` command primitive** (`src/cli/commands/__tests__/reload.test.ts`, commit `8f2184fc` `fix(ci): apply prettier formatting and fix reload test import [autohealing]`): The colocated test file was importing its subject via the workspace-absolute path `../../../src/cli/commands/reload.js` — a stale path that survived only because the file resolved through TypeScript's module resolution against the source tree, not the emitted `dist/`. Rewritten to a relative sibling import `../reload.js`. No behaviour change; the fix makes the test independent of the repository root and keeps `npm test` green when the file is executed via a directly-provided path (e.g. `npm test -- src/cli/commands/__tests__/reload.test.ts`).
+
 ### Changed
 
-- **Prettier auto-fix for line-joining in five source files** (`src/cli/commands/reload.ts`, `src/core/promptQueue.ts`, `src/permission/index.ts`, `src/permission/prompt.ts`, `src/tool/tools/shell.ts`, commit `69d2dcb5` `style(ci): auto-fix lint/format issues [alexi-bot]`): No behaviour change. Prettier's 100-column formatter re-joined five multi-line expressions (a `Reload complete:` template concatenation, the `QueueLogger` type alias, a permission-manager `trimmedFeedback` ternary, a `console.log` call in the permission prompt renderer, and the sandboxed-git-write `detail` ternary in the shell tool) onto single lines because each fits comfortably under the 100-col cap. Emitted output, control flow, and public types are byte-identical to their pre-format equivalents — this is a pure style commit produced by the `ci-auto-fix` workflow after CI's `format:check` job flagged the diff. No API, routing, tool-execution, or permission-prompt semantics are affected; no tests were changed.
+- **Prettier auto-format applied to five source files** (`src/cli/commands/reload.ts`, `src/core/promptQueue.ts`, `src/permission/index.ts`, `src/permission/prompt.ts`, `src/tool/tools/shell.ts`, commit `69d2dcb5` `style(ci): auto-fix lint/format issues [alexi-bot]` and follow-up `8f2184fc`): Whitespace-only collapse of previously wrapped expressions that now fit within the project-wide 100-column Prettier limit — the `formatReloadResult` reload-summary template literal (`src/cli/commands/reload.ts:200-203`), the `QueueLogger` type alias signature (`src/core/promptQueue.ts:46-52`), the deny-feedback trim ternary in `PermissionManager.requestPermission` (`src/permission/index.ts:912-918`), the deny/never tip line in `renderPermissionPrompt` (`src/permission/prompt.ts:178-183`), and the sandboxed-git-write `detail` ternary in the `shell` tool (`src/tool/tools/shell.ts:192-197`). No behaviour change — output strings, permission decision shape, and shell rejection payloads are byte-identical to the previous release.
 
 ## [1.22.19] - 2026-09-13
 
