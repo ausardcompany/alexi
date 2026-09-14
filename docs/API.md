@@ -407,6 +407,81 @@ List all available Definition of Done checks.
 alexi dod-list
 ```
 
+### reload
+
+Refresh runtime state for the current project (routing config, user config, skills, and any other subsystem registered via `registerRefresher`) without restarting the CLI. Registered by `src/cli/commands/reload.ts`.
+
+```bash
+alexi reload
+```
+
+The command has no options today — that mirrors the upstream `/reload` shape and keeps the surface area minimal. Output is rendered by `formatReloadResult`:
+
+```text
+  ✓ routing-config
+  ✓ user-config
+  ⏭  skills — skipped: in-flight request
+
+Reload complete: 2 ok, 0 failed, 1 skipped (42ms).
+```
+
+Exit codes:
+
+- `0` — all subsystems either succeeded or were skipped because they had an in-flight request.
+- `1` — at least one subsystem reported a non-skip failure (its `ok` is `false` AND `skipped` is not `true`).
+
+An in-flight skip is NOT an error — a reload attempted during an active completion is a valid outcome, and the CLI intentionally does not fail the exit code for that case.
+
+#### Programmatic API
+
+```typescript
+import {
+  registerRefresher,
+  registerDefaultRefreshers,
+  executeReload,
+  formatReloadResult,
+  IN_FLIGHT_MARKER,
+  registeredSubsystems,
+  type ReloadOutcome,
+  type ReloadResult,
+  type Refresher,
+} from './cli/commands/reload.js';
+
+// Bootstrap the built-in targets (routing-config, user-config, skills).
+// Idempotent — safe to call from multiple bootstrap paths.
+registerDefaultRefreshers();
+
+// Plug an extra subsystem into the reload pass. Later calls with the
+// same name overwrite the earlier function reference.
+registerRefresher('my-plugin', async () => {
+  // Throw with the IN_FLIGHT_MARKER prefix to signal "skip, don't fail":
+  if (pluginBusy) {
+    throw new Error(`${IN_FLIGHT_MARKER} one request in flight`);
+  }
+  await reloadMyPluginState();
+});
+
+const result: ReloadResult = await executeReload();
+console.log(formatReloadResult(result));
+console.log('registered:', registeredSubsystems());
+
+interface ReloadOutcome {
+  subsystem: string;
+  ok: boolean;
+  reason?: string;    // populated on failure or skip
+  skipped?: boolean;  // true when the refresher threw an IN_FLIGHT_MARKER error
+}
+
+interface ReloadResult {
+  outcomes: ReloadOutcome[];
+  elapsedMs: number;
+}
+
+type Refresher = () => Promise<void>;
+```
+
+See [ARCHITECTURE.md — `/reload` Command Primitive](ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts) for the design contract.
+
 ### code-review
 
 Run a structured correctness-bug review over the current `git diff`. The command reuses the
@@ -1597,7 +1672,7 @@ Behaviour:
 
 ## Snapshot Persistence API
 
-`src/core/snapshot.ts` persists the "snapshots disabled" flag across CLI restarts.
+`src/core/snapshot.ts` persists the "snapshots disabled" flag across CLI restarts and exposes the on-disk snapshot lifecycle.
 
 ```typescript
 import {
@@ -1606,6 +1681,8 @@ import {
   shouldSnapshot,
   SNAPSHOT_DISABLE_STATE_KEY,   // 'kilocode.snapshot.disabled'
   pruneSnapshots,
+  discardSnapshotRepository,
+  snapshotRepositoryExists,
 } from '../core/snapshot.js';
 
 await disableSnapshots();                 // persist disable to ~/.alexi/state/snapshot.json
@@ -1616,9 +1693,62 @@ const on = await shouldSnapshot();        // true when snapshots are on
 // Retains the newest `keep` files (default 20). No-op when the
 // snapshots directory does not exist.
 const deleted = await pruneSnapshots(sessionId, 20);
+
+// Wipe every snapshot for a session. Idempotent — a missing directory
+// resolves to 0 without throwing, so stale in-memory references cannot
+// pin a session that no longer exists.
+const removed = await discardSnapshotRepository(sessionId);
+
+// Cheap sync check for UI paths that need to know whether a rewind
+// dialog built from a stale listSnapshots() result is still valid.
+if (!snapshotRepositoryExists(sessionId)) {
+  // repository has been discarded — refetch or bail out
+}
 ```
 
-A missing or unreadable state file is treated as "not disabled" so an unwritable state directory degrades gracefully rather than silently disabling snapshots.
+A missing or unreadable state file is treated as "not disabled" so an unwritable state directory degrades gracefully rather than silently disabling snapshots. `discardSnapshotRepository` returns the number of `.json` files actually deleted (`0` when the directory did not exist). See [ARCHITECTURE.md — Snapshot-Repository Lifecycle](ARCHITECTURE.md#snapshot-repository-lifecycle).
+
+## Prompt Queue API
+
+`src/core/promptQueue.ts` exposes the append-only queue used by interactive drivers to hold user prompts that arrive while an agent goal is in flight. A new inbound prompt does NOT cancel the goal — that would throw away partial work. Only an explicit `interrupt()` (Ctrl+C, `/stop`, abort) cancels.
+
+```typescript
+import { PromptQueue, type QueuedPrompt, type ActiveGoalHandle } from '../core/promptQueue.js';
+
+interface QueuedPrompt {
+  text: string;
+  enqueuedAt: number;
+  metadata?: Record<string, unknown>;
+}
+
+interface ActiveGoalHandle {
+  id: string;
+  cancel: (reason: string) => void;   // ONLY invoked by interrupt(), never by enqueue()
+}
+
+const queue = new PromptQueue({
+  logger: (event, fields) => log.debug(event, fields),
+  onQueuedBehindGoal: (prompt, goalId) =>
+    ui.showBadge(`queued (${goalId})`),
+});
+
+queue.startGoal({ id: 'goal-1', cancel: (r) => abortController.abort(r) });
+queue.enqueue({ text: 'follow up', enqueuedAt: Date.now() });   // never cancels the goal
+queue.finishGoal();                                             // idempotent
+const pending: QueuedPrompt[] = queue.drain();
+
+queue.interrupt('user pressed Ctrl+C');                         // the ONLY cancel path
+```
+
+Semantics:
+
+- `enqueue(prompt)` — appends; fires `onQueuedBehindGoal(prompt, goalId)` when a goal is active.
+- `interrupt(reason)` — the only path that calls `handle.cancel(reason)`. Snapshots the handle before nulling out so a slow cancel implementation cannot race with a concurrent `finishGoal()`.
+- `finishGoal()` — idempotent, safe to call in `finally` blocks even when `startGoal` was skipped.
+- `drain()` — returns queued prompts in enqueue order and clears the buffer; typically called by the driver once `finishGoal()` has been invoked.
+- `size()` / `hasActiveGoal()` — status accessors for prompt indicators; `size()` excludes any in-flight goal.
+
+See [ARCHITECTURE.md — Prompt Queue](ARCHITECTURE.md#prompt-queue-srccorepromptqueuets).
 
 ## Sandbox Git-Write API
 
@@ -1780,6 +1910,58 @@ interface PermissionRule {
   homeExpansion?: boolean;
 }
 ```
+
+### Permission Result and Rejection Feedback
+
+```typescript
+interface PermissionResult {
+  decision: PermissionDecision;
+  rule?: PermissionRule;
+  granted: boolean;
+  provenance?: PermissionProvenance;
+  /**
+   * Optional natural-language reason supplied by the user when rejecting the
+   * tool. Only populated when `decision === 'deny'` and the user's response
+   * carried a `feedback` payload. Approvals never surface feedback.
+   * Whitespace-only input is trimmed to `undefined`.
+   */
+  feedback?: string;
+}
+```
+
+The permission-rejection feedback flow (ports of kilocode `b30b2cf0d` and follow-ups) threads a user-supplied natural-language reason from the prompt UI through `PermissionResponse` and `PermissionResult` out to the tool result, where the agent loop forwards it to the model as a follow-up user turn.
+
+Event shape (`src/bus/index.ts`):
+
+```typescript
+export const PermissionResponse = defineEvent(
+  'permission.response',
+  z.object({
+    id: z.string(),
+    granted: z.boolean(),
+    remember: z.boolean().optional(),
+    timestamp: z.number(),
+    /**
+     * Optional natural-language reason the user supplied when rejecting
+     * the tool. Absent / empty when the user did not supply a reason.
+     */
+    feedback: z.string().optional(),
+  })
+);
+```
+
+TUI dialog result shape (`src/cli/tui/dialogs/PermissionDialog.tsx`):
+
+```typescript
+export interface PermissionResult {
+  granted: boolean;
+  remember: boolean;
+  /** Empty / omitted when the user approved or skipped the reason prompt. */
+  feedback?: string;
+}
+```
+
+The tool-result string is built by `buildUserRejectedToolReason(toolName, reason)` in `src/permission/index.ts` and always ends with the guidance suffix so the model does not treat the rejection as a system failure. See [ARCHITECTURE.md — Permission-Rejection Feedback Flow](ARCHITECTURE.md#permission-rejection-feedback-flow).
 
 ### Agentic Permission Configuration
 

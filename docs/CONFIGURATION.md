@@ -727,6 +727,36 @@ import { compactInChunks } from '../core/compaction-chunks.js';
 const result = await compactInChunks(largeContent, summarizeFn, 100000);
 ```
 
+## Runtime Reload (`alexi reload`)
+
+Configuration and skill files are read on process boot. To pick up a change
+in `~/.alexi/config.json`, `~/.alexi/routing.json`, a repo-local routing
+override, or the skill directories without restarting the CLI, run:
+
+```bash
+alexi reload
+```
+
+The command re-runs a lazy dynamic-import for each registered target
+(`routing-config`, `user-config`, `skills`) and prints a per-subsystem
+summary:
+
+```text
+  ✓ routing-config
+  ✓ user-config
+  ⏭  skills — skipped: in-flight request
+
+Reload complete: 2 ok, 0 failed, 1 skipped (42ms).
+```
+
+Skipped subsystems are not failures — a reload attempted during an active
+completion is a valid outcome, and the exit code stays `0`. A non-skip
+failure sets `process.exitCode = 1`. Plugins and hosts that own additional
+runtime state can plug into the reload pass via `registerRefresher(name, fn)`
+from `src/cli/commands/reload.js` — see
+[API.md — reload](./API.md#reload) and
+[ARCHITECTURE.md — `/reload` Command Primitive](./ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts).
+
 ## Hooks Configuration
 
 Lifecycle hooks execute at specific events during tool execution and session management.
@@ -1066,8 +1096,19 @@ The snapshots-disabled flag persists across CLI restarts via
 A missing or unreadable file is treated as "not disabled" (snapshots on by
 default) so an unwritable state directory degrades gracefully. See
 [API.md — Snapshot Persistence API](./API.md#snapshot-persistence-api) for
-the programmatic surface (`disableSnapshots`, `enableSnapshots`,
-`shouldSnapshot`, `SNAPSHOT_DISABLE_STATE_KEY`).
+the full programmatic surface (`disableSnapshots`, `enableSnapshots`,
+`shouldSnapshot`, `SNAPSHOT_DISABLE_STATE_KEY`, `pruneSnapshots`,
+`discardSnapshotRepository`, `snapshotRepositoryExists`).
+
+The snapshot directory itself lives at `~/.alexi/sessions/<sessionId>/snapshots/`
+and can disappear underneath a running session (user `rm -rf`'d the sessions
+dir, an out-of-band migration ran, a purge command completed). Callers that
+need to recover from that condition without crashing should use
+`discardSnapshotRepository(sessionId)` (idempotent — returns `0` when the
+directory is already gone) and `snapshotRepositoryExists(sessionId)` (cheap
+synchronous existence check) rather than trying to `stat` or `readdir` the
+directory manually. See
+[ARCHITECTURE.md — Snapshot-Repository Lifecycle](./ARCHITECTURE.md#snapshot-repository-lifecycle).
 
 ### SQLite Databases
 
