@@ -118,8 +118,10 @@ export const builtInTools = [
  * the next process restart (Alexi does not hot-reload tools mid-turn).
  *
  * Ports kilocode #14013: the enable path also accepts the environment
- * flags `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1` or the umbrella
- * `KILO_EXPERIMENTAL=1`, via `isBoardEnabled()` in `userConfig.ts`.
+ * flags `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1`, the umbrella
+ * `KILO_EXPERIMENTAL=1`, or the upstream-parity
+ * `KILOCODE_EXPERIMENTAL_SWARM_BOARD` (truthy: `1|true|yes|on`), all
+ * resolved by `isBoardEnabled()` in `userConfig.ts`.
  */
 export function registerBuiltInTools(): void {
   for (const tool of builtInTools) {

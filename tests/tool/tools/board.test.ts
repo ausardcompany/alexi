@@ -24,6 +24,7 @@ import {
 describe('isBoardEnabled', () => {
   const savedSpecific = process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
   const savedUmbrella = process.env.KILO_EXPERIMENTAL;
+  const savedKilocode = process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
   let originalConfigContent: string | null = null;
 
   beforeEach(() => {
@@ -37,6 +38,7 @@ describe('isBoardEnabled', () => {
     setConfigSharedAgentBoard(false);
     delete process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD;
     delete process.env.KILO_EXPERIMENTAL;
+    delete process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
   });
 
   afterEach(() => {
@@ -60,6 +62,11 @@ describe('isBoardEnabled', () => {
       delete process.env.KILO_EXPERIMENTAL;
     } else {
       process.env.KILO_EXPERIMENTAL = savedUmbrella;
+    }
+    if (savedKilocode === undefined) {
+      delete process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
+    } else {
+      process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD = savedKilocode;
     }
   });
 
@@ -97,4 +104,27 @@ describe('isBoardEnabled', () => {
     process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD = '1';
     expect(isBoardEnabled()).toBe(true);
   });
+
+  // Issue #1732 verification: the upstream-parity env var name must also
+  // enable the board via the primary gate consulted by
+  // `registerBuiltInTools()`. Before this fix, only the `KILO_*` namespace
+  // was wired in and setting `KILOCODE_EXPERIMENTAL_SWARM_BOARD=1` had no
+  // effect on tool registration.
+  it.each(['1', 'true', 'yes', 'on', 'TRUE', 'On'])(
+    'returns true when KILOCODE_EXPERIMENTAL_SWARM_BOARD is truthy value %s',
+    (value) => {
+      setConfigSharedAgentBoard(false);
+      process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD = value;
+      expect(isBoardEnabled()).toBe(true);
+    }
+  );
+
+  it.each(['0', 'false', 'no', 'off', '', 'maybe'])(
+    'ignores KILOCODE_EXPERIMENTAL_SWARM_BOARD value %s when nothing else opts in',
+    (value) => {
+      setConfigSharedAgentBoard(false);
+      process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD = value;
+      expect(isBoardEnabled()).toBe(false);
+    }
+  );
 });

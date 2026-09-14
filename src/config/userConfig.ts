@@ -708,6 +708,8 @@ export function setConfigSharedAgentBoard(enabled: boolean): void {
  *   1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json`
  *   2. `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1` in the environment
  *   3. `KILO_EXPERIMENTAL=1` umbrella flag in the environment
+ *   4. `KILOCODE_EXPERIMENTAL_SWARM_BOARD` in the environment (upstream
+ *      kilocode env-var name, truthy `1|true|yes|on`, falsy `0|false|no|off`)
  *
  * The rule is a boolean OR: an explicit config `false` does NOT override a
  * set env flag. This mirrors upstream `BoardEnabled.resolve` so operators
@@ -715,17 +717,48 @@ export function setConfigSharedAgentBoard(enabled: boolean): void {
  * editing the persistent config file, while a permanent opt-in via config
  * continues to work when no env vars are set.
  *
- * Env flag values are compared literally to `'1'` — any other value
- * (`'0'`, `'true'`, empty, unset) is treated as unset. This keeps the
- * enable path unambiguous and prevents `KILO_EXPERIMENTAL=0` from being
- * misread as an opt-in.
+ * The two `KILO_*` env flags use strict `=== '1'` comparison — any other
+ * value (`'0'`, `'true'`, empty, unset) is treated as unset, keeping the
+ * enable path unambiguous and preventing `KILO_EXPERIMENTAL=0` from being
+ * misread as an opt-in. The upstream-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD`
+ * flag delegates to `isBoardEnvFlagEnabled` in `src/kilocode/board/enabled.ts`
+ * so it accepts the wider truthy/falsy vocabulary documented by upstream
+ * kilocode PR #14013; a falsy value there does NOT force-disable the feature
+ * (that would require reading three signals coherently), it simply does not
+ * count as an opt-in — the OR still wins on any of the other three signals.
+ *
+ * Issue #1732 (2026-09-14): closes the gap where setting only
+ * `KILOCODE_EXPERIMENTAL_SWARM_BOARD=1` had NO effect on tool registration
+ * because `registerBuiltInTools()` only consulted this predicate and this
+ * predicate only knew about the `KILO_*` namespace. The two env-var
+ * namespaces are now unified here at the single primary gate.
  */
 export function isBoardEnabled(): boolean {
   return (
     getConfigSharedAgentBoard() ||
     process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1' ||
-    process.env.KILO_EXPERIMENTAL === '1'
+    process.env.KILO_EXPERIMENTAL === '1' ||
+    isKilocodeSwarmBoardEnvTruthy()
   );
+}
+
+/**
+ * Local mirror of `src/kilocode/board/enabled.ts`'s truthy set. Kept private
+ * to this module because `isBoardEnabled()` needs a sync, side-effect-free
+ * check with no external imports (the kilocode module still exists for
+ * downstream tooling that wants the standalone three-signal resolver).
+ *
+ * Only truthy values register as an opt-in. Falsy values are treated as
+ * "no opinion" so a mistakenly set `KILOCODE_EXPERIMENTAL_SWARM_BOARD=0`
+ * does not force-off a config-based or `KILO_EXPERIMENTAL=1` opt-in.
+ */
+function isKilocodeSwarmBoardEnvTruthy(): boolean {
+  const raw = process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD;
+  if (raw === undefined) {
+    return false;
+  }
+  const lowered = raw.toLowerCase();
+  return lowered === '1' || lowered === 'true' || lowered === 'yes' || lowered === 'on';
 }
 
 // ============ Batch update with options ============

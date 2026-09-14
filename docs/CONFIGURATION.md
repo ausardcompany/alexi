@@ -128,6 +128,8 @@ KILOCODE_EXPERIMENTAL_SWARM_BOARD=0 alexi chat -m "..."
 
 Callers should compose this env flag with the persisted config via `isBoardEnabled(experimentalConfigFlag)` in `src/kilocode/board/enabled.ts` — the function returns `true` if any of the three signals (env, channel default, persisted config) enables the feature, with the env flag winning on explicit falsy values. See [Experimental Shared Agent Board](#experimental-shared-agent-board) for the full enablement matrix.
 
+Since issue #1732 (2026-09-14), the primary registration gate `isBoardEnabled()` in `src/config/userConfig.ts` also honors this env-var directly, so setting `KILOCODE_EXPERIMENTAL_SWARM_BOARD=1` alone is sufficient to expose `kilo_board_read` / `kilo_board_write` to the model without also flipping `experimental.sharedAgentBoard` or setting a `KILO_*` flag. Truthy vocabulary at the primary gate: `1|true|yes|on` (case-insensitive). Falsy values there are treated as "no opinion" — they do NOT force-disable an opt-in coming from the config or a `KILO_*` env flag, so if you want to force-off the board while also having `KILO_EXPERIMENTAL=1` in scope, unset `KILO_EXPERIMENTAL` rather than relying on `KILOCODE_EXPERIMENTAL_SWARM_BOARD=0`.
+
 #### KILO_EXPERIMENTAL_SHARED_AGENT_BOARD
 
 Alexi-native feature-specific env flag for the shared agent board, resolved by `isBoardEnabled()` in `src/config/userConfig.ts:628` (issue #1698). Complements the upstream-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag: `KILO_*` follows the same naming convention as `KILO_FLAGS` / `KILO_RETRIES` in Alexi's agent workflows, while `KILOCODE_*` preserves upstream kilocode compatibility. Set to the literal string `'1'` to enable — any other value (`'0'`, `'true'`, empty, unset) is treated as unset, so `KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=0` is never misread as an opt-in.
@@ -136,11 +138,12 @@ Alexi-native feature-specific env flag for the shared agent board, resolved by `
 KILO_EXPERIMENTAL_SHARED_AGENT_BOARD=1 alexi chat -m "..."
 ```
 
-The resolver combines three signals with boolean OR — an explicit config `false` does NOT override a set env flag:
+The resolver combines four signals with boolean OR — an explicit config `false` does NOT override a set env flag:
 
 1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
 2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` (this flag).
 3. `process.env.KILO_EXPERIMENTAL === '1'` (umbrella flag, see below).
+4. `process.env.KILOCODE_EXPERIMENTAL_SWARM_BOARD` matches a truthy value `1|true|yes|on` (case-insensitive, upstream-parity name — wired in for issue #1732).
 
 Read fresh on each call — a config change picks up on the next process restart. Alexi does not hot-reload tool registrations mid-turn.
 
@@ -152,7 +155,7 @@ Umbrella experimental flag that enables every Alexi-native experimental feature 
 KILO_EXPERIMENTAL=1 alexi agent -m "explore repo"
 ```
 
-This coexists with the kilocode-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag documented above. The two resolvers live in separate modules (`src/config/userConfig.ts` vs `src/kilocode/board/enabled.ts`) and target different env-var namespaces (`KILO_*` vs `KILOCODE_*`) — they are not unified because they serve different audiences: `isBoardEnabled()` in `userConfig.ts` is the primary gate used by tool registration and swarm-identity attach; the kilocode module preserves upstream parity for anyone porting downstream tooling that expects the upstream env-flag name.
+This coexists with the kilocode-parity `KILOCODE_EXPERIMENTAL_SWARM_BOARD` flag documented above. Since issue #1732 (2026-09-14) both env-var namespaces are wired into the primary registration gate (`isBoardEnabled()` in `src/config/userConfig.ts`), so setting either one is sufficient. The standalone three-signal resolver in `src/kilocode/board/enabled.ts` is preserved for downstream tooling that ports from kilocode and expects the upstream module path — the two coexist because they serve different audiences: the primary gate is the OR-of-four resolver used by tool registration and swarm-identity attach; the kilocode module is a self-contained truthy/falsy-with-fallback helper for downstream code.
 
 #### MAX_SUBAGENT_DEPTH
 
