@@ -3651,3 +3651,132 @@ The following pieces of the image-generation feature are **not yet in the codeba
 - **TUI image rendering.** A component under `src/cli/tui/components/` will render a `NormalizedImageChunk` inline in terminals that support Kitty or iTerm2 graphics protocols, falling back to `[Image: <mime>, <size>]` placeholders elsewhere. The optional `terminal-image` module (already used for the input-side attachment flow in `src/cli/tui/utils/terminalImage.ts`) is the anticipated backend.
 
 When these pieces land, this section will be revised to document their user-facing surfaces alongside the infrastructure above.
+
+## Prompt Queue (`src/core/promptQueue.ts`)
+
+Alexi's interactive REPL and headless session drivers keep a running agent goal in flight for the duration of a single tool-execution loop. A new user prompt arriving mid-turn must NOT preempt that goal — doing so throws away partial work and, worse, means a Ctrl+C interrupt and a typed follow-up are indistinguishable at the CLI boundary. `PromptQueue` splits the two:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Driver as REPL / headless driver
+    participant Queue as PromptQueue
+    participant Agent as Agent loop
+
+    User->>Driver: turn 1 ("refactor the auth module")
+    Driver->>Queue: startGoal(handle)
+    Driver->>Agent: run goal
+    User->>Driver: turn 2 ("also add tests") — arrives mid-turn
+    Driver->>Queue: enqueue(turn 2)
+    Note over Queue: onQueuedBehindGoal fires; goal keeps running
+    Agent-->>Driver: turn 1 result
+    Driver->>Queue: finishGoal()
+    Driver->>Queue: drain()
+    Queue-->>Driver: [turn 2]
+    Driver->>Agent: process turn 2
+
+    User->>Driver: Ctrl+C
+    Driver->>Queue: interrupt("user pressed Ctrl+C")
+    Queue-->>Agent: handle.cancel("user pressed Ctrl+C")
+```
+
+Design invariants (ports of kilocode `5665631ab` and `60bb54b0f`):
+
+- `enqueue()` NEVER touches `activeGoal.cancel`. Message-arrival is not an interrupt.
+- `interrupt(reason)` is the only path that calls `handle.cancel(reason)`. The handle is snapshotted before nulling out so a slow cancel implementation cannot race with a concurrent `finishGoal()`.
+- `finishGoal()` is idempotent. Drivers can safely call it inside a `finally` block even when `startGoal` was skipped (e.g. an abort before the goal was registered).
+- The module is dependency-free. `PromptQueueOptions.logger` defaults to a silent no-op so unit tests can silence the queue without any global setup, and the CLI attaches its own structured logger when it wires up the queue.
+- The queue itself never triggers drain — the driver decides when to call `drain()` (typically once the active goal settles). `size()` and `hasActiveGoal()` are exposed for status-bar / prompt indicators.
+
+`onQueuedBehindGoal(prompt, goalId)` is an informational callback so drivers can render a "queued behind current goal" indicator; it does not participate in scheduling.
+
+## `/reload` Command Primitive (`src/cli/commands/reload.ts`)
+
+`alexi reload` (also exposed as the `/reload` slash-command once the TUI wires it in) re-reads runtime state for the current project without restarting the CLI. Ports kilocode `feat(cli): reload the whole project from /reload` (commit `3a2c5d5c2`) plus follow-up `fix(cli): surface reload failures and skip in-flight instances` (commit `546195019`).
+
+```mermaid
+flowchart TD
+    Cmd[alexi reload] --> Bootstrap{Any refreshers registered?}
+    Bootstrap -->|No| DefaultReg[registerDefaultRefreshers]
+    Bootstrap -->|Yes| Run
+    DefaultReg --> Run[executeReload]
+    Run --> Iter[for each refresher in registration order]
+    Iter --> Call[await refresher]
+    Call --> ClassifyErr{Threw?}
+    ClassifyErr -->|No| Ok[outcome: ok=true]
+    ClassifyErr -->|Message starts with IN_FLIGHT| Skip[outcome: skipped=true, reason=message after marker]
+    ClassifyErr -->|Other error| Fail[outcome: ok=false, reason=message]
+    Ok --> Next[next refresher]
+    Skip --> Next
+    Fail --> Next
+    Next --> AllDone{All done?}
+    AllDone -->|No| Iter
+    AllDone -->|Yes| Format[formatReloadResult]
+    Format --> Log[logger.info + stdout write]
+    Log --> ExitCode{Any failures?}
+    ExitCode -->|Yes| Exit1[process.exitCode = 1]
+    ExitCode -->|Skipped only| Exit0[exitCode unchanged]
+```
+
+Design contract:
+
+- **In-flight is a skip, not a failure.** A refresher that refuses because a request is in flight throws an `Error` whose message starts with `IN_FLIGHT:` (exported as `IN_FLIGHT_MARKER`). `executeReload` strips the marker, sets `skipped: true`, and preserves the reason for display. A reload during an active completion is a valid outcome, not an error, and does NOT set `process.exitCode = 1`.
+- **Failures do not abort the pass.** Each refresher gets its chance regardless of what the previous one did. Aggregated `outcomes` are returned to the caller, which decides how to render them (`formatReloadResult` is the shared renderer).
+- **Idempotent bootstrap.** `registerDefaultRefreshers` uses dynamic imports so the config / skill graph is not pulled into memory before the user actually invokes `/reload`. Re-registering the same subsystem overwrites the previous function reference, so bootstrap order does not matter.
+- **Alexi ≠ kilocode multi-instance registry.** Kilocode's `/reload` walks a runtime instance registry; Alexi treats "the current project" as one logical unit. The reload targets are `routing-config`, `user-config`, and `skills`. MCP servers are registered separately by the interactive bootstrap when it needs a soft reconnect.
+- **Extension points.** Modules that own runtime state plug into the reload pass via `registerRefresher(name, fn)`; there is no central switch statement or import list to edit. `unregisterRefresher(name)` and `_resetRefreshersForTest()` support test isolation.
+
+## Permission-Rejection Feedback Flow
+
+When the user denies a tool call they can supply an optional natural-language reason. That reason travels end-to-end so the agent loop can forward it to the model as a follow-up user turn — the model then adapts to the user's stated preference instead of blindly retrying.
+
+```mermaid
+sequenceDiagram
+    participant Tool
+    participant PM as PermissionManager
+    participant Bus as Event Bus
+    participant Prompt as Prompt UI (CLI/TUI)
+    participant User
+    participant Agent as Agent loop
+    participant Model
+
+    Tool->>PM: check(ctx)
+    PM->>Bus: publish PermissionRequested
+    Bus->>Prompt: deliver request
+    Prompt->>User: [A]pprove [D]eny [R]emember [N]ever
+    User->>Prompt: D
+    Prompt->>User: Optional reason (Enter to skip)
+    User->>Prompt: "please use the read-only tool instead"
+    Prompt->>Bus: publish PermissionResponse { granted: false, feedback }
+    Bus-->>PM: PermissionResponse
+    PM->>PM: trim feedback (whitespace-only -> undefined)
+    PM-->>Tool: PermissionResult { granted: false, feedback }
+    Tool-->>Agent: ToolResult { success: false, error: buildUserRejectedToolReason(name, feedback) }
+    Agent->>Model: follow-up user turn with rejection reason
+    Model-->>Agent: adapted response
+```
+
+Contract (ports kilocode `b30b2cf0d`, `60bb54b0f`, `845565872`):
+
+- **Event shape.** `PermissionResponse` gains an optional `feedback: string`. Absent / empty when the user did not supply a reason. Approvals never carry feedback.
+- **Manager surface.** `PermissionResult.feedback?: string`. `PermissionManager.askUser` trims the incoming payload; whitespace-only feedback resolves to `undefined` so callers always see a clean value or nothing at all. Feedback is denial-only — an approval with an attached `feedback` string is silently dropped.
+- **CLI prompt (`src/permission/prompt.ts`).** After the primary approve/deny prompt, denials open a second read-only prompt with a 30 s timeout. The primary readline is closed BEFORE opening the feedback prompt so the approval shortcut (`A` / `R`) cannot fire on top of the feedback line.
+- **TUI prompt (`src/cli/tui/dialogs/PermissionDialog.tsx`).** Two-phase state (`pendingDeny` / `feedback`). While `pendingDeny` is set, `useInput` swallows shortcut keys so a stray `a` in the reason cannot re-arm the approve path. Enter submits; Esc closes with an empty feedback (equivalent to skipping the reason).
+- **Tool result.** `defineTool` (`src/tool/index.ts:483-497`) and the sandboxed-git-write path in `src/tool/tools/shell.ts:190-201` prefer `result.feedback` over the generic action/resource descriptor when building the `buildUserRejectedToolReason` string. The `USER_REJECTION_GUIDANCE_SUFFIX` (cline/cline#12673) is still appended so the model does not treat the rejection as a system failure.
+
+Example serialized error the agent forwards to the model:
+
+```text
+User rejected shell: please use the read-only tool instead — The user's rejection is not evidence you did something wrong. Consider waiting for further guidance before trying again.
+```
+
+## Snapshot-Repository Lifecycle
+
+`src/core/snapshot.ts` persists per-step snapshots under `~/.alexi/sessions/<sessionId>/snapshots/<stepId>.json`. Long-running sessions and multi-driver deployments must tolerate the on-disk repository disappearing between snapshot creation and access (user `rm -rf`'d the sessions dir, a `sessions purge` ran mid-agent, an out-of-band migration moved the tree). Ports the concept behind kilocode's `bdb303f09`, `6435aa954`, and `a81cdf905` — Alexi does not use kilocode's worktree/seed-pin model, but the "already gone" failure modes are the same.
+
+Public surface:
+
+- `discardSnapshotRepository(sessionId): Promise<number>` — single entry point for wiping a session's snapshot directory. Returns the number of `.json` files actually deleted (`0` when the directory did not exist or was already empty). Idempotent: a missing directory returns `0` without throwing, so a stale in-memory reference cannot pin a session that no longer exists. Best-effort `rmdir` on the (now-empty) directory; a concurrent writer racing the deletion is fine — the next call is still idempotent.
+- `snapshotRepositoryExists(sessionId): boolean` — synchronous best-effort check via `existsSync`. Safe for zero-await callers (UI paths). Long-lived references built from a stale `listSnapshots()` result should re-check this before attempting `revertTo()`: a `false` result means the on-disk repository is gone and the caller must refetch or bail out. For async callers, `listSnapshots(sessionId).then(x => x.length > 0)` is equivalent and preferred.
+
+Both helpers are additive on top of the existing `recordSnapshot` / `listSnapshots` / `loadSnapshot` / `previewRevert` / `revertTo` / `pruneSnapshots` API (see [API.md — Snapshot Persistence API](API.md#snapshot-persistence-api)).
