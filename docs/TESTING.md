@@ -4759,3 +4759,122 @@ Regression barriers pinned by the suite (do not remove without adding an equival
 7. **`describeReason` covers both trip kinds.** The pure formatter's output is asserted for both `kind: 'loop'` (contains `"same tool ('<name>')"`, `"N times in a row"`, `"loop"`) and `kind: 'mistake'` (contains `"N consecutive tool failures"`, `"last: '<name>'"`, `"flailing"`).
 
 When extending this suite, keep every case restricted to the callback surface only. The `agenticChat` steering-message injection is covered by the integration suite above and should NOT be re-tested here — mixing the two layers is what the `mistakeLimitPrompt` module was extracted to prevent.
+
+## Testing the `/reload` Command Primitive
+
+The reload command has a single test file at `src/cli/commands/__tests__/reload.test.ts` (86 lines, 5 cases). Every test starts from `_resetRefreshersForTest()` so global registration state does not leak between cases:
+
+```typescript
+import {
+  registerRefresher,
+  executeReload,
+  formatReloadResult,
+  IN_FLIGHT_MARKER,
+  _resetRefreshersForTest,
+  registeredSubsystems,
+} from '../../../src/cli/commands/reload.js';
+
+beforeEach(() => {
+  _resetRefreshersForTest();
+});
+```
+
+Contract asserted by the suite:
+
+1. **Every registered refresher runs.** After registering two async refreshers, `executeReload()` calls both exactly once and reports `ok: true` for each.
+2. **Failures do not abort the pass.** A refresher that throws does NOT prevent subsequent refreshers from running; the failure surfaces as `outcome.ok === false` with the error message on `outcome.reason`.
+3. **In-flight is a skip, not a failure.** A refresher that throws `${IN_FLIGHT_MARKER} <reason>` is classified as `skipped: true` with the marker prefix stripped from `outcome.reason`.
+4. **Format renderer output shape.** `formatReloadResult({ elapsedMs: 42, outcomes: [...] })` produces the `✓ / ✗ / ⏭` bullets, the `X ok, Y failed, Z skipped` tally, and the `42ms` elapsed suffix — the TUI slash-command handler and the CLI Commander action both reuse it.
+5. **Registration order preserved.** `registeredSubsystems()` returns names in insertion order so status displays and observability tools have a stable ordering.
+
+Do not add tests that call the real `registerDefaultRefreshers()` here — that path pulls the config / skill graph via dynamic import and is exercised end-to-end by the CLI integration tests. Keep the primitive tests dependency-free.
+
+## Testing the Prompt Queue
+
+`src/core/__tests__/promptQueue.test.ts` (99 lines, 8 cases) pins the enqueue-vs-preempt policy that separates message-arrival from user-initiated interrupts. A shared `makeGoal(id)` helper returns a handle whose `cancel` field is a `vi.fn()` so the tests can assert directly on how many times `cancel` was called and with what reason:
+
+```typescript
+function makeGoal(id: string) {
+  const cancel = vi.fn();
+  return { handle: { id, cancel }, cancel };
+}
+```
+
+Regression barriers pinned by the suite (do not remove without adding an equivalent test elsewhere):
+
+1. **`enqueue()` NEVER cancels an active goal.** Multiple `enqueue()` calls while a goal is in flight leave `handle.cancel` un-called and `hasActiveGoal()` `true`. This is the exact upstream bug (kilocode `5665631ab`) — a new inbound prompt would preempt the goal mid-turn. Any regression that lets `enqueue()` call `cancel` should be caught here.
+2. **`drain()` preserves enqueue order and clears the buffer.** Prompts come out in the order they went in; after drain, `size() === 0` and `hasActiveGoal() === false`.
+3. **`interrupt(reason)` is the ONLY path that calls `handle.cancel`.** Asserted with `expect(cancel).toHaveBeenCalledWith('user pressed Ctrl+C')`.
+4. **`interrupt()` is a no-op with no active goal.** Does not throw; `hasActiveGoal()` stays `false`.
+5. **`finishGoal()` is idempotent.** Multiple calls do not throw and do not resurrect a stale goal.
+6. **`onQueuedBehindGoal` fires with `(prompt, goalId)` only when a goal is active.** The callback receives the goal id as its second argument; when no goal is in flight the callback is NOT fired.
+7. **Empty drain returns `[]`.** `drain()` on an empty queue returns an empty array, not `undefined`.
+
+## Testing Permission-Rejection Feedback
+
+`src/permission/__tests__/rejection-feedback.test.ts` (131 lines, 4 cases) locks in the "reject with feedback" flow at the `PermissionManager` boundary. Each test spins up a fresh `PermissionManager` with an `ask` rule for `shell`, subscribes to `PermissionRequested`, publishes a `PermissionResponse` with a controlled `feedback` payload, and asserts on the resulting `PermissionResult.feedback`:
+
+```typescript
+const manager = new PermissionManager([
+  { id: 'ask-shell', tools: ['shell'], decision: 'ask', priority: 10 },
+]);
+
+const unsub = PermissionRequested.subscribe((req) => {
+  PermissionResponse.publish({
+    id: req.id,
+    granted: false,
+    timestamp: Date.now(),
+    feedback: '  please use the read-only tool instead  ',
+  });
+});
+
+try {
+  const result = await manager.check({
+    toolName: 'shell',
+    action: 'execute',
+    resource: 'ls -la',
+  });
+  expect(result.granted).toBe(false);
+  expect(result.feedback).toBe('please use the read-only tool instead');
+} finally {
+  unsub();
+}
+```
+
+Contract pinned by the suite:
+
+1. **Trimmed feedback is surfaced on `PermissionResult.feedback`.** Whitespace at the edges is stripped by `askUser()`.
+2. **Approvals never surface feedback.** Even when the caller mistakenly attaches a feedback string to an approval response, `PermissionResult.feedback` is `undefined` — feedback is denial-only.
+3. **Plain deny with no reason resolves to `undefined`.** The common case: user rejected but did not type a reason.
+4. **Whitespace-only feedback is treated as absent.** `'   \t  '` is trimmed to `''`, which resolves to `undefined` so callers always see a clean value or nothing at all.
+
+Test isolation: each test unsubscribes its bus listener in a `finally` block so a failing assertion does not leak a subscription into subsequent cases. No global state to reset — a fresh `PermissionManager` per test is enough.
+
+## Testing the Snapshot-Repository Lifecycle
+
+`tests/core/snapshot-lifecycle.test.ts` (81 lines, 3 cases) covers the "already gone" hardening on top of the existing snapshot-persistence tests. Each test creates a temp `$HOME` (`fs.mkdtemp`) and tears it down in `afterEach` so parallel test runs are safe:
+
+```typescript
+beforeEach(async () => {
+  tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-snapshot-lifecycle-'));
+  originalHome = process.env.HOME;
+  process.env.HOME = tmpHome;
+});
+
+afterEach(async () => {
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+  await fs.rm(tmpHome, { recursive: true, force: true });
+});
+```
+
+Contract asserted by the suite:
+
+1. **`discardSnapshotRepository` removes every snapshot for a session and returns the count.** After recording two snapshots, `discardSnapshotRepository` deletes both and reports `2`; `snapshotRepositoryExists` flips to `false`; `listSnapshots` returns `[]`.
+2. **Idempotent when the directory is already gone.** Calling `discardSnapshotRepository` on a session that never created snapshots resolves to `0` without throwing. This is the "seed pin held after repo removed" scenario from kilocode — a stale in-memory reference must not pin a session that no longer exists on disk.
+3. **`snapshotRepositoryExists` reflects on-disk state.** Returns `false` before any snapshot exists, `true` after `recordSnapshot`, `false` again after `discardSnapshotRepository`.
+
+Do not use the real `~/.alexi/sessions/` directory in these tests — the `fs.mkdtemp` + `process.env.HOME` swap guarantees the suite is isolated from the developer's actual session store and safe to run in parallel with other snapshot tests.

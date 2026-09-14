@@ -481,12 +481,17 @@ export function defineTool<TParams extends z.ZodType, TResult>(
         });
 
         if (!result.granted) {
+          // Prefer the user's own feedback (kilocode "reject with feedback"
+          // flow, commit b30b2cf0d) over the generic action/resource
+          // fallback. When present, it becomes the reason that flows back
+          // to the model as the tool result — the agent loop then sees a
+          // natural-language explanation instead of a boilerplate rejection.
+          const rejectionDetail = result.feedback
+            ? result.feedback
+            : `${definition.permission.action} on ${resource}`;
           return {
             success: false,
-            error: buildUserRejectedToolReason(
-              definition.name,
-              `${definition.permission.action} on ${resource}`
-            ),
+            error: buildUserRejectedToolReason(definition.name, rejectionDetail),
           };
         }
       }

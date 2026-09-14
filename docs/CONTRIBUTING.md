@@ -1835,6 +1835,64 @@ Contract for hook / instrumentation authors:
 - Auto-title generation skips any message carrying `displayRole`, so a `displayRole: 'system'` hook message will not become the session title.
 - If you add a new transcript view (a `sessions view` subcommand, an HTTP `/api/session/:id` endpoint, an MCP resource), you MUST honour `displayRole: 'system'` as a hard-hide. Tests should cover both the "user message is visible" and "displayRole=system is hidden even when showSystemMessages=true" cases.
 
+## Adding a Runtime-Reload Target
+
+Modules that own long-lived runtime state (a plugin loader, a hooks table, an in-process cache derived from an on-disk config) should plug themselves into the `alexi reload` pass rather than owning their own bespoke re-read flow. The registration surface lives in `src/cli/commands/reload.js`:
+
+```typescript
+import {
+  registerRefresher,
+  IN_FLIGHT_MARKER,
+  type Refresher,
+} from '../cli/commands/reload.js';
+
+const refreshMyPlugin: Refresher = async () => {
+  if (isMyPluginBusy()) {
+    // Skip, don't fail — a reload during an active request is a valid outcome.
+    throw new Error(`${IN_FLIGHT_MARKER} plugin request in flight`);
+  }
+  await reloadMyPluginState();
+};
+
+registerRefresher('my-plugin', refreshMyPlugin);
+```
+
+Guidelines when adding a new refresher:
+
+- **Idempotence.** Registering the same name overwrites the previous function reference, so bootstrap order does not matter and multiple bootstrap paths can safely call `registerRefresher` for the same subsystem.
+- **In-flight is a skip.** Throw an `Error` whose message starts with `IN_FLIGHT_MARKER` (exported constant `'IN_FLIGHT:'`) when the module cannot safely re-read state because a request is in flight. The reload pass classifies these as `skipped: true` and does NOT flip the exit code to `1`.
+- **Failure is not fatal.** A refresher that throws any other error surfaces as `outcome.ok === false` with the error message on `outcome.reason`, but the reload pass continues with the next refresher. Do NOT try to catch and recover inside the refresher just to avoid the failure being reported — the aggregated report is exactly the mechanism operators use to see which subsystems are unhealthy.
+- **Dynamic imports for expensive state.** Follow the pattern in `registerDefaultRefreshers` and use `await import('./path.js')` inside the refresher body rather than a top-level import; that keeps the reload module cold-start cheap and avoids pulling the full config / skill / plugin graph into memory just to satisfy the CLI dispatcher.
+- **Tests.** Add a case to `src/cli/commands/__tests__/reload.test.ts` (or a sibling file) that (1) registers your refresher via `registerRefresher`, (2) uses `_resetRefreshersForTest()` in `beforeEach`, and (3) asserts the `ReloadOutcome` shape returned by `executeReload()`.
+
+See [ARCHITECTURE.md — `/reload` Command Primitive](./ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts) for the design contract and [API.md — reload](./API.md#reload) for the full programmatic API.
+
+## Threading User Feedback Through New Permission Surfaces
+
+Any new tool-permission surface (a custom prompt UI, a headless approval hook, an alternative TUI dialog) MUST honour the permission-rejection feedback contract introduced in 1.22.20:
+
+1. **Publish feedback on the `PermissionResponse` event.** The bus schema (`src/bus/index.ts`) accepts an optional `feedback: string` field. Emit it when the user supplied a natural-language reason on a rejection; leave it absent (or empty) on approvals and plain denies.
+2. **Do NOT re-arm the approval shortcut while capturing feedback.** The CLI closes the primary readline BEFORE opening the feedback prompt; the TUI dialog uses a `pendingDeny` state to swallow shortcut keys. A stray `a` in a reason must not fire the approve path (parity with kilocode fix `845565872`).
+3. **Feedback is denial-only.** An approval carrying a `feedback` string is silently dropped by `PermissionManager.askUser` — do not build UX that relies on collecting feedback for a granted call.
+4. **Whitespace-only feedback is `undefined`.** The manager trims the payload; consumers always see either a non-empty trimmed string or nothing.
+
+Callers reading `PermissionResult.feedback` should prefer it over the generic action/resource descriptor when building the rejection reason the tool result forwards to the model — `defineTool` (`src/tool/index.ts`) and the sandboxed-git-write path in `src/tool/tools/shell.ts` are the reference implementations.
+
+See [ARCHITECTURE.md — Permission-Rejection Feedback Flow](./ARCHITECTURE.md#permission-rejection-feedback-flow).
+
+## Draining Prompts With `PromptQueue`
+
+Any new interactive or headless driver that maintains a user-message loop across an agent goal MUST route incoming prompts through `PromptQueue` (`src/core/promptQueue.ts`) instead of implementing its own preempt policy. The queue enforces the invariant that a new prompt appends behind the active goal and does NOT cancel it; only `interrupt(reason)` cancels.
+
+Two mistakes the queue exists to prevent:
+
+- **Message-arrival that masquerades as an interrupt.** Do not call `handle.cancel(...)` from your enqueue path. Route Ctrl+C, `/stop`, and abort signals through `queue.interrupt(reason)` — that is the single documented cancel channel.
+- **Draining before the goal settles.** Call `queue.finishGoal()` in a `finally` block after the active turn resolves (success or failure), then `queue.drain()` on the next tick to pick up any prompts that arrived mid-turn. The queue does not automatically drain — that decision belongs to the driver.
+
+Tests for a new driver should assert (a) `enqueue()` never invokes `handle.cancel`, (b) `interrupt(reason)` invokes `handle.cancel(reason)` exactly once, and (c) `drain()` after `finishGoal()` returns prompts in enqueue order.
+
+See [ARCHITECTURE.md — Prompt Queue](./ARCHITECTURE.md#prompt-queue-srccorepromptqueuets) and [API.md — Prompt Queue API](./API.md#prompt-queue-api).
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

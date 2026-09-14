@@ -332,3 +332,88 @@ export async function pruneSnapshots(sessionId: string, keep = 20): Promise<stri
   return deleted;
 }
 // alexi_change end
+
+// ============================================================================
+// alexi_change start: robustness for missing / discarded snapshot repositories
+// ============================================================================
+//
+// Mirrors kilocode upstream hardening for the snapshot subsystem:
+//   - `bdb303f09 fix: clean discarded worktree snapshots`
+//   - `6435aa954 fix(opencode): release the seed pin whenever the snapshot
+//      repository is gone`
+//   - `a81cdf905 fix(opencode): release the seed pin when removing an
+//      untracked snapshot repository`
+//
+// Alexi does not use a worktree/seed-pin model — snapshots are JSON files
+// under `~/.alexi/sessions/<id>/snapshots/` — but the same failure modes
+// apply: the on-disk directory can disappear underneath us (user rm -rf'd
+// their sessions dir, a `sessions purge` ran mid-agent, an out-of-band
+// migration moved the tree). In every case the correct behaviour is to
+// treat the snapshot as "gone", never crash, and let the caller decide
+// whether to recreate.
+//
+// `discardSnapshotRepository()` is the single entry point for wiping a
+// session's snapshot dir. It is idempotent — if the directory is already
+// missing it succeeds silently, so a stale in-memory reference cannot
+// pin a session that no longer exists.
+
+/**
+ * Remove every snapshot for a session and return the number of files
+ * that were actually deleted. Never throws for the common "already gone"
+ * case — that's the whole point of this helper; a missing directory is
+ * a valid post-condition.
+ *
+ * @param sessionId The session whose snapshot dir should be discarded.
+ * @returns The number of `.json` snapshot files deleted (0 when the
+ *   directory did not exist or was empty).
+ */
+export async function discardSnapshotRepository(sessionId: string): Promise<number> {
+  const dir = getSnapshotsDir(sessionId);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    // Already gone — nothing to release.
+    return 0;
+  }
+
+  let deleted = 0;
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) {
+      continue;
+    }
+    try {
+      await fs.unlink(path.join(dir, entry));
+      deleted++;
+    } catch {
+      // Best-effort — file may have vanished between readdir and unlink.
+    }
+  }
+
+  // Attempt to remove the (now-empty) directory. If it is still
+  // non-empty (e.g. concurrent writer just created a new snapshot) or
+  // permissions block us, that is fine — the next `discardSnapshotRepository`
+  // call is idempotent.
+  try {
+    await fs.rmdir(dir);
+  } catch {
+    // Non-fatal.
+  }
+
+  return deleted;
+}
+
+/**
+ * Check whether the on-disk snapshot repository for a session still
+ * exists. Callers holding a long-lived reference (e.g. a rewind dialog
+ * built from a stale listSnapshots() result) should re-check this
+ * before attempting revertTo(): a `false` result means the seed pin has
+ * effectively been released and the caller must refetch or bail out.
+ *
+ * Sync + best-effort: uses `existsSync` for zero-await callers (UI
+ * paths). For async callers `listSnapshots(sessionId).then(x => x.length > 0)`
+ * is equivalent and preferred.
+ */
+export function snapshotRepositoryExists(sessionId: string): boolean {
+  return existsSync(getSnapshotsDir(sessionId));
+}

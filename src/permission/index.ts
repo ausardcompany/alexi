@@ -305,6 +305,15 @@ export interface PermissionResult {
    * inspects `PermissionResult` continues to work unchanged).
    */
   provenance?: PermissionProvenance;
+  /**
+   * Optional natural-language reason supplied by the user when rejecting
+   * the tool. Only populated when `decision === 'deny'` and the user's
+   * response carried a `feedback` payload. Mirrors kilocode's
+   * "reject with feedback" flow — the agent loop is expected to forward
+   * this to the model as a follow-up user message so it can adapt to
+   * the user's stated preference.
+   */
+  feedback?: string;
 }
 
 // Permission manager class
@@ -899,9 +908,16 @@ export class PermissionManager {
         this.recordOperationAttempt(ctx);
       }
 
+      // Trim/normalise the optional rejection feedback so callers get a
+      // clean payload (or undefined) rather than whitespace. Only carried
+      // through on denials — approvals never surface feedback.
+      const trimmedFeedback =
+        !response.granted && typeof response.feedback === 'string' ? response.feedback.trim() : '';
+
       return {
         decision: response.granted ? 'allow' : 'deny',
         granted: response.granted,
+        feedback: trimmedFeedback ? trimmedFeedback : undefined,
       };
     } catch {
       // Timeout - deny by default, record the attempt

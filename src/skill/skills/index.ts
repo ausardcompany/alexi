@@ -27,18 +27,35 @@ export const codeReviewSkill = defineSkill({
 5. **Testability**: Missing tests, untestable code patterns
 
 ## Output Format
-After review, provide:
 
-### MUST FIX (Critical)
-- Issues that will cause bugs or security vulnerabilities
+Produce EXACTLY three top-level sections, in this order, using level-3
+markdown headers so downstream parsers can locate them reliably.
+Under each section, emit ONE bullet per finding. Every bullet must start
+with a backticked \`path/to/file.ext:LINE\` reference (or just
+\`path/to/file.ext\` when a specific line does not apply), followed by
+a short imperative summary, an optional second line explaining WHY it
+matters, and — for MUST FIX / SHOULD IMPROVE — a suggested fix as an
+indented sub-bullet. Keep every bullet self-contained (do not reference
+"the above" — the fix pass may reorder them).
 
-### SHOULD IMPROVE (Important)
-- Issues that affect maintainability or performance
+### MUST FIX
+- \`src/example.ts:42\` Guard against null before dereferencing \`user\`.
+  Rationale: crashes on unauthenticated requests reaching this branch.
+  - Fix: \`if (!user) return unauthorized();\`
 
-### NICE TO HAVE (Suggestions)
-- Optional improvements and best practices
+### SHOULD IMPROVE
+- \`src/example.ts:88\` Extract the retry loop into a helper.
+  Rationale: three call-sites duplicate the same backoff logic.
+  - Fix: introduce \`withBackoff(fn, opts)\` in \`src/utils/retry.ts\`.
 
-Be specific: include file paths, line numbers, and code snippets.`,
+### NICE TO HAVE
+- \`src/example.ts\` Consider renaming \`doThing\` to reflect intent.
+
+Emit an empty section (header + no bullets) when a category has no
+findings — do NOT omit the header, and do NOT invent findings to fill
+it. If there are no findings anywhere, still emit all three headers
+with empty bodies plus a single line above them:
+\`_No issues found._\``,
 });
 
 export const securityAuditSkill = defineSkill({
