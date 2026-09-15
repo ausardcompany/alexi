@@ -1239,9 +1239,8 @@ cleanupToolOutputs(): void
 | `background_process` | `command`, `name?`, `workingDirectory?`, `env?` | Spawn long-running detached process (see [background_process semantics](#background_process-tool-semantics) below) |
 | `agent_manager` | `action`, `sessionId?`, `agentId?`, `answer?`, `sourceSessionId?`, `worktreeId?`, `config?` | Manage agent sessions and answer pending sub-agent questions (nullable-friendly schema — see below) |
 | `open_plan` | `path`, `title?` | Signal that an agent-authored plan markdown file is ready for review; publishes `plan.opened` on the shared bus (see [open_plan tool](#open_plan-tool) below) |
-| `recall` | `query`, `sessionLimit?`, `includeCurrentSession?`, `roles?` | Search past sessions with weighted relevance ranking (see [Recall Tool API](#recall-tool-api) below) |
-| `schedule_wakeup` | `when`, `reason`, `payload?` | Schedule a future resume of the current session (see [Wakeup API](#wakeup-api) below) |
-| `cancel_wakeup` | `wakeupID` | Cancel a previously scheduled wakeup by id (idempotent) |
+| `schedule_wakeup` | `when`, `reason`, `payload?` | Schedule a future resume of the current session; `when` accepts an ISO-8601 timestamp or a relative duration (`"5m"`, `"1h"`, `"30s"`, `"2d"`). Requires an active session context. See [Wakeup tools](#wakeup-tools) below |
+| `cancel_wakeup` | `wakeupID` | Cancel a previously scheduled wakeup by id. Idempotent — returns `{ cancelled: false }` for unknown, already-fired, or foreign-session ids. See [Wakeup tools](#wakeup-tools) below |
 
 #### `todowrite` tool contract
 
@@ -1416,6 +1415,74 @@ if (!result.success) {
   // On symlink escape: result.error === 'Directory attachments cannot be expanded: <requested>'
   console.error(result.error);
 }
+```
+
+#### Wakeup tools
+
+`schedule_wakeup` (`src/tool/tools/schedule-wakeup.ts`) and `cancel_wakeup` (`src/tool/tools/cancel-wakeup.ts`) let an active agent schedule and cancel future resumes of its own session. Both delegate to the `Wakeup` namespace in `src/kilocode/wakeup/index.ts` (see [ARCHITECTURE.md — Wakeup Subsystem](./ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup)).
+
+Parameter schemas:
+
+```typescript
+// src/tool/tools/schedule-wakeup.ts
+const ScheduleWakeupParamsSchema = z.object({
+  when: z
+    .string()
+    .describe(
+      "ISO 8601 timestamp (e.g. '2026-09-15T12:00:00Z') or relative duration ('5m', '1h', '30s', '2d')"
+    ),
+  reason: z.string().describe('Why the wakeup is scheduled — surfaced back to the agent on resume'),
+  payload: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe('Optional opaque payload delivered to the resumed session'),
+});
+
+// src/tool/tools/cancel-wakeup.ts
+const CancelWakeupParamsSchema = z.object({
+  wakeupID: z.string().describe('ID of the wakeup to cancel (returned by schedule_wakeup)'),
+});
+```
+
+Both `payload` on `schedule_wakeup` and the persisted `WakeupSchema.Entry.payload` use Zod v4's two-argument `z.record(z.string(), z.unknown())` signature. The single-argument form `z.record(z.unknown())` is deprecated in v4; call sites and consumers should use the explicit key/value form.
+
+Result shapes:
+
+```typescript
+// schedule_wakeup — success
+{
+  success: true,
+  data: { wakeupID: string; at: string /* ISO-8601 */ },
+  hint: `Wakeup <id> scheduled for <at>: <reason>`,
+  metadata: { wakeupID, at },
+}
+
+// cancel_wakeup — success (always success unless the tool itself throws)
+{
+  success: true,
+  data: { cancelled: boolean; wakeupID: string },
+  hint: cancelled
+    ? `Wakeup <id> cancelled`
+    : `No pending wakeup with id <id>`,
+  metadata: { cancelled },
+}
+```
+
+Semantics:
+
+- **Session-scoped.** Both tools return `{ success: false, error: '<tool> requires an active session context' }` when invoked without `context.sessionId` — a wakeup must belong to exactly one session so a driver cannot accidentally schedule a global timer.
+- **Cancel is idempotent.** `cancel_wakeup` returns `{ cancelled: false }` (not an error) for unknown ids, foreign-session ids, and already-fired / already-cancelled entries so an agent can call it defensively without pre-checking. Use `Wakeup.read(id)` from the runtime API if the agent needs to inspect state before deciding.
+- **Duration parsing.** `when` accepts either an ISO-8601 timestamp or a relative duration matching `/^(\d+)(ms|s|m|h|d)$/i`. Anything else that `new Date(when)` cannot parse is rejected with `Invalid wakeup 'when' value: <when>`.
+- **Resume delivery.** When the fire time elapses, the wakeup entry is transitioned to `status: 'fired'` on disk and `WakeupResume.resume(entry)` returns a `ResumeInstruction` value the driver injects as a synthetic `<system-reminder source="wakeup">` user turn. The original `reason` and `payload` are preserved so the resumed agent has full context.
+
+Example agent invocations:
+
+```json
+{ "when": "5m", "reason": "Poll SAP batch job status", "payload": { "jobId": "BATCH-4711" } }
+```
+
+```json
+{ "wakeupID": "5f3b0a3e-2c4a-4d99-9e21-6b4c7f5d3a01" }
 ```
 
 ## Event Bus API — Batched Publish

@@ -342,6 +342,21 @@ Key rules enforced:
 - `prefer-const: error` -- Use `const` when not reassigned
 - `@typescript-eslint/no-explicit-any: warn`
 - `@typescript-eslint/no-unused-vars: error`
+- `@typescript-eslint/no-namespace: error` -- New code must NOT use TypeScript `namespace` blocks. The only sanctioned exception is upstream-kilocode compat modules under `src/kilocode/**` and `src/core/session/recall-message-index.ts`, which re-export the upstream `namespace X { ... }` API shape so cross-repo diffs stay reviewable. Those files carry a line-scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. Do not apply a file-scoped disable — the suppression must remain line-scoped so the rule still fires on unrelated additions.
+
+### Zod v4 record signature
+
+The project uses Zod v4. The single-argument `z.record(z.unknown())` form is deprecated in v4; always write the explicit key/value form `z.record(z.string(), z.unknown())` (or the appropriate key schema) so the code type-checks and lints cleanly:
+
+```typescript
+// Preferred (Zod v4):
+payload: z.record(z.string(), z.unknown()).optional();
+
+// Deprecated (Zod v3 single-argument form):
+payload: z.record(z.unknown()).optional();
+```
+
+This applies uniformly to tool parameter schemas (`src/tool/tools/*.ts`), persisted entity schemas (`src/kilocode/wakeup/schema.ts`), and event payload schemas registered via `defineEvent` (`src/bus/index.ts`). When porting an upstream kilocode module that still uses the single-argument form, migrate the call site in the same commit as the port so `npm run typecheck` and `npm run lint` stay green.
 
 ## Testing Guidelines
 

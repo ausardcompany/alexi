@@ -3787,157 +3787,125 @@ Both helpers are additive on top of the existing `recordSnapshot` / `listSnapsho
 
 ## Wakeup Subsystem (`src/kilocode/wakeup/`)
 
-Introduced in 1.22.21 (2026-09-15 upstream sync, ports kilocode commit `b7070e507`). Adds a deferred-resume subsystem so a running agent can schedule a future resume of its own session. When the timestamp elapses, the wakeup entry is converted into a synthetic user turn and delivered to the SessionManager as a `<system-reminder source="wakeup">…</system-reminder>` message.
+The wakeup subsystem lets an active agent schedule a future resume of its own session — the model asks "wake me up in 5m to check the batch job" and, when the timestamp elapses, the session is resumed with the original reason and payload as additional context. Ports upstream kilocode `packages/opencode/src/kilocode/wakeup/` (commit `b7070e507`) with two Alexi-native adaptations documented below.
 
-Typical use cases (SAP AI Core workflows):
+### Persistence model
 
-- Wait for a long-running SAP batch/approval and check back later without holding the connection open.
-- Retry a step after a backoff period.
-- Break a large multi-hour workflow into deferred checkpoints.
-
-### Storage
-
-Alexi_change: upstream persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as one JSON file per wakeup under `~/.alexi/wakeups/<id>.json` and the timer loop is a plain `setInterval`. The Zod schema `WakeupSchema.Entry` is the source of truth for the on-disk shape:
+Upstream opencode uses `App.state` (Effect-TS) plus drizzle-orm to persist wakeups against SQLite. Alexi does not ship a SQL runtime, so entries are persisted as **one JSON file per wakeup** under `~/.alexi/wakeups/<uuid>.json`, and the timer loop is a plain `setInterval`. The Zod schema in `src/kilocode/wakeup/schema.ts` is the source of truth for the on-disk shape:
 
 ```typescript
+// src/kilocode/wakeup/schema.ts
 export namespace WakeupSchema {
   export const Status = z.enum(['pending', 'fired', 'cancelled']);
+  export type Status = z.infer<typeof Status>;
+
   export const Entry = z.object({
     id: z.string(),
     sessionID: z.string(),
-    at: z.string(), // ISO-8601 fire time
+    at: z.string(),                           // ISO-8601 fire time
     reason: z.string(),
-    payload: z.record(z.unknown()).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
     status: Status,
-    createdAt: z.string(),
+    createdAt: z.string(),                    // ISO-8601 schedule time
   });
+  export type Entry = z.infer<typeof Entry>;
 }
 ```
 
-### Lifecycle
+The `payload` field uses Zod v4's two-argument `z.record(z.string(), z.unknown())` signature — the same call the `schedule_wakeup` tool parameter schema uses (`src/tool/tools/schedule-wakeup.ts:28`) so the model-facing surface, the on-disk shape, and the runtime type `Record<string, unknown>` all agree.
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending: Wakeup.schedule
-    pending --> cancelled: Wakeup.cancel (same session)
-    pending --> fired: Wakeup.fireDue (at <= now)
-    fired --> [*]: WakeupResume.resume -> SessionManager
-    cancelled --> [*]
-```
+### Public API
 
-Design invariants:
-
-- `Wakeup.schedule` writes the entry to disk BEFORE returning so a crash immediately after does not lose the scheduling intent.
-- `Wakeup.cancel` is idempotent and ownership-checked. Cancelling an unknown, already-fired, foreign-session, or already-cancelled wakeup returns `{ cancelled: false }` rather than throwing, so agents can call it defensively without pre-checking.
-- `Wakeup.fireDue` marks entries as `fired` on disk before handing them back. If the write fails, the entry stays `pending` and the next `fireDue` pass will retry — the caller never sees a "phantom fire".
-- `WakeupResume.resume` is synchronous and side-effect-free. It emits a `ResumeInstruction { sessionID; message; payload?; wakeupID }` value object and lets the caller decide how the resume is delivered (production: SessionManager; tests: mocked bus).
-- `normalizeWhen(when, now?)` accepts either an ISO-8601 timestamp or the relative form `<n>(ms|s|m|h|d)` (case-insensitive). Any other input throws `Error("Invalid wakeup 'when' value: …")` so the caller can surface a validation failure before writing to disk.
-
-### Tool wiring
-
-Two built-in tools registered by `registerBuiltInTools()` in `src/tool/tools/index.ts:115-116`:
-
-- `schedule_wakeup` (`src/tool/tools/schedule-wakeup.ts`): parameters `when` (ISO-8601 or relative duration), `reason`, optional `payload`. Requires an active `context.sessionId` — the tool refuses with `success: false, error: 'schedule_wakeup requires an active session context'` when invoked outside a session (e.g. by a top-level command). Returns `{ wakeupID, at }` on success and echoes the created id + fire time as the `hint`.
-- `cancel_wakeup` (`src/tool/tools/cancel-wakeup.ts`): parameter `wakeupID`. Same session gate as `schedule_wakeup`. Returns `{ cancelled, wakeupID }` — the `cancelled` flag distinguishes a real cancel from a no-op so agents can distinguish "was pending, now cancelled" from "was already gone" without inspecting the entry directly.
-
-The tools port verbatim from upstream because `Wakeup.schedule` / `Wakeup.cancel` match the upstream contract exactly, and cross-session cancellation is blocked at the `Wakeup.cancel` layer (`entry.sessionID !== opts.sessionID → cancelled: false`) rather than at the tool boundary.
-
-## Recall Tool Ranking (`src/tool/tools/recall.ts`)
-
-The `recall` tool searches through past session JSON files under `~/.alexi/sessions/` and returns the top-20 matches ranked by a weighted blend of signals. Ports upstream kilocode `02e92bcc6` (ranking rewrite) and `306b4ed6c` (fallback recovery for prepare-time index errors).
-
-### Ranking formula
+`src/kilocode/wakeup/index.ts` mirrors the upstream namespaced API shape so companion tools (`schedule_wakeup`, `cancel_wakeup`) can be ported verbatim:
 
 ```typescript
-function calculateRelevance(content: string, query: string, role: string): number {
-  const lowerContent = content.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  const safe = escapeRegExp(lowerQuery);
-
-  const wbHits = (lowerContent.match(new RegExp(`\\b${safe}\\b`, 'g')) || []).length;
-  const substrHits = (lowerContent.match(new RegExp(safe, 'g')) || []).length;
-  const density = substrHits / Math.max(1, content.length / 100);
-
-  let score = wbHits * 30 + Math.min(density * 10, 40);
-  if (role === 'user') {
-    score += 5;
-  } else if (role === 'assistant') {
-    score += 3;
+export namespace Wakeup {
+  export interface ScheduleOptions {
+    sessionID: string;
+    when: string;                            // ISO-8601 or relative duration
+    reason: string;
+    payload?: Record<string, unknown>;
   }
-  return Math.min(score, 100);
+
+  export function schedule(opts: ScheduleOptions): Promise<WakeupSchema.Entry>;
+  export function cancel(opts: { sessionID: string; wakeupID: string }): Promise<{ cancelled: boolean }>;
+  export function read(id: string): Promise<WakeupSchema.Entry | null>;
+  export function list(sessionID?: string): Promise<WakeupSchema.Entry[]>;
+  export function fireDue(now?: Date): Promise<WakeupSchema.Entry[]>;
 }
 ```
 
-- **Word-boundary matches (`\bfoo\b`)** dominate (weight 30 per hit) — the strongest signal for a genuine topical match.
-- **Substring density** (occurrences per 100 chars, capped at 40) is a tie-breaker for content with no whole-word hits but many partial substring occurrences.
-- **Role bonus** nudges the ranking so identical-content matches from user turns rank above system prompts.
-- **Query is escaped via `escapeRegExp`** so partial metacharacters like a trailing `\` or unbalanced `(` cannot cause a `SyntaxError` or runaway backtracking.
+- `schedule` normalizes `when` (accepts either an ISO-8601 timestamp or a relative duration like `"5m"`, `"1h"`, `"30s"`, `"2d"`) via the exported `normalizeWhen(when, now)` helper, writes the entry as pending, and returns the created record.
+- `cancel` is **idempotent**: cancelling an unknown, foreign-session, or non-pending wakeup returns `{ cancelled: false }` rather than throwing so the caller does not have to pre-check.
+- `fireDue` transitions every pending entry whose `at` is `<= now` to `status: 'fired'` on disk and returns the newly fired entries. Callers are responsible for actually resuming the associated sessions — see `WakeupResume.resume` below.
 
-### Fast path with slow-path fallback
+### Resume conversion
+
+`src/kilocode/wakeup/resume.ts` is deliberately side-effect-free so the same helper works in production (persistent `SessionManager`) and in tests (mocked bus):
+
+```typescript
+export interface ResumeInstruction {
+  sessionID: string;
+  message: string;                           // synthetic user turn
+  payload?: Record<string, unknown>;
+  wakeupID: string;
+}
+
+export namespace WakeupResume {
+  export function resume(entry: WakeupSchema.Entry): ResumeInstruction {
+    const message = [
+      `<system-reminder source="wakeup">`,
+      `Scheduled wakeup ${entry.id} fired at ${entry.at}.`,
+      `Reason: ${entry.reason}`,
+      `</system-reminder>`,
+    ].join('\n');
+    return { sessionID: entry.sessionID, message, payload: entry.payload, wakeupID: entry.id };
+  }
+}
+```
+
+The synthetic message is wrapped in a `<system-reminder source="wakeup">` fence so downstream `contextModification` hooks can filter or annotate wakeup turns without pattern-matching on prose.
+
+### End-to-end flow
 
 ```mermaid
-flowchart TD
-    Start[recall.execute] --> ListSessions[readdir sessions dir]
-    ListSessions --> ForEach[for each session file]
-    ForEach --> Load[loadSession]
-    Load -->|fail| LogSkip[logger.warn, skip file]
-    Load -->|ok| Fast[scanSessionFast: role pre-filter -> relevance]
-    Fast -->|throws| Slow[scanSessionSlow: role-agnostic scan]
-    Slow -->|throws| SkipSession[logger.warn, skip file]
-    Fast -->|ok| Collect[collect hits]
-    Slow -->|ok| Collect
-    Collect --> More{More files?}
-    More -->|Yes| ForEach
-    More -->|No| Sort[sort by relevance desc]
-    Sort --> Top20[slice top 20]
-    Top20 --> Return[return { results, totalMatches }]
+sequenceDiagram
+  participant Agent as Agent (tool call)
+  participant Tool as schedule_wakeup
+  participant Wakeup as Wakeup namespace
+  participant FS as ~/.alexi/wakeups/
+  participant Timer as setInterval loop
+  participant Resume as WakeupResume.resume
+  participant Session as SessionManager
+
+  Agent->>Tool: { when: "5m", reason, payload }
+  Tool->>Wakeup: schedule({ sessionID, when, reason, payload })
+  Wakeup->>Wakeup: normalizeWhen(when)
+  Wakeup->>FS: writeFile(<uuid>.json, { status: 'pending' })
+  Wakeup-->>Tool: Entry
+  Tool-->>Agent: { wakeupID, at }
+
+  Note over Timer: N minutes later
+  Timer->>Wakeup: fireDue(now)
+  Wakeup->>FS: readdir + read every entry
+  Wakeup->>FS: writeFile(<uuid>.json, { status: 'fired' })
+  Wakeup-->>Timer: fired: Entry[]
+  Timer->>Resume: resume(entry)
+  Resume-->>Timer: ResumeInstruction
+  Timer->>Session: enqueue synthetic user turn (message + payload)
 ```
 
-- **`scanSessionFast`** pre-filters messages by role BEFORE running the relevance scorer, mirroring the upstream SQL covering-index approach (`recall_message_role_idx`). Only messages whose role is in the caller-configurable `allowedRoles` set are scored.
-- **`scanSessionSlow`** is the role-agnostic fallback used when the fast path throws unexpectedly (e.g. session on-disk shape drift). One weird session cannot hide matches from the other N-1 files.
-- **Corrupt session files** are logged via `logger.warn('[recall] failed to load session, skipping', …)` and skipped — a single corrupt file cannot fail the whole recall query.
+### Namespace re-export exception
 
-### Parameters
+Alexi's ESLint config bans `namespace` blocks project-wide (`@typescript-eslint/no-namespace`), but the four wakeup / recall-index compat modules re-export the upstream namespaced API shape intentionally so cross-repo diffs stay reviewable and the companion tools can be ported verbatim. Each block carries a line-scoped suppression:
 
 ```typescript
-const RecallParamsSchema = z.object({
-  query: z.string(),
-  sessionLimit: z.number().optional(),          // default 10
-  includeCurrentSession: z.boolean().optional(),// default false
-  roles: z.array(z.enum(['user', 'assistant', 'system'])).optional(), // default ['user', 'assistant']
-});
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
+export namespace Wakeup { ... }
 ```
 
-Result rows carry `role: 'user' | 'assistant' | 'system' | 'unknown'` — messages whose on-disk role is unrecognised are normalized to `'unknown'` and dropped from the default filter, but a caller can opt them in by requesting `roles: ['user', 'assistant', 'system']`.
+Affected files: `src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/schema.ts`, `src/kilocode/wakeup/resume.ts`, `src/core/session/recall-message-index.ts`. New non-compat code must NOT use `namespace`; the suppression is deliberately scoped to the single `export namespace` line so the rule still fires elsewhere.
 
-### `RecallMessageIndex` marker + DDL shim
+### Recall message index (documented shim)
 
-The upstream commit `02e92bcc6` adds a SQLite covering index. Alexi persists sessions as JSON files so there is no `message` table to index today; the marker module `src/core/session/recall-message-index.ts` exists so a future migration to a SQL-backed session store can install the covering index without hunting through history:
-
-```typescript
-export namespace RecallMessageIndex {
-  export const name = 'recall_message_role_idx';
-  export const createSql = `CREATE INDEX IF NOT EXISTS \`${name}\` ON \`message\` (\`id\`,json_extract("data", '$.role'),coalesce(json_extract("data", '$.parentID'), ''));`;
-}
-```
-
-The index name is included in `KILOCODE_PRESERVED_SQL_NAMES` / `KILOCODE_PRESERVED_SQL_REGEX` (`src/core/database/migration.gen.ts`) so upstream syncs treat it as a kilocode change and do not drop it.
-
-## Kilocode-Preserved SQL Names
-
-Upstream sync scripts (`scripts/sync-upstream.sh`) inspect raw DDL strings to decide whether a table/index reference is upstream-owned or Alexi-owned. Dropping a kilocode-owned identifier silently on a sync would break board coordination, model-usage aggregation, or recall search performance, so `src/core/database/migration.gen.ts` exports the union of protected identifiers:
-
-```typescript
-export const KILOCODE_PRESERVED_SQL_NAMES: readonly string[] = [
-  'kilo_board',
-  'kilo_board_message',
-  'part_session_step_finish_idx',
-  'recall_part_search_idx',
-  'recall_message_role_idx',
-];
-
-export const KILOCODE_PRESERVED_SQL_REGEX =
-  /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/;
-```
-
-Any new SQL name introduced by a `kilocode_change` migration MUST be appended here — the regex is the single source of truth consumed by the sync tooling.
+`src/core/session/recall-message-index.ts` ports upstream's SQLite covering index `recall_message_role_idx` used for role-scoped recall search. Alexi persists sessions as one JSON file per session, so there is no `message` table to index today — the module exists as a marker + documented shim so a future migration to a SQL-backed session store can drop the DDL back in without hunting through history. The exported `RecallMessageIndex.createSql` is the exact DDL upstream uses; `RecallMessageIndex.name` is referenced by the migration allow-list regex in `src/core/database/migration.ts` so upstream syncs preserve the `kilocode_change` marker across replays.
