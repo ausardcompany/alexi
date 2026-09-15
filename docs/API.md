@@ -547,6 +547,28 @@ not invoke the LLM.
 The candidate set is the enabled-model list from `loadRoutingConfig()`
 (`src/config/routingConfig.ts`).
 
+#### Structured output contract
+
+`result.review` obeys the shape mandated by the `code-review` skill prompt
+(`src/skill/skills/index.ts`):
+
+- Exactly three level-3 headers, in this order, always emitted (with empty
+  bodies when a category has no findings): `### MUST FIX`, `### SHOULD IMPROVE`,
+  `### NICE TO HAVE`.
+- Every finding starts with a backticked `path/to/file.ext:LINE` reference (or
+  `path/to/file.ext` when no specific line applies), followed by an imperative
+  summary. `MUST FIX` and `SHOULD IMPROVE` findings carry an indented
+  `- Fix: ...` sub-bullet with a concrete remediation.
+- When there are no findings anywhere, the review is a single `_No issues found._`
+  line above the three empty headers.
+
+This shape is designed for downstream parsers (PR comment renderers, DoD
+checkers) — a passing review is distinguishable from a silently-failed review
+by looking for the three headers, and each finding is individually
+tool-friendly. Empty-diff runs bypass this contract entirely and return
+`No changes to review.` verbatim (see the fast path in
+`src/command/codeReview.ts`).
+
 #### Programmatic API
 
 `executeCodeReview` can also be called directly from TypeScript:

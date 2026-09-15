@@ -1459,6 +1459,15 @@ The effort level controls both the system prompt preamble and the model selectio
 The base system prompt is the `code-review` skill prompt from `src/skill/skills/index.ts`,
 preserving the structured `MUST FIX / SHOULD IMPROVE / NICE TO HAVE` review format.
 
+### Structured review output contract
+
+The `codeReviewSkill.prompt` mandates a machine-parseable output shape so downstream tooling (PR comment renderers, review dashboards, DoD checkers) can locate findings without regex-guessing:
+
+- Exactly three top-level level-3 markdown headers, in this order: `### MUST FIX`, `### SHOULD IMPROVE`, `### NICE TO HAVE`. Empty sections are emitted with the header and no bullets — the header is NEVER omitted, and findings are NEVER invented to fill an empty category.
+- Every finding is a bullet whose FIRST token is a backticked `path/to/file.ext:LINE` reference (or `path/to/file.ext` when no specific line applies), followed by an imperative summary. A second line explains WHY the finding matters, and for MUST FIX / SHOULD IMPROVE an indented `- Fix: ...` sub-bullet carries a concrete remediation.
+- Bullets are self-contained: no "the above" / "the earlier bullet" references, because the fix pass may reorder them.
+- When there are no findings anywhere, a single `_No issues found._` line is emitted above the three empty headers so parsers can distinguish "reviewed, clean" from "review failed silently".
+
 ### Targets
 
 ```typescript
