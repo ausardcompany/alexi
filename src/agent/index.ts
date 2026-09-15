@@ -6,6 +6,7 @@
 import { z } from 'zod';
 
 import { AgentSwitched } from '../bus/index.js';
+import { getRetryAfterMs, isRetryableError } from '../core/error-backoff.js';
 import { getAgentPrompt } from './system.js';
 import { loadAllCustomAgents } from './customAgentLoader.js';
 
@@ -126,6 +127,152 @@ export function stripInternalOptions(options: Record<string, any>): Record<strin
     result[key] = options[key];
   }
   return result;
+}
+
+// ============ Turn-level retry for transient provider errors ============
+
+/**
+ * Configuration for {@link retryProviderCall}. Distinct from the
+ * provider-layer `ErrorBackoff` retry (which caps at 5 with a 60s max):
+ * the turn-level budget is deliberately smaller (3 attempts, 15s cap) so
+ * that a single genuinely-broken turn does not stall the agent loop for
+ * minutes. Both layers compose — a fatal-classified provider error
+ * short-circuits before the turn retry ever sees it.
+ */
+export interface TurnRetryConfig {
+  /** Maximum number of attempts INCLUDING the first (default 3). */
+  maxRetries: number;
+  /** Initial delay in ms before retry #1 (default 1000). */
+  initialDelayMs: number;
+  /** Cap on any single sleep in ms (default 15000). */
+  maxDelayMs: number;
+  /** Exponential multiplier applied per attempt (default 2). */
+  multiplier: number;
+}
+
+const DEFAULT_TURN_RETRY_CONFIG: TurnRetryConfig = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 15_000,
+  multiplier: 2,
+};
+
+/**
+ * Streaming-state tracker consulted by {@link retryProviderCall} before it
+ * retries. When `hasEmittedContent()` returns true, the wrapper MUST NOT
+ * retry — replaying the request would emit duplicate content/tool-call
+ * deltas that no downstream consumer can retract. Only pre-content
+ * failures (request-start network errors, 429 before any stream chunk)
+ * are eligible for retry.
+ */
+export interface StreamingStateTracker {
+  hasEmittedContent(): boolean;
+}
+
+/**
+ * Compute the exponential-backoff delay before attempt `attemptNumber`
+ * (1-indexed: attempt 1 = first retry, i.e. the sleep BEFORE it). Server
+ * `Retry-After` hints are honoured over the default schedule when present.
+ * The result is always capped at `config.maxDelayMs`.
+ */
+export function computeRetryDelay(
+  attemptNumber: number,
+  err: unknown,
+  config: TurnRetryConfig = DEFAULT_TURN_RETRY_CONFIG
+): number {
+  const retryAfterMs = getRetryAfterMs(err);
+  if (retryAfterMs !== undefined) {
+    return Math.min(retryAfterMs, config.maxDelayMs);
+  }
+  const raw = config.initialDelayMs * Math.pow(config.multiplier, Math.max(0, attemptNumber - 1));
+  return Math.min(raw, config.maxDelayMs);
+}
+
+/**
+ * Injectable sleep hook. Overridden by tests via
+ * {@link setTurnRetrySleep} to skip real timers. Production callers
+ * never touch this.
+ */
+let sleepFn: (ms: number) => Promise<void> = (ms) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Override the sleep function used by {@link retryProviderCall}. Tests
+ * install a synchronous / instrumented replacement to assert the backoff
+ * schedule without waiting real seconds. Pass no argument to restore the
+ * default `setTimeout`-based sleep.
+ */
+export function setTurnRetrySleep(fn?: (ms: number) => Promise<void>): void {
+  sleepFn = fn ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+}
+
+/**
+ * Wrap a single provider invocation with turn-level retry for transient
+ * failures. Composition with existing retry layers:
+ *
+ *   caller → retryProviderCall (this) → provider.complete
+ *                                     → provider-layer ErrorBackoff (5x)
+ *
+ * Contract:
+ *   - Retries ONLY when `isRetryableError(err)` returns true (429, 5xx,
+ *     xAI capacity, network blips). Everything else (401, 400, config
+ *     failures) throws immediately.
+ *   - Retries ONLY when the streaming state tracker reports NO content
+ *     has been emitted yet. Once a delta or tool-call has surfaced, a
+ *     retry would produce duplicate output with no way to retract it.
+ *   - Uses exponential backoff (1s → 2s → 4s, capped at 15s) unless the
+ *     server provided a `Retry-After` hint.
+ *   - The originating error is rethrown after the final attempt fails
+ *     so caller error-handling (route classification, compaction
+ *     recovery) still sees the real cause.
+ *
+ * The `streamState` argument is optional; when omitted the wrapper
+ * behaves as if no content has ever been emitted (safe default for
+ * non-streaming callers like `provider.complete`).
+ */
+export async function retryProviderCall<T>(
+  providerCallFn: () => Promise<T>,
+  streamState?: StreamingStateTracker,
+  config: Partial<TurnRetryConfig> = {}
+): Promise<T> {
+  const cfg: TurnRetryConfig = { ...DEFAULT_TURN_RETRY_CONFIG, ...config };
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= cfg.maxRetries; attempt++) {
+    try {
+      return await providerCallFn();
+    } catch (err) {
+      lastErr = err;
+
+      // Streaming guard: if the caller has already emitted content or a
+      // tool call, a retry would produce duplicate output with no
+      // mechanism to retract it. Rethrow immediately.
+      if (streamState?.hasEmittedContent()) {
+        throw err;
+      }
+
+      // Permanent errors (401, 400, model_not_found, config failures)
+      // must NOT burn the retry budget. `isRetryableError` returns
+      // true only for the transient set enumerated in the AGENTS.md
+      // error-classification contract.
+      if (!isRetryableError(err)) {
+        throw err;
+      }
+
+      // Last attempt — do not sleep, just rethrow so the caller sees
+      // the underlying provider error rather than a wrapped variant.
+      if (attempt === cfg.maxRetries) {
+        throw err;
+      }
+
+      const delay = computeRetryDelay(attempt, err, cfg);
+      await sleepFn(delay);
+    }
+  }
+
+  // Unreachable in practice: the loop either returns a value or throws.
+  // The rethrow here keeps TypeScript happy about the return type.
+  throw lastErr;
 }
 
 export interface Agent extends AgentConfig {

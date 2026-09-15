@@ -547,6 +547,28 @@ not invoke the LLM.
 The candidate set is the enabled-model list from `loadRoutingConfig()`
 (`src/config/routingConfig.ts`).
 
+#### Structured output contract
+
+`result.review` obeys the shape mandated by the `code-review` skill prompt
+(`src/skill/skills/index.ts`):
+
+- Exactly three level-3 headers, in this order, always emitted (with empty
+  bodies when a category has no findings): `### MUST FIX`, `### SHOULD IMPROVE`,
+  `### NICE TO HAVE`.
+- Every finding starts with a backticked `path/to/file.ext:LINE` reference (or
+  `path/to/file.ext` when no specific line applies), followed by an imperative
+  summary. `MUST FIX` and `SHOULD IMPROVE` findings carry an indented
+  `- Fix: ...` sub-bullet with a concrete remediation.
+- When there are no findings anywhere, the review is a single `_No issues found._`
+  line above the three empty headers.
+
+This shape is designed for downstream parsers (PR comment renderers, DoD
+checkers) — a passing review is distinguishable from a silently-failed review
+by looking for the three headers, and each finding is individually
+tool-friendly. Empty-diff runs bypass this contract entirely and return
+`No changes to review.` verbatim (see the fast path in
+`src/command/codeReview.ts`).
+
 #### Programmatic API
 
 `executeCodeReview` can also be called directly from TypeScript:
@@ -666,6 +688,80 @@ Semantics:
 - The `question` tool is excluded from loop fingerprinting so repeated user prompts do not trip the detector.
 
 `ConsecutiveMistakeReason` is also re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for consumers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
+
+### Turn-Level Retry (issue #1737)
+
+The agent loop wraps each `provider.complete` call in `retryProviderCall`
+(exported from `src/agent/index.ts`) so a transient `429` / `5xx` /
+network blip that lands *before any content is emitted* no longer
+aborts the whole agent run. The wrapper composes with the provider-layer
+`ErrorBackoff` — it does not duplicate its budget.
+
+Defaults: 3 attempts total (initial + 2 retries), exponential backoff
+`1 s → 2 s → 4 s`, capped at 15 s. A server-supplied `Retry-After` hint
+takes precedence over the default schedule (still capped at 15 s).
+
+Contract:
+
+- **Transient only.** `isRetryableError(err)` (from
+  `src/core/error-backoff.ts`) is the single classifier. HTTP `401`,
+  `400`, `model_not_found`, config failures, and named auth errors
+  (`NoRefreshTokenError`) throw immediately with no sleep.
+- **Streaming guard.** When a `StreamingStateTracker` is passed and it
+  reports `hasEmittedContent() === true`, the wrapper rethrows without
+  retrying — a replayed request would produce duplicate deltas.
+- **Original error preserved.** After the last attempt the underlying
+  provider error is rethrown unchanged so route classification,
+  compaction recovery, and the REPL auth-rewrite path still see the real
+  cause.
+
+TypeScript surface (all exported from `src/agent/index.ts`):
+
+```typescript
+interface TurnRetryConfig {
+  maxRetries: number;     // default 3
+  initialDelayMs: number; // default 1000
+  maxDelayMs: number;     // default 15_000
+  multiplier: number;     // default 2
+}
+
+interface StreamingStateTracker {
+  hasEmittedContent(): boolean;
+}
+
+function computeRetryDelay(
+  attemptNumber: number,
+  err: unknown,
+  config?: TurnRetryConfig
+): number;
+
+function setTurnRetrySleep(fn?: (ms: number) => Promise<void>): void;
+
+function retryProviderCall<T>(
+  providerCallFn: () => Promise<T>,
+  streamState?: StreamingStateTracker,
+  config?: Partial<TurnRetryConfig>
+): Promise<T>;
+```
+
+Example — the pattern used by `agenticChat` today
+(`src/core/agenticChat.ts:673`):
+
+```typescript
+import { retryProviderCall, stripInternalOptions } from '../agent/index.js';
+
+result = await retryProviderCall(() =>
+  provider.complete(messages, stripInternalOptions(merged))
+);
+```
+
+The same wrapper is used for the post-compaction re-drive so a transient
+outage that lands during the compaction window does not turn an
+otherwise recoverable overflow into a hard failure.
+
+`setTurnRetrySleep(fn?)` is a test hook — production code never touches
+it. See [Testing → Turn-level retry](TESTING.md#testing-the-turn-level-retry-wrapper)
+for the assertion pattern.
 
 ### Progress Events
 
