@@ -7,9 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.21] - 2026-09-15
+
+### Added
+
+- **Wakeup scheduling engine and companion tools** (`src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/schema.ts`, `src/kilocode/wakeup/resume.ts`, `src/tool/tools/schedule-wakeup.ts`, `src/tool/tools/cancel-wakeup.ts`, `src/tool/tools/index.ts`, commit `14acf74e` `feat(sync): apply upstream changes (2026-09-15)`): Ports upstream kilocode `packages/opencode/src/kilocode/wakeup/*` (commit `b7070e507`). Adds a deferred-resume subsystem so a running agent can ask "wake me up at T with this payload" and have its session resumed as a synthetic user turn when the timestamp elapses. Useful for long-running SAP AI Core workflows that poll a batch, wait for an approval window, or defer follow-up work without holding a live connection open.
+
+  Public surface:
+
+  - `Wakeup.schedule({ sessionID, when, reason, payload? }): Promise<WakeupSchema.Entry>` — persists a pending wakeup. `when` accepts either an ISO-8601 timestamp (`"2026-09-15T12:00:00Z"`) or a relative duration string (`"5m"`, `"1h"`, `"30s"`, `"2d"`) via the exported `normalizeWhen(when, now?)` helper. Returns the created entry with a generated `id` and normalized `at`.
+  - `Wakeup.cancel({ sessionID, wakeupID }): Promise<{ cancelled: boolean }>` — idempotent. Cancelling an unknown, already-fired, foreign-session, or already-cancelled wakeup returns `{ cancelled: false }` instead of throwing.
+  - `Wakeup.list(sessionID?): Promise<WakeupSchema.Entry[]>` — enumerates every persisted wakeup, optionally filtered by session id.
+  - `Wakeup.read(id): Promise<WakeupSchema.Entry | null>` — single-entry lookup; corrupt/missing files resolve to `null`.
+  - `Wakeup.fireDue(now?): Promise<WakeupSchema.Entry[]>` — returns every pending wakeup whose `at` is `<= now`, marks them as `fired` on disk, and hands the entries back to the caller. Callers are responsible for actually resuming the associated sessions.
+  - `WakeupResume.resume(entry): ResumeInstruction` — converts a fired entry into a `ResumeInstruction { sessionID; message; payload?; wakeupID }`. The `message` is a `<system-reminder source="wakeup">…</system-reminder>` block containing the wakeup id, fire timestamp, and reason. Synchronous and side-effect-free so callers decide how the resume is delivered.
+  - `WakeupSchema.Entry` (Zod schema) — source of truth for the on-disk shape: `{ id, sessionID, at, reason, payload?, status: 'pending'|'fired'|'cancelled', createdAt }`.
+
+  Two new built-in tools registered by `registerBuiltInTools()` in `src/tool/tools/index.ts`:
+
+  - `schedule_wakeup` — parameters: `when` (ISO-8601 or relative duration), `reason` (surfaced to the agent on resume), optional `payload` (`Record<string, unknown>`). Requires an active `context.sessionId`; returns `{ wakeupID, at }` on success.
+  - `cancel_wakeup` — parameters: `wakeupID`. Returns `{ cancelled, wakeupID }` — the `cancelled` flag distinguishes a real cancel from a no-op so agents can call it defensively.
+
+  Alexi_change: upstream persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as one JSON file per wakeup under `~/.alexi/wakeups/<id>.json` and the timer loop is a plain `setInterval`. The public surface matches the upstream contract exactly so the companion tools port verbatim.
+
+- **`RecallMessageIndex` marker + DDL shim** (`src/core/session/recall-message-index.ts`, `src/core/database/migration.gen.ts`, commit `14acf74e`): Ports upstream kilocode `02e92bcc6` which adds a SQLite covering index (`recall_message_role_idx`) so recall search can resolve message roles without reading full message rows. Alexi persists sessions as one JSON file per session (see `~/.alexi/sessions/`) so there is no `message` table to index today; the module exists as a documented shim so a future migration to a SQL-backed session store can drop the covering index back in without hunting through history.
+
+  Public surface:
+
+  - `RecallMessageIndex.name` — the SQLite index name (`recall_message_role_idx`).
+  - `RecallMessageIndex.createSql` — DDL upstream uses, kept verbatim so a future SQL-backed session store can install it without translation.
+  - `KILOCODE_PRESERVED_SQL_NAMES` (readonly array) and `KILOCODE_PRESERVED_SQL_REGEX` (`/kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/`) in `src/core/database/migration.gen.ts` — the union of every SQL identifier introduced by a `kilocode_change` migration. Upstream sync scripts (`scripts/sync-upstream.sh`) MUST preserve any DDL that references one of these identifiers; dropping them silently on a sync would break board coordination, model-usage aggregation, or recall search performance.
+
 ### Changed
 
-- **Prettier auto-fix reflow on `setConfigSharedAgentBoard` and `scanSession*` helpers** (`src/config/userConfig.ts`, `src/tool/tools/recall.ts`, commit `64fc6676` `style(ci): auto-fix lint/format issues [alexi-bot]`): Two-file, three-hunk Prettier reflow with no semantic change. In `src/config/userConfig.ts:754-758` the three-condition guard inside `setConfigSharedAgentBoard(enabled)` — which strips a legacy `experimental.sharedAgentBoard` key when persisting the top-level `sharedAgentBoard` flag — was split from a single-line 106-column `if (config.experimental && typeof config.experimental === 'object' && !Array.isArray(config.experimental))` onto four lines so each `&&`-joined predicate occupies its own line under Prettier's `printWidth: 100` ceiling. In `src/tool/tools/recall.ts:153` (`scanSessionFast`) and `:194` (`scanSessionSlow`) the `const createdTs = session?.metadata?.created?.toString() ?? new Date().toISOString();` fallback was collapsed from a hand-authored two-line form onto a single 82-column line — it fits under `printWidth: 100` so the compact form is preferred. Semantic contract of both helpers is byte-identical: `setConfigSharedAgentBoard` still writes the new top-level key, still removes any legacy `experimental.sharedAgentBoard` entry, still deletes the whole `experimental` block when it becomes empty, and still calls `saveFullConfig(config)`; `scanSessionFast` and `scanSessionSlow` still fall back to `new Date().toISOString()` when a session record has no `metadata.created` timestamp so `RecallHit.timestamp` is never empty. Diff statistics: `2 files changed, 7 insertions(+), 5 deletions(-)`.
+- **Recall tool ranking upgraded and hardened** (`src/tool/tools/recall.ts`, commit `14acf74e`): Ports upstream kilocode `02e92bcc6` (rewrite) and `306b4ed6c` (fallback recovery). Two behaviour changes.
+
+  1. **Ranking is a weighted blend, not raw density.** `calculateRelevance(content, query, role)` now scores as `wbHits * 30 + min(density * 10, 40)` plus a role bonus (`user`: +5, `assistant`: +3). Word-boundary matches (`\bfoo\b`) dominate over pure substring density, and identical-content matches from user turns rank above system prompts. The user-provided query is escaped via `escapeRegExp` so partial metacharacters cannot cause `SyntaxError` or runaway backtracking.
+  2. **Fast path with slow-path fallback.** `scanSessionFast` pre-filters messages by role BEFORE running the relevance scorer (mirrors the upstream SQL covering-index approach). On any unexpected exception, the caller falls back to the role-agnostic `scanSessionSlow` so one weird session cannot hide matches from the other N-1 files. `loadSession` logs and skips a single corrupt session file rather than aborting the whole recall query.
+
+  New optional parameter: `roles?: Array<'user' | 'assistant' | 'system'>` — restricts recall to messages with these roles (default `['user', 'assistant']`). Unknown / missing roles are normalized to `'unknown'` and dropped from the default filter. Result rows now carry a `role: 'user' | 'assistant' | 'system' | 'unknown'` field.
+
+- **`sharedAgentBoard` config key promoted to top-level with default `true`** (`src/config/userConfig.ts`, commit `14acf74e`): Ports upstream kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, and `6cfb025f9`. The setting has moved out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (previously `false`).
+
+  Resolution order for `getConfigSharedAgentBoard()`:
+
+  1. Top-level `sharedAgentBoard` (new preferred location).
+  2. Legacy `experimental.sharedAgentBoard` (accepted for backwards compatibility; a one-time deprecation warning is logged the first time this path is hit).
+  3. Default `true`.
+
+  `setConfigSharedAgentBoard(enabled)` writes the new top-level key AND, if the legacy key is present, removes it — so the config file converges on the new shape on the next write. If the legacy `experimental` object becomes empty after the deletion, the parent key is removed as well. Callers that need to keep the legacy shape (e.g. a fixture exercising the deprecation warning) must write to `config.experimental` directly via `saveFullConfig`.
+
+  New test helper: `_resetSharedAgentBoardDeprecationWarningLatchForTests()` — resets the once-per-process deprecation-warning latch so consecutive fixtures can each observe the warning without spawning a fresh process.
+
+- **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `14acf74e` `feat(sync): apply upstream changes (2026-09-15)`)**: Version bumped from `1.22.20` to `1.22.21`. Tracked upstream refs advanced: `kilocode` from `2ad44882023693b1338bb2601ce74728e73a4b91` to `9597be3a14e7afa51a90f523c93e32f46b67c322`; `opencode` from `228e9095ba3988a02664c3816cb51f98584e86c2` to `e03db9bc6908f75c9334d8aa997deeaac81c0298`; `claude-code` from `18be13be81538c38efa5cb157fb2fc8da7469855` to `f96c3b49c4c8721685206aaab23609b2d399df4e`. `workflow_run` id advanced from `34841012365` to `34962237956`.
 
 ## [1.22.20] - 2026-09-14
 

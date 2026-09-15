@@ -1893,6 +1893,45 @@ Tests for a new driver should assert (a) `enqueue()` never invokes `handle.cance
 
 See [ARCHITECTURE.md — Prompt Queue](./ARCHITECTURE.md#prompt-queue-srccorepromptqueuets) and [API.md — Prompt Queue API](./API.md#prompt-queue-api).
 
+## Config-Key Promotion Pattern (`sharedAgentBoard`, 2026-09-15)
+
+When an upstream sync promotes a config key out of `experimental.*` to the top-level config namespace, follow the pattern established for `sharedAgentBoard` (`src/config/userConfig.ts:721-767`). The pattern is deliberately conservative so operator config files continue to work across sync boundaries.
+
+**Resolution order (three tiers):**
+
+1. **New preferred location** — top-level config key (e.g. `config.sharedAgentBoard`). This is the canonical read path; return immediately on a boolean hit.
+2. **Legacy location** — the old `experimental.<key>` slot, still accepted for backwards compatibility. Reading from this path MUST log a one-time deprecation warning naming both the old and new locations so operators can migrate.
+3. **Default** — the value the promotion PR chose (the promotion often flips the default from `false` to `true` — always call this out explicitly in the docstring).
+
+**Write behaviour:**
+
+- Always write to the new top-level key.
+- If the legacy key is present, delete it in the same write so the config file converges on the new shape on the next round-trip.
+- If deleting the legacy key leaves the `experimental` object empty, delete the parent key too. A dangling empty `experimental: {}` is confusing when an operator later inspects the file.
+
+**Deprecation warning latch:**
+
+- Use a module-scoped `let _<key>DeprecationWarned = false` boolean plus a `warn<Key>LegacyOnce()` helper so the warning fires exactly once per process even when the accessor is called on every tool-registration event.
+- Import `logger` lazily via `import('../utils/logger.js').then(...)` so a bare `require` of `userConfig` from a test harness that wants no console noise still reaches the accessors without triggering a module cycle.
+- Export a test-only `_reset<Key>DeprecationWarningLatchForTests()` helper so consecutive fixtures can each observe the warning without spawning a fresh process. Mark it `@internal` in the docstring so production code cannot lean on it.
+
+**Testing:**
+
+- Cover all three tiers: (a) top-level key present, (b) legacy key present + deprecation warning fires exactly once, (c) neither key present + default applies.
+- Assert that `set<Key>(value)` after (b) removes the legacy entry AND drops the `experimental` parent if empty.
+- Reset the deprecation-warning latch in `beforeEach` (or `afterEach`) so tier (b) can be re-observed across cases.
+
+Worked example: `getConfigSharedAgentBoard` / `setConfigSharedAgentBoard` in `src/config/userConfig.ts:721-767`.
+
+## Wakeup Subsystem Testing
+
+The wakeup subsystem (`src/kilocode/wakeup/`) is filesystem-backed — each `Wakeup.schedule` call writes a JSON file under `~/.alexi/wakeups/`. When adding tests, follow the same temp-dir pattern used by tool tests:
+
+- Create a temp `WAKEUP_DIR` with `fs.mkdtemp` in `beforeEach` and tear it down in `afterEach` so parallel-safe.
+- Do NOT mock `Wakeup.schedule` / `Wakeup.cancel` — exercise the real filesystem code path so schema drift shows up in the test suite.
+- To exercise `Wakeup.fireDue` deterministically, schedule with a relative `when` value (`normalizeWhen('0s', now)` or a past ISO timestamp) and pass an explicit `now: Date` to `fireDue(now)`. Do not rely on wall-clock timing.
+- The companion tools (`schedule_wakeup`, `cancel_wakeup`) refuse without an active `context.sessionId`. Test both the happy path (with a session id) and the session-gate refusal.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

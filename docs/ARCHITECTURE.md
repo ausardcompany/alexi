@@ -183,7 +183,7 @@ Non-live callers (`getProviderForModel`, `isOrchestrationModel`) never block on 
 
 ### Tool System
 
-Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `warpgrep` / `codebase_search` tool has been extracted to the `alexi-mcp-warpgrep` MCP server — see [`docs/mcp-servers.md`](./mcp-servers.md)):
+Alexi registers **31 built-in tools** via `registerBuiltInTools()` (the former `warpgrep` / `codebase_search` tool has been extracted to the `alexi-mcp-warpgrep` MCP server — see [`docs/mcp-servers.md`](./mcp-servers.md)). Two additional tools (`kilo_board_read` / `kilo_board_write`) are conditionally registered when `isBoardEnabled()` returns `true`:
 
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
@@ -213,6 +213,8 @@ Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `
 | `agent-manager` | `agent-manager.ts` | admin | Manage agent instances |
 | `apply-patch` | `apply-patch.ts` | write | Apply code patches |
 | `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
+| `schedule_wakeup` | `schedule-wakeup.ts` | -- | Schedule a future resume of the current session (ISO-8601 timestamp or relative duration; see [Wakeup Subsystem](#wakeup-subsystem-srckilocodewakeup)) |
+| `cancel_wakeup` | `cancel-wakeup.ts` | -- | Cancel a previously scheduled wakeup by id (idempotent) |
 
 #### Shell detection and PowerShell fail-fast bootstrap
 
@@ -3272,7 +3274,9 @@ interface TaskResult {
 
 ## Shared Agent Board (`src/core/database/boardStore.ts`)
 
-New 1.22.10 module (2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits). Adds a task-scoped coordination channel for multi-agent swarms — a per-task chat room the model can use to broadcast status, questions, or intermediate results to peer subagents without round-tripping through the parent orchestrator. Gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json` (default `false`); when the flag is off the tools are not registered and the model never learns about them.
+New 1.22.10 module (2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits). Adds a task-scoped coordination channel for multi-agent swarms — a per-task chat room the model can use to broadcast status, questions, or intermediate results to peer subagents without round-tripping through the parent orchestrator.
+
+**Config-key promotion (1.22.21, 2026-09-15 upstream sync):** the setting has been promoted out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (ports kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, `6cfb025f9`). `getConfigSharedAgentBoard()` reads in the resolution order (1) top-level `sharedAgentBoard`, (2) legacy `experimental.sharedAgentBoard` (backwards-compatible; a one-time deprecation warning is logged the first time this path is hit), (3) default `true`. `setConfigSharedAgentBoard(enabled)` writes the new top-level key and, when a legacy `experimental.sharedAgentBoard` entry is present, removes it — if the `experimental` object becomes empty after the deletion the parent key is removed as well so the config file converges on the new shape on the next write.
 
 ### Registration flow
 
@@ -3413,7 +3417,7 @@ Any of the three enables the feature; the env flag wins over the on-disk config 
 
 A second resolver lives in `src/config/userConfig.ts:628` under the `KILO_*` namespace, complementing the `KILOCODE_*` upstream-parity resolver. It composes three signals with a boolean OR — an explicit config `false` does NOT override a set env flag:
 
-1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
+1. Top-level `sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`; legacy `experimental.sharedAgentBoard` is still accepted with a one-time deprecation warning, and the default is now `true`).
 2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — feature-specific env flag matching the `KILO_FLAGS` / `KILO_RETRIES` convention used in the agent workflows.
 3. `process.env.KILO_EXPERIMENTAL === '1'` — umbrella flag that enables every experimental feature at once (CI, ad-hoc containers).
 
@@ -3780,3 +3784,160 @@ Public surface:
 - `snapshotRepositoryExists(sessionId): boolean` — synchronous best-effort check via `existsSync`. Safe for zero-await callers (UI paths). Long-lived references built from a stale `listSnapshots()` result should re-check this before attempting `revertTo()`: a `false` result means the on-disk repository is gone and the caller must refetch or bail out. For async callers, `listSnapshots(sessionId).then(x => x.length > 0)` is equivalent and preferred.
 
 Both helpers are additive on top of the existing `recordSnapshot` / `listSnapshots` / `loadSnapshot` / `previewRevert` / `revertTo` / `pruneSnapshots` API (see [API.md — Snapshot Persistence API](API.md#snapshot-persistence-api)).
+
+## Wakeup Subsystem (`src/kilocode/wakeup/`)
+
+Introduced in 1.22.21 (2026-09-15 upstream sync, ports kilocode commit `b7070e507`). Adds a deferred-resume subsystem so a running agent can schedule a future resume of its own session. When the timestamp elapses, the wakeup entry is converted into a synthetic user turn and delivered to the SessionManager as a `<system-reminder source="wakeup">…</system-reminder>` message.
+
+Typical use cases (SAP AI Core workflows):
+
+- Wait for a long-running SAP batch/approval and check back later without holding the connection open.
+- Retry a step after a backoff period.
+- Break a large multi-hour workflow into deferred checkpoints.
+
+### Storage
+
+Alexi_change: upstream persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as one JSON file per wakeup under `~/.alexi/wakeups/<id>.json` and the timer loop is a plain `setInterval`. The Zod schema `WakeupSchema.Entry` is the source of truth for the on-disk shape:
+
+```typescript
+export namespace WakeupSchema {
+  export const Status = z.enum(['pending', 'fired', 'cancelled']);
+  export const Entry = z.object({
+    id: z.string(),
+    sessionID: z.string(),
+    at: z.string(), // ISO-8601 fire time
+    reason: z.string(),
+    payload: z.record(z.unknown()).optional(),
+    status: Status,
+    createdAt: z.string(),
+  });
+}
+```
+
+### Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Wakeup.schedule
+    pending --> cancelled: Wakeup.cancel (same session)
+    pending --> fired: Wakeup.fireDue (at <= now)
+    fired --> [*]: WakeupResume.resume -> SessionManager
+    cancelled --> [*]
+```
+
+Design invariants:
+
+- `Wakeup.schedule` writes the entry to disk BEFORE returning so a crash immediately after does not lose the scheduling intent.
+- `Wakeup.cancel` is idempotent and ownership-checked. Cancelling an unknown, already-fired, foreign-session, or already-cancelled wakeup returns `{ cancelled: false }` rather than throwing, so agents can call it defensively without pre-checking.
+- `Wakeup.fireDue` marks entries as `fired` on disk before handing them back. If the write fails, the entry stays `pending` and the next `fireDue` pass will retry — the caller never sees a "phantom fire".
+- `WakeupResume.resume` is synchronous and side-effect-free. It emits a `ResumeInstruction { sessionID; message; payload?; wakeupID }` value object and lets the caller decide how the resume is delivered (production: SessionManager; tests: mocked bus).
+- `normalizeWhen(when, now?)` accepts either an ISO-8601 timestamp or the relative form `<n>(ms|s|m|h|d)` (case-insensitive). Any other input throws `Error("Invalid wakeup 'when' value: …")` so the caller can surface a validation failure before writing to disk.
+
+### Tool wiring
+
+Two built-in tools registered by `registerBuiltInTools()` in `src/tool/tools/index.ts:115-116`:
+
+- `schedule_wakeup` (`src/tool/tools/schedule-wakeup.ts`): parameters `when` (ISO-8601 or relative duration), `reason`, optional `payload`. Requires an active `context.sessionId` — the tool refuses with `success: false, error: 'schedule_wakeup requires an active session context'` when invoked outside a session (e.g. by a top-level command). Returns `{ wakeupID, at }` on success and echoes the created id + fire time as the `hint`.
+- `cancel_wakeup` (`src/tool/tools/cancel-wakeup.ts`): parameter `wakeupID`. Same session gate as `schedule_wakeup`. Returns `{ cancelled, wakeupID }` — the `cancelled` flag distinguishes a real cancel from a no-op so agents can distinguish "was pending, now cancelled" from "was already gone" without inspecting the entry directly.
+
+The tools port verbatim from upstream because `Wakeup.schedule` / `Wakeup.cancel` match the upstream contract exactly, and cross-session cancellation is blocked at the `Wakeup.cancel` layer (`entry.sessionID !== opts.sessionID → cancelled: false`) rather than at the tool boundary.
+
+## Recall Tool Ranking (`src/tool/tools/recall.ts`)
+
+The `recall` tool searches through past session JSON files under `~/.alexi/sessions/` and returns the top-20 matches ranked by a weighted blend of signals. Ports upstream kilocode `02e92bcc6` (ranking rewrite) and `306b4ed6c` (fallback recovery for prepare-time index errors).
+
+### Ranking formula
+
+```typescript
+function calculateRelevance(content: string, query: string, role: string): number {
+  const lowerContent = content.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const safe = escapeRegExp(lowerQuery);
+
+  const wbHits = (lowerContent.match(new RegExp(`\\b${safe}\\b`, 'g')) || []).length;
+  const substrHits = (lowerContent.match(new RegExp(safe, 'g')) || []).length;
+  const density = substrHits / Math.max(1, content.length / 100);
+
+  let score = wbHits * 30 + Math.min(density * 10, 40);
+  if (role === 'user') {
+    score += 5;
+  } else if (role === 'assistant') {
+    score += 3;
+  }
+  return Math.min(score, 100);
+}
+```
+
+- **Word-boundary matches (`\bfoo\b`)** dominate (weight 30 per hit) — the strongest signal for a genuine topical match.
+- **Substring density** (occurrences per 100 chars, capped at 40) is a tie-breaker for content with no whole-word hits but many partial substring occurrences.
+- **Role bonus** nudges the ranking so identical-content matches from user turns rank above system prompts.
+- **Query is escaped via `escapeRegExp`** so partial metacharacters like a trailing `\` or unbalanced `(` cannot cause a `SyntaxError` or runaway backtracking.
+
+### Fast path with slow-path fallback
+
+```mermaid
+flowchart TD
+    Start[recall.execute] --> ListSessions[readdir sessions dir]
+    ListSessions --> ForEach[for each session file]
+    ForEach --> Load[loadSession]
+    Load -->|fail| LogSkip[logger.warn, skip file]
+    Load -->|ok| Fast[scanSessionFast: role pre-filter -> relevance]
+    Fast -->|throws| Slow[scanSessionSlow: role-agnostic scan]
+    Slow -->|throws| SkipSession[logger.warn, skip file]
+    Fast -->|ok| Collect[collect hits]
+    Slow -->|ok| Collect
+    Collect --> More{More files?}
+    More -->|Yes| ForEach
+    More -->|No| Sort[sort by relevance desc]
+    Sort --> Top20[slice top 20]
+    Top20 --> Return[return { results, totalMatches }]
+```
+
+- **`scanSessionFast`** pre-filters messages by role BEFORE running the relevance scorer, mirroring the upstream SQL covering-index approach (`recall_message_role_idx`). Only messages whose role is in the caller-configurable `allowedRoles` set are scored.
+- **`scanSessionSlow`** is the role-agnostic fallback used when the fast path throws unexpectedly (e.g. session on-disk shape drift). One weird session cannot hide matches from the other N-1 files.
+- **Corrupt session files** are logged via `logger.warn('[recall] failed to load session, skipping', …)` and skipped — a single corrupt file cannot fail the whole recall query.
+
+### Parameters
+
+```typescript
+const RecallParamsSchema = z.object({
+  query: z.string(),
+  sessionLimit: z.number().optional(),          // default 10
+  includeCurrentSession: z.boolean().optional(),// default false
+  roles: z.array(z.enum(['user', 'assistant', 'system'])).optional(), // default ['user', 'assistant']
+});
+```
+
+Result rows carry `role: 'user' | 'assistant' | 'system' | 'unknown'` — messages whose on-disk role is unrecognised are normalized to `'unknown'` and dropped from the default filter, but a caller can opt them in by requesting `roles: ['user', 'assistant', 'system']`.
+
+### `RecallMessageIndex` marker + DDL shim
+
+The upstream commit `02e92bcc6` adds a SQLite covering index. Alexi persists sessions as JSON files so there is no `message` table to index today; the marker module `src/core/session/recall-message-index.ts` exists so a future migration to a SQL-backed session store can install the covering index without hunting through history:
+
+```typescript
+export namespace RecallMessageIndex {
+  export const name = 'recall_message_role_idx';
+  export const createSql = `CREATE INDEX IF NOT EXISTS \`${name}\` ON \`message\` (\`id\`,json_extract("data", '$.role'),coalesce(json_extract("data", '$.parentID'), ''));`;
+}
+```
+
+The index name is included in `KILOCODE_PRESERVED_SQL_NAMES` / `KILOCODE_PRESERVED_SQL_REGEX` (`src/core/database/migration.gen.ts`) so upstream syncs treat it as a kilocode change and do not drop it.
+
+## Kilocode-Preserved SQL Names
+
+Upstream sync scripts (`scripts/sync-upstream.sh`) inspect raw DDL strings to decide whether a table/index reference is upstream-owned or Alexi-owned. Dropping a kilocode-owned identifier silently on a sync would break board coordination, model-usage aggregation, or recall search performance, so `src/core/database/migration.gen.ts` exports the union of protected identifiers:
+
+```typescript
+export const KILOCODE_PRESERVED_SQL_NAMES: readonly string[] = [
+  'kilo_board',
+  'kilo_board_message',
+  'part_session_step_finish_idx',
+  'recall_part_search_idx',
+  'recall_message_role_idx',
+];
+
+export const KILOCODE_PRESERVED_SQL_REGEX =
+  /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/;
+```
+
+Any new SQL name introduced by a `kilocode_change` migration MUST be appended here — the regex is the single source of truth consumed by the sync tooling.
