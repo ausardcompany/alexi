@@ -198,6 +198,69 @@ it('transitions idle → loading → ready', async () => {
 
 `invalidateCatalog()` clears the pending refresh timer, aborts any in-flight fetch tracking flag, and resets `entries` to the static seed. Without it a test that flips the catalog to `ready` leaks state into subsequent tests via the module singleton. The refresh timer uses `.unref()` so Node exits cleanly even if a test forgets to call `invalidateCatalog()`, but the cache pollution will still cause assertion drift.
 
+#### Testing static-catalog membership contracts (`src/providers/__tests__/modelCatalog.test.ts`)
+
+New entries to `ORCHESTRATION_MODELS` in `src/providers/sapOrchestration.ts` should ship with a small contract-pinning test that walks the id through every string-based matcher a caller might reach. The canonical example is `src/providers/__tests__/modelCatalog.test.ts` (added with `deepseek-v4.1-flash` in commit `531a15c1`, `feat(providers): add deepseek-v4.1-flash to model catalog`):
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  getAvailableModels,
+  isAvailableModel,
+  getModelMetadata,
+} from '../modelCatalog.js';
+import {
+  ORCHESTRATION_MODELS,
+  ORCHESTRATION_MODEL_METADATA,
+  isOrchestrationModel,
+  modelHasCapability,
+} from '../sapOrchestration.js';
+import { modelSupportsReasoningEffort } from '../model-match.js';
+
+describe('modelCatalog: deepseek-v4.1-flash entry', () => {
+  it('is present in the static ORCHESTRATION_MODELS list', () => {
+    expect((ORCHESTRATION_MODELS as readonly string[]).includes('deepseek-v4.1-flash')).toBe(true);
+  });
+
+  it('is accepted by isOrchestrationModel()', () => {
+    expect(isOrchestrationModel('deepseek-v4.1-flash')).toBe(true);
+  });
+
+  it('is exposed via getAvailableModels()', () => {
+    expect(getAvailableModels()).toContain('deepseek-v4.1-flash');
+  });
+
+  it('is accepted by isAvailableModel()', () => {
+    expect(isAvailableModel('deepseek-v4.1-flash')).toBe(true);
+  });
+
+  it('has a metadata entry matching the deepseek-r1 capability profile', () => {
+    const flashMeta = ORCHESTRATION_MODEL_METADATA['deepseek-v4.1-flash'];
+    const r1Meta = ORCHESTRATION_MODEL_METADATA['deepseek-ai--deepseek-r1'];
+    expect(flashMeta).toBeDefined();
+    expect(r1Meta).toBeDefined();
+    expect(flashMeta?.capabilities).toEqual(r1Meta?.capabilities);
+  });
+
+  it('does not advertise tool-calling (matches deepseek family profile)', () => {
+    expect(modelHasCapability('deepseek-v4.1-flash', 'tools')).toBe(false);
+  });
+
+  it('supports reasoning_effort at "levels" (low/medium/high) like deepseek-v4-chat', () => {
+    expect(modelSupportsReasoningEffort('deepseek-v4.1-flash')).toBe('levels');
+    expect(modelSupportsReasoningEffort('DEEPSEEK-V4.1-FLASH')).toBe('levels');
+    expect(modelSupportsReasoningEffort('sap-ai-core/deepseek-v4.1-flash')).toBe('levels');
+  });
+});
+```
+
+Key patterns for follow-on entries:
+
+1. **Cover both the `ORCHESTRATION_MODELS` list AND the `ORCHESTRATION_MODEL_METADATA` map.** A regression that adds the id to the string list but forgets the metadata entry (or vice versa) is invisible to a happy-path e2e test — the metadata absence only surfaces on `modelHasCapability(...)` calls, and the string absence only surfaces on `isAvailableModel(...)` / router dispatch. Assert both explicitly.
+2. **Cross-check against a sibling id in the same family.** When a new id is intended to inherit an existing family's capability profile (as `deepseek-v4.1-flash` inherits `deepseek-ai--deepseek-r1`'s `capabilities: []`), assert `.toEqual(siblingMeta?.capabilities)` rather than duplicating the literal. Duplicating the literal makes future family-wide updates a search-and-replace exercise; the `.toEqual` shape lets a single family-level change propagate to every sibling test with no edits.
+3. **Exercise the case-insensitive and provider-prefixed forms of the reasoning-effort guard.** `modelSupportsReasoningEffort` normalises via `toLowerCase()` and matches on the `deepseek` substring, so `DEEPSEEK-V4.1-FLASH` and `sap-ai-core/deepseek-v4.1-flash` must both classify as `'levels'`. A regression that tightened the guard to an exact-id lookup would silently drop reasoning-effort on any envelope with a `sap-ai-core/` prefix — pin the two variants so the regression trips loudly.
+4. **Do NOT mock `modelCatalog.ts` in this suite.** Unlike the router / inline-override tests that need a controlled `isAvailableModel` return, this suite is validating the real module wiring (static list ↔ metadata map ↔ family guards) and MUST use the real exports so a broken export chain fails the suite. If the catalog's `refreshModelCatalog()` fetches something in a `beforeAll` hook, the suite is still correct because the static seed already contains the id — the assertion `getAvailableModels().includes('deepseek-v4.1-flash')` passes regardless of whether the live fetch has completed.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):

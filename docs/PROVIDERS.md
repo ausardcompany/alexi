@@ -346,6 +346,31 @@ const GEMINI_MODELS = [
 - Thinking mode for complex reasoning
 - Large context windows
 
+#### DeepSeek Models
+
+```typescript
+const DEEPSEEK_MODELS = [
+  'deepseek-ai--deepseek-r1',
+  'deepseek-v4.1-flash',
+];
+```
+
+**Characteristics**:
+
+- Native reasoning-content emission; `getModelFamily(id) === 'deepseek'` in `src/providers/model-match.ts:42` opts them into the reasoning-content transform.
+- Reasoning-effort API is `'levels'` (low / medium / high) rather than the binary `enable_thinking` switch — see `modelSupportsReasoningEffort(modelId)` in `src/providers/model-match.ts:223`, which returns `'levels'` for any id whose lowercased form contains the `deepseek` substring.
+- No tool-calling advertised on the SAP AI Core deployments today; `capabilities: []` in `ORCHESTRATION_MODEL_METADATA` (`src/providers/sapOrchestration.ts:2313-2317`). Consumers that route through the tool-capability gate (`modelHasCapability(modelId, 'tools')`) will not register function-calling schemas for these ids.
+
+##### `deepseek-v4.1-flash` — id shape and prefix-heuristic implications
+
+The `deepseek-v4.1-flash` id ships in the OpenCode / upstream form and deliberately omits the `deepseek-ai--` vendor prefix that `deepseek-ai--deepseek-r1` uses. This is not accidental — it interacts with three separate string-based matchers:
+
+1. **`modelCatalog.ts` prefix heuristic** (see [Dynamic Model Catalog](#dynamic-model-catalog) above). The `deepseek-` prefix is one of the eight explicit provider prefixes the catalog uses to match SAP AI Core deployments whose `configurationName` is not an exact hit in `ORCHESTRATION_MODELS`. `deepseek-v4.1-flash` still matches this heuristic, so a deployment named `deepseek-v4.1-flash` on the tenant is recognised as a live entry the moment `refreshModelCatalog()` returns.
+2. **`getModelFamily` in `src/providers/model-match.ts:42`** — plain `.includes('deepseek')` substring match. Both `deepseek-ai--deepseek-r1` and `deepseek-v4.1-flash` (and any provider-prefixed form like `sap-ai-core/deepseek-v4.1-flash`) resolve to family `'deepseek'`.
+3. **`modelSupportsReasoningEffort` in `src/providers/model-match.ts:223`** — same substring guard. Returns `'levels'` for the new id, so the CLI's `--reasoning-effort low|medium|high` flag round-trips into the SAP AI Core request as `reasoning_effort` rather than being dropped or forcibly rewritten to `enable_thinking`.
+
+Because the guard is a substring match, a `deepseek-v4.1-flash` id embedded in an upstream envelope (for example, `sap-ai-core/deepseek-v4.1-flash` when the provider prefix is retained) also classifies correctly. Callers should NOT rely on the exact `deepseek-ai--` vendor prefix — the reasoning code path treats any id containing `deepseek` uniformly.
+
 ### Model Selection
 
 Models are selected through:
