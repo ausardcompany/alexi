@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
 export namespace WakeupSchema {
   export const Status = z.enum(['pending', 'fired', 'cancelled']);
   export type Status = z.infer<typeof Status>;
@@ -34,7 +35,7 @@ export namespace WakeupSchema {
      * Kept as `Record<string, unknown>` so callers can round-trip any
      * JSON structure without a schema migration.
      */
-    payload: z.record(z.unknown()).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
     /** Current lifecycle state of the wakeup. */
     status: Status,
     /** ISO-8601 timestamp of when the wakeup was scheduled. */

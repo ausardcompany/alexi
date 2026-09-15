@@ -64,6 +64,7 @@ export function normalizeWhen(when: string, now: Date = new Date()): string {
   return parsed.toISOString();
 }
 
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
 export namespace Wakeup {
   export interface ScheduleOptions {
     sessionID: string;

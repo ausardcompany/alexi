@@ -25,7 +25,7 @@ const ScheduleWakeupParamsSchema = z.object({
     ),
   reason: z.string().describe('Why the wakeup is scheduled — surfaced back to the agent on resume'),
   payload: z
-    .record(z.unknown())
+    .record(z.string(), z.unknown())
     .optional()
     .describe('Optional opaque payload delivered to the resumed session'),
 });

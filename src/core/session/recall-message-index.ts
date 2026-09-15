@@ -20,6 +20,7 @@
  * `kilocode_change` marker across replays.
  */
 
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
 export namespace RecallMessageIndex {
   /**
    * SQLite index name. Included in the migration preservation regex so

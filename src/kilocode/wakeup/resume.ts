@@ -29,6 +29,7 @@ export interface ResumeInstruction {
   wakeupID: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
 export namespace WakeupResume {
   /**
    * Convert a fired wakeup entry into a `ResumeInstruction` ready for
