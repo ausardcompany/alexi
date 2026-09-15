@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Prettier auto-fix reflow on `setConfigSharedAgentBoard` and `scanSession*` helpers** (`src/config/userConfig.ts`, `src/tool/tools/recall.ts`, commit `64fc6676` `style(ci): auto-fix lint/format issues [alexi-bot]`): Two-file, three-hunk Prettier reflow with no semantic change. In `src/config/userConfig.ts:754-758` the three-condition guard inside `setConfigSharedAgentBoard(enabled)` — which strips a legacy `experimental.sharedAgentBoard` key when persisting the top-level `sharedAgentBoard` flag — was split from a single-line 106-column `if (config.experimental && typeof config.experimental === 'object' && !Array.isArray(config.experimental))` onto four lines so each `&&`-joined predicate occupies its own line under Prettier's `printWidth: 100` ceiling. In `src/tool/tools/recall.ts:153` (`scanSessionFast`) and `:194` (`scanSessionSlow`) the `const createdTs = session?.metadata?.created?.toString() ?? new Date().toISOString();` fallback was collapsed from a hand-authored two-line form onto a single 82-column line — it fits under `printWidth: 100` so the compact form is preferred. Semantic contract of both helpers is byte-identical: `setConfigSharedAgentBoard` still writes the new top-level key, still removes any legacy `experimental.sharedAgentBoard` entry, still deletes the whole `experimental` block when it becomes empty, and still calls `saveFullConfig(config)`; `scanSessionFast` and `scanSessionSlow` still fall back to `new Date().toISOString()` when a session record has no `metadata.created` timestamp so `RecallHit.timestamp` is never empty. Diff statistics: `2 files changed, 7 insertions(+), 5 deletions(-)`.
+
 ## [1.22.20] - 2026-09-14
 
 ### Added
