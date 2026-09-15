@@ -1335,6 +1335,8 @@ cleanupToolOutputs(): void
 | `background_process` | `command`, `name?`, `workingDirectory?`, `env?` | Spawn long-running detached process (see [background_process semantics](#background_process-tool-semantics) below) |
 | `agent_manager` | `action`, `sessionId?`, `agentId?`, `answer?`, `sourceSessionId?`, `worktreeId?`, `config?` | Manage agent sessions and answer pending sub-agent questions (nullable-friendly schema — see below) |
 | `open_plan` | `path`, `title?` | Signal that an agent-authored plan markdown file is ready for review; publishes `plan.opened` on the shared bus (see [open_plan tool](#open_plan-tool) below) |
+| `schedule_wakeup` | `when`, `reason`, `payload?` | Schedule a future resume of the current session; `when` accepts an ISO-8601 timestamp or a relative duration (`"5m"`, `"1h"`, `"30s"`, `"2d"`). Requires an active session context. See [Wakeup tools](#wakeup-tools) below |
+| `cancel_wakeup` | `wakeupID` | Cancel a previously scheduled wakeup by id. Idempotent — returns `{ cancelled: false }` for unknown, already-fired, or foreign-session ids. See [Wakeup tools](#wakeup-tools) below |
 
 #### `todowrite` tool contract
 
@@ -1509,6 +1511,74 @@ if (!result.success) {
   // On symlink escape: result.error === 'Directory attachments cannot be expanded: <requested>'
   console.error(result.error);
 }
+```
+
+#### Wakeup tools
+
+`schedule_wakeup` (`src/tool/tools/schedule-wakeup.ts`) and `cancel_wakeup` (`src/tool/tools/cancel-wakeup.ts`) let an active agent schedule and cancel future resumes of its own session. Both delegate to the `Wakeup` namespace in `src/kilocode/wakeup/index.ts` (see [ARCHITECTURE.md — Wakeup Subsystem](./ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup)).
+
+Parameter schemas:
+
+```typescript
+// src/tool/tools/schedule-wakeup.ts
+const ScheduleWakeupParamsSchema = z.object({
+  when: z
+    .string()
+    .describe(
+      "ISO 8601 timestamp (e.g. '2026-09-15T12:00:00Z') or relative duration ('5m', '1h', '30s', '2d')"
+    ),
+  reason: z.string().describe('Why the wakeup is scheduled — surfaced back to the agent on resume'),
+  payload: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe('Optional opaque payload delivered to the resumed session'),
+});
+
+// src/tool/tools/cancel-wakeup.ts
+const CancelWakeupParamsSchema = z.object({
+  wakeupID: z.string().describe('ID of the wakeup to cancel (returned by schedule_wakeup)'),
+});
+```
+
+Both `payload` on `schedule_wakeup` and the persisted `WakeupSchema.Entry.payload` use Zod v4's two-argument `z.record(z.string(), z.unknown())` signature. The single-argument form `z.record(z.unknown())` is deprecated in v4; call sites and consumers should use the explicit key/value form.
+
+Result shapes:
+
+```typescript
+// schedule_wakeup — success
+{
+  success: true,
+  data: { wakeupID: string; at: string /* ISO-8601 */ },
+  hint: `Wakeup <id> scheduled for <at>: <reason>`,
+  metadata: { wakeupID, at },
+}
+
+// cancel_wakeup — success (always success unless the tool itself throws)
+{
+  success: true,
+  data: { cancelled: boolean; wakeupID: string },
+  hint: cancelled
+    ? `Wakeup <id> cancelled`
+    : `No pending wakeup with id <id>`,
+  metadata: { cancelled },
+}
+```
+
+Semantics:
+
+- **Session-scoped.** Both tools return `{ success: false, error: '<tool> requires an active session context' }` when invoked without `context.sessionId` — a wakeup must belong to exactly one session so a driver cannot accidentally schedule a global timer.
+- **Cancel is idempotent.** `cancel_wakeup` returns `{ cancelled: false }` (not an error) for unknown ids, foreign-session ids, and already-fired / already-cancelled entries so an agent can call it defensively without pre-checking. Use `Wakeup.read(id)` from the runtime API if the agent needs to inspect state before deciding.
+- **Duration parsing.** `when` accepts either an ISO-8601 timestamp or a relative duration matching `/^(\d+)(ms|s|m|h|d)$/i`. Anything else that `new Date(when)` cannot parse is rejected with `Invalid wakeup 'when' value: <when>`.
+- **Resume delivery.** When the fire time elapses, the wakeup entry is transitioned to `status: 'fired'` on disk and `WakeupResume.resume(entry)` returns a `ResumeInstruction` value the driver injects as a synthetic `<system-reminder source="wakeup">` user turn. The original `reason` and `payload` are preserved so the resumed agent has full context.
+
+Example agent invocations:
+
+```json
+{ "when": "5m", "reason": "Poll SAP batch job status", "payload": { "jobId": "BATCH-4711" } }
+```
+
+```json
+{ "wakeupID": "5f3b0a3e-2c4a-4d99-9e21-6b4c7f5d3a01" }
 ```
 
 ## Event Bus API — Batched Publish
@@ -2975,23 +3045,36 @@ export function _instanceCacheCount(): number;
 
 ## Shared Agent Board API
 
-Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23`). Task-scoped coordination channel for multi-agent swarms. Gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json` (default `false`); when the flag is off the tools are not registered.
+Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23`). Task-scoped coordination channel for multi-agent swarms.
+
+**Config-key promotion (1.22.21, 2026-09-15 upstream sync — ports kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, `6cfb025f9`):** the setting has moved out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (previously `false`). Legacy `experimental.sharedAgentBoard` is still accepted with a one-time deprecation warning.
 
 ### Config helpers (`src/config/userConfig.ts`)
 
 ```typescript
 /**
- * Read the experimental.sharedAgentBoard flag. Returns false for
- * missing, non-object, array, or non-boolean values so a corrupt
- * config never accidentally enables the feature.
+ * Read the sharedAgentBoard flag. Resolution order:
+ *   1. Top-level `sharedAgentBoard` (new preferred location).
+ *   2. Legacy `experimental.sharedAgentBoard` (one-time deprecation warning).
+ *   3. Default `true`.
  */
 export function getConfigSharedAgentBoard(): boolean;
 
 /**
- * Persist experimental.sharedAgentBoard. Merges into the existing
- * experimental object without clobbering other experimental flags.
+ * Persist the shared-agent-board flag to the top-level `sharedAgentBoard`
+ * key. Also removes any legacy `experimental.sharedAgentBoard` entry so
+ * the config file converges on the new shape on the next write. If
+ * `experimental` becomes empty after the deletion, the parent key is
+ * removed as well.
  */
 export function setConfigSharedAgentBoard(enabled: boolean): void;
+
+/**
+ * Test-only. Resets the once-per-process deprecation-warning latch so
+ * consecutive fixtures can each observe the warning without spawning a
+ * fresh process. Marked `@internal`; production code must not call it.
+ */
+export function _resetSharedAgentBoardDeprecationWarningLatchForTests(): void;
 ```
 
 ### BoardStore (`src/core/database/boardStore.ts`)
@@ -3169,7 +3252,15 @@ setConfigSharedAgentBoard(true);
 // tool schema. Alexi does not hot-reload tools mid-turn.
 ```
 
-Or edit `~/.alexi/config.json` directly:
+Or edit `~/.alexi/config.json` directly (new preferred top-level shape, default is `true`):
+
+```json
+{
+  "sharedAgentBoard": true
+}
+```
+
+The legacy shape below is still accepted but emits a one-time deprecation warning when consulted (`[config] experimental.sharedAgentBoard is deprecated — move the setting to top-level "sharedAgentBoard" in ~/.alexi/config.json`) and is removed on the next `setConfigSharedAgentBoard()` write:
 
 ```json
 {
@@ -3292,5 +3383,224 @@ export function setConfigCompactionModel(modelId: string): void;
      `[alexi] config: \`context.compactionModel\` is deprecated; use \`models.compaction\` instead.`
 - **Write behaviour:** always writes to `models.compaction`; if `context.compactionModel` is set, it is removed from the persisted file so subsequent reads never fall back to a stale value. Empty / whitespace-only ids throw `Error('compaction model id must be a non-empty string')`.
 - **Test-only:** `_resetLegacyCompactionModelWarning()` — resets the one-shot warning cache so tests can re-observe the deprecation warning. Marked `@internal`; production code must not call it.
+
+## Wakeup API
+
+Introduced in 1.22.21 (2026-09-15 upstream sync, ports upstream kilocode commit `b7070e507`). Deferred-resume subsystem allowing an agent to schedule a future resume of its own session. See [ARCHITECTURE.md — Wakeup Subsystem](./ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup) for the storage model and lifecycle.
+
+### `Wakeup` namespace (`src/kilocode/wakeup/index.ts`)
+
+```typescript
+export namespace Wakeup {
+  export interface ScheduleOptions {
+    sessionID: string;
+    when: string;        // ISO-8601 timestamp or relative duration ("5m", "1h", "30s", "2d")
+    reason: string;      // Surfaced to the agent on resume
+    payload?: Record<string, unknown>;
+  }
+
+  export interface CancelOptions {
+    sessionID: string;
+    wakeupID: string;
+  }
+
+  export function schedule(opts: ScheduleOptions): Promise<WakeupSchema.Entry>;
+  export function cancel(opts: CancelOptions): Promise<{ cancelled: boolean }>;
+  export function read(id: string): Promise<WakeupSchema.Entry | null>;
+  export function list(sessionID?: string): Promise<WakeupSchema.Entry[]>;
+  export function fireDue(now?: Date): Promise<WakeupSchema.Entry[]>;
+}
+
+export function normalizeWhen(when: string, now?: Date): string;
+```
+
+- `schedule` writes the entry to disk BEFORE returning so a crash immediately after does not lose the scheduling intent.
+- `cancel` is idempotent and ownership-checked. Cancelling an unknown, already-fired, foreign-session, or already-cancelled wakeup returns `{ cancelled: false }` rather than throwing.
+- `fireDue` marks entries as `fired` on disk before handing them back. If the write fails, the entry stays `pending` and the next `fireDue` pass will retry.
+- `normalizeWhen` accepts either an ISO-8601 timestamp or the relative form `<n>(ms|s|m|h|d)` (case-insensitive). Any other input throws `Error("Invalid wakeup 'when' value: …")`.
+
+### `WakeupSchema` (`src/kilocode/wakeup/schema.ts`)
+
+```typescript
+export namespace WakeupSchema {
+  export const Status = z.enum(['pending', 'fired', 'cancelled']);
+  export type Status = z.infer<typeof Status>;
+
+  export const Entry = z.object({
+    id: z.string(),
+    sessionID: z.string(),
+    at: z.string(),                           // ISO-8601 fire time
+    reason: z.string(),
+    payload: z.record(z.unknown()).optional(),
+    status: Status,
+    createdAt: z.string(),
+  });
+  export type Entry = z.infer<typeof Entry>;
+}
+```
+
+### `WakeupResume.resume` (`src/kilocode/wakeup/resume.ts`)
+
+```typescript
+export interface ResumeInstruction {
+  sessionID: string;
+  message: string;      // <system-reminder source="wakeup">…</system-reminder>
+  payload?: Record<string, unknown>;
+  wakeupID: string;
+}
+
+export namespace WakeupResume {
+  export function resume(entry: WakeupSchema.Entry): ResumeInstruction;
+}
+```
+
+Synchronous and side-effect-free so callers decide how the resume is delivered (production: SessionManager; tests: mocked bus).
+
+### `schedule_wakeup` tool
+
+Parameters:
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `when` | string | ISO-8601 timestamp (`"2026-09-15T12:00:00Z"`) or relative duration (`"5m"`, `"1h"`, `"30s"`, `"2d"`) |
+| `reason` | string | Why the wakeup is scheduled — surfaced back to the agent on resume |
+| `payload` | object? | Optional opaque payload delivered to the resumed session |
+
+Requires an active `context.sessionId`; refuses with `success: false, error: 'schedule_wakeup requires an active session context'` when invoked outside a session.
+
+Result:
+
+```typescript
+interface ScheduleWakeupResult {
+  wakeupID: string;
+  at: string; // normalized ISO-8601
+}
+```
+
+Example:
+
+```json
+{
+  "when": "1h",
+  "reason": "Check status of SAP batch job Z_MASS_UPDATE_2026091501",
+  "payload": { "jobId": "Z_MASS_UPDATE_2026091501" }
+}
+```
+
+### `cancel_wakeup` tool
+
+Parameters:
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `wakeupID` | string | ID of the wakeup to cancel (returned by `schedule_wakeup`) |
+
+Same session gate as `schedule_wakeup`. Returns `{ cancelled, wakeupID }` — the `cancelled` flag distinguishes a real cancel from a no-op so agents can call it defensively without pre-checking the wakeup state.
+
+Example (defensive cleanup pattern):
+
+```json
+{
+  "wakeupID": "5d7ad3a4-2b96-4d09-8f8c-f8b8a9c1e2f3"
+}
+```
+
+## Recall Tool API
+
+The `recall` tool (`src/tool/tools/recall.ts`) searches through past session JSON files under `~/.alexi/sessions/` and returns the top-20 matches ranked by a weighted blend of signals. Ports upstream kilocode `02e92bcc6` (ranking rewrite) and `306b4ed6c` (fallback recovery). See [ARCHITECTURE.md — Recall Tool Ranking](./ARCHITECTURE.md#recall-tool-ranking-srctooltoolsrecallts) for the ranking formula and fast/slow-path fallback design.
+
+### Parameters
+
+```typescript
+const RecallParamsSchema = z.object({
+  query: z.string(),
+  sessionLimit: z.number().optional(),          // default 10
+  includeCurrentSession: z.boolean().optional(),// default false
+  roles: z.array(z.enum(['user', 'assistant', 'system'])).optional(), // default ['user', 'assistant']
+});
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `query` | (required) | Search query string. Escaped via `escapeRegExp` before being compiled to a regex, so partial metacharacters cannot cause `SyntaxError` or runaway backtracking. |
+| `sessionLimit` | `10` | Maximum number of sessions to search (most-recent first). |
+| `includeCurrentSession` | `false` | Whether to include the current session (identified by `context.sessionId`) in results. |
+| `roles` | `['user', 'assistant']` | Restrict recall to messages with these roles. |
+
+### Result shape
+
+```typescript
+interface RecallHit {
+  sessionId: string;
+  messageId: string;                                      // "msg-<index>"
+  role: 'user' | 'assistant' | 'system' | 'unknown';
+  content: string;                                        // truncated to 500 chars
+  relevance: number;                                      // 0-100
+  timestamp: string;                                      // ISO-8601
+}
+
+interface RecallResult {
+  results: RecallHit[];  // top 20 by relevance desc
+  totalMatches: number;  // total match count across all searched sessions
+}
+```
+
+- Unknown / missing roles are normalized to `'unknown'` and dropped from the default filter. A caller can opt them in by requesting `roles: ['user', 'assistant', 'system']`.
+- The tool declares no permission — recall is a read-only operation on session history.
+- When more than 20 matches exist, the returned `hint` reads `Found <n> matches, showing top 20 most relevant`.
+
+### Ranking formula
+
+```typescript
+score = wbHits * 30 + Math.min(density * 10, 40) + roleBonus
+// roleBonus: 'user' → +5, 'assistant' → +3, otherwise 0
+// score is capped at 100
+```
+
+- **Word-boundary matches** (`\bfoo\b`) dominate — weight 30 per hit.
+- **Substring density** (occurrences per 100 chars, capped at 40) is a tie-breaker.
+- **Role bonus** nudges identical-content matches from user turns above system prompts.
+
+### Example
+
+```json
+{
+  "query": "SAP AI Core rate limit",
+  "sessionLimit": 20,
+  "roles": ["user", "assistant"]
+}
+```
+
+## Kilocode-Preserved SQL Names (`src/core/database/migration.gen.ts`)
+
+Introduced in 1.22.21 (2026-09-15 upstream sync). Exports the union of SQL identifiers introduced by `kilocode_change` migrations. Upstream sync scripts (`scripts/sync-upstream.sh`) MUST preserve any DDL that references one of these identifiers — dropping them silently on a sync would break board coordination, model-usage aggregation, or recall search performance.
+
+```typescript
+export const KILOCODE_PRESERVED_SQL_NAMES: readonly string[] = [
+  'kilo_board',
+  'kilo_board_message',
+  'part_session_step_finish_idx',
+  'recall_part_search_idx',
+  'recall_message_role_idx',
+];
+
+export const KILOCODE_PRESERVED_SQL_REGEX =
+  /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/;
+```
+
+Any new SQL identifier introduced by a `kilocode_change` migration MUST be appended to `KILOCODE_PRESERVED_SQL_NAMES` and the regex must be updated in the same commit.
+
+### `RecallMessageIndex` marker (`src/core/session/recall-message-index.ts`)
+
+Documented shim for a future SQL-backed session store. Alexi persists sessions as JSON files today, so the covering index is not installed, but the DDL is kept verbatim so a future migration can drop it back in without hunting through history:
+
+```typescript
+export namespace RecallMessageIndex {
+  export const name = 'recall_message_role_idx';
+  export const createSql = `CREATE INDEX IF NOT EXISTS \`${name}\` ON \`message\` (\`id\`,json_extract("data", '$.role'),coalesce(json_extract("data", '$.parentID'), ''));`;
+}
+```
+
+The index name is referenced by `KILOCODE_PRESERVED_SQL_REGEX` above so upstream syncs treat it as a kilocode change and do not drop it.
 
 See [Configuration → Auxiliary-Task Model Selection](CONFIGURATION.md#auxiliary-task-model-selection-modelscompaction) for the operator-facing writeup and [Providers → Auxiliary-Task Model Selection](PROVIDERS.md#auxiliary-task-model-selection) for the runtime flow.

@@ -47,6 +47,11 @@ import { openPlanTool } from './open-plan.js';
 // shared agent board tools are gated behind `experimental.sharedAgentBoard`.
 import { boardReadTool, boardWriteTool } from './board.js';
 import { isBoardEnabled } from '../../config/userConfig.js';
+// kilocode_change: schedule_wakeup / cancel_wakeup let agents defer work
+// (kilocode commit b7070e507). Backed by the filesystem wakeup store
+// under `src/kilocode/wakeup/`.
+import { scheduleWakeupTool } from './schedule-wakeup.js';
+import { cancelWakeupTool } from './cancel-wakeup.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -107,6 +112,8 @@ export const builtInTools = [
   repoCloneTool,
   imageGenTool,
   openPlanTool,
+  scheduleWakeupTool, // kilocode_change
+  cancelWakeupTool, // kilocode_change
 ];
 
 /**
@@ -173,6 +180,8 @@ export {
   openPlanTool,
   boardReadTool,
   boardWriteTool,
+  scheduleWakeupTool,
+  cancelWakeupTool,
 };
 
 // Re-export UI utilities from specific tools

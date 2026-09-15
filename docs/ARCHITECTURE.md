@@ -183,7 +183,7 @@ Non-live callers (`getProviderForModel`, `isOrchestrationModel`) never block on 
 
 ### Tool System
 
-Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `warpgrep` / `codebase_search` tool has been extracted to the `alexi-mcp-warpgrep` MCP server — see [`docs/mcp-servers.md`](./mcp-servers.md)):
+Alexi registers **31 built-in tools** via `registerBuiltInTools()` (the former `warpgrep` / `codebase_search` tool has been extracted to the `alexi-mcp-warpgrep` MCP server — see [`docs/mcp-servers.md`](./mcp-servers.md)). Two additional tools (`kilo_board_read` / `kilo_board_write`) are conditionally registered when `isBoardEnabled()` returns `true`:
 
 | Tool | File | Permission | Description |
 |------|------|-----------|-------------|
@@ -213,6 +213,8 @@ Alexi registers **29 built-in tools** via `registerBuiltInTools()` (the former `
 | `agent-manager` | `agent-manager.ts` | admin | Manage agent instances |
 | `apply-patch` | `apply-patch.ts` | write | Apply code patches |
 | `repo-clone` | `repo-clone.ts` | execute | Clone repositories |
+| `schedule_wakeup` | `schedule-wakeup.ts` | -- | Schedule a future resume of the current session (ISO-8601 timestamp or relative duration; see [Wakeup Subsystem](#wakeup-subsystem-srckilocodewakeup)) |
+| `cancel_wakeup` | `cancel-wakeup.ts` | -- | Cancel a previously scheduled wakeup by id (idempotent) |
 
 #### Shell detection and PowerShell fail-fast bootstrap
 
@@ -3396,7 +3398,9 @@ interface TaskResult {
 
 ## Shared Agent Board (`src/core/database/boardStore.ts`)
 
-New 1.22.10 module (2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits). Adds a task-scoped coordination channel for multi-agent swarms — a per-task chat room the model can use to broadcast status, questions, or intermediate results to peer subagents without round-tripping through the parent orchestrator. Gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json` (default `false`); when the flag is off the tools are not registered and the model never learns about them.
+New 1.22.10 module (2026-09-03 upstream sync, ports kilocode `162e30d23` + accompanying store/migration commits). Adds a task-scoped coordination channel for multi-agent swarms — a per-task chat room the model can use to broadcast status, questions, or intermediate results to peer subagents without round-tripping through the parent orchestrator.
+
+**Config-key promotion (1.22.21, 2026-09-15 upstream sync):** the setting has been promoted out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (ports kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, `6cfb025f9`). `getConfigSharedAgentBoard()` reads in the resolution order (1) top-level `sharedAgentBoard`, (2) legacy `experimental.sharedAgentBoard` (backwards-compatible; a one-time deprecation warning is logged the first time this path is hit), (3) default `true`. `setConfigSharedAgentBoard(enabled)` writes the new top-level key and, when a legacy `experimental.sharedAgentBoard` entry is present, removes it — if the `experimental` object becomes empty after the deletion the parent key is removed as well so the config file converges on the new shape on the next write.
 
 ### Registration flow
 
@@ -3537,7 +3541,7 @@ Any of the three enables the feature; the env flag wins over the on-disk config 
 
 A second resolver lives in `src/config/userConfig.ts:628` under the `KILO_*` namespace, complementing the `KILOCODE_*` upstream-parity resolver. It composes three signals with a boolean OR — an explicit config `false` does NOT override a set env flag:
 
-1. `experimental.sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`).
+1. Top-level `sharedAgentBoard: true` in `~/.alexi/config.json` (via `getConfigSharedAgentBoard()`; legacy `experimental.sharedAgentBoard` is still accepted with a one-time deprecation warning, and the default is now `true`).
 2. `process.env.KILO_EXPERIMENTAL_SHARED_AGENT_BOARD === '1'` — feature-specific env flag matching the `KILO_FLAGS` / `KILO_RETRIES` convention used in the agent workflows.
 3. `process.env.KILO_EXPERIMENTAL === '1'` — umbrella flag that enables every experimental feature at once (CI, ad-hoc containers).
 
@@ -3904,3 +3908,128 @@ Public surface:
 - `snapshotRepositoryExists(sessionId): boolean` — synchronous best-effort check via `existsSync`. Safe for zero-await callers (UI paths). Long-lived references built from a stale `listSnapshots()` result should re-check this before attempting `revertTo()`: a `false` result means the on-disk repository is gone and the caller must refetch or bail out. For async callers, `listSnapshots(sessionId).then(x => x.length > 0)` is equivalent and preferred.
 
 Both helpers are additive on top of the existing `recordSnapshot` / `listSnapshots` / `loadSnapshot` / `previewRevert` / `revertTo` / `pruneSnapshots` API (see [API.md — Snapshot Persistence API](API.md#snapshot-persistence-api)).
+
+## Wakeup Subsystem (`src/kilocode/wakeup/`)
+
+The wakeup subsystem lets an active agent schedule a future resume of its own session — the model asks "wake me up in 5m to check the batch job" and, when the timestamp elapses, the session is resumed with the original reason and payload as additional context. Ports upstream kilocode `packages/opencode/src/kilocode/wakeup/` (commit `b7070e507`) with two Alexi-native adaptations documented below.
+
+### Persistence model
+
+Upstream opencode uses `App.state` (Effect-TS) plus drizzle-orm to persist wakeups against SQLite. Alexi does not ship a SQL runtime, so entries are persisted as **one JSON file per wakeup** under `~/.alexi/wakeups/<uuid>.json`, and the timer loop is a plain `setInterval`. The Zod schema in `src/kilocode/wakeup/schema.ts` is the source of truth for the on-disk shape:
+
+```typescript
+// src/kilocode/wakeup/schema.ts
+export namespace WakeupSchema {
+  export const Status = z.enum(['pending', 'fired', 'cancelled']);
+  export type Status = z.infer<typeof Status>;
+
+  export const Entry = z.object({
+    id: z.string(),
+    sessionID: z.string(),
+    at: z.string(),                           // ISO-8601 fire time
+    reason: z.string(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+    status: Status,
+    createdAt: z.string(),                    // ISO-8601 schedule time
+  });
+  export type Entry = z.infer<typeof Entry>;
+}
+```
+
+The `payload` field uses Zod v4's two-argument `z.record(z.string(), z.unknown())` signature — the same call the `schedule_wakeup` tool parameter schema uses (`src/tool/tools/schedule-wakeup.ts:28`) so the model-facing surface, the on-disk shape, and the runtime type `Record<string, unknown>` all agree.
+
+### Public API
+
+`src/kilocode/wakeup/index.ts` mirrors the upstream namespaced API shape so companion tools (`schedule_wakeup`, `cancel_wakeup`) can be ported verbatim:
+
+```typescript
+export namespace Wakeup {
+  export interface ScheduleOptions {
+    sessionID: string;
+    when: string;                            // ISO-8601 or relative duration
+    reason: string;
+    payload?: Record<string, unknown>;
+  }
+
+  export function schedule(opts: ScheduleOptions): Promise<WakeupSchema.Entry>;
+  export function cancel(opts: { sessionID: string; wakeupID: string }): Promise<{ cancelled: boolean }>;
+  export function read(id: string): Promise<WakeupSchema.Entry | null>;
+  export function list(sessionID?: string): Promise<WakeupSchema.Entry[]>;
+  export function fireDue(now?: Date): Promise<WakeupSchema.Entry[]>;
+}
+```
+
+- `schedule` normalizes `when` (accepts either an ISO-8601 timestamp or a relative duration like `"5m"`, `"1h"`, `"30s"`, `"2d"`) via the exported `normalizeWhen(when, now)` helper, writes the entry as pending, and returns the created record.
+- `cancel` is **idempotent**: cancelling an unknown, foreign-session, or non-pending wakeup returns `{ cancelled: false }` rather than throwing so the caller does not have to pre-check.
+- `fireDue` transitions every pending entry whose `at` is `<= now` to `status: 'fired'` on disk and returns the newly fired entries. Callers are responsible for actually resuming the associated sessions — see `WakeupResume.resume` below.
+
+### Resume conversion
+
+`src/kilocode/wakeup/resume.ts` is deliberately side-effect-free so the same helper works in production (persistent `SessionManager`) and in tests (mocked bus):
+
+```typescript
+export interface ResumeInstruction {
+  sessionID: string;
+  message: string;                           // synthetic user turn
+  payload?: Record<string, unknown>;
+  wakeupID: string;
+}
+
+export namespace WakeupResume {
+  export function resume(entry: WakeupSchema.Entry): ResumeInstruction {
+    const message = [
+      `<system-reminder source="wakeup">`,
+      `Scheduled wakeup ${entry.id} fired at ${entry.at}.`,
+      `Reason: ${entry.reason}`,
+      `</system-reminder>`,
+    ].join('\n');
+    return { sessionID: entry.sessionID, message, payload: entry.payload, wakeupID: entry.id };
+  }
+}
+```
+
+The synthetic message is wrapped in a `<system-reminder source="wakeup">` fence so downstream `contextModification` hooks can filter or annotate wakeup turns without pattern-matching on prose.
+
+### End-to-end flow
+
+```mermaid
+sequenceDiagram
+  participant Agent as Agent (tool call)
+  participant Tool as schedule_wakeup
+  participant Wakeup as Wakeup namespace
+  participant FS as ~/.alexi/wakeups/
+  participant Timer as setInterval loop
+  participant Resume as WakeupResume.resume
+  participant Session as SessionManager
+
+  Agent->>Tool: { when: "5m", reason, payload }
+  Tool->>Wakeup: schedule({ sessionID, when, reason, payload })
+  Wakeup->>Wakeup: normalizeWhen(when)
+  Wakeup->>FS: writeFile(<uuid>.json, { status: 'pending' })
+  Wakeup-->>Tool: Entry
+  Tool-->>Agent: { wakeupID, at }
+
+  Note over Timer: N minutes later
+  Timer->>Wakeup: fireDue(now)
+  Wakeup->>FS: readdir + read every entry
+  Wakeup->>FS: writeFile(<uuid>.json, { status: 'fired' })
+  Wakeup-->>Timer: fired: Entry[]
+  Timer->>Resume: resume(entry)
+  Resume-->>Timer: ResumeInstruction
+  Timer->>Session: enqueue synthetic user turn (message + payload)
+```
+
+### Namespace re-export exception
+
+Alexi's ESLint config bans `namespace` blocks project-wide (`@typescript-eslint/no-namespace`), but the four wakeup / recall-index compat modules re-export the upstream namespaced API shape intentionally so cross-repo diffs stay reviewable and the companion tools can be ported verbatim. Each block carries a line-scoped suppression:
+
+```typescript
+// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape
+export namespace Wakeup { ... }
+```
+
+Affected files: `src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/schema.ts`, `src/kilocode/wakeup/resume.ts`, `src/core/session/recall-message-index.ts`. New non-compat code must NOT use `namespace`; the suppression is deliberately scoped to the single `export namespace` line so the rule still fires elsewhere.
+
+### Recall message index (documented shim)
+
+`src/core/session/recall-message-index.ts` ports upstream's SQLite covering index `recall_message_role_idx` used for role-scoped recall search. Alexi persists sessions as one JSON file per session, so there is no `message` table to index today — the module exists as a marker + documented shim so a future migration to a SQL-backed session store can drop the DDL back in without hunting through history. The exported `RecallMessageIndex.createSql` is the exact DDL upstream uses; `RecallMessageIndex.name` is referenced by the migration allow-list regex in `src/core/database/migration.ts` so upstream syncs preserve the `kilocode_change` marker across replays.

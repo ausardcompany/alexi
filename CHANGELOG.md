@@ -7,9 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI lint/typecheck/format errors from an upstream sync resolved via targeted ESLint suppressions and Zod v4 record signatures** (`src/core/session/recall-message-index.ts`, `src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/resume.ts`, `src/kilocode/wakeup/schema.ts`, `src/tool/tools/schedule-wakeup.ts`, commit `dba29fd0` `fix(ci): resolve lint/typecheck/format errors from upstream sync [autohealing]`): Diff statistics `5 files changed, 6 insertions(+), 2 deletions(-)`. Two independent fixes bundled under one autohealing commit — neither changes runtime behaviour, both keep the ports of upstream kilocode modules building under Alexi's stricter tooling.
+
+  1. `@typescript-eslint/no-namespace` suppressions on four kilocode-compat modules that intentionally re-export the upstream namespaced API shape (`WakeupSchema`, `Wakeup`, `WakeupResume`, `RecallMessageIndex`). Alexi's shared ESLint config bans `namespace` blocks project-wide, but the compat surface has to mirror upstream's `namespace X { ... }` shape exactly so cross-repo diffs stay reviewable and companion tools (`schedule_wakeup`, `cancel_wakeup`) can be ported verbatim. Each block now carries a scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. The suppression is deliberately line-scoped (not file-scoped) so new non-compat namespaces added later still trigger the rule.
+
+  2. Zod v4 record-signature migration on the two wakeup `payload` fields. In Zod v4 the single-argument form `z.record(z.unknown())` is deprecated — v4 requires the two-argument form `z.record(z.string(), z.unknown())` for a "map from string keys to values of type V". Updated call sites:
+     - `src/kilocode/wakeup/schema.ts:38` — `WakeupSchema.Entry.payload` (persisted opaque payload on the on-disk wakeup entry).
+     - `src/tool/tools/schedule-wakeup.ts:28` — `ScheduleWakeupParamsSchema.payload` (parameter shape the model sees when calling the `schedule_wakeup` tool).
+
+     Round-trip semantics are byte-identical: any JSON object the caller previously supplied still validates, and the runtime type `Record<string, unknown>` on `Wakeup.ScheduleOptions.payload` (`src/kilocode/wakeup/index.ts:73`) and `ResumeInstruction.payload` (`src/kilocode/wakeup/resume.ts:27`) is unchanged.
+
 ### Changed
 
 - **Tightened `codeReviewSkill` output-format contract for machine-parseable review results** (`src/skill/skills/index.ts`): The base system prompt used by `alexi code-review` and the `/code-review` slash commands now requires a strict, downstream-parseable shape instead of the previous free-form checklist. The three top-level level-3 headers (`### MUST FIX`, `### SHOULD IMPROVE`, `### NICE TO HAVE`) MUST all be present in that order — empty sections are emitted with the header and no bullets so parsers can distinguish "reviewed, clean" from "review failed silently". Every finding is now a bullet whose first token is a backticked `path/to/file.ext:LINE` reference (or `path/to/file.ext` when no specific line applies), followed by an imperative summary, an optional rationale line, and — for MUST FIX / SHOULD IMPROVE — an indented `- Fix: ...` sub-bullet carrying a concrete remediation. Bullets are required to be self-contained (no "the above" references) because the downstream fix pass may reorder them. When there are no findings anywhere, the reviewer emits a single `_No issues found._` line above the three empty headers. Effort levels, model selection, targets (`uncommitted` / `--base <branch>`), and the empty-diff fast path are unchanged — this is a prompt-only change; no code path was touched. See [docs/ARCHITECTURE.md — Structured review output contract](docs/ARCHITECTURE.md#structured-review-output-contract).
+
+- **Recall tool ranking upgraded and hardened** (`src/tool/tools/recall.ts`, commit `14acf74e`): Ports upstream kilocode `02e92bcc6` (rewrite) and `306b4ed6c` (fallback recovery). Two behaviour changes.
+
+  1. **Ranking is a weighted blend, not raw density.** `calculateRelevance(content, query, role)` now scores as `wbHits * 30 + min(density * 10, 40)` plus a role bonus (`user`: +5, `assistant`: +3). Word-boundary matches (`\bfoo\b`) dominate over pure substring density, and identical-content matches from user turns rank above system prompts. The user-provided query is escaped via `escapeRegExp` so partial metacharacters cannot cause `SyntaxError` or runaway backtracking.
+  2. **Fast path with slow-path fallback.** `scanSessionFast` pre-filters messages by role BEFORE running the relevance scorer (mirrors the upstream SQL covering-index approach). On any unexpected exception, the caller falls back to the role-agnostic `scanSessionSlow` so one weird session cannot hide matches from the other N-1 files. `loadSession` logs and skips a single corrupt session file rather than aborting the whole recall query.
+
+  New optional parameter: `roles?: Array<'user' | 'assistant' | 'system'>` — restricts recall to messages with these roles (default `['user', 'assistant']`). Unknown / missing roles are normalized to `'unknown'` and dropped from the default filter. Result rows now carry a `role: 'user' | 'assistant' | 'system' | 'unknown'` field.
+
+- **`sharedAgentBoard` config key promoted to top-level with default `true`** (`src/config/userConfig.ts`, commit `14acf74e`): Ports upstream kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, and `6cfb025f9`. The setting has moved out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (previously `false`).
+
+  Resolution order for `getConfigSharedAgentBoard()`:
+
+  1. Top-level `sharedAgentBoard` (new preferred location).
+  2. Legacy `experimental.sharedAgentBoard` (accepted for backwards compatibility; a one-time deprecation warning is logged the first time this path is hit).
+  3. Default `true`.
+
+  `setConfigSharedAgentBoard(enabled)` writes the new top-level key AND, if the legacy key is present, removes it — so the config file converges on the new shape on the next write. If the legacy `experimental` object becomes empty after the deletion, the parent key is removed as well. Callers that need to keep the legacy shape (e.g. a fixture exercising the deprecation warning) must write to `config.experimental` directly via `saveFullConfig`.
+
+  New test helper: `_resetSharedAgentBoardDeprecationWarningLatchForTests()` — resets the once-per-process deprecation-warning latch so consecutive fixtures can each observe the warning without spawning a fresh process.
+
+- **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `14acf74e` `feat(sync): apply upstream changes (2026-09-15)`)**: Version bumped from `1.22.20` to `1.22.21`. Tracked upstream refs advanced: `kilocode` from `2ad44882023693b1338bb2601ce74728e73a4b91` to `9597be3a14e7afa51a90f523c93e32f46b67c322`; `opencode` from `228e9095ba3988a02664c3816cb51f98584e86c2` to `e03db9bc6908f75c9334d8aa997deeaac81c0298`; `claude-code` from `18be13be81538c38efa5cb157fb2fc8da7469855` to `f96c3b49c4c8721685206aaab23609b2d399df4e`. `workflow_run` id advanced from `34841012365` to `34962237956`.
 
 ### Added
 

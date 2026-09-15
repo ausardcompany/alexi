@@ -1549,19 +1549,19 @@ Introduced 2026-09-07 (`1.22.15`, ports upstream opencode 2026-09 `worktreeID` s
 
 **Configuration surface**: none. The field is a per-tool-call parameter emitted by the LLM, not a config-file setting. There is no environment variable or `~/.alexi/config.json` flag that enables or disables the parameter. Once the managed-worktree registry lands in a future release, the capability error is expected to be replaced with an actual directory lookup without changing the parameter surface.
 
-## Experimental Shared Agent Board
+## Shared Agent Board
 
-Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23` + accompanying store/migration commits). Adds two opt-in coordination tools — `kilo_board_read` and `kilo_board_write` — that let subagents spawned by the `task` tool broadcast messages to their swarm peers without round-tripping through the parent orchestrator. The default is `false` so subagent invocations retain Alexi's classical single-agent-per-task behaviour unless the operator opts in.
+Introduced 2026-09-03 (`1.22.10`, ports upstream kilocode `162e30d23` + accompanying store/migration commits). Adds two opt-in coordination tools — `kilo_board_read` and `kilo_board_write` — that let subagents spawned by the `task` tool broadcast messages to their swarm peers without round-tripping through the parent orchestrator.
+
+**Config-key promotion (1.22.21, 2026-09-15 upstream sync — ports kilocode `1c33649f9`, `c63f77c2e`, `50fc57db0`, `6cfb025f9`):** the setting has moved out of `experimental.*` to the top-level `sharedAgentBoard` key and its default is now `true` (previously `false`). Legacy `experimental.sharedAgentBoard` is still accepted with a one-time deprecation warning and is removed on the next `setConfigSharedAgentBoard()` write.
 
 ### Enabling
 
-Add the flag to `~/.alexi/config.json`:
+By default the board is enabled. To disable it, add the flag to `~/.alexi/config.json` (new preferred top-level shape):
 
 ```json
 {
-  "experimental": {
-    "sharedAgentBoard": true
-  }
+  "sharedAgentBoard": false
 }
 ```
 
@@ -1573,7 +1573,15 @@ import { setConfigSharedAgentBoard } from './config/userConfig.js';
 setConfigSharedAgentBoard(true);
 ```
 
-The read helper `getConfigSharedAgentBoard()` returns `false` for missing, non-object, array, or non-boolean values, so a corrupt config never accidentally enables the feature. The flag lives inside the same `experimental` object as `task_model_selection`, so both can coexist:
+`setConfigSharedAgentBoard()` writes the new top-level key AND, if a legacy `experimental.sharedAgentBoard` entry is present, removes it — if the `experimental` object becomes empty after the deletion the parent key is removed as well, so the config file converges on the new shape on the next write.
+
+The read helper `getConfigSharedAgentBoard()` resolves in this order:
+
+1. Top-level `sharedAgentBoard` (new preferred location).
+2. Legacy `experimental.sharedAgentBoard` (accepted for backwards compatibility; emits a one-time deprecation warning: `[config] experimental.sharedAgentBoard is deprecated — move the setting to top-level "sharedAgentBoard" in ~/.alexi/config.json`).
+3. Default `true`.
+
+Legacy shape (still accepted, deprecation warning on read):
 
 ```json
 {
@@ -1631,11 +1639,56 @@ Three signals combine via `isBoardEnabled(experimentalConfigFlag)` in `src/kiloc
 | ----------------------------------------------------- | -------------------- | --------------------------------------------------------------------------- |
 | `KILOCODE_EXPERIMENTAL_SWARM_BOARD` env var           | Highest (when set)   | Truthy `1|true|yes|on` forces on; falsy `0|false|no|off` forces off.        |
 | `INSTALLATION_CHANNEL` = `dev|beta|local`             | Medium               | Default-on for these channels via `unstableDefault()`.                      |
-| `experimental.sharedAgentBoard` in `~/.alexi/config.json` | Lowest           | Alexi's existing persisted flag. Consulted when env var is unset.           |
+| Top-level `sharedAgentBoard` in `~/.alexi/config.json` | Lowest           | Alexi's persisted flag (default `true` as of 1.22.21; legacy `experimental.sharedAgentBoard` still accepted with a deprecation warning). |
 
 Any of the three enables the feature; an explicit falsy env value overrides both the channel default and the persisted config. This unification lets CI pipelines flip the feature on for a specific run without editing on-disk config, and lets operators keep the feature persistently on in `~/.alexi/config.json` for interactive use.
 
 See [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the design notes and public TypeScript surface.
+
+## Wakeup Storage
+
+Introduced 2026-09-15 (`1.22.21`, ports upstream kilocode commit `b7070e507`). The wakeup subsystem lets an agent schedule a future resume of its own session. There is no configuration flag for the feature itself — the `schedule_wakeup` and `cancel_wakeup` tools are always registered and require an active `context.sessionId` to function.
+
+### Storage layout
+
+Alexi persists wakeups as one JSON file per wakeup under `~/.alexi/wakeups/`:
+
+```text
+~/.alexi/wakeups/
+  5d7ad3a4-2b96-4d09-8f8c-f8b8a9c1e2f3.json
+  a8f2d0b1-4c1e-4a63-9b8b-9c1e2f35d7ad.json
+  ...
+```
+
+Each file is a JSON object matching `WakeupSchema.Entry` (`src/kilocode/wakeup/schema.ts`):
+
+```json
+{
+  "id": "5d7ad3a4-2b96-4d09-8f8c-f8b8a9c1e2f3",
+  "sessionID": "session-abc-123",
+  "at": "2026-09-15T13:00:00.000Z",
+  "reason": "Check status of SAP batch job Z_MASS_UPDATE_2026091501",
+  "payload": { "jobId": "Z_MASS_UPDATE_2026091501" },
+  "status": "pending",
+  "createdAt": "2026-09-15T12:00:00.000Z"
+}
+```
+
+`status` is one of `'pending'`, `'fired'`, or `'cancelled'`. Fired entries are kept on disk so downstream telemetry can correlate a resumed session back to its wakeup id; operators can prune them safely at any time — `Wakeup.list` and `Wakeup.fireDue` treat missing / corrupt files as if the entry never existed.
+
+### Reset
+
+To clear every scheduled wakeup for a fresh state:
+
+```bash
+rm -rf ~/.alexi/wakeups
+```
+
+The directory is recreated by `Wakeup.schedule` on the next invocation via `ensureDir()`.
+
+### Alexi_change vs upstream
+
+Upstream kilocode persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as JSON files and the timer loop is a plain `setInterval`. The public surface matches the upstream contract exactly (`Wakeup.schedule`, `Wakeup.cancel`, `Wakeup.list`, `Wakeup.fireDue`) so the companion tools (`schedule_wakeup` / `cancel_wakeup`) port verbatim. See [ARCHITECTURE.md — Wakeup Subsystem](ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup) and [API.md — Wakeup API](API.md#wakeup-api) for the design notes and public TypeScript surface.
 
 ## Related Documentation
 

@@ -41,3 +41,34 @@ export async function loadMigrations(): Promise<Migration[]> {
   const modules = await Promise.all(MIGRATION_MODULES);
   return modules.map((m) => m.default);
 }
+
+/**
+ * Index / table names created by kilocode-flavoured migrations. Upstream
+ * sync scripts (see `scripts/sync-upstream.sh`) must preserve any DDL
+ * that references one of these identifiers — dropping them silently on
+ * a sync would break board coordination, model-usage aggregation, or
+ * recall search performance.
+ *
+ * Any new SQL name introduced by a `kilocode_change` migration MUST be
+ * appended here. The matching regex is:
+ *
+ *   /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/
+ *
+ * kilocode 02e92bcc6 added the recall_message_role_idx covering index —
+ * see `src/core/session/recall-message-index.ts` for the DDL and the
+ * documented shim that guards a future SQL-backed session store port.
+ */
+export const KILOCODE_PRESERVED_SQL_NAMES: readonly string[] = [
+  'kilo_board',
+  'kilo_board_message',
+  'part_session_step_finish_idx',
+  'recall_part_search_idx',
+  'recall_message_role_idx',
+];
+
+/**
+ * Regex form of {@link KILOCODE_PRESERVED_SQL_NAMES}, ready to drop into
+ * a sync script that inspects raw DDL strings.
+ */
+export const KILOCODE_PRESERVED_SQL_REGEX =
+  /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/;
