@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Turn-level retry wrapper for transient provider errors** (`src/agent/index.ts`, `src/core/agenticChat.ts`, `tests/agent/turn-retry.test.ts`, commit `3879179b` `feat(agent): add turn-level retry for transient provider errors`, issue #1737): New `retryProviderCall(providerCallFn, streamState?, config?)` helper in `src/agent/index.ts` wraps a single provider invocation with a bounded retry budget (default: 3 attempts, exponential backoff `1 s → 2 s → 4 s`, capped at 15 s) so a brief SAP AI Core outage no longer aborts an otherwise recoverable agent turn. Composes with — does not duplicate — the provider-layer `ErrorBackoff` (5 attempts, 60 s cap): a permanent error short-circuits both layers via `isRetryableError` / `ErrorBackoff.isFatal`, and a transient error is bounded by each layer's own budget.
+
+  Contract:
+
+  - **Transient only.** Retries when `isRetryableError(err)` (in `src/core/error-backoff.ts`) returns true — 429 / 5xx / xAI capacity / network blips. HTTP 401 / 400 / `model_not_found` / config failures / named auth errors (`NoRefreshTokenError`) throw immediately with no sleep.
+  - **Streaming guard.** When a `StreamingStateTracker` is provided and its `hasEmittedContent()` returns `true`, the wrapper rethrows immediately — a replayed request would emit duplicate content/tool-call deltas that no downstream consumer can retract. Non-streaming callers (like `provider.complete` in the agentic loop) omit the tracker and the guard is a no-op.
+  - **Retry-After hints honoured.** `getRetryAfterMs(err)` overrides the default schedule when the server provides one, still capped at `maxDelayMs`.
+  - **Original error rethrown.** After the final attempt the underlying provider error is rethrown unchanged so route classification, compaction recovery, and the REPL auth-rewrite path still see the real cause.
+  - **Injectable sleep for tests.** `setTurnRetrySleep(fn?)` replaces the default `setTimeout`-driven sleep with an instrumented no-op so the backoff schedule can be asserted without real timers.
+
+  Public surface (all exported from `src/agent/index.ts`): `TurnRetryConfig`, `StreamingStateTracker`, `computeRetryDelay(attempt, err, config?)`, `setTurnRetrySleep(fn?)`, `retryProviderCall<T>(fn, streamState?, config?)`.
+
+  Integration: `src/core/agenticChat.ts:673` (primary turn call) and `src/core/agenticChat.ts:727` (post-compaction re-drive) now invoke `provider.complete` via `retryProviderCall`. Both call sites are non-streaming, so the streaming guard is a safe no-op today; streaming call sites reusing the same wrapper will supply a real tracker.
+
+  Test coverage (`tests/agent/turn-retry.test.ts`, 229 lines, 13 cases across 4 `describe` blocks): transient 429 / 502 / xAI-capacity retry with exact sleep schedules, first-attempt success without sleeping, permanent errors bypass the retry budget, streaming guard rejects a retry after content emission and allows it before, exponential progression `1 s → 2 s → 4 s → 8 s`, `maxDelayMs` cap at `15 s`, server `Retry-After` overrides the default and clamps at `maxDelayMs`, and pure-function contract for `computeRetryDelay`.
+
 - **`deepseek-v4.1-flash` in the static SAP AI Core orchestration catalog** (`src/providers/sapOrchestration.ts`, `src/providers/__tests__/modelCatalog.test.ts`, commit `531a15c1` `feat(providers): add deepseek-v4.1-flash to model catalog`): Adds the DeepSeek V4.1 Flash reasoning variant to the `ORCHESTRATION_MODELS` tuple and pins a matching `capabilities: []` entry in `ORCHESTRATION_MODEL_METADATA`, mirroring the existing `deepseek-ai--deepseek-r1` capability profile. Ports OpenCode #48270. The id ships in the OpenCode / upstream form (`deepseek-v4.1-flash` — no `deepseek-ai--` vendor prefix) which still matches the three string-based matchers callers rely on:
 
   - the `deepseek-` prefix heuristic in `src/providers/modelCatalog.ts` (`extractModelId`) so a matching SAP AI Core deployment is recognised as a live entry once `refreshModelCatalog()` returns;

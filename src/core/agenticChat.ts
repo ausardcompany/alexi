@@ -29,7 +29,7 @@ import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
 import { type EffortLevel, getEffortConfig, DEFAULT_EFFORT } from './effortLevel.js';
 import { buildAssembledSystemPromptAsync } from '../agent/system.js';
-import { stripInternalOptions } from '../agent/index.js';
+import { retryProviderCall, stripInternalOptions } from '../agent/index.js';
 import { initReferenceService, getReferenceService } from '../reference/reference.js';
 import { initRepositoryCache } from '../reference/repository-cache.js';
 import {
@@ -673,9 +673,16 @@ export async function agenticChat(
         signal: options?.signal,
       };
       const providerOpts = stripInternalOptions(merged);
-      result = await provider.complete(
-        messages as Array<{ role: string; content: string }>,
-        providerOpts
+      // Turn-level retry wrapper (issue #1737): transient 429 / 5xx /
+      // network blips that occur BEFORE any content is emitted are
+      // retried up to 3 times with exponential backoff (1s / 2s / 4s,
+      // cap 15s) so a brief SAP AI Core outage no longer aborts the
+      // whole agent run. `provider.complete` is a single-shot call
+      // (no streaming deltas), so the streaming-guard is a no-op here
+      // — but the same wrapper is reused by streaming call sites with
+      // a real tracker.
+      result = await retryProviderCall(() =>
+        provider.complete(messages as Array<{ role: string; content: string }>, providerOpts)
       );
       recordRouteOutcome(modelId, { kind: 'success' });
     } catch (err) {
@@ -720,9 +727,12 @@ export async function agenticChat(
               signal: options?.signal,
             };
             const retryOpts = stripInternalOptions(mergedRetry);
-            result = await provider.complete(
-              messages as Array<{ role: string; content: string }>,
-              retryOpts
+            // Post-compaction re-drive also uses turn-level retry so a
+            // transient outage that lands during the compaction window
+            // does not turn an otherwise recoverable overflow into a
+            // hard failure. See issue #1737.
+            result = await retryProviderCall(() =>
+              provider.complete(messages as Array<{ role: string; content: string }>, retryOpts)
             );
             recordRouteOutcome(modelId, { kind: 'success' });
           } catch (retryErr) {
