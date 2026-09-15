@@ -670,34 +670,99 @@ export function setConfigTaskModelSelection(enabled: boolean): void {
  * commit `162e30d23`). When enabled, subagents spawned by the `task`
  * tool are attached to a shared board and gain access to
  * `kilo_board_read` / `kilo_board_write` for lightweight peer-to-peer
- * coordination. Default `false` — SAP AI Core deployments keep the
- * classical single-agent-per-task behaviour unless the operator opts in.
+ * coordination.
  *
- * Stored under `experimental.sharedAgentBoard` in `~/.alexi/config.json`
- * (camelCase to match the upstream JSON shape).
+ * kilocode_change (upstream 2026-09 sync): the setting has been PROMOTED
+ * out of `experimental.*` to the top-level `sharedAgentBoard` key
+ * (commits 1c33649f9, c63f77c2e) and its default is now `true`
+ * (commit 50fc57db0). The reader below implements the resolution order:
+ *
+ *   1. Top-level `sharedAgentBoard` (new preferred location).
+ *   2. Legacy `experimental.sharedAgentBoard` (accepted for backwards
+ *      compatibility; a one-time deprecation warning is logged the
+ *      first time this path is hit — commit 6cfb025f9).
+ *   3. Default `true`.
+ *
+ * `setConfigSharedAgentBoard` writes the new top-level key AND, if the
+ * legacy key is present, removes it so the retired location does not
+ * linger. Callers that want to keep the legacy shape (e.g. a fixture
+ * exercising the deprecation warning) must write to `config.experimental`
+ * directly via `saveFullConfig`.
  */
-export function getConfigSharedAgentBoard(): boolean {
-  const config = loadFullConfig();
-  const experimental = config.experimental;
-  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
-    return false;
+let _sharedAgentBoardDeprecationWarned = false;
+
+function warnLegacySharedAgentBoardOnce(): void {
+  if (_sharedAgentBoardDeprecationWarned) {
+    return;
   }
-  const value = (experimental as Record<string, unknown>).sharedAgentBoard;
-  return value === true;
+  _sharedAgentBoardDeprecationWarned = true;
+  // Deferred import so a bare `require('userConfig')` in a test harness
+  // that does not want console noise can still reach the accessors.
+  import('../utils/logger.js')
+    .then(({ logger }) => {
+      logger.warn(
+        '[config] experimental.sharedAgentBoard is deprecated — move the setting to top-level "sharedAgentBoard" in ~/.alexi/config.json'
+      );
+    })
+    .catch(() => {
+      // Non-fatal: warning is best-effort.
+    });
 }
 
 /**
- * Persist the `experimental.sharedAgentBoard` flag.
+ * Reset the once-per-process deprecation-warning latch. Exposed for
+ * tests so consecutive fixtures can each observe the warning without
+ * spawning a fresh process.
+ */
+export function _resetSharedAgentBoardDeprecationWarningLatchForTests(): void {
+  _sharedAgentBoardDeprecationWarned = false;
+}
+
+export function getConfigSharedAgentBoard(): boolean {
+  const config = loadFullConfig();
+
+  // Preferred: top-level `sharedAgentBoard`.
+  const topLevel = config.sharedAgentBoard;
+  if (typeof topLevel === 'boolean') {
+    return topLevel;
+  }
+
+  // Legacy: `experimental.sharedAgentBoard`. Emits a one-time
+  // deprecation warning when the key is actually consulted.
+  const experimental = config.experimental;
+  if (experimental && typeof experimental === 'object' && !Array.isArray(experimental)) {
+    const legacy = (experimental as Record<string, unknown>).sharedAgentBoard;
+    if (typeof legacy === 'boolean') {
+      warnLegacySharedAgentBoardOnce();
+      return legacy;
+    }
+  }
+
+  // Default: enabled (kilocode 50fc57db0).
+  return true;
+}
+
+/**
+ * Persist the shared-agent-board flag to the top-level `sharedAgentBoard`
+ * key. Also removes any legacy `experimental.sharedAgentBoard` entry so
+ * the config file converges on the new shape on the next write.
  */
 export function setConfigSharedAgentBoard(enabled: boolean): void {
   const config = loadFullConfig();
-  const existing =
-    config.experimental &&
-    typeof config.experimental === 'object' &&
-    !Array.isArray(config.experimental)
-      ? (config.experimental as Record<string, unknown>)
-      : {};
-  config.experimental = { ...existing, sharedAgentBoard: enabled };
+  config.sharedAgentBoard = enabled;
+
+  if (config.experimental && typeof config.experimental === 'object' && !Array.isArray(config.experimental)) {
+    const experimental = { ...(config.experimental as Record<string, unknown>) };
+    if ('sharedAgentBoard' in experimental) {
+      delete experimental.sharedAgentBoard;
+      if (Object.keys(experimental).length === 0) {
+        delete config.experimental;
+      } else {
+        config.experimental = experimental;
+      }
+    }
+  }
+
   saveFullConfig(config);
 }
 
