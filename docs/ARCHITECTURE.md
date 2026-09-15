@@ -1790,6 +1790,7 @@ Concrete backoff sequences for the defaults each site ships with:
 | MCP connect retry             | 1000           | 4000       | 3             | 1000, 2000                         |
 | `NetworkManager` reconnect    | 1000           | 30000      | 5             | 1000, 2000, 4000, 8000             |
 | `ErrorBackoff` (provider API) | 1000           | 60000      | 5             | 1000, 2000, 4000, 8000, 16000      |
+| `retryProviderCall` (turn)    | 1000           | 15000      | 3             | 1000, 2000                         |
 
 `NetworkManager` and `ErrorBackoff` allow the caller to override every
 field via the constructor options block; MCP retry defaults are documented
@@ -1836,6 +1837,120 @@ Example error messages and their classification:
 - `Error: model_not_found` -> permanent. `classifyRouteError` records a
   permanent outcome and, after `routeFailureThreshold` matches, disables
   the route for the rest of the session.
+
+### Turn-level retry wrapper (`retryProviderCall`, issue #1737)
+
+Between the caller (`agenticChat`) and the provider-layer `ErrorBackoff`
+there is a third, narrower retry layer defined in `src/agent/index.ts`.
+It exists to solve a specific failure mode: a single transient blip
+(HTTP 429, 502, `ECONNRESET`, xAI capacity) at request-start would
+otherwise abort the whole agent run because the provider layer has
+already returned its error to the caller. `ErrorBackoff` circuit-breaks
+consecutive errors across a session; `retryProviderCall` retries a
+**single provider invocation** so that a brief SAP AI Core outage no
+longer terminates an otherwise recoverable turn.
+
+Composition (top-down):
+
+```text
+agenticChat (caller)
+  └─> retryProviderCall (turn budget: 3 attempts, 15 s cap)
+        └─> provider.complete
+              └─> ErrorBackoff (session budget: 5 attempts, 60 s cap)
+```
+
+Both layers compose without duplicating work. A `4xx`-classified fatal
+error short-circuits `ErrorBackoff.isFatal()`, and `isRetryableError()`
+in `retryProviderCall` rejects the same permanent set — so a permanent
+error is never retried twice, and a transient error is bounded by each
+layer's own budget.
+
+Contract enforced by `retryProviderCall` (`src/agent/index.ts:233`):
+
+- **Only transient errors retry.** `isRetryableError(err)` (defined in
+  `src/core/error-backoff.ts`) is the single classifier. HTTP 401/400,
+  `model_not_found`, config failures, and named auth errors (e.g.
+  `NoRefreshTokenError`) throw immediately with no sleep.
+- **Streaming guard: never retry after content is emitted.** A caller
+  that already surfaced any content delta or tool-call passes a
+  `StreamingStateTracker` whose `hasEmittedContent()` returns `true`; the
+  wrapper rethrows immediately because a replayed request would produce
+  duplicate output with no downstream retract mechanism. Non-streaming
+  callers (like `provider.complete` in the agentic loop) omit the tracker
+  and the guard is a no-op.
+- **Bounded exponential backoff.** `computeRetryDelay(attempt, err, cfg)`
+  yields `1 s → 2 s → 4 s`, capped at `maxDelayMs` (default 15 s). A
+  server-supplied `Retry-After` (via `getRetryAfterMs(err)`) is preferred
+  over the default schedule, still capped at `maxDelayMs`.
+- **Original error is rethrown.** After the final attempt the underlying
+  provider error is rethrown unchanged so downstream classification
+  (route auto-disable, compaction recovery, REPL auth rewrite) still
+  sees the real cause — no wrapped/masked variant.
+- **Injectable sleep for tests.** `setTurnRetrySleep(fn?)` replaces the
+  default `setTimeout`-backed sleep with an instrumented no-op so the
+  backoff schedule can be asserted without real timers. Production
+  callers never touch this hook. See
+  [`docs/TESTING.md#testing-the-turn-level-retry-wrapper`](TESTING.md#testing-the-turn-level-retry-wrapper).
+
+`agenticChat` wraps two provider call sites with `retryProviderCall`
+(`src/core/agenticChat.ts:673`, `src/core/agenticChat.ts:727`): the
+primary turn call and the post-compaction re-drive. A transient outage
+that lands during the compaction window therefore no longer turns an
+otherwise recoverable overflow into a hard failure.
+
+```mermaid
+flowchart TB
+    Caller[agenticChat turn]
+    Caller --> Turn[retryProviderCall wrapper]
+    Turn --> Attempt{attempt N}
+    Attempt --> Provider[provider.complete]
+    Provider --> Backoff{ErrorBackoff}
+    Backoff -->|success| Return[return result]
+    Backoff -->|4xx fatal| Fatal[rethrow immediately]
+    Backoff -->|transient| Err[throw to turn wrapper]
+    Err --> Emitted{content emitted?}
+    Emitted -->|yes| RethrowStream[rethrow - streaming guard]
+    Emitted -->|no| Classify{isRetryableError?}
+    Classify -->|no| RethrowPerm[rethrow - permanent]
+    Classify -->|yes| Budget{attempt < maxRetries?}
+    Budget -->|no| RethrowBudget[rethrow - budget exhausted]
+    Budget -->|yes| Sleep[sleep computeRetryDelay]
+    Sleep --> Attempt
+    Return --> Caller
+    Fatal --> Caller
+    RethrowStream --> Caller
+    RethrowPerm --> Caller
+    RethrowBudget --> Caller
+```
+
+Public surface (all exported from `src/agent/index.ts`):
+
+```typescript
+export interface TurnRetryConfig {
+  maxRetries: number;     // default 3
+  initialDelayMs: number; // default 1000
+  maxDelayMs: number;     // default 15_000
+  multiplier: number;     // default 2
+}
+
+export interface StreamingStateTracker {
+  hasEmittedContent(): boolean;
+}
+
+export function computeRetryDelay(
+  attemptNumber: number,
+  err: unknown,
+  config?: TurnRetryConfig
+): number;
+
+export function setTurnRetrySleep(fn?: (ms: number) => Promise<void>): void;
+
+export function retryProviderCall<T>(
+  providerCallFn: () => Promise<T>,
+  streamState?: StreamingStateTracker,
+  config?: Partial<TurnRetryConfig>
+): Promise<T>;
+```
 
 ### MCP connection retry policy
 

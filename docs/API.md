@@ -667,6 +667,80 @@ Semantics:
 
 `ConsecutiveMistakeReason` is also re-exported from `src/core/orchestrator.ts` and `src/core/streamingOrchestrator.ts` for consumers that dispatch through `sendChat` / `streamChat` and later fan out to `agenticChat`.
 
+### Turn-Level Retry (issue #1737)
+
+The agent loop wraps each `provider.complete` call in `retryProviderCall`
+(exported from `src/agent/index.ts`) so a transient `429` / `5xx` /
+network blip that lands *before any content is emitted* no longer
+aborts the whole agent run. The wrapper composes with the provider-layer
+`ErrorBackoff` — it does not duplicate its budget.
+
+Defaults: 3 attempts total (initial + 2 retries), exponential backoff
+`1 s → 2 s → 4 s`, capped at 15 s. A server-supplied `Retry-After` hint
+takes precedence over the default schedule (still capped at 15 s).
+
+Contract:
+
+- **Transient only.** `isRetryableError(err)` (from
+  `src/core/error-backoff.ts`) is the single classifier. HTTP `401`,
+  `400`, `model_not_found`, config failures, and named auth errors
+  (`NoRefreshTokenError`) throw immediately with no sleep.
+- **Streaming guard.** When a `StreamingStateTracker` is passed and it
+  reports `hasEmittedContent() === true`, the wrapper rethrows without
+  retrying — a replayed request would produce duplicate deltas.
+- **Original error preserved.** After the last attempt the underlying
+  provider error is rethrown unchanged so route classification,
+  compaction recovery, and the REPL auth-rewrite path still see the real
+  cause.
+
+TypeScript surface (all exported from `src/agent/index.ts`):
+
+```typescript
+interface TurnRetryConfig {
+  maxRetries: number;     // default 3
+  initialDelayMs: number; // default 1000
+  maxDelayMs: number;     // default 15_000
+  multiplier: number;     // default 2
+}
+
+interface StreamingStateTracker {
+  hasEmittedContent(): boolean;
+}
+
+function computeRetryDelay(
+  attemptNumber: number,
+  err: unknown,
+  config?: TurnRetryConfig
+): number;
+
+function setTurnRetrySleep(fn?: (ms: number) => Promise<void>): void;
+
+function retryProviderCall<T>(
+  providerCallFn: () => Promise<T>,
+  streamState?: StreamingStateTracker,
+  config?: Partial<TurnRetryConfig>
+): Promise<T>;
+```
+
+Example — the pattern used by `agenticChat` today
+(`src/core/agenticChat.ts:673`):
+
+```typescript
+import { retryProviderCall, stripInternalOptions } from '../agent/index.js';
+
+result = await retryProviderCall(() =>
+  provider.complete(messages, stripInternalOptions(merged))
+);
+```
+
+The same wrapper is used for the post-compaction re-drive so a transient
+outage that lands during the compaction window does not turn an
+otherwise recoverable overflow into a hard failure.
+
+`setTurnRetrySleep(fn?)` is a test hook — production code never touches
+it. See [Testing → Turn-level retry](TESTING.md#testing-the-turn-level-retry-wrapper)
+for the assertion pattern.
+
 ### Progress Events
 
 The agent emits progress events during execution:

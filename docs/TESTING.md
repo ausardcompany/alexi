@@ -4815,3 +4815,65 @@ Contract asserted by the suite:
 3. **`snapshotRepositoryExists` reflects on-disk state.** Returns `false` before any snapshot exists, `true` after `recordSnapshot`, `false` again after `discardSnapshotRepository`.
 
 Do not use the real `~/.alexi/sessions/` directory in these tests — the `fs.mkdtemp` + `process.env.HOME` swap guarantees the suite is isolated from the developer's actual session store and safe to run in parallel with other snapshot tests.
+
+## Testing the Turn-Level Retry Wrapper
+
+`tests/agent/turn-retry.test.ts` (229 lines, 13 cases across 4 `describe` blocks) pins the contract for `retryProviderCall` — the turn-level wrapper that shields a single provider invocation from transient 429 / 5xx / xAI-capacity / network blips without duplicating the provider-layer `ErrorBackoff` budget. The suite is dependency-light: it does not spin up a real provider, does not touch the network, and does not wait real seconds — a `setTurnRetrySleep(fn)` hook replaces the default `setTimeout`-driven sleep with a recorder so the backoff schedule can be asserted exactly.
+
+Setup:
+
+```typescript
+import {
+  computeRetryDelay,
+  retryProviderCall,
+  setTurnRetrySleep,
+  type StreamingStateTracker,
+} from '../../src/agent/index.js';
+
+const sleeps: number[] = [];
+
+beforeEach(() => {
+  sleeps.length = 0;
+  // No real timers — record every ms the wrapper would have slept.
+  setTurnRetrySleep(async (ms: number) => {
+    sleeps.push(ms);
+  });
+});
+
+afterEach(() => {
+  setTurnRetrySleep(); // restore default setTimeout-based sleep
+});
+```
+
+Contract pinned by the suite:
+
+1. **Transient errors retry up to `maxRetries` and eventually rethrow.** A `{ statusCode: 429 }` shape retried with the defaults yields 3 total attempts and exactly two sleeps `[1000, 2000]`.
+2. **Recovery on the last transient attempt returns the result.** After two `429`s the third attempt succeeds and the sleep log is still `[1000, 2000]` — the wrapper does NOT sleep after success.
+3. **xAI capacity errors are transient.** `{ message: 'xai capacity exceeded' }` classifies as retryable via `isXAICapacityError`; a single retry recovers with `sleeps === [1000]`.
+4. **First-attempt success sleeps zero times.** No unnecessary latency when the provider responds cleanly.
+5. **Permanent errors are NOT retried.** A `NoRefreshTokenError`-shaped object and a plain `new Error('validation failed')` both throw on the first attempt with `sleeps === []`. This is the anti-regression guard for burning provider budget on 401 / 400 / config failures.
+6. **Streaming guard rejects a retry once content has been emitted.** When the tracker's `hasEmittedContent()` returns `true`, even a retryable `{ statusCode: 429 }` rethrows immediately. Confirms the wrapper cannot cause duplicate stream output.
+7. **Streaming guard allows a retry when no content has been emitted.** With `hasEmittedContent() === false`, a pre-stream `429` retries and recovers on the second attempt.
+8. **Backoff progression follows `1 s → 2 s → 4 s → 8 s`.** With `maxRetries: 5` and `maxDelayMs: 15_000`, the recorded sleeps are `[1000, 2000, 4000, 8000]` — pure exponential, all under the cap.
+9. **Sleeps cap at `maxDelayMs`.** With `maxRetries: 6`, the sleep sequence is `[1000, 2000, 4000, 8000, 15_000]` — the raw `16 000` value is clamped at the 15-second ceiling.
+10. **A server `Retry-After` hint overrides the default schedule.** `{ statusCode: 429, retryAfterSeconds: 5 }` produces `sleeps === [5000]` instead of the default `1000`.
+11. **`Retry-After` is capped at `maxDelayMs`.** A hostile `retryAfterSeconds: 3600` still clamps to `15_000`.
+12. **`computeRetryDelay` returns the correct raw values.** `1000 / 2000 / 4000 / 8000` for attempts `1..4` under the defaults.
+13. **`computeRetryDelay` honours the cap and Retry-After for direct callers.** `computeRetryDelay(6, {})` returns `15_000` (raw would be `32_000`); `computeRetryDelay(1, { retryAfterSeconds: 3600 })` returns `15_000`; `computeRetryDelay(1, { retryAfterSeconds: 7 })` returns `7000`.
+
+Example — the canonical shape of a transient-retry assertion:
+
+```typescript
+it('retries 429 rate-limit errors up to maxRetries and eventually rethrows', async () => {
+  const err = { statusCode: 429, message: 'rate limit exceeded' };
+  const fn = vi.fn().mockRejectedValue(err);
+
+  await expect(retryProviderCall(fn)).rejects.toBe(err);
+  expect(fn).toHaveBeenCalledTimes(3);         // initial + 2 retries
+  expect(sleeps).toEqual([1000, 2000]);         // exact schedule
+});
+```
+
+Test isolation: `sleeps.length = 0` in `beforeEach` clears the recorder, and `setTurnRetrySleep()` in `afterEach` restores the default sleep so a failing case cannot leak the recorder into the next `it`. No global state to reset beyond that — the wrapper itself is stateless between calls.
+
+Do not add a real-timer smoke test to this suite. The whole point of the injected sleep hook is that the backoff schedule can be asserted deterministically; a `vi.useFakeTimers()` variant would be superseded by the current pattern and would add flakiness on slow CI runners.
