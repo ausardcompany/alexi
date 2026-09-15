@@ -751,7 +751,11 @@ export function setConfigSharedAgentBoard(enabled: boolean): void {
   const config = loadFullConfig();
   config.sharedAgentBoard = enabled;
 
-  if (config.experimental && typeof config.experimental === 'object' && !Array.isArray(config.experimental)) {
+  if (
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+  ) {
     const experimental = { ...(config.experimental as Record<string, unknown>) };
     if ('sharedAgentBoard' in experimental) {
       delete experimental.sharedAgentBoard;

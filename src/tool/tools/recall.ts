@@ -150,8 +150,7 @@ function scanSessionFast(
   const hits: RecallHit[] = [];
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   const sessionId = session?.metadata?.id || file.replace('.json', '');
-  const createdTs =
-    session?.metadata?.created?.toString() ?? new Date().toISOString();
+  const createdTs = session?.metadata?.created?.toString() ?? new Date().toISOString();
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
@@ -192,8 +191,7 @@ function scanSessionSlow(
   const hits: RecallHit[] = [];
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   const sessionId = session?.metadata?.id || file.replace('.json', '');
-  const createdTs =
-    session?.metadata?.created?.toString() ?? new Date().toISOString();
+  const createdTs = session?.metadata?.created?.toString() ?? new Date().toISOString();
 
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
