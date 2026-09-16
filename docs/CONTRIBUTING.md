@@ -1942,6 +1942,24 @@ When an upstream sync promotes a config key out of `experimental.*` to the top-l
 
 Worked example: `getConfigSharedAgentBoard` / `setConfigSharedAgentBoard` in `src/config/userConfig.ts:721-767`.
 
+## Adding a New Entry to `mcp-servers.example.json`
+
+`mcp-servers.example.json` at the repo root is the template operators copy into `~/.alexi/mcp-servers.json` on first setup. Two regression tests in `tests/mcp-config.test.ts` (introduced with the Playwright scaffold in commit `ae461291`) enforce that the file stays valid against the schema in `src/mcp/config.ts` and that shipped disabled scaffolds keep their opt-in shape. When adding a new example entry, follow this checklist so the tests keep passing:
+
+1. **Ship disabled and non-autoconnecting.** New scaffolds MUST set `enabled: false` and `autoConnect: false`. Operators opt in by flipping `enabled: true` — a commit that accidentally ships the entry pre-enabled would auto-run the referenced binary against every fresh `alexi` session and is caught by the structural test.
+2. **Validate the entry against the schema before committing.** Run `npm test -- tests/mcp-config.test.ts` locally. The `validates the checked-in mcp-servers.example.json against the schema` case exercises the exported `validateMcpConfig(raw)` from `src/mcp/config.ts` against the on-disk file and fails on any unrecognised field or missing required key. It is faster than round-tripping through the CLI to catch a typo.
+3. **Set a `timeout` shape appropriate for the server's startup profile.** The shared global default is `{ startup: 5000, request: 8000 }`; a browser MCP server, a JVM warmup, or any `npx -y <package>` cold-cache launch typically needs a larger `startup` (Playwright ships with `startup: 10000`). Assert the full `timeout` object via `.toEqual({...})` in any new per-entry structural test — a per-field chain would miss a stray key.
+4. **Add a per-entry structural test if the entry documents opt-in defaults.** For scaffolds where the shipped `timeout` / `retry` / `env` values ARE the documented default (as with Playwright's 10 s startup and 3-attempt retry policy), add a companion test that locates the entry by `s.name === '<your-name>'` and pins those fields. The Playwright case in `tests/mcp-config.test.ts` is the canonical worked example — see `docs/TESTING.md#testing-the-mcp-serversexamplejson-schema-guard-commit-ae461291` for the pattern.
+5. **Locate the file via `fileURLToPath(import.meta.url)`, not `process.cwd()`.** Vitest may run from a nested directory in the future; anchor the path to the test file's compiled location:
+   ```typescript
+   import { fileURLToPath } from 'url';
+   const here = path.dirname(fileURLToPath(import.meta.url));
+   const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+   ```
+6. **Document any new environment-variable references.** When an entry declares `env: { KEY: '${VAR}' }`, list the variable in the repo `.env.example` (if broadly useful) or at minimum in the entry's `description` field. The `resolveEnvVars` helper in `src/mcp/config.ts:496` substitutes `${VAR}` at load time and silently leaves unresolved references as literals — operators who miss the required export get a runtime failure at first invocation rather than a clear "missing env var" at startup.
+
+Do NOT mock `validateMcpConfig` in the example-config suite. The load-bearing property being tested is that the on-disk file matches the real schema; a mock would defeat the purpose.
+
 ## Wakeup Subsystem Testing
 
 The wakeup subsystem (`src/kilocode/wakeup/`) is filesystem-backed — each `Wakeup.schedule` call writes a JSON file under `~/.alexi/wakeups/`. When adding tests, follow the same temp-dir pattern used by tool tests:

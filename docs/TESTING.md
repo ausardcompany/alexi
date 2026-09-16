@@ -3679,8 +3679,60 @@ describe('resolveFileInclusions', () => {
 
 - `tests/mcp/client.test.ts` — connection management, tool discovery, and reconnection behaviour
 - `tests/mcp/client-timeout.test.ts` — `callTool` / handshake timeout budgets, precedence, and per-server independence (issue #1532)
+- `tests/mcp-config.test.ts` — MCP config loader, environment-variable resolution, per-server timeout parsing, and the example-config schema guard
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing the `mcp-servers.example.json` schema guard (commit `ae461291`)
+
+`mcp-servers.example.json` at the repo root is the copy-and-paste template operators start from when they first set up MCP integrations. If the file drifts from the Zod schema in `src/mcp/config.ts` — an example entry gains an unrecognised field, drops a required key, or an enum value falls out of sync — an operator who copies the file into their real `~/.alexi/mcp-servers.json` gets silent fall-through to defaults instead of an explicit validation failure. Two regression tests in `tests/mcp-config.test.ts` catch this drift at CI time.
+
+Both tests locate the file relative to the compiled test URL rather than `process.cwd()` so they remain runnable from any working directory:
+
+```typescript
+import { fileURLToPath } from 'url';
+import { validateMcpConfig, type McpConfig } from '../src/mcp/config.js';
+
+it('validates the checked-in mcp-servers.example.json against the schema', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+  const raw = JSON.parse(fs.readFileSync(examplePath, 'utf-8')) as unknown;
+  const result = validateMcpConfig(raw);
+  expect(result.ok).toBe(true);
+});
+
+it('mcp-servers.example.json includes a disabled Playwright entry', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+  const raw = JSON.parse(fs.readFileSync(examplePath, 'utf-8')) as McpConfig;
+  const playwright = raw.servers.find((s) => s.name === 'playwright');
+  expect(playwright).toBeDefined();
+  expect(playwright?.enabled).toBe(false);
+  expect(playwright?.autoConnect).toBe(false);
+  expect(playwright?.transport).toBe('stdio');
+  // startup 10s covers `npx -y` warm-cache launches; 3s default is
+  // too tight for a fresh browser MCP server start.
+  expect(playwright?.timeout).toEqual({ startup: 10000, request: 30000 });
+  // Retry is opt-in and matches the shared default policy so an
+  // intermittently slow start-up gets one automatic retry attempt.
+  expect(playwright?.retry).toEqual({
+    enabled: true,
+    maxAttempts: 3,
+    initialDelayMs: 1000,
+    maxDelayMs: 4000,
+  });
+});
+```
+
+Key patterns to reuse when extending the example-config suite:
+
+1. **Resolve the example path via `fileURLToPath(import.meta.url)`, not `process.cwd()`.** Vitest may run tests from a subdirectory (via `npm test -- tests/mcp-config.test.ts` from a nested `packages/*` layout in the future). `path.dirname(fileURLToPath(import.meta.url))` anchors the resolution to the compiled test file's location, so `path.resolve(here, '..', 'mcp-servers.example.json')` always points at the repo-root file.
+2. **Call `validateMcpConfig(raw)` — do NOT re-import `McpConfigSchema` directly.** `validateMcpConfig` is the exported entry point (`src/mcp/config.ts:352`) that returns the discriminated `{ ok: true, config } | { ok: false, errors }` union. Asserting on `result.ok === true` locks in the same contract that `loadMcpConfig` uses at runtime, so a schema-visible regression fails the test AND breaks production the same way.
+3. **Pin each optional field a disabled scaffold declares.** The Playwright entry is a template — operators enable it by flipping `enabled: true`. The test explicitly asserts `enabled: false`, `autoConnect: false`, and the exact `timeout` / `retry` shapes so an accidental commit that ships the entry pre-enabled (or with the default 3 s startup that is too tight for `npx -y` browser launches) trips the assertion before it reaches operators.
+4. **Prefer `.toEqual({...})` over per-field chains for compound objects.** `timeout` and `retry` are compound objects with 2 / 4 keys respectively; asserting `.toEqual(...)` catches both value drift and structural drift (a missing key, an extra key) in a single line. Per-field `expect(playwright?.retry?.enabled).toBe(true)` chains would miss an accidental new `retry.backoffMultiplier` field creeping in.
+5. **Cast the raw JSON to `McpConfig` only for the field-shape assertions.** The first test uses `raw: unknown` because it is exercising the validator itself; the second casts to `McpConfig` because it is asserting on the declared shape of individual servers. Do not use `any` — the schema-typed cast is what surfaces a rename of `enabled` / `autoConnect` in the type as a compile error on the test.
+
+The two tests together are a cheap regression net: adding a new example entry that ships with `enabled: true`, uses a deprecated field, or drops a required key will fail the schema-validation test on the first case and the per-entry structural test on the second. Both run in under a millisecond because they touch a 73-line JSON file on disk with no mocks and no network.
 
 ### Testing per-server timeout independence (issue #1532)
 
