@@ -53,6 +53,19 @@ interface RecallHit {
 interface RecallResult {
   results: RecallHit[];
   totalMatches: number;
+  /**
+   * True when the primary substring search returned zero results and the
+   * fallback title-typo scan was used to produce approximate matches.
+   * Callers should treat these hits as "close but not exact" and may want
+   * to prompt the user to refine the query.
+   */
+  partialMatch?: boolean;
+  /**
+   * Query terms that could not be matched (exact or via distance-1 typo)
+   * in any of the returned hits. Populated only for `partialMatch: true`
+   * responses so the caller can surface which words are still missing.
+   */
+  missingTerms?: string[];
 }
 
 /**
@@ -65,6 +78,104 @@ function escapeRegExp(input: string): string {
 }
 
 /**
+ * Return `true` iff the Levenshtein edit distance between `a` and `b` is
+ * exactly 1 (single insertion, deletion, or substitution). Distance 0
+ * (identical strings) returns `false` — callers use exact-match logic for
+ * that case. Runs in O(max(|a|,|b|)) with an early exit when the length
+ * difference alone rules out a distance-1 relationship.
+ *
+ * Used for session-title typo tolerance: the fallback scan only fires
+ * when the primary substring search returned zero results, and only over
+ * short title strings, so the naive scan is cheap enough in practice.
+ */
+function isDistanceOne(a: string, b: string): boolean {
+  if (a === b) {
+    return false;
+  }
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > 1) {
+    return false;
+  }
+
+  // Substitution case: same length, count mismatches.
+  if (la === lb) {
+    let diff = 0;
+    for (let i = 0; i < la; i++) {
+      if (a[i] !== b[i]) {
+        diff++;
+        if (diff > 1) {
+          return false;
+        }
+      }
+    }
+    return diff === 1;
+  }
+
+  // Insertion / deletion case: the shorter string must equal the longer
+  // one with a single character removed. Walk both strings in lockstep
+  // and allow exactly one "skip" on the longer side.
+  const shorter = la < lb ? a : b;
+  const longer = la < lb ? b : a;
+  let i = 0;
+  let j = 0;
+  let skipped = false;
+  while (i < shorter.length && j < longer.length) {
+    if (shorter[i] === longer[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (skipped) {
+      return false;
+    }
+    skipped = true;
+    j++;
+  }
+  return true;
+}
+
+/**
+ * Check whether `token` matches `word` exactly or with a single-character
+ * typo (Levenshtein distance 1). Returns `'exact' | 'typo' | null`.
+ * Comparisons are case-insensitive; callers pass already-lowercased
+ * strings for speed, but the function is defensive.
+ */
+function tokenMatchKind(token: string, word: string): 'exact' | 'typo' | null {
+  const t = token.toLowerCase();
+  const w = word.toLowerCase();
+  if (t === w) {
+    return 'exact';
+  }
+  if (isDistanceOne(t, w)) {
+    return 'typo';
+  }
+  return null;
+}
+
+/**
+ * Split a query into whitespace-separated non-empty terms. Used by the
+ * typo-tolerant title-fallback scan so multi-word queries can be scored
+ * term-by-term rather than as one monolithic substring.
+ */
+function splitQueryTerms(query: string): string[] {
+  return query
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Tokenize a session title into lowercase word tokens for typo matching.
+ * Only alphanumeric runs are kept so punctuation ("orchestrator." →
+ * "orchestrator") does not defeat the distance-1 comparison.
+ */
+function tokenizeTitle(title: string): string[] {
+  const tokens = title.toLowerCase().match(/[a-z0-9]+/g);
+  return tokens ?? [];
+}
+
+/**
  * Score a message for query relevance. Weighted blend of:
  *   - Word-boundary matches (`\bfoo\b`) — the strongest signal.
  *   - Raw substring density (occurrences per 100 chars) — fallback signal.
@@ -72,7 +183,12 @@ function escapeRegExp(input: string): string {
  *     to carry outcomes, so the caller-configurable role filter also
  *     nudges the ranking.
  */
-function calculateRelevance(content: string, query: string, role: string): number {
+function calculateRelevance(
+  content: string,
+  query: string,
+  role: string,
+  matchKind: 'exact' | 'typo' = 'exact'
+): number {
   const lowerContent = content.toLowerCase();
   const lowerQuery = query.toLowerCase();
   const safe = escapeRegExp(lowerQuery);
@@ -94,6 +210,20 @@ function calculateRelevance(content: string, query: string, role: string): numbe
   } else if (role === 'assistant') {
     score += 3;
   }
+
+  // Typo-tolerant match: exact hits already got their full score; a
+  // distance-1 title-typo hit synthesises a minimum baseline (the
+  // content will not contain the raw query substring, so the regex
+  // matches above are 0) and then applies a 20% penalty so exact
+  // matches always rank above typo matches. See
+  // `scanSessionTitlesTypoTolerant` for the fallback caller.
+  if (matchKind === 'typo') {
+    // Give typo matches a non-zero baseline (they will otherwise score
+    // 0 on both word-boundary and density signals). Cap and penalise.
+    const baseline = 30 + (role === 'user' ? 5 : role === 'assistant' ? 3 : 0);
+    score = Math.max(score, baseline) * 0.8;
+  }
+
   return Math.min(score, 100);
 }
 
@@ -216,6 +346,110 @@ function scanSessionSlow(
   return hits;
 }
 
+/**
+ * Fallback typo-tolerant scan over session TITLES only.
+ *
+ * Rationale: full-transcript Levenshtein would be O(messages * tokens *
+ * queryTerms) per session, which is far too expensive for the 20-hit
+ * common case. Titles are short (auto-generated from the first user
+ * turn, capped at ~50 chars) and highly indicative of session topic, so
+ * a title-only fallback catches the "I remember the topic but typoed
+ * it" case cheaply.
+ *
+ * A session is returned as a hit iff AT LEAST ONE query term either
+ * matches a title token exactly OR is within Levenshtein distance 1 of
+ * a title token. Query terms that fail to match any token in this
+ * particular title are surfaced via `termsMissing`, and the enclosing
+ * `RecallResult.missingTerms` reports terms that did not match in ANY
+ * of the returned hits (the union across all successful sessions).
+ * Relevance scaling by matched-term fraction keeps a title matching
+ * only 1 of 3 terms below a title matching 3 of 3.
+ */
+function scanSessionTitlesTypoTolerant(
+  session: any,
+  file: string,
+  queryTerms: string[]
+): { hit: RecallHit | null; termsMatched: Set<string>; termsMissing: Set<string> } {
+  const title: string | undefined =
+    typeof session?.metadata?.title === 'string' ? session.metadata.title : undefined;
+  if (!title) {
+    return { hit: null, termsMatched: new Set(), termsMissing: new Set() };
+  }
+
+  const titleTokens = tokenizeTitle(title);
+  if (titleTokens.length === 0) {
+    return { hit: null, termsMatched: new Set(), termsMissing: new Set() };
+  }
+
+  const termsMatched = new Set<string>();
+  const termsMissing = new Set<string>();
+  let bestKindOverall: 'exact' | 'typo' = 'typo';
+  let anyExact = false;
+
+  for (const term of queryTerms) {
+    let bestForTerm: 'exact' | 'typo' | null = null;
+    for (const tok of titleTokens) {
+      const kind = tokenMatchKind(term, tok);
+      if (kind === 'exact') {
+        bestForTerm = 'exact';
+        break;
+      }
+      if (kind === 'typo') {
+        // We only reach this branch when no earlier iteration set
+        // 'exact' (that would have broken out of the loop). Keep the
+        // first typo hit; subsequent typo hits do not upgrade.
+        bestForTerm = bestForTerm ?? 'typo';
+      }
+    }
+    if (bestForTerm === null) {
+      termsMissing.add(term.toLowerCase());
+    } else {
+      termsMatched.add(term.toLowerCase());
+      if (bestForTerm === 'exact') {
+        anyExact = true;
+      }
+    }
+  }
+
+  // At least one term must have matched (via exact or typo) for the
+  // session to be a hit. A zero-match title is not a partial match, it
+  // is just noise.
+  if (termsMatched.size === 0) {
+    return { hit: null, termsMatched, termsMissing };
+  }
+
+  // If every matched term was an exact hit AND no terms were missing,
+  // report as an exact match; otherwise treat as a typo match so the
+  // relevance is penalised relative to the primary exact-substring
+  // path.
+  if (anyExact && termsMissing.size === 0 && termsMatched.size === queryTerms.length) {
+    bestKindOverall = 'exact';
+  }
+
+  const sessionId = session?.metadata?.id || file.replace('.json', '');
+  const createdTs = session?.metadata?.created?.toString() ?? new Date().toISOString();
+
+  // Score against the title itself so density/word-boundary signals are
+  // meaningful. Scale down proportionally to the fraction of matched
+  // terms so a partial-match title ranks below a full-match title.
+  const rawScore = calculateRelevance(title, queryTerms.join(' '), 'user', bestKindOverall);
+  const fraction = termsMatched.size / queryTerms.length;
+  const relevance = rawScore * fraction;
+
+  return {
+    hit: {
+      sessionId,
+      messageId: 'title',
+      role: 'user',
+      content: title.slice(0, 500),
+      relevance,
+      timestamp: createdTs,
+    },
+    termsMatched,
+    termsMissing,
+  };
+}
+
 export const recallTool = defineTool<typeof RecallParamsSchema, RecallResult>({
   name: 'recall',
   description: `Search through past conversation sessions to recall relevant context and information.
@@ -304,6 +538,66 @@ The tool ranks matches by a blend of word-boundary hits, substring density, and 
 
       // Sort by relevance
       results.sort((a, b) => b.relevance - a.relevance);
+
+      // Zero-result fallback: retry with typo tolerance over session
+      // titles ONLY. Full-transcript typo scanning would be O(n*m*k)
+      // per query and is not worth the cost; titles are short and
+      // topical enough to catch the common "misspelled the topic"
+      // case (issue #1745).
+      if (results.length === 0) {
+        const queryTerms = splitQueryTerms(params.query);
+        if (queryTerms.length > 0) {
+          const typoHits: RecallHit[] = [];
+          const matchedTerms = new Set<string>();
+          for (const file of sessionFiles) {
+            const sessionPath = path.join(sessionsDir, file);
+            const session = await loadSession(sessionPath);
+            if (!session) {
+              continue;
+            }
+            if (!includeCurrentSession && context.sessionId && file.includes(context.sessionId)) {
+              continue;
+            }
+            const { hit, termsMatched } = scanSessionTitlesTypoTolerant(session, file, queryTerms);
+            if (hit) {
+              typoHits.push(hit);
+              // Only aggregate matched-terms from sessions that
+              // actually made it into the result set — a session that
+              // matched zero terms contributes nothing.
+              for (const t of termsMatched) {
+                matchedTerms.add(t);
+              }
+            }
+          }
+
+          if (typoHits.length > 0) {
+            typoHits.sort((a, b) => b.relevance - a.relevance);
+            const topTypo = typoHits.slice(0, 20);
+            // `missingTerms` = query terms that failed to match in ANY
+            // returned typo hit (union of per-hit misses). A term that
+            // matched at least one hit is not missing overall.
+            const missingTerms = queryTerms
+              .filter((t) => !matchedTerms.has(t.toLowerCase()))
+              // Deduplicate case-insensitively while preserving original casing.
+              .filter(
+                (t, i, arr) => arr.findIndex((x) => x.toLowerCase() === t.toLowerCase()) === i
+              );
+            return {
+              success: true,
+              data: {
+                results: topTypo,
+                totalMatches: typoHits.length,
+                partialMatch: true,
+                missingTerms,
+              },
+              hint:
+                missingTerms.length > 0
+                  ? `No exact matches; ${typoHits.length} session title(s) matched with typo tolerance. Missing terms: ${missingTerms.join(', ')}`
+                  : `No exact matches; ${typoHits.length} session title(s) matched with typo tolerance`,
+            };
+          }
+        }
+      }
 
       // Return top 20 results
       const topResults = results.slice(0, 20);
