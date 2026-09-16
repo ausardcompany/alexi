@@ -107,18 +107,34 @@ export function defineSkill(definition: SkillDefinition): Skill {
  * - `disallowed-tools` (kebab-case, upstream Claude Code convention) — denylist of tools
  *   the skill may not use. Also accepted as `disallowedTools` and the legacy `disabledTools`.
  *   All three spellings are honored as synonyms; the kebab-case form takes precedence.
+ *
+ * Alexi_change (kilocode: skills leading-slash paths): `filePath` may be
+ * either an absolute filesystem path (`/abs/path/foo.md`) or a
+ * project-anchored logical path with a leading slash (`/skills/foo.md`
+ * or `/foo.md`). When the leading-slash form is supplied and the file
+ * does not exist at that literal filesystem location, the loader
+ * retries against `<projectRoot>/.alexi<path>` and the OS-wide
+ * `<globalSkillsRoot>/<basename>` in that order. This mirrors the
+ * upstream convention where prompt authors write leading-slash paths
+ * to mean "project-relative" without needing to know where the skill
+ * store lives on disk.
  */
-export function loadSkillFromFile(filePath: string): Skill | null {
+export function loadSkillFromFile(filePath: string, projectRoot?: string): Skill | null {
+  const resolved = resolveSkillPath(filePath, projectRoot);
+  if (!resolved) {
+    console.warn(`Skill file not found: ${filePath}`);
+    return null;
+  }
   try {
     // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
     // sees `---` at byte offset 0. Otherwise the frontmatter is silently
     // ignored — see src/utils/frontmatter.ts.
-    const content = readUtf8FileSyncStripBom(filePath);
+    const content = readUtf8FileSyncStripBom(resolved);
     const { data, content: promptContent } = matter(content);
 
     const skill: Skill = {
-      id: data.id || path.basename(filePath, path.extname(filePath)),
-      name: data.name || data.id || path.basename(filePath, path.extname(filePath)),
+      id: data.id || path.basename(resolved, path.extname(resolved)),
+      name: data.name || data.id || path.basename(resolved, path.extname(resolved)),
       description: data.description || '',
       prompt: promptContent.trim(),
       prompts: data.prompts,
@@ -131,14 +147,58 @@ export function loadSkillFromFile(filePath: string): Skill | null {
       tags: data.tags,
       aliases: data.aliases,
       source: 'file',
-      sourcePath: filePath,
+      sourcePath: resolved,
     };
 
     return skill;
   } catch (error) {
-    console.warn(`Failed to load skill from ${filePath}:`, error);
+    console.warn(`Failed to load skill from ${resolved}:`, error);
     return null;
   }
+}
+
+/**
+ * Resolve a skill file path.
+ *
+ * Alexi_change (kilocode: skills leading-slash paths): accept both
+ * absolute filesystem paths and project-anchored logical paths
+ * (leading `/`, but not an existing filesystem file). Returns the first
+ * candidate that exists on disk, or `null` if none do.
+ *
+ * Resolution order for `/foo.md` (leading slash, not on disk):
+ *   1. `<projectRoot>/.alexi/skills/foo.md`
+ *   2. `<projectRoot>/.alexi/foo.md`
+ *   3. `<globalSkillsDir>/foo.md`
+ *
+ * Absolute paths that DO exist on disk are returned verbatim.
+ * Relative paths are resolved against `process.cwd()` (Node's default).
+ */
+function resolveSkillPath(filePath: string, projectRoot?: string): string | null {
+  // Absolute (or leading-slash) path that exists on disk — use as-is.
+  if (fs.existsSync(filePath)) {
+    return filePath;
+  }
+
+  // Leading-slash logical path: try project-relative fallbacks.
+  if (filePath.startsWith('/')) {
+    const relative = filePath.replace(/^\/+/, '');
+    const globalPaths = getGlobalPaths();
+    const candidates: string[] = [];
+    if (projectRoot) {
+      candidates.push(path.join(projectRoot, '.alexi', 'skills', relative));
+      candidates.push(path.join(projectRoot, '.alexi', relative));
+    }
+    candidates.push(path.join(globalPaths.skills, relative));
+    for (const c of candidates) {
+      if (fs.existsSync(c)) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  // Relative path not found — let the caller see the miss.
+  return null;
 }
 
 /**

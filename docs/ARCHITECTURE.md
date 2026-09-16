@@ -3938,6 +3938,8 @@ export namespace WakeupSchema {
 
 The `payload` field uses Zod v4's two-argument `z.record(z.string(), z.unknown())` signature — the same call the `schedule_wakeup` tool parameter schema uses (`src/tool/tools/schedule-wakeup.ts:28`) so the model-facing surface, the on-disk shape, and the runtime type `Record<string, unknown>` all agree.
 
+The `instanceID` field (added in the 2026-09-16 sync, ports kilocode `16831a04e`) is optional for backwards compatibility with entries written before the field existed. A session id can be reused across process restarts, but the instance id is minted fresh on each session activation — persisting it lets `cancel({ instanceID })` be scoped to the exact instance that scheduled the wakeup so a delete-during-restart race cannot wipe the newly-restarted session's pending wakeups.
+
 ### Public API
 
 `src/kilocode/wakeup/index.ts` mirrors the upstream namespaced API shape so companion tools (`schedule_wakeup`, `cancel_wakeup`) can be ported verbatim:
@@ -3946,22 +3948,56 @@ The `payload` field uses Zod v4's two-argument `z.record(z.string(), z.unknown()
 export namespace Wakeup {
   export interface ScheduleOptions {
     sessionID: string;
+    instanceID?: string;                     // (2026-09-16) session-instance tag
     when: string;                            // ISO-8601 or relative duration
     reason: string;
     payload?: Record<string, unknown>;
   }
 
+  export interface CancelOptions {
+    sessionID: string;
+    instanceID?: string;                     // (2026-09-16) stale-instance guard
+    wakeupID?: string;                       // omit for a bulk sweep of this session
+    reason?: 'manual' | 'session-delete' | 'tool';
+  }
+
   export function schedule(opts: ScheduleOptions): Promise<WakeupSchema.Entry>;
-  export function cancel(opts: { sessionID: string; wakeupID: string }): Promise<{ cancelled: boolean }>;
+  export function cancel(opts: CancelOptions): Promise<{ cancelled: boolean; cancelledCount?: number }>;
   export function read(id: string): Promise<WakeupSchema.Entry | null>;
   export function list(sessionID?: string): Promise<WakeupSchema.Entry[]>;
   export function fireDue(now?: Date): Promise<WakeupSchema.Entry[]>;
 }
 ```
 
-- `schedule` normalizes `when` (accepts either an ISO-8601 timestamp or a relative duration like `"5m"`, `"1h"`, `"30s"`, `"2d"`) via the exported `normalizeWhen(when, now)` helper, writes the entry as pending, and returns the created record.
-- `cancel` is **idempotent**: cancelling an unknown, foreign-session, or non-pending wakeup returns `{ cancelled: false }` rather than throwing so the caller does not have to pre-check.
-- `fireDue` transitions every pending entry whose `at` is `<= now` to `status: 'fired'` on disk and returns the newly fired entries. Callers are responsible for actually resuming the associated sessions — see `WakeupResume.resume` below.
+- `schedule` normalizes `when` (accepts either an ISO-8601 timestamp or a relative duration like `"5m"`, `"1h"`, `"30s"`, `"2d"`) via the exported `normalizeWhen(when, now)` helper, writes the entry as pending, publishes `WakeupScheduled` on the bus, and returns the created record.
+- `cancel` is **idempotent** and **instance-scoped** when `instanceID` is supplied. When the caller's instance id disagrees with the entry's persisted one, the cancel is a no-op (`{ cancelled: false }`). Cancelling an unknown, foreign-session, or non-pending wakeup returns `{ cancelled: false }` rather than throwing. When `wakeupID` is omitted, `cancel` performs a **bulk sweep** — every pending wakeup matching `sessionID` (and, if supplied, `instanceID`) is transitioned to `cancelled`, and a single `WakeupCancelled` event is published with `cancelledCount` populated. This is the code path `SessionManager.deleteSession` uses to sweep orphaned wakeups; see [End-to-end flow](#end-to-end-flow) below.
+- `fireDue` transitions every pending entry whose `at` is `<= now` to `status: 'fired'` on disk, publishes `WakeupFired` for each, and returns the newly fired entries. Callers are responsible for actually resuming the associated sessions — see `WakeupResume.resume` below.
+
+#### Lifecycle events
+
+Three typed events on the shared bus (`src/bus/index.ts:479-524`) let downstream consumers (TUI status bar, telemetry, HTTP webhooks) observe wakeup transitions without polling the on-disk store:
+
+```typescript
+export const WakeupScheduled = defineEvent('wakeup.scheduled', z.object({
+  wakeupID: z.string(), sessionID: z.string(), instanceID: z.string().optional(),
+  at: z.string(), reason: z.string(), timestamp: z.number(),
+}));
+
+export const WakeupCancelled = defineEvent('wakeup.cancelled', z.object({
+  wakeupID: z.string().optional(),            // omitted for bulk sweeps
+  sessionID: z.string(), instanceID: z.string().optional(),
+  reason: z.enum(['manual', 'session-delete', 'tool']).optional(),
+  cancelledCount: z.number().optional(),      // >1 for bulk, 1 for single-id
+  timestamp: z.number(),
+}));
+
+export const WakeupFired = defineEvent('wakeup.fired', z.object({
+  wakeupID: z.string(), sessionID: z.string(), instanceID: z.string().optional(),
+  at: z.string(), reason: z.string(), timestamp: z.number(),
+}));
+```
+
+Publish failures are best-effort — each publish call is wrapped in `try / catch` and demoted to `logger.debug`. A broken subscriber cannot block the scheduling / cancel / fire path.
 
 ### Resume conversion
 
@@ -4019,6 +4055,16 @@ sequenceDiagram
   Timer->>Session: enqueue synthetic user turn (message + payload)
 ```
 
+### Session-delete wakeup sweep
+
+`SessionManager.deleteSession(sessionId)` (`src/core/sessionManager.ts:713`) dispatches a fire-and-forget `Wakeup.cancel({ sessionID, reason: 'session-delete' })` after a successful on-disk delete. This centralises wakeup cleanup so every deletion path — CLI `sessions delete`, HTTP `DELETE /sessions/:id`, TUI session list, programmatic callers — gets the same behaviour without touching each caller. Ports upstream kilocode `a0bd23321 fix: move session-delete wakeup cancel into KiloSession`.
+
+Design notes:
+
+- **Dynamic import.** The `Wakeup` module is imported inside an async IIFE so `sessionManager.ts`'s dependency graph is unchanged; `Wakeup` is a filesystem-backed module and is not part of the synchronous session-manager path.
+- **Best-effort.** Wakeup cancel errors are logged and swallowed via `console.warn`. A failed wakeup cancel must never block a successful session deletion.
+- **Ordering.** The sweep runs asynchronously by design — callers that require a strict ordering guarantee (e.g. a test asserting no pending wakeups remain immediately after `deleteSession` returns) must `await Wakeup.cancel(...)` themselves before invoking `deleteSession`.
+
 ### Namespace re-export exception
 
 Alexi's ESLint config bans `namespace` blocks project-wide (`@typescript-eslint/no-namespace`), but the four wakeup / recall-index compat modules re-export the upstream namespaced API shape intentionally so cross-repo diffs stay reviewable and the companion tools can be ported verbatim. Each block carries a line-scoped suppression:
@@ -4033,3 +4079,36 @@ Affected files: `src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/schema.ts`,
 ### Recall message index (documented shim)
 
 `src/core/session/recall-message-index.ts` ports upstream's SQLite covering index `recall_message_role_idx` used for role-scoped recall search. Alexi persists sessions as one JSON file per session, so there is no `message` table to index today — the module exists as a marker + documented shim so a future migration to a SQL-backed session store can drop the DDL back in without hunting through history. The exported `RecallMessageIndex.createSql` is the exact DDL upstream uses; `RecallMessageIndex.name` is referenced by the migration allow-list regex in `src/core/database/migration.ts` so upstream syncs preserve the `kilocode_change` marker across replays.
+
+### Kilocode-preserved SQL identifiers (`src/core/database/migration.gen.ts`)
+
+The 2026-09-16 sync formalises the migration allow-list as an exported constant + regex pair so `scripts/sync-upstream.sh` and any DDL inspector can verify that kilocode-flavoured indexes/tables were preserved across a sync replay:
+
+```typescript
+export const KILOCODE_PRESERVED_SQL_NAMES: readonly string[] = [
+  'kilo_board',
+  'kilo_board_message',
+  'part_session_step_finish_idx',
+  'recall_part_search_idx',
+  'recall_message_role_idx',
+];
+
+export const KILOCODE_PRESERVED_SQL_REGEX =
+  /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/;
+```
+
+Any new SQL identifier introduced by a `kilocode_change` migration MUST be appended to `KILOCODE_PRESERVED_SQL_NAMES` in the same commit that adds the migration, and the regex updated to match. Dropping one of these identifiers silently on a sync would break board coordination, model-usage aggregation, or recall search performance.
+
+## Malformed Tool-Call Cap (`src/core/agenticChat.ts`)
+
+Introduced in the 2026-09-16 sync (ports upstream kilocode `1df699326`, `106b1793c`, `8426ace5f`). A provider stuck emitting invalid tool JSON — unparseable arguments, unknown tool names that the repair pass also fails to rescue — could previously loop up to `maxIterations` times per turn, burning tokens and blocking the user with no forward progress. The agentic loop now caps consecutive malformed tool calls per turn.
+
+Contract:
+
+- **Threshold.** `MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3` (`src/core/agenticChat.ts:605`).
+- **What counts as malformed.** A tool result is malformed when `success === false` AND the `error` string begins with `Invalid JSON in tool arguments` or `Unknown tool`. These are the two failure modes that never reach the tool `execute` fn.
+- **Counter reset.** Any successful tool call resets `malformedToolCallCount` to `0` — intermittent bad calls do not exhaust the budget.
+- **Abort shape.** When the cap is exceeded the loop synthesises an assistant message `[Aborted turn: 3 consecutive malformed tool calls]`, pushes it onto the message log, logs a `logger.warn`, and breaks out of the iteration loop so the caller sees a bounded `iterations` count.
+- **Orthogonal to loop/mistake tracking.** The existing `LoopDetector` (identical calls in a row) and `MistakeTracker` (successive tool failures) still run against every tool call. The malformed cap is a third, orthogonal trip because a bad tool JSON never counts as a "call" from those trackers' perspective — the tool `execute` was never invoked.
+
+Test coverage: `src/core/__tests__/agenticChat.test.ts` — `aborts the turn after repeated malformed tool calls` (1 case, provider mocked to emit invalid JSON every turn, asserts `iterations < 10`, `text` contains `malformed tool calls`, and the tool `execute` mock was never called).

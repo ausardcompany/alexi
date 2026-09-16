@@ -413,6 +413,49 @@ describe('agenticChat', () => {
         { name: 'failing', success: false, error: 'Tool execution error: Tool crashed' },
       ]);
     });
+
+    // Alexi_change (kilocode 1df699326 / 106b1793c / 8426ace5f): repeated
+    // malformed tool calls (invalid JSON, unknown tool) must not loop
+    // indefinitely — the turn aborts once the per-turn cap is exceeded.
+    it('aborts the turn after repeated malformed tool calls', async () => {
+      const mockTool = {
+        name: 'test',
+        description: 'Test',
+        toFunctionSchema: () => ({
+          name: 'test',
+          description: 'Test',
+          parameters: { type: 'object', properties: {} },
+        }),
+        execute: vi.fn(),
+      };
+
+      mockToolRegistry.list.mockReturnValue([mockTool]);
+      mockToolRegistry.get.mockImplementation((name: string) =>
+        name === 'test' ? mockTool : undefined
+      );
+
+      // Every provider response emits a call with malformed JSON so the
+      // agentic loop keeps observing "Invalid JSON in tool arguments".
+      mockProvider.complete.mockResolvedValue({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_x',
+            type: 'function',
+            function: { name: 'test', arguments: 'not valid json' },
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      } satisfies CompletionResult);
+
+      const result = await agenticChat('trigger malformed loop');
+
+      // Should NOT have reached the default max-iterations limit — the
+      // malformed-call cap trips much earlier (3 consecutive).
+      expect(result.iterations).toBeLessThan(10);
+      expect(result.text).toContain('malformed tool calls');
+      expect(mockTool.execute).not.toHaveBeenCalled();
+    });
   });
 
   describe('max iterations', () => {

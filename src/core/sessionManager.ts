@@ -713,6 +713,16 @@ export class SessionManager {
 
   /**
    * Delete a session
+   *
+   * Alexi_change (kilocode a0bd23321): cancel any pending wakeups owned
+   * by this session as part of the tear-down. Wakeup cancellation lives
+   * here (not in the CLI/HTTP delete endpoints) so every deletion path
+   * — CLI `sessions delete`, HTTP `DELETE /sessions/:id`, TUI session
+   * list, programmatic `deleteSession` — cleans up wakeups uniformly.
+   * The cleanup is best-effort: wakeup errors never block session
+   * deletion. Runs synchronously by kicking off a fire-and-forget
+   * async sweep — callers that need a strict ordering guarantee can
+   * `await Wakeup.cancel(...)` themselves before invoking this method.
    */
   deleteSession(sessionId: string): boolean {
     const sessionPath = path.join(this.sessionsDir, `${sessionId}.json`);
@@ -732,6 +742,24 @@ export class SessionManager {
         // deleted session. Safe when the index has not been initialized
         // yet — the call short-circuits internally.
         this.searchIndex.deleteSession(sessionId);
+
+        // Alexi_change (kilocode a0bd23321): sweep any pending wakeups.
+        // Dynamic import keeps this file's dependency graph unchanged
+        // (Wakeup is a filesystem-backed module, not required for the
+        // synchronous session-manager path). Errors are logged and
+        // swallowed — a failed wakeup cancel must never block a
+        // successful session deletion.
+        void (async () => {
+          try {
+            const { Wakeup } = await import('../kilocode/wakeup/index.js');
+            await Wakeup.cancel({ sessionID: sessionId, reason: 'session-delete' });
+          } catch (err) {
+            console.warn(
+              `Failed to cancel wakeups during session delete (sessionId=${sessionId}):`,
+              err instanceof Error ? err.message : String(err)
+            );
+          }
+        })();
 
         return true;
       }
