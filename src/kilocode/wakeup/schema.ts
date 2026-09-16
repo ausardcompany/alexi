@@ -26,6 +26,17 @@ export namespace WakeupSchema {
     id: z.string(),
     /** Owning session id — a wakeup fires against exactly one session. */
     sessionID: z.string(),
+    /**
+     * Owning session INSTANCE id. Ports kilocode `16831a04e`
+     * (fix: tag wakeup cancel events with the session instance) — a
+     * session id can be reused across process restarts, but the
+     * instance id is minted fresh on each activation. Cancels must
+     * only apply to the same instance so a delete-during-restart race
+     * cannot wipe the newly-restarted session's pending wakeups.
+     * Optional for backwards compatibility with entries written before
+     * this field existed.
+     */
+    instanceID: z.string().optional(),
     /** ISO-8601 timestamp of when the wakeup should fire. */
     at: z.string(),
     /** Human-readable reason surfaced back to the agent on resume. */

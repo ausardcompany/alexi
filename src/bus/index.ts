@@ -475,3 +475,50 @@ export const ErrorOccurred = defineEvent(
     timestamp: z.number(),
   })
 );
+
+// Wakeup lifecycle events
+//
+// Alexi_change (kilocode `packages/schema/src/kilocode/wakeup-event.ts`):
+// wakeups have their own scheduled/cancelled/fired lifecycle that
+// downstream consumers (TUI status bar, telemetry, HTTP webhooks)
+// benefit from observing without polling the on-disk store. All three
+// events carry the owning `sessionID` and (optional) `instanceID` so
+// consumers can filter to a specific session instance — see
+// `src/kilocode/wakeup/index.ts` for the instance-tagging rationale.
+export const WakeupScheduled = defineEvent(
+  'wakeup.scheduled',
+  z.object({
+    wakeupID: z.string(),
+    sessionID: z.string(),
+    instanceID: z.string().optional(),
+    at: z.string(),
+    reason: z.string(),
+    timestamp: z.number(),
+  })
+);
+
+export const WakeupCancelled = defineEvent(
+  'wakeup.cancelled',
+  z.object({
+    wakeupID: z.string().optional(),
+    sessionID: z.string(),
+    instanceID: z.string().optional(),
+    /** Why the cancel happened: manual API call, session-delete sweep, or tool call. */
+    reason: z.enum(['manual', 'session-delete', 'tool']).optional(),
+    /** Number of wakeups cancelled — >1 for bulk sweeps, 1 for single-id cancels. */
+    cancelledCount: z.number().optional(),
+    timestamp: z.number(),
+  })
+);
+
+export const WakeupFired = defineEvent(
+  'wakeup.fired',
+  z.object({
+    wakeupID: z.string(),
+    sessionID: z.string(),
+    instanceID: z.string().optional(),
+    at: z.string(),
+    reason: z.string(),
+    timestamp: z.number(),
+  })
+);
