@@ -3394,18 +3394,21 @@ Introduced in 1.22.21 (2026-09-15 upstream sync, ports upstream kilocode commit 
 export namespace Wakeup {
   export interface ScheduleOptions {
     sessionID: string;
-    when: string;        // ISO-8601 timestamp or relative duration ("5m", "1h", "30s", "2d")
-    reason: string;      // Surfaced to the agent on resume
+    instanceID?: string;    // (2026-09-16) session-instance tag; matched on cancel
+    when: string;           // ISO-8601 timestamp or relative duration ("5m", "1h", "30s", "2d")
+    reason: string;         // Surfaced to the agent on resume
     payload?: Record<string, unknown>;
   }
 
   export interface CancelOptions {
     sessionID: string;
-    wakeupID: string;
+    instanceID?: string;    // (2026-09-16) stale-instance guard — cancel is a no-op if IDs mismatch
+    wakeupID?: string;      // omit to bulk-sweep every pending wakeup for the session
+    reason?: 'manual' | 'session-delete' | 'tool';
   }
 
   export function schedule(opts: ScheduleOptions): Promise<WakeupSchema.Entry>;
-  export function cancel(opts: CancelOptions): Promise<{ cancelled: boolean }>;
+  export function cancel(opts: CancelOptions): Promise<{ cancelled: boolean; cancelledCount?: number }>;
   export function read(id: string): Promise<WakeupSchema.Entry | null>;
   export function list(sessionID?: string): Promise<WakeupSchema.Entry[]>;
   export function fireDue(now?: Date): Promise<WakeupSchema.Entry[]>;
@@ -3414,10 +3417,36 @@ export namespace Wakeup {
 export function normalizeWhen(when: string, now?: Date): string;
 ```
 
-- `schedule` writes the entry to disk BEFORE returning so a crash immediately after does not lose the scheduling intent.
-- `cancel` is idempotent and ownership-checked. Cancelling an unknown, already-fired, foreign-session, or already-cancelled wakeup returns `{ cancelled: false }` rather than throwing.
-- `fireDue` marks entries as `fired` on disk before handing them back. If the write fails, the entry stays `pending` and the next `fireDue` pass will retry.
+- `schedule` writes the entry to disk BEFORE returning (so a crash immediately after does not lose the scheduling intent) and publishes `WakeupScheduled` on the shared bus.
+- `cancel` is idempotent, ownership-checked, and (since 2026-09-16) instance-scoped when `instanceID` is supplied. Cancelling an unknown, already-fired, foreign-session, foreign-instance, or already-cancelled wakeup returns `{ cancelled: false }` rather than throwing. Omitting `wakeupID` performs a bulk sweep of every pending wakeup for `sessionID` (optionally scoped to `instanceID`) and populates `cancelledCount` on the result. A single `WakeupCancelled` event is published per call.
+- `fireDue` marks entries as `fired` on disk before handing them back and publishes `WakeupFired` for each. If the write fails, the entry stays `pending` and the next `fireDue` pass will retry.
 - `normalizeWhen` accepts either an ISO-8601 timestamp or the relative form `<n>(ms|s|m|h|d)` (case-insensitive). Any other input throws `Error("Invalid wakeup 'when' value: …")`.
+
+### Wakeup bus events (`src/bus/index.ts`)
+
+Introduced in the 2026-09-16 sync. Ports upstream kilocode `packages/schema/src/kilocode/wakeup-event.ts`.
+
+```typescript
+export const WakeupScheduled: BusEvent<{
+  wakeupID: string; sessionID: string; instanceID?: string;
+  at: string; reason: string; timestamp: number;
+}>;
+
+export const WakeupCancelled: BusEvent<{
+  wakeupID?: string;                                       // omitted for bulk sweeps
+  sessionID: string; instanceID?: string;
+  reason?: 'manual' | 'session-delete' | 'tool';
+  cancelledCount?: number;                                 // >1 for bulk, 1 for single-id
+  timestamp: number;
+}>;
+
+export const WakeupFired: BusEvent<{
+  wakeupID: string; sessionID: string; instanceID?: string;
+  at: string; reason: string; timestamp: number;
+}>;
+```
+
+Publish errors are best-effort — every call site wraps the `.publish(...)` in `try { … } catch { logger.debug(...) }` so a broken subscriber cannot block the scheduling / cancel / fire code path.
 
 ### `WakeupSchema` (`src/kilocode/wakeup/schema.ts`)
 
@@ -3429,9 +3458,10 @@ export namespace WakeupSchema {
   export const Entry = z.object({
     id: z.string(),
     sessionID: z.string(),
-    at: z.string(),                           // ISO-8601 fire time
+    instanceID: z.string().optional(),                     // (2026-09-16) session-instance tag
+    at: z.string(),                                        // ISO-8601 fire time
     reason: z.string(),
-    payload: z.record(z.unknown()).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(), // Zod v4 two-argument signature
     status: Status,
     createdAt: z.string(),
   });

@@ -105,6 +105,83 @@ tool wins (it registers first). To force the MCP path early, uninstall or
 disable `@morphllm/morphsdk` from the `alexi` install so the built-in
 availability check returns `false`.
 
+### `@playwright/mcp-server` - browser automation (optional)
+
+Alexi ships a bundled Puppeteer-based `browser` tool in
+[`src/tool/tools/browser.ts`](../src/tool/tools/browser.ts). For projects
+that prefer Playwright's automation surface (or want to share a single
+browser MCP server across multiple agent processes), an external
+Playwright MCP server can be registered as an alternative.
+
+This is a **convenience feature**, not a capability gap: the bundled
+Puppeteer tool already works out of the box, and installing Playwright
+MCP is only worthwhile when you already prefer Playwright.
+
+#### Tradeoffs vs. the bundled Puppeteer tool
+
+- Playwright MCP is a **separate process** whose lifecycle Alexi manages
+  via the standard MCP stdio transport. Slower cold start (the `10s`
+  startup budget in the example config leaves headroom for
+  `npx -y` warm-cache launches), but the browser can be reused across
+  MCP-aware clients on the same host.
+- Playwright vs. Puppeteer has feature parity for the common tasks
+  (`navigate`, `click`, `fill`, screenshots, tracing) with Playwright
+  edging ahead on cross-browser support (WebKit, Firefox) and
+  auto-waiting semantics.
+- The bundled Puppeteer tool requires no extra install and no config;
+  Playwright MCP requires a global (or workspace-local) install of the
+  `@playwright/mcp-server` package.
+- If both are enabled, both toolsets will be exposed to the model —
+  prefer disabling one to keep the tool surface tight.
+
+#### Installation
+
+```bash
+npm install -g @playwright/mcp-server
+```
+
+Follow the upstream server's docs to install the underlying browser
+binaries (`npx playwright install`).
+
+#### Configuration
+
+The scaffold entry lives in
+[`mcp-servers.example.json`](../mcp-servers.example.json). Copy it into
+your `mcp-servers.json` and flip `enabled` to `true`:
+
+```json
+{
+  "name": "playwright",
+  "description": "Browser automation via Playwright (optional alternative to bundled Puppeteer tool)",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@playwright/mcp-server"],
+  "enabled": true,
+  "autoConnect": false,
+  "timeout": { "startup": 10000, "request": 30000 },
+  "retry": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "initialDelayMs": 1000,
+    "maxDelayMs": 4000
+  }
+}
+```
+
+`timeout.startup` is set to 10s to cover the `npx -y` warm-cache path
+(the built-in 3s default is too tight for a cold Playwright launch).
+`timeout.request` gives long-running interactions (screenshots, page
+loads on slow sites) room to complete. Retry is opt-in and only takes
+effect on transient stdio-connect failures — see
+[`docs/MCP.md`](./MCP.md) for the retry classification rules.
+
+#### Tool discovery
+
+Once the server is enabled, its tools are discovered automatically over
+the MCP protocol on session start. Run `alexi chat` and use `/tools` (or
+the tool-picker in the TUI) to confirm the Playwright tools are listed.
+Tool names come from the upstream server; Alexi does not remap them.
+
 ## Writing your own MCP server
 
 Follow the pattern in

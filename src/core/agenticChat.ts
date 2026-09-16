@@ -595,6 +595,16 @@ export async function agenticChat(
   const STEERING_MESSAGE =
     'The previous approach is stuck. Try a different method, simpler steps, or ask me for help.';
 
+  // Alexi_change (kilocode 1df699326 / 106b1793c / 8426ace5f): bound repeated
+  // malformed tool-call failures per turn. When a provider emits invalid
+  // tool JSON (bad arguments, unknown tool name that also fails the
+  // repair pass, ...) it can loop indefinitely, burning tokens and
+  // blocking the user. Cap the number of consecutive malformed tool
+  // calls in a single turn; once exceeded, abort the turn with a
+  // synthetic assistant message so the caller can surface the failure.
+  const MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3;
+  let malformedToolCallCount = 0;
+
   while (iterations < maxIterations) {
     iterations++;
 
@@ -938,6 +948,22 @@ export async function agenticChat(
           arguments: toolCall.function.arguments,
         });
 
+        // Alexi_change (kilocode 8426ace5f): count consecutive malformed
+        // tool calls per turn. A malformed call is one whose result surfaces
+        // a JSON parse failure or an unknown-tool failure that the repair
+        // pass did not rescue. Any successful tool call resets the counter,
+        // matching upstream semantics ("stuck-turn variants" across models).
+        const isMalformed =
+          toolResult.success === false &&
+          typeof toolResult.error === 'string' &&
+          (toolResult.error.startsWith('Invalid JSON in tool arguments') ||
+            toolResult.error.startsWith('Unknown tool'));
+        if (isMalformed) {
+          malformedToolCallCount += 1;
+        } else if (toolResult.success) {
+          malformedToolCallCount = 0;
+        }
+
         // Loop / mistake detection (issue #1692). Record BEFORE injecting
         // any steering message so the trip check reflects the state that
         // triggered it. The `question` tool is exempt from loop detection
@@ -1159,6 +1185,21 @@ export async function agenticChat(
           role: 'user',
           content: `${steeringPreamble}\n\n${STEERING_MESSAGE}`,
         });
+      }
+
+      // Alexi_change (kilocode 1df699326 / 106b1793c / 8426ace5f): abort the
+      // turn after N consecutive malformed tool calls. This is orthogonal to
+      // the loop/mistake trackers above — those trip on identical calls or
+      // successive failures, while this one trips on repeated *unparseable*
+      // tool invocations that don't even reach the tool. Without this cap a
+      // provider stuck emitting malformed JSON burns tokens indefinitely.
+      if (malformedToolCallCount >= MAX_MALFORMED_TOOL_CALLS_PER_TURN) {
+        logger.warn(
+          `[agenticChat] aborting turn after ${malformedToolCallCount} malformed tool calls`
+        );
+        finalText = `[Aborted turn: ${MAX_MALFORMED_TOOL_CALLS_PER_TURN} consecutive malformed tool calls]`;
+        messages.push({ role: 'assistant', content: finalText });
+        break;
       }
 
       // Continue loop to let LLM process tool results

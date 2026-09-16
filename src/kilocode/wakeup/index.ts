@@ -21,6 +21,7 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { WakeupSchema } from './schema.js';
+import { WakeupScheduled, WakeupCancelled, WakeupFired } from '../../bus/index.js';
 
 const WAKEUP_DIR = path.join(os.homedir(), '.alexi', 'wakeups');
 
@@ -68,6 +69,14 @@ export function normalizeWhen(when: string, now: Date = new Date()): string {
 export namespace Wakeup {
   export interface ScheduleOptions {
     sessionID: string;
+    /**
+     * Alexi_change (kilocode 16831a04e): session INSTANCE id. A session id
+     * can be reused across restarts, but the instance id is minted fresh
+     * on each session activation. Persisted with the entry so a later
+     * `cancel({ instanceID })` from a different session instance is
+     * treated as a no-op instead of wiping a live wakeup.
+     */
+    instanceID?: string;
     when: string;
     reason: string;
     payload?: Record<string, unknown>;
@@ -75,7 +84,21 @@ export namespace Wakeup {
 
   export interface CancelOptions {
     sessionID: string;
-    wakeupID: string;
+    /**
+     * Alexi_change (kilocode 16831a04e): if provided, only cancel wakeups
+     * whose stored `instanceID` matches. When the caller's instance id
+     * disagrees with the entry's stored one, the cancel is ignored and
+     * `{ cancelled: false }` is returned — the wakeup belongs to a
+     * different session instance (e.g. after a restart).
+     */
+    instanceID?: string;
+    wakeupID?: string;
+    /**
+     * Optional reason for the cancel. Recorded in logs so operators can
+     * distinguish tool-initiated cancels from session-delete cleanup.
+     * Alexi_change (kilocode a0bd23321).
+     */
+    reason?: 'manual' | 'session-delete' | 'tool';
   }
 
   /**
@@ -87,6 +110,7 @@ export namespace Wakeup {
     const entry: WakeupSchema.Entry = {
       id: randomUUID(),
       sessionID: opts.sessionID,
+      instanceID: opts.instanceID,
       at: normalizeWhen(opts.when, now),
       reason: opts.reason,
       payload: opts.payload,
@@ -94,7 +118,29 @@ export namespace Wakeup {
       createdAt: now.toISOString(),
     };
     await fs.writeFile(entryPath(entry.id), JSON.stringify(entry, null, 2), 'utf-8');
-    logger.info('[wakeup] scheduled', { id: entry.id, sessionID: entry.sessionID, at: entry.at });
+    logger.info('[wakeup] scheduled', {
+      id: entry.id,
+      sessionID: entry.sessionID,
+      instanceID: entry.instanceID,
+      at: entry.at,
+    });
+    // Alexi_change: publish wakeup lifecycle event. Best-effort — publish
+    // errors are swallowed by the bus (see `defineEvent`), so a
+    // misconfigured subscriber cannot block the scheduling path.
+    try {
+      WakeupScheduled.publish({
+        wakeupID: entry.id,
+        sessionID: entry.sessionID,
+        instanceID: entry.instanceID,
+        at: entry.at,
+        reason: entry.reason,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      logger.debug('[wakeup] failed to publish WakeupScheduled', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     return entry;
   }
 
@@ -103,8 +149,66 @@ export namespace Wakeup {
    * existed AND belonged to the given session AND was still pending;
    * `{ cancelled: false }` otherwise. Idempotent — cancelling an already
    * cancelled or fired wakeup is a no-op that returns `false`.
+   *
+   * Alexi_change (kilocode 16831a04e): when `wakeupID` is omitted, cancel
+   * ALL pending wakeups matching `sessionID` (and, if provided,
+   * `instanceID`). Called from `SessionManager.deleteSession` to sweep
+   * orphaned wakeups when a session is torn down.
    */
-  export async function cancel(opts: CancelOptions): Promise<{ cancelled: boolean }> {
+  export async function cancel(
+    opts: CancelOptions
+  ): Promise<{ cancelled: boolean; cancelledCount?: number }> {
+    // Bulk cancel path: no wakeupID → sweep all pending entries for this
+    // session (optionally instance-scoped).
+    if (!opts.wakeupID) {
+      const entries = await list(opts.sessionID);
+      let cancelledCount = 0;
+      for (const entry of entries) {
+        if (entry.status !== 'pending') {
+          continue;
+        }
+        if (opts.instanceID && entry.instanceID && entry.instanceID !== opts.instanceID) {
+          logger.debug('[wakeup] skipping stale-instance cancel', {
+            id: entry.id,
+            evtInstance: opts.instanceID,
+            entryInstance: entry.instanceID,
+          });
+          continue;
+        }
+        const updated: WakeupSchema.Entry = { ...entry, status: 'cancelled' };
+        try {
+          await fs.writeFile(entryPath(entry.id), JSON.stringify(updated, null, 2), 'utf-8');
+          cancelledCount++;
+          logger.info('[wakeup] cancelled', {
+            id: entry.id,
+            sessionID: entry.sessionID,
+            reason: opts.reason ?? 'manual',
+          });
+        } catch (err) {
+          logger.warn('[wakeup] failed to cancel during sweep', {
+            id: entry.id,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (cancelledCount > 0) {
+        try {
+          WakeupCancelled.publish({
+            sessionID: opts.sessionID,
+            instanceID: opts.instanceID,
+            reason: opts.reason,
+            cancelledCount,
+            timestamp: Date.now(),
+          });
+        } catch (err) {
+          logger.debug('[wakeup] failed to publish WakeupCancelled (bulk)', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return { cancelled: cancelledCount > 0, cancelledCount };
+    }
+
     const entry = await read(opts.wakeupID);
     if (!entry) {
       return { cancelled: false };
@@ -112,12 +216,40 @@ export namespace Wakeup {
     if (entry.sessionID !== opts.sessionID) {
       return { cancelled: false };
     }
+    // Alexi_change (kilocode 16831a04e): if instance IDs disagree, the
+    // wakeup belongs to a different session instance — ignore the cancel.
+    if (opts.instanceID && entry.instanceID && entry.instanceID !== opts.instanceID) {
+      logger.debug('[wakeup] ignoring cancel for stale instance', {
+        id: entry.id,
+        evtInstance: opts.instanceID,
+        entryInstance: entry.instanceID,
+      });
+      return { cancelled: false };
+    }
     if (entry.status !== 'pending') {
       return { cancelled: false };
     }
     const updated: WakeupSchema.Entry = { ...entry, status: 'cancelled' };
     await fs.writeFile(entryPath(entry.id), JSON.stringify(updated, null, 2), 'utf-8');
-    logger.info('[wakeup] cancelled', { id: entry.id, sessionID: entry.sessionID });
+    logger.info('[wakeup] cancelled', {
+      id: entry.id,
+      sessionID: entry.sessionID,
+      reason: opts.reason ?? 'manual',
+    });
+    try {
+      WakeupCancelled.publish({
+        wakeupID: entry.id,
+        sessionID: entry.sessionID,
+        instanceID: entry.instanceID,
+        reason: opts.reason,
+        cancelledCount: 1,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      logger.debug('[wakeup] failed to publish WakeupCancelled', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     return { cancelled: true };
   }
 
@@ -180,6 +312,20 @@ export namespace Wakeup {
         try {
           await fs.writeFile(entryPath(entry.id), JSON.stringify(fired, null, 2), 'utf-8');
           due.push(fired);
+          try {
+            WakeupFired.publish({
+              wakeupID: fired.id,
+              sessionID: fired.sessionID,
+              instanceID: fired.instanceID,
+              at: fired.at,
+              reason: fired.reason,
+              timestamp: Date.now(),
+            });
+          } catch (evtErr) {
+            logger.debug('[wakeup] failed to publish WakeupFired', {
+              err: evtErr instanceof Error ? evtErr.message : String(evtErr),
+            });
+          }
         } catch (err) {
           logger.warn('[wakeup] failed to mark fired', {
             id: entry.id,

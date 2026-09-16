@@ -1956,14 +1956,44 @@ When an upstream sync promotes a config key out of `experimental.*` to the top-l
 
 Worked example: `getConfigSharedAgentBoard` / `setConfigSharedAgentBoard` in `src/config/userConfig.ts:721-767`.
 
+## Adding a New Entry to `mcp-servers.example.json`
+
+`mcp-servers.example.json` at the repo root is the template operators copy into `~/.alexi/mcp-servers.json` on first setup. Two regression tests in `tests/mcp-config.test.ts` (introduced with the Playwright scaffold in commit `ae461291`) enforce that the file stays valid against the schema in `src/mcp/config.ts` and that shipped disabled scaffolds keep their opt-in shape. When adding a new example entry, follow this checklist so the tests keep passing:
+
+1. **Ship disabled and non-autoconnecting.** New scaffolds MUST set `enabled: false` and `autoConnect: false`. Operators opt in by flipping `enabled: true` — a commit that accidentally ships the entry pre-enabled would auto-run the referenced binary against every fresh `alexi` session and is caught by the structural test.
+2. **Validate the entry against the schema before committing.** Run `npm test -- tests/mcp-config.test.ts` locally. The `validates the checked-in mcp-servers.example.json against the schema` case exercises the exported `validateMcpConfig(raw)` from `src/mcp/config.ts` against the on-disk file and fails on any unrecognised field or missing required key. It is faster than round-tripping through the CLI to catch a typo.
+3. **Set a `timeout` shape appropriate for the server's startup profile.** The shared global default is `{ startup: 5000, request: 8000 }`; a browser MCP server, a JVM warmup, or any `npx -y <package>` cold-cache launch typically needs a larger `startup` (Playwright ships with `startup: 10000`). Assert the full `timeout` object via `.toEqual({...})` in any new per-entry structural test — a per-field chain would miss a stray key.
+4. **Add a per-entry structural test if the entry documents opt-in defaults.** For scaffolds where the shipped `timeout` / `retry` / `env` values ARE the documented default (as with Playwright's 10 s startup and 3-attempt retry policy), add a companion test that locates the entry by `s.name === '<your-name>'` and pins those fields. The Playwright case in `tests/mcp-config.test.ts` is the canonical worked example — see `docs/TESTING.md#testing-the-mcp-serversexamplejson-schema-guard-commit-ae461291` for the pattern.
+5. **Locate the file via `fileURLToPath(import.meta.url)`, not `process.cwd()`.** Vitest may run from a nested directory in the future; anchor the path to the test file's compiled location:
+   ```typescript
+   import { fileURLToPath } from 'url';
+   const here = path.dirname(fileURLToPath(import.meta.url));
+   const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+   ```
+6. **Document any new environment-variable references.** When an entry declares `env: { KEY: '${VAR}' }`, list the variable in the repo `.env.example` (if broadly useful) or at minimum in the entry's `description` field. The `resolveEnvVars` helper in `src/mcp/config.ts:496` substitutes `${VAR}` at load time and silently leaves unresolved references as literals — operators who miss the required export get a runtime failure at first invocation rather than a clear "missing env var" at startup.
+
+Do NOT mock `validateMcpConfig` in the example-config suite. The load-bearing property being tested is that the on-disk file matches the real schema; a mock would defeat the purpose.
+
 ## Wakeup Subsystem Testing
 
 The wakeup subsystem (`src/kilocode/wakeup/`) is filesystem-backed — each `Wakeup.schedule` call writes a JSON file under `~/.alexi/wakeups/`. When adding tests, follow the same temp-dir pattern used by tool tests:
 
-- Create a temp `WAKEUP_DIR` with `fs.mkdtemp` in `beforeEach` and tear it down in `afterEach` so parallel-safe.
+- Redirect `os.homedir()` to a per-test tempdir via `vi.spyOn(os, 'homedir').mockReturnValue(WAKEUP_TMP)` in `beforeEach` and tear it down in `afterEach` so parallel test runs and pre-existing user wakeups do not interfere. `src/kilocode/wakeup/index.ts` reads `os.homedir()` at module load time; call `vi.resetModules()` after mounting the spy and dynamically `await import('../index.js')` inside each `it` block so the fresh homedir is picked up.
 - Do NOT mock `Wakeup.schedule` / `Wakeup.cancel` — exercise the real filesystem code path so schema drift shows up in the test suite.
 - To exercise `Wakeup.fireDue` deterministically, schedule with a relative `when` value (`normalizeWhen('0s', now)` or a past ISO timestamp) and pass an explicit `now: Date` to `fireDue(now)`. Do not rely on wall-clock timing.
 - The companion tools (`schedule_wakeup`, `cancel_wakeup`) refuse without an active `context.sessionId`. Test both the happy path (with a session id) and the session-gate refusal.
+- **Session-instance semantics (2026-09-16).** When adding a cancel test that supplies `instanceID`, always cover the mismatching-instance branch — a `cancel({ sessionID, instanceID: 'inst-2', wakeupID })` against an entry scheduled with `instanceID: 'inst-1'` MUST return `{ cancelled: false }` and leave the on-disk entry pending. The canonical suite is `src/kilocode/wakeup/__tests__/instance-cancel.test.ts`; new tests should follow the same shape.
+- **Bulk-cancel path.** The `SessionManager.deleteSession` sweep calls `Wakeup.cancel({ sessionID, reason: 'session-delete' })` with no `wakeupID`. When adding a bulk-cancel test, schedule two or more wakeups under the same `sessionID` and assert `cancelledCount` on the result. Bulk-cancel publishes a single `WakeupCancelled` event (with `cancelledCount > 1`), not one per entry — a test that asserts one event per swept entry is testing the wrong contract.
+- **Bus events.** All three lifecycle events (`WakeupScheduled`, `WakeupCancelled`, `WakeupFired`) publish through the shared bus. Subscribe with `WakeupScheduled.subscribe(payload => …)` before triggering the code path under test, and remember to unsubscribe in `afterEach` — the bus retains subscriptions across `it` blocks in the same file. Publish failures are swallowed by design; do NOT write a test that asserts a broken subscriber crashes the wakeup path.
+
+## Malformed Tool-Call Cap
+
+The agentic loop (`src/core/agenticChat.ts`) caps consecutive malformed tool calls per turn at `MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3`. When adding a code path that returns a `ToolResult` with `success: false`, keep the two prefixes the cap recognises stable:
+
+- `Invalid JSON in tool arguments …` — emitted when the model's function-call arguments string fails `JSON.parse` and cannot be repaired.
+- `Unknown tool …` — emitted when the model calls a name that the registry does not know.
+
+Any other error message is scored as a normal failure (counts against `MistakeTracker`, not `malformedToolCallCount`). If a new failure mode should participate in the cap, extend the prefix check in `src/core/agenticChat.ts:956` and add a test to `src/core/__tests__/agenticChat.test.ts` mirroring the existing `aborts the turn after repeated malformed tool calls` case.
 
 ## License
 

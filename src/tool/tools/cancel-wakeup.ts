@@ -43,6 +43,10 @@ you can call this defensively without pre-checking the wakeup state.`,
       const result = await Wakeup.cancel({
         sessionID: context.sessionId,
         wakeupID: params.wakeupID,
+        // Alexi_change (kilocode 16831a04e / a0bd23321): tag the cancel with
+        // the tool source so operator logs can distinguish tool-initiated
+        // cancels from session-delete sweeps.
+        reason: 'tool',
       });
       return {
         success: true,
