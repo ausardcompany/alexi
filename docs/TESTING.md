@@ -1130,6 +1130,100 @@ Key patterns:
 3. **Test UPDATE with real `---`/`+++` headers, not just naked hunks.** LLM-emitted patches almost always include the `diff --git` / `index` / `--- a/foo` / `+++ b/foo` preamble. Historically this preamble broke the line-based hunk parser (it would treat `--- a/foo` as a deletion of `-- a/foo`), and this test pins the `stripPatchHeaders` call inside `execute` so a regression that dropped the strip step trips loudly.
 4. **Do NOT assert on encoding or line-ending fields in the ADD case.** ADD seeds the encoder with a canonical `{ encoding: 'utf-8', confidence: 1, hasBOM: false }` and picks the platform default line ending (`os.EOL === '\r\n' ? 'crlf' : 'lf'`), which means the exact byte-level output for ADD on a mixed-CI matrix (Linux + macOS + Windows) will differ. Assert on `.toContain('line 1')` / `startsWith('line 1')` rather than an exact `.toBe(...)` string so the case does not flake on Windows runners.
 
+### Testing the `recall` tool typo tolerance (issue #1745)
+
+`src/tool/tools/recall.ts` gained a title-level typo-tolerant fallback: when the primary substring scan returns zero hits, the tool retries against session titles using a Levenshtein distance-1 matcher. Coverage lives in `tests/tool/tools/recall.test.ts` under `describe('typo tolerance (issue #1745)')` and follows the same temp-directory / fake-`HOME` pattern the rest of the recall suite uses (write session JSON files into `path.join(tempDir, '.alexi', 'sessions')` in `beforeEach`; `fs.rm` the whole tempDir in `afterEach`; set `process.env.HOME = tempDir` so the tool's `getSessionsDir()` resolves under the fake home).
+
+Every case in the block exercises one of five contract properties. Skipping any of them lets a regression through:
+
+1. **Distance-1 title typo triggers the fallback.** Given a session titled `"How to build the orchestrator pipeline"` and a query `"orcestrator"` (single `'h'` deletion, distance 1), the tool must return `success: true`, `data.partialMatch: true`, at least one hit whose `sessionId` matches the seeded session, and `data.missingTerms: []` (all query terms matched via typo).
+2. **Exact matches always outrank typo matches.** Seed two sessions in the same tempDir: one with `"We need to fix the orchestrator today"` in a `user` message (exact substring match), one with only a distance-1 title typo (`"orchestratur"`). A query for `"orchestrator"` must fire the primary path — `data.partialMatch` is `undefined` — and `data.results[0].sessionId` must be the exact-match session. The typo fallback never runs because the primary pass returned a non-empty result.
+3. **Distance-2 typos do NOT match.** Query `"orxxxstrator"` against a session titled `"Notes on the orchestrator"` (edit distance 2) must return `data.results.length === 0` and `data.partialMatch: undefined`. The `isDistanceOne` helper's early length-difference exit and single-mismatch counter must both be pinned by this case.
+4. **Multi-term queries surface `missingTerms`.** Query `"orcestrator sapaicore"` against a session titled `"Refactoring the orchestrator internals"` must return `data.partialMatch: true`, one hit for the matched session, and `data.missingTerms: ['sapaicore']` (the term that failed both exact and typo comparison against every title token).
+5. **`missingTerms` is a case-insensitive union across returned hits.** A query term that matched at least one hit is NOT missing overall, regardless of which specific title it matched. A term that matched zero hits is missing exactly once, with the casing of its first occurrence preserved.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
+import { recallTool } from '../../../src/tool/tools/recall.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+describe('typo tolerance (issue #1745)', () => {
+  let tempDir: string;
+  let sessionsDir: string;
+  let context: ToolContext;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'recall-typo-'));
+    sessionsDir = path.join(tempDir, '.alexi', 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    process.env.HOME = tempDir;
+    context = { workdir: tempDir, sessionId: 'test-session' };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('detects a distance-1 title typo and flags partialMatch', async () => {
+    await fs.writeFile(
+      path.join(sessionsDir, 'session-typo-1.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'session-typo-1',
+          created: Date.now(),
+          title: 'How to build the orchestrator pipeline',
+        },
+        messages: [
+          { role: 'user', content: 'unrelated body content', timestamp: Date.now() },
+        ],
+      }),
+      'utf-8'
+    );
+
+    const result = await recallTool.execute({ query: 'orcestrator' }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.partialMatch).toBe(true);
+    expect(result.data?.results.length).toBeGreaterThan(0);
+    expect(result.data?.results[0].sessionId).toBe('session-typo-1');
+    expect(result.data?.missingTerms).toEqual([]);
+  });
+
+  it('does NOT match a distance-2 typo', async () => {
+    await fs.writeFile(
+      path.join(sessionsDir, 'far-typo.json'),
+      JSON.stringify({
+        metadata: {
+          id: 'far-typo',
+          created: Date.now(),
+          title: 'Notes on the orchestrator',
+        },
+        messages: [{ role: 'user', content: 'unrelated', timestamp: Date.now() }],
+      }),
+      'utf-8'
+    );
+
+    const result = await recallTool.execute({ query: 'orxxxstrator' }, context);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.results.length).toBe(0);
+    expect(result.data?.partialMatch).toBeUndefined();
+  });
+});
+```
+
+Key patterns:
+
+1. **Do NOT mock `getSessionsDir()`.** The tool derives its sessions directory from `os.homedir()`, so overriding `process.env.HOME` in `beforeEach` is the intended (and simpler) way to sandbox reads. A `vi.mock` on the private helper would additionally have to unify with the `loadSession` mock, which is fragile — the fake-HOME pattern is what the rest of the recall suite uses.
+2. **Seed sessions as JSON files, not via `sessionManager`.** The recall tool reads `.alexi/sessions/*.json` directly; going through `sessionManager` would add turn-numbering, checkpoint, and metadata side effects that the tests do not care about. Writing the JSON directly keeps each case self-contained and lets the test author pin the exact `metadata.title` string that drives the typo comparison.
+3. **Assert on `data.partialMatch` explicitly on BOTH the fallback and the primary path.** The flag is `undefined` on the exact-match path and `true` on the fallback path — a regression that always set it (`partialMatch: false` on the primary path) would silently break downstream renderers that use `partialMatch: true` as the trigger to prompt the user to refine their query. Both cases must assert on the flag, one with `toBe(true)` and one with `toBeUndefined()`.
+4. **Distance-2 case pins the load-bearing safety property.** The whole point of clamping the matcher at distance 1 is to keep the fallback from turning into a fuzzy search that surfaces every session ever created. A regression that widened the tolerance to distance 2 (e.g. by swapping `isDistanceOne` for a `<= 2` check) would silently trip false-positive recall — this test is the guard.
+5. **The exact-match precedence case seeds TWO sessions, not one.** A single-session test cannot distinguish "the fallback never fired" from "the fallback fired and happened to pick the same session". Two sessions with disjoint text sources (message body vs title) force the ranking logic to make a visible choice.
+6. **Assert `missingTerms` even in the all-matched case.** The empty-array assertion (`expect(result.data?.missingTerms).toEqual([])`) is the guard for a regression where the field would be `undefined` on the fallback path when every term matched. Downstream code (agent loop hints, REPL prompts) uses the presence of the field, not its length, as the "am I on the fallback path?" signal, so it must be present as an empty array rather than absent.
+
 ### Testing the `open_plan` tool
 
 `src/tool/tools/__tests__/open-plan.test.ts` pins four contract properties for `openPlanTool` (`src/tool/tools/open-plan.ts`): relative-path resolution against `context.workdir`, `plan.opened` event emission, `title` defaulting to the file basename, and the two error paths (missing file, non-markdown extension). Each case creates an isolated temp workdir via `fs.mkdtemp` in `beforeEach` and tears it down in `afterEach` so parallel test runs never collide on shared plan files.

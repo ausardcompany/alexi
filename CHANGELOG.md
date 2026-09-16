@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typo tolerance in the `recall` tool via a distance-1 title-fallback scan** (`src/tool/tools/recall.ts`, `tests/tool/tools/recall.test.ts`, commit `3516c8c0` `feat(tools): add typo tolerance to recall tool`): When the primary substring search returns zero hits, `recall` now retries with a bounded typo-tolerant scan over session TITLES only. A title token is considered a match for a query term when the two are identical (case-insensitive) OR when their Levenshtein edit distance is exactly 1 (single insertion, deletion, or substitution). Full-transcript typo scanning would be O(sessions × messages × queryTerms) and is not worth the cost; titles are auto-generated from the first user turn and capped at ~50 chars, so a title-only fallback catches the common "misspelled the topic" case cheaply.
+
+  New helpers exported from `src/tool/tools/recall.ts` (all pure, no I/O):
+
+  - `isDistanceOne(a, b): boolean` — Levenshtein distance-exactly-1 check with an early length-difference exit. Substitution case counts mismatches; insertion / deletion case walks both strings in lockstep and allows a single "skip" on the longer side. Distance 0 (identical) returns `false` — callers use exact-match logic for that case.
+  - `tokenMatchKind(token, word): 'exact' | 'typo' | null` — case-insensitive classification. Returns `'exact'` when the two are equal, `'typo'` when they are distance-1, and `null` otherwise.
+  - `splitQueryTerms(query): string[]` — splits a query on whitespace, drops empty tokens.
+  - `tokenizeTitle(title): string[]` — lowercase alphanumeric-run tokenizer. Punctuation is stripped so `"orchestrator."` and `"orchestrator"` compare equal.
+  - `scanSessionTitlesTypoTolerant(session, file, queryTerms)` — per-session fallback scanner. Returns `{ hit, termsMatched, termsMissing }` where `hit` is a synthesised `RecallHit` (message id `'title'`, role `'user'`, content = first 500 chars of the title) or `null` when no query term matched.
+
+  New optional fields on `RecallResult`:
+
+  - `partialMatch?: boolean` — `true` when the fallback typo scan produced the returned hits; absent (undefined) on the normal exact-match path. Callers should treat partial-match hits as "close but not exact" and may want to prompt the user to refine the query.
+  - `missingTerms?: string[]` — query terms that failed to match (exact or typo) in ANY returned hit — the union across successful sessions. Populated only when `partialMatch: true`. Case-insensitive deduplication preserving the original casing of the first occurrence.
+
+  Ranking rules:
+
+  1. **Exact matches always outrank typo matches.** The primary substring scan runs first and returns before the fallback is engaged, so a query that hits ANY session on the exact path never triggers the typo fallback — the two paths are mutually exclusive per invocation.
+  2. **`calculateRelevance` gained a `matchKind: 'exact' | 'typo'` parameter (default `'exact'`).** For typo hits, the content will not contain the raw query substring so the word-boundary / density signals are 0; the scorer synthesises a `baseline = 30 + roleBonus` and then applies a 20% penalty (`score = max(score, baseline) * 0.8`) so a typo hit's ceiling is strictly below an exact hit's floor at the same role.
+  3. **Partial-match sessions are scaled by matched-term fraction.** A title that matched 1 of 3 query terms scores `rawScore × (1/3)`; a title that matched 3 of 3 keeps the full `rawScore`. This keeps partial-match titles below full-match titles when both fire in the same fallback pass.
+  4. **A hit requires at least one matched term.** A zero-match title is not a partial match — it is noise and is dropped.
+  5. **Distance ≥ 2 never matches.** `isDistanceOne` returns `false` for any pair whose length differs by more than 1 or that has more than one substitution, so `orxxxstrator` vs `orchestrator` (distance 2) is filtered out even at the fallback layer.
+
+  Top-level fallback pipeline in `execute()` (`src/tool/tools/recall.ts:542-600`): after sorting `results` by relevance, if `results.length === 0` AND `splitQueryTerms(params.query).length > 0`, walk every session file again, call `scanSessionTitlesTypoTolerant`, collect surviving hits into `typoHits`, sort by relevance, take the top 20, compute `missingTerms` as `queryTerms.filter(t => !matchedTerms.has(t.toLowerCase()))` with case-insensitive dedup, and return `{ success: true, data: { results, totalMatches, partialMatch: true, missingTerms }, hint }`. The `hint` string includes the missing terms when the array is non-empty so a caller (agent loop, REPL renderer) can surface them without decoding the structured payload.
+
+  The `includeCurrentSession` filter and the `context.sessionId` skip logic are applied in the fallback pass with the same semantics as the primary pass — a typo fallback cannot leak the current session into results when the caller opted out.
+
+  Test coverage (`tests/tool/tools/recall.test.ts` +183 lines, new `describe('typo tolerance (issue #1745)')` block with 4+ cases): (1) a distance-1 title typo (`orcestrator` vs `orchestrator`) hits the fallback path, `partialMatch: true`, `missingTerms: []`; (2) an exact match in message content beats a title-typo-only match in a sibling session — the exact-match session ranks first and `partialMatch` is `undefined` because the fallback never fires; (3) a distance-2 typo (`orxxxstrator` vs `orchestrator`) does NOT match — `results` is empty, `partialMatch` is `undefined`; (4) a multi-term query where only some terms match a title reports the unmatched terms via `missingTerms`. Follow-on cases in the same block cover the case-insensitive dedup of `missingTerms`, the `partialMatch` flag's absence on the exact-match path, and the 20-hit cap on the fallback pass. Diff statistics: `2 files changed, 478 insertions(+), 1 deletion(-)`.
+
 - **Wakeup lifecycle events on the shared bus** (`src/bus/index.ts`, `src/kilocode/wakeup/index.ts`, commit `5d813c67` `feat(sync): apply upstream changes (2026-09-16)`): Ports upstream kilocode `packages/schema/src/kilocode/wakeup-event.ts`. The wakeup subsystem now publishes three typed lifecycle events on the shared event bus so downstream consumers (TUI status bar, telemetry, HTTP webhooks) can observe scheduled / cancelled / fired transitions without polling the on-disk store under `~/.alexi/wakeups/`.
 
   - `WakeupScheduled` (`wakeup.scheduled`): `{ wakeupID, sessionID, instanceID?, at, reason, timestamp }` — emitted after a wakeup is persisted by `Wakeup.schedule(...)`.
