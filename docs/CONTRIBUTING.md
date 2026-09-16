@@ -1118,6 +1118,20 @@ Contract for a new discovery module:
 
 The rules-discovery module (`src/config/rulesDiscovery.ts`) exemplifies the contract: `discoverRules({ workdir?, homedir?, customPaths?, silent? })` returns a `RulesDiscoveryResult` with `rules`, `allFiles`, `conflicts`, and `scannedDirs`; every branch that could throw is wrapped in a `try / catch` that degrades to `[]` or `null`; and `resetRulesDiscoveryLogCache()` in `src/agent/system.ts` is exposed only for tests.
 
+### Zero-result fallback paths (mutually-exclusive with the primary path)
+
+When a tool's primary search returns zero results and a bounded fallback path takes over (the canonical example is `src/tool/tools/recall.ts` under commit `3516c8c0` — the title-level typo-tolerant scan added for issue #1745), test coverage MUST pin BOTH the mutual-exclusivity contract and the fallback-only invariants. A change that flipped the fallback to run in parallel with the primary path — or that always set the fallback marker flag regardless of which path fired — would silently corrupt every downstream renderer that uses the flag to decide whether to prompt the user to refine their query.
+
+Contract to pin in tests:
+
+1. **Explicit flag assertions on BOTH paths.** The fallback marker (`partialMatch: boolean | undefined` for recall) must be asserted with `toBe(true)` on the fallback path AND `toBeUndefined()` on the primary path. Without the second assertion, a regression that always sets `partialMatch: false` on success is invisible.
+2. **Precedence via two-session (or two-input) fixtures.** A single-fixture test cannot distinguish "the fallback never fired" from "the fallback fired and happened to return the same result". Seed at least two inputs — one that matches the primary path, one that only matches the fallback — and assert on the winning result's identity as well as the flag.
+3. **Distance / tolerance boundary on the load-bearing safety property.** For any tolerance-based fallback (distance-1 Levenshtein, prefix expansion, phonetic collapse), pin the failure case at distance+1 explicitly. A regression that widened the tolerance would flip the fallback into a fuzzy search and surface false positives — the boundary test is the guard.
+4. **Aggregate result fields (`missingTerms`, `partialMatch`, `totalMatches`) tested in both empty-populated and non-empty forms.** For recall specifically: assert `missingTerms: []` when all query terms matched via typo, and assert `missingTerms: ['sapaicore']` (or similar) when a specific term failed both exact AND typo comparison. The empty-array-not-undefined case is the guard against regressions where the field is dropped from the payload on the "clean" fallback.
+5. **`includeCurrentSession` / caller-scoped filters applied identically in both passes.** A fallback pass that forgot to re-apply the primary pass's filters would leak the current session (or a user-excluded scope) into results. Test by seeding a fixture that would ONLY hit the fallback, setting `context.sessionId` to that fixture, and asserting `results.length === 0`.
+
+See [`docs/TESTING.md#testing-the-recall-tool-typo-tolerance-issue-1745`](./TESTING.md#testing-the-recall-tool-typo-tolerance-issue-1745) for the concrete test suite that pins the five properties above for the recall tool.
+
 ### Environment-driven detection (snapshot-and-restore)
 
 Some detection modules read process-level environment variables directly and
