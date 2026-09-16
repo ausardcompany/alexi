@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Wakeup lifecycle events on the shared bus** (`src/bus/index.ts`, `src/kilocode/wakeup/index.ts`, commit `5d813c67` `feat(sync): apply upstream changes (2026-09-16)`): Ports upstream kilocode `packages/schema/src/kilocode/wakeup-event.ts`. The wakeup subsystem now publishes three typed lifecycle events on the shared event bus so downstream consumers (TUI status bar, telemetry, HTTP webhooks) can observe scheduled / cancelled / fired transitions without polling the on-disk store under `~/.alexi/wakeups/`.
+
+  - `WakeupScheduled` (`wakeup.scheduled`): `{ wakeupID, sessionID, instanceID?, at, reason, timestamp }` — emitted after a wakeup is persisted by `Wakeup.schedule(...)`.
+  - `WakeupCancelled` (`wakeup.cancelled`): `{ wakeupID?, sessionID, instanceID?, reason?: 'manual' | 'session-delete' | 'tool', cancelledCount?, timestamp }` — emitted after a successful cancel; `wakeupID` is omitted and `cancelledCount` is populated for bulk sweeps (session-delete cleanup).
+  - `WakeupFired` (`wakeup.fired`): `{ wakeupID, sessionID, instanceID?, at, reason, timestamp }` — emitted when `Wakeup.fireDue(now)` transitions a pending entry to `fired`.
+
+  All three payloads carry the owning `sessionID` and the optional `instanceID` so subscribers can filter to a specific session instance. Publish failures are swallowed via `logger.debug` — a broken subscriber cannot block the scheduling/cancel/fire code path.
+
+- **Session-instance tagging for wakeup entries and cancel events** (`src/kilocode/wakeup/schema.ts`, `src/kilocode/wakeup/index.ts`, `src/tool/tools/cancel-wakeup.ts`, `src/kilocode/wakeup/__tests__/instance-cancel.test.ts`, commit `5d813c67`): Ports upstream kilocode `16831a04e fix: tag wakeup cancel events with the session instance`. A session id can be reused across process restarts, but the instance id is minted fresh on each session activation. Persisting it on the wakeup entry and comparing it on cancel prevents a delete-during-restart race from wiping the newly-restarted session's pending wakeups.
+
+  Contract:
+
+  - `WakeupSchema.Entry.instanceID: z.string().optional()` — persisted with each entry (optional for backwards compatibility with entries written before this field existed).
+  - `Wakeup.schedule({ sessionID, instanceID?, when, reason, payload? })` — accepts and persists the caller's instance id.
+  - `Wakeup.cancel({ sessionID, instanceID?, wakeupID?, reason? })` — when the caller supplies an `instanceID` and it disagrees with the entry's persisted one, the cancel is a no-op (`{ cancelled: false }`). Matching or absent instance ids fall through to the pre-existing session-scoped cancel logic.
+  - **Bulk cancel.** Omitting `wakeupID` sweeps every pending wakeup matching `sessionID` (optionally scoped by `instanceID`). Called from `SessionManager.deleteSession` to garbage-collect orphaned wakeups; returns `{ cancelled: boolean, cancelledCount: number }`.
+  - **Reason tagging.** The optional `reason: 'manual' | 'session-delete' | 'tool'` is recorded in logs and forwarded onto the `WakeupCancelled` event so operators can distinguish tool-initiated cancels from session-delete sweeps.
+
+  Test coverage (`src/kilocode/wakeup/__tests__/instance-cancel.test.ts`, 96 lines, 3 cases): `schedule()` persists the `instanceID` and `cancel()` honours it on match; a cancel from a mismatching instance is treated as a no-op and leaves the pending wakeup on disk; a `cancel({ sessionID })` without a `wakeupID` sweeps every pending wakeup for that session (the session-delete cleanup path).
+
+- **Session-delete cleanup: fire-and-forget wakeup sweep** (`src/core/sessionManager.ts`, commit `5d813c67`): Ports upstream kilocode `a0bd23321 fix: move session-delete wakeup cancel into KiloSession`. When `SessionManager.deleteSession(sessionId)` succeeds, it now dispatches a fire-and-forget `Wakeup.cancel({ sessionID, reason: 'session-delete' })` so every deletion path — CLI `sessions delete`, HTTP `DELETE /sessions/:id`, TUI session list, programmatic callers — cleans up orphaned wakeups uniformly. The cleanup is best-effort: wakeup errors are logged and swallowed and never block a successful session deletion. The `Wakeup` module is imported dynamically inside the async IIFE to keep the session-manager dependency graph unchanged; callers that require strict ordering can `await Wakeup.cancel(...)` themselves before calling `deleteSession`.
+
+- **Malformed tool-call cap in the agentic loop** (`src/core/agenticChat.ts`, `src/core/__tests__/agenticChat.test.ts`, commit `5d813c67`): Ports upstream kilocode `1df699326`, `106b1793c`, and `8426ace5f`. A provider stuck emitting invalid tool JSON (unparseable arguments, unknown tool that also fails the repair pass) could previously loop up to `maxIterations` times, burning tokens and blocking the user. The loop now aborts the turn after `MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3` consecutive malformed calls.
+
+  - **What counts as malformed.** A tool result is considered malformed when `success === false` AND the `error` string starts with `Invalid JSON in tool arguments` or `Unknown tool`. Any successful tool call resets the counter, so intermittent bad calls do not exhaust the budget.
+  - **Orthogonal to loop/mistake tracking.** The existing `LoopDetector` and `MistakeTracker` trip on identical calls or successive failures respectively; the malformed-tool-call cap trips on repeated *unparseable* invocations that never even reach the tool.
+  - **Abort shape.** When the cap is hit the loop pushes a synthetic assistant message (`[Aborted turn: 3 consecutive malformed tool calls]`) and breaks, so the caller sees a bounded `iterations` count and a diagnostic tail.
+
+  Test coverage (`src/core/__tests__/agenticChat.test.ts`, +43 lines, 1 case): with a mock provider that returns malformed tool JSON on every turn, `agenticChat()` aborts after fewer iterations than the default `maxIterations`, the final text contains `malformed tool calls`, and the tool `execute` is never called.
+
+- **`KILOCODE_PRESERVED_SQL_NAMES` upstream-sync safety list** (`src/core/database/migration.gen.ts`, `src/core/session/recall-message-index.ts`, commit `5d813c67`): Exports the union of SQL identifiers introduced by `kilocode_change` migrations plus a companion regex `KILOCODE_PRESERVED_SQL_REGEX = /kilo_board(?:_message)?|part_session_step_finish_idx|recall_(?:part_search|message_role)_idx/` so `scripts/sync-upstream.sh` and any DDL inspector can be sure not to drop kilocode-flavoured indexes/tables. New name in this cycle: `recall_message_role_idx` (from `src/core/session/recall-message-index.ts` — the documented shim that preserves the covering-index DDL against a future SQL-backed session store).
+
 ### Fixed
 
 - **CI lint/typecheck/format errors from an upstream sync resolved via targeted ESLint suppressions and Zod v4 record signatures** (`src/core/session/recall-message-index.ts`, `src/kilocode/wakeup/index.ts`, `src/kilocode/wakeup/resume.ts`, `src/kilocode/wakeup/schema.ts`, `src/tool/tools/schedule-wakeup.ts`, commit `dba29fd0` `fix(ci): resolve lint/typecheck/format errors from upstream sync [autohealing]`): Diff statistics `5 files changed, 6 insertions(+), 2 deletions(-)`. Two independent fixes bundled under one autohealing commit — neither changes runtime behaviour, both keep the ports of upstream kilocode modules building under Alexi's stricter tooling.
@@ -43,6 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New test helper: `_resetSharedAgentBoardDeprecationWarningLatchForTests()` — resets the once-per-process deprecation-warning latch so consecutive fixtures can each observe the warning without spawning a fresh process.
 
 - **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `14acf74e` `feat(sync): apply upstream changes (2026-09-15)`)**: Version bumped from `1.22.20` to `1.22.21`. Tracked upstream refs advanced: `kilocode` from `2ad44882023693b1338bb2601ce74728e73a4b91` to `9597be3a14e7afa51a90f523c93e32f46b67c322`; `opencode` from `228e9095ba3988a02664c3816cb51f98584e86c2` to `e03db9bc6908f75c9334d8aa997deeaac81c0298`; `claude-code` from `18be13be81538c38efa5cb157fb2fc8da7469855` to `f96c3b49c4c8721685206aaab23609b2d399df4e`. `workflow_run` id advanced from `34841012365` to `34962237956`.
+
+- **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `5d813c67` `feat(sync): apply upstream changes (2026-09-16)`)**: Version bumped from `1.22.20` to `1.22.22`. Tracked upstream refs advanced: `kilocode` to `c23548f4fae86239096568de5fad87c0e86f5644`; `claude-code` to `b782847db9a18667f00918ea341197f201b22bb4`. `workflow_run` id advanced to `35087734759`. Behaviour surface: adds the wakeup bus events, session-instance tagging, session-delete wakeup sweep, and the malformed-tool-call cap listed above.
 
 ### Added
 

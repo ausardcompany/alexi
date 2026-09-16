@@ -4940,3 +4940,73 @@ it('retries 429 rate-limit errors up to maxRetries and eventually rethrows', asy
 Test isolation: `sleeps.length = 0` in `beforeEach` clears the recorder, and `setTurnRetrySleep()` in `afterEach` restores the default sleep so a failing case cannot leak the recorder into the next `it`. No global state to reset beyond that — the wrapper itself is stateless between calls.
 
 Do not add a real-timer smoke test to this suite. The whole point of the injected sleep hook is that the backoff schedule can be asserted deterministically; a `vi.useFakeTimers()` variant would be superseded by the current pattern and would add flakiness on slow CI runners.
+
+## Testing the Wakeup Instance-Cancel Semantics
+
+`src/kilocode/wakeup/__tests__/instance-cancel.test.ts` (96 lines, 3 cases) pins the 2026-09-16 sync's session-instance tagging on wakeup entries and the corresponding cancel-scope guard. The suite is filesystem-driven — every `it` block resets `os.homedir()` to a fresh `mkdtemp` so parallel runs and pre-existing user wakeups under the real `~/.alexi/wakeups/` cannot interfere.
+
+Setup pattern (per test, before `import`ing the code under test):
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
+
+let WAKEUP_TMP: string;
+
+beforeEach(async () => {
+  WAKEUP_TMP = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-wakeup-test-'));
+  vi.spyOn(os, 'homedir').mockReturnValue(WAKEUP_TMP);
+  vi.resetModules();                                     // re-import so WAKEUP_DIR sees the new homedir
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await fs.rm(WAKEUP_TMP, { recursive: true, force: true });
+});
+```
+
+The `vi.resetModules()` call is essential: `src/kilocode/wakeup/index.ts` reads `os.homedir()` at module load time (`const WAKEUP_DIR = path.join(os.homedir(), '.alexi', 'wakeups')`). Without resetting the module cache the spy on `homedir` never reaches the constant. Each `it` block dynamically imports `Wakeup` from `'../index.js'` so the fresh homedir is picked up.
+
+Contract pinned by the suite:
+
+1. **`schedule()` persists `instanceID`.** Given `{ sessionID: 'sess-A', instanceID: 'inst-1', when: '1h', reason: 'test' }`, the returned `Entry.instanceID` is `'inst-1'` — and a subsequent `cancel({ sessionID: 'sess-A', instanceID: 'inst-1', wakeupID })` resolves to `{ cancelled: true }`.
+2. **Mismatching-instance cancel is a no-op.** Same schedule as above, then `cancel({ sessionID: 'sess-A', instanceID: 'inst-2', wakeupID })` resolves to `{ cancelled: false }` and the pending wakeup stays on disk. This is the anti-regression guard for the delete-during-restart race that motivated kilocode `16831a04e`.
+3. **Bulk session cancel.** `cancel({ sessionID: 'sess-A' })` (no `wakeupID`) sweeps every pending wakeup for that session — this is the exact call `SessionManager.deleteSession` makes with `reason: 'session-delete'`.
+
+When adding new wakeup tests: keep the per-test tempdir + `vi.resetModules()` pattern, dynamically import the module inside each `it`, and do NOT reach into the singleton `~/.alexi/wakeups/` directly — a global write would leak across parallel test files.
+
+## Testing the Malformed Tool-Call Cap
+
+`src/core/__tests__/agenticChat.test.ts` — `aborts the turn after repeated malformed tool calls` (1 case, +43 lines in the 2026-09-16 sync) — pins the `MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3` cap in the agentic loop. Follows the file's existing pattern: mock the tool registry, mock the provider `complete` call, drive `agenticChat()`, assert on the returned result shape.
+
+Setup expectations:
+
+```typescript
+const mockTool = {
+  name: 'test',
+  description: 'Test',
+  toFunctionSchema: () => ({ name: 'test', description: 'Test', parameters: { type: 'object', properties: {} } }),
+  execute: vi.fn(),
+};
+
+mockToolRegistry.list.mockReturnValue([mockTool]);
+mockToolRegistry.get.mockImplementation((name: string) => (name === 'test' ? mockTool : undefined));
+
+// Every provider response emits a call with malformed JSON so the agentic loop
+// keeps observing "Invalid JSON in tool arguments".
+mockProvider.complete.mockResolvedValue({
+  text: '',
+  toolCalls: [{ id: 'call_x', type: 'function', function: { name: 'test', arguments: 'not valid json' } }],
+  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+} satisfies CompletionResult);
+```
+
+Assertions that pin the contract:
+
+- `result.iterations < 10` — the cap trips much earlier than the default `maxIterations`, so a regression that removed the cap (making the loop run to exhaustion) trips this assertion loudly.
+- `result.text` contains the substring `malformed tool calls` — pinned so a rewrite of the synthetic assistant message keeps the diagnostic tail discoverable.
+- `mockTool.execute` was never called — confirms the loop terminates on the parse-failure signal before the tool ever runs.
+
+Do NOT count exact iterations. The malformed-call cap and the mistake tracker interact (both count consecutive failures), and pinning an exact number would cross-lock the two orthogonal budgets. `< 10` (well under `maxIterations`) is the right level of precision.

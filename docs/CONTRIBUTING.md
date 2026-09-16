@@ -1946,10 +1946,22 @@ Worked example: `getConfigSharedAgentBoard` / `setConfigSharedAgentBoard` in `sr
 
 The wakeup subsystem (`src/kilocode/wakeup/`) is filesystem-backed — each `Wakeup.schedule` call writes a JSON file under `~/.alexi/wakeups/`. When adding tests, follow the same temp-dir pattern used by tool tests:
 
-- Create a temp `WAKEUP_DIR` with `fs.mkdtemp` in `beforeEach` and tear it down in `afterEach` so parallel-safe.
+- Redirect `os.homedir()` to a per-test tempdir via `vi.spyOn(os, 'homedir').mockReturnValue(WAKEUP_TMP)` in `beforeEach` and tear it down in `afterEach` so parallel test runs and pre-existing user wakeups do not interfere. `src/kilocode/wakeup/index.ts` reads `os.homedir()` at module load time; call `vi.resetModules()` after mounting the spy and dynamically `await import('../index.js')` inside each `it` block so the fresh homedir is picked up.
 - Do NOT mock `Wakeup.schedule` / `Wakeup.cancel` — exercise the real filesystem code path so schema drift shows up in the test suite.
 - To exercise `Wakeup.fireDue` deterministically, schedule with a relative `when` value (`normalizeWhen('0s', now)` or a past ISO timestamp) and pass an explicit `now: Date` to `fireDue(now)`. Do not rely on wall-clock timing.
 - The companion tools (`schedule_wakeup`, `cancel_wakeup`) refuse without an active `context.sessionId`. Test both the happy path (with a session id) and the session-gate refusal.
+- **Session-instance semantics (2026-09-16).** When adding a cancel test that supplies `instanceID`, always cover the mismatching-instance branch — a `cancel({ sessionID, instanceID: 'inst-2', wakeupID })` against an entry scheduled with `instanceID: 'inst-1'` MUST return `{ cancelled: false }` and leave the on-disk entry pending. The canonical suite is `src/kilocode/wakeup/__tests__/instance-cancel.test.ts`; new tests should follow the same shape.
+- **Bulk-cancel path.** The `SessionManager.deleteSession` sweep calls `Wakeup.cancel({ sessionID, reason: 'session-delete' })` with no `wakeupID`. When adding a bulk-cancel test, schedule two or more wakeups under the same `sessionID` and assert `cancelledCount` on the result. Bulk-cancel publishes a single `WakeupCancelled` event (with `cancelledCount > 1`), not one per entry — a test that asserts one event per swept entry is testing the wrong contract.
+- **Bus events.** All three lifecycle events (`WakeupScheduled`, `WakeupCancelled`, `WakeupFired`) publish through the shared bus. Subscribe with `WakeupScheduled.subscribe(payload => …)` before triggering the code path under test, and remember to unsubscribe in `afterEach` — the bus retains subscriptions across `it` blocks in the same file. Publish failures are swallowed by design; do NOT write a test that asserts a broken subscriber crashes the wakeup path.
+
+## Malformed Tool-Call Cap
+
+The agentic loop (`src/core/agenticChat.ts`) caps consecutive malformed tool calls per turn at `MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3`. When adding a code path that returns a `ToolResult` with `success: false`, keep the two prefixes the cap recognises stable:
+
+- `Invalid JSON in tool arguments …` — emitted when the model's function-call arguments string fails `JSON.parse` and cannot be repaired.
+- `Unknown tool …` — emitted when the model calls a name that the registry does not know.
+
+Any other error message is scored as a normal failure (counts against `MistakeTracker`, not `malformedToolCallCount`). If a new failure mode should participate in the cap, extend the prefix check in `src/core/agenticChat.ts:956` and add a test to `src/core/__tests__/agenticChat.test.ts` mirroring the existing `aborts the turn after repeated malformed tool calls` case.
 
 ## License
 
