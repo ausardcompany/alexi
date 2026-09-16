@@ -52,6 +52,22 @@
         "initialDelayMs": 1000,
         "maxDelayMs": 4000
       }
+    },
+    {
+      "name": "playwright",
+      "description": "Browser automation via Playwright (optional alternative to bundled Puppeteer tool)",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp-server"],
+      "enabled": false,
+      "autoConnect": false,
+      "timeout": { "startup": 10000, "request": 30000 },
+      "retry": {
+        "enabled": true,
+        "maxAttempts": 3,
+        "initialDelayMs": 1000,
+        "maxDelayMs": 4000
+      }
     }
   ]
 }

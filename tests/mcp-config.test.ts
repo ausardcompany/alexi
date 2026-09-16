@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { resolveEnvVars, type McpConfig, type McpServerConfig } from '../src/mcp/config.js';
+import {
+  resolveEnvVars,
+  validateMcpConfig,
+  type McpConfig,
+  type McpServerConfig,
+} from '../src/mcp/config.js';
+import { fileURLToPath } from 'url';
 
 // Mock the config file path
 const _originalHome = os.homedir;
@@ -171,6 +177,45 @@ describe('MCP Config', () => {
       };
       expect(typeof server.timeout).toBe('object');
       expect((server.timeout as { startup: number }).startup).toBe(60000);
+    });
+
+    it('validates the checked-in mcp-servers.example.json against the schema', () => {
+      // Regression guard: if the example file drifts from the Zod schema
+      // (a new example entry uses an unrecognised field, or an existing
+      // one drops a required key), operators copying from it into their
+      // real mcp-servers.json would silently fall back to defaults. This
+      // catches that at CI time, before it hits an operator.
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+      const raw = JSON.parse(fs.readFileSync(examplePath, 'utf-8')) as unknown;
+      const result = validateMcpConfig(raw);
+      expect(result.ok).toBe(true);
+    });
+
+    it('mcp-servers.example.json includes a disabled Playwright entry', () => {
+      // The Playwright MCP server is an OPTIONAL alternative to the
+      // bundled Puppeteer browser tool. It ships in the example config
+      // as a disabled scaffold (operators opt in by flipping `enabled`).
+      // Guard against accidental removal or accidentally-enabled state.
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const examplePath = path.resolve(here, '..', 'mcp-servers.example.json');
+      const raw = JSON.parse(fs.readFileSync(examplePath, 'utf-8')) as McpConfig;
+      const playwright = raw.servers.find((s) => s.name === 'playwright');
+      expect(playwright).toBeDefined();
+      expect(playwright?.enabled).toBe(false);
+      expect(playwright?.autoConnect).toBe(false);
+      expect(playwright?.transport).toBe('stdio');
+      // startup 10s covers `npx -y` warm-cache launches; 3s default is
+      // too tight for a fresh browser MCP server start.
+      expect(playwright?.timeout).toEqual({ startup: 10000, request: 30000 });
+      // Retry is opt-in and matches the shared default policy so an
+      // intermittently slow start-up gets one automatic retry attempt.
+      expect(playwright?.retry).toEqual({
+        enabled: true,
+        maxAttempts: 3,
+        initialDelayMs: 1000,
+        maxDelayMs: 4000,
+      });
     });
 
     it('preserves per-server timeout field after JSON round-trip', () => {
