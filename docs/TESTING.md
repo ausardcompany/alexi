@@ -1491,6 +1491,113 @@ Key patterns:
 2. **Reuse `shellSpawnArgs` exactly as bash.ts does.** Destructure `prefixArgs` and `suffixArgs = []` and spawn `[...prefixArgs, userCommand, ...suffixArgs]` — asserting on the return value directly guarantees the tests catch any drift between the tool code and the shell binding.
 3. **Assert the four contract properties.** Fail-fast exit code, bounded stderr (single error record), successful commands still succeed, per-cmdlet `-ErrorAction` opt-out, and `param(...)` compatibility. The shape-only assertions on `shellSpawnArgs` (no shell spawn required) live in `tests/tool/tools/shell-detect.test.ts`.
 
+### Testing nested-PowerShell unwrapping (issue #1754)
+
+`src/tool/tools/shell/powershell.ts` provides the `parseNestedPowerShellCommand` and `unwrapNestedPowerShellCommand` helpers used by the `bash` tool to strip a single- or multi-layer `powershell -Command "..."` wrapper before spawn. The pure parser is exercised across every platform by `tests/tool/tools/shell/powershell-unwrap.test.ts`; the end-to-end wiring through `bashTool` is exercised only when a real PowerShell executable is on PATH by `tests/tool/tools/shell/bash-powershell-unwrap.test.ts`.
+
+#### Pure-parser tests (`tests/tool/tools/shell/powershell-unwrap.test.ts`)
+
+The suite runs on every platform — no shell spawn, no `describe.skipIf`, no PATH probe:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  parseNestedPowerShellCommand,
+  unwrapNestedPowerShellCommand,
+} from '../../../../src/tool/tools/shell/powershell.js';
+
+describe('parseNestedPowerShellCommand', () => {
+  it('unwraps a double-quoted -Command body and preserves $_', () => {
+    const cmd = `powershell -NoProfile -Command "Get-ChildItem | Where-Object { $_.Name -like '*.ts' }"`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result).toBeDefined();
+    expect(result?.executable).toBe('powershell');
+    // $_ MUST NOT be interpolated away — the whole point of the fix.
+    expect(result?.script).toBe(`Get-ChildItem | Where-Object { $_.Name -like '*.ts' }`);
+  });
+
+  it('accepts extra bootstrap-equivalent flags before -Command', () => {
+    const cmd = `powershell -NoProfile -NoLogo -NonInteractive -Command "Write-Output hi"`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result?.script).toBe('Write-Output hi');
+  });
+
+  it('decodes doubled double-quotes to a single quote', () => {
+    const cmd = `powershell -NoProfile -Command "Write-Output ""hello"""`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result?.script).toBe('Write-Output "hello"');
+  });
+});
+```
+
+Key patterns to preserve when extending the suite:
+
+1. **Pin the `$_` preservation invariant explicitly.** The load-bearing assertion is `expect(result?.script).toBe(`... $_.Name ...`)`. A regression that silently interpolated `$_` away would still pass a `toBeDefined()` check because the wrapper detection would succeed — only the byte-level `.toBe(...)` comparison catches the actual bug.
+2. **Cover every allowed / refused flag combination explicitly.** The unwrapper's flag allowlist is `-NoLogo`, `-NonInteractive`, `-NoProfile` and it requires `-NoProfile` to be present in full. Tests must cover: `-NoProfile` alone (accepted), `-NoProfile` + `-NoLogo` + `-NonInteractive` (accepted), `-Command` without `-NoProfile` (refused → returns `undefined`), and any other flag such as `-ExecutionPolicy Bypass` or the abbreviation `-c` (refused). A regression that broadened the allowlist would silently reintroduce profile-loading semantics that the outer bootstrap cannot reproduce.
+3. **Cover BOTH quote styles and their escape rules.** Double-quoted bodies MUST decode `""` → `"`, `` `n `` → `\n`, `` `$ `` → `$`, and leave `$_` untouched; single-quoted bodies MUST decode only `''` → `'`. A test that only covers one style would miss a regression where the double-quoted decoder ate a legitimate `$`-expression.
+4. **Cover the multi-layer case with `unwrapNestedPowerShellCommand`.** A doubly-wrapped command like `powershell -NoProfile -Command "powershell -NoProfile -Command 'Write-Output hi'"` must strip both layers. Assert the final `script` is the innermost payload — if the recursive walk stops after one iteration the outer bootstrap will still run PowerShell source instead of the decoded script.
+5. **Refuse cases must return `undefined`, not throw.** The caller (`bashTool`) treats `undefined` as "run the original command unchanged". A parser that threw on an unsupported wrapper shape would crash the tool for every operator who happened to use `-ExecutionPolicy Bypass`.
+
+#### End-to-end tests (`tests/tool/tools/shell/bash-powershell-unwrap.test.ts`)
+
+Because the wiring requires a real PowerShell process to observe the outer `-Command` parser's `$_` interpolation, the suite self-skips when neither `pwsh` nor `powershell(.exe)` is on PATH:
+
+```typescript
+function findPowerShell(): { command: string; path: string } | undefined {
+  const candidates = ['pwsh', 'powershell.exe', 'powershell'];
+  for (const cmd of candidates) {
+    const probe = spawnSync(
+      cmd,
+      ['-NoProfile', '-NoLogo', '-Command', 'Write-Output $PSVersionTable.PSEdition'],
+      { encoding: 'utf8' }
+    );
+    if (probe.status === 0) {
+      const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
+        encoding: 'utf8',
+      });
+      const resolved =
+        which.status === 0 && which.stdout.trim().length > 0
+          ? which.stdout.split(/\r?\n/)[0].trim()
+          : cmd;
+      return { command: cmd, path: resolved };
+    }
+  }
+  return undefined;
+}
+
+const pwsh = findPowerShell();
+const describePwsh = pwsh ? describe : describe.skip;
+```
+
+To route `bashTool` through PowerShell on a POSIX developer box, the suite pins `detectShell` via the test-only hooks `_resetDetectShellCacheForTests` and `_setFsProbeForTests` in `src/tool/tools/shell/id.ts` and reassigns `process.env.SHELL`. Both hooks MUST be reset in `afterEach` so unrelated bash-tool tests do not observe the pinned probe:
+
+```typescript
+afterEach(() => {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests(undefined);
+});
+
+function forcePwsh(): void {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests((p: string) => p === pwsh!.path);
+  process.env.SHELL = pwsh!.path;
+}
+```
+
+Every end-to-end case follows the same shape: `forcePwsh()` in the body (not in `beforeEach`, so cases that assert the pass-through behaviour can opt out), then `bashTool.executeUnsafe({ command }, context())`, then assert on `result.data?.stdout` / `.stderr` / `.exitCode`. The suite covers four invariants:
+
+1. **Double-quoted `$_` pipeline survives.** A `Get-ChildItem | Where-Object { $_.Name -like '*.ts' }` pipeline over a real temp directory returns the expected `.ts` filenames on stdout and does NOT emit the `property 'Name' cannot be found` flood on stderr. This is the flood-vs-single-error assertion that maps to the original Cline #13284 bug.
+2. **Single-quoted `$_` pipeline survives.** The same shape with `'1,2,3 | Where-Object { $_ -gt 1 } | ForEach-Object { $_ * 10 }'` returns `['20', '30']` — a regression that only handled double-quoted bodies would silently pass the double-quoted case and fail here.
+3. **Abort signal still terminates the child.** An `AbortController` fired 200 ms into a `Start-Sleep -Seconds 30` produces `result.success === false` and `result.data?.exitCode !== 0`. The unwrapping code path must not swallow the abort signal or leak the child process.
+4. **Non-matching invocations pass through unchanged.** A wrapper with `-ExecutionPolicy Bypass` (not on the unwrappable-flag allowlist) is NOT stripped: the command runs the wrapper as PowerShell source, which spawns a nested `pwsh` and prints the literal string. Asserting `stdout === 'wrapped-ok'` proves the wrapper survived — a stripped wrapper would have executed `-ExecutionPolicy` as a standalone statement and errored.
+
+Key patterns:
+
+1. **Use `executeUnsafe`**, not `execute`. The unwrap code path is orthogonal to permission gating; `executeUnsafe` bypasses the permission audit so the suite does not need to stub the permission layer per case.
+2. **`context()` returns a fresh `ToolContext` per call.** A shared context object leaked across cases would make the `sessionId` (used by the bash tool for streaming registry keys) collide — pinning it inside each `it()` keeps the cases parallel-safe.
+3. **Set a per-case timeout of 30 s / 15 s.** PowerShell cold-start on Linux via `dotnet` can take 5-8 s; a 5 s default Vitest timeout would false-positive as a flaky hang. The pipeline cases pin `30000`, the abort/pass-through cases pin `15000`.
+4. **Assert both `stdout` presence AND `stderr` absence.** The regression this fixes is not "the command failed" but "the command emitted N stderr error records where N = enumerated-item count". A test that only asserts `success === true` would miss the flood — the negative assertion `not.toContain('property')` is what pins the specific bug.
+
 ### Testing the PowerShell 7 resolver
 
 `tests/core/powershell.test.ts` (added in 1.22.1) unit-tests the pure resolver in `src/core/powershell.ts`. Because the tests run on Linux CI, none of the Windows install locations exist — the suite is written so that shape assertions pass on every platform and the "is anything installed?" question is asserted only through explicit env-injection:
