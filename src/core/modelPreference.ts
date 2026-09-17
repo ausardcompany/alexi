@@ -66,8 +66,7 @@ export function resolveSessionModelPreference(
   incoming: Partial<SessionModelPreference> | undefined,
   configDefault: SessionModelPreference
 ): SessionModelPreference {
-  const isCurrentExplicit =
-    current?.source === 'user-explicit' || current?.source === 'inherited';
+  const isCurrentExplicit = current?.source === 'user-explicit' || current?.source === 'inherited';
   const isIncomingExplicit = incoming?.source === 'user-explicit';
 
   // Rule 1: user's explicit choice survives incoming non-explicit updates.

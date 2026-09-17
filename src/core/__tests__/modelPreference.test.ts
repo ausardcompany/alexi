@@ -23,7 +23,7 @@ describe('resolveSessionModelPreference', () => {
     expect(resolved).toEqual(cfg);
   });
 
-  it("does NOT overwrite a user-explicit choice with a default incoming update", () => {
+  it('does NOT overwrite a user-explicit choice with a default incoming update', () => {
     const current = userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'high');
     const incoming = defaultPreference('sap-ai-core/gpt-4o', 'sap-ai-core', 'medium');
 
@@ -43,7 +43,11 @@ describe('resolveSessionModelPreference', () => {
   });
 
   it('merges a fresh effort update into a user-explicit choice without swapping model', () => {
-    const current = userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium');
+    const current = userExplicitPreference(
+      'sap-ai-core/claude-3.5-sonnet',
+      'sap-ai-core',
+      'medium'
+    );
     // Simulate `/effort high` — non-explicit source, only effort field set.
     const incoming = { reasoningEffort: 'high' as const };
 
