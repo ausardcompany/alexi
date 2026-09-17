@@ -449,6 +449,47 @@ callbacks, `harvestMacosCAs` accepts a `SecurityRunner`, and
 new providers, tools, or hooks that touch external I/O. See
 `docs/TESTING.md#testing-the-auto-ca-harvester` for a fully worked example.
 
+**Test-only reset / probe hooks (preferred over module-level mutation).** When
+a module maintains a process-wide cache that cannot easily be injected — the
+canonical example is `detectShell` in `src/tool/tools/shell/id.ts`, which
+caches the resolved shell path for a short TTL — expose two `_`-prefixed
+exports that let tests bypass and reset the cache: `_resetXCacheForTests()`
+and `_setXProbeForTests(probe | undefined)`. The nested-PowerShell suite in
+`tests/tool/tools/shell/bash-powershell-unwrap.test.ts` uses this shape to
+route `bashTool` through PowerShell on a POSIX developer box:
+
+```typescript
+import {
+  _resetDetectShellCacheForTests,
+  _setFsProbeForTests,
+} from '../../../../src/tool/tools/shell/id.js';
+
+afterEach(() => {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests(undefined);
+});
+
+function forcePwsh(): void {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests((p: string) => p === pwsh.path);
+  process.env.SHELL = pwsh.path;
+}
+```
+
+Rules for this pattern:
+
+1. **The exports are prefixed with `_` and named `*ForTests`.** ESLint's
+   `no-unused-vars` rule already allows `_`-prefixed imports; the `ForTests`
+   suffix documents intent for grep and code review. Do not drop the suffix
+   just because the export happens to also work in production.
+2. **`afterEach` MUST reset both the cache AND the probe override.** A
+   leaked probe pins every subsequent bash-tool test to the same fake shell
+   binary and produces test failures that look like flakiness. Restoration
+   is not optional.
+3. **Do not use these hooks in production code.** They exist so a unit test
+   can pin a hermetic view of the filesystem without spawning a real shell
+   or mutating global `process.env` state permanently.
+
 ### Experimental flag gating (preferred over hard flag reads)
 
 New behaviour that ports upstream features should be gated behind an `experimental.*` flag when the feature changes tool contracts, override defaults, or introduces new resolution paths. The canonical pattern lives in `src/config/userConfig.ts` — `experimental.task_model_selection` (2026-08-31, ports upstream `ab143253a`) demonstrates the full shape:
