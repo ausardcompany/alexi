@@ -836,6 +836,8 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/models` | Open interactive model picker | `/models` |
 | `/autoroute` | Toggle automatic model routing | `/autoroute` |
 
+Persistence semantics: `/model <id>` and the `/models` interactive picker record the choice through `userExplicitPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts`) so `SessionModelPreference.source` is set to `'user-explicit'`. The `resolveSessionModelPreference` reconciler then protects the choice against any subsequent non-explicit update — a config reload, an `AICORE_MODEL` change, or an implicit routing default cannot silently overwrite the user's selection on the next turn. Only another explicit action (`/model`, `--model`, or the TUI picker) may overwrite. `/effort <level>` is intentionally the **only** non-explicit update that may modify a protected preference: it sets `reasoningEffort` without swapping the model or provider, so a user typing `/effort high` mid-session does not have to re-pick their model. See `docs/ARCHITECTURE.md` under **Session Model Preferences** for the full contract, provenance model (`'user-explicit' | 'default' | 'inherited'`), and rule table.
+
 ### Session Commands
 
 | Command | Description |

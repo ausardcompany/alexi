@@ -778,6 +778,76 @@ Design boundaries:
 - `routingReason` is populated (`Inline override: @<model>`) so downstream telemetry, TUI status displays, and `session-export` can distinguish inline overrides from auto-router decisions and explicit `--model` flags.
 - The parser is a pure function of the message text; it does not touch the session manager, the router, or the provider layer. Adding a new provider that ships as `<new-provider>/<model>` requires no change to `inlineModelOverride.ts` — only the model catalog needs to know about the new id.
 
+## Session Model Preferences
+
+`src/core/modelPreference.ts` owns the per-session reconciliation contract for the "which model does this session want to use, and where did that choice come from?" question. It exists because upstream kilocode fixed a class of bug in which `session.model = config.defaultModel` was applied unconditionally on every turn — a config reload would then silently overwrite a user's explicit `/model` selection. Alexi's routing is JSON-driven (see `docs/ROUTING.md`), so a config reload is a routine event and the fix is load-bearing.
+
+### Provenance model
+
+Every persisted preference carries a `source` field that records **why** the value was set. The reconciler uses `source` to decide whether an incoming update is allowed to overwrite the current value:
+
+```typescript
+// src/core/modelPreference.ts:36-43
+export type SessionModelPreferenceSource = 'user-explicit' | 'default' | 'inherited';
+
+export interface SessionModelPreference {
+  modelID: string;
+  providerID: string;
+  reasoningEffort?: EffortLevel;
+  source: SessionModelPreferenceSource;
+}
+```
+
+- `'user-explicit'`: the user picked this via `/model <id>`, the `--model` CLI flag, the TUI model picker, or an equivalent explicit affordance. Only another `'user-explicit'` update may overwrite.
+- `'inherited'`: forwarded from a parent session (subagent handoff, resumed session). Behaves like `'user-explicit'` for override purposes — a parent's explicit choice is respected downstream.
+- `'default'`: derived from `routing-config.json` / `AICORE_MODEL` / the built-in default. Freely overwritten by any incoming update.
+
+### Reconciliation rules
+
+```mermaid
+flowchart TB
+    Start([resolveSessionModelPreference<br/>current, incoming, configDefault]) --> HasCurrent{current defined<br/>AND source in<br/>user-explicit / inherited?}
+    HasCurrent -->|No| Fallback[Rule 2:<br/>incoming ?? configDefault<br/>source = incoming.source ?? default]
+    HasCurrent -->|Yes| Incoming{incoming.source ===<br/>user-explicit?}
+    Incoming -->|Yes| Overwrite[Rule 2 path:<br/>a fresh explicit choice<br/>overwrites the old one]
+    Incoming -->|No| Preserve[Rule 1:<br/>keep current model + provider + source<br/>merge incoming.reasoningEffort if set<br/>else keep current.reasoningEffort]
+    Fallback --> Emit([SessionModelPreference])
+    Overwrite --> Emit
+    Preserve --> Emit
+```
+
+Two rules, in order:
+
+1. **Rule 1 — explicit-choice survival.** When the current preference has `source` in `{'user-explicit', 'inherited'}` AND the incoming update is NOT `'user-explicit'`, the current `modelID`, `providerID`, and `source` are preserved. The **only** field a non-explicit incoming update may refresh on a protected current preference is `reasoningEffort` — a user typing `/effort high` mid-session must not need to re-pick their model. When the incoming payload omits `reasoningEffort`, the current value is kept (upstream kilocode `50f7d01ad` "preserve effort intent and live session defaults").
+2. **Rule 2 — incoming → default fallback.** Otherwise fall back to `incoming ?? configDefault` for every field. This preserves the classical "config wins over nothing" behaviour for brand-new sessions and lets a user explicit choice overwrite a previous explicit choice.
+
+The function is pure — it never mutates its arguments and the return value is safe to persist directly. The complete implementation is `src/core/modelPreference.ts:64-94`.
+
+### Public helpers
+
+Three constructor helpers ensure callers set `source` correctly instead of hand-writing it (which would defeat the persistence guard):
+
+- `userExplicitPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts:103-109`): construct a preference explicitly attributed to the user. All call sites that process a `/model` command, a `--model` CLI flag, or a TUI model-picker selection route through this helper so `source: 'user-explicit'` is set and the next `resolveSessionModelPreference` call protects the choice.
+- `defaultPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts:117-123`): construct a preference derived from configuration. Freely overwritten by any incoming update, matching the pre-fix behaviour for brand-new sessions.
+- `migrateLegacyPreference(raw)` (`src/core/modelPreference.ts:136-147`): hydration shim for on-disk preferences persisted before `source` existed. Legacy entries are conservatively defaulted to `'user-explicit'` so a user's saved model choice is NOT silently downgraded to `'default'` (which would then be overwritten on the next config reload). An already-present `source` field is preserved verbatim.
+
+### Interaction with inline overrides
+
+`resolveSessionModelPreference` operates at a different layer from the inline `@provider/model` override documented in **Inline Model Override** above. The inline override applies for a **single turn** and does NOT touch the persisted `SessionModelPreference`; a `/model` command or a `--model` flag DOES update the persistent preference and routes through `userExplicitPreference` so the choice survives config reloads. Auto-router decisions (`options.autoRoute`) are one-shot per turn and do not upgrade the persisted preference to `'user-explicit'` — the router is a suggestion path, not an intent signal.
+
+### Regression coverage
+
+`src/core/__tests__/modelPreference.test.ts` pins the load-bearing behaviours in six + two cases:
+
+- Applies the config default on a brand-new session (no current preference).
+- Does NOT overwrite a `'user-explicit'` current with a `'default'` incoming update.
+- Allows a fresh `'user-explicit'` incoming to overwrite an existing `'user-explicit'` current.
+- Merges a fresh `reasoningEffort` from a non-explicit incoming into a `'user-explicit'` current WITHOUT swapping model or provider (`/effort high` path).
+- Preserves the existing `reasoningEffort` when the incoming update omits it (a config-default reload with a different effort must not downgrade the user's effort intent).
+- Treats `'inherited'` the same as `'user-explicit'` for override protection.
+- `migrateLegacyPreference` defaults a missing `source` to `'user-explicit'`.
+- `migrateLegacyPreference` preserves an explicitly-provided `source: 'default'`.
+
 ## Routing Decision Flow
 
 ```mermaid

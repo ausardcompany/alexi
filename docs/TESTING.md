@@ -4021,6 +4021,55 @@ contributors do not re-introduce them by hand:
    a spurious `style(ci): auto-fix lint/format issues [alexi-bot]` commit.
    Running `npm run format` before committing avoids the follow-up.
 
+6. **Default `describe` / `it` titles to single-quoted string literals, and
+   break short factory-call fixtures across multiple lines only when the
+   single-line form overflows 100 columns.** Two patterns from the same axis:
+
+   - `it("...")` / `describe("...")` titles authored with double quotes are
+     rewritten to single quotes by Prettier under `singleQuote: true` whenever
+     the string contains no apostrophe that would otherwise require a `\'`
+     escape. Do NOT hand-author test titles with double quotes for stylistic
+     variety; the pre-commit hook will rewrite them.
+   - Factory-call fixtures like `userExplicitPreference('sap-ai-core/foo', 'sap-ai-core', 'medium')`
+     stay on one line as long as the full statement (including the leading
+     `const name = ` and the trailing `;`) fits under `printWidth: 100`. When
+     the statement overflows, Prettier wraps the call across four lines with
+     one argument per line — do NOT hand-author the wrapped form early just
+     because the identifier list *looks* long; write the single-line form and
+     let Prettier decide.
+
+   Canonical worked example: the 2026-09-17 auto-fix pass in commit
+   `ffdfa8e4` on `src/core/__tests__/modelPreference.test.ts` rewrote one
+   double-quoted test title to single quotes AND wrapped one
+   `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium')`
+   call across four lines because the full `const current = ...;` statement
+   sat at 102 columns:
+
+   ```typescript
+   // Anti-pattern — double-quoted title with no escape need (rewritten)
+   it("does NOT overwrite a user-explicit choice with a default incoming update", () => {
+
+   // Canonical form after auto-fix
+   it('does NOT overwrite a user-explicit choice with a default incoming update', () => {
+
+   // Anti-pattern — 102-column single-line factory call (wrapped)
+   const current = userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium');
+
+   // Canonical form after auto-fix — one argument per line
+   const current = userExplicitPreference(
+     'sap-ai-core/claude-3.5-sonnet',
+     'sap-ai-core',
+     'medium'
+   );
+   ```
+
+   Assertion semantics are unchanged in both hunks: `it(...)` still runs
+   the same test body, and `userExplicitPreference` still constructs the
+   same `SessionModelPreference` (see `docs/ARCHITECTURE.md` under
+   **Session Model Preferences**). Diff statistics for that pass:
+   `2 files changed, 7 insertions(+), 4 deletions(-)`. Running
+   `npm run format` before committing avoids the `style(ci)` follow-up.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has
