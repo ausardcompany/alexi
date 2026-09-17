@@ -4112,3 +4112,116 @@ Contract:
 - **Orthogonal to loop/mistake tracking.** The existing `LoopDetector` (identical calls in a row) and `MistakeTracker` (successive tool failures) still run against every tool call. The malformed cap is a third, orthogonal trip because a bad tool JSON never counts as a "call" from those trackers' perspective — the tool `execute` was never invoked.
 
 Test coverage: `src/core/__tests__/agenticChat.test.ts` — `aborts the turn after repeated malformed tool calls` (1 case, provider mocked to emit invalid JSON every turn, asserts `iterations < 10`, `text` contains `malformed tool calls`, and the tool `execute` mock was never called).
+
+## Session Model Preference Reconciliation (`src/core/modelPreference.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `dd2f2f9a9` "default model not persistent after explicit user choice" + `50f7d01ad` "preserve effort intent and live session defaults"). Alexi's routing is JSON-driven, so a config reload during a live session used to silently overwrite an explicit user model choice with the config default on the next turn. The fix threads a `source` provenance field through every persisted preference and gates overrides on it.
+
+```mermaid
+flowchart TD
+    Start["Incoming preference update"] --> HasCurrent{"current preference exists?"}
+    HasCurrent -- no --> UseDefault["Apply configDefault verbatim"]
+    HasCurrent -- yes --> IsExplicit{"current.source in {user-explicit, inherited}?"}
+    IsExplicit -- no --> Merge["Merge incoming over current, fall through to configDefault"]
+    IsExplicit -- yes --> IncomingExplicit{"incoming.source === user-explicit?"}
+    IncomingExplicit -- yes --> Overwrite["Overwrite: incoming wins"]
+    IncomingExplicit -- no --> Preserve["Preserve current modelID/providerID; refresh reasoningEffort if incoming carries one"]
+    UseDefault --> Persist["Return SessionModelPreference"]
+    Merge --> Persist
+    Overwrite --> Persist
+    Preserve --> Persist
+```
+
+Contract:
+
+- `resolveSessionModelPreference(current, incoming, configDefault)` is pure — it never mutates its arguments and the return value is safe to persist directly.
+- Only `source: 'user-explicit'` on the incoming payload can overwrite a current explicit / inherited preference. `'default'` incoming updates route through the preserve branch.
+- The effort intent is the ONE field an incoming non-explicit update may refresh — a user typing `/effort high` mid-session must not need to re-pick their model. When the incoming payload omits `reasoningEffort`, the current effort is preserved (this is the `50f7d01ad` follow-up fix).
+- `'inherited'` is treated the same as `'user-explicit'` for override protection so a parent's explicit choice survives subagent handoff.
+- `migrateLegacyPreference(raw)` treats a missing `source` field on an on-disk record as `'user-explicit'` — the conservative choice. The alternative (`'default'`) would silently downgrade a user's saved model on the next config reload, restoring the pre-fix regression.
+
+Callers wiring model-selection into a session:
+
+- `/model <id>`, `--model` CLI, and TUI model-picker code paths MUST route through `userExplicitPreference(modelID, providerID, reasoningEffort?)` so the persistence guard engages on the next reconciliation.
+- Config-derived preferences (from `routing-config.json` / `AICORE_MODEL` / built-in default) MUST route through `defaultPreference(...)` so they are freely overwritable by any incoming update on a brand-new session.
+- Hydration from disk MUST route the raw JSON through `migrateLegacyPreference` before handing it to `resolveSessionModelPreference`.
+
+## Session Busy Publish Ordering (`src/core/sessionBusy.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `88d23150b` + `e31aa5769`). Fixes the "stale session status blocks reload" regression where a crashed publisher left the in-memory `SessionBusyTracker` holding a phantom busy entry that blocked every subsequent turn until the process restarted. The tracker now follows a "clear-before-publish, write-after-publish" ordering with rollback on publisher failure.
+
+```mermaid
+sequenceDiagram
+    participant Caller as chat / agent
+    participant Tracker as SessionBusyTracker
+    participant Store as busySessions Map
+    participant Publisher as event bus / WebSocket
+
+    Note over Caller,Publisher: markBusy(sessionId, "chat")
+    Caller->>Tracker: markBusy(id, op)
+    Tracker->>Tracker: isBusy(id)?
+    alt already busy
+        Tracker-->>Caller: throw SessionBusyError
+    else free
+        Tracker->>Publisher: publish({ status: 'busy', id, op })
+        alt publisher throws (sync)
+            Publisher-->>Tracker: Error
+            Tracker-->>Caller: rethrow (store stays clear)
+        else publisher OK
+            Publisher-->>Tracker: void
+            Tracker->>Store: busySessions.set(id, op)
+            Tracker-->>Caller: return
+        end
+    end
+
+    Note over Caller,Publisher: markFree(sessionId)
+    Caller->>Tracker: markFree(id)
+    Tracker->>Store: busySessions.delete(id)
+    Tracker->>Publisher: publish({ status: 'idle', id })
+    Publisher-->>Tracker: (errors are logged and swallowed)
+    Tracker-->>Caller: return
+```
+
+Contract on `SessionBusyTracker`:
+
+- **`markBusy(sessionId, operation)`** publishes FIRST. On successful publication the busy entry is recorded. A synchronous publisher throw leaves the store clear and rethrows — the caller sees the failure instead of a silent wedge. An async publisher rejection triggers a best-effort deferred rollback via a `.catch` handler that only deletes the slot when the current entry still matches the failed operation (so another `markBusy` that reused the slot in the meantime is not clobbered).
+- **`markFree(sessionId)`** clears the store entry FIRST, then publishes. Publisher errors are logged and swallowed — freeing a session must never fail from the caller's perspective. This is the primary reload-unwedge mechanism: even if the idle publish fails, the session is guaranteed free for the next `markBusy`.
+- **`markBusy` on an already-busy session** still throws `SessionBusyError` synchronously (unchanged historical contract). Callers translate this to HTTP 409 via `toBusyResponse`.
+- **`markFree` on a non-busy session** is a no-op and does NOT invoke the publisher — subscribers only see real transitions.
+- **`setPublisher(publisher | undefined)`** replaces the current publisher; passing `undefined` detaches. When no publisher is configured, the tracker behaves as a plain in-memory Map for backwards compatibility with pre-fix callers.
+- **`resetSessionBusyTracker()`** is a test-only helper. Production code MUST NOT call it — it exists so tests that assert on transition ordering can start from a clean slate without cross-test bleed.
+
+## Draft Cache (`src/session/draft.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `0d2fee251` "discard empty draft caches after goal promotion"). Preserves a user's mid-composition prompt across session reload / resume without letting stale empty drafts linger past their setter.
+
+```mermaid
+flowchart LR
+    User["User types in TUI"] --> Debounce["TUI debounce"]
+    Debounce --> Set["DraftCache.set(sessionID, buffer)"]
+    Set --> Empty{"buffer.trim().length === 0?"}
+    Empty -- yes --> Evict["store.delete(sessionID)"]
+    Empty -- no --> Persist["store.set(sessionID, buffer)"]
+
+    Reload["Session reload / resume"] --> Get["DraftCache.get(sessionID)"]
+    Get --> ReturnDraft["Restore prompt buffer"]
+
+    Submit["User submits"] --> Promote["DraftCache.promote(sessionID, buffer)"]
+    Promote --> Trim["Trim input"]
+    Trim --> Delete["store.delete(sessionID) (both branches)"]
+    Delete --> NonEmpty{"trimmed.length > 0?"}
+    NonEmpty -- yes --> ReturnPrompt["Return trimmed prompt"]
+    NonEmpty -- no --> ReturnUndef["Return undefined (caller drops)"]
+```
+
+Contract on `DraftCache`:
+
+- **`get(sessionID)`** returns `undefined` when nothing is cached — never returns an empty string. Callers can rely on the null-vs-empty distinction.
+- **`set(sessionID, draft)`** actively evicts on empty or whitespace-only input. Callers do NOT need to pre-trim; passing `''`, `'   '`, or `'\n'` all funnel to `store.delete(sessionID)`.
+- **`promote(sessionID, draft)`** always evicts the cache entry — both when the input is empty (return `undefined`, caller must not submit) and when it is non-empty (return the trimmed prompt for submission). This is the point of the upstream fix: the cache must never survive promotion even when the promotion itself is a no-op.
+- **`delete(sessionID)`** is idempotent — safe to call on a session that has no cached draft.
+- **`clear()`** is a test / shutdown helper that wipes every cached draft.
+
+Persistence is deliberately in-memory (`InMemoryDraftStore`, a plain `Map<string, string>`). Alexi's interactive TUI holds a single process, and cross-process persistence would require a durable store that survives crashes AND respects the empty-draft eviction contract. The `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) is exported so a future persistent variant plugs in without changing callers or tests.
+
+The process-global `getDraftCache()` singleton is provided for CLI subcommand and TUI hook callers that have no natural lifetime to hang an instance off. Tests should construct their own `DraftCache` (or `new DraftCache(customStore)`) for isolation.

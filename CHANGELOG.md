@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session model preference reconciliation with provenance tracking** (`src/core/modelPreference.ts`, `src/core/__tests__/modelPreference.test.ts`, 2026-09-17 sync): Ports upstream kilocode `dd2f2f9a9` "default model not persistent after explicit user choice" and `50f7d01ad` "preserve effort intent and live session defaults". Introduces a new `SessionModelPreference` record with a `source: 'user-explicit' | 'default' | 'inherited'` provenance field so an explicit user model selection (via `/model`, `--model`, or the TUI model picker) is never silently overwritten by a config default on subsequent turns.
+
+  Public surface exported from `src/core/modelPreference.ts` (all pure functions, no I/O):
+
+  - `type SessionModelPreferenceSource = 'user-explicit' | 'default' | 'inherited'`
+  - `interface SessionModelPreference { modelID: string; providerID: string; reasoningEffort?: EffortLevel; source: SessionModelPreferenceSource }`
+  - `resolveSessionModelPreference(current, incoming, configDefault): SessionModelPreference` — pure reconciler. When `current.source` is `'user-explicit'` or `'inherited'` and `incoming.source` is NOT `'user-explicit'`, the current model / provider are preserved; the incoming `reasoningEffort` is merged in (or, when omitted, the current effort is preserved). Otherwise falls through to incoming → configDefault. Returns a fresh object — arguments are never mutated.
+  - `userExplicitPreference(modelID, providerID, reasoningEffort?)` — constructs a `source: 'user-explicit'` preference. Route `/model <id>`, `--model` CLI, and TUI model-picker code paths through this helper so the persistence guard engages.
+  - `defaultPreference(modelID, providerID, reasoningEffort?)` — constructs a `source: 'default'` preference from `routing-config.json` / `AICORE_MODEL` / built-in defaults. Freely overwritten by any incoming update.
+  - `migrateLegacyPreference(raw)` — one-shot migrator for on-disk preferences persisted before the `source` field existed. Legacy entries without a `source` are treated as `'user-explicit'` (the conservative choice — the alternative would silently downgrade a user's saved choice to `'default'` and let the next config reload overwrite it).
+
+  Reconciliation rules pinned by tests:
+
+  1. Brand-new session (no current) → apply config default verbatim.
+  2. Current `'user-explicit'` + incoming `'default'` → keep the user's `modelID` / `providerID` / `source`, refresh the effort intent when the incoming payload carries one.
+  3. Current `'user-explicit'` + incoming `'user-explicit'` → incoming wins (a new explicit choice overrides an older one).
+  4. Fresh effort update (`/effort high`) merges into an explicit choice without swapping the model.
+  5. `'inherited'` is treated the same as `'user-explicit'` for override protection — a parent session's explicit choice is respected in subagent handoffs and resumed sessions.
+  6. `migrateLegacyPreference` defaults missing `source` to `'user-explicit'`; an already-present `source` is preserved.
+
+  Test coverage (`src/core/__tests__/modelPreference.test.ts`, 102 lines, 8 cases across `resolveSessionModelPreference` and `migrateLegacyPreference`).
+
+- **`SessionBusyTracker` publish ordering and rollback contract** (`src/core/sessionBusy.ts`, `src/core/__tests__/sessionBusy.test.ts`, 2026-09-17 sync): Ports upstream kilocode `88d23150b` + `e31aa5769` and the companion regression suite (`packages/opencode/test/kilocode/session-status.test.ts`). Fixes the "stale session status blocks reload" regression where a crashed / interrupted publish left the in-memory busy tracker holding a phantom entry that blocked every subsequent turn until the process restarted.
+
+  New transition contract on `SessionBusyTracker` (`src/core/sessionBusy.ts:79`):
+
+  - `markFree(sessionId)` clears the in-memory entry FIRST, then publishes. Publisher errors are logged and swallowed — the session is guaranteed free after the call regardless of publish outcome.
+  - `markBusy(sessionId, operation)` publishes FIRST and only persists the busy entry on successful publication. A synchronous publisher throw rolls back the store and rethrows so the caller sees the failure; a rejected async publisher promise triggers a best-effort deferred rollback via the tracker's `unhandledRejection`-style catch handler (guarded against clobbering another operation that reused the slot).
+  - `setPublisher(publisher | undefined)` attaches or detaches a publish callback (event bus emit, WebSocket broadcast). Setting a new publisher replaces the previous one. When unset, the tracker behaves as a plain in-memory Map for backwards compatibility with pre-fix callers.
+
+  New public types exported from `src/core/sessionBusy.ts`:
+
+  - `type SessionBusyStatus = 'busy' | 'idle'`
+  - `interface SessionBusyStatusEvent { sessionId: string; status: SessionBusyStatus; operation?: string }`
+  - `type SessionBusyPublisher = (event: SessionBusyStatusEvent) => void | Promise<void>`
+  - `resetSessionBusyTracker()` — test-only helper to reset the process-global tracker. Production code should not call this — it exists so tests that assert on transition ordering can start from a clean slate.
+
+  Test coverage (`src/core/__tests__/sessionBusy.test.ts`, 134 lines, 7 cases): `markFree` clears state even when the publisher throws (no stale busy wedge); `markBusy` rolls back on synchronous publisher failure so a retry succeeds; `markBusy` publishes BEFORE persisting (observable via `isBusy(id)` from inside the publisher callback returning `false` at publish time and `true` after the call); `markFree` clears BEFORE publishing (observable via `isBusy(id)` returning `false` from inside the idle publisher); `markBusy` still throws `SessionBusyError` when the session is already busy; `markFree` is a no-op (and does not publish) when the session is not busy; the reload regression: after a failed idle publish followed by `markFree`, a subsequent `markBusy` for the same session id succeeds instead of throwing `SessionBusyError`.
+
+- **`DraftCache` for cross-reload prompt buffer preservation** (`src/session/draft.ts`, `src/session/__tests__/draft.test.ts`, 2026-09-17 sync): Ports upstream kilocode `0d2fee251` "discard empty draft caches after goal promotion". Tracks in-progress prompt buffers across session reload / resume so a user's mid-composition text is not lost, while actively evicting empty drafts to match the upstream contract that empty drafts must never linger past their setter.
+
+  Public surface exported from `src/session/draft.ts`:
+
+  - `interface DraftCacheStore { get(id): string | undefined; set(id, value): void; delete(id): void; clear(): void }` — pluggable store contract. The default is an in-memory `Map`; tests or a future persistent variant can swap in their own implementation without changing callers.
+  - `class DraftCache` with methods `get(id)`, `set(id, draft)`, `delete(id)`, `promote(id, draft)`, `clear()`. `set` actively deletes when passed an empty or whitespace-only value (no pre-trim needed). `promote` trims the input, evicts the cache entry unconditionally (both for empty and non-empty inputs), and returns the trimmed value or `undefined` when the draft was empty.
+  - `getDraftCache()` — process-global singleton for CLI subcommand and TUI hook callers.
+  - `resetDraftCache()` — test-only helper to reset the process-global cache.
+
+  Persistence is deliberately in-memory: Alexi's interactive TUI holds a single process, and cross-process persistence would require a durable store that survives crashes AND respects the empty-draft eviction contract. When a durable store is added, plug it in via the `DraftCacheStore` interface without changing callers.
+
+  Test coverage (`src/session/__tests__/draft.test.ts`, 88 lines, cases covering: setting and reading a draft; empty-string sets evict; whitespace-only sets evict; `promote` returns the trimmed value and evicts the cache; `promote` on an empty input returns `undefined` and still evicts a stale cache entry; `delete` is idempotent on missing entries; `clear` wipes every entry; the singleton `getDraftCache` returns the same instance across calls and `resetDraftCache` produces a fresh instance).
+
 - **Typo tolerance in the `recall` tool via a distance-1 title-fallback scan** (`src/tool/tools/recall.ts`, `tests/tool/tools/recall.test.ts`, commit `3516c8c0` `feat(tools): add typo tolerance to recall tool`): When the primary substring search returns zero hits, `recall` now retries with a bounded typo-tolerant scan over session TITLES only. A title token is considered a match for a query term when the two are identical (case-insensitive) OR when their Levenshtein edit distance is exactly 1 (single insertion, deletion, or substitution). Full-transcript typo scanning would be O(sessions × messages × queryTerms) and is not worth the cost; titles are auto-generated from the first user turn and capped at ~50 chars, so a title-only fallback catches the common "misspelled the topic" case cheaply.
 
   New helpers exported from `src/tool/tools/recall.ts` (all pure, no I/O):
@@ -108,6 +160,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `14acf74e` `feat(sync): apply upstream changes (2026-09-15)`)**: Version bumped from `1.22.20` to `1.22.21`. Tracked upstream refs advanced: `kilocode` from `2ad44882023693b1338bb2601ce74728e73a4b91` to `9597be3a14e7afa51a90f523c93e32f46b67c322`; `opencode` from `228e9095ba3988a02664c3816cb51f98584e86c2` to `e03db9bc6908f75c9334d8aa997deeaac81c0298`; `claude-code` from `18be13be81538c38efa5cb157fb2fc8da7469855` to `f96c3b49c4c8721685206aaab23609b2d399df4e`. `workflow_run` id advanced from `34841012365` to `34962237956`.
 
 - **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `5d813c67` `feat(sync): apply upstream changes (2026-09-16)`)**: Version bumped from `1.22.20` to `1.22.22`. Tracked upstream refs advanced: `kilocode` to `c23548f4fae86239096568de5fad87c0e86f5644`; `claude-code` to `b782847db9a18667f00918ea341197f201b22bb4`. `workflow_run` id advanced to `35087734759`. Behaviour surface: adds the wakeup bus events, session-instance tagging, session-delete wakeup sweep, and the malformed-tool-call cap listed above.
+
+- **Upstream sync (`.github/last-sync-commits.json`, `package.json`, commit `09ff0109` `feat(sync): apply upstream changes (2026-09-17)`)**: Version bumped from `1.22.22` to `1.22.23`. Tracked upstream refs advanced: `kilocode` from `c23548f4fae86239096568de5fad87c0e86f5644` to `8db973de9bfb4997524e7a1b66867edb53ba01ef`; `opencode` from `e03db9bc6908f75c9334d8aa997deeaac81c0298` to `5a8335857b0ebec44ef6aa1d52b339cf25c329ca`; `claude-code` from `b782847db9a18667f00918ea341197f201b22bb4` to `68ac8bbf0245b615b41517bf8f2b2f35af1ae31d`. `workflow_run` id advanced from `35087734759` to `35213995358`. Behaviour surface: adds the `SessionModelPreference` reconciliation contract with provenance-based override protection, the `SessionBusyTracker` publish-ordering / rollback fix, and the `DraftCache` for cross-reload prompt buffer preservation described above.
 
 ### Added
 

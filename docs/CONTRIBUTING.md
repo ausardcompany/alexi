@@ -1995,6 +1995,39 @@ The agentic loop (`src/core/agenticChat.ts`) caps consecutive malformed tool cal
 
 Any other error message is scored as a normal failure (counts against `MistakeTracker`, not `malformedToolCallCount`). If a new failure mode should participate in the cap, extend the prefix check in `src/core/agenticChat.ts:956` and add a test to `src/core/__tests__/agenticChat.test.ts` mirroring the existing `aborts the turn after repeated malformed tool calls` case.
 
+## Session Model Preference (`SessionModelPreference`)
+
+Added in the 2026-09-17 sync. When wiring a new code path that picks a model for a session — a new CLI flag, a TUI affordance, a routing rule that fires mid-session — always route the choice through `src/core/modelPreference.ts` rather than writing to a session field directly. The provenance guard (`source: 'user-explicit' | 'inherited' | 'default'`) only works if every writer sets the field.
+
+Contributor rules:
+
+- User-facing affordances (`/model <id>` slash command, `--model` CLI flag, TUI model picker) MUST call `userExplicitPreference(modelID, providerID, reasoningEffort?)`. Never construct the object literal in place — a missing `source` field breaks the override guard.
+- Config-derived defaults (routing-config, `AICORE_MODEL`, built-in fallback) MUST call `defaultPreference(...)`. This keeps brand-new sessions overwritable by the next config reload as before.
+- Session hydration from disk MUST route the raw JSON through `migrateLegacyPreference(...)` before handing it to `resolveSessionModelPreference(...)`. Legacy records without a `source` are treated as `'user-explicit'` — the conservative choice.
+- Effort-only mid-session updates (`/effort high`, TUI effort picker) MUST pass an incoming payload with ONLY `reasoningEffort` set and NO `source: 'user-explicit'`. The reconciler's merge branch depends on this distinction to preserve the current model while refreshing the effort intent.
+
+Add coverage in `src/core/__tests__/modelPreference.test.ts` for any new code path — the reconciler is pure, so tests are cheap and pin the contract without mocks.
+
+## Session Busy Transitions (`SessionBusyTracker`)
+
+Added in the 2026-09-17 sync. The tracker in `src/core/sessionBusy.ts` now enforces "clear-before-publish, write-after-publish" ordering. When adding a new caller or a new publisher (event bus, WebSocket broadcast, telemetry sink):
+
+- Wrap the busy region in `try / finally` with `markFree` in the `finally`. `markFree` is guaranteed to leave the session free even if the publisher throws, so this shape is safe.
+- Do NOT persist a "session is busy" flag alongside the tracker in a separate store — the internal `busySessions` Map is the source of truth. A parallel store would drift under the rollback branch on failed publish.
+- Publisher implementations should return promises (`SessionBusyPublisher = (event) => void | Promise<void>`), but MUST NOT rely on the tracker awaiting them. `markBusy` and `markFree` are synchronous — a rejected promise triggers a best-effort deferred rollback via `.catch`, but there is no back-pressure. If a subscriber needs guaranteed delivery, buffer internally.
+- New failure modes should surface `SessionBusyError` unchanged. HTTP callers translate it to 409 via `toBusyResponse`; CLI callers should log the operation name from `error.operation` and exit with a distinct code.
+
+## Draft Cache (`DraftCache`)
+
+Added in the 2026-09-17 sync. The in-memory cache in `src/session/draft.ts` is the canonical place for TUI in-progress prompt state. When adding a new place that reads or writes the buffer:
+
+- Do NOT persist an empty string to the cache — `set(id, '')` and `set(id, '   ')` both evict, so if a call site wants to explicitly clear a draft it can just pass `''`. The distinction between `undefined` (no draft) and `''` (empty draft) is intentionally collapsed in the store.
+- Route submit paths through `promote(id, buffer)` rather than `get` + `delete` + trim — `promote` guarantees the eviction happens in both branches (empty and non-empty), which is the whole point of the upstream fix (`0d2fee251`).
+- Do NOT add a `stat`-like method that returns `boolean`. Callers should just check `get(id) === undefined`. Adding a separate presence method creates a two-source-of-truth problem when a persistent store is added later.
+- Prefer constructing a local `new DraftCache(customStore)` in tests over mutating the global singleton via `getDraftCache()` — see [TESTING.md — Testing the Draft Cache](TESTING.md#testing-the-draft-cache).
+
+If a durable variant is added (crash-recovery across process restart), it MUST implement the `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) and preserve the empty-value eviction semantics — the reconciler and the callers depend on it.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
