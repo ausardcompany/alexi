@@ -15,6 +15,7 @@ import { getPlanModeManager } from '../../plan/index.js';
 import { BashOutputChunk } from '../../bus/index.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
+import { unwrapNestedPowerShellCommand } from './shell/powershell.js';
 import {
   BashDetachAvailable,
   BashDetachedExited,
@@ -229,11 +230,49 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
     // executed the command (helpful for debugging shell-specific
     // syntax across platforms).
     const shellInfo = detectShell();
+
+    // Nested PowerShell unwrapping (Cline PR #13815, issue #1754).
+    // When PowerShell is the outer shell, the user command is passed as
+    // an argument to `-Command` and parsed as PowerShell source before
+    // the scriptblock runs. A nested `powershell -Command "... $_ ..."`
+    // therefore has its double-quoted body interpolated by the OUTER
+    // parser, silently stripping `$_` and other dollar-expressions
+    // before the nested shell sees them. Detect that pattern, decode
+    // the quoted body per PowerShell string rules, and run the decoded
+    // script through the same bootstrap using the requested edition.
+    let commandToRun = params.command;
+    let effectiveShell: ShellInfo = shellInfo;
+    if (shellInfo.type === 'powershell') {
+      const unwrapped = unwrapNestedPowerShellCommand(params.command, shellInfo.path);
+      if (unwrapped) {
+        commandToRun = unwrapped.script;
+        // Preserve the requested edition. When the outer shell path and
+        // the requested executable share a normalized basename we keep
+        // the resolved absolute path from `detectShell` (avoids libuv's
+        // Windows cwd-first path search for bare names, cline#14149);
+        // otherwise use the executable spelled by the wrapper so
+        // pwsh -> powershell and vice-versa still cross editions.
+        const outerBase = shellInfo.path.replaceAll('\\', '/').split('/').pop()?.toLowerCase();
+        const nestedBase = unwrapped.executable
+          .replaceAll('\\', '/')
+          .split('/')
+          .pop()
+          ?.toLowerCase();
+        const sameEdition =
+          outerBase !== undefined &&
+          nestedBase !== undefined &&
+          outerBase.replace(/\.exe$/, '') === nestedBase.replace(/\.exe$/, '');
+        effectiveShell = sameEdition
+          ? shellInfo
+          : { type: 'powershell', path: unwrapped.executable };
+      }
+    }
+
     const {
       file: shellFile,
       prefixArgs: shellPrefix,
       suffixArgs: shellSuffix = [],
-    } = shellSpawnArgs(shellInfo);
+    } = shellSpawnArgs(effectiveShell);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -252,7 +291,7 @@ const bashToolBase = defineTool<typeof BashParamsSchema, BashResult>({
       // `%ComSpec%` — usually `cmd.exe` — on Windows). Passing the
       // command as a single argument after the shell's "-c" flag keeps
       // quoting semantics identical to the previous `shell: true` path.
-      const proc = spawn(shellFile, [...shellPrefix, params.command, ...shellSuffix], {
+      const proc = spawn(shellFile, [...shellPrefix, commandToRun, ...shellSuffix], {
         cwd: workdir,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
