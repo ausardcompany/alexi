@@ -1491,6 +1491,113 @@ Key patterns:
 2. **Reuse `shellSpawnArgs` exactly as bash.ts does.** Destructure `prefixArgs` and `suffixArgs = []` and spawn `[...prefixArgs, userCommand, ...suffixArgs]` — asserting on the return value directly guarantees the tests catch any drift between the tool code and the shell binding.
 3. **Assert the four contract properties.** Fail-fast exit code, bounded stderr (single error record), successful commands still succeed, per-cmdlet `-ErrorAction` opt-out, and `param(...)` compatibility. The shape-only assertions on `shellSpawnArgs` (no shell spawn required) live in `tests/tool/tools/shell-detect.test.ts`.
 
+### Testing nested-PowerShell unwrapping (issue #1754)
+
+`src/tool/tools/shell/powershell.ts` provides the `parseNestedPowerShellCommand` and `unwrapNestedPowerShellCommand` helpers used by the `bash` tool to strip a single- or multi-layer `powershell -Command "..."` wrapper before spawn. The pure parser is exercised across every platform by `tests/tool/tools/shell/powershell-unwrap.test.ts`; the end-to-end wiring through `bashTool` is exercised only when a real PowerShell executable is on PATH by `tests/tool/tools/shell/bash-powershell-unwrap.test.ts`.
+
+#### Pure-parser tests (`tests/tool/tools/shell/powershell-unwrap.test.ts`)
+
+The suite runs on every platform — no shell spawn, no `describe.skipIf`, no PATH probe:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  parseNestedPowerShellCommand,
+  unwrapNestedPowerShellCommand,
+} from '../../../../src/tool/tools/shell/powershell.js';
+
+describe('parseNestedPowerShellCommand', () => {
+  it('unwraps a double-quoted -Command body and preserves $_', () => {
+    const cmd = `powershell -NoProfile -Command "Get-ChildItem | Where-Object { $_.Name -like '*.ts' }"`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result).toBeDefined();
+    expect(result?.executable).toBe('powershell');
+    // $_ MUST NOT be interpolated away — the whole point of the fix.
+    expect(result?.script).toBe(`Get-ChildItem | Where-Object { $_.Name -like '*.ts' }`);
+  });
+
+  it('accepts extra bootstrap-equivalent flags before -Command', () => {
+    const cmd = `powershell -NoProfile -NoLogo -NonInteractive -Command "Write-Output hi"`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result?.script).toBe('Write-Output hi');
+  });
+
+  it('decodes doubled double-quotes to a single quote', () => {
+    const cmd = `powershell -NoProfile -Command "Write-Output ""hello"""`;
+    const result = parseNestedPowerShellCommand(cmd, 'powershell');
+    expect(result?.script).toBe('Write-Output "hello"');
+  });
+});
+```
+
+Key patterns to preserve when extending the suite:
+
+1. **Pin the `$_` preservation invariant explicitly.** The load-bearing assertion is `expect(result?.script).toBe(`... $_.Name ...`)`. A regression that silently interpolated `$_` away would still pass a `toBeDefined()` check because the wrapper detection would succeed — only the byte-level `.toBe(...)` comparison catches the actual bug.
+2. **Cover every allowed / refused flag combination explicitly.** The unwrapper's flag allowlist is `-NoLogo`, `-NonInteractive`, `-NoProfile` and it requires `-NoProfile` to be present in full. Tests must cover: `-NoProfile` alone (accepted), `-NoProfile` + `-NoLogo` + `-NonInteractive` (accepted), `-Command` without `-NoProfile` (refused → returns `undefined`), and any other flag such as `-ExecutionPolicy Bypass` or the abbreviation `-c` (refused). A regression that broadened the allowlist would silently reintroduce profile-loading semantics that the outer bootstrap cannot reproduce.
+3. **Cover BOTH quote styles and their escape rules.** Double-quoted bodies MUST decode `""` → `"`, `` `n `` → `\n`, `` `$ `` → `$`, and leave `$_` untouched; single-quoted bodies MUST decode only `''` → `'`. A test that only covers one style would miss a regression where the double-quoted decoder ate a legitimate `$`-expression.
+4. **Cover the multi-layer case with `unwrapNestedPowerShellCommand`.** A doubly-wrapped command like `powershell -NoProfile -Command "powershell -NoProfile -Command 'Write-Output hi'"` must strip both layers. Assert the final `script` is the innermost payload — if the recursive walk stops after one iteration the outer bootstrap will still run PowerShell source instead of the decoded script.
+5. **Refuse cases must return `undefined`, not throw.** The caller (`bashTool`) treats `undefined` as "run the original command unchanged". A parser that threw on an unsupported wrapper shape would crash the tool for every operator who happened to use `-ExecutionPolicy Bypass`.
+
+#### End-to-end tests (`tests/tool/tools/shell/bash-powershell-unwrap.test.ts`)
+
+Because the wiring requires a real PowerShell process to observe the outer `-Command` parser's `$_` interpolation, the suite self-skips when neither `pwsh` nor `powershell(.exe)` is on PATH:
+
+```typescript
+function findPowerShell(): { command: string; path: string } | undefined {
+  const candidates = ['pwsh', 'powershell.exe', 'powershell'];
+  for (const cmd of candidates) {
+    const probe = spawnSync(
+      cmd,
+      ['-NoProfile', '-NoLogo', '-Command', 'Write-Output $PSVersionTable.PSEdition'],
+      { encoding: 'utf8' }
+    );
+    if (probe.status === 0) {
+      const which = spawnSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
+        encoding: 'utf8',
+      });
+      const resolved =
+        which.status === 0 && which.stdout.trim().length > 0
+          ? which.stdout.split(/\r?\n/)[0].trim()
+          : cmd;
+      return { command: cmd, path: resolved };
+    }
+  }
+  return undefined;
+}
+
+const pwsh = findPowerShell();
+const describePwsh = pwsh ? describe : describe.skip;
+```
+
+To route `bashTool` through PowerShell on a POSIX developer box, the suite pins `detectShell` via the test-only hooks `_resetDetectShellCacheForTests` and `_setFsProbeForTests` in `src/tool/tools/shell/id.ts` and reassigns `process.env.SHELL`. Both hooks MUST be reset in `afterEach` so unrelated bash-tool tests do not observe the pinned probe:
+
+```typescript
+afterEach(() => {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests(undefined);
+});
+
+function forcePwsh(): void {
+  _resetDetectShellCacheForTests();
+  _setFsProbeForTests((p: string) => p === pwsh!.path);
+  process.env.SHELL = pwsh!.path;
+}
+```
+
+Every end-to-end case follows the same shape: `forcePwsh()` in the body (not in `beforeEach`, so cases that assert the pass-through behaviour can opt out), then `bashTool.executeUnsafe({ command }, context())`, then assert on `result.data?.stdout` / `.stderr` / `.exitCode`. The suite covers four invariants:
+
+1. **Double-quoted `$_` pipeline survives.** A `Get-ChildItem | Where-Object { $_.Name -like '*.ts' }` pipeline over a real temp directory returns the expected `.ts` filenames on stdout and does NOT emit the `property 'Name' cannot be found` flood on stderr. This is the flood-vs-single-error assertion that maps to the original Cline #13284 bug.
+2. **Single-quoted `$_` pipeline survives.** The same shape with `'1,2,3 | Where-Object { $_ -gt 1 } | ForEach-Object { $_ * 10 }'` returns `['20', '30']` — a regression that only handled double-quoted bodies would silently pass the double-quoted case and fail here.
+3. **Abort signal still terminates the child.** An `AbortController` fired 200 ms into a `Start-Sleep -Seconds 30` produces `result.success === false` and `result.data?.exitCode !== 0`. The unwrapping code path must not swallow the abort signal or leak the child process.
+4. **Non-matching invocations pass through unchanged.** A wrapper with `-ExecutionPolicy Bypass` (not on the unwrappable-flag allowlist) is NOT stripped: the command runs the wrapper as PowerShell source, which spawns a nested `pwsh` and prints the literal string. Asserting `stdout === 'wrapped-ok'` proves the wrapper survived — a stripped wrapper would have executed `-ExecutionPolicy` as a standalone statement and errored.
+
+Key patterns:
+
+1. **Use `executeUnsafe`**, not `execute`. The unwrap code path is orthogonal to permission gating; `executeUnsafe` bypasses the permission audit so the suite does not need to stub the permission layer per case.
+2. **`context()` returns a fresh `ToolContext` per call.** A shared context object leaked across cases would make the `sessionId` (used by the bash tool for streaming registry keys) collide — pinning it inside each `it()` keeps the cases parallel-safe.
+3. **Set a per-case timeout of 30 s / 15 s.** PowerShell cold-start on Linux via `dotnet` can take 5-8 s; a 5 s default Vitest timeout would false-positive as a flaky hang. The pipeline cases pin `30000`, the abort/pass-through cases pin `15000`.
+4. **Assert both `stdout` presence AND `stderr` absence.** The regression this fixes is not "the command failed" but "the command emitted N stderr error records where N = enumerated-item count". A test that only asserts `success === true` would miss the flood — the negative assertion `not.toContain('property')` is what pins the specific bug.
+
 ### Testing the PowerShell 7 resolver
 
 `tests/core/powershell.test.ts` (added in 1.22.1) unit-tests the pure resolver in `src/core/powershell.ts`. Because the tests run on Linux CI, none of the Windows install locations exist — the suite is written so that shape assertions pass on every platform and the "is anything installed?" question is asserted only through explicit env-injection:
@@ -4043,6 +4150,55 @@ contributors do not re-introduce them by hand:
    a spurious `style(ci): auto-fix lint/format issues [alexi-bot]` commit.
    Running `npm run format` before committing avoids the follow-up.
 
+6. **Default `describe` / `it` titles to single-quoted string literals, and
+   break short factory-call fixtures across multiple lines only when the
+   single-line form overflows 100 columns.** Two patterns from the same axis:
+
+   - `it("...")` / `describe("...")` titles authored with double quotes are
+     rewritten to single quotes by Prettier under `singleQuote: true` whenever
+     the string contains no apostrophe that would otherwise require a `\'`
+     escape. Do NOT hand-author test titles with double quotes for stylistic
+     variety; the pre-commit hook will rewrite them.
+   - Factory-call fixtures like `userExplicitPreference('sap-ai-core/foo', 'sap-ai-core', 'medium')`
+     stay on one line as long as the full statement (including the leading
+     `const name = ` and the trailing `;`) fits under `printWidth: 100`. When
+     the statement overflows, Prettier wraps the call across four lines with
+     one argument per line — do NOT hand-author the wrapped form early just
+     because the identifier list *looks* long; write the single-line form and
+     let Prettier decide.
+
+   Canonical worked example: the 2026-09-17 auto-fix pass in commit
+   `ffdfa8e4` on `src/core/__tests__/modelPreference.test.ts` rewrote one
+   double-quoted test title to single quotes AND wrapped one
+   `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium')`
+   call across four lines because the full `const current = ...;` statement
+   sat at 102 columns:
+
+   ```typescript
+   // Anti-pattern — double-quoted title with no escape need (rewritten)
+   it("does NOT overwrite a user-explicit choice with a default incoming update", () => {
+
+   // Canonical form after auto-fix
+   it('does NOT overwrite a user-explicit choice with a default incoming update', () => {
+
+   // Anti-pattern — 102-column single-line factory call (wrapped)
+   const current = userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium');
+
+   // Canonical form after auto-fix — one argument per line
+   const current = userExplicitPreference(
+     'sap-ai-core/claude-3.5-sonnet',
+     'sap-ai-core',
+     'medium'
+   );
+   ```
+
+   Assertion semantics are unchanged in both hunks: `it(...)` still runs
+   the same test body, and `userExplicitPreference` still constructs the
+   same `SessionModelPreference` (see `docs/ARCHITECTURE.md` under
+   **Session Model Preferences**). Diff statistics for that pass:
+   `2 files changed, 7 insertions(+), 4 deletions(-)`. Running
+   `npm run format` before committing avoids the `style(ci)` follow-up.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has
@@ -5178,3 +5334,94 @@ Assertions that pin the contract:
 - `mockTool.execute` was never called — confirms the loop terminates on the parse-failure signal before the tool ever runs.
 
 Do NOT count exact iterations. The malformed-call cap and the mistake tracker interact (both count consecutive failures), and pinning an exact number would cross-lock the two orthogonal budgets. `< 10` (well under `maxIterations`) is the right level of precision.
+
+## Testing Session Model Preference Reconciliation
+
+`src/core/__tests__/modelPreference.test.ts` (102 lines, 8 cases across two `describe` blocks) pins the pure-function contract of `resolveSessionModelPreference` and `migrateLegacyPreference`. Added in the 2026-09-17 sync. No mocks are required — the module has no I/O — so the tests are the simplest reference for the reconciliation rules.
+
+Import shape (mirrors the module's public surface):
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  resolveSessionModelPreference,
+  userExplicitPreference,
+  defaultPreference,
+  migrateLegacyPreference,
+} from '../modelPreference.js';
+```
+
+The `cfg` helper (`defaultPreference('sap-ai-core/gpt-4o', 'sap-ai-core', 'medium')`) is reused across cases as the "config default" argument so the test file reads as a matrix of `(current, incoming)` shapes.
+
+Cases pinned:
+
+1. `resolveSessionModelPreference(undefined, undefined, cfg)` returns `cfg` verbatim (brand-new session).
+2. Current `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', ...)` + incoming `defaultPreference('sap-ai-core/gpt-4o', ...)` returns `modelID: 'sap-ai-core/claude-3.5-sonnet'`, `source: 'user-explicit'` — the user's choice is NOT overwritten.
+3. Current `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', ...)` + incoming `userExplicitPreference('sap-ai-core/gpt-4o', ...)` returns `modelID: 'sap-ai-core/gpt-4o'` — a new explicit choice overrides an older one.
+4. Fresh effort update (`{ reasoningEffort: 'high' }` — no explicit source) merges into an explicit choice without swapping the model. This is the `/effort high` mid-session case.
+5. Current `userExplicitPreference(..., 'high')` + incoming `defaultPreference(..., 'low')` returns `reasoningEffort: 'high'` — the user's effort intent is preserved even when the incoming payload carries a different effort (the `50f7d01ad` follow-up fix).
+6. `source: 'inherited'` is treated the same as `'user-explicit'` for override protection.
+7. `resolveSessionModelPreference(undefined, {}, cfg)` returns `cfg` — an empty incoming update on a brand-new session falls through to the default.
+8. `migrateLegacyPreference` defaults a missing `source` to `'user-explicit'`; an already-present `source: 'default'` is preserved.
+
+Do NOT add cases that assert on argument mutation — the reconciler is documented as pure, and the tests are the specification for that. If a change ever introduces a mutation, it should be caught by a new assertion, not by silently rewriting the existing case.
+
+## Testing the `SessionBusyTracker` Publish Ordering
+
+`src/core/__tests__/sessionBusy.test.ts` (134 lines, 7 cases in one `describe('SessionBusyTracker publish ordering')` block) pins the "clear-before-publish, write-after-publish" contract added in the 2026-09-17 sync. The tests use the process-global tracker (`getSessionBusyTracker`) with a per-case `resetSessionBusyTracker()` in `beforeEach` so state does not bleed across cases.
+
+Setup pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  getSessionBusyTracker,
+  resetSessionBusyTracker,
+  SessionBusyError,
+  type SessionBusyPublisher,
+  type SessionBusyStatusEvent,
+} from '../sessionBusy.js';
+
+beforeEach(() => {
+  resetSessionBusyTracker();
+});
+```
+
+Key assertion patterns:
+
+- **Failed idle publish still frees the session.** Configure a publisher that throws unconditionally, call `markBusy` then `markFree`, and assert `isBusy(sessionId) === false`. If `markFree` ever regressed to persist-after-publish, this case would trip.
+- **Failed busy publish rolls back.** Configure a synchronously throwing publisher, assert `markBusy(...)` throws, then assert `isBusy(sessionId) === false`. A subsequent `markBusy` with a healthy publisher must succeed — this is the retry-after-failure regression that upstream `e31aa5769` fixed.
+- **Ordering is observable from inside the publisher.** Attach a publisher that captures `tracker.isBusy(event.sessionId)` at publish time. For `status: 'busy'`, the observed value MUST be `false` (persist happens AFTER publish). For `status: 'idle'`, the observed value MUST be `false` (clear happens BEFORE publish). Pin both directions.
+- **Already-busy sessions still throw.** `markBusy` on a session already in the map throws `SessionBusyError` synchronously. This is the historical contract — do not weaken.
+- **No-op transitions do NOT publish.** `markFree` on a session that was never busy is a no-op. Use `vi.fn()` for the publisher and assert `expect(publisher).not.toHaveBeenCalled()` so subscribers only see real transitions.
+- **The reload regression.** Fail the idle publish, call `markFree`, swap in a healthy publisher, then call `markBusy` for the same session id. The final `markBusy` MUST NOT throw `SessionBusyError`. This is the failure mode users hit when a reload after a wedged session would previously get stuck.
+
+Do NOT test the async publisher rejection path with real timers — the tracker's `.catch` handler is best-effort and fires on the next microtask. If a case needs to assert on that path, use `await Promise.resolve()` to flush microtasks rather than `setTimeout`-based waits.
+
+## Testing the Draft Cache
+
+`src/session/__tests__/draft.test.ts` (88 lines) pins the empty-draft eviction contract of the `DraftCache` added in the 2026-09-17 sync. The tests construct a fresh `DraftCache` per case rather than using the global singleton, so cross-test state cannot bleed.
+
+Setup pattern:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { DraftCache, getDraftCache, resetDraftCache } from '../draft.js';
+
+it('...', () => {
+  const cache = new DraftCache();
+  // ...
+});
+```
+
+Assertion patterns:
+
+- **Round-trip.** `cache.set(id, 'in progress')` then `cache.get(id)` returns `'in progress'`.
+- **Empty-string eviction.** `cache.set(id, '')` evicts. `cache.get(id)` returns `undefined` — NEVER `''`. The distinction matters because callers rely on `undefined` to mean "no draft".
+- **Whitespace-only eviction.** `cache.set(id, '   \n\t')` also evicts. Callers do NOT pre-trim.
+- **`promote` always evicts.** After `cache.set(id, 'draft')`, calling `cache.promote(id, 'draft')` returns `'draft'` AND `cache.get(id)` returns `undefined`. Both branches evict — the promotion-with-empty-input case (`promote(id, '')`) returns `undefined` AND evicts any stale entry.
+- **`promote` trims.** `cache.promote(id, '  hello  ')` returns `'hello'`.
+- **`delete` is idempotent.** Calling `cache.delete(id)` on a missing entry does not throw.
+- **Singleton behaviour.** `getDraftCache() === getDraftCache()` is `true` within a process. `resetDraftCache()` produces a fresh singleton so the next `getDraftCache()` returns a different instance.
+
+Prefer constructing a local `new DraftCache()` in test bodies over `getDraftCache()`. The singleton is convenient for production callers that have no natural lifetime to hang an instance off, but tests should keep instances local for isolation.

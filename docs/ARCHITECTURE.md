@@ -778,6 +778,76 @@ Design boundaries:
 - `routingReason` is populated (`Inline override: @<model>`) so downstream telemetry, TUI status displays, and `session-export` can distinguish inline overrides from auto-router decisions and explicit `--model` flags.
 - The parser is a pure function of the message text; it does not touch the session manager, the router, or the provider layer. Adding a new provider that ships as `<new-provider>/<model>` requires no change to `inlineModelOverride.ts` — only the model catalog needs to know about the new id.
 
+## Session Model Preferences
+
+`src/core/modelPreference.ts` owns the per-session reconciliation contract for the "which model does this session want to use, and where did that choice come from?" question. It exists because upstream kilocode fixed a class of bug in which `session.model = config.defaultModel` was applied unconditionally on every turn — a config reload would then silently overwrite a user's explicit `/model` selection. Alexi's routing is JSON-driven (see `docs/ROUTING.md`), so a config reload is a routine event and the fix is load-bearing.
+
+### Provenance model
+
+Every persisted preference carries a `source` field that records **why** the value was set. The reconciler uses `source` to decide whether an incoming update is allowed to overwrite the current value:
+
+```typescript
+// src/core/modelPreference.ts:36-43
+export type SessionModelPreferenceSource = 'user-explicit' | 'default' | 'inherited';
+
+export interface SessionModelPreference {
+  modelID: string;
+  providerID: string;
+  reasoningEffort?: EffortLevel;
+  source: SessionModelPreferenceSource;
+}
+```
+
+- `'user-explicit'`: the user picked this via `/model <id>`, the `--model` CLI flag, the TUI model picker, or an equivalent explicit affordance. Only another `'user-explicit'` update may overwrite.
+- `'inherited'`: forwarded from a parent session (subagent handoff, resumed session). Behaves like `'user-explicit'` for override purposes — a parent's explicit choice is respected downstream.
+- `'default'`: derived from `routing-config.json` / `AICORE_MODEL` / the built-in default. Freely overwritten by any incoming update.
+
+### Reconciliation rules
+
+```mermaid
+flowchart TB
+    Start([resolveSessionModelPreference<br/>current, incoming, configDefault]) --> HasCurrent{current defined<br/>AND source in<br/>user-explicit / inherited?}
+    HasCurrent -->|No| Fallback[Rule 2:<br/>incoming ?? configDefault<br/>source = incoming.source ?? default]
+    HasCurrent -->|Yes| Incoming{incoming.source ===<br/>user-explicit?}
+    Incoming -->|Yes| Overwrite[Rule 2 path:<br/>a fresh explicit choice<br/>overwrites the old one]
+    Incoming -->|No| Preserve[Rule 1:<br/>keep current model + provider + source<br/>merge incoming.reasoningEffort if set<br/>else keep current.reasoningEffort]
+    Fallback --> Emit([SessionModelPreference])
+    Overwrite --> Emit
+    Preserve --> Emit
+```
+
+Two rules, in order:
+
+1. **Rule 1 — explicit-choice survival.** When the current preference has `source` in `{'user-explicit', 'inherited'}` AND the incoming update is NOT `'user-explicit'`, the current `modelID`, `providerID`, and `source` are preserved. The **only** field a non-explicit incoming update may refresh on a protected current preference is `reasoningEffort` — a user typing `/effort high` mid-session must not need to re-pick their model. When the incoming payload omits `reasoningEffort`, the current value is kept (upstream kilocode `50f7d01ad` "preserve effort intent and live session defaults").
+2. **Rule 2 — incoming → default fallback.** Otherwise fall back to `incoming ?? configDefault` for every field. This preserves the classical "config wins over nothing" behaviour for brand-new sessions and lets a user explicit choice overwrite a previous explicit choice.
+
+The function is pure — it never mutates its arguments and the return value is safe to persist directly. The complete implementation is `src/core/modelPreference.ts:64-94`.
+
+### Public helpers
+
+Three constructor helpers ensure callers set `source` correctly instead of hand-writing it (which would defeat the persistence guard):
+
+- `userExplicitPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts:103-109`): construct a preference explicitly attributed to the user. All call sites that process a `/model` command, a `--model` CLI flag, or a TUI model-picker selection route through this helper so `source: 'user-explicit'` is set and the next `resolveSessionModelPreference` call protects the choice.
+- `defaultPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts:117-123`): construct a preference derived from configuration. Freely overwritten by any incoming update, matching the pre-fix behaviour for brand-new sessions.
+- `migrateLegacyPreference(raw)` (`src/core/modelPreference.ts:136-147`): hydration shim for on-disk preferences persisted before `source` existed. Legacy entries are conservatively defaulted to `'user-explicit'` so a user's saved model choice is NOT silently downgraded to `'default'` (which would then be overwritten on the next config reload). An already-present `source` field is preserved verbatim.
+
+### Interaction with inline overrides
+
+`resolveSessionModelPreference` operates at a different layer from the inline `@provider/model` override documented in **Inline Model Override** above. The inline override applies for a **single turn** and does NOT touch the persisted `SessionModelPreference`; a `/model` command or a `--model` flag DOES update the persistent preference and routes through `userExplicitPreference` so the choice survives config reloads. Auto-router decisions (`options.autoRoute`) are one-shot per turn and do not upgrade the persisted preference to `'user-explicit'` — the router is a suggestion path, not an intent signal.
+
+### Regression coverage
+
+`src/core/__tests__/modelPreference.test.ts` pins the load-bearing behaviours in six + two cases:
+
+- Applies the config default on a brand-new session (no current preference).
+- Does NOT overwrite a `'user-explicit'` current with a `'default'` incoming update.
+- Allows a fresh `'user-explicit'` incoming to overwrite an existing `'user-explicit'` current.
+- Merges a fresh `reasoningEffort` from a non-explicit incoming into a `'user-explicit'` current WITHOUT swapping model or provider (`/effort high` path).
+- Preserves the existing `reasoningEffort` when the incoming update omits it (a config-default reload with a different effort must not downgrade the user's effort intent).
+- Treats `'inherited'` the same as `'user-explicit'` for override protection.
+- `migrateLegacyPreference` defaults a missing `source` to `'user-explicit'`.
+- `migrateLegacyPreference` preserves an explicitly-provided `source: 'default'`.
+
 ## Routing Decision Flow
 
 ```mermaid
@@ -4112,3 +4182,116 @@ Contract:
 - **Orthogonal to loop/mistake tracking.** The existing `LoopDetector` (identical calls in a row) and `MistakeTracker` (successive tool failures) still run against every tool call. The malformed cap is a third, orthogonal trip because a bad tool JSON never counts as a "call" from those trackers' perspective — the tool `execute` was never invoked.
 
 Test coverage: `src/core/__tests__/agenticChat.test.ts` — `aborts the turn after repeated malformed tool calls` (1 case, provider mocked to emit invalid JSON every turn, asserts `iterations < 10`, `text` contains `malformed tool calls`, and the tool `execute` mock was never called).
+
+## Session Model Preference Reconciliation (`src/core/modelPreference.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `dd2f2f9a9` "default model not persistent after explicit user choice" + `50f7d01ad` "preserve effort intent and live session defaults"). Alexi's routing is JSON-driven, so a config reload during a live session used to silently overwrite an explicit user model choice with the config default on the next turn. The fix threads a `source` provenance field through every persisted preference and gates overrides on it.
+
+```mermaid
+flowchart TD
+    Start["Incoming preference update"] --> HasCurrent{"current preference exists?"}
+    HasCurrent -- no --> UseDefault["Apply configDefault verbatim"]
+    HasCurrent -- yes --> IsExplicit{"current.source in {user-explicit, inherited}?"}
+    IsExplicit -- no --> Merge["Merge incoming over current, fall through to configDefault"]
+    IsExplicit -- yes --> IncomingExplicit{"incoming.source === user-explicit?"}
+    IncomingExplicit -- yes --> Overwrite["Overwrite: incoming wins"]
+    IncomingExplicit -- no --> Preserve["Preserve current modelID/providerID; refresh reasoningEffort if incoming carries one"]
+    UseDefault --> Persist["Return SessionModelPreference"]
+    Merge --> Persist
+    Overwrite --> Persist
+    Preserve --> Persist
+```
+
+Contract:
+
+- `resolveSessionModelPreference(current, incoming, configDefault)` is pure — it never mutates its arguments and the return value is safe to persist directly.
+- Only `source: 'user-explicit'` on the incoming payload can overwrite a current explicit / inherited preference. `'default'` incoming updates route through the preserve branch.
+- The effort intent is the ONE field an incoming non-explicit update may refresh — a user typing `/effort high` mid-session must not need to re-pick their model. When the incoming payload omits `reasoningEffort`, the current effort is preserved (this is the `50f7d01ad` follow-up fix).
+- `'inherited'` is treated the same as `'user-explicit'` for override protection so a parent's explicit choice survives subagent handoff.
+- `migrateLegacyPreference(raw)` treats a missing `source` field on an on-disk record as `'user-explicit'` — the conservative choice. The alternative (`'default'`) would silently downgrade a user's saved model on the next config reload, restoring the pre-fix regression.
+
+Callers wiring model-selection into a session:
+
+- `/model <id>`, `--model` CLI, and TUI model-picker code paths MUST route through `userExplicitPreference(modelID, providerID, reasoningEffort?)` so the persistence guard engages on the next reconciliation.
+- Config-derived preferences (from `routing-config.json` / `AICORE_MODEL` / built-in default) MUST route through `defaultPreference(...)` so they are freely overwritable by any incoming update on a brand-new session.
+- Hydration from disk MUST route the raw JSON through `migrateLegacyPreference` before handing it to `resolveSessionModelPreference`.
+
+## Session Busy Publish Ordering (`src/core/sessionBusy.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `88d23150b` + `e31aa5769`). Fixes the "stale session status blocks reload" regression where a crashed publisher left the in-memory `SessionBusyTracker` holding a phantom busy entry that blocked every subsequent turn until the process restarted. The tracker now follows a "clear-before-publish, write-after-publish" ordering with rollback on publisher failure.
+
+```mermaid
+sequenceDiagram
+    participant Caller as chat / agent
+    participant Tracker as SessionBusyTracker
+    participant Store as busySessions Map
+    participant Publisher as event bus / WebSocket
+
+    Note over Caller,Publisher: markBusy(sessionId, "chat")
+    Caller->>Tracker: markBusy(id, op)
+    Tracker->>Tracker: isBusy(id)?
+    alt already busy
+        Tracker-->>Caller: throw SessionBusyError
+    else free
+        Tracker->>Publisher: publish({ status: 'busy', id, op })
+        alt publisher throws (sync)
+            Publisher-->>Tracker: Error
+            Tracker-->>Caller: rethrow (store stays clear)
+        else publisher OK
+            Publisher-->>Tracker: void
+            Tracker->>Store: busySessions.set(id, op)
+            Tracker-->>Caller: return
+        end
+    end
+
+    Note over Caller,Publisher: markFree(sessionId)
+    Caller->>Tracker: markFree(id)
+    Tracker->>Store: busySessions.delete(id)
+    Tracker->>Publisher: publish({ status: 'idle', id })
+    Publisher-->>Tracker: (errors are logged and swallowed)
+    Tracker-->>Caller: return
+```
+
+Contract on `SessionBusyTracker`:
+
+- **`markBusy(sessionId, operation)`** publishes FIRST. On successful publication the busy entry is recorded. A synchronous publisher throw leaves the store clear and rethrows — the caller sees the failure instead of a silent wedge. An async publisher rejection triggers a best-effort deferred rollback via a `.catch` handler that only deletes the slot when the current entry still matches the failed operation (so another `markBusy` that reused the slot in the meantime is not clobbered).
+- **`markFree(sessionId)`** clears the store entry FIRST, then publishes. Publisher errors are logged and swallowed — freeing a session must never fail from the caller's perspective. This is the primary reload-unwedge mechanism: even if the idle publish fails, the session is guaranteed free for the next `markBusy`.
+- **`markBusy` on an already-busy session** still throws `SessionBusyError` synchronously (unchanged historical contract). Callers translate this to HTTP 409 via `toBusyResponse`.
+- **`markFree` on a non-busy session** is a no-op and does NOT invoke the publisher — subscribers only see real transitions.
+- **`setPublisher(publisher | undefined)`** replaces the current publisher; passing `undefined` detaches. When no publisher is configured, the tracker behaves as a plain in-memory Map for backwards compatibility with pre-fix callers.
+- **`resetSessionBusyTracker()`** is a test-only helper. Production code MUST NOT call it — it exists so tests that assert on transition ordering can start from a clean slate without cross-test bleed.
+
+## Draft Cache (`src/session/draft.ts`)
+
+Introduced in the 2026-09-17 sync (ports upstream kilocode `0d2fee251` "discard empty draft caches after goal promotion"). Preserves a user's mid-composition prompt across session reload / resume without letting stale empty drafts linger past their setter.
+
+```mermaid
+flowchart LR
+    User["User types in TUI"] --> Debounce["TUI debounce"]
+    Debounce --> Set["DraftCache.set(sessionID, buffer)"]
+    Set --> Empty{"buffer.trim().length === 0?"}
+    Empty -- yes --> Evict["store.delete(sessionID)"]
+    Empty -- no --> Persist["store.set(sessionID, buffer)"]
+
+    Reload["Session reload / resume"] --> Get["DraftCache.get(sessionID)"]
+    Get --> ReturnDraft["Restore prompt buffer"]
+
+    Submit["User submits"] --> Promote["DraftCache.promote(sessionID, buffer)"]
+    Promote --> Trim["Trim input"]
+    Trim --> Delete["store.delete(sessionID) (both branches)"]
+    Delete --> NonEmpty{"trimmed.length > 0?"}
+    NonEmpty -- yes --> ReturnPrompt["Return trimmed prompt"]
+    NonEmpty -- no --> ReturnUndef["Return undefined (caller drops)"]
+```
+
+Contract on `DraftCache`:
+
+- **`get(sessionID)`** returns `undefined` when nothing is cached — never returns an empty string. Callers can rely on the null-vs-empty distinction.
+- **`set(sessionID, draft)`** actively evicts on empty or whitespace-only input. Callers do NOT need to pre-trim; passing `''`, `'   '`, or `'\n'` all funnel to `store.delete(sessionID)`.
+- **`promote(sessionID, draft)`** always evicts the cache entry — both when the input is empty (return `undefined`, caller must not submit) and when it is non-empty (return the trimmed prompt for submission). This is the point of the upstream fix: the cache must never survive promotion even when the promotion itself is a no-op.
+- **`delete(sessionID)`** is idempotent — safe to call on a session that has no cached draft.
+- **`clear()`** is a test / shutdown helper that wipes every cached draft.
+
+Persistence is deliberately in-memory (`InMemoryDraftStore`, a plain `Map<string, string>`). Alexi's interactive TUI holds a single process, and cross-process persistence would require a durable store that survives crashes AND respects the empty-draft eviction contract. The `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) is exported so a future persistent variant plugs in without changing callers or tests.
+
+The process-global `getDraftCache()` singleton is provided for CLI subcommand and TUI hook callers that have no natural lifetime to hang an instance off. Tests should construct their own `DraftCache` (or `new DraftCache(customStore)`) for isolation.
