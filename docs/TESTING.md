@@ -4021,6 +4021,55 @@ contributors do not re-introduce them by hand:
    a spurious `style(ci): auto-fix lint/format issues [alexi-bot]` commit.
    Running `npm run format` before committing avoids the follow-up.
 
+6. **Default `describe` / `it` titles to single-quoted string literals, and
+   break short factory-call fixtures across multiple lines only when the
+   single-line form overflows 100 columns.** Two patterns from the same axis:
+
+   - `it("...")` / `describe("...")` titles authored with double quotes are
+     rewritten to single quotes by Prettier under `singleQuote: true` whenever
+     the string contains no apostrophe that would otherwise require a `\'`
+     escape. Do NOT hand-author test titles with double quotes for stylistic
+     variety; the pre-commit hook will rewrite them.
+   - Factory-call fixtures like `userExplicitPreference('sap-ai-core/foo', 'sap-ai-core', 'medium')`
+     stay on one line as long as the full statement (including the leading
+     `const name = ` and the trailing `;`) fits under `printWidth: 100`. When
+     the statement overflows, Prettier wraps the call across four lines with
+     one argument per line — do NOT hand-author the wrapped form early just
+     because the identifier list *looks* long; write the single-line form and
+     let Prettier decide.
+
+   Canonical worked example: the 2026-09-17 auto-fix pass in commit
+   `ffdfa8e4` on `src/core/__tests__/modelPreference.test.ts` rewrote one
+   double-quoted test title to single quotes AND wrapped one
+   `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium')`
+   call across four lines because the full `const current = ...;` statement
+   sat at 102 columns:
+
+   ```typescript
+   // Anti-pattern — double-quoted title with no escape need (rewritten)
+   it("does NOT overwrite a user-explicit choice with a default incoming update", () => {
+
+   // Canonical form after auto-fix
+   it('does NOT overwrite a user-explicit choice with a default incoming update', () => {
+
+   // Anti-pattern — 102-column single-line factory call (wrapped)
+   const current = userExplicitPreference('sap-ai-core/claude-3.5-sonnet', 'sap-ai-core', 'medium');
+
+   // Canonical form after auto-fix — one argument per line
+   const current = userExplicitPreference(
+     'sap-ai-core/claude-3.5-sonnet',
+     'sap-ai-core',
+     'medium'
+   );
+   ```
+
+   Assertion semantics are unchanged in both hunks: `it(...)` still runs
+   the same test body, and `userExplicitPreference` still constructs the
+   same `SessionModelPreference` (see `docs/ARCHITECTURE.md` under
+   **Session Model Preferences**). Diff statistics for that pass:
+   `2 files changed, 7 insertions(+), 4 deletions(-)`. Running
+   `npm run format` before committing avoids the `style(ci)` follow-up.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has
@@ -5156,3 +5205,94 @@ Assertions that pin the contract:
 - `mockTool.execute` was never called — confirms the loop terminates on the parse-failure signal before the tool ever runs.
 
 Do NOT count exact iterations. The malformed-call cap and the mistake tracker interact (both count consecutive failures), and pinning an exact number would cross-lock the two orthogonal budgets. `< 10` (well under `maxIterations`) is the right level of precision.
+
+## Testing Session Model Preference Reconciliation
+
+`src/core/__tests__/modelPreference.test.ts` (102 lines, 8 cases across two `describe` blocks) pins the pure-function contract of `resolveSessionModelPreference` and `migrateLegacyPreference`. Added in the 2026-09-17 sync. No mocks are required — the module has no I/O — so the tests are the simplest reference for the reconciliation rules.
+
+Import shape (mirrors the module's public surface):
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  resolveSessionModelPreference,
+  userExplicitPreference,
+  defaultPreference,
+  migrateLegacyPreference,
+} from '../modelPreference.js';
+```
+
+The `cfg` helper (`defaultPreference('sap-ai-core/gpt-4o', 'sap-ai-core', 'medium')`) is reused across cases as the "config default" argument so the test file reads as a matrix of `(current, incoming)` shapes.
+
+Cases pinned:
+
+1. `resolveSessionModelPreference(undefined, undefined, cfg)` returns `cfg` verbatim (brand-new session).
+2. Current `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', ...)` + incoming `defaultPreference('sap-ai-core/gpt-4o', ...)` returns `modelID: 'sap-ai-core/claude-3.5-sonnet'`, `source: 'user-explicit'` — the user's choice is NOT overwritten.
+3. Current `userExplicitPreference('sap-ai-core/claude-3.5-sonnet', ...)` + incoming `userExplicitPreference('sap-ai-core/gpt-4o', ...)` returns `modelID: 'sap-ai-core/gpt-4o'` — a new explicit choice overrides an older one.
+4. Fresh effort update (`{ reasoningEffort: 'high' }` — no explicit source) merges into an explicit choice without swapping the model. This is the `/effort high` mid-session case.
+5. Current `userExplicitPreference(..., 'high')` + incoming `defaultPreference(..., 'low')` returns `reasoningEffort: 'high'` — the user's effort intent is preserved even when the incoming payload carries a different effort (the `50f7d01ad` follow-up fix).
+6. `source: 'inherited'` is treated the same as `'user-explicit'` for override protection.
+7. `resolveSessionModelPreference(undefined, {}, cfg)` returns `cfg` — an empty incoming update on a brand-new session falls through to the default.
+8. `migrateLegacyPreference` defaults a missing `source` to `'user-explicit'`; an already-present `source: 'default'` is preserved.
+
+Do NOT add cases that assert on argument mutation — the reconciler is documented as pure, and the tests are the specification for that. If a change ever introduces a mutation, it should be caught by a new assertion, not by silently rewriting the existing case.
+
+## Testing the `SessionBusyTracker` Publish Ordering
+
+`src/core/__tests__/sessionBusy.test.ts` (134 lines, 7 cases in one `describe('SessionBusyTracker publish ordering')` block) pins the "clear-before-publish, write-after-publish" contract added in the 2026-09-17 sync. The tests use the process-global tracker (`getSessionBusyTracker`) with a per-case `resetSessionBusyTracker()` in `beforeEach` so state does not bleed across cases.
+
+Setup pattern:
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  getSessionBusyTracker,
+  resetSessionBusyTracker,
+  SessionBusyError,
+  type SessionBusyPublisher,
+  type SessionBusyStatusEvent,
+} from '../sessionBusy.js';
+
+beforeEach(() => {
+  resetSessionBusyTracker();
+});
+```
+
+Key assertion patterns:
+
+- **Failed idle publish still frees the session.** Configure a publisher that throws unconditionally, call `markBusy` then `markFree`, and assert `isBusy(sessionId) === false`. If `markFree` ever regressed to persist-after-publish, this case would trip.
+- **Failed busy publish rolls back.** Configure a synchronously throwing publisher, assert `markBusy(...)` throws, then assert `isBusy(sessionId) === false`. A subsequent `markBusy` with a healthy publisher must succeed — this is the retry-after-failure regression that upstream `e31aa5769` fixed.
+- **Ordering is observable from inside the publisher.** Attach a publisher that captures `tracker.isBusy(event.sessionId)` at publish time. For `status: 'busy'`, the observed value MUST be `false` (persist happens AFTER publish). For `status: 'idle'`, the observed value MUST be `false` (clear happens BEFORE publish). Pin both directions.
+- **Already-busy sessions still throw.** `markBusy` on a session already in the map throws `SessionBusyError` synchronously. This is the historical contract — do not weaken.
+- **No-op transitions do NOT publish.** `markFree` on a session that was never busy is a no-op. Use `vi.fn()` for the publisher and assert `expect(publisher).not.toHaveBeenCalled()` so subscribers only see real transitions.
+- **The reload regression.** Fail the idle publish, call `markFree`, swap in a healthy publisher, then call `markBusy` for the same session id. The final `markBusy` MUST NOT throw `SessionBusyError`. This is the failure mode users hit when a reload after a wedged session would previously get stuck.
+
+Do NOT test the async publisher rejection path with real timers — the tracker's `.catch` handler is best-effort and fires on the next microtask. If a case needs to assert on that path, use `await Promise.resolve()` to flush microtasks rather than `setTimeout`-based waits.
+
+## Testing the Draft Cache
+
+`src/session/__tests__/draft.test.ts` (88 lines) pins the empty-draft eviction contract of the `DraftCache` added in the 2026-09-17 sync. The tests construct a fresh `DraftCache` per case rather than using the global singleton, so cross-test state cannot bleed.
+
+Setup pattern:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { DraftCache, getDraftCache, resetDraftCache } from '../draft.js';
+
+it('...', () => {
+  const cache = new DraftCache();
+  // ...
+});
+```
+
+Assertion patterns:
+
+- **Round-trip.** `cache.set(id, 'in progress')` then `cache.get(id)` returns `'in progress'`.
+- **Empty-string eviction.** `cache.set(id, '')` evicts. `cache.get(id)` returns `undefined` — NEVER `''`. The distinction matters because callers rely on `undefined` to mean "no draft".
+- **Whitespace-only eviction.** `cache.set(id, '   \n\t')` also evicts. Callers do NOT pre-trim.
+- **`promote` always evicts.** After `cache.set(id, 'draft')`, calling `cache.promote(id, 'draft')` returns `'draft'` AND `cache.get(id)` returns `undefined`. Both branches evict — the promotion-with-empty-input case (`promote(id, '')`) returns `undefined` AND evicts any stale entry.
+- **`promote` trims.** `cache.promote(id, '  hello  ')` returns `'hello'`.
+- **`delete` is idempotent.** Calling `cache.delete(id)` on a missing entry does not throw.
+- **Singleton behaviour.** `getDraftCache() === getDraftCache()` is `true` within a process. `resetDraftCache()` produces a fresh singleton so the next `getDraftCache()` returns a different instance.
+
+Prefer constructing a local `new DraftCache()` in test bodies over `getDraftCache()`. The singleton is convenient for production callers that have no natural lifetime to hang an instance off, but tests should keep instances local for isolation.

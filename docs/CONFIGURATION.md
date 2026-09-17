@@ -1153,6 +1153,45 @@ interface Session {
 
 Session titles are auto-generated from the first user message. Sessions support auto-compaction when configurable `maxContextTokens` (default: 128K) is reached.
 
+### Session Model Preference Persistence
+
+Introduced in the 2026-09-17 sync. Per-session model / effort choices are persisted with a `source` provenance field so an explicit user selection is not silently overwritten by a config default on the next config reload. The on-disk record shape:
+
+```json
+{
+  "modelID": "sap-ai-core/claude-3.5-sonnet",
+  "providerID": "sap-ai-core",
+  "reasoningEffort": "high",
+  "source": "user-explicit"
+}
+```
+
+Provenance values (`SessionModelPreferenceSource`):
+
+- `"user-explicit"` — the user picked this via `/model`, a `--model` CLI flag, the TUI model picker, or an equivalent affordance. Only another `"user-explicit"` update may overwrite it.
+- `"inherited"` — forwarded from a parent session (subagent handoff, resumed session). Behaves like `"user-explicit"` for override protection so a parent's explicit choice is respected downstream.
+- `"default"` — derived from `routing-config.json` / `AICORE_MODEL` / the built-in default. Freely overwritten by any incoming update.
+
+Reconciliation rules (`resolveSessionModelPreference`):
+
+1. Brand-new session (no current record) → apply the config default verbatim.
+2. Current `"user-explicit"` (or `"inherited"`) + incoming `"default"` → keep the user's `modelID` / `providerID` / `source`; refresh `reasoningEffort` when the incoming payload carries one, otherwise preserve the current effort intent (`/effort high` mid-session works without re-picking a model).
+3. Current `"user-explicit"` + incoming `"user-explicit"` → the incoming choice wins.
+4. Fresh effort update (only `reasoningEffort` set) merges into an explicit choice without swapping the model.
+
+Legacy records (persisted before the `source` field existed) are migrated by treating a missing `source` as `"user-explicit"` — the conservative choice. The alternative (`"default"`) would silently downgrade a user's saved model on the next config reload. See [ARCHITECTURE.md — Session Model Preference Reconciliation](ARCHITECTURE.md#session-model-preference-reconciliation-srccoremodelpreferencets) for the design and [API.md — Session Model Preference API](API.md#session-model-preference-api-srccoremodelpreferencets) for the programmatic surface.
+
+### Draft Cache
+
+Introduced in the 2026-09-17 sync. The interactive TUI persists a user's in-progress prompt buffer in an in-memory `DraftCache` (`src/session/draft.ts`) so a session reload / resume does not lose mid-composition text. Empty or whitespace-only drafts are actively evicted rather than persisted — matching the upstream kilocode contract that empty drafts must never linger past their setter.
+
+Persistence is deliberately in-memory only:
+
+- Cross-process persistence would require a durable store that survives crashes AND respects the empty-draft eviction contract.
+- The `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) is exported from `src/session/draft.ts` so a future durable variant plugs in without changing callers or tests.
+
+There is currently no user-facing configuration key for the draft cache — it is a runtime behaviour of the interactive TUI. See [API.md — Draft Cache API](API.md#draft-cache-api-srcsessiondraftts) for the programmatic surface.
+
 > **Not a session-config surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`, version bump `1.18.11` → `1.18.12`) added a 4-line orphan file at `src/context/server-session-reducer.ts` declaring a non-exported `reduceSession(session: Session): Session` function that references two undeclared free identifiers (`Session` and `optimizeSessionData`) and has no `return` statement. It is **not** part of the session-persistence pipeline documented in this section — canonical session state is managed by the `SessionManager` class in `src/core/sessionManager.ts`, with checkpoint / undo semantics in `src/core/checkpoints.ts` and `src/undo/`. There is no reducer-shaped session pipeline in Alexi, and setting any environment variable or configuration key cannot activate this file because nothing imports it. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26. A companion 2026-07-26 orphan under `src/context/global-sync/bootstrap.ts` similarly declares a `bootstrapGlobalSync()` function against an undeclared `initializeContext()` identifier and is unrelated to Alexi's real upstream-sync entrypoint (the `.github/workflows/sync-upstream.yml` GitHub Actions workflow plus the tracked commits at `.github/last-sync-commits.json`).
 
 ## Configuration Examples

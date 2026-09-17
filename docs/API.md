@@ -836,6 +836,8 @@ The Ink-based TUI provides slash commands for managing sessions, configuration, 
 | `/models` | Open interactive model picker | `/models` |
 | `/autoroute` | Toggle automatic model routing | `/autoroute` |
 
+Persistence semantics: `/model <id>` and the `/models` interactive picker record the choice through `userExplicitPreference(modelID, providerID, reasoningEffort?)` (`src/core/modelPreference.ts`) so `SessionModelPreference.source` is set to `'user-explicit'`. The `resolveSessionModelPreference` reconciler then protects the choice against any subsequent non-explicit update — a config reload, an `AICORE_MODEL` change, or an implicit routing default cannot silently overwrite the user's selection on the next turn. Only another explicit action (`/model`, `--model`, or the TUI picker) may overwrite. `/effort <level>` is intentionally the **only** non-explicit update that may modify a protected preference: it sets `reasoningEffort` without swapping the model or provider, so a user typing `/effort high` mid-session does not have to re-pick their model. See `docs/ARCHITECTURE.md` under **Session Model Preferences** for the full contract, provenance model (`'user-explicit' | 'default' | 'inherited'`), and rule table.
+
 ### Session Commands
 
 | Command | Description |
@@ -3634,3 +3636,215 @@ export namespace RecallMessageIndex {
 The index name is referenced by `KILOCODE_PRESERVED_SQL_REGEX` above so upstream syncs treat it as a kilocode change and do not drop it.
 
 See [Configuration → Auxiliary-Task Model Selection](CONFIGURATION.md#auxiliary-task-model-selection-modelscompaction) for the operator-facing writeup and [Providers → Auxiliary-Task Model Selection](PROVIDERS.md#auxiliary-task-model-selection) for the runtime flow.
+
+## Session Model Preference API (`src/core/modelPreference.ts`)
+
+Introduced in the 2026-09-17 sync. Pure helpers that reconcile per-session model / effort choices with a `source` provenance field so an explicit user selection is never silently overwritten by a config default on subsequent turns. Callers wiring `/model`, `--model`, and TUI model-picker code paths MUST route through these helpers so the persistence guard engages. See [ARCHITECTURE.md — Session Model Preference Reconciliation](ARCHITECTURE.md#session-model-preference-reconciliation-srccoremodelpreferencets) for the design.
+
+Public surface:
+
+```typescript
+import type { EffortLevel } from './effortLevel.js';
+
+export type SessionModelPreferenceSource = 'user-explicit' | 'default' | 'inherited';
+
+export interface SessionModelPreference {
+  modelID: string;
+  providerID: string;
+  reasoningEffort?: EffortLevel;
+  source: SessionModelPreferenceSource;
+}
+
+/**
+ * Reconcile the current preference with an incoming update and a config default.
+ * Pure — never mutates arguments. Safe to persist the return value directly.
+ */
+export function resolveSessionModelPreference(
+  current: SessionModelPreference | undefined,
+  incoming: Partial<SessionModelPreference> | undefined,
+  configDefault: SessionModelPreference
+): SessionModelPreference;
+
+/** Attribute a preference to an explicit user selection. */
+export function userExplicitPreference(
+  modelID: string,
+  providerID: string,
+  reasoningEffort?: EffortLevel
+): SessionModelPreference;
+
+/** Attribute a preference to a config-derived default (routing-config, AICORE_MODEL, built-in). */
+export function defaultPreference(
+  modelID: string,
+  providerID: string,
+  reasoningEffort?: EffortLevel
+): SessionModelPreference;
+
+/** Migrate an on-disk record persisted before the `source` field existed. */
+export function migrateLegacyPreference(
+  raw: Partial<SessionModelPreference> & { modelID: string; providerID: string }
+): SessionModelPreference;
+```
+
+Usage example — hydrate a session from disk, apply the CLI `--model` override, then reconcile against the config default:
+
+```typescript
+import {
+  resolveSessionModelPreference,
+  userExplicitPreference,
+  defaultPreference,
+  migrateLegacyPreference,
+} from '../core/modelPreference.js';
+
+const raw = await loadSessionPreferenceFromDisk(sessionId);
+const current = raw ? migrateLegacyPreference(raw) : undefined;
+
+// User passed --model on the CLI: attribute the update to an explicit choice.
+const incoming = flags.model
+  ? userExplicitPreference(flags.model, 'sap-ai-core', flags.effort)
+  : undefined;
+
+// Config-derived fallback (routing-config.json / AICORE_MODEL / built-in default).
+const configDefault = defaultPreference(config.defaultModel, 'sap-ai-core', config.defaultEffort);
+
+const resolved = resolveSessionModelPreference(current, incoming, configDefault);
+await saveSessionPreferenceToDisk(sessionId, resolved);
+```
+
+Rules pinned by `src/core/__tests__/modelPreference.test.ts`:
+
+1. Brand-new session (no `current`) → apply `configDefault` verbatim.
+2. Current `'user-explicit'` + incoming `'default'` → keep the user's `modelID` / `providerID` / `source`; refresh `reasoningEffort` when the incoming payload carries one, otherwise preserve the current effort intent.
+3. Current `'user-explicit'` + incoming `'user-explicit'` → incoming wins (a new explicit choice overrides an older one).
+4. Fresh effort update (only `reasoningEffort` on the incoming payload) merges into an explicit choice without swapping the model.
+5. `'inherited'` behaves the same as `'user-explicit'` for override protection (subagent handoff / resumed session).
+6. `migrateLegacyPreference` defaults a missing `source` to `'user-explicit'`; an already-present `source` is preserved.
+
+## Session Busy Tracker API (`src/core/sessionBusy.ts`)
+
+Introduced in the 2026-09-17 sync. Prevents concurrent operations on a single session and now guarantees "clear-before-publish, write-after-publish" transition ordering so a failed publisher cannot wedge the session in a stale busy state. See [ARCHITECTURE.md — Session Busy Publish Ordering](ARCHITECTURE.md#session-busy-publish-ordering-srccoresessionbusyts) for the design.
+
+Public surface:
+
+```typescript
+export class SessionBusyError extends Error {
+  constructor(readonly sessionId: string, readonly operation: string);
+}
+
+export interface BusyResponse {
+  status: number; // 409
+  body: { error: 'SessionBusy'; message: string; sessionId: string };
+}
+
+export function toBusyResponse(error: SessionBusyError): BusyResponse;
+
+export type SessionBusyStatus = 'busy' | 'idle';
+
+export interface SessionBusyStatusEvent {
+  sessionId: string;
+  status: SessionBusyStatus;
+  operation?: string;
+}
+
+export type SessionBusyPublisher = (event: SessionBusyStatusEvent) => void | Promise<void>;
+
+export function getSessionBusyTracker(): SessionBusyTracker;
+
+/** Test-only: reset the process-global tracker. */
+export function resetSessionBusyTracker(): void;
+```
+
+`SessionBusyTracker` instance methods:
+
+- `setPublisher(publisher: SessionBusyPublisher | undefined): void` — attach or detach the publish callback (event bus emit, WebSocket broadcast). Setting a new publisher replaces the previous one; passing `undefined` detaches. Optional: when unset, the tracker behaves as a plain in-memory Map for backwards compatibility.
+- `markBusy(sessionId: string, operation: string): void` — throws `SessionBusyError` synchronously when the session is already busy. Publishes FIRST; only persists the busy entry on successful publication. A synchronous publisher throw rolls back the store and rethrows.
+- `markFree(sessionId: string): void` — clears the store FIRST, then publishes. Publisher errors are logged and swallowed — freeing a session must never fail from the caller's perspective. No-op (and does NOT invoke the publisher) when the session is not busy.
+- `isBusy(sessionId: string): boolean`
+- `getCurrentOperation(sessionId: string): string | undefined`
+
+Wire an event-bus publisher in bootstrap code:
+
+```typescript
+import { getSessionBusyTracker } from '../core/sessionBusy.js';
+import { getEventBus } from '../bus/index.js';
+
+const tracker = getSessionBusyTracker();
+const bus = getEventBus();
+tracker.setPublisher((event) => {
+  bus.publish('session.busy', event);
+});
+```
+
+An HTTP handler translates `SessionBusyError` to HTTP 409 with `toBusyResponse`:
+
+```typescript
+try {
+  tracker.markBusy(sessionId, 'chat');
+  // ... run turn ...
+} catch (err) {
+  if (err instanceof SessionBusyError) {
+    const { status, body } = toBusyResponse(err);
+    return res.status(status).json(body);
+  }
+  throw err;
+} finally {
+  tracker.markFree(sessionId);
+}
+```
+
+## Draft Cache API (`src/session/draft.ts`)
+
+Introduced in the 2026-09-17 sync. In-memory cache for in-progress prompt buffers across session reload / resume. Empty drafts are never persisted — the setter and `promote` both evict actively. See [ARCHITECTURE.md — Draft Cache](ARCHITECTURE.md#draft-cache-srcsessiondraftts) for the design.
+
+Public surface:
+
+```typescript
+export interface DraftCacheStore {
+  get(sessionID: string): string | undefined;
+  set(sessionID: string, value: string): void;
+  delete(sessionID: string): void;
+  clear(): void;
+}
+
+export class DraftCache {
+  constructor(store?: DraftCacheStore);
+  /** Returns undefined when nothing is cached — never an empty string. */
+  get(sessionID: string): string | undefined;
+  /** Empty or whitespace-only values are actively evicted. */
+  set(sessionID: string, draft: string): void;
+  /** Idempotent. */
+  delete(sessionID: string): void;
+  /** Trims input, always evicts the cache, returns the trimmed prompt or undefined. */
+  promote(sessionID: string, draft: string): string | undefined;
+  /** Test / shutdown helper. */
+  clear(): void;
+}
+
+/** Process-global singleton for CLI subcommand and TUI hook callers. */
+export function getDraftCache(): DraftCache;
+
+/** Test-only helper. */
+export function resetDraftCache(): void;
+```
+
+TUI usage pattern — restore a draft on session mount, persist on change, promote on submit:
+
+```typescript
+import { getDraftCache } from '../session/draft.js';
+
+const cache = getDraftCache();
+
+// On session mount / reload:
+const restored = cache.get(sessionID);
+setBuffer(restored ?? '');
+
+// On buffer change (debounce upstream):
+cache.set(sessionID, buffer); // empty buffer auto-evicts, no pre-trim needed.
+
+// On submit:
+const prompt = cache.promote(sessionID, buffer);
+if (prompt !== undefined) {
+  await session.send(prompt);
+}
+```
+
+The pluggable `DraftCacheStore` interface allows a future durable implementation without changing callers or tests. The default in-memory store is a plain `Map<string, string>`.
