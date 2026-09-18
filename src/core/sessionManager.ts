@@ -179,6 +179,19 @@ export class SessionManager {
     parentSessionId?: string,
     options?: { initialMessages?: Message[]; signal?: AbortSignal }
   ): Session {
+    // Alexi_change: reconcile any permission prompts stalled by a previous
+    // session/abort before starting a new one. Runs on every createSession
+    // so hot-reload and provider re-init both benefit. Dynamic import keeps
+    // this out of the module's import graph if recovery is unused at
+    // runtime (test harnesses, unit tests of sessionManager).
+    void import('../permission/recovery.js')
+      .then(({ recoverStalledPermissions }) => {
+        recoverStalledPermissions();
+      })
+      .catch(() => {
+        // Non-fatal — recovery is best-effort.
+      });
+
     const initialMessages = options?.initialMessages ?? [];
     const totalTokens = initialMessages.reduce(
       (sum, m) => sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0),

@@ -2238,6 +2238,10 @@ interface DoomLoopConfig {
 }
 ```
 
+### Stalled Approval Recovery
+
+`src/permission/recovery.ts` reconciles pending `askUser()` prompts that were disrupted by an abort / hot-reload / provider re-init. Entries past their deadline resolve as denials with `reason: 'stalled_recovery'`; entries whose paired rule-save aborted are dropped with `reason: 'save_aborted'`. `SessionManager.createSession()` fires the sweep on every session creation via a fire-and-forget dynamic import so unit tests of `sessionManager` do not pull in the recovery module. See [Stalled Permission Approval Recovery](#stalled-permission-approval-recovery) for the sequence diagram and the full contract.
+
 ## MCP Integration
 
 Model Context Protocol support allows external tool servers to be connected:
@@ -2452,6 +2456,162 @@ await configureConnection({ run: (sql) => db.exec(sql) });
 Classification is deliberately broad — "when in doubt, escalate", not "only escalate on destructive commands". Read-only subcommands (`log`, `status`, `diff`, `show`, `ls-files`, `rev-parse`, …) are NOT included. Write-shaped subcommands: `add`, `am`, `apply`, `branch`, `checkout`, `cherry-pick`, `clean`, `commit`, `config`, `fetch`, `gc`, `init`, `merge`, `mv`, `pull`, `push`, `rebase`, `reflog`, `remote`, `reset`, `restore`, `revert`, `rm`, `stash`, `submodule`, `switch`, `tag`, `worktree`.
 
 `isGitWrite(command)` walks past leading global flags (`-C`, `-c`, `--git-dir`, `--work-tree`) before checking the subcommand token, so `git -C path subcommand ...` and `git --git-dir=... subcommand ...` classify correctly.
+
+### Masked-mutation detection (2026-09-18)
+
+Upstream commits `32aaae25d` and `2da7e2bb7` hardened the classifier against read-only-shaped invocations that carry a mutating global flag. The following flags now force a `write` classification regardless of the subcommand shape:
+
+| Flag | Attack shape |
+|------|--------------|
+| `-c` / `--config` | `git -c core.hooksPath=/tmp/attacker log` — points git at a caller-controlled hooks directory, so a subsequent legitimate `commit` on the same repo runs an attacker binary as a `pre-commit` hook. |
+| `--exec-path` | Overrides where git looks for helper binaries. |
+| `--upload-pack` / `--receive-pack` | Points remote-side git at caller-controlled binaries during `fetch` / `push`. |
+| `--work-tree` / `--git-dir` | Re-scope the operation onto a different repo the user did not intend to touch. |
+
+`isGitWrite()` now runs masked-mutation detection FIRST — write intent takes precedence over any read-only subcommand classification. Short-flag clusters are expanded (`-abc` becomes `-a -b -c`) so `-c` embedded in a cluster is detected, while numeric-tail short flags (`-n1`, `-C10`) are preserved verbatim because they carry a value, not a flag list.
+
+```typescript
+// From src/kilocode/sandbox/git.ts
+const MASKED_MUTATION_FLAGS: ReadonlySet<string> = new Set([
+  '-c', '--config',
+  '--exec-path',
+  '--upload-pack', '--receive-pack',
+  '--work-tree', '--git-dir',
+]);
+
+export function isGitWrite(command: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens[0] !== 'git') return false;
+  const expanded = expandShortFlagClusters(tokens.slice(1));
+  // 1. Masked mutation wins over subcommand shape.
+  if (hasMaskedMutation(expanded)) return true;
+  // 2. Otherwise walk past leading global flags to the subcommand.
+  // ...
+}
+```
+
+## Sandbox `gh` (GitHub CLI) Classification
+
+`src/kilocode/sandbox/gh.ts` (upstream kilocode `13e05d066`, `ecedeea49`, `700345267`, `15b6b3287`) is the analogue for the GitHub CLI. Prior to these fixes every `gh` invocation triggered an escalation prompt because the sandbox layer treated the entire GitHub CLI as untrusted — an interactive code-review flow full of `gh pr list` and `gh issue view` calls became unusable. The classifier lets read-only subcommands pass through without a prompt while keeping writes and the auth-sensitive `gh auth *` subgroup behind the permission gate.
+
+```typescript
+export type GhClassification = 'readonly' | 'auth-gated' | 'write';
+
+export function classifyGh(args: readonly string[]): GhClassification;
+export function isGhReadOnly(tokens: readonly string[]): boolean;
+```
+
+`classifyGh(args)` expects `gh`'s argv AFTER the `gh` token itself (e.g. `['pr', 'list']`), so the shell tool tokenises the raw command before delegating. Read-only allow-list highlights: `browse`, `config get`, `gist list`/`view`, `issue list`/`view`/`status`, `label list`, `pr list`/`view`/`status`/`checks`/`diff`, `release list`/`view`, `repo list`/`view`, `run list`/`view`/`watch`, `search`, `workflow list`/`view`, plus the single-token helpers `help`, `version`, `--help`, `--version`.
+
+Anything that creates, updates, or deletes remote state (`gh pr create`, `gh issue edit`, `gh release create`, …) or opens an editor / `--web` shell classifies as `'write'`. The `gh auth *` subgroup is read-only in shape but the auth material is sensitive, so `auth status`, `auth token`, `auth setup-git`, and bare `gh auth` land in `'auth-gated'` — callers must still surface an escalation prompt but must NOT treat them as destructive writes.
+
+```mermaid
+flowchart TD
+    Cmd[gh &lt;argv&gt;] --> Empty{args empty?}
+    Empty -->|Yes| RO[readonly]
+    Empty -->|No| Filter[Filter flag tokens]
+    Filter --> OnlyFlags{Only flags?}
+    OnlyFlags -->|Yes| CheckFlag{args[0] in readonly set?}
+    CheckFlag -->|Yes| RO
+    CheckFlag -->|No| Wr[write]
+    OnlyFlags -->|No| TwoWord[two-word key]
+    TwoWord --> Auth{In auth set OR starts &#x27;auth&#x27;?}
+    Auth -->|Yes| AuthGated[auth-gated]
+    Auth -->|No| ReadCheck{In readonly set?}
+    ReadCheck -->|Yes| RO
+    ReadCheck -->|No| Wr
+```
+
+## Stalled Permission Approval Recovery
+
+`src/permission/recovery.ts` (upstream kilocode `d8eaefdf1`, `f6d761e65`, `fa897b854`) closes the class of hangs where a permission approval was in-flight when a session was aborted, hot-reloaded, or had its provider re-initialised, and the tool pipeline then blocked forever waiting for a `bus.waitForEvent(PermissionResponse)` reply that could never arrive. Alexi's `PermissionManager.askUser()` already uses a per-prompt timeout, but the recovery module adds cross-cutting reconciliation for the case where the event bus itself is disrupted between publish and subscribe.
+
+The registry keeps in-flight prompts in a process-local `Map<string, PendingPermission>` keyed by request id. Every entry carries its creation timestamp and per-prompt timeout window (`DEFAULT_RECOVERY_WINDOW_MS = 5 * 60 * 1000`, i.e. 5 minutes). Sweep-based reconciliation resolves stalled entries as DENIALS — a lost prompt must never silently escalate a tool call — with a diagnostic `reason` so callers can distinguish between a normal denial and a recovery-driven one.
+
+```typescript
+export interface PermissionRecoveryResult {
+  approved: boolean;                                        // Always false — recovery denies.
+  reason: 'stalled_recovery' | 'save_aborted';
+}
+
+export function trackPendingPermission(
+  id: string,
+  resolver: (result: PermissionRecoveryResult) => void,
+  timeoutMs: number = 5 * 60 * 1000,
+): void;
+
+export function clearPendingPermission(id: string): void;
+
+export function recoverStalledPermissions(): number;
+
+export function reconcileAbortedSave(ruleId: string): boolean;
+```
+
+`SessionManager.createSession()` (`src/core/sessionManager.ts:179+`) fires `recoverStalledPermissions()` on every session creation via a fire-and-forget dynamic import of `../permission/recovery.js`. Dynamic import keeps the recovery module out of `sessionManager`'s import graph when recovery is unused (e.g. unit tests that never touch permissions). Failures are swallowed with a no-op `.catch()` — recovery is best-effort and the session must still start even if the module cannot load.
+
+```mermaid
+sequenceDiagram
+    participant Caller as Session start / provider re-init
+    participant SM as SessionManager.createSession()
+    participant Rec as recovery.ts
+    participant Pending as pending: Map&lt;id, entry&gt;
+    Caller->>SM: createSession(sessionID, ...)
+    SM-)Rec: dynamic import('../permission/recovery.js')
+    Rec->>Pending: iterate entries
+    loop for each entry
+        alt now - entry.createdAt > entry.timeoutMs
+            Rec->>Pending: pending.delete(id)
+            Rec-)Caller: entry.resolver({ approved: false, reason: 'stalled_recovery' })
+        else within window
+            Rec->>Pending: keep entry
+        end
+    end
+    SM-->>Caller: session
+```
+
+## Deferred Session Title Generation
+
+`src/kilocode/session/title.ts` (upstream kilocode `7e0ce5ec6`, `31bfc440c`, `4ab5fe935`) defers session title generation until AFTER the first substantive user activity, dramatically improving perceived latency on session start — the model no longer spends a round-trip generating a title before the user's actual first prompt executes. Alexi does not use Effect-TS in-tree, so the upstream code shape is translated to plain async/await.
+
+Gating rules (all four must hold before an attempt is scheduled):
+
+| # | Rule | Constant |
+|---|------|----------|
+| 1 | Session not yet titled | `state.generated === false` |
+| 2 | Attempt budget not exhausted | `TITLE_MAX_ATTEMPTS = 3` |
+| 3 | Past per-session backoff window | `TITLE_BACKOFF_MS = 60_000` ms after a failure |
+| 4 | Message long enough after trimming | `TITLE_MIN_MESSAGE_LENGTH = 8` |
+
+```typescript
+export type TitleGenerator = (sessionId: string, firstMessage: string) => Promise<string>;
+
+export async function ensureTitle(
+  sessionId: string,
+  message: string,
+  generate: TitleGenerator,
+): Promise<string | undefined>;
+
+export function resetTitleState(sessionId?: string): void;
+```
+
+`ensureTitle` is idempotent — after a successful call the cached title is returned on every subsequent call for the same session. On failure the entry's `gatedUntil` is pushed to `Date.now() + TITLE_BACKOFF_MS` and a warning is logged; the next call inside the backoff window returns `undefined` without invoking `generate`. The `TitleGenerator` shape stays caller-supplied so this module remains decoupled from `src/providers/` — the caller wires in whichever provider it wants (SAP AI Core / proxy / mock).
+
+## Programmatic Tool Calling (`experimental.code_mode`)
+
+`src/tool/code-mode.ts` (upstream kilocode `6b5e8a04e`, `e0dcb0e4e`) is the entry point for the **Programmatic Tool Calling** experiment. When `experimental.code_mode === true` in the user config, MCP tool calls are routed through a confined JavaScript runtime with on-demand tool discovery instead of being advertised on every turn. The direct-tool path exposes the full MCP tool catalog to the model on every request, which is expensive under SAP AI Core token-metered deployments (opus / gpt-4-class); code_mode trades a small per-call resolution overhead for a much smaller per-turn schema block.
+
+The runtime is intentionally NOT eagerly imported — `loadCodeMode()` dynamic-imports the runtime module the first time the flag is observed, so users who never enable code_mode pay zero import cost. `loadCodeMode()` also short-circuits to `null` when the process is network-restricted (`ALEXI_NO_NETWORK=1`, `ALEXI_NO_NETWORK=true`, `NO_PROXY=*`, `no_proxy=*`) because on-demand tool discovery requires network egress to fetch tool definitions.
+
+```typescript
+export interface CodeMode {
+  dispatch(toolName: string, args: unknown): Promise<unknown>;
+  dispose(): Promise<void>;
+}
+
+export async function loadCodeMode(): Promise<CodeMode | null>;
+```
+
+The shim in `src/tool/code-mode.ts` unlocks the config gate; the actual sandbox implementation lands in follow-up commits as the upstream implementation stabilises. See [docs/CONFIGURATION.md — experimental.code_mode](CONFIGURATION.md#experimental-code_mode) for the config surface and interaction with `getConfigCodeMode()` / `setConfigCodeMode()`.
 
 ## Directory Structure
 
