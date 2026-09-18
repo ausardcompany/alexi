@@ -12,6 +12,8 @@ import {
   type CodeReviewEffort,
   type CodeReviewTarget,
 } from '../../command/codeReview.js';
+import { detectVCSProvider, type VCSRemote } from '../../git/remoteDetection.js';
+import { formatMRPRUrl, requestNoun } from '../../git/urlFormatter.js';
 
 interface CodeReviewCliOptions {
   effort?: string;
@@ -22,6 +24,40 @@ interface CodeReviewCliOptions {
   fixMax?: number;
   comment?: boolean;
   commentDryRun?: boolean;
+}
+
+/**
+ * Best-effort formatter for the current MR/PR URL from CI environment
+ * variables. Returns `undefined` when no MR/PR number can be found.
+ *
+ * Recognised env vars:
+ *   - GitLab CI: `CI_MERGE_REQUEST_IID`
+ *   - Bitbucket Pipelines: `BITBUCKET_PR_ID`
+ *   - Generic fallback: `ALEXI_MR_NUMBER` / `ALEXI_PR_NUMBER`
+ */
+function tryFormatEnvMRPRUrl(remote: VCSRemote): string | undefined {
+  const raw =
+    process.env['ALEXI_MR_NUMBER'] ??
+    process.env['ALEXI_PR_NUMBER'] ??
+    (remote.provider === 'gitlab' ? process.env['CI_MERGE_REQUEST_IID'] : undefined) ??
+    (remote.provider === 'bitbucket' ? process.env['BITBUCKET_PR_ID'] : undefined);
+  if (!raw) {
+    return undefined;
+  }
+  const num = Number.parseInt(raw, 10);
+  if (!Number.isInteger(num) || num <= 0) {
+    return undefined;
+  }
+  try {
+    return formatMRPRUrl({
+      provider: remote.provider,
+      org: remote.org,
+      repo: remote.repo,
+      number: num,
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function parseEffort(value: string | undefined): CodeReviewEffort {
@@ -54,6 +90,28 @@ export function registerCodeReviewCommand(program: Command): void {
         const effort = parseEffort(opts.effort);
         const target: CodeReviewTarget = opts.base ? { base: opts.base } : 'uncommitted';
 
+        // Detect VCS provider (best-effort). Only affects output wording
+        // and `--comment` handling for non-GitHub remotes; the review
+        // itself is provider-agnostic.
+        const remote = await detectVCSProvider(opts.workdir ?? process.cwd());
+        const noun = remote ? requestNoun(remote.provider) : 'PR';
+
+        // The `--comment` flag posts findings via `gh api`, which is
+        // GitHub-only. On GitLab/Bitbucket we surface the equivalent
+        // MR/PR URL (when derivable from CI env) and skip the gh path.
+        let commentPassthrough = opts.comment;
+        if (opts.comment && remote && remote.provider !== 'github') {
+          commentPassthrough = false;
+          process.stderr.write(
+            `[code-review] --comment is GitHub-only; skipping ${noun} comment posting ` +
+              `for ${remote.provider} remote\n`
+          );
+          const mrPrUrl = tryFormatEnvMRPRUrl(remote);
+          if (mrPrUrl) {
+            process.stderr.write(`[code-review] detected ${noun}: ${mrPrUrl}\n`);
+          }
+        }
+
         const result = await executeCodeReview({
           effort,
           target,
@@ -61,7 +119,7 @@ export function registerCodeReviewCommand(program: Command): void {
           modelOverride: opts.model,
           fix: opts.fix,
           fixMaxFindings: opts.fixMax,
-          comment: opts.comment,
+          comment: commentPassthrough,
           commentDryRun: opts.commentDryRun,
           onProgress: (msg) => process.stderr.write(`[code-review] ${msg}\n`),
         });
@@ -96,7 +154,8 @@ export function registerCodeReviewCommand(program: Command): void {
 
         if (result.comments) {
           process.stderr.write(
-            `\n[code-review] comments: ${result.comments.posted} posted, ${result.comments.skipped} skipped\n`
+            `\n[code-review] ${noun} comments: ${result.comments.posted} posted, ` +
+              `${result.comments.skipped} skipped\n`
           );
           if (result.comments.summaryCommentUrl) {
             process.stderr.write(`[code-review] summary: ${result.comments.summaryCommentUrl}\n`);

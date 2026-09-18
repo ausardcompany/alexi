@@ -34,6 +34,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GitLab MR and Bitbucket PR linking in the `code-review` command** (`src/cli/commands/codeReview.ts`, new `src/git/remoteDetection.ts`, new `src/git/urlFormatter.ts`, `tests/git/remoteDetection.test.ts`, `tests/git/urlFormatter.test.ts`, commit `58bc3d80` `feat(cli): add GitLab MR and Bitbucket PR linking to code-review`): The `alexi code-review` command now detects the hosting provider of the current git remote and surfaces the correct merge/pull request URL and terminology per host, without breaking the existing GitHub-only `--comment` path.
+
+  The `--comment` flag posts findings via `gh api` — that remains GitHub-only. On non-GitHub remotes the CLI now degrades gracefully:
+
+  1. Detects the VCS provider with a best-effort `git remote -v` scan (`detectVCSProvider(workdir)` in `src/git/remoteDetection.ts`). Falls back to `null` (i.e. treats the repo as GitHub-shaped) when git is unavailable or no supported remote is configured — the command never throws for a missing-git or unrecognised-remote case.
+  2. When `--comment` is passed on a GitLab or Bitbucket remote, the `gh api` invocation is suppressed. A stderr message explains the skip (`[code-review] --comment is GitHub-only; skipping <MR|PR> comment posting for <provider> remote`) and, when a CI env var carries the MR/PR number, prints the equivalent hosted URL so operators can navigate to the request without a manual URL edit.
+  3. The final "comments posted / skipped" summary line uses `MR` on GitLab remotes and `PR` on GitHub / Bitbucket remotes so the terminology matches the destination host.
+
+  New public surface exported from `src/git/remoteDetection.ts`:
+
+  - `type VCSProvider = 'github' | 'gitlab' | 'bitbucket'`
+  - `interface VCSRemote { provider: VCSProvider; org: string; repo: string }`
+  - `parseRemoteUrl(url): VCSRemote | null` — pure per-URL parser. Recognises HTTPS (`https://<host>/<org>/<repo>(.git)?`), scp-style SSH (`git@<host>:<org>/<repo>(.git)?`), and `ssh://` (`ssh://git@<host>/<org>/<repo>(.git)?`) formats for the three well-known SaaS hosts (`github.com`, `gitlab.com`, `bitbucket.org`). A trailing `/` and trailing `.git` are stripped. Custom self-hosted GitLab/Bitbucket instances are intentionally out of scope — the case-insensitive host substring match will return `null` for them, and the CLI falls back to the GitHub-shaped path.
+  - `parseRemoteVOutput(stdout): VCSRemote | null` — parses the raw stdout of `git remote -v`. Prefers the `origin` remote when one of the supported hosts is present; otherwise returns the first supported remote encountered. Exported so tests can exercise the parser without shelling out to git.
+  - `detectVCSProvider(workdir): Promise<VCSRemote | null>` — the async workhorse. Wraps `child_process.execFile('git', ['remote', '-v'], { cwd: workdir, maxBuffer: 1MB })` in a promise that never rejects — a missing `git` binary, a non-zero exit code, or an unparseable output all resolve to `null` so the code-review command's fallback path stays purely additive.
+
+  New public surface exported from `src/git/urlFormatter.ts` (kept dependency-free so agent PR flows, hooks, and MCP tools can reuse it without extra imports):
+
+  - `interface FormatMRPRUrlArgs { provider: VCSProvider; org: string; repo: string; number: number }`
+  - `formatMRPRUrl(args): string` — provider-specific URL builder. `github` → `https://github.com/<org>/<repo>/pull/<n>`, `gitlab` → `https://gitlab.com/<org>/<repo>/-/merge_requests/<n>`, `bitbucket` → `https://bitbucket.org/<org>/<repo>/pull-requests/<n>`. Throws `Error('formatMRPRUrl: invalid MR/PR number ...')` on a non-integer or non-positive number and `Error('formatMRPRUrl: missing org or repo ...')` when either is empty — this way misconfigured callers get a clear error at build time instead of shipping a broken URL. An exhaustiveness `never` guard rejects unknown providers at type-check time.
+  - `requestNoun(provider): 'MR' | 'PR'` — returns `'MR'` for `'gitlab'` and `'PR'` for `'github'` / `'bitbucket'`. Used by `src/cli/commands/codeReview.ts` for user-facing wording in the `--comment` skip message and the "comments posted / skipped" summary line so the terminology matches the destination host.
+
+  New CLI helper in `src/cli/commands/codeReview.ts` — `tryFormatEnvMRPRUrl(remote)`. Reads the MR/PR number from (in order) `ALEXI_MR_NUMBER`, `ALEXI_PR_NUMBER`, then the provider-specific CI variables `CI_MERGE_REQUEST_IID` (GitLab CI) or `BITBUCKET_PR_ID` (Bitbucket Pipelines). Returns `undefined` when no candidate is set, when the value is not a positive integer, or when `formatMRPRUrl` throws. This is a best-effort convenience — callers running outside CI (or without the generic env fallback set) just get the skip warning without a URL, which was the previous behaviour.
+
+  Test coverage:
+
+  - `tests/git/remoteDetection.test.ts` (117 lines, 14 cases across `parseRemoteUrl` and `parseRemoteVOutput`): HTTPS, scp-SSH, and `ssh://` shapes for all three providers; trailing-slash tolerance; `null` for unsupported hosts, empty input, and malformed remotes missing the repo segment; `parseRemoteVOutput` prefers `origin` when it points at a supported host; falls back to the first supported remote when `origin` is not a supported host; returns `null` when no remote line matches a supported host or when the output is empty.
+  - `tests/git/urlFormatter.test.ts` (57 lines, cases across `formatMRPRUrl` and `requestNoun`): each provider's URL shape; throws on `1.5` (non-integer), `0` (non-positive), missing `org`, and missing `repo`; `requestNoun` returns `'MR'` for GitLab and `'PR'` for the other two.
+
+  Non-goals of this change: the review itself remains provider-agnostic (same diff, same skill prompt, same routing), `--comment` posting on GitLab/Bitbucket is NOT implemented (the operator still has to paste findings into the destination host manually or via a follow-up tool), and self-hosted GitLab / Bitbucket instances are still detected as `null` — the CLI treats them the same as it did before this change.
+
 - **`code-mode-runtime.ts` placeholder for the `experimental.code_mode` sandbox** (`src/tool/code-mode-runtime.ts`, commit `85e11d06` `fix(ci): add code-mode-runtime stub and format registry [autohealing]`): New 33-line stub module that resolves the dynamic import in `src/tool/code-mode.ts` at type-check time so the `experimental.code_mode` feature flag can be flipped on ahead of the confined-JavaScript sandbox landing. The real `isolated-vm` / worker + MCP on-demand tool cache is a multi-file port from upstream kilocode (`6b5e8a04e experimental.code_mode`) that will land in a follow-up commit; until then this stub keeps the loader wiring green under `tsc --noEmit` and the co-located tests without pretending the sandbox exists.
 
   Public surface exported from `src/tool/code-mode-runtime.ts`:
