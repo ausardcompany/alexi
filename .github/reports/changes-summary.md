@@ -1,122 +1,135 @@
-# Alexi Update Plan — Execution Summary
+# Update Plan Execution Summary
 
-**Date**: 2026-09-17
-**Plan basis**: Upstream analysis of kilocode `c23548f4f..8db973de9` (v7.7.3) and opencode `e03db9b..5a83358`.
+Executed: 2026-09-18
+Basis: Alexi update plan derived from kilocode `8db973de9..c33d81690` (166 commits)
+and opencode `5a83358..3dd1b30` (4 commits).
 
-## Executed changes
+## Files Modified / Created
 
-### ✅ Change #1 (high priority) — Session status ordering fix
+### Modified
 
-**File modified**: `src/core/sessionBusy.ts`
+- `src/kilocode/sandbox/git.ts` — Hardened `isGitWrite()` against masked
+  mutations; short-flag cluster expansion; write-flag / masked-mutation
+  detection now runs before the read-only subcommand check.
+- `src/permission/index.ts` — Re-exports the new recovery surface
+  (`recoverStalledPermissions`, `reconcileAbortedSave`, `trackPendingPermission`,
+  `clearPendingPermission`, and their test helpers).
+- `src/core/sessionManager.ts` — `createSession()` now triggers a
+  best-effort `recoverStalledPermissions()` sweep on session start (dynamic
+  import, non-blocking, non-fatal on failure).
+- `src/config/userConfig.ts` — New `getConfigCodeMode()` / `setConfigCodeMode()`
+  accessors for the `experimental.code_mode` flag, following the same
+  serialisation pattern as `experimental.task_model_selection`.
+- `src/tool/registry.ts` — Added first-class `ToolCategory` taxonomy
+  (`read` / `write` / `execute` / `network` / `agent` / `meta` / `other`)
+  and a `categories` filter on `ToolResolutionContext`. `resolveForPrompt`
+  now honours the category filter for static tools (dynamic resolvers own
+  their own filtering).
 
-Enhanced `SessionBusyTracker` with a publish-safe transition contract mirroring upstream kilocode `88d23150b` ("clear session status before publishing status events") and `e31aa5769` ("keep busy status writes after successful publication"):
+### Created
 
-- **`markBusy`** now publishes the busy event BEFORE persisting to the store. If the publisher throws synchronously, the busy entry is NOT recorded, and the caller sees the error (no phantom wedge). Async publisher failures trigger a best-effort rollback.
-- **`markFree`** now clears the store entry BEFORE publishing the idle event. A publisher failure on the idle transition can no longer leave the session stuck in busy state — which was the root cause of the "stale session status blocks reload" bug.
-- Added optional publisher hook via `setPublisher(publisher)` — fully backwards-compatible; existing callers that don't wire a publisher get identical Map-based behaviour.
-- Added `resetSessionBusyTracker()` test helper.
+- `src/permission/recovery.ts` — Stalled-permission-approval recovery.
+  Tracks pending prompts by id, provides `recoverStalledPermissions()`
+  (called on session resume) and `reconcileAbortedSave(ruleId)`
+  (called when a rule save is aborted mid-flight). Both resolve their
+  entries as denials with structured `reason` codes.
+- `src/tool/code-mode.ts` — Shim / loader for the `code_mode`
+  experimental feature. `loadCodeMode()` returns `null` unless the
+  config flag is set AND network access is not restricted (per upstream
+  `e0dcb0e4e`). The actual runtime module (`./code-mode-runtime.js`) is
+  a follow-up drop-in — the shim lets us land the config gate now.
+- `src/kilocode/session/title.ts` — Deferred session title generation.
+  Enforces the four-way gate (not-yet-titled, attempt budget, backoff
+  window, min-message-length) before invoking a caller-supplied
+  `TitleGenerator`. Failed attempts back off for 60s.
+- `src/kilocode/sandbox/gh.ts` — `gh` (GitHub CLI) sandbox
+  classification. Read-only subcommands (`pr list`, `issue view`, ...)
+  now pass without a permission prompt; `gh auth *` stays behind the
+  gate; everything else is treated as a write.
 
-**New test file**: `src/core/__tests__/sessionBusy.test.ts` (7 test cases, mirrors upstream `packages/opencode/test/kilocode/session-status.test.ts`):
+## Changes Applied (in priority order)
 
-- `markFree` clears state even when publisher throws (no stale busy wedge)
-- `markBusy` rolls back on synchronous publisher failure so retries succeed
-- Ordering assertions: publish-before-persist for busy, clear-before-publish for idle
-- `SessionBusyError` still thrown when session is already busy (regression guard)
-- `markFree` is a no-op when session is not busy
-- End-to-end reload-after-markFree regression test
+### 1. [critical] Harden read-only git classification (`src/kilocode/sandbox/git.ts`)
+Ports upstream `32aaae25d` (masked mutations) + `2da7e2bb7` (flag order).
+Short-flag cluster expansion (`-abc → -a -b -c`, preserving numeric-tail
+short flags like `-n1`). Masked-mutation flag set (`-c`, `--config`,
+`--exec-path`, `--upload-pack`, `--receive-pack`, `--work-tree`,
+`--git-dir`) evaluated first — any hit forces write classification even
+when the visible subcommand is read-only-shaped.
 
----
+### 2. [critical] Recover stalled permission approvals (new module)
+Ports `d8eaefdf1`, `f6d761e65`, `fa897b854`. New
+`src/permission/recovery.ts` module registers pending prompts by id;
+`recoverStalledPermissions()` sweeps expired entries and resolves them
+as denials (`stalled_recovery`); `reconcileAbortedSave(ruleId)` handles
+the aborted-save race (`save_aborted`). Wired into
+`sessionManager.createSession()` so every new/resumed session drains
+stalled prompts from prior aborts. Re-exported through
+`src/permission/index.ts`.
 
-### ✅ Change #2 (high priority) — Preserve explicit model selection
+### 3. [high] `experimental.code_mode` gate (`src/config/userConfig.ts`, `src/tool/code-mode.ts`)
+Ports `6b5e8a04e` (config flag) + `e0dcb0e4e` (network-restricted gate).
+Config accessors added following the existing `task_model_selection`
+pattern. `loadCodeMode()` returns `null` when the flag is off or when
+the environment is network-restricted (`ALEXI_NO_NETWORK=1`,
+`NO_PROXY=*`). Runtime module is dynamically imported so unused
+deployments do not pay for it.
 
-**New file**: `src/core/modelPreference.ts`
+### 4. [high] Deferred session title generation (`src/kilocode/session/title.ts`)
+Ports `7e0ce5ec6`, `31bfc440c`, `4ab5fe935`. New `ensureTitle()` helper
+enforces the four-part gate (not-yet-titled → attempt budget →
+backoff window → min-message-length) before calling a
+caller-supplied `TitleGenerator`. Idempotent, backoff on failure,
+`resetTitleState()` on session close.
 
-Introduces `SessionModelPreference` with a `source` intent field (`"user-explicit" | "default" | "inherited"`) and a pure `resolveSessionModelPreference()` reconciler. Ports upstream kilocode `dd2f2f9a9` ("default model not persistent after explicit user choice") and `50f7d01ad` ("preserve effort intent and live session defaults"):
+### 5. [high] Read-only `gh` classification (`src/kilocode/sandbox/gh.ts`)
+Ports `13e05d066`, `ecedeea49`, `700345267`, `15b6b3287`. Explicit
+read-only subcommand table (`pr list`, `pr view`, `issue view`,
+`repo view`, `run list`, `workflow view`, `search`, `browse`, ...).
+`gh auth *` classified as `auth-gated` — still needs the permission
+gate but treated separately from write. Everything else defaults to
+`write` (escalate). `isGhReadOnly(tokens)` convenience for the shell
+tool.
 
-- User-explicit and inherited choices are never overwritten by `default` updates.
-- Effort intent is the one field a non-explicit update may refresh (so `/effort high` keeps the current model).
-- A missing effort on an incoming default update does not clobber the current effort.
-- `migrateLegacyPreference()` helper defaults on-disk entries without a `source` field to `"user-explicit"` — the conservative choice, avoiding silent downgrades of users' saved model picks.
-- Helper constructors `userExplicitPreference()` and `defaultPreference()` guide callers into setting the correct provenance.
+### 6. [high] Tool-registry categorisation (`src/tool/registry.ts`)
+Ports the opencode +25/-11 refactor. New `ToolCategory` union
+(`read` / `write` / `execute` / `network` / `agent` / `meta` /
+`other`) and a `categories?` filter on `ToolResolutionContext`.
+`resolveForPrompt` filters static tools by declared `category` when
+the caller supplies a filter (dynamic resolvers own their own
+filtering). Missing category defaults to `other`.
 
-**New test file**: `src/core/__tests__/modelPreference.test.ts` (9 test cases):
+## Compatibility Notes
 
-- Default applied to brand-new sessions
-- User-explicit choice survives incoming default
-- New user-explicit overwrites previous user-explicit
-- Effort update merges without swapping model
-- Effort intent preserved when incoming update omits it
-- `"inherited"` source treated same as user-explicit for override protection
-- Config-default fallback when neither current nor incoming supply a model
-- Legacy migration → `"user-explicit"`; explicit `source` preserved
+- **SAP AI Core**: no changes to provider dispatch, model routing, or
+  the SAP-specific auth path. `code_mode` is opt-in (default `false`)
+  and network-restricted deployments (typical for on-prem AI Core)
+  will short-circuit the loader before any external call is made.
+- **ESM imports**: every new module uses the `.js` suffix on relative
+  imports per the project's `NodeNext` module resolution.
+- **Test surface**: the new modules export `_...ForTests` helpers so
+  unit tests can reset in-memory state without spawning a fresh
+  process. No global mocks were touched.
 
-Note: this module is currently standalone. Existing session code (`src/core/sessionManager.ts`) does NOT yet call the reconciler. This mirrors the plan's intent — the module and its regression harness land first, and downstream integration into the routing pipeline is a follow-up that requires broader refactoring of how `Session.metadata.modelId` is written today (currently unconditional writes at multiple sites). Callers that adopt this reconciler get the fix; existing behaviour is unchanged.
+## Issues Encountered
 
----
-
-### ✅ Change #3 (medium priority) — Discard empty draft caches after promotion
-
-**New file**: `src/session/draft.ts`
-
-Introduces `DraftCache` mirroring upstream kilocode `0d2fee251` ("discard empty draft caches after goal promotion"):
-
-- `set(sessionID, draft)` evicts empty / whitespace-only drafts instead of persisting them.
-- `promote(sessionID, draft)` returns the trimmed prompt and ALWAYS evicts the cache entry — even when the promote is a no-op (empty input). This is the exact upstream bug: a stale non-empty cache surviving an empty promotion.
-- Pluggable `DraftCacheStore` interface so a future durable backend can be swapped in without changing callers.
-- Global singleton via `getDraftCache()` with test-only `resetDraftCache()`.
-
-**New test file**: `src/session/__tests__/draft.test.ts` (8 test cases):
-
-- Basic set / get
-- Empty draft evicted on set
-- Whitespace-only draft evicted on set
-- `promote` returns trimmed prompt and evicts cache
-- `promote` of empty draft returns `undefined` AND evicts stale cache (upstream regression)
-- `delete` is idempotent
-- `clear` wipes every entry
-- Singleton identity check
-
----
-
-### ⏭️ Change #4 (low priority) — `@opencode-ai/core` bump: **N/A**
-
-Verified `package.json`: Alexi does not declare `@opencode-ai/core` as a dependency (SAP AI Core integration goes through `@sap-ai-sdk/orchestration` and `@sap-ai-sdk/ai-api` directly, not through opencode's package). Alexi's upstream-ported code lives in-tree (`src/kilocode/**`, `src/session/**`, etc.), so no version bump is needed. Skipped as the plan itself notes: "If Alexi vendored the code, no action needed."
-
----
-
-## Files modified / created
-
-| Path | Kind | Change |
-|---|---|---|
-| `src/core/sessionBusy.ts` | modified | Publish-safe transitions, publisher hook, reset helper |
-| `src/core/__tests__/sessionBusy.test.ts` | created | 7 regression tests |
-| `src/core/modelPreference.ts` | created | New reconciler module |
-| `src/core/__tests__/modelPreference.test.ts` | created | 9 regression tests |
-| `src/session/draft.ts` | created | New DraftCache module |
-| `src/session/__tests__/draft.test.ts` | created | 8 regression tests |
-| `.github/reports/changes-summary.md` | created | This file |
-
----
-
-## Explicitly skipped (per plan)
-
-- KiloClaw removal (Alexi has no KiloClaw)
-- VSCode extension / JetBrains changes
-- Stats aggregation infra / Union Alpha stealth model
-- Console migrated-workspace selector
-- SDK regeneration (Alexi does not consume the opencode OpenAPI spec)
-- i18n bundles, dev:stats script, review command aliases
-
----
-
-## Issues / notes
-
-1. **Session status publisher wiring is opt-in.** The `sessionBusy.ts` refactor is fully backwards-compatible: without a publisher installed via `setPublisher`, the tracker behaves exactly as before (plain in-memory Map). Downstream wiring — e.g. having `SessionManager` call `setPublisher(event => bus.publish(...))` — is intentionally left to a follow-up so this PR does not perturb the existing event flow. The regression tests use a synthetic publisher to prove the ordering contract holds.
-
-2. **Model preference reconciler is not yet threaded into `sessionManager.ts`.** The plan calls out that existing code unconditionally overwrites `session.model = config.defaultModel`; migrating those sites is a wider refactor because Alexi's session shape (`SessionMetadata.modelId: string | undefined`) has no `source` field on disk yet. Adding a `modelPreference?: SessionModelPreference` field on `SessionMetadata` and a migration path can be done in a follow-up PR without touching this module — the pure reconciler and its migrator are already ready.
-
-3. **No SAP AI Core provider surface was touched.** All changes are additive at the core / session-management layer; the provider layer (`src/providers/sapOrchestration.ts`, `src/providers/index.ts`) is unchanged. SAP AI Core compatibility is preserved.
-
-4. **All new tests are colocated under `src/**/__tests__/`** which matches the vitest include glob `src/**/*.test.ts`.
-
-5. **ESLint style respected**: `no-console` allowlist bypassed only via `// eslint-disable-next-line no-console` for the two best-effort warning paths in `sessionBusy.ts`; `curly: all`, `eqeqeq`, and single-quote conventions maintained; all local imports use `.js` extensions as required by NodeNext ESM.
+- The update plan was truncated mid-item-6 in the input. Items 1–6
+  (2 critical + 4 high) were fully specified and have been executed.
+  The plan's stated totals (14 changes across critical/high/medium/low)
+  could not be honoured for items 7–14 because their file targets and
+  code diffs were not present in the received prompt. Per the
+  execution instructions ("Do NOT add extra changes not in the plan"),
+  I did not fabricate items 7–14 — those should be re-issued with a
+  fresh (non-truncated) plan.
+- No downstream call sites for the new `recoverStalledPermissions()`
+  hook exist yet beyond `sessionManager.createSession()`; the hook
+  point in `askUser()` that would register prompts via
+  `trackPendingPermission()` is deliberately NOT patched here because
+  it changes an already-tested code path. Suggested follow-up: wire
+  `trackPendingPermission` / `clearPendingPermission` into
+  `PermissionManager.askUser()` in a separate commit with its own
+  test coverage.
+- `src/tool/code-mode-runtime.ts` is intentionally NOT created — the
+  shim in `code-mode.ts` refers to it via a dynamic import and
+  gracefully returns `null` when the module is absent, so the config
+  gate can land ahead of the sandbox implementation.
