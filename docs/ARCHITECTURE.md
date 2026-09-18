@@ -1565,6 +1565,86 @@ When `git diff` returns an empty string the executor returns
 `{ success: true, review: 'No changes to review.', modelUsed: '', totalTokens: 0 }` without
 invoking `sendChat`. Both interactive surfaces and the CLI handle this transparently.
 
+### VCS Provider Detection (`src/git/remoteDetection.ts`, `src/git/urlFormatter.ts`)
+
+The non-interactive CLI (`src/cli/commands/codeReview.ts`) is provider-aware for two output concerns — the terminology used in status lines ("MR" vs "PR"), and gating of the GitHub-only `--comment` path — while the review itself remains provider-agnostic. Detection is a **strictly additive** step: any failure resolves to `null` and the command falls back to its pre-existing GitHub-shaped behaviour. No new required dependencies were introduced.
+
+Public surface:
+
+```typescript
+// src/git/remoteDetection.ts
+export type VCSProvider = 'github' | 'gitlab' | 'bitbucket';
+export interface VCSRemote { provider: VCSProvider; org: string; repo: string }
+
+export function parseRemoteUrl(url: string): VCSRemote | null;
+export function parseRemoteVOutput(stdout: string): VCSRemote | null;
+export async function detectVCSProvider(workdir: string): Promise<VCSRemote | null>;
+
+// src/git/urlFormatter.ts
+export interface FormatMRPRUrlArgs {
+  provider: VCSProvider;
+  org: string;
+  repo: string;
+  number: number;
+}
+export function formatMRPRUrl(args: FormatMRPRUrlArgs): string;
+export function requestNoun(provider: VCSProvider): 'MR' | 'PR';
+```
+
+Supported hostname mapping (case-insensitive substring match, `HOST_MAP` in `src/git/remoteDetection.ts`):
+
+| Host substring | Provider |
+|----------------|----------|
+| `github.com` | `github` |
+| `gitlab.com` | `gitlab` |
+| `bitbucket.org` | `bitbucket` |
+
+Self-hosted GitLab / Bitbucket instances are intentionally out of scope — they fall through to `null` and the CLI treats them as GitHub-shaped. Recognised URL shapes per host (in probe order): scp-style SSH (`git@<host>:<org>/<repo>(.git)?`), `ssh://` (`ssh://git@<host>/<org>/<repo>(.git)?`), and HTTPS (`https://<host>/<org>/<repo>(.git)?`). Trailing `.git` and trailing `/` are stripped.
+
+`parseRemoteVOutput` walks the raw stdout of `git remote -v`, one line per `<name>\t<url> (fetch|push)` entry, and prefers a remote named `origin` when it points at a supported host — otherwise it returns the first supported remote seen. `detectVCSProvider(workdir)` shells out to `execFile('git', ['remote', '-v'], { cwd: workdir, maxBuffer: 1 MB })` inside a promise that never rejects: an `ENOENT` (git missing), a non-zero exit, or an unparseable output all resolve to `null`.
+
+Provider-specific URL formatting is centralised in `formatMRPRUrl` so agent PR flows, hooks, and MCP tools can reuse the same shape without pulling in additional dependencies:
+
+| Provider | URL template |
+|----------|--------------|
+| `github` | `https://github.com/<org>/<repo>/pull/<n>` |
+| `gitlab` | `https://gitlab.com/<org>/<repo>/-/merge_requests/<n>` |
+| `bitbucket` | `https://bitbucket.org/<org>/<repo>/pull-requests/<n>` |
+
+`formatMRPRUrl` throws on a non-integer or non-positive `number` and on an empty `org` / `repo`, and uses a `never`-typed exhaustiveness guard on `provider` so a new value added to `VCSProvider` becomes a compile-time error until the switch statement covers it.
+
+CLI decision flow when `--comment` is set:
+
+```mermaid
+flowchart TB
+    Start["alexi code-review --comment"] --> Detect["detectVCSProvider(workdir)"]
+    Detect --> Result{Remote detected?}
+    Result -->|null| GH1["noun = 'PR'<br/>commentPassthrough = opts.comment"]
+    Result -->|github| GH2["noun = 'PR'<br/>commentPassthrough = opts.comment"]
+    Result -->|gitlab| Skip1["noun = 'MR'<br/>commentPassthrough = false<br/>warn: skipping MR comment posting"]
+    Result -->|bitbucket| Skip2["noun = 'PR'<br/>commentPassthrough = false<br/>warn: skipping PR comment posting"]
+    Skip1 --> EnvLookup
+    Skip2 --> EnvLookup
+    EnvLookup["tryFormatEnvMRPRUrl(remote)<br/>ALEXI_MR_NUMBER / ALEXI_PR_NUMBER<br/>→ CI_MERGE_REQUEST_IID (gitlab)<br/>→ BITBUCKET_PR_ID (bitbucket)"] --> Have{Number valid?}
+    Have -->|Yes| PrintURL["stderr: detected MR/PR: <url>"]
+    Have -->|No| Continue
+    PrintURL --> Continue
+    GH1 --> Continue
+    GH2 --> Continue
+    Continue["executeCodeReview({ comment: commentPassthrough, ... })"]
+```
+
+The `tryFormatEnvMRPRUrl` helper (`src/cli/commands/codeReview.ts:38`) tries in order:
+
+1. `ALEXI_MR_NUMBER` (generic override, both providers)
+2. `ALEXI_PR_NUMBER` (generic override, both providers)
+3. `CI_MERGE_REQUEST_IID` — only when `remote.provider === 'gitlab'`
+4. `BITBUCKET_PR_ID` — only when `remote.provider === 'bitbucket'`
+
+A non-integer or non-positive value at any step yields `undefined` and the URL line is silently omitted — the skip warning still fires so the operator knows why `--comment` did not run.
+
+Test coverage lives in `tests/git/remoteDetection.test.ts` (14 cases across HTTPS / scp-SSH / `ssh://` shapes, trailing-slash tolerance, unsupported hosts, empty input, malformed remotes, and the `origin`-preferred / first-supported-fallback ordering in `parseRemoteVOutput`) and `tests/git/urlFormatter.test.ts` (URL shape per provider, `throw`-on-invalid-number, `throw`-on-empty-org/repo, and `requestNoun` mapping).
+
 ## Network Management
 
 The `NetworkManager` class (`src/core/network.ts`) provides automatic reconnection with exponential backoff to prevent session loss during network interruptions:

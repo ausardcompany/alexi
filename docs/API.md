@@ -501,6 +501,60 @@ alexi code-review [options]
 | `--base <branch>` | string | _(uncommitted)_ | Compare against this base branch instead of `HEAD`. |
 | `--model <id>` | string | _(routed by effort)_ | Override the model used for the review. Takes precedence over effort-based routing. |
 | `--workdir <path>` | string | `process.cwd()` | Working directory for the `git diff` invocation. |
+| `--fix` | boolean | `false` | Apply `MUST FIX` findings as edits via the agentic loop after the review completes. |
+| `--fix-max <n>` | integer | `10` | Maximum findings to auto-apply when `--fix` is set. |
+| `--comment` | boolean | `false` | Post findings to the current GitHub PR via `gh api`. **GitHub-only**: on GitLab or Bitbucket remotes the flag is skipped and a stderr warning is emitted (see [VCS-aware output](#vcs-aware-output) below). |
+| `--comment-dry-run` | boolean | `false` | Print the planned `gh api` invocations without executing them. Useful for previewing PR comments before an actual post. |
+
+#### VCS-aware output
+
+`src/cli/commands/codeReview.ts` runs a best-effort `git remote -v` detection at the top of the command (`detectVCSProvider` from `src/git/remoteDetection.ts`) and adjusts two things when the current remote is GitLab or Bitbucket instead of GitHub:
+
+1. **Terminology.** The final summary line uses `MR` on GitLab remotes and `PR` on GitHub / Bitbucket, so the wording matches the destination host:
+
+   ```text
+   [code-review] MR comments: 3 posted, 0 skipped     # GitLab
+   [code-review] PR comments: 3 posted, 0 skipped     # GitHub / Bitbucket
+   ```
+
+2. **`--comment` gating.** `--comment` posts via `gh api`, which only speaks the GitHub REST API. On a non-GitHub remote the flag is suppressed with a stderr message and, when a CI environment variable carries the MR/PR number, the equivalent URL is printed so operators can navigate manually:
+
+   ```text
+   [code-review] --comment is GitHub-only; skipping MR comment posting for gitlab remote
+   [code-review] detected MR: https://gitlab.com/<org>/<repo>/-/merge_requests/42
+   ```
+
+   MR/PR number lookup order (first match wins): `ALEXI_MR_NUMBER`, `ALEXI_PR_NUMBER`, then (per provider) `CI_MERGE_REQUEST_IID` (GitLab CI) or `BITBUCKET_PR_ID` (Bitbucket Pipelines). Non-integer or non-positive values are ignored — the skip warning still fires without a URL.
+
+Detection is intentionally best-effort: a missing `git` binary, a non-zero `git remote -v` exit code, an unparseable output, or a remote pointing at a host other than `github.com` / `gitlab.com` / `bitbucket.org` (including self-hosted GitLab / Bitbucket) all resolve to `null`. In that case the noun defaults to `PR` and `--comment` is left untouched, preserving the pre-change GitHub-only behaviour.
+
+The shared VCS helpers live under `src/git/` and are also usable programmatically:
+
+```typescript
+import { detectVCSProvider, type VCSRemote } from './src/git/remoteDetection.js';
+import { formatMRPRUrl, requestNoun } from './src/git/urlFormatter.js';
+
+const remote: VCSRemote | null = await detectVCSProvider(process.cwd());
+if (remote) {
+  const url = formatMRPRUrl({
+    provider: remote.provider,   // 'github' | 'gitlab' | 'bitbucket'
+    org: remote.org,
+    repo: remote.repo,
+    number: 42,
+  });
+  console.log(`${requestNoun(remote.provider)}: ${url}`);
+}
+```
+
+Format shapes:
+
+| Provider | URL template |
+|----------|--------------|
+| `github` | `https://github.com/<org>/<repo>/pull/<n>` |
+| `gitlab` | `https://gitlab.com/<org>/<repo>/-/merge_requests/<n>` |
+| `bitbucket` | `https://bitbucket.org/<org>/<repo>/pull-requests/<n>` |
+
+`formatMRPRUrl` throws on an invalid `number` (non-integer or `<= 0`) or an empty `org` / `repo`, and uses a `never`-typed exhaustiveness guard to reject unknown providers at type-check time.
 
 #### Examples
 

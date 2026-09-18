@@ -5425,3 +5425,26 @@ Assertion patterns:
 - **Singleton behaviour.** `getDraftCache() === getDraftCache()` is `true` within a process. `resetDraftCache()` produces a fresh singleton so the next `getDraftCache()` returns a different instance.
 
 Prefer constructing a local `new DraftCache()` in test bodies over `getDraftCache()`. The singleton is convenient for production callers that have no natural lifetime to hang an instance off, but tests should keep instances local for isolation.
+
+## Testing VCS remote detection and MR/PR URL formatting
+
+`tests/git/remoteDetection.test.ts` (117 lines, 14 cases) and `tests/git/urlFormatter.test.ts` (57 lines) pin the helpers introduced to make `alexi code-review` provider-aware. Both suites are pure — no filesystem, no `execFile`, no network — and run in single-digit milliseconds.
+
+`parseRemoteUrl` and `parseRemoteVOutput` are exported explicitly so tests can exercise the parser in isolation without shelling out to `git`. `detectVCSProvider` itself (the async `execFile` wrapper) is deliberately NOT covered by a unit test — the `execFile` promise wrapper is trivial and any regression would surface in the parser tests.
+
+Assertion patterns:
+
+- **Per-URL shape coverage.** Exercise every accepted URL flavour for each supported provider: `https://github.com/foo/bar.git`, `git@github.com:foo/bar.git`, `ssh://git@github.com/foo/bar.git`, and the same three shapes for `gitlab.com` and `bitbucket.org`. Each `parseRemoteUrl` call must return `{ provider, org, repo }` with the trailing `.git` stripped.
+- **Trailing slash tolerance.** `https://github.com/foo/bar/` must parse identically to `https://github.com/foo/bar` and `https://github.com/foo/bar.git`.
+- **Negative cases return `null`.** Unsupported hosts (`https://example.com/foo/bar.git`), empty input, and malformed remotes missing the repo segment (`https://github.com/foo`) all return `null` — do NOT throw, callers rely on graceful degradation.
+- **`origin` preference.** `parseRemoteVOutput` prefers a supported `origin` even when other supported remotes precede it in the `git remote -v` output. Include a fixture with `upstream` on `github.com` and `origin` on `gitlab.com` and assert the parsed remote is the GitLab one.
+- **First-supported fallback.** When `origin` points at an unsupported host but a later remote (e.g. `gh`) points at a supported one, the parser returns the first supported remote.
+- **No supported remote.** When every line points at an unsupported host, the parser returns `null`, not an error.
+- **URL formatting.** `formatMRPRUrl` produces the documented shape per provider:
+  - `github` → `https://github.com/<org>/<repo>/pull/<n>`
+  - `gitlab` → `https://gitlab.com/<org>/<repo>/-/merge_requests/<n>`
+  - `bitbucket` → `https://bitbucket.org/<org>/<repo>/pull-requests/<n>`
+- **`formatMRPRUrl` throws on bad input.** Non-integer numbers (`1.5`), non-positive numbers (`0`), and empty `org` or `repo` must throw with a message that identifies the offending field. Use `expect(() => ...).toThrow(/invalid MR\/PR number/)` and `.toThrow(/missing org or repo/)` — these regexes are stable and mirror the exceptions thrown in `src/git/urlFormatter.ts`.
+- **`requestNoun` mapping.** `requestNoun('gitlab') === 'MR'`, `requestNoun('github') === 'PR'`, `requestNoun('bitbucket') === 'PR'`.
+
+The exhaustiveness guard on `provider` in `formatMRPRUrl` is a compile-time check — do NOT write a runtime test that passes an invalid provider (TypeScript prevents it, and forcing it via `as never` proves nothing). When a fourth provider is added, the switch statement will fail to compile until it is handled, which is the desired signal.
