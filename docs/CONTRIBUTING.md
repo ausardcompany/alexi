@@ -2075,6 +2075,54 @@ Added in the 2026-09-17 sync. The in-memory cache in `src/session/draft.ts` is t
 
 If a durable variant is added (crash-recovery across process restart), it MUST implement the `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) and preserve the empty-value eviction semantics — the reconciler and the callers depend on it.
 
+## Programmatic Tool Calling (`experimental.code_mode`)
+
+Added in the 2026-09-18 sync. `src/tool/code-mode.ts` is the ONLY entry point that should observe `experimental.code_mode`. When wiring a caller that wants to route MCP tool calls through the confined runtime:
+
+- Call `loadCodeMode()` — do NOT read the config flag directly. The helper folds in three orthogonal gates (config, network-restriction env, runtime-load failure) and every regression on any one gate is caught by the unit tests in `src/tool/__tests__/code-mode.test.ts` (add coverage there for any new gate).
+- Treat a `null` return as the normal fallback — the direct-tool path stays fully supported. Do NOT hard-fail or log an error when `null` is returned; the runtime returns `null` on purpose in air-gapped SAP AI Core deployments.
+- Do NOT import `./code-mode-runtime.js` statically. The dynamic import in `loadCodeMode()` keeps users who never enable the flag from paying an import cost.
+- When persisting the flag through the config setter, use `setConfigCodeMode(enabled)` — it preserves sibling `experimental.*` keys via a spread merge. Never write a fresh `{ code_mode: enabled }` object into `config.experimental` directly, or you will wipe unrelated experimental settings (`task_model_selection`, `background_tasks`, …).
+
+## Stalled Permission Approval Recovery (`recoverStalledPermissions`)
+
+Added in the 2026-09-18 sync. `src/permission/recovery.ts` is the recovery surface for pending `askUser()` prompts disrupted by an abort / hot-reload / provider re-init. When adding a new place that calls `askUser()` or persists a permission rule:
+
+- Wrap the in-flight prompt with `trackPendingPermission(id, resolver)` at the start and `clearPendingPermission(id)` when the response arrives normally. Missing either half leaves the entry either recovered-as-denied while the user IS answering (dropped answer) or permanently pending (memory leak).
+- Callers that do not persist a rule (transient one-shot approvals) still need the tracker so a session abort mid-prompt does not stall the tool pipeline.
+- Do NOT invoke `recoverStalledPermissions()` from inside a tool. The sweep is owned by `SessionManager.createSession()`; adding a second call site would race the dynamic import and log spurious warnings.
+- Recovery results are ALWAYS denials (`approved: false`). Never author a code path that treats a `stalled_recovery` or `save_aborted` result as an approval — that would silently escalate a tool call the user never sanctioned.
+- Add tests under `tests/permission/recovery.test.ts` (or `src/permission/__tests__/`) using `_resetPendingPermissionsForTests()` in `beforeEach` and `_getPendingPermissionCountForTests()` for assertions.
+
+## Sandbox `gh` Classification
+
+Added in the 2026-09-18 sync. `src/kilocode/sandbox/gh.ts` classifies GitHub CLI subcommands into `'readonly' | 'auth-gated' | 'write'`. When adding a new call site that shells out to `gh` or a new `gh` subcommand to the allow-list:
+
+- Consult `classifyGh(args)` or `isGhReadOnly(tokens)` rather than allow-listing the entire `gh` executable — the point of the classifier is that read-only subcommands do NOT trigger a permission prompt while writes and auth still do.
+- When adding a new subcommand to `GH_READONLY_SUBCOMMANDS`, prefer the two-word form (`'issue view'`, `'pr checks'`) so the classifier picks it up via the two-word key. Single-token entries (`'browse'`, `'help'`) exist only for subcommands that do not have a two-word shape.
+- Do NOT add anything that creates / updates / deletes remote state to the read-only set. In particular, `gh pr create`, `gh issue edit`, `gh release create`, and anything that opens an editor or uses `--web` must stay classified as `'write'`.
+- `gh auth *` subcommands stay in `GH_AUTH_SUBCOMMANDS` regardless of shape. Read-only-looking auth calls (`auth status`, `auth token`) still need the permission gate because the underlying auth material is sensitive.
+- New tests belong under `tests/kilocode/sandbox/gh.test.ts` (or the colocated `src/kilocode/sandbox/__tests__/gh.test.ts`). Cover the empty argv → `'readonly'` case, the flags-only case (`gh --version`), and both single-token and two-word matches.
+
+## Sandbox Git Masked-Mutation Detection
+
+Also in the 2026-09-18 sync. `isGitWrite()` in `src/kilocode/sandbox/git.ts` now flags read-only-shaped git invocations as writes when they carry a mutating flag (`-c`, `--config`, `--exec-path`, `--upload-pack`, `--receive-pack`, `--work-tree`, `--git-dir`). When adding a new global git flag to Alexi's shell tool or the classifier:
+
+- If the flag can change what binary runs (`--exec-path`, `--upload-pack`, `--receive-pack`), a config value (`-c`, `--config`), or the repo scope (`--work-tree`, `--git-dir`), it belongs in `MASKED_MUTATION_FLAGS`. Otherwise (e.g. `-C <path>`, which only changes cwd), it does not.
+- `expandShortFlagClusters` deliberately preserves numeric-tail short flags (`-n1`, `-C10`). Do NOT change this rule to split them — git's numeric short flags encode a value, not a flag list, and splitting `-n1` into `-n -1` would spuriously classify count-limited log queries as writes.
+- Ordering matters: the masked-mutation check MUST run BEFORE the read-only subcommand check so write intent wins. If you refactor `isGitWrite()`, keep this ordering explicit — a regression here would let `git -c core.hooksPath=... log` slip through the sandbox.
+- Add coverage for both `-c key=value` (single token) and `-c key=value` split into `-c`, `key=value` (two tokens). Both shapes exercise the same detector but through different tokeniser paths.
+
+## Deferred Session Title Generation (`ensureTitle`)
+
+Added in the 2026-09-18 sync. `src/kilocode/session/title.ts` defers title generation until after the first substantive user activity. When adding a new place that seeds a session title (a resume-from-JSON path, an import command, a TUI affordance):
+
+- Call `ensureTitle(sessionId, message, generate)` — do NOT bypass the gating rules by writing directly to the session's `title` field. The gating (attempt budget, backoff window, minimum message length) is the point of the module.
+- The `generate: TitleGenerator` callback stays caller-supplied so this module is decoupled from `src/providers/`. Do NOT hard-wire a specific provider inside `title.ts` — pass it in.
+- Call `resetTitleState(sessionId)` when closing a session so a re-used id starts fresh. `resetTitleState()` (no argument) is for test cleanup, not production close paths.
+- Do NOT lower `TITLE_MIN_MESSAGE_LENGTH` below `8` without pairing evidence — the threshold exists so a one-word ack ("yes", "ok", "no") does not seed a permanent title. If a lower threshold is really needed, add a per-caller override rather than moving the module constant.
+- Tests belong under `src/kilocode/session/__tests__/title.test.ts` using `_peekTitleStateForTests` for assertions and `_TITLE_*_FOR_TESTS` for constant references so the tests do not silently break if the constants are re-tuned.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
