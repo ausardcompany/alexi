@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Subagent approval boundaries — remove parent-approval inheritance** (`src/agent/subagent-permissions.ts`, `src/tool/tools/task.ts`, commit `d37f77ba` `feat(agent): enforce subagent approval boundaries without inheritance`): Ports upstream cline PR #14225. The `task` tool used to spawn subagents with `inheritPermissions: true`, which forwarded every parent-session permission rule — including interactive `allow` / `ask` decisions the operator had granted mid-turn. A subagent could therefore silently reuse a `write` grant negotiated by the parent without ever re-prompting. That flag has been removed and the derivation now enforces a stricter contract:
+
+  1. **Restrictions ARE inherited.** Parent `deny` rules, external-directory guards, plan-mode ceilings, and `disabledTools` on the parent agent are all forwarded to the subagent's ruleset so the delegate cannot bypass boundaries the parent already accepted.
+  2. **Approvals are NOT inherited.** Parent `allow` / `ask` rules are stripped when the subagent's permission set is derived. A subagent must either operate on the read-only baseline or hold an explicit approval configured on the `task` call itself.
+  3. **Explicit allow-list narrowing.** The `task` tool schema now accepts an optional `allowed_tools: string[]` parameter. When present, the subagent may only invoke tools whose names appear in the list plus a fixed baseline (`read`, `glob`, `grep`, `list`, `ls`, `task_status`). Every other side-effect-carrying tool (`write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash`, `shell`, `webfetch`, `delete`, `task`, `todowrite`) is explicitly denied with priority 2000.
+  4. **Bash command denies for delegated agents.** When the subagent is the `explore` agent (or any caller supplies a `bashRules` map), each `deny`-marked bash pattern is translated into a command-based deny rule (priority 1500) so escapes such as `find -delete` or `gh *` remain closed even if `bash` itself is on the allow-list.
+
+  Public surface changes:
+
+  - `src/agent/subagent-permissions.ts`
+    - New exported interface `DeriveSubagentSessionPermissionInput { parentSessionPermission, parentAgent, subagent, allowedTools?, bashRules? }`.
+    - `deriveSubagentSessionPermission(input)` now takes a single input object and returns the composed deny-only rule list ordered as `[parentAgentDenies, sessionDeniesAndExternal, defaultDenies, explicitDenies, bashDenies]`.
+    - `BASELINE_SUBAGENT_TOOLS` is the canonical baseline used to compute the allow-set intersection.
+  - `src/tool/tools/task.ts`
+    - New `allowed_tools: string[]` schema field on `TaskParamsSchema`.
+    - `SubagentOptions` gains `parentAgent`, `parentSessionPermission`, `allowedTools`; `inheritPermissions` is retained solely as a `@deprecated` no-op field for source-compat and is ignored by `buildSubagentConfig`.
+    - `SubagentConfig` gains a required `permission: PermissionRule[]` and an optional `allowedTools: readonly string[]`.
+    - `TaskTool.buildSubagentConfig(context, subagent, options?)` — the signature now takes the `Agent` explicitly and derives the permission ruleset through `deriveSubagentSessionPermission`. Callers that were reaching into the TODO comment with a hand-rolled permission block can drop that scaffolding.
+
+  Test coverage (`tests/tool/tools/task-approval-boundary.test.ts`, 291 lines, 9 cases): parent `allow` rules for `bash` / `write` are stripped from the derived set; parent `deny` rules are preserved; `allowedTools: ['read', 'grep']` produces explicit deny rules for `write` / `edit` / `bash` / `shell` / `webfetch` / `multiedit` / `apply_patch`; `allowedTools: ['bash', 'read']` does NOT deny `bash`; empty `allowedTools: []` denies every dangerous tool even if the parent had approved them; a limited parent agent (`tools: ['read', 'grep']`) yields `write` and `shell` / `bash` denies via the parent-restriction path even without an explicit allow-list; the `explore` subagent adds command-based bash denies for `gh *` and `find *`; parent `ask` rules are stripped; `SubagentConfig.allowedTools` echoes the caller's list; `taskTool.execute` accepts the new `allowed_tools` schema field.
+
+  Companion coverage — `tests/tool/tools/task-abort-propagation.test.ts` (236 lines), `tests/tool/tools/task-depth-limit.test.ts` (245 lines), and `tests/tool/tools/task-failure-paths.test.ts` (154 lines) were updated to mock `../../../src/agent/index.js` via `vi.importActual + spread` so the real `getExploreAgentBashRules` / `isExploreAgent` exports remain reachable during `buildSubagentConfig`.
+
 ### Added
 
 - **`code-mode-runtime.ts` placeholder for the `experimental.code_mode` sandbox** (`src/tool/code-mode-runtime.ts`, commit `85e11d06` `fix(ci): add code-mode-runtime stub and format registry [autohealing]`): New 33-line stub module that resolves the dynamic import in `src/tool/code-mode.ts` at type-check time so the `experimental.code_mode` feature flag can be flipped on ahead of the confined-JavaScript sandbox landing. The real `isolated-vm` / worker + MCP on-demand tool cache is a multi-file port from upstream kilocode (`6b5e8a04e experimental.code_mode`) that will land in a follow-up commit; until then this stub keeps the loader wiring green under `tsc --noEmit` and the co-located tests without pretending the sandbox exists.
