@@ -96,14 +96,7 @@ export interface ToolResolutionContext {
  *   - `meta`: tools about the tool system itself (help, list, etc.).
  *   - `other`: unclassified — falls through category filters.
  */
-export type ToolCategory =
-  | 'read'
-  | 'write'
-  | 'execute'
-  | 'network'
-  | 'agent'
-  | 'meta'
-  | 'other';
+export type ToolCategory = 'read' | 'write' | 'execute' | 'network' | 'agent' | 'meta' | 'other';
 
 export interface PromptToolResolver {
   resolve(context: ToolResolutionContext): Promise<Tool<any, any>[]>;
