@@ -14,7 +14,10 @@ import type { ToolContext } from '../../../src/tool/index.js';
 // Mock the agent registry BEFORE importing the task tool. The `code` and
 // `explore` agents both need `mode !== 'primary'` so validation passes
 // and the depth check is what determines the outcome.
-vi.mock('../../../src/agent/index.js', () => {
+vi.mock('../../../src/agent/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/agent/index.js')>(
+    '../../../src/agent/index.js'
+  );
   const codeAgent = {
     id: 'code',
     name: 'Code Agent',
@@ -43,6 +46,7 @@ vi.mock('../../../src/agent/index.js', () => {
     },
   };
   return {
+    ...actual,
     getAgentRegistry: () => registry,
   };
 });
