@@ -2865,7 +2865,62 @@ Compaction and `sessionClose` are stubbed via `vi.mock` so `addMessage`'s auto-c
 - `abortSession` walks descendants breadth-first via `getSessionChildren` and aborts every session with an active run.
 - `endSessionRun` removes the parent-signal listener but leaves the controller intact (`signal.aborted === false`).
 
-A parallel suite in `tests/tool/tools/task-abort-propagation.test.ts` (233 lines) exercises the `task` tool's session-materialisation path: when the parent is already aborted at spawn time, the tool must refuse to start the subagent (returning `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of paying the cost of a provider request whose result no consumer will read. The `finally`-block `releaseSession` call is asserted for both the happy path and the cancellation path.
+A parallel suite in `tests/tool/tools/task-abort-propagation.test.ts` (236 lines) exercises the `task` tool's session-materialisation path: when the parent is already aborted at spawn time, the tool must refuse to start the subagent (returning `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of paying the cost of a provider request whose result no consumer will read. The `finally`-block `releaseSession` call is asserted for both the happy path and the cancellation path.
+
+### Testing subagent approval boundaries
+
+`tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.
+
+**Fixture pattern.** The suite mocks `../../../src/agent/index.js` with `vi.importActual + spread` so real exports (`getExploreAgentBashRules`, `isExploreAgent`) remain reachable while `getAgentRegistry` is replaced with an in-memory stub that returns `code` and `explore` agents:
+
+```typescript
+vi.mock('../../../src/agent/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/agent/index.js')>(
+    '../../../src/agent/index.js'
+  );
+  const codeAgent: Agent = { id: 'code', name: 'Code Agent', mode: 'all', /* ... */ };
+  const exploreAgent: Agent = { id: 'explore', name: 'Explore Agent', mode: 'subagent', /* ... */ };
+  return {
+    ...actual,
+    getAgentRegistry: () => ({
+      get: (idOrAlias: string) =>
+        idOrAlias === 'code' ? codeAgent : idOrAlias === 'explore' ? exploreAgent : undefined,
+    }),
+    isExploreAgent: (idOrAlias: string) => idOrAlias === 'explore',
+  };
+});
+
+import { TaskTool, taskTool, getTaskStore } from '../../../src/tool/tools/task.js';
+
+function hasDenyFor(rules: PermissionRule[], tool: string): boolean {
+  return rules.some((r) => r.decision === 'deny' && r.tools?.includes(tool));
+}
+
+function hasAllowFor(rules: PermissionRule[], tool: string): boolean {
+  return rules.some((r) => r.decision === 'allow' && r.tools?.includes(tool));
+}
+```
+
+**Contract points asserted.** Every case walks `TaskTool.buildSubagentConfig(context, subagent, options)` and inspects `config.permission` / `config.allowedTools`:
+
+1. **Parent allow rules are stripped.** Given `parentSessionPermission` containing `allow` rules for `bash` and `write`, `hasAllowFor(config.permission, 'bash')` must be `false` and the rule id `parent-allow-bash` must not appear in the derived set. This is the load-bearing assertion for the whole port.
+2. **Parent deny rules are forwarded.** A `deny` rule with `paths: ['**/.env']` on the parent survives into the subagent's permission list — inherited restrictions remain the safety floor.
+3. **Explicit `allowedTools: ['read', 'grep']` denies every non-baseline dangerous tool.** The derivation adds explicit deny rules for `write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash`, `shell`, `webfetch`, `delete`, `task`, `todowrite` — every tool in the internal `potentiallyDangerous` list that is not on the caller's allow-set. The two tools the caller explicitly granted (`read`, `grep`) are absent from the deny list.
+4. **`allowedTools` containing `bash` does not add a `subagent-deny-bash` rule.** The negative assertion catches a regression where the deny loop failed to consult the allow-set intersection.
+5. **Empty `allowedTools: []` denies every dangerous tool.** Even when the parent session pre-approved `bash`, an explicit empty allow-list narrows the subagent to the read-only baseline; both a `deny` for `bash` AND the absence of any inherited `allow` for `bash` are asserted.
+6. **Parent restrictions without an explicit allow-list.** A parent agent with `tools: ['read', 'grep']` yields the `parent-deny-write` and `parent-deny-shell` rules via the `parentAgentDenies` branch. No `subagent-deny-*` rules appear because `allowedTools` was `undefined`.
+7. **The `explore` subagent gets command-based bash denies.** The suite locates every `decision === 'deny'` rule whose `tools` array contains `bash` or `shell` AND that carries a `commands` array. The flattened patterns must contain `gh *` and `find *` — this is the guard for the delegated-agent hardening path.
+8. **Parent `ask` rules are stripped.** Same principle as (1) — an ask rule on the parent must not surface on the child. Interactive prompts for the parent are not re-asked on the child; the child must be denied outright unless explicitly allow-listed.
+9. **`SubagentConfig.allowedTools` echoes the caller's list.** `config.allowedTools` must be reference-preserving so downstream registry filtering can rely on the same array.
+
+**Schema round-trip.** Two additional cases drive `taskTool.execute` directly with `allowed_tools: ['read', 'grep']` and `allowed_tools: []` to confirm the new schema field is accepted end-to-end. The tool returns `success: true` in both cases — the assertion pins the schema validity and does not assert on subagent behaviour (which is exercised by the depth / abort / failure suites).
+
+Key patterns:
+
+1. **Assert on `hasDenyFor(...)` / `hasAllowFor(...)` helpers, not on exact rule objects.** The derivation adds internal ids (`subagent-deny-write`, `parent-deny-shell`) that are stable but implementation-scoped; predicate helpers keep the assertion focused on the observable contract (a specific tool is denied / allowed) without coupling to the exact id.
+2. **Import `TaskTool`, `taskTool`, AND `getTaskStore`.** The suite calls `getTaskStore().clear()` in `afterEach` so background-task entries from the schema-round-trip cases do not leak into other tests in the same file.
+3. **Mock via `vi.importActual + spread`, not a bare `vi.mock` factory.** Bare factories drop the real module surface, which breaks `buildSubagentConfig` at import time because it reaches for `getExploreAgentBashRules` and `isExploreAgent`. The three companion suites (`task-abort-propagation.test.ts`, `task-depth-limit.test.ts`, `task-failure-paths.test.ts`) were updated to the same shape in the same commit — copy that pattern when adding a new task-tool test file.
+4. **Do NOT assert on `constructor` or class-name shapes for the derivation output.** `deriveSubagentSessionPermission` returns plain `PermissionRule[]` objects; asserting on prototype chain would fail after any refactor that inlines rule construction.
 
 ## Testing Minify-Safe Telemetry Detection
 

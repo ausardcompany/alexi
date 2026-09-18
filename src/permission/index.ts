@@ -1058,3 +1058,18 @@ export function setPermissionManager(manager: PermissionManager): void {
 
 // Export prompt functionality
 export { startPermissionPromptHandler, isPermissionPromptSupported } from './prompt.js';
+
+// Alexi_change: recovery entry points for stalled permission approvals.
+// Callers running session-resume / provider re-init flows should invoke
+// `recoverStalledPermissions()` to drain any prompts whose deadline has
+// passed instead of blocking the tool pipeline forever. See
+// `src/permission/recovery.ts` for the full contract.
+export {
+  recoverStalledPermissions,
+  reconcileAbortedSave,
+  trackPendingPermission,
+  clearPendingPermission,
+  _resetPendingPermissionsForTests,
+  _getPendingPermissionCountForTests,
+  type PermissionRecoveryResult,
+} from './recovery.js';

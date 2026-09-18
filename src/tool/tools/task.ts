@@ -27,7 +27,14 @@
 
 import { z } from 'zod';
 import { defineTool, type ToolResult, type ToolContext } from '../index.js';
-import { getAgentRegistry, type Agent } from '../../agent/index.js';
+import {
+  getAgentRegistry,
+  getExploreAgentBashRules,
+  isExploreAgent,
+  type Agent,
+} from '../../agent/index.js';
+import { deriveSubagentSessionPermission } from '../../agent/subagent-permissions.js';
+import type { PermissionRule } from '../../permission/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
 import { getConfigTaskModelSelection, isBoardEnabled } from '../../config/userConfig.js';
@@ -102,18 +109,73 @@ const TaskParamsSchema = z.object({
     .describe(
       'Optional reasoning effort hint for reasoning-capable models. Requires experimental.task_model_selection.'
     ),
+  // Explicit approval boundary for the spawned subagent. When provided,
+  // the subagent's session permission is narrowed to this list plus a
+  // safe baseline (read/glob/grep/list). Parent-session approvals are
+  // NEVER inherited — see docs/security section in
+  // `src/agent/subagent-permissions.ts`. Ports upstream cline #14225.
+  allowed_tools: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Explicit list of tools the subagent may invoke. Parent approvals are NOT inherited; leave undefined to keep the baseline read-only surface. Empty array = deny all non-baseline tools.'
+    ),
 });
 
 // Task tool utility interfaces
 export interface SubagentOptions {
   autoMode?: boolean;
+  /**
+   * When `true`, forwards parent-session ALLOW/ASK rules verbatim to the
+   * subagent. Defaults to `false` and should stay that way: subagents
+   * are only allowed to run tools that are either baseline (read-only)
+   * or explicitly listed in the `task` call's `allowed_tools`. See
+   * `src/agent/subagent-permissions.ts` for the security contract.
+   *
+   * @deprecated Retained only so external callers relying on the shape
+   * of `SubagentOptions` don't break at compile time; the field is
+   * intentionally ignored by `buildSubagentConfig`. Cline #14225.
+   */
   inheritPermissions?: boolean;
   maxDepth?: number;
+  /**
+   * Parent-agent context used to derive subagent RESTRICTIONS
+   * (`disabledTools`, limited `tools` list, etc.). Restrictions ARE
+   * inherited so the subagent cannot bypass a parent's plan-mode /
+   * read-only guardrails; approvals are NOT. When undefined, only
+   * baseline restrictions are applied.
+   */
+  parentAgent?: Agent;
+  /**
+   * Current parent-session permission ruleset. Only DENY /
+   * external_directory rules are forwarded to the subagent's derived
+   * permission. Parent ALLOW/ASK rules are dropped so a parent's
+   * interactive approvals never propagate to the delegate.
+   */
+  parentSessionPermission?: readonly PermissionRule[];
+  /**
+   * Explicit approval boundary for the subagent (see `allowed_tools`
+   * schema field).
+   */
+  allowedTools?: readonly string[];
 }
 
 export interface SubagentConfig {
   autoMode: boolean;
   maxDepth: number;
+  /**
+   * Derived permission ruleset the subagent's session should run under.
+   * Combines inherited restrictions (deny rules, external-directory,
+   * plan-mode guardrails) with explicit allow-list narrowing when the
+   * caller provided `allowed_tools`. Never contains parent ALLOW rules.
+   */
+  permission: PermissionRule[];
+  /**
+   * The final tool allow-list surfaced to the subagent's registry. When
+   * `allowedTools` was supplied on the `task` call, this reflects it;
+   * otherwise the subagent falls back to its own registered surface.
+   */
+  allowedTools?: readonly string[];
 }
 
 // Task tool utilities
@@ -135,15 +197,36 @@ export const TaskTool = {
   },
 
   /**
-   * Build configuration for spawning a subagent.
-   * Propagates relevant flags from parent context.
+   * Build configuration for spawning a subagent. Derives the subagent's
+   * permission ruleset from parent RESTRICTIONS while explicitly refusing
+   * to forward parent APPROVALS — subagents only have approvals that
+   * were explicitly configured on this `task` call via `allowed_tools`.
+   *
+   * Ports upstream cline #14225 (remove inherited approvals from
+   * subagent runtime config).
    */
-  buildSubagentConfig(_parentCtx: ToolContext, options: SubagentOptions = {}): SubagentConfig {
-    // Note: context.flags would need to be added to ToolContext type
-    // For now, we prepare the structure for future integration
+  buildSubagentConfig(
+    _parentCtx: ToolContext,
+    subagent: Agent,
+    options: SubagentOptions = {}
+  ): SubagentConfig {
+    const bashRules = isExploreAgent(subagent.id) ? getExploreAgentBashRules() : undefined;
+
+    const permission = deriveSubagentSessionPermission({
+      parentSessionPermission: options.parentSessionPermission
+        ? [...options.parentSessionPermission]
+        : [],
+      parentAgent: options.parentAgent,
+      subagent,
+      allowedTools: options.allowedTools,
+      bashRules,
+    });
+
     return {
       autoMode: options.autoMode ?? false, // Would be: parentCtx.flags?.auto ?? false
       maxDepth: options.maxDepth ?? getMaxSubagentDepth(),
+      permission,
+      allowedTools: options.allowedTools,
     };
   },
 };
@@ -533,33 +616,20 @@ Usage:
       content: params.prompt,
     });
 
-    // TODO: When full session/permission integration is added, use deriveSubagentSessionPermission
-    // to inherit edit, bash, and MCP restrictions from the calling agent to prevent privilege
-    // escalation. Sub-agents must inherit restrictions so they cannot bypass parent agent permissions.
+    // Build subagent configuration. `deriveSubagentSessionPermission`
+    // enforces the security contract: parent RESTRICTIONS (deny rules,
+    // disabled tools, external-directory guards, plan-mode ceilings) are
+    // forwarded, parent APPROVALS are NOT. The subagent may only invoke
+    // tools that (a) sit on the read-only baseline or (b) were listed
+    // explicitly in `params.allowed_tools`. Ports upstream cline #14225.
     //
-    // For the `explore` subagent in particular, merge `getExploreAgentBashRules()` from
-    // `src/agent/index.ts` on top of the derived ruleset — the explore agent is delegated
-    // and cannot answer permission prompts, so `gh *` and `find *` must be strict denies
-    // (kilocode 3a99f36d9).
-    //
-    // Example integration (requires session context in ToolContext):
-    // import { deriveSubagentSessionPermission } from '../../agent/subagent-permissions.js';
-    // import { getExploreAgentBashRules, isExploreAgent } from '../../agent/index.js';
-    // const subagentPermission = deriveSubagentSessionPermission({
-    //   parentSessionPermission: context.session.permission,
-    //   parentAgent: context.agent,
-    //   subagent: agent,
-    // });
-    // if (isExploreAgent(agent.id)) {
-    //   subagentPermission.bash = { ...subagentPermission.bash, ...getExploreAgentBashRules() };
-    // }
-    //
-    // See src/agent/subagent-permissions.ts for implementation.
-
-    // Build subagent configuration with auto flag propagation
-    const subagentConfig = TaskTool.buildSubagentConfig(context, {
+    // For the `explore` subagent in particular, the derivation merges
+    // `getExploreAgentBashRules()` — `gh *` and `find *` must remain
+    // strict denies because the explore agent cannot answer permission
+    // prompts (kilocode 3a99f36d9).
+    const subagentConfig = TaskTool.buildSubagentConfig(context, agent, {
       autoMode: false, // TODO: Extract from context.flags when available
-      inheritPermissions: true,
+      allowedTools: params.allowed_tools,
     });
 
     // Handle background task execution

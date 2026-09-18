@@ -71,7 +71,32 @@ export interface ToolResolutionContext {
   sessionId: string;
   agentId?: string;
   permissions: string[];
+  /**
+   * Optional category filter — when set, `resolveForPrompt` only returns
+   * tools whose declared `category` is in the allow-list. Used by the
+   * agent factory to trim the tool catalog for role-specialised subagents
+   * (e.g. a review-only agent should not see filesystem-write tools).
+   *
+   * Ports upstream opencode `registry.ts` refactor (+25 / -11) that
+   * introduced first-class categorisation for tool selection at prompt
+   * time. Passing `undefined` (or an empty array) disables the filter
+   * for backwards compatibility.
+   */
+  categories?: readonly ToolCategory[];
 }
+
+/**
+ * Tool category taxonomy. Mirrors the upstream opencode categorisation:
+ *
+ *   - `read`: filesystem reads, repo/context lookup, git query.
+ *   - `write`: filesystem writes, edits, patches, diff application.
+ *   - `execute`: shell / subprocess execution.
+ *   - `network`: web search, HTTP fetch, MCP endpoints that reach out.
+ *   - `agent`: agent-manager / task / subagent orchestration.
+ *   - `meta`: tools about the tool system itself (help, list, etc.).
+ *   - `other`: unclassified — falls through category filters.
+ */
+export type ToolCategory = 'read' | 'write' | 'execute' | 'network' | 'agent' | 'meta' | 'other';
 
 export interface PromptToolResolver {
   resolve(context: ToolResolutionContext): Promise<Tool<any, any>[]>;
@@ -114,15 +139,31 @@ export class EnhancedToolRegistry {
   /**
    * Resolve tools for a given prompt context
    * Handles both static and dynamic tool resolution
+   *
+   * Alexi_change (upstream opencode registry refactor +25 / -11): when
+   * `context.categories` is provided, static tools are filtered so only
+   * those declaring a matching `category` (via the tool's optional
+   * `category` field) are returned. Tools without an explicit category
+   * are treated as `other` and pass the filter only when the caller
+   * includes `other` in the allow-list. Dynamic prompt resolvers are
+   * still consulted — they own their own filtering.
    */
   async resolveForPrompt(context: ToolResolutionContext): Promise<Tool<any, any>[]> {
     const resolvedTools: Tool<any, any>[] = [];
+    const categoryFilter =
+      context.categories && context.categories.length > 0
+        ? new Set<ToolCategory>(context.categories)
+        : null;
 
-    // Add static tools that match permissions
+    // Add static tools that match permissions (and category filter, if any)
     for (const [_name, tool] of this.tools) {
-      if (this.hasPermission(tool, context.permissions)) {
-        resolvedTools.push(tool);
+      if (!this.hasPermission(tool, context.permissions)) {
+        continue;
       }
+      if (categoryFilter && !this.matchesCategory(tool, categoryFilter)) {
+        continue;
+      }
+      resolvedTools.push(tool);
     }
 
     // Resolve dynamic prompt tools
@@ -137,6 +178,11 @@ export class EnhancedToolRegistry {
     }
 
     return resolvedTools;
+  }
+
+  private matchesCategory(tool: Tool<any, any>, filter: ReadonlySet<ToolCategory>): boolean {
+    const declared = (tool as { category?: ToolCategory }).category ?? 'other';
+    return filter.has(declared);
   }
 
   private hasPermission(tool: Tool<any, any>, permissions: string[]): boolean {

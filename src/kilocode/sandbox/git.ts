@@ -10,6 +10,13 @@
  *
  * This module isolates the classification logic so the shell tool can
  * consult it without pulling in permission plumbing.
+ *
+ * Alexi_change (upstream 32aaae25d, 2da7e2bb7): hardened against masked
+ * mutations — read-only-looking git invocations that carry a mutating
+ * flag like `-c core.hooksPath=...`, `--exec-path`, `--upload-pack`,
+ * `--receive-pack`, `--work-tree`, or `--git-dir`. Write-flag / masked-
+ * mutation detection now runs BEFORE the read-only subcommand check so
+ * write intent takes precedence over apparent read-only shape.
  */
 
 /**
@@ -58,19 +65,91 @@ const GIT_WRITE_SUBCOMMANDS: ReadonlySet<string> = new Set([
 const GIT_FLAGS_WITH_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree']);
 
 /**
+ * Flags that can mask a mutation inside an otherwise read-only-shaped
+ * git invocation. `-c key=value` can override arbitrary git config
+ * for the invocation (including `core.hooksPath` — a code-execution
+ * vector). `--exec-path`, `--upload-pack`, `--receive-pack` all point
+ * git at a caller-controlled binary. `--work-tree` / `--git-dir` re-
+ * scope the operation onto a different repo the user did not intend
+ * to touch.
+ *
+ * Any of these turn "read-only" into "not read-only" regardless of
+ * the subcommand shape.
+ */
+const MASKED_MUTATION_FLAGS: ReadonlySet<string> = new Set([
+  '-c',
+  '--config',
+  '--exec-path',
+  '--upload-pack',
+  '--receive-pack',
+  '--work-tree',
+  '--git-dir',
+]);
+
+/**
+ * Expand short-flag clusters into individual flags. `-abc` becomes
+ * `-a -b -c`; a numeric-tail short flag like `-n1` is preserved
+ * verbatim because git's numeric short-flags (`-n<count>`) do not
+ * split. Long flags (`--foo`) and non-flag tokens pass through
+ * untouched.
+ */
+function expandShortFlagClusters(args: readonly string[]): string[] {
+  return args.flatMap((arg) => {
+    if (!arg.startsWith('-') || arg.startsWith('--')) {
+      return [arg];
+    }
+    const chars = arg.slice(1);
+    // Preserve `-n1`, `-C10`, etc. — numeric tail is a value, not a flag cluster.
+    if (/\d/.test(chars)) {
+      return [arg];
+    }
+    if (chars.length <= 1) {
+      return [arg];
+    }
+    return chars.split('').map((c) => `-${c}`);
+  });
+}
+
+/**
+ * True when any argument (or its `--flag=value` head) matches a
+ * masked-mutation flag.
+ */
+function hasMaskedMutation(args: readonly string[]): boolean {
+  return args.some((a) => {
+    const head = a.split('=')[0];
+    return head !== undefined && MASKED_MUTATION_FLAGS.has(head);
+  });
+}
+
+/**
  * Return true if `command` invokes a git subcommand that is known
  * to mutate repository state.
  *
  * Handles global-flag prefixes such as `git -C path subcommand ...`
  * and `git --git-dir=... subcommand ...` by walking past leading
  * options before checking the subcommand token.
+ *
+ * Also flags read-only-shaped subcommands as writes when they carry
+ * a masked-mutation flag (`-c`, `--exec-path`, `--upload-pack`,
+ * `--receive-pack`, `--work-tree`, `--git-dir`).
  */
 export function isGitWrite(command: string): boolean {
   const tokens = command.trim().split(/\s+/);
   if (tokens[0] !== 'git') {
     return false;
   }
-  // Skip global flags like `git -C path subcommand`
+
+  const rest = tokens.slice(1);
+  const expanded = expandShortFlagClusters(rest);
+
+  // 1. Masked mutation: an otherwise read-only-shaped invocation with
+  //    a mutating flag is treated as a write. Ordered FIRST so write
+  //    intent wins over any read-only subcommand classification.
+  if (hasMaskedMutation(expanded)) {
+    return true;
+  }
+
+  // 2. Walk past leading global flags to find the subcommand token.
   let i = 1;
   while (i < tokens.length && tokens[i]?.startsWith('-')) {
     // skip flag and its argument if it takes one

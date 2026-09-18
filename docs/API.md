@@ -1983,11 +1983,131 @@ isGitWrite('git commit -m msg');                    // true
 isGitWrite('git -C repo push origin main');         // true (walks past -C flag)
 isGitWrite('git log --oneline');                    // false (read-only)
 
+// Masked-mutation detection (2026-09-18, kilocode 32aaae25d + 2da7e2bb7):
+// read-only-looking subcommands are flagged as writes when they carry
+// a mutating global flag.
+isGitWrite('git -c core.hooksPath=/tmp/evil log');  // true (masked mutation via -c)
+isGitWrite('git --exec-path=/tmp/evil log');        // true (masked mutation via --exec-path)
+isGitWrite('git --git-dir=/other/repo log');        // true (masked scope change)
+
 const sandboxEnabled = process.env.ALEXI_SANDBOX === '1';
 if (requiresSandboxEscalation(command, sandboxEnabled)) {
   // prompt the user via getPermissionManager().check(...)
 }
 ```
+
+`MASKED_MUTATION_FLAGS` includes `-c`, `--config`, `--exec-path`, `--upload-pack`, `--receive-pack`, `--work-tree`, and `--git-dir`. Short-flag clusters are expanded (`-abc` → `-a -b -c`) so a `-c` embedded in a cluster is detected; numeric-tail short flags (`-n1`, `-C10`) are preserved verbatim.
+
+## Sandbox `gh` (GitHub CLI) API
+
+`src/kilocode/sandbox/gh.ts` (upstream kilocode `13e05d066`, `ecedeea49`, `700345267`, `15b6b3287`) classifies GitHub CLI subcommands so read-only calls (`gh pr list`, `gh issue view`, `gh run watch`, …) pass through the sandbox without a permission prompt, while writes and the auth-sensitive `gh auth *` subgroup still gate through the permission system.
+
+```typescript
+import { classifyGh, isGhReadOnly, type GhClassification } from '../kilocode/sandbox/gh.js';
+
+export type GhClassification = 'readonly' | 'auth-gated' | 'write';
+
+// Input is the argv AFTER `gh` itself.
+classifyGh(['pr', 'list']);                          // 'readonly'
+classifyGh(['pr', 'list', '--state', 'closed']);     // 'readonly' (flags do not change class)
+classifyGh(['pr', 'create']);                        // 'write'
+classifyGh(['auth', 'status']);                      // 'auth-gated'
+classifyGh(['auth']);                                // 'auth-gated' (bare `gh auth`)
+classifyGh([]);                                      // 'readonly' (bare `gh` prints help)
+
+// Convenience for the shell tool given tokens starting with `gh`.
+isGhReadOnly(['gh', 'pr', 'list']);                  // true
+isGhReadOnly(['gh', 'pr', 'create']);                // false
+isGhReadOnly(['git', 'log']);                        // false (defensive — first token must be 'gh')
+```
+
+The read-only allow-list intentionally excludes anything that creates / updates / deletes remote state, opens an editor, or takes a `--web` flag (`gh pr create --web`). The full set is `browse`, `config get`, `gist list`, `gist view`, `issue list`, `issue view`, `issue status`, `label list`, `pr list`, `pr view`, `pr status`, `pr checks`, `pr diff`, `release list`, `release view`, `repo list`, `repo view`, `run list`, `run view`, `run watch`, `search`, `workflow list`, `workflow view`, `help`, `version`, `--help`, `--version`.
+
+## Deferred Session Title API
+
+`src/kilocode/session/title.ts` (upstream kilocode `7e0ce5ec6`, `31bfc440c`, `4ab5fe935`) defers session title generation until after the first substantive user activity.
+
+```typescript
+import {
+  ensureTitle,
+  resetTitleState,
+  type TitleGenerator,
+} from '../kilocode/session/title.js';
+
+export type TitleGenerator = (sessionId: string, firstMessage: string) => Promise<string>;
+
+export async function ensureTitle(
+  sessionId: string,
+  message: string,
+  generate: TitleGenerator,
+): Promise<string | undefined>;
+
+export function resetTitleState(sessionId?: string): void;
+```
+
+Returns the cached title on success. Returns `undefined` when gated out — the message is shorter than `TITLE_MIN_MESSAGE_LENGTH = 8` after trimming, the attempt budget (`TITLE_MAX_ATTEMPTS = 3`) is exhausted, or the per-session backoff window (`TITLE_BACKOFF_MS = 60_000` ms after a failure) has not elapsed. Failures record `state.gatedUntil` and log a warning through `src/utils/logger.ts`.
+
+## Stalled Permission Approval Recovery API
+
+`src/permission/recovery.ts` (upstream kilocode `d8eaefdf1`, `f6d761e65`, `fa897b854`) reconciles pending permission prompts that were disrupted by an abort, hot-reload, or provider re-init. Re-exported from `src/permission/index.ts` so consumers can import from a single entry point.
+
+```typescript
+import {
+  recoverStalledPermissions,
+  reconcileAbortedSave,
+  trackPendingPermission,
+  clearPendingPermission,
+  type PermissionRecoveryResult,
+} from '../permission/index.js';
+
+export interface PermissionRecoveryResult {
+  approved: boolean;                                        // Always false — recovery denies.
+  reason: 'stalled_recovery' | 'save_aborted';
+}
+
+// Register a pending prompt so it can be reconciled on session resume.
+// Default timeoutMs is 5 * 60 * 1000 (5 minutes).
+export function trackPendingPermission(
+  id: string,
+  resolver: (result: PermissionRecoveryResult) => void,
+  timeoutMs?: number,
+): void;
+
+// Clear an entry that resolved normally (user answered before recovery ran).
+export function clearPendingPermission(id: string): void;
+
+// Sweep pending entries and reconcile any past their deadline as denials.
+// Returns the number of entries recovered.
+export function recoverStalledPermissions(): number;
+
+// Reconcile an aborted rule save. Resolves the pending entry keyed by
+// ruleId as a denial with reason 'save_aborted'. Returns true if an
+// entry was cleared.
+export function reconcileAbortedSave(ruleId: string): boolean;
+```
+
+`SessionManager.createSession()` invokes `recoverStalledPermissions()` on every session creation via a fire-and-forget dynamic import, so callers that go through the normal session-start path get recovery for free.
+
+## Programmatic Tool Calling API (`experimental.code_mode`)
+
+`src/tool/code-mode.ts` (upstream kilocode `6b5e8a04e`, `e0dcb0e4e`) routes MCP tool calls through a confined JavaScript runtime with on-demand tool discovery when the `experimental.code_mode` flag is set.
+
+```typescript
+import { loadCodeMode, type CodeMode } from '../tool/code-mode.js';
+
+export interface CodeMode {
+  dispatch(toolName: string, args: unknown): Promise<unknown>;
+  dispose(): Promise<void>;
+}
+
+// Returns null when experimental.code_mode is off, when the process is
+// network-restricted (ALEXI_NO_NETWORK=1 / NO_PROXY=*), or when the
+// runtime module fails to load. Fallback callers should use the direct
+// MCP tool path.
+export async function loadCodeMode(): Promise<CodeMode | null>;
+```
+
+The config flag lives at `experimental.code_mode` in `~/.alexi/config.json`. See [CONFIGURATION.md — `experimental.code_mode`](CONFIGURATION.md#experimental-code_mode) for the getter / setter surface.
 
 ## Native Notifications API
 

@@ -1543,6 +1543,52 @@ The flag lives inside a top-level `experimental` object so future experimental f
 
 See [ARCHITECTURE.md — Per-Task Model Selection](ARCHITECTURE.md#per-task-model-selection-srctoolmodel-selectionts) for the resolution flow diagram and public API.
 
+## Experimental Programmatic Tool Calling (`experimental.code_mode`)
+
+Introduced 2026-09-18 (`1.22.24`, ports upstream kilocode `6b5e8a04e`, `e0dcb0e4e`). Routes MCP tool calls through a confined JavaScript runtime with on-demand tool discovery instead of advertising every MCP tool directly on each turn. Reduces the tool-schema token overhead — critical against SAP AI Core token-metered deployments (opus / gpt-4-class), where every input token in the tool catalog is billed on every request.
+
+Default is `false` so vanilla SAP AI Core behaviour is preserved on upgrade.
+
+### Enabling
+
+Add the flag to `~/.alexi/config.json`:
+
+```json
+{
+  "experimental": {
+    "code_mode": true
+  }
+}
+```
+
+Or programmatically:
+
+```typescript
+import { setConfigCodeMode } from './config/userConfig.js';
+
+setConfigCodeMode(true);
+```
+
+The read helper `getConfigCodeMode()` returns `false` for missing, non-object, array, or non-boolean values — a corrupt config never accidentally enables the feature. `setConfigCodeMode(enabled)` merges the flag into the existing `experimental` object without clobbering sibling flags (e.g. `experimental.task_model_selection`).
+
+### Runtime gate
+
+`loadCodeMode()` (`src/tool/code-mode.ts`) is the single entry point callers use to obtain a runtime. It returns `null` (the direct-tool fallback path) when any of the following holds:
+
+1. `getConfigCodeMode()` returned `false` — flag disabled.
+2. The process is network-restricted. All of the following environments count as restricted:
+   - `ALEXI_NO_NETWORK=1`
+   - `ALEXI_NO_NETWORK=true`
+   - `NO_PROXY=*`
+   - `no_proxy=*`
+3. The dynamic import of `./code-mode-runtime.js` fails. A warning is logged via `src/utils/logger.ts` so operators can see the fallback engaged.
+
+Network-restricted air-gapped SAP AI Core deployments cannot fetch on-demand tool definitions, so falling back to the direct-tool path is the correct behaviour — running code_mode there would be worse than the direct-tool baseline.
+
+The runtime module is intentionally NOT eagerly imported — `loadCodeMode()` dynamic-imports it the first time the flag is observed, so users who never enable code_mode pay zero import cost.
+
+See [ARCHITECTURE.md — Programmatic Tool Calling (`experimental.code_mode`)](ARCHITECTURE.md#programmatic-tool-calling-experimentalcode_mode) for the runtime contract and [API.md — Programmatic Tool Calling API](API.md#programmatic-tool-calling-api-experimentalcode_mode) for the surface exposed to callers.
+
 ### JSON-encoded tool params tolerance (1.22.8)
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). The `agent_manager` tool's `config` field accepts either a native object or a JSON-encoded string:

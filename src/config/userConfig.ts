@@ -664,6 +664,43 @@ export function setConfigTaskModelSelection(enabled: boolean): void {
 }
 
 /**
+ * Experimental feature flag: `code_mode` — route MCP tool calls through
+ * a confined JavaScript runtime with on-demand tool discovery instead
+ * of exposing every MCP tool directly.
+ *
+ * Ports upstream `experimental.code_mode` (kilocode commit 6b5e8a04e).
+ * Reduces token overhead by not advertising every MCP tool to the model
+ * on every turn — important for SAP AI Core token budgets.
+ *
+ * Default is `false` so vanilla SAP AI Core behaviour is preserved.
+ * Non-boolean or missing values fall back to `false`.
+ */
+export function getConfigCodeMode(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return false;
+  }
+  const value = (experimental as Record<string, unknown>).code_mode;
+  return value === true;
+}
+
+/**
+ * Persist the `experimental.code_mode` flag.
+ */
+export function setConfigCodeMode(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, code_mode: enabled };
+  saveFullConfig(config);
+}
+
+/**
  * Experimental feature flag: enable the task-scoped shared agent board.
  *
  * Ports upstream kilocode `experimental.sharedAgentBoard` (2026-08 sync,

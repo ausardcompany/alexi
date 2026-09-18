@@ -17,7 +17,10 @@ import type { ToolContext } from '../../../src/tool/index.js';
 // Mock the agent registry BEFORE importing the task tool so the registry
 // returned to `taskTool.execute` is deterministic. The validate-failure
 // path requires `agent.mode === 'primary'` for the `explore` agent slot.
-vi.mock('../../../src/agent/index.js', () => {
+vi.mock('../../../src/agent/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/agent/index.js')>(
+    '../../../src/agent/index.js'
+  );
   const primaryExploreAgent = {
     id: 'explore',
     name: 'Explore Agent (forced primary)',
@@ -46,6 +49,7 @@ vi.mock('../../../src/agent/index.js', () => {
     },
   };
   return {
+    ...actual,
     getAgentRegistry: () => registry,
   };
 });

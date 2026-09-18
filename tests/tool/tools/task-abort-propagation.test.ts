@@ -18,7 +18,10 @@ import type { ToolContext } from '../../../src/tool/index.js';
 // `code` and `explore` agent lookups succeed with `mode !== 'primary'`
 // (validate() passes) and we exercise the abort path without needing a
 // real agent registry.
-vi.mock('../../../src/agent/index.js', () => {
+vi.mock('../../../src/agent/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../../src/agent/index.js')>(
+    '../../../src/agent/index.js'
+  );
   const codeAgent = {
     id: 'code',
     name: 'Code Agent',
@@ -46,7 +49,7 @@ vi.mock('../../../src/agent/index.js', () => {
       return undefined;
     },
   };
-  return { getAgentRegistry: () => registry };
+  return { ...actual, getAgentRegistry: () => registry };
 });
 
 // Mock compaction so SessionManager.addMessage stays deterministic.
