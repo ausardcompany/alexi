@@ -10,20 +10,13 @@
 
 import { readFileSync } from 'node:fs';
 import { Option, type Command } from 'commander';
-import { agenticChat, type AgenticProgressEvent } from '../../core/agenticChat.js';
-import { SessionManager } from '../../core/sessionManager.js';
-import { createAutoCommitManager } from '../../git/autoCommit.js';
-import { loadGitConfig } from '../../git/config.js';
-import { commitDirtyFiles } from '../../git/dirtyFiles.js';
-import { RepoMapManager } from '../../context/repoMap.js';
-import { parseEffortLevel, type EffortLevel } from '../../core/effortLevel.js';
-import { createWorktree } from '../../utils/gitWorktree.js';
-import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
-import { getConfigDefaultAgent } from '../../config/userConfig.js';
-import { getPermissionManager } from '../../permission/index.js';
-import { PermissionRequested, PermissionResponse } from '../../bus/index.js';
-import { isAbortError } from '../../core/streamingOrchestrator.js';
-import { createMistakeLimitPrompt } from '../utils/mistakeLimitPrompt.js';
+// Heavy runtime imports (agent loop, orchestrator, git, repo map, etc.) are
+// loaded lazily inside `.action(...)` — see #1769. Types are still imported
+// eagerly (erased at runtime so no cost) so the option shape stays typed.
+import type { AgenticProgressEvent } from '../../core/agenticChat.js';
+import type { EffortLevel } from '../../core/effortLevel.js';
+import type { AutoCommitManager } from '../../git/autoCommit.js';
+import type { RepoMapManager } from '../../context/repoMap.js';
 
 interface AgentOptions {
   message?: string;
@@ -90,6 +83,42 @@ export function registerAgentCommand(program: Command): void {
     .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
     .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: AgentOptions) => {
+      // Lazy imports (issue #1769): only pay for the agent loop,
+      // orchestrator, git, repo map, permission bus, etc. when the agent
+      // command actually runs. Registering the command (metadata for
+      // `alexi --help`) does not trigger any of these.
+      const [
+        { agenticChat },
+        { SessionManager },
+        { createAutoCommitManager },
+        { loadGitConfig },
+        { commitDirtyFiles },
+        { RepoMapManager },
+        { parseEffortLevel },
+        { createWorktree },
+        { resolveDefaultAgent },
+        { getConfigDefaultAgent },
+        { getPermissionManager },
+        { PermissionRequested, PermissionResponse },
+        { isAbortError },
+        { createMistakeLimitPrompt },
+      ] = await Promise.all([
+        import('../../core/agenticChat.js'),
+        import('../../core/sessionManager.js'),
+        import('../../git/autoCommit.js'),
+        import('../../git/config.js'),
+        import('../../git/dirtyFiles.js'),
+        import('../../context/repoMap.js'),
+        import('../../core/effortLevel.js'),
+        import('../../utils/gitWorktree.js'),
+        import('../../agent/defaultAgent.js'),
+        import('../../config/userConfig.js'),
+        import('../../permission/index.js'),
+        import('../../bus/index.js'),
+        import('../../core/streamingOrchestrator.js'),
+        import('../utils/mistakeLimitPrompt.js'),
+      ]);
+
       let worktreeCleanup: (() => Promise<void>) | undefined;
       // AbortController fired on first SIGINT (issue #1639) so a Ctrl+C
       // during `agenticChat` propagates through to `provider.complete()`
@@ -249,7 +278,7 @@ export function registerAgentCommand(program: Command): void {
 
         // Set up git auto-commits
         // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
-        let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
+        let gitManager: AutoCommitManager | undefined;
         if (opts.autoCommits !== false) {
           const gitConfig = await loadGitConfig(workdir);
 

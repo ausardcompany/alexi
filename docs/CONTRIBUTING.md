@@ -2142,6 +2142,29 @@ Added in the 2026-09-18 sync. `src/kilocode/session/title.ts` defers title gener
 - Do NOT lower `TITLE_MIN_MESSAGE_LENGTH` below `8` without pairing evidence — the threshold exists so a one-word ack ("yes", "ok", "no") does not seed a permanent title. If a lower threshold is really needed, add a per-caller override rather than moving the module constant.
 - Tests belong under `src/kilocode/session/__tests__/title.test.ts` using `_peekTitleStateForTests` for assertions and `_TITLE_*_FOR_TESTS` for constant references so the tests do not silently break if the constants are re-tuned.
 
+## Shell Permission Pattern Masking (`patternFor`)
+
+Added in the 2026-09-19 sync (upstream kilocode `c33d81690..a85ae672a`). `src/tool/shell-pattern.ts` renders the permission `resource` for shell commands from a tree-sitter parse instead of the raw text, so anywhere-match deny globs (`*|*`, `*>*`, `*;*`, `*$(*`) do not fire on operator characters that live inside quoted strings, `/dev/null` redirects, or fd duplication. The shell tool (`src/tool/tools/shell.ts`) is the only production caller today.
+
+When adding a new place that needs to compute a permission pattern for a shell command:
+
+- Call `patternFor(command, shellType)` — do NOT reach for `pattern(node, kind, raw)` unless you already have a parsed `TreeSitterSyntaxNode` in hand. The convenience wrapper handles the parse-source call and the null-node fallback in one place.
+- The masker is length-preserving and byte-position-preserving. If you add a position-anchored rule to a read-only ruleset, it will see the same offsets in the masked pattern as it saw in the raw command — do NOT bypass the masker on the assumption that mask characters shift positions.
+- Non-POSIX shells (`powershell`, `cmd`) return the raw command unchanged. If you add a new shell type that shares the bash operator glossary (`sh`, `zsh`, `bash` are the current allow-list), update the `kind !== 'bash' && kind !== 'sh' && kind !== 'zsh'` early-return in `pattern()` — otherwise the masker's output falls through to the raw command and the rulesets go back to over-denying.
+- Tree-sitter is an optional peer dependency. The masker MUST NOT throw when `tree-sitter-bash` is unavailable — the outer `try / catch` around `render(node)` and the `!node` guard exist for this reason. If you refactor the render loop, keep the exception-swallowing behaviour: a parse failure resolves to the raw command, matching upstream.
+- Do NOT re-lex the command text to compute the mask. The whole point of the port is that regex-based operator masking is unsafe (it cannot tell a quoted `|` from a real pipe). If a future case needs finer-grained masking (e.g. `${var}` expansions), extend the tree-walker in `render()`, not a sibling regex pass.
+- New tests belong colocated in `src/tool/shell-pattern.test.ts` and MUST use the `describeIfBash` pattern (see `docs/TESTING.md`) so cases that need the grammar skip cleanly on grammar-less installations.
+
+## Compaction Trigger Projection (`shouldCompact`)
+
+Also in the 2026-09-19 sync (upstream kilocode `f607bf0e0` + `030412ea0` + `e28ec562b`). `shouldCompact` in `src/core/compaction.ts` now supports an options bag that projects the next-turn cost from the provider's reported baseline instead of re-estimating the whole transcript. When wiring a new caller into the compaction system:
+
+- Prefer the options-bag call shape: `shouldCompact(messages, maxContextTokens, { threshold, reserveOutputTokens, reportedUsage, systemPromptTokens, toolContentTokens })`. The legacy `shouldCompact(messages, max, 80)` form still works but takes the slower whole-transcript estimation path and cannot benefit from the projection.
+- The caller — NOT `shouldCompact` — owns the `reportedUsage` value. After a cancelled / aborted response the caller MUST clear `reportedUsage` back to `undefined` (or `0`) before the next call, otherwise a stale baseline keeps the projection inflated on every subsequent trigger check. There is no side-effect in `shouldCompact` that would reset it for you.
+- Count `systemPromptTokens` at most ONCE against the projection. The upstream bug that this port fixes was `systemPromptTokens` being folded into the transcript estimator once per message; do NOT re-add per-turn accumulation of the system prompt anywhere in the pipeline.
+- `toolContentTokens` is for tool outputs that have landed since the last provider-reported usage (build logs, grep dumps, large `read` responses). If your caller keeps the tool outputs as regular messages with recorded `tokens.input` / `tokens.output`, they are already in `reportedUsage` on the next turn — do NOT double-count by also passing them via `toolContentTokens`.
+- Tests belong alongside existing compaction coverage in `tests/core/compaction.test.ts` (or the colocated `src/core/__tests__/`). See `docs/TESTING.md — Testing the compaction trigger projection` for the recommended case matrix.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

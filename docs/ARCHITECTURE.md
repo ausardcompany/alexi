@@ -1324,6 +1324,61 @@ const targetSummaryTokens = Math.max(
 // "Keep your summary under approximately N tokens."
 ```
 
+### Trigger Projection from Provider-Reported Usage
+
+Ports upstream kilocode `f607bf0e0` (`Fix auto-compaction threshold`) plus companions `030412ea0` and `e28ec562b`. Historically, `shouldCompact(messages, maxContextTokens, threshold)` walked the entire transcript on every call via `estimateMessagesTokens`, which double-counted the system prompt on every turn and could trip the trigger prematurely on large tool outputs. `shouldCompact` now accepts an options bag that projects the NEXT-turn cost from the provider's reported baseline plus anything new that has landed since:
+
+```typescript
+// src/core/compaction.ts
+export interface ShouldCompactOptions {
+  threshold?: number;
+  reserveOutputTokens?: number;
+  /** Provider-reported input tokens from the previous completed turn. */
+  reportedUsage?: number;
+  /** Approx system-prompt tokens — counted at most ONCE, not per turn. */
+  systemPromptTokens?: number;
+  /** Approx tokens of tool result content since the last reportedUsage. */
+  toolContentTokens?: number;
+}
+
+export function shouldCompact(
+  messages: Message[],
+  maxContextTokens: number,
+  thresholdOrOptions?: number | ShouldCompactOptions
+): boolean;
+```
+
+Projection algorithm (when `reportedUsage > 0`):
+
+```text
+currentTokens = reportedUsage
+              + systemPromptTokens          // counted once
+              + toolContentTokens           // new tool output not yet baked in
+              + Σ (4 + estimateTokens(m.content))
+                  for m in messages where m.tokens is unrecorded
+```
+
+Messages that already carry a recorded `tokens.input` / `tokens.output` are excluded from `Σ` because those counts are already folded into `reportedUsage` — including them would double-count. Every uncounted message adds a `+4` structural overhead for role / delimiter tokens. Legacy positional form (`shouldCompact(messages, maxContextTokens, thresholdNumber)`) still works — a `number` third argument is normalised to `{ threshold: thresholdOrOptions }` and takes the pre-existing estimation path. `reserveOutputTokens` continues to be subtracted from `maxContextTokens` BEFORE the percentage threshold on both paths, so the reserved output budget never trips the trigger.
+
+Caller contract: `reportedUsage` MUST be cleared (dropped to `undefined` or `0`) after a cancelled / aborted response so a stale baseline does not keep the projection inflated on every subsequent call. The projection is intentionally conservative on uncounted messages — the trigger fires slightly early rather than slightly late so summarisation has room to run before the provider rejects the next request for context overflow.
+
+```mermaid
+flowchart TD
+    Call["shouldCompact(messages, max, opts)"] --> LegacyOrOpts{third arg}
+    LegacyOrOpts -->|number| Legacy["opts = { threshold: number }"]
+    LegacyOrOpts -->|object| Explicit["opts = object"]
+    Legacy --> Trigger["triggerTokens = max - reserveOutputTokens"]
+    Explicit --> Trigger
+    Trigger --> Path{reportedUsage &gt; 0?}
+    Path -->|No| OldPath["currentTokens = estimateMessagesTokens(messages)"]
+    Path -->|Yes| NewPath["currentTokens = reportedUsage + systemPromptTokens + toolContentTokens + Σ new-content"]
+    OldPath --> Compare
+    NewPath --> Compare
+    Compare["currentTokens ≥ triggerTokens * (threshold / 100)"]
+    Compare -->|Yes| Fire[return true]
+    Compare -->|No| Skip[return false]
+```
+
 ### Chunked Compaction
 
 Large contexts are split into chunks at natural boundaries (newlines, paragraphs) before compaction:
@@ -2528,6 +2583,82 @@ await configureConnection({ run: (sql) => db.exec(sql) });
 ### Persistent snapshot-disable
 
 `src/core/snapshot.ts` persists the "snapshots disabled" flag under `~/.alexi/state/snapshot.json` (JSON key: `disabled`) so the choice survives CLI restart. A missing or unreadable file is treated as "not disabled" (snapshots on by default) so an unwritable state directory degrades gracefully rather than silently disabling snapshots. Public API: `disableSnapshots()`, `enableSnapshots()`, `shouldSnapshot()`, `SNAPSHOT_DISABLE_STATE_KEY` (`kilocode.snapshot.disabled`). The paired `pruneSnapshots(sessionId, keep = 20)` helper cleans stale snapshot / truncation files by `mtime`, oldest first.
+
+## Shell Permission Pattern Masking
+
+`src/tool/shell-pattern.ts` (upstream kilocode range `c33d81690..a85ae672a`) closes an over-denial gap in the read-only bash rulesets. The rulesets deny shell operators with anywhere-match globs (`*|*`, `*>*`, `*;*`, `*$(*`) so a real pipe, real redirect, or real command substitution is caught. When the shell tool used the raw command text as the permission `resource`, a `|` inside a quoted `grep -E "foo|bar"` regex or the `>` in `2>/dev/null` matched those globs and denied a legitimate read-only command.
+
+The masker renders the permission pattern FROM the tree-sitter parse of the command instead of re-lexing the text. Operator characters (`< > | & ; $ \` newline`) are replaced with `_` only where the parser proves they are inert:
+
+| Inert location | Reason |
+|----------------|--------|
+| Quoted strings (`"..."`, `'...'`) | Shell does not re-lex operators inside a quoted body. |
+| ANSI-C strings (`$'...'`) | Same as quoted strings. |
+| Heredoc bodies | Heredoc contents are pure data. |
+| Escaped words (`\|`, `\>`) | Backslash suppresses operator interpretation. |
+| `/dev/null` redirect targets (`2>/dev/null`) | Cannot touch a real file — target is a well-known sink. |
+| Fd duplication (`2>&1`) | No filesystem touch. |
+| Explicit fd close (`n>&-`) | No filesystem touch. |
+
+Everything else — real pipes, real redirects, real command substitution, real statement separators — is preserved verbatim so the deny globs still fire on them.
+
+Public surface:
+
+```typescript
+// src/tool/shell-pattern.ts
+export type ShellID = ShellType;    // alias for src/tool/tools/shell/id.ts
+
+export function pattern(
+  node: TreeSitterSyntaxNode | null,
+  kind: ShellID,
+  raw: string
+): string;
+
+export function patternFor(command: string, kind: ShellID): string;
+```
+
+`patternFor` is the runtime entry point. It parses `command` via `parseSource(command, 'command.bash')` from `src/context/treeSitter.ts` and delegates to `pattern`. Non-POSIX shells (`powershell`, `cmd`) fall through to raw text because they do not share the bash operator glossary. Tree-sitter is an optional peer dependency — when `tree-sitter-bash` is not installed the masker returns the raw command unchanged, matching upstream's behaviour on parse failure.
+
+Wiring in `src/tool/tools/shell.ts`:
+
+```typescript
+import { patternFor } from '../shell-pattern.js';
+
+// shellTool permission block
+permission: {
+  action: 'execute',
+  // Alexi: run the raw command through `patternFor` before it becomes the
+  // permission `resource`. This masks inert operator characters (quoted
+  // pipes, `2>/dev/null`, fd duplication like `2>&1`) that the read-only
+  // ruleset would otherwise deny by anywhere-matching `*|*` / `*>*` globs.
+  // Real operators still reach the ruleset. Falls back to the raw command
+  // when `tree-sitter-bash` is not installed.
+  getResource: (params) =>
+    patternFor(normalizeUrls(params.command), detectShell().type),
+},
+```
+
+The mask is a strict superset of the raw text at every position — no character is added or removed; each masked position is replaced by an underscore, so the resulting pattern has the same length and byte positions as the input. This preserves any position-anchored globs the ruleset uses.
+
+```mermaid
+flowchart TB
+    Raw["Raw command<br/>grep -E &quot;foo|bar&quot; file.txt"] --> Parse["parseSource(command, 'command.bash')"]
+    Parse --> Root{Grammar available?}
+    Root -->|No| RawOut[Return raw command]
+    Root -->|Yes| Walk["Recursively render nodes"]
+    Walk --> Literal{Node is literal?}
+    Literal -->|string/heredoc/word/number| Mask[Mask operator chars → _]
+    Literal -->|file_redirect/heredoc_redirect| Inert{inert()?}
+    Inert -->|Yes: /dev/null, dup, close| Mask
+    Inert -->|No: real redirect| Preserve[Preserve operators]
+    Literal -->|Other| Recurse[Recurse into children]
+    Mask --> Combine[Reassemble with gap-preserving joins]
+    Preserve --> Combine
+    Recurse --> Combine
+    Combine --> Result["Masked pattern<br/>grep -E &quot;foo_bar&quot; file.txt"]
+    RawOut --> Ruleset
+    Result --> Ruleset[Permission ruleset match]
+```
 
 ## Sandbox Git-Write Detection
 

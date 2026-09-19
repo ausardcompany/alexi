@@ -3,7 +3,9 @@
  */
 
 import type { Command } from 'commander';
-import { DeploymentApi } from '@sap-ai-sdk/ai-api';
+// `@sap-ai-sdk/ai-api` (DeploymentApi) is imported lazily inside
+// `listDeployments` — see #1769 — so callers that never run
+// `alexi models` do not pay for the SAP SDK graph.
 import { env } from '../../config/env.js';
 
 // Color helpers
@@ -82,6 +84,10 @@ async function listDeployments(options: {
   }
 
   const resourceGroup = options.resourceGroup || 'default';
+
+  // Lazy import of the SAP AI SDK — see #1769. Keeps startup fast for
+  // callers that never run `alexi models`.
+  const { DeploymentApi } = await import('@sap-ai-sdk/ai-api');
 
   // Fetch deployments
   const response = await DeploymentApi.deploymentQuery(
