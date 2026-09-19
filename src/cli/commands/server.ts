@@ -10,15 +10,9 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import type { Command } from 'commander';
-import {
-  defaultSocketPath,
-  defaultTokenPath,
-  loadOrCreateToken,
-  readTokenIfExists,
-} from '../../server/auth.js';
-import { startSocketServer } from '../../server/socket.js';
-import { encodeFrame } from '../../server/protocol.js';
-import { registerBuiltInCommands } from '../../command/index.js';
+// Server modules (socket, auth, protocol, built-in slash commands) are
+// loaded lazily per-subcommand — see #1769 — so callers of unrelated
+// commands do not pay for the server module graph.
 
 interface ServerStartOptions {
   socket?: string;
@@ -45,6 +39,14 @@ interface ServerStatusOptions {
  * Returns `true` if the server responded on the socket, `false` if the
  * socket path does not exist or the connection was refused.
  */
+/**
+ * Lazy loader for the server auth helpers. Isolated in one place so the
+ * dynamic imports do not sprinkle through every subcommand action.
+ */
+async function loadAuth(): Promise<typeof import('../../server/auth.js')> {
+  return import('../../server/auth.js');
+}
+
 export function pingSocket(socketPath: string, timeoutMs = 500): Promise<boolean> {
   return new Promise((resolve) => {
     if (!fs.existsSync(socketPath)) {
@@ -81,6 +83,17 @@ export function registerServerCommand(program: Command): void {
     )
     .action(async (opts: ServerStartOptions) => {
       try {
+        // Lazy imports (#1769): only load the socket-server / command
+        // registry graph when `alexi server start` actually runs.
+        const [
+          { defaultSocketPath, defaultTokenPath, loadOrCreateToken },
+          { startSocketServer },
+          { registerBuiltInCommands },
+        ] = await Promise.all([
+          loadAuth(),
+          import('../../server/socket.js'),
+          import('../../command/index.js'),
+        ]);
         // Ensure built-in slash commands are loaded so remote clients
         // can dispatch /review, /explain, /help, etc.
         registerBuiltInCommands();
@@ -113,6 +126,8 @@ export function registerServerCommand(program: Command): void {
     .description('Stop a running Alexi socket server (removes the socket file)')
     .option('-s, --socket <path>', 'Socket path (default ~/.alexi/server.sock)')
     .action(async (opts: ServerStopOptions) => {
+      const { defaultSocketPath, readTokenIfExists } = await loadAuth();
+      const { encodeFrame } = await import('../../server/protocol.js');
       const socketPath = opts.socket ?? defaultSocketPath();
       if (!fs.existsSync(socketPath)) {
         console.log('No running server (socket file not found)');
@@ -162,6 +177,7 @@ export function registerServerCommand(program: Command): void {
     .option('-s, --socket <path>', 'Socket path (default ~/.alexi/server.sock)')
     .option('--json', 'Emit machine-readable JSON')
     .action(async (opts: ServerStatusOptions) => {
+      const { defaultSocketPath } = await loadAuth();
       const socketPath = opts.socket ?? defaultSocketPath();
       const exists = fs.existsSync(socketPath);
       const alive = exists ? await pingSocket(socketPath) : false;
