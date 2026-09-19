@@ -13,6 +13,10 @@ import { normalizeUrls } from '../../utils/url.js';
 import { quoteFilePath } from '../../utils/file-mention.js';
 import { detectShell, shellSpawnArgs, type ShellInfo } from './shell/id.js';
 import { detectShellEnv, formatShellEnvSummary } from './shell/env.js';
+// Alexi: mask inert operators (quoted content, /dev/null redirects,
+// fd duplication) so read-only rulesets don't over-deny. See upstream
+// kilocode commit range c33d81690..a85ae672a.
+import { patternFor } from '../shell-pattern.js';
 import { auditCommand } from '../../permission/next.js';
 import { getPermissionManager, buildUserRejectedToolReason } from '../../permission/index.js';
 import { requiresSandboxEscalation } from '../../kilocode/sandbox/git.js';
@@ -148,7 +152,13 @@ const shellToolBase = defineTool<typeof ShellParamsSchema, ShellResult>({
 
   permission: {
     action: 'execute',
-    getResource: (params) => normalizeUrls(params.command),
+    // Alexi: run the raw command through `patternFor` before it becomes the
+    // permission `resource`. This masks inert operator characters (quoted
+    // pipes, `2>/dev/null`, fd duplication like `2>&1`) that the read-only
+    // ruleset would otherwise deny by anywhere-matching `*|*` / `*>*` globs.
+    // Real operators still reach the ruleset. Falls back to the raw command
+    // when `tree-sitter-bash` is not installed.
+    getResource: (params) => patternFor(normalizeUrls(params.command), detectShell().type),
   },
 
   async execute(params, context): Promise<ToolResult<ShellResult>> {
