@@ -30,11 +30,29 @@ vi.mock('../../../src/providers/index.js', () => ({
 
 describe('T037: interactive command uses startTui', () => {
   it('interactive.ts imports startTui from the tui package', async () => {
+    // Since the lazy-loading refactor (#1769), the TUI is loaded via a
+    // dynamic `import('../tui/index.js')` inside the `.action(...)`
+    // closure so `alexi --help` / `--version` and other subcommands
+    // do not pay for Ink/React at startup. Accept EITHER the historical
+    // static-import form OR the dynamic-import form so this test keeps
+    // guarding the wiring contract (that interactive.ts still binds
+    // `startTui` from the correct module) without regressing the lazy
+    // load. See `tests/cli/lazyLoading.test.ts` for the complementary
+    // regression that ENFORCES the dynamic form.
     const content = fs.readFileSync(
       path.resolve(process.cwd(), 'src/cli/commands/interactive.ts'),
       'utf-8'
     );
-    expect(content).toContain("import { startTui } from '../tui/index.js'");
+    const staticImport = /import\s+\{\s*startTui\s*\}\s+from\s+['"]\.\.\/tui\/index\.js['"]/.test(
+      content
+    );
+    // Dynamic form is a `Promise.all([...])` destructuring that binds
+    // `startTui` in one branch and `import('../tui/index.js')` in
+    // another; the two need not be on the same line, so we assert on
+    // their coexistence in the file rather than adjacency.
+    const dynamicImport =
+      /\bstartTui\b/.test(content) && /import\(\s*['"]\.\.\/tui\/index\.js['"]\s*\)/.test(content);
+    expect(staticImport || dynamicImport).toBe(true);
   });
 
   it('interactive.ts does not actively import startInteractive', async () => {
