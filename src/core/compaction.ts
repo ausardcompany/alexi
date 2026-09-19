@@ -73,6 +73,30 @@ export class NothingToCompactError extends Error {
 export interface ShouldCompactOptions {
   threshold?: number;
   reserveOutputTokens?: number;
+  /**
+   * The provider-reported token usage from the previous completed turn.
+   * When supplied, `shouldCompact` projects the next-turn cost as
+   * `reportedUsage + newContentTokens` instead of re-estimating the whole
+   * transcript. Callers MUST drop this back to `undefined` (or `0`) after
+   * a cancelled / aborted response so the stale baseline does not keep
+   * inflating the projection. Mirrors upstream kilocode `f607bf0e0` +
+   * `030412ea0` + `e28ec562b`.
+   */
+  reportedUsage?: number;
+  /**
+   * Approximate token cost of the system prompt. When supplied together
+   * with `reportedUsage`, it is counted exactly ONCE against the trigger
+   * budget rather than once per turn (upstream compaction was over-counting
+   * the system prompt on every message when projecting).
+   */
+  systemPromptTokens?: number;
+  /**
+   * Additional token cost of tool result content that has landed since the
+   * last provider-reported usage. Added to `reportedUsage` when projecting
+   * the next-turn cost so large tool outputs (build logs, grep dumps) do
+   * not slip past the trigger.
+   */
+  toolContentTokens?: number;
 }
 
 export interface CompactionResult {
@@ -174,10 +198,20 @@ export function estimateMessagesTokens(messages: Message[]): number {
  * Check if compaction is needed based on current token usage.
  *
  * Accepts either the legacy positional `threshold?: number` form or an
- * options bag with `{ threshold, reserveOutputTokens }`. When
- * `reserveOutputTokens` is supplied, it is subtracted from
- * `maxContextTokens` BEFORE applying the percentage threshold so the
- * reserved output budget never trips the trigger.
+ * options bag with `{ threshold, reserveOutputTokens, reportedUsage,
+ * systemPromptTokens, toolContentTokens }`. When `reserveOutputTokens` is
+ * supplied, it is subtracted from `maxContextTokens` BEFORE applying the
+ * percentage threshold so the reserved output budget never trips the
+ * trigger.
+ *
+ * When `reportedUsage` is supplied, the trigger projects the NEXT turn's
+ * cost as `reportedUsage + systemPromptTokens + toolContentTokens +
+ * newContentTokens` where `newContentTokens` is the chars/4 estimate of any
+ * message that does NOT already carry recorded `tokens.input`/`tokens.output`.
+ * The system prompt is counted at most once against the projection rather
+ * than once per turn (upstream kilocode `f607bf0e0` — "Fix auto-compaction
+ * threshold"). Callers MUST clear `reportedUsage` after a cancelled response
+ * so a stale baseline does not keep the projection inflated.
  */
 export function shouldCompact(
   messages: Message[],
@@ -197,7 +231,32 @@ export function shouldCompact(
   const reserveOutputTokens = opts.reserveOutputTokens ?? 0;
   const triggerTokens = Math.max(0, maxContextTokens - reserveOutputTokens);
 
-  const currentTokens = estimateMessagesTokens(messages);
+  let currentTokens: number;
+  if (typeof opts.reportedUsage === 'number' && opts.reportedUsage > 0) {
+    // Project from the provider's reported baseline plus anything new that
+    // has landed since. Recorded token counts are already baked into the
+    // reported usage, so we only sum the chars/4 estimate for messages
+    // WITHOUT a recorded count — otherwise we double-count.
+    let newContent = 0;
+    for (const message of messages) {
+      const recordedInput = message.tokens?.input;
+      const recordedOutput = message.tokens?.output;
+      const hasRecorded =
+        (typeof recordedInput === 'number' && recordedInput > 0) ||
+        (typeof recordedOutput === 'number' && recordedOutput > 0);
+      if (!hasRecorded) {
+        // +4 structural overhead per uncounted message.
+        newContent += 4 + estimateTokens(message.content);
+      }
+    }
+    // Count the system prompt exactly once (upstream bugfix).
+    const systemPromptTokens = opts.systemPromptTokens ?? 0;
+    const toolContentTokens = opts.toolContentTokens ?? 0;
+    currentTokens = opts.reportedUsage + systemPromptTokens + toolContentTokens + newContent;
+  } else {
+    currentTokens = estimateMessagesTokens(messages);
+  }
+
   const thresholdTokens = (triggerTokens * thresholdPercent) / 100;
 
   return currentTokens >= thresholdTokens;
