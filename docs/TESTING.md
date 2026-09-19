@@ -2922,6 +2922,68 @@ Key patterns:
 3. **Mock via `vi.importActual + spread`, not a bare `vi.mock` factory.** Bare factories drop the real module surface, which breaks `buildSubagentConfig` at import time because it reaches for `getExploreAgentBashRules` and `isExploreAgent`. The three companion suites (`task-abort-propagation.test.ts`, `task-depth-limit.test.ts`, `task-failure-paths.test.ts`) were updated to the same shape in the same commit — copy that pattern when adding a new task-tool test file.
 4. **Do NOT assert on `constructor` or class-name shapes for the derivation output.** `deriveSubagentSessionPermission` returns plain `PermissionRule[]` objects; asserting on prototype chain would fail after any refactor that inlines rule construction.
 
+#### Co-located pure-function tests (`src/agent/subagent-permissions.test.ts`)
+
+Extends the integration suite above with a tight, mock-free unit suite that drives `deriveSubagentSessionPermission` directly. The tool-level path is already covered by `tests/tool/tools/task-approval-boundary.test.ts`; this co-located suite pins the three-decision contract at the derivation-function level so a regression that only touches `subagent-permissions.ts` fails a fast, dependency-free test instead of surfacing indirectly through the tool wiring.
+
+The four approval-boundary cases (`src/agent/subagent-permissions.test.ts:163`, commit `82dbef06` `test(agent): verify subagent approval boundaries do not inherit parent approvals`) each construct a `parentSessionPermission` array carrying a single decision-shape and assert on the derived output:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { deriveSubagentSessionPermission } from './subagent-permissions.js';
+import type { Agent } from './index.js';
+import type { PermissionRule } from '../permission/index.js';
+
+it('does NOT inherit parent ALLOW rule for write tool', () => {
+  const parentSessionPermission: PermissionRule[] = [
+    { id: 'parent-allow-write', tools: ['write'], decision: 'allow', priority: 50 },
+  ];
+  const subagent: Agent = {
+    id: 'coder',
+    name: 'Coder',
+    description: 'Coding agent',
+    mode: 'all',
+    systemPrompt: 'You are a coder',
+    canUseTool: () => true,
+  };
+
+  const result = deriveSubagentSessionPermission({
+    parentSessionPermission,
+    parentAgent: undefined,
+    subagent,
+    // Deliberately omit `write` from allowedTools — the subagent
+    // must NOT silently reuse the parent's grant.
+    allowedTools: ['read', 'glob'],
+  });
+
+  expect(result.find((r) => r.id === 'parent-allow-write')).toBeUndefined();
+  expect(
+    result.find((r) => r.decision === 'allow' && r.tools?.includes('write'))
+  ).toBeUndefined();
+
+  // Because `write` was not in `allowedTools`, the derivation adds
+  // an explicit deny to close the door (fail-closed default).
+  const writeDeny = result.find(
+    (r) => r.tools?.includes('write') && r.decision === 'deny'
+  );
+  expect(writeDeny).toBeDefined();
+});
+```
+
+**Contract points asserted at the pure-function layer.**
+
+1. **Parent `allow` rule for `write` is dropped AND replaced with an explicit deny.** The rule id `parent-allow-write` must not appear in the derived set, no `decision === 'allow'` rule for `write` may survive, and — because `write` was omitted from `allowedTools` — the derivation must add a `subagent-deny-write` rule with `decision: 'deny'`. This is the fail-closed behaviour the port guarantees.
+2. **Parent `ask` rule for `edit` is dropped.** The rule id `parent-ask-edit` must not appear in the derived set and `result.some((r) => r.decision === 'ask')` must be `false`. Interactive prompts for the parent are not silently re-issued (or worse, elided) on the child.
+3. **Parent `deny` rule with `paths: ['**/.env', '**/secrets.*']` survives verbatim.** The rule id `parent-deny-secrets` must appear on the derived set — inherited restrictions remain the safety floor even without an `allowedTools` override.
+4. **Mixed ALLOW + ASK + DENY + external_directory input filters correctly.** The comprehensive case seeds all four decision shapes (`allow-write`, `ask-bash`, `deny-config`, `external-dir` with `decision: 'allow'`) and asserts the derivation drops the `allow` and `ask` rules while retaining the `deny` rule AND the `external_directory` rule — the latter even when it carries an `allow` decision, because external-directory guards are structural boundaries and not subject to the approval-inheritance filter.
+
+Key patterns:
+
+1. **No mocks, no fixtures — the derivation is pure.** `deriveSubagentSessionPermission` reads only its input object; the suite constructs an `Agent` literal, calls the function, and asserts on the returned array. No `vi.mock`, no `beforeEach`, no temp directory.
+2. **Assert BOTH the absence of the parent rule id AND the absence of the decision shape.** The negative pair (`.find((r) => r.id === 'parent-allow-write')` is `undefined` AND `.find((r) => r.decision === 'allow' && r.tools?.includes('write'))` is `undefined`) catches two independent regressions: dropping the id filter while forwarding an identically-shaped rule, or renaming the internal rule id while still forwarding the parent's allow.
+3. **Cover the fail-closed default in the ALLOW-drop case.** The `writeDeny` assertion pins the invariant that a subagent whose parent used to have `write` approval — but which is NOT on the caller's `allowedTools` — ends up with an explicit deny for `write`. A regression that dropped the parent allow but forgot to add the explicit deny would leave the tool in a "no rule" state, and the tool's default resolution could then vary by registry.
+4. **Cover the `external_directory` retention explicitly.** The mixed case's `external-dir` entry carries `decision: 'allow'` deliberately — even an ALLOW decision on an `external_directory` rule is forwarded because external-directory guards are structural, not approval-shaped. A regression that filtered on `decision !== 'allow'` alone would drop this rule and let the subagent walk outside the workspace boundary.
+
 ## Testing Minify-Safe Telemetry Detection
 
 The `src/utils/telemetry.ts` module exposes a structural detection surface (`isTelemetryService`, `telemetryInstance`, `TelemetryServiceLike`) designed to survive bundler minification. The regression suite at `tests/utils/telemetry-minify.test.ts` locks in the contract that class-name based checks (`obj.constructor.name === 'TelemetryService'`) must NEVER be relied on, and that the exported structural helpers keep working when the module is passed through a real minifier.
