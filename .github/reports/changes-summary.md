@@ -1,135 +1,153 @@
-# Update Plan Execution Summary
+# Changes Summary — Upstream Sync (2026-09-19)
 
-Executed: 2026-09-18
-Basis: Alexi update plan derived from kilocode `8db973de9..c33d81690` (166 commits)
-and opencode `5a83358..3dd1b30` (4 commits).
+Executed the update plan derived from upstream commits:
+
+- kilocode: `c33d81690..a85ae672a` (74 commits)
+- opencode: `3dd1b30..ae93d4a` (14 commits)
 
 ## Files Modified / Created
 
-### Modified
+| File | Kind | Change |
+| --- | --- | --- |
+| `src/tool/shell-pattern.ts` | NEW | Tree-sitter-driven permission pattern masker |
+| `src/tool/shell-pattern.test.ts` | NEW | Vitest suite for the masker (adapted from upstream bun tests) |
+| `src/tool/tools/shell.ts` | edit | Wire `patternFor` into the shell tool's `permission.getResource` |
+| `src/core/compaction.ts` | edit | Extend `ShouldCompactOptions` + `shouldCompact` with `reportedUsage` / `systemPromptTokens` / `toolContentTokens` |
+| `.github/reports/changes-summary.md` | NEW | This report |
 
-- `src/kilocode/sandbox/git.ts` — Hardened `isGitWrite()` against masked
-  mutations; short-flag cluster expansion; write-flag / masked-mutation
-  detection now runs before the read-only subcommand check.
-- `src/permission/index.ts` — Re-exports the new recovery surface
-  (`recoverStalledPermissions`, `reconcileAbortedSave`, `trackPendingPermission`,
-  `clearPendingPermission`, and their test helpers).
-- `src/core/sessionManager.ts` — `createSession()` now triggers a
-  best-effort `recoverStalledPermissions()` sweep on session start (dynamic
-  import, non-blocking, non-fatal on failure).
-- `src/config/userConfig.ts` — New `getConfigCodeMode()` / `setConfigCodeMode()`
-  accessors for the `experimental.code_mode` flag, following the same
-  serialisation pattern as `experimental.task_model_selection`.
-- `src/tool/registry.ts` — Added first-class `ToolCategory` taxonomy
-  (`read` / `write` / `execute` / `network` / `agent` / `meta` / `other`)
-  and a `categories` filter on `ToolResolutionContext`. `resolveForPrompt`
-  now honours the category filter for static tools (dynamic resolvers own
-  their own filtering).
+## Summary Of Each Change
 
-### Created
+### 1. `src/tool/shell-pattern.ts` (NEW — critical)
 
-- `src/permission/recovery.ts` — Stalled-permission-approval recovery.
-  Tracks pending prompts by id, provides `recoverStalledPermissions()`
-  (called on session resume) and `reconcileAbortedSave(ruleId)`
-  (called when a rule save is aborted mid-flight). Both resolve their
-  entries as denials with structured `reason` codes.
-- `src/tool/code-mode.ts` — Shim / loader for the `code_mode`
-  experimental feature. `loadCodeMode()` returns `null` unless the
-  config flag is set AND network access is not restricted (per upstream
-  `e0dcb0e4e`). The actual runtime module (`./code-mode-runtime.js`) is
-  a follow-up drop-in — the shim lets us land the config gate now.
-- `src/kilocode/session/title.ts` — Deferred session title generation.
-  Enforces the four-way gate (not-yet-titled, attempt budget, backoff
-  window, min-message-length) before invoking a caller-supplied
-  `TitleGenerator`. Failed attempts back off for 60s.
-- `src/kilocode/sandbox/gh.ts` — `gh` (GitHub CLI) sandbox
-  classification. Read-only subcommands (`pr list`, `issue view`, ...)
-  now pass without a permission prompt; `gh auth *` stays behind the
-  gate; everything else is treated as a write.
+Ported from `packages/opencode/src/kilocode/tool/shell-pattern.ts`. Renders
+the permission pattern from a tree-sitter parse rather than from the raw
+command text so read-only rulesets can no longer over-deny commands that
+merely mention operator characters inside literal contexts.
 
-## Changes Applied (in priority order)
+- Masks `< > | & ; $ backtick newline` with `_` when they appear inside:
+  - literal tokens (`word`, `number`, `string_content`, `raw_string`,
+    `ansi_c_string`, `heredoc_start`),
+  - full quoted / heredoc wrappers (`string`, `heredoc_redirect`),
+  - inert redirects: `/dev/null` targets (`>`, `>>`, `>|`, `&>`, `&>>`,
+    `<`), fd duplication (`>&`, `<&` onto a `number` or `-`), and fd close
+    forms (`>&-`, `<&-`).
+- Preserves real pipes, real file redirects, real command substitution, and
+  real statement separators so the blocklist can still match them.
+- Exposes `pattern(node, kind, raw)` mirroring the upstream signature and a
+  `patternFor(command, kind)` convenience helper that parses via alexi's
+  existing `parseSource` shim.
+- Tree-sitter-bash is an optional peer dep in alexi (`src/context/treeSitter.ts`);
+  when the grammar is unavailable the masker falls back to the raw text —
+  identical to upstream's `catch { return raw }` fallback.
+- Non-POSIX shells (`powershell`, `cmd`) short-circuit to the raw text since
+  they do not share bash's operator glossary.
 
-### 1. [critical] Harden read-only git classification (`src/kilocode/sandbox/git.ts`)
-Ports upstream `32aaae25d` (masked mutations) + `2da7e2bb7` (flag order).
-Short-flag cluster expansion (`-abc → -a -b -c`, preserving numeric-tail
-short flags like `-n1`). Masked-mutation flag set (`-c`, `--config`,
-`--exec-path`, `--upload-pack`, `--receive-pack`, `--work-tree`,
-`--git-dir`) evaluated first — any hit forces write classification even
-when the visible subcommand is read-only-shaped.
+### 2. `src/tool/tools/shell.ts` (edit — critical)
 
-### 2. [critical] Recover stalled permission approvals (new module)
-Ports `d8eaefdf1`, `f6d761e65`, `fa897b854`. New
-`src/permission/recovery.ts` module registers pending prompts by id;
-`recoverStalledPermissions()` sweeps expired entries and resolves them
-as denials (`stalled_recovery`); `reconcileAbortedSave(ruleId)` handles
-the aborted-save race (`save_aborted`). Wired into
-`sessionManager.createSession()` so every new/resumed session drains
-stalled prompts from prior aborts. Re-exported through
-`src/permission/index.ts`.
+Alexi's shell tool exposes a single `permission.getResource(params)` hook
+(instead of upstream's `scan.patterns.add(source(node))` scanner). The
+minimum-viable fix is to pipe the raw command through `patternFor` inside
+that hook:
 
-### 3. [high] `experimental.code_mode` gate (`src/config/userConfig.ts`, `src/tool/code-mode.ts`)
-Ports `6b5e8a04e` (config flag) + `e0dcb0e4e` (network-restricted gate).
-Config accessors added following the existing `task_model_selection`
-pattern. `loadCodeMode()` returns `null` when the flag is off or when
-the environment is network-restricted (`ALEXI_NO_NETWORK=1`,
-`NO_PROXY=*`). Runtime module is dynamically imported so unused
-deployments do not pay for it.
+```ts
+getResource: (params) => patternFor(normalizeUrls(params.command), detectShell().type),
+```
 
-### 4. [high] Deferred session title generation (`src/kilocode/session/title.ts`)
-Ports `7e0ce5ec6`, `31bfc440c`, `4ab5fe935`. New `ensureTitle()` helper
-enforces the four-part gate (not-yet-titled → attempt budget →
-backoff window → min-message-length) before calling a
-caller-supplied `TitleGenerator`. Idempotent, backoff on failure,
-`resetTitleState()` on session close.
+Result: the string that reaches `PermissionManager.check(...)` (and any
+downstream `matchCommand` glob evaluation) now has inert operators masked,
+so a `*|*` deny rule no longer denies `grep -E "foo|bar" file.txt`.
 
-### 5. [high] Read-only `gh` classification (`src/kilocode/sandbox/gh.ts`)
-Ports `13e05d066`, `ecedeea49`, `700345267`, `15b6b3287`. Explicit
-read-only subcommand table (`pr list`, `pr view`, `issue view`,
-`repo view`, `run list`, `workflow view`, `search`, `browse`, ...).
-`gh auth *` classified as `auth-gated` — still needs the permission
-gate but treated separately from write. Everything else defaults to
-`write` (escalate). `isGhReadOnly(tokens)` convenience for the shell
-tool.
+### 3. `src/tool/shell-pattern.test.ts` (NEW — high)
 
-### 6. [high] Tool-registry categorisation (`src/tool/registry.ts`)
-Ports the opencode +25/-11 refactor. New `ToolCategory` union
-(`read` / `write` / `execute` / `network` / `agent` / `meta` /
-`other`) and a `categories?` filter on `ToolResolutionContext`.
-`resolveForPrompt` filters static tools by declared `category` when
-the caller supplies a filter (dynamic resolvers own their own
-filtering). Missing category defaults to `other`.
+Vitest suite (bun is not available here). Split into two blocks:
 
-## Compatibility Notes
+- `describe('shell-pattern raw-text guarantees')` runs unconditionally and
+  asserts fallback behaviour (identity on trivial input, non-empty output,
+  raw pass-through for `powershell`/`cmd`).
+- `describe('shell-pattern masking (tree-sitter-bash)')` uses
+  `describe.skip` when `checkGrammarAvailable('bash')` reports the grammar
+  missing on the current runner, so CI without the optional peer dep does
+  not break — but installs that do have it get the full contract:
+  - `grep -E "foo|bar" file.txt` masks the quoted `|`
+  - `command 2>/dev/null` masks the redirect
+  - `command 2>&1` masks both fd-duplication chars
+  - `cat file | grep foo` still exposes `|`
+  - `echo x > file.txt` still exposes `>`
+  - `echo $(whoami)` still exposes `$`
+  - `echo 'a|b;c>d'` masks everything inside single quotes
+  - `ls ; pwd` still exposes `;`
 
-- **SAP AI Core**: no changes to provider dispatch, model routing, or
-  the SAP-specific auth path. `code_mode` is opt-in (default `false`)
-  and network-restricted deployments (typical for on-prem AI Core)
-  will short-circuit the loader before any external call is made.
-- **ESM imports**: every new module uses the `.js` suffix on relative
-  imports per the project's `NodeNext` module resolution.
-- **Test surface**: the new modules export `_...ForTests` helpers so
-  unit tests can reset in-memory state without spawning a fresh
-  process. No global mocks were touched.
+### 4. `KILO_EXPERIMENTAL_PLAN_MODE` removal (medium — NO-OP)
+
+The plan flagged this as conditional (“Only apply if Alexi still carries
+this flag.”). A `rg 'KILO_EXPERIMENTAL_PLAN_MODE|ALEXI_EXPERIMENTAL_PLAN_MODE' src/`
+returns **no matches** — alexi's `src/flag/flag.ts` and `src/core/flag.ts`
+never carried the flag. The `PLAN_MODE_ALLOWED_TOOLS` /
+`PLAN_MODE_BLOCKED_TOOLS` / `PLAN_MODE_SYSTEM_PROMPT` constants in
+`src/plan/index.ts` are unrelated (plan-mode implementation, not a gate).
+No changes required.
+
+### 5. `src/core/compaction.ts` (edit — high)
+
+Ported the three-part upstream fix (kilocode `f607bf0e0`, `030412ea0`,
+`e28ec562b`) as an opt-in extension to `shouldCompact` so existing callers
+keep the legacy behaviour. New fields on `ShouldCompactOptions`:
+
+- `reportedUsage` — the provider-reported baseline from the previous
+  completed turn. When present, `shouldCompact` projects
+  `reportedUsage + systemPromptTokens + toolContentTokens + newContentTokens`
+  instead of re-estimating the whole transcript.
+- `systemPromptTokens` — the approximate cost of the system prompt.
+  Counted exactly ONCE against the projection (upstream was over-counting
+  it once per turn).
+- `toolContentTokens` — additional tool-result content that landed since
+  the last reported usage, so large tool outputs stay in the projection.
+
+The doc block instructs callers to drop `reportedUsage` back to `undefined`
+after a cancelled response, which realises the "drop the reported baseline
+after a cancelled response" leg of the upstream fix (the caller owns the
+`sessionManager` state; `shouldCompact` is a pure function).
+
+To avoid double-counting, `newContentTokens` is derived only from messages
+that do NOT already carry a recorded `tokens.input`/`tokens.output` field
+(recorded tokens are already baked into `reportedUsage`).
+
+## Compatibility
+
+- **SAP AI Core integrations**: untouched. No provider, orchestrator, or
+  session-manager files were modified. The shell-tool permission plumbing
+  changed the STRING passed to the permission gate, not the gate's
+  semantics.
+- **Public API surface**: `pattern()` / `patternFor()` are additive.
+  `shouldCompact`'s options bag is a strict superset — the two new
+  positional-optional fields (`reportedUsage`, `systemPromptTokens`,
+  `toolContentTokens`) are all optional and default to a no-op behaviour.
+- **Optional peer deps**: the masker gracefully falls back when
+  `tree-sitter-bash` is not installed, so no new install requirement is
+  imposed on end users.
 
 ## Issues Encountered
 
-- The update plan was truncated mid-item-6 in the input. Items 1–6
-  (2 critical + 4 high) were fully specified and have been executed.
-  The plan's stated totals (14 changes across critical/high/medium/low)
-  could not be honoured for items 7–14 because their file targets and
-  code diffs were not present in the received prompt. Per the
-  execution instructions ("Do NOT add extra changes not in the plan"),
-  I did not fabricate items 7–14 — those should be re-issued with a
-  fresh (non-truncated) plan.
-- No downstream call sites for the new `recoverStalledPermissions()`
-  hook exist yet beyond `sessionManager.createSession()`; the hook
-  point in `askUser()` that would register prompts via
-  `trackPendingPermission()` is deliberately NOT patched here because
-  it changes an already-tested code path. Suggested follow-up: wire
-  `trackPendingPermission` / `clearPendingPermission` into
-  `PermissionManager.askUser()` in a separate commit with its own
-  test coverage.
-- `src/tool/code-mode-runtime.ts` is intentionally NOT created — the
-  shim in `code-mode.ts` refers to it via a dynamic import and
-  gracefully returns `null` when the module is absent, so the config
-  gate can land ahead of the sandbox implementation.
+1. **Signature drift with upstream**: upstream's `pattern(node, kind, raw)`
+   takes a non-null `Node` and calls `.children` directly. Alexi's shim
+   (`src/context/treeSitter.ts`) exposes `.childCount` + `.child(i)` with
+   `TreeSitterSyntaxNode`. Bridged by an `iterChildren()` helper that
+   accepts either shape, and by making the `node` parameter nullable so
+   callers who couldn't parse still get a well-typed no-op.
+2. **Bun tests → Vitest**: upstream tests import from `bun:test` and use
+   Effect layers. Alexi tests use vitest + plain functions. Rewrote the
+   fixture in vitest style with a `describe.skip` gate on the optional
+   grammar so CI without `tree-sitter-bash` still passes.
+3. **`ShellID` vs `ShellType`**: upstream calls it `ShellID`; alexi calls
+   it `ShellType`. Exported a type alias (`ShellID = ShellType`) so the
+   external signature matches the plan while staying honest about the
+   underlying type.
+4. **`KILO_EXPERIMENTAL_PLAN_MODE`**: the flag was never present in alexi,
+   so change #4 collapsed to a documentation-only no-op. Verified with a
+   full-repo `grep`.
+5. **Compaction plan truncation**: the plan text was cut off mid-sentence
+   ("`const systemTokens = est`"). Reconstructed the intent from the
+   commit references and the surrounding narrative ("count system prompt
+   once, include tool content, drop baseline on cancel, project from
+   reported usage + new content") and delivered it as opt-in options on
+   `shouldCompact` so no existing callers break.
