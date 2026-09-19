@@ -1200,7 +1200,43 @@ interface CompactionResult {
   removedMessages?: number;
   error?: string;
 }
+
+// src/core/compaction.ts — trigger evaluation
+interface ShouldCompactOptions {
+  /** 0-100. Percentage of max context tokens at which to fire. */
+  threshold?: number;
+  /** Subtracted from maxContextTokens BEFORE applying threshold. */
+  reserveOutputTokens?: number;
+  /**
+   * Provider-reported input token usage from the previous completed turn.
+   * When supplied and positive, projects next-turn cost as
+   * `reportedUsage + systemPromptTokens + toolContentTokens + newContentTokens`
+   * instead of re-estimating the whole transcript. MUST be cleared to
+   * undefined / 0 after a cancelled response so the stale baseline does
+   * not keep the projection inflated.
+   */
+  reportedUsage?: number;
+  /**
+   * Approx system-prompt tokens. Counted at most ONCE against the trigger
+   * (upstream kilocode `f607bf0e0` bugfix — was previously per-turn).
+   */
+  systemPromptTokens?: number;
+  /**
+   * Approx tokens of tool result content that has landed since the last
+   * reportedUsage. Added to the projection so large tool outputs cannot
+   * slip past the trigger.
+   */
+  toolContentTokens?: number;
+}
+
+function shouldCompact(
+  messages: Message[],
+  maxContextTokens: number,
+  thresholdOrOptions?: number | ShouldCompactOptions
+): boolean;
 ```
+
+`shouldCompact` accepts either the legacy positional `threshold?: number` third argument or the options bag. A positional number is normalised to `{ threshold: n }` and takes the pre-existing whole-transcript estimation path. See [ARCHITECTURE.md — Trigger Projection from Provider-Reported Usage](ARCHITECTURE.md#trigger-projection-from-provider-reported-usage) for the projection algorithm and the caller contract.
 
 ### Hook Interfaces
 
@@ -1997,6 +2033,69 @@ if (requiresSandboxEscalation(command, sandboxEnabled)) {
 ```
 
 `MASKED_MUTATION_FLAGS` includes `-c`, `--config`, `--exec-path`, `--upload-pack`, `--receive-pack`, `--work-tree`, and `--git-dir`. Short-flag clusters are expanded (`-abc` → `-a -b -c`) so a `-c` embedded in a cluster is detected; numeric-tail short flags (`-n1`, `-C10`) are preserved verbatim.
+
+## Shell Permission Pattern API
+
+`src/tool/shell-pattern.ts` (upstream kilocode range `c33d81690..a85ae672a`) renders the permission-check pattern for a shell command from its tree-sitter parse instead of from the raw text. It exists so the read-only bash rulesets — which deny shell operators with anywhere-match globs (`*|*`, `*>*`, `*;*`, `*$(*`) — do not over-deny legitimate read-only commands that carry an operator character inside a quoted string or an inert redirect.
+
+```typescript
+import { pattern, patternFor, type ShellID } from '../tool/shell-pattern.js';
+import type { TreeSitterSyntaxNode } from '../context/treeSitter.js';
+
+export type ShellID = 'bash' | 'sh' | 'zsh' | 'powershell' | 'cmd' | ...;
+
+// The primitive: given an already-parsed tree-sitter node, render the
+// masked permission pattern. Falls back to `raw` when `node` is null,
+// when `kind` is not a POSIX-family shell, when the render is empty,
+// or when any exception is thrown during rendering.
+export function pattern(
+  node: TreeSitterSyntaxNode | null,
+  kind: ShellID,
+  raw: string
+): string;
+
+// The runtime entry point: parse `command` via
+// `parseSource(command, 'command.bash')` and delegate to `pattern`.
+// Non-POSIX shells (`powershell`, `cmd`) return the raw command
+// unchanged. When `tree-sitter-bash` is not installed, returns the raw
+// command as well.
+export function patternFor(command: string, kind: ShellID): string;
+```
+
+Usage in the shell tool (`src/tool/tools/shell.ts`):
+
+```typescript
+import { patternFor } from '../shell-pattern.js';
+import { detectShell } from './shell/id.js';
+
+const shellToolBase = defineTool({
+  name: 'shell',
+  parameters: ShellParamsSchema,
+  permission: {
+    action: 'execute',
+    getResource: (params) =>
+      patternFor(normalizeUrls(params.command), detectShell().type),
+  },
+  // ...
+});
+```
+
+Masking behaviour by input:
+
+| Input command | Masked pattern | Notes |
+|---------------|----------------|-------|
+| `ls -la` | `ls -la` | No operators — passthrough. |
+| `grep -E "foo\|bar" file.txt` | `grep -E "foo_bar" file.txt` | `\|` inside quotes is inert. |
+| `command 2>/dev/null` | `command 2__dev_null` | Redirect to `/dev/null` is inert. |
+| `command 2>&1` | `command 2__1` | Fd duplication is inert. |
+| `cat file \| grep foo` | `cat file \| grep foo` | Real pipe survives. |
+| `echo x > file.txt` | `echo x > file.txt` | Real redirect survives. |
+| `echo $(whoami)` | `echo $(whoami)` | Real command substitution survives. |
+| `ls ; pwd` | `ls ; pwd` | Real statement separator survives. |
+| `'a\|b;c>d'` | `'a_b_c_d'` | Everything inside single quotes is masked. |
+| `Get-ChildItem \| Where-Object` (`powershell`) | `Get-ChildItem \| Where-Object` | Non-POSIX shell: raw text. |
+
+The mask is a length-preserving byte-position-preserving transform — each masked position is replaced by a single `_`, so any position-anchored globs in the ruleset still see the same offsets they saw in the raw command.
 
 ## Sandbox `gh` (GitHub CLI) API
 

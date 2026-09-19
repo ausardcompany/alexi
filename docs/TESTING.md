@@ -5503,3 +5503,94 @@ Assertion patterns:
 - **`requestNoun` mapping.** `requestNoun('gitlab') === 'MR'`, `requestNoun('github') === 'PR'`, `requestNoun('bitbucket') === 'PR'`.
 
 The exhaustiveness guard on `provider` in `formatMRPRUrl` is a compile-time check — do NOT write a runtime test that passes an invalid provider (TypeScript prevents it, and forcing it via `as never` proves nothing). When a fourth provider is added, the switch statement will fail to compile until it is handled, which is the desired signal.
+
+## Testing the shell permission pattern masker
+
+`src/tool/shell-pattern.test.ts` (95 lines, 10 cases) pins `patternFor` — the tree-sitter-backed masker that the shell tool uses to compute its permission `resource`. The test file is colocated with the module (both live under `src/tool/`) so any refactor of the masker breaks and fixes its coverage in a single edit.
+
+The suite splits into two `describe` blocks so the tree-sitter-parsed cases can be skipped cleanly when the optional `tree-sitter-bash` grammar is not installed:
+
+```typescript
+// src/tool/shell-pattern.test.ts
+import { describe, it, expect } from 'vitest';
+import { checkGrammarAvailable } from '../context/treeSitter.js';
+import { patternFor } from './shell-pattern.js';
+
+const bashAvailable = checkGrammarAvailable('bash');
+const describeIfBash = bashAvailable ? describe : describe.skip;
+
+describe('shell-pattern raw-text guarantees', () => {
+  it('returns the raw command when nothing needs masking', () => {
+    expect(patternFor('ls -la', 'bash')).toBe('ls -la');
+  });
+  it('never returns an empty string for a non-empty input', () => {
+    expect(patternFor('echo hello', 'bash').length).toBeGreaterThan(0);
+  });
+  it('leaves non-POSIX shells (powershell/cmd) untouched', () => {
+    expect(patternFor('Get-ChildItem | Where-Object', 'powershell')).toBe(
+      'Get-ChildItem | Where-Object'
+    );
+    expect(patternFor('dir | findstr foo', 'cmd')).toBe('dir | findstr foo');
+  });
+});
+
+describeIfBash('shell-pattern masking (tree-sitter-bash)', () => {
+  // Inert operators must be masked so the read-only rulesets do not over-deny.
+  it('does not deny grep with pipe inside quoted regex', () => {
+    expect(patternFor('grep -E "foo|bar" file.txt', 'bash')).not.toContain('|');
+  });
+  it('does not deny redirect to /dev/null', () => {
+    expect(patternFor('command 2>/dev/null', 'bash')).not.toContain('>');
+  });
+  it('does not deny fd duplication (2>&1)', () => {
+    const out = patternFor('command 2>&1', 'bash');
+    expect(out).not.toContain('>');
+    expect(out).not.toContain('&');
+  });
+  // Real operators must survive so the read-only rulesets still fire on them.
+  it('still exposes real pipes to the ruleset', () => {
+    expect(patternFor('cat file | grep foo', 'bash')).toContain('|');
+  });
+  // ...
+});
+```
+
+Assertion patterns:
+
+- **Raw-text guarantees run unconditionally.** The three cases in the first `describe` do not depend on tree-sitter — they exercise the passthrough path (raw command with no operators), the never-empty invariant, and the non-POSIX shell short-circuit. Even a fresh clone without the optional grammar sees these three cases pass.
+- **Grammar-gated cases via `describeIfBash`.** The second `describe` uses `describe.skip` when `checkGrammarAvailable('bash')` returns `false`. Do NOT use `it.skipIf` per-case — the whole block is meaningless without the parser, and per-case skipping produces noisy skip output on grammar-less installations. `checkGrammarAvailable('bash')` from `src/context/treeSitter.ts` is the canonical availability check.
+- **Assert `not.toContain(operator)` for inert cases.** For inputs where every operator character is inside a quoted string, an inert redirect (`>/dev/null`), or an fd duplication (`>&`), the assertion is that NONE of that operator character survives in the output. This matches the deny-glob shape (`*|*`) — a single unmasked character is enough to fire the ruleset.
+- **Assert `toContain(operator)` for real-operator cases.** Real pipes (`cat file | grep foo`), real redirects (`echo x > file.txt`), real command substitution (`echo $(whoami)`), and real statement separators (`ls ; pwd`) MUST preserve their operator character so the ruleset still catches them.
+- **Do not assert on exact byte-for-byte output.** The masker is length-preserving but the exact whitespace between tokens depends on tree-sitter node byte offsets — the fallback `gapBetween` helper uses a single space when byte offsets are unavailable. Use `toContain` / `not.toContain` assertions on operator characters, not `toBe(exactString)`, so the tests remain stable across minor parser upgrades.
+- **Non-POSIX shells fall through to raw text.** Passing `'powershell'` or `'cmd'` as the `ShellID` must return the raw command unchanged. This matches the runtime behaviour and prevents a bash parser from masking operators in a shell that does not share bash's operator glossary.
+
+Running the suite:
+
+```bash
+# Full pass (skips grammar cases if tree-sitter-bash is not installed)
+npm test -- src/tool/shell-pattern.test.ts
+
+# Filter to raw-text guarantees only
+npm test -- src/tool/shell-pattern.test.ts -t "raw-text"
+
+# Filter to grammar-gated cases (only meaningful when grammar is installed)
+npm test -- src/tool/shell-pattern.test.ts -t "masking"
+```
+
+The grammar is an optional peer dependency. When a CI job needs the grammar-gated coverage (e.g. a permission-regression check), install `tree-sitter-bash` in the job's setup step; when the intent is only to smoke-test the passthrough path, the grammar is not required and the suite will report the second `describe` as skipped.
+
+## Testing the compaction trigger projection
+
+`shouldCompact` (`src/core/compaction.ts`) is unit-testable at two entry shapes: the legacy positional form (`shouldCompact(messages, max, thresholdNumber)`) and the options-bag form (`shouldCompact(messages, max, opts)`). Test coverage MUST exercise both because the runtime call sites still mix them. The projection path is only taken when `opts.reportedUsage` is a positive number — pass `0` or `undefined` to keep the pre-existing whole-transcript estimation path.
+
+Recommended cases:
+
+- **Legacy positional shape stays working.** `shouldCompact(messages, 100_000, 80)` must behave identically to `shouldCompact(messages, 100_000, { threshold: 80 })` and take the whole-transcript estimation path. Regression insurance for callers not yet migrated to the options bag.
+- **`reserveOutputTokens` subtracts before the percentage.** For `maxContextTokens = 100_000` and `reserveOutputTokens = 20_000`, the trigger budget is `80_000` and an `80%` threshold fires at `64_000` (not `80_000`). Assert on both the estimation path and the projection path — the reserve applies to both.
+- **Projection uses reported baseline plus new content.** Set `reportedUsage = 50_000` on a transcript where every message has `tokens.input` / `tokens.output` recorded. The projection should ignore the recorded messages (they are baked into `reportedUsage`) and match `reportedUsage + systemPromptTokens + toolContentTokens` — no `Σ new-content` contribution.
+- **Uncounted messages ADD to the projection.** Append a message with no `tokens` field to the same transcript. The projection should add `4 + estimateTokens(content)` (structural overhead + chars/4 estimate) — the delta from the previous case is exactly one message's contribution.
+- **System prompt counted exactly once.** With `reportedUsage = 50_000` and `systemPromptTokens = 5_000`, the projection is `55_000` even for a transcript with dozens of turns. Compare to the pre-fix behaviour (which would have added `5_000 * turnCount`) — the correction is what upstream `f607bf0e0` is called "Fix auto-compaction threshold" for.
+- **Callers MUST clear `reportedUsage` after a cancelled response.** Simulate a cancel by leaving `reportedUsage` from the previous turn in place while adding new user content. Assert that the caller-side reset (dropping to `undefined` / `0`) restores the whole-transcript estimation path. This is a contract test on the caller, not on `shouldCompact` itself — but the test should live in the same file so the coupling is visible.
+- **Empty or nil messages return false.** `shouldCompact([], anything, anything)` and `shouldCompact(null as unknown as Message[], ...)` must return `false` without throwing. The guard is at the top of the function.
+
+Do NOT test the projection with mocked `estimateTokens` — the calculation is deterministic under `estimateTokens(text) = Math.ceil(text.length / 4)`, so real inputs work fine and mocking obscures the intent.
