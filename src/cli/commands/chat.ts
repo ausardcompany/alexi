@@ -4,12 +4,13 @@
 
 import { readFileSync } from 'node:fs';
 import { Option, type Command } from 'commander';
-import { sendChat } from '../../core/orchestrator.js';
-import { isAbortError } from '../../core/streamingOrchestrator.js';
-import { SessionManager } from '../../core/sessionManager.js';
-import { resolveDefaultAgent } from '../../agent/defaultAgent.js';
-import { getConfigDefaultAgent } from '../../config/userConfig.js';
-import { getAgentRegistry } from '../../agent/index.js';
+// Command-action-only imports (sendChat, SessionManager, agent registry,
+// SessionDrain, isAbortError) are loaded lazily inside `.action(...)` so
+// `alexi --help` / `alexi --version` and other subcommands do not pay
+// for the orchestrator, session I/O, or agent-loop modules. See #1769.
+// Imports used by exported helpers (`runChatImageMode`,
+// `runCommandNonInteractive`) MUST stay at top-level because tests
+// import those helpers directly and expect their dependencies wired.
 import {
   type Command as CustomCommand,
   renderSubmitPrompt,
@@ -18,7 +19,6 @@ import {
 import { getPermissionManager } from '../../permission/index.js';
 import { imageGenTool, type ImageGenResult } from '../../tool/tools/image-gen.js';
 import type { ToolResult } from '../../tool/index.js';
-import { SessionDrain } from '../../session/drain.js';
 
 /**
  * Result of running a custom command in non-interactive (chat) mode.
@@ -237,6 +237,28 @@ export function registerChatCommand(program: Command): void {
     .option('--image-size <spec>', 'Optional size hint for --image, e.g. "1024x1024"')
     .option('--image-output-path <dir>', 'Directory to save decoded base64 images from --image')
     .action(async (opts: ChatOptions) => {
+      // Lazy imports (issue #1769): loaded only when the chat command
+      // actually runs. Everything below the try/catch that operates on
+      // the orchestrator, session manager, or agent registry lives
+      // behind these dynamic imports.
+      const [
+        { sendChat },
+        { isAbortError },
+        { SessionManager },
+        { resolveDefaultAgent },
+        { getConfigDefaultAgent },
+        { getAgentRegistry },
+        { SessionDrain },
+      ] = await Promise.all([
+        import('../../core/orchestrator.js'),
+        import('../../core/streamingOrchestrator.js'),
+        import('../../core/sessionManager.js'),
+        import('../../agent/defaultAgent.js'),
+        import('../../config/userConfig.js'),
+        import('../../agent/index.js'),
+        import('../../session/drain.js'),
+      ]);
+
       // Hoisted so the catch block can call restoreSigint even when the
       // failure happens after the SIGINT handler was installed (issue #1639).
       let restoreSigint: () => void = () => {};

@@ -4,14 +4,15 @@
 
 import { Option, type Command } from 'commander';
 // Fallback: import { startInteractive } from '../interactive.js';
-import { startTui } from '../tui/index.js';
-import { getDefaultModel } from '../../providers/index.js';
-import { getPermissionManager } from '../../permission/index.js';
-import { createAutoCommitManager } from '../../git/autoCommit.js';
-import { loadGitConfig } from '../../git/config.js';
-import { commitDirtyFiles } from '../../git/dirtyFiles.js';
-import { RepoMapManager } from '../../context/repoMap.js';
-import { createWorktree } from '../../utils/gitWorktree.js';
+//
+// Heavy runtime imports (Ink/React TUI, git auto-commit, repo map, provider
+// initialisation) are deferred into the `.action(...)` closure below via
+// dynamic `import(...)`. They only run when the `interactive` command
+// actually executes — merely registering the command metadata (for
+// `alexi --help`, `alexi --version`, or dispatching a different
+// subcommand) does not pull them in. See #1769.
+import type { AutoCommitManager } from '../../git/autoCommit.js';
+import type { RepoMapManager } from '../../context/repoMap.js';
 
 interface InteractiveOptions {
   model?: string;
@@ -55,6 +56,30 @@ export function registerInteractiveCommand(program: Command): void {
     .option('--yolo', 'Auto-approve all permission prompts (dangerous)')
     .addOption(new Option('--dangerously-skip-permissions', 'Alias for --yolo').hideHelp())
     .action(async (opts: InteractiveOptions) => {
+      // Lazy imports (issue #1769): loaded only when the interactive
+      // command actually runs so `alexi --help`, `alexi --version`, and
+      // other subcommands do not pay for the Ink/React TUI, git
+      // auto-commit, repo map, or provider initialisation.
+      const [
+        { startTui },
+        { getDefaultModel },
+        { getPermissionManager },
+        { createAutoCommitManager },
+        { loadGitConfig },
+        { commitDirtyFiles },
+        { RepoMapManager },
+        { createWorktree },
+      ] = await Promise.all([
+        import('../tui/index.js'),
+        import('../../providers/index.js'),
+        import('../../permission/index.js'),
+        import('../../git/autoCommit.js'),
+        import('../../git/config.js'),
+        import('../../git/dirtyFiles.js'),
+        import('../../context/repoMap.js'),
+        import('../../utils/gitWorktree.js'),
+      ]);
+
       let worktreeCleanup: (() => Promise<void>) | undefined;
       try {
         if (opts.yolo || opts.dangerouslySkipPermissions) {
@@ -88,7 +113,7 @@ export function registerInteractiveCommand(program: Command): void {
           });
         }
 
-        let gitManager: ReturnType<typeof createAutoCommitManager> | undefined;
+        let gitManager: AutoCommitManager | undefined;
 
         // Commander's --no-auto-commits sets opts.autoCommits = false (default: true)
         if (opts.autoCommits !== false) {
