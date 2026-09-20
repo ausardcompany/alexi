@@ -107,6 +107,71 @@ graph TB
 | Interactive | `src/cli/interactive.ts` | Legacy interactive mode (deprecated in favor of TUI) |
 | TUI | `src/cli/tui/` | Full-screen Ink/React TUI with streaming, dialogs, and slash commands |
 
+#### CLI Command Lazy-Loading (issue #1769)
+
+Commander command **registration** is fast — it only records subcommand metadata (name, description, options, action closure) against the `program` instance. What used to be slow was that registering the metadata pulled in every module the action would eventually need: the Ink/React TUI, the orchestrator, the agent loop, the SAP AI SDK's `DeploymentApi`, `git`, the repo map, the permission bus. On a `alexi --help`, `alexi --version`, or `alexi models` invocation the user paid the full startup cost of subsystems they were never going to use.
+
+`src/cli/commands/*.ts` now defer their heavy runtime graphs to the `.action(async (opts) => { ... })` body via a single `Promise.all([...])` of dynamic `import(...)` calls. Only when Commander actually dispatches the matched subcommand do those modules resolve.
+
+```mermaid
+flowchart TD
+    User[$ alexi &lt;subcommand&gt;] --> Program[src/cli/program.ts]
+    Program --> Register[registerXxxCommand]
+    Register -->|static import at top level| Types[type-only + Commander types + small utils]
+    Register -->|register metadata only| Meta[[.action(...) closure captured, not executed]]
+    Program --> Dispatch{matched subcommand?}
+    Dispatch -->|no| Fast[--help / --version / other cmd<br/>heavy modules never resolved]
+    Dispatch -->|yes| ActionEnter[.action(opts) starts]
+    ActionEnter --> DynImport[Promise.all of import('...')]
+    DynImport --> Heavy[TUI, orchestrator, agent loop, git,<br/>repo map, permission bus, SAP AI SDK]
+    Heavy --> RunAction[run the actual command]
+```
+
+The refactor is per-file and pattern-consistent. Every command action now opens with a destructuring `Promise.all` of the modules it needs:
+
+```typescript
+// src/cli/commands/chat.ts — action body (excerpt)
+.action(async (opts: ChatOptions) => {
+  const [
+    { sendChat },
+    { isAbortError },
+    { SessionManager },
+    { resolveDefaultAgent },
+    { getConfigDefaultAgent },
+    { getAgentRegistry },
+    { SessionDrain },
+  ] = await Promise.all([
+    import('../../core/orchestrator.js'),
+    import('../../core/streamingOrchestrator.js'),
+    import('../../core/sessionManager.js'),
+    import('../../agent/defaultAgent.js'),
+    import('../../config/userConfig.js'),
+    import('../../agent/index.js'),
+    import('../../session/drain.js'),
+  ]);
+  // ... rest of the action body uses the destructured locals
+});
+```
+
+Per-file scope for the refactor:
+
+| Command file | Modules moved to dynamic import (see `tests/cli/lazyLoading.test.ts` `BANNED_TOP_LEVEL_IMPORTS`) |
+|--------------|--------------------------------------------------------------------------------------------------|
+| `agent.ts` | `agenticChat`, `sessionManager`, `streamingOrchestrator`, `effortLevel`, `git/autoCommit`, `git/config`, `git/dirtyFiles`, `context/repoMap`, `utils/gitWorktree`, `agent/defaultAgent`, `config/userConfig`, `permission/index`, `bus/index`, `../utils/mistakeLimitPrompt` |
+| `chat.ts` | `core/orchestrator`, `core/streamingOrchestrator`, `core/sessionManager`, `agent/defaultAgent`, `agent/index`, `config/userConfig`, `session/drain` |
+| `interactive.ts` | `../tui/index`, `providers/index`, `git/autoCommit`, `git/config`, `git/dirtyFiles`, `context/repoMap`, `utils/gitWorktree`, `permission/index` |
+| `models.ts` | `@sap-ai-sdk/ai-api` (only `listDeployments` needs `DeploymentApi`) |
+| `server.ts` | `server/auth`, `server/socket`, `server/protocol`, `command/index` (with a per-file `loadAuth()` helper so `server start` / `server stop` / `server status` share the same dependency graph without repeating the import list) |
+
+Rules the refactor codifies (enforced by `tests/cli/lazyLoading.test.ts`):
+
+1. **Type-only imports stay at the top level.** `import type { AutoCommitManager } from '../../git/autoCommit.js'` is erased at compile time, so it has zero runtime cost. Two `ReturnType<typeof createAutoCommitManager>` uses were rewritten to `AutoCommitManager` (imported as a type) so the surface stayed typed without pulling `git/autoCommit.js` into the eager graph.
+2. **Exports used by other tests stay at the top level.** `chat.ts` still statically imports the modules that `runChatImageMode` and `runCommandNonInteractive` need, because tests import those helpers directly and expect their dependencies wired. Only imports used purely inside the `.action(...)` body are moved.
+3. **Every banned static import has a matching dynamic import(...).** The audit fails if a specifier is removed from the top-level graph but not added to a dynamic loader — that state throws `ReferenceError` at runtime, and the audit catches it at review time.
+4. **`src/cli/commands/index.ts` still re-exports every `register*` helper.** Downstream callers that import by name (`import { registerChatCommand } from '.../commands/index.js'`) keep working; the refactor is invisible to them.
+
+Non-command entry points (the socket server, direct programmatic use of `sendChat`, the TUI when spawned from `startTui` outside the CLI) are unaffected — they import their dependencies statically at the call site.
+
 > **Not part of the CLI surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`) emitted a 5-line orphan file `src/cli/remote.ts` containing a non-exported `executeRemoteCommand(command: string): void` function that references an undeclared `isValidCommand` free identifier. It is **not** wired into `src/cli/program.ts`, does not correspond to any `alexi <subcommand>` on the [CLI Commands](API.md#cli-commands) reference, and fails `npm run typecheck` with `TS2304: Cannot find name 'isValidCommand'`. There is no `alexi remote` subcommand; remote LLM invocation goes through the SAP AI Core Orchestration provider (`src/providers/sapOrchestration.ts`), and remote MCP tool surfaces live under `src/mcp/`. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26.
 
 ### Core Layer

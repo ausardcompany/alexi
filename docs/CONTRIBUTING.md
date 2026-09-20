@@ -175,6 +175,48 @@ import { defineTool } from '../index.js';
 import type { ToolContext } from '../tool/index.js';
 ```
 
+#### CLI command actions: dynamic-import the heavy graph (issue #1769)
+
+Files under `src/cli/commands/*.ts` follow one extra rule that does not apply to the rest of the codebase: **heavy runtime modules used only inside the `.action(async (opts) => { ... })` closure must be loaded via dynamic `import(...)` inside the action, not statically at the top of the file.** The registration function (`registerXxxCommand(program)`) is called on every `alexi` invocation just to record Commander metadata for `--help`; a static import there transitively resolves the entire dependency graph, so `alexi --help` ends up loading the TUI, the orchestrator, and the SAP AI SDK for no reason.
+
+The convention (see `src/cli/commands/chat.ts`, `agent.ts`, `interactive.ts`, `models.ts`, `server.ts` for reference implementations):
+
+```typescript
+// src/cli/commands/foo.ts
+import { Option, type Command } from 'commander';
+// Type-only imports stay top-level (erased at compile time).
+import type { AutoCommitManager } from '../../git/autoCommit.js';
+
+export function registerFooCommand(program: Command): void {
+  program
+    .command('foo')
+    .description('Do foo')
+    .action(async (opts: FooOptions) => {
+      // Heavy imports live here, inside the action.
+      const [
+        { sendChat },
+        { SessionManager },
+        { createAutoCommitManager },
+      ] = await Promise.all([
+        import('../../core/orchestrator.js'),
+        import('../../core/sessionManager.js'),
+        import('../../git/autoCommit.js'),
+      ]);
+      // ... use the destructured locals
+    });
+}
+```
+
+Rules of thumb:
+
+- **Type-only imports stay at the top.** `import type { Foo } from '...'` and `import { type Foo } from '...'` are erased by `tsc` so cost nothing at runtime. Prefer them over `ReturnType<typeof heavyFactory>` when the factory itself would otherwise be a static import.
+- **Group dynamic imports into one `Promise.all([...])`.** The imports run concurrently, so batching gives a single microtask boundary and keeps the action body readable. Do not scatter individual `await import(...)` calls through the action body — the reader has to reconstruct the load graph manually and TypeScript cannot narrow the types as cleanly.
+- **Register the specifier in `tests/cli/lazyLoading.test.ts`.** When you move an import out of the static graph, add the specifier to `BANNED_TOP_LEVEL_IMPORTS[<file>]` in the test. Both the static-import audit and the dynamic-import audit rely on that table; if you forget, the regression is undetected and the next reviewer who "cleans up" the dynamic import by making it static will not fail CI.
+- **Exports used by other tests stay static.** If a helper you export is imported by a test (`import { runChatImageMode } from '../src/cli/commands/chat.js'`), its own dependencies MUST stay at the top level — the test would otherwise see undefined references. Only imports used purely inside the `.action(...)` body should be moved.
+- **Non-command entry points are unaffected.** The TUI when spawned from `startTui` outside the CLI, the socket server, and programmatic `sendChat` callers all import their dependencies statically at the call site. The refactor is scoped to files that register Commander subcommands.
+
+Non-command files should NOT copy this pattern. Dynamic imports have a real ergonomic cost (weakened type narrowing, harder to grep for callers, extra microtask on every call) and are only worth it when the alternative is paying the cost on every CLI startup.
+
 ### Naming Conventions
 
 | Element | Convention | Example |

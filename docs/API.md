@@ -14,6 +14,8 @@ This document provides comprehensive API documentation for Alexi's CLI commands,
 
 ## CLI Commands
 
+> **Lazy-loaded command actions.** Every subcommand under `src/cli/commands/*.ts` is registered by a `register<Name>Command(program: Command): void` helper. The registration itself only records Commander metadata; the heavy runtime graph (TUI, orchestrator, agent loop, SAP AI SDK, git, repo map, permission bus) is imported dynamically inside the `.action(...)` closure so `alexi --help`, `alexi --version`, and unrelated subcommands do not pay for modules they never use. See [ARCHITECTURE.md — CLI Command Lazy-Loading (issue #1769)](ARCHITECTURE.md#cli-command-lazy-loading-issue-1769) for the per-file scope and the contract enforced by `tests/cli/lazyLoading.test.ts`.
+
 ### chat
 
 Send messages to LLMs with optional auto-routing and session management.
