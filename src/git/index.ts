@@ -21,3 +21,7 @@ export { isGitRepo, getDirtyFiles, commitDirtyFiles } from './dirtyFiles.js';
 
 export type { CommitResult, AutoCommitManagerOptions } from './autoCommit.js';
 export { AutoCommitManager, createAutoCommitManager } from './autoCommit.js';
+
+export type { GitProvider, ParsedRemote } from './provider.js';
+export { detectGitProvider, parseRemote } from './provider.js';
+export { formatPRLink } from './pr-link.js';
