@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CLI command actions now dynamic-import their heavy runtime graphs** (`src/cli/commands/agent.ts`, `src/cli/commands/chat.ts`, `src/cli/commands/interactive.ts`, `src/cli/commands/models.ts`, `src/cli/commands/server.ts`, `tests/cli/lazyLoading.test.ts`, commit `2ae4611f` `perf(cli): lazy-load heavy command imports to reduce startup time`, merged via PR #1773; issue #1769). Registering the Commander metadata for a subcommand no longer transitively pulls in the modules the action needs to run. Instead, each `.action(async (opts) => { ... })` body opens with a `Promise.all([...])` of dynamic `import(...)` calls and destructures the used exports into locals. Value imports of the following modules were moved out of the top-level import graph of the corresponding command files:
+  - `agent.ts`: `../../core/agenticChat.js`, `../../core/sessionManager.js`, `../../core/streamingOrchestrator.js`, `../../core/effortLevel.js`, `../../git/autoCommit.js`, `../../git/config.js`, `../../git/dirtyFiles.js`, `../../context/repoMap.js`, `../../utils/gitWorktree.js`, `../../agent/defaultAgent.js`, `../../config/userConfig.js`, `../../permission/index.js`, `../../bus/index.js`, `../utils/mistakeLimitPrompt.js`.
+  - `chat.ts`: `../../core/orchestrator.js`, `../../core/streamingOrchestrator.js`, `../../core/sessionManager.js`, `../../agent/defaultAgent.js`, `../../agent/index.js`, `../../config/userConfig.js`, `../../session/drain.js`. Imports still used by the exported helpers `runChatImageMode` and `runCommandNonInteractive` remain at the top level because tests import those helpers directly.
+  - `interactive.ts`: `../tui/index.js`, `../../providers/index.js`, `../../git/autoCommit.js`, `../../git/config.js`, `../../git/dirtyFiles.js`, `../../context/repoMap.js`, `../../utils/gitWorktree.js`, `../../permission/index.js`.
+  - `models.ts`: `@sap-ai-sdk/ai-api` (only `listDeployments` needs `DeploymentApi`; the other subcommands do not).
+  - `server.ts`: `../../server/auth.js`, `../../server/socket.js`, `../../server/protocol.js`, `../../command/index.js`. A per-file `loadAuth()` helper centralises the auth-module import so the `server start` / `server stop` / `server status` actions each pull the same dependency graph without repeating themselves.
+
+  Type-only imports (`type` in the specifier list, `import type`) are kept at the top level because they are erased at compile time so cost nothing at runtime. Two intermediate `ReturnType<typeof createAutoCommitManager>` uses were rewritten to `AutoCommitManager` (imported as a type) so the surface stays typed without pulling in `../../git/autoCommit.js` eagerly.
+
+  Contract enforcement lives in `tests/cli/lazyLoading.test.ts` (254 lines, three describe blocks): (1) a top-level static-import regex parse over each command file asserts none of the banned specifiers appear as value imports, catching an accidental re-eagerification on review; (2) a dynamic-import audit asserts that every banned specifier still has a matching `import('<spec>')` somewhere in the file so a half-refactored command action does not throw `ReferenceError` at runtime; (3) `src/cli/commands/index.ts` is asserted to still re-export every `register*` helper so the lazy-loading refactor does not silently lose a command registration for downstream callers that import by name.
+
+- **Version bump 1.22.24 -> 1.22.26** (`package.json`). Rolls up the CLI lazy-loading refactor and the 2026-09-19 / 2026-09-20 upstream sync ports (subagent approval boundaries, shell permission pattern masking, compaction trigger projection).
+
 ### Added
 
 - **Co-located pure-function regression suite for subagent approval boundaries** (`src/agent/subagent-permissions.test.ts`, commit `82dbef06` `test(agent): verify subagent approval boundaries do not inherit parent approvals`): Adds 173 lines / four new cases directly against `deriveSubagentSessionPermission` in `src/agent/subagent-permissions.ts`, complementing the existing integration coverage in `tests/tool/tools/task-approval-boundary.test.ts` by pinning the three-decision contract at the derivation-function level without going through the `task` tool wiring. The suite is mock-free — the derivation is a pure function of its input object — and asserts:

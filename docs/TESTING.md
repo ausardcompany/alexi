@@ -5656,3 +5656,29 @@ Recommended cases:
 - **Empty or nil messages return false.** `shouldCompact([], anything, anything)` and `shouldCompact(null as unknown as Message[], ...)` must return `false` without throwing. The guard is at the top of the function.
 
 Do NOT test the projection with mocked `estimateTokens` — the calculation is deterministic under `estimateTokens(text) = Math.ceil(text.length / 4)`, so real inputs work fine and mocking obscures the intent.
+
+## Testing the CLI lazy-loading contract (issue #1769)
+
+`tests/cli/lazyLoading.test.ts` defends the invariant that `alexi --help`, `alexi --version`, and unrelated subcommands do not pull the heavy runtime graph (TUI, orchestrator, agent loop, git, repo map, permission bus, SAP AI SDK) into memory. The test does NOT boot Commander or shell out — it parses each command file's source with a regex and asserts on the top-level import statements.
+
+The suite is intentionally small (254 lines, three describe blocks) so it stays cheap to run on every push:
+
+1. **`top-level import assertions`** — for each entry in `BANNED_TOP_LEVEL_IMPORTS`, parse the file with `extractTopLevelValueImports` (a line-oriented regex that consumes `import ...;` blocks and ignores `import type { ... } from '...';`) and assert none of the banned specifiers appear as static value imports. Adding a static `import { sendChat } from '../../core/orchestrator.js'` back to `chat.ts` fails this test immediately, without needing to boot the CLI.
+2. **`dynamic import audit`** — for each banned specifier in each file, assert there is at least one matching `import('<spec>')` call. Catches the half-refactored state where a heavy import was removed from the top level but the dynamic loader was forgotten, which would throw `ReferenceError` at runtime when the action ran.
+3. **`commands/index.ts still re-exports every register* helper`** — a hard-coded list of `registerChatCommand`, `registerAgentCommand`, `registerInteractiveCommand`, ..., `registerReloadCommand` must all appear in `src/cli/commands/index.ts`. The lazy-loading refactor is scoped to individual files; the barrel export must keep working for callers that import registrations by name.
+
+The banned-module list is scoped to the "big rocks" from the profiling pass in issue #1769 — TUI (Ink/React), orchestrator, agent loop, SAP AI SDK, git auto-commit, and the background-process tool graph. Small utilities, Commander types, and plain type-only imports stay top-level.
+
+Adding a new command file:
+
+- If the action needs a heavy module, add its specifier to `BANNED_TOP_LEVEL_IMPORTS[<file>]` in the test AND wire a dynamic `import('<spec>')` inside the `.action(...)` closure. Both must be present or the audit fails.
+- If the action only needs cheap modules (Commander, `node:fs`, small utils), no entry in the banned list is required — the audit is opt-in per file, not a whitelist.
+- Type-only imports (`import type { ... }` or `import { type ... }`) are never flagged. Prefer them where the ergonomics allow: they cost nothing at runtime.
+
+Run just this suite locally:
+
+```bash
+npm test -- tests/cli/lazyLoading.test.ts
+```
+
+The test does not depend on `tsx`, a working `AICORE_SERVICE_KEY`, or any native module — it runs on any Node install that can execute Vitest.
