@@ -18,7 +18,7 @@ Write file: `.github/research/YYYY-MM-DD-spec.md`
 
    - `gh api repos/Kilo-Org/kilocode/commits?per_page=20 --jq '.[].commit.message'`  <!-- daily -->
    - `gh api repos/cline/cline/commits?per_page=20 --jq '.[].commit.message'`        <!-- daily -->
-   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`      <!-- daily -->
+   - `gh api repos/sst/opencode/commits?per_page=20 --jq '.[].commit.message'`      <!-- weekly (Mon) --> <!-- rotated from daily on 2026-09-20 after 26 consecutive cycles with zero CLI-actionable items (dryness 26/5) -->
    - `gh api repos/anthropics/claude-code/commits?per_page=20 --jq '.[].commit.message'`  <!-- monthly (1st Mon) -->
    - `gh api repos/aider-ai/aider/commits?per_page=20 --jq '.[].commit.message'`     <!-- monthly (1st Mon) -->
 
