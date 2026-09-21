@@ -17,6 +17,7 @@
  *        - `<workdir>/.kilocode/rules/`
  *        - `<workdir>/.opencode/rules/`
  *        - `<workdir>/.cline/rules/`
+ *        - `<workdir>/.cline/`   (cross-compatibility with Cline-based workflows)
  *        - `<workdir>/rules/`
  *   4. User-level `~/.alexi/rules/`
  *
@@ -47,6 +48,9 @@ export const DEFAULT_PROJECT_RULE_DIRS: readonly string[] = [
   '.kilocode/rules',
   '.opencode/rules',
   '.cline/rules',
+  // Cross-compatibility with Cline-based workflows: some projects place
+  // markdown rules directly under `.cline/` (mirrors Cline PR #14207).
+  '.cline',
   'rules',
 ];
 

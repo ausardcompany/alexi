@@ -1678,7 +1678,7 @@ The test intentionally uses the current process as the ground-truth pid it expec
 
 ### Testing rules file discovery
 
-`tests/rulesDiscovery.test.ts` and the `Rules discovery integration` describe block in `src/agent/system.test.ts` cover the expanded rules-file discovery module in `src/config/rulesDiscovery.ts`. The discovery module walks up to nine directories per invocation (six default project directories, the user-level `~/.alexi/rules`, plus zero-or-more custom `rulesPath` entries from project and global `.alexi/config.json`) and resolves basename conflicts with first-seen-wins semantics. Tests must isolate against the real user `HOME` and the real repository config to stay hermetic.
+`tests/rulesDiscovery.test.ts` and the `Rules discovery integration` describe block in `src/agent/system.test.ts` cover the expanded rules-file discovery module in `src/config/rulesDiscovery.ts`. The discovery module walks up to ten directories per invocation (seven default project directories — `.alexi/rules`, `.kilo/rules`, `.kilocode/rules`, `.opencode/rules`, `.cline/rules`, `.cline` (Cline flat layout), and root `rules` — plus the user-level `~/.alexi/rules` and zero-or-more custom `rulesPath` entries from project and global `.alexi/config.json`) and resolves basename conflicts with first-seen-wins semantics. Tests must isolate against the real user `HOME` and the real repository config to stay hermetic.
 
 Key patterns for the unit suite (`tests/rulesDiscovery.test.ts`):
 
@@ -1774,7 +1774,9 @@ Additional integration-test invariants:
 1. **`resetRulesDiscoveryLogCache()` in `beforeEach`.** The prompt assembler suppresses repeat log output per workdir per process; without the reset, a test that asserts the log summary would only see it once across the whole file.
 2. **Redirect both `HOME` and `USERPROFILE`.** `os.homedir()` prefers `HOME` on POSIX and `USERPROFILE` on Windows; setting both keeps the test cross-platform. Restore both in `afterEach`, deleting when previously unset.
 3. **Assert on the `<rule file="...">` wrapper shape.** The prompt assembler emits `<rule file="<basename>">\n<content>\n</rule>` for every winning rule. Assert on both the wrapper and the content token so a regression that silently drops the wrapper (breaking downstream consumers that parse `<rule file>` blocks) is caught.
-4. **Cover multiple alternative directories in one prompt.** Write rules into all six default project directories with distinct tokens and assert every token appears — this pins the guarantee that the expanded discovery paths land in the same prompt without any single directory shadowing the others when basenames differ.
+4. **Cover multiple alternative directories in one prompt.** Write rules into all seven default project directories with distinct tokens and assert every token appears — this pins the guarantee that the expanded discovery paths land in the same prompt without any single directory shadowing the others when basenames differ. The seventh directory, the `.cline/` flat layout, was added in commit `6ce4ab8c` for cross-compatibility with Cline-based workflows (Cline PR #14207); when covering it, seed a same-basename file under `.cline/rules/` as well and assert the nested variant wins with the flat variant reported under `result.conflicts[0].shadowed` — this is the load-bearing precedence guarantee that `<workdir>/.cline/rules/*.md` is scanned strictly before `<workdir>/.cline/*.md`.
+
+Directory-list membership is additionally pinned by direct assertions against `DEFAULT_PROJECT_RULE_DIRS` (`expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline/rules')` / `expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline')`) so a rename of either directory string is caught before any filesystem interaction — see the `discoverRules — default project paths` describe block in `tests/rulesDiscovery.test.ts`.
 
 ### Testing session response classifier and output budget
 

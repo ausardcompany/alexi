@@ -3,7 +3,7 @@
  *
  * Exercises:
  *   1. Discovery across all default project paths (`.alexi/`, `.kilo/`,
- *      `.kilocode/`, `.opencode/`, `.cline/`, root `rules/`).
+ *      `.kilocode/`, `.opencode/`, `.cline/rules/`, `.cline/`, root `rules/`).
  *   2. Discovery of user-level `~/.alexi/rules/`.
  *   3. Custom `rulesPath` in `.alexi/config.json` (project + global), string
  *      and array forms.
@@ -204,6 +204,64 @@ describe('discoverRules — default project paths', () => {
     writeFile(path.join(workdir, '.alexi', 'rules', 'ignore.txt'), 'text');
     const result = discoverRules({ workdir, homedir: home, silent: true });
     expect(result.rules.map((r) => r.fileName)).toEqual(['note.md']);
+  });
+
+  it('includes both .cline/rules/ and .cline/ in the default scan (Cline compat)', () => {
+    // Cross-compatibility with Cline-based workflows: markdown rules can
+    // live under either `.cline/rules/` or directly under `.cline/`.
+    expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline/rules');
+    expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline');
+  });
+
+  it('discovers rules placed directly under .cline/ (Cline flat layout)', () => {
+    writeFile(path.join(workdir, '.cline', 'flat.md'), '# flat cline rule');
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].fileName).toBe('flat.md');
+    expect(result.rules[0].source).toBe('project');
+    expect(result.rules[0].content).toContain('flat cline rule');
+  });
+
+  it('discovers rules from both .cline/rules/ and .cline/ when both exist', () => {
+    writeFile(path.join(workdir, '.cline', 'rules', 'nested.md'), '# nested');
+    writeFile(path.join(workdir, '.cline', 'flat.md'), '# flat');
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    const names = result.rules.map((r) => r.fileName).sort();
+    expect(names).toEqual(['flat.md', 'nested.md']);
+  });
+
+  it('.kilo/ overrides .cline/rules/ when the same rule key is present in both', () => {
+    // Priority order: .kilo/ > .kilocode/rules/ > .cline/rules/ > .cline/
+    writeFile(path.join(workdir, '.kilo', 'rules', 'style.md'), '# kilo style');
+    writeFile(path.join(workdir, '.cline', 'rules', 'style.md'), '# cline style');
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].content).toContain('kilo style');
+    expect(result.rules[0].filePath).toBe(path.join(workdir, '.kilo', 'rules', 'style.md'));
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].shadowed).toEqual([
+      path.join(workdir, '.cline', 'rules', 'style.md'),
+    ]);
+  });
+
+  it('.kilocode/rules/ overrides .cline/rules/ when the same rule key is present', () => {
+    writeFile(path.join(workdir, '.kilocode', 'rules', 'style.md'), '# kilocode style');
+    writeFile(path.join(workdir, '.cline', 'rules', 'style.md'), '# cline style');
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].content).toContain('kilocode style');
+    expect(result.rules[0].filePath).toBe(path.join(workdir, '.kilocode', 'rules', 'style.md'));
+  });
+
+  it('.cline/rules/ overrides .cline/ when the same rule key is present', () => {
+    writeFile(path.join(workdir, '.cline', 'rules', 'style.md'), '# nested wins');
+    writeFile(path.join(workdir, '.cline', 'style.md'), '# flat loses');
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].content).toContain('nested wins');
+    expect(result.rules[0].filePath).toBe(path.join(workdir, '.cline', 'rules', 'style.md'));
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].shadowed).toEqual([path.join(workdir, '.cline', 'style.md')]);
   });
 });
 
