@@ -16,6 +16,7 @@ import {
   resolveEnvVars,
   type McpServerConfig,
 } from './config.js';
+import { classifyProbeContentType } from './sse-probe.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -321,6 +322,12 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
   }
   // Missing env variable hint emitted by `checkMissingEnvVars`.
   if (/missing environment variable/i.test(message)) {
+    return 'config';
+  }
+  // Probe returned a valid HTTP response with a content-type we can't
+  // handshake with (HTML login page, intercepting proxy, wrong URL) —
+  // permanent config error, retrying will produce the same wrong body.
+  if (/unexpected Content-Type '/.test(message)) {
     return 'config';
   }
   // "command not found" style messages from various shells / SDK wrappers.
@@ -1228,6 +1235,31 @@ export class McpClientManager {
       // is what we care about at this layer.
       if (response.status === 401 || response.status === 403) {
         throw new McpConnectAuthError(config.name, response.status);
+      }
+      // When the peer DID advertise a `content-type` (some servers echo
+      // it on HEAD, some don't), classify it case-insensitively so
+      // `Text/Event-Stream; charset=utf-8`, `TEXT/EVENT-STREAM`, and
+      // `application/json` all resolve correctly. A truly unexpected
+      // content-type (`text/html`, a login page from an intercepting
+      // proxy, ...) is a permanent config error and MUST NOT be
+      // retried — the retry budget is reserved for transient network
+      // blips. When no content-type is set we let the fall-through
+      // "transport not yet implemented" error carry the classification.
+      const advertised = response.headers.get('content-type');
+      if (advertised) {
+        const kind = classifyProbeContentType(advertised);
+        if (kind === 'other') {
+          // Permanent: name the observed type in the message so the
+          // operator can spot a reverse-proxy misconfiguration
+          // (login page, HTML error, ...).
+          throw new Error(
+            `Failed to connect to MCP server '${config.name}': unexpected ` +
+              `Content-Type '${advertised}' on probe of ${config.url}. ` +
+              `Expected 'text/event-stream' (sse) or 'application/json' ` +
+              `(streamable HTTP). This is a permanent error and will NOT ` +
+              `be retried; check the 'url' field in mcp-servers.json.`
+          );
+        }
       }
     });
 

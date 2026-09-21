@@ -866,3 +866,92 @@ export function updateGlobal(
     });
   }
 }
+
+// ============ Session retention policy ============
+
+/**
+ * Machine-wide session retention policy.
+ *
+ * Ports upstream opencode `Info.retention` (2026-09 sync). When enabled,
+ * a background sweep permanently deletes sessions older than
+ * `maxAgeDays`. Alexi keeps the schema/reader/writer here so the CLI can
+ * surface the setting via `alexi config`; the actual retention *runner*
+ * is intentionally deferred (upstream centralises this in a backend
+ * service that Alexi does not yet own).
+ *
+ * Serialized shape in `~/.alexi/config.json`:
+ * ```json
+ * { "retention": { "enabled": true, "maxAgeDays": 30 } }
+ * ```
+ *
+ * - `enabled` defaults to `false` — deletion is permanent, so the
+ *   feature is strictly opt-in.
+ * - `maxAgeDays` defaults to 30, clamped to a minimum of 1. Values that
+ *   are not positive finite integers fall back to the default rather
+ *   than throwing, so a corrupt config never wedges the CLI.
+ */
+export interface SessionRetentionPolicy {
+  /**
+   * Whether automatic deletion is enabled. `false` (or missing) means
+   * the retention runner is a no-op even if `maxAgeDays` is set.
+   */
+  enabled: boolean;
+  /**
+   * Days a session is kept before retention deletes it. Minimum 1.
+   */
+  maxAgeDays: number;
+}
+
+const DEFAULT_RETENTION_MAX_AGE_DAYS = 30;
+
+/**
+ * Return the effective session-retention policy. When `retention` is
+ * absent from `~/.alexi/config.json`, returns the safe default
+ * (`enabled: false`, `maxAgeDays: 30`) so callers can rely on the
+ * shape being present without null-checks.
+ */
+export function getConfigSessionRetention(): SessionRetentionPolicy {
+  const config = loadFullConfig();
+  const raw = config.retention;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { enabled: false, maxAgeDays: DEFAULT_RETENTION_MAX_AGE_DAYS };
+  }
+  const rec = raw as Record<string, unknown>;
+  const enabled = rec.enabled === true;
+  let maxAgeDays = DEFAULT_RETENTION_MAX_AGE_DAYS;
+  const rawMax = rec.maxAgeDays;
+  if (typeof rawMax === 'number' && isFinite(rawMax) && rawMax >= 1) {
+    maxAgeDays = Math.floor(rawMax);
+  }
+  return { enabled, maxAgeDays };
+}
+
+/**
+ * Persist the session-retention policy. Validates that `maxAgeDays` is
+ * a positive integer; throws otherwise so callers (e.g. a `config set`
+ * subcommand) can surface a clear error message.
+ */
+export function setConfigSessionRetention(policy: Partial<SessionRetentionPolicy>): void {
+  if (
+    policy.maxAgeDays !== undefined &&
+    (!Number.isFinite(policy.maxAgeDays) || policy.maxAgeDays < 1)
+  ) {
+    throw new Error(
+      `retention.maxAgeDays must be a positive integer >= 1 (got ${String(policy.maxAgeDays)})`
+    );
+  }
+  const config = loadFullConfig();
+  const existing =
+    config.retention && typeof config.retention === 'object' && !Array.isArray(config.retention)
+      ? (config.retention as Record<string, unknown>)
+      : {};
+  const merged: Record<string, unknown> = { ...existing };
+  if (policy.enabled !== undefined) {
+    merged.enabled = policy.enabled;
+  }
+  if (policy.maxAgeDays !== undefined) {
+    merged.maxAgeDays = Math.floor(policy.maxAgeDays);
+  }
+  config.retention = merged;
+  saveFullConfig(config);
+}
