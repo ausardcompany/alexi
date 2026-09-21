@@ -297,20 +297,45 @@ When adding future reverse dependencies between modules that already form an ESM
 
 #### Anthropic Claude Models
 
+Two id shapes are exposed by SAP AI Core Orchestration and both are present in `ORCHESTRATION_MODELS`:
+
+1. **Moving `major.minor` tags** — resolve to the latest published snapshot in that line. Use these when routing configs should ride point releases automatically.
+2. **Dated snapshot ids** — pin to a specific model revision (`YYYYMMDD` suffix). Use these when a routing rule or agent must not shift under the caller's feet across model updates.
+
 ```typescript
+// src/providers/sapOrchestration.ts (excerpt)
 const CLAUDE_MODELS = [
-  'anthropic--claude-4.5-opus',
+  // Moving major.minor tags
+  'anthropic--claude-3.7-sonnet',
+  'anthropic--claude-4.5-haiku',
   'anthropic--claude-4.5-sonnet',
-  'anthropic--claude-4-sonnet',
-  'anthropic--claude-4-haiku',
+  'anthropic--claude-4.5-opus',
+  'anthropic--claude-4.6-opus',
+  'anthropic--claude-4.7-opus',
+  // Dated snapshot ids (Aider #5173, 2026-09-21)
+  'anthropic--claude-3-7-sonnet-20250219',
+  'anthropic--claude-opus-4-1-20250805',
+  'anthropic--claude-opus-4-5-20251101',
+  'anthropic--claude-opus-4-6-20260205',
+  'anthropic--claude-opus-4-7-20260416',
 ];
 ```
 
-**Characteristics**:
+**Characteristics** (both shapes):
+
 - Excellent code generation and analysis
 - Strong reasoning capabilities
 - Large context windows (200K+ tokens)
-- Native tool calling support
+- Native tool calling support (`capabilities: ['tools']` in `ORCHESTRATION_MODEL_METADATA`)
+
+**Dated snapshots (Aider PR #5173, ported 2026-09-21).** SAP AI Core exposes Anthropic's dated Claude snapshots under the same `anthropic--` prefix used for moving tags, and Alexi's static catalog now accepts them without requiring an escape-hatch `deploymentId` override. Every entry inherits the tool-calling capability profile of its corresponding moving tag — `anthropic--claude-3-7-sonnet-20250219` shares the `['tools']` capability set with `anthropic--claude-3.7-sonnet`, and each `-opus-4-N-YYYYMMDD` snapshot mirrors its `anthropic--claude-4.N-opus` sibling. The regression suite in `src/providers/__tests__/modelCatalog.test.ts` pins the membership contract for each new id across the string list, the metadata map, `isOrchestrationModel`, `isAvailableModel`, `getAvailableModels`, `getModelMetadata`, and `modelHasCapability` (including the `sap-ai-core/`-prefixed form used by the router).
+
+When to prefer which shape:
+
+| Shape | Example | Behaviour under model updates | Best for |
+| --- | --- | --- | --- |
+| Moving tag | `anthropic--claude-4.7-opus` | Silently rolls to the newest snapshot in the 4.7 line | Interactive chat, human-in-the-loop agents |
+| Dated snapshot | `anthropic--claude-opus-4-7-20260416` | Pinned to that revision until the deployment is decommissioned | Auto-implement / auto-review workflows, reproducible CI runs, regression baselines |
 
 #### OpenAI GPT Models
 
