@@ -2138,6 +2138,16 @@ export const ORCHESTRATION_MODELS = [
   'anthropic--claude-4.5-opus',
   'anthropic--claude-4.6-opus',
   'anthropic--claude-4.7-opus',
+  // Anthropic dated snapshot ids (Aider #5173, 2026-09-21). SAP AI Core
+  // exposes point-in-time Claude snapshots alongside the moving major.minor
+  // ids so routing configs can pin to an exact model revision. All variants
+  // share the 200k context window and tool-calling capability profile of
+  // their moving-tag counterparts.
+  'anthropic--claude-3-7-sonnet-20250219',
+  'anthropic--claude-opus-4-1-20250805',
+  'anthropic--claude-opus-4-5-20251101',
+  'anthropic--claude-opus-4-6-20260205',
+  'anthropic--claude-opus-4-7-20260416',
   // Google models
   'gemini-2.5-flash',
   'gemini-2.5-pro',
@@ -2296,6 +2306,13 @@ export const ORCHESTRATION_MODEL_METADATA: Readonly<
   'anthropic--claude-4.5-opus': { capabilities: ['tools'] },
   'anthropic--claude-4.6-opus': { capabilities: ['tools'] },
   'anthropic--claude-4.7-opus': { capabilities: ['tools'] },
+  // Anthropic dated snapshots (Aider #5173): same tool-calling capability
+  // profile as their corresponding moving-tag ids.
+  'anthropic--claude-3-7-sonnet-20250219': { capabilities: ['tools'] },
+  'anthropic--claude-opus-4-1-20250805': { capabilities: ['tools'] },
+  'anthropic--claude-opus-4-5-20251101': { capabilities: ['tools'] },
+  'anthropic--claude-opus-4-6-20260205': { capabilities: ['tools'] },
+  'anthropic--claude-opus-4-7-20260416': { capabilities: ['tools'] },
   // Google Gemini 2.5 family: tool calling supported.
   'gemini-2.5-flash': { capabilities: ['tools'] },
   'gemini-2.5-pro': { capabilities: ['tools'] },
