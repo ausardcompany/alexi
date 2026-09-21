@@ -3998,6 +3998,96 @@ Key patterns to reuse when extending the suite:
 
 The paired module-level shims — `startWatcher(location, subscribe)` and `getDefaultWatcherInstance()` — are covered by their own case (`'backwards-compatible startWatcher shim delegates to the default instance'`); when adding shims to the module, add a matching case there to lock in the delegation contract.
 
+## Testing the semantic-search output helper (`tests/tool/semantic-search-output.test.ts`)
+
+Added in the 2026-09-21 sync (ports upstream opencode). The helper in
+`src/tool/semantic-search-output.ts` is a pure-function contract with the
+model: an empty semantic-search result MUST explain WHY it is empty (index
+disabled, still building, broken, or genuinely up-to-date), so the model
+never concludes "no such code exists" when the truth is "the index was
+unavailable". The exact phrasing IS the contract, so the 107-line suite
+pins one case per state:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  empty,
+  normalizePath,
+  reason,
+  scope,
+  type IndexingStatus,
+} from '../../src/tool/semantic-search-output.js';
+
+describe('semantic-search-output', () => {
+  it('normalizePath converts backslashes', () => {
+    expect(normalizePath('a\\b\\c')).toBe('a/b/c');
+  });
+
+  it('scope joins root and prefix', () => {
+    expect(scope('/repo')).toBe('/repo');
+    expect(scope('/repo', 'src\\a')).toBe('/repo/src/a');
+  });
+
+  it('reason for In Progress reports percent and file counts', () => {
+    const status: IndexingStatus = {
+      state: 'In Progress',
+      message: '',
+      percent: 42,
+      processedFiles: 21,
+      totalFiles: 50,
+    };
+    expect(reason(status)).toContain('(42%, 21/50 files)');
+  });
+
+  it('empty output includes scope and reason', () => {
+    const out = empty('/repo', 'src', undefined);
+    expect(out).toContain('Scope: /repo/src');
+    expect(out).toContain('Reason:');
+  });
+});
+```
+
+Key patterns to reuse when writing similar output-contract tests:
+
+1. **Assert on stable substrings, not verbatim strings.** The reason
+   sentences are stable in intent, not in wording — a small copyedit
+   ("disabled" -> "turned off") would break `.toBe(...)` on the full
+   sentence but should not break a `.toContain('disabled')` assertion.
+   Every case above targets a discriminating substring (`'disabled'`,
+   `'failed'`, `'(42%, 21/50 files)'`, `'not active'`, `'up to date'`,
+   `'could not be queried'`) so the test remains resistant to wording
+   drift while still failing on state confusion.
+2. **Cover each explicit state AND the `undefined` branch.** The
+   `state` union has five values (`'Disabled' | 'Error' | 'In Progress'
+   | 'Standby' | 'Ready'`). Missing coverage on any one is how the
+   "index up to date so no results exist" default sentence quietly gets
+   emitted for a broken index — the exact failure mode the port fixes.
+   The `reason(undefined)` case pins the "index could not be queried"
+   branch that fires when the caller has no status object at all.
+3. **Verify the percent / file-count format.** The `In Progress` case
+   asserts `(42%, 21/50 files)` verbatim because the parenthesised
+   metric is the ONE piece of concrete progress the model can act on
+   ("retry after some minutes"). A regression that renders it as
+   `42 percent, 21 of 50 files` would still pass a `.toContain('42')`
+   check but degrade the model's downstream reasoning.
+4. **Test `normalizePath` and `scope` even though they look trivial.**
+   The Windows backslash conversion is not just cosmetic — the scope
+   line is fed back to the model, and a mixed `\\` / `/` path is
+   ambiguous under some tokenisers. `scope('/repo', 'src\\a')` must
+   resolve to `/repo/src/a`, not `/repo/src\\a`, and the trivial-looking
+   assertion is the only place that contract is pinned.
+5. **Do NOT mock `IndexingStatus`.** The interface is inlined in
+   `src/tool/semantic-search-output.ts` specifically to avoid a runtime
+   dependency on `@kilocode/kilo-indexing`; tests should construct plain
+   object literals that match the shape rather than importing a mocked
+   library type.
+
+The helper has no production callers in Alexi 1.22.27 (semantic-search is
+delegated to `@morphllm/morphsdk` and the `alexi-mcp-warpgrep` MCP server),
+so the suite doubles as the specification any future first-party
+semantic-search tool must satisfy — render empty results through `empty()`
+so the reason travels with the miss.
+
 ## Testing Agent Custom Loader
 
 ### Test Files
@@ -4063,6 +4153,7 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp/client-timeout.test.ts` — `callTool` / handshake timeout budgets, precedence, and per-server independence (issue #1532)
 - `tests/mcp-config.test.ts` — MCP config loader, environment-variable resolution, per-server timeout parsing, and the example-config schema guard
 - `tests/mcp/playwright.test.ts` — end-to-end contract tests for the optional Playwright MCP server entry: schema validation of the example scaffold, generic startup retry, graceful degradation on a missing `@playwright/mcp-server` binary, and unchanged tool-schema passthrough
+- `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
 
@@ -4181,6 +4272,80 @@ Key patterns to reuse when extending the MCP timeout suite:
 5. **Preserve the abort-name convention (`AbortError`).** The manager's abort path branches on `err.name === 'AbortError'` to distinguish user-cancellation from a real transport error. Tests that reject with a plain `Error` (no `.name` assignment) will fall through the wrong branch and produce misleading diagnostics.
 
 The three existing describe blocks (`callTool timeout`, `per-server independence`, `connect handshake timeout`) together cover the four-layer precedence chain (per-server config > global config > `MCP_TOOL_TIMEOUT` env > 60 s default for requests, 3 s default for connect handshake per the issue #1339 hung-server guard) plus the concurrency contract from issue #1532.
+
+### Testing the SSE probe content-type classifier (`tests/mcp/sse-probe.test.ts`)
+
+Added in the 2026-09-21 sync. `classifyProbeContentType` and `isSseContentType`
+in `src/mcp/sse-probe.ts` are the single source of truth for the question
+"what kind of MCP endpoint did we probe?" — mistakes there directly cause
+`McpClientManager.connectRemote` to either retry indefinitely on a permanent
+misconfiguration (missed SSE header) or reject a valid endpoint
+(case-sensitive matching). The 57-line suite locks in the case matrix:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { classifyProbeContentType, isSseContentType } from '../../src/mcp/sse-probe.js';
+
+describe('sse-probe / classifyProbeContentType', () => {
+  it('classifies canonical text/event-stream as sse', () => {
+    expect(classifyProbeContentType('text/event-stream')).toBe('sse');
+  });
+
+  it('classifies case-varying text/event-stream as sse', () => {
+    expect(classifyProbeContentType('Text/Event-Stream')).toBe('sse');
+    expect(classifyProbeContentType('TEXT/EVENT-STREAM')).toBe('sse');
+  });
+
+  it('strips charset / parameters before matching sse', () => {
+    expect(classifyProbeContentType('text/event-stream; charset=utf-8')).toBe('sse');
+  });
+
+  it('classifies application/json as json (streamable HTTP)', () => {
+    expect(classifyProbeContentType('application/json')).toBe('json');
+  });
+
+  it('treats missing / non-string content-type as other', () => {
+    expect(classifyProbeContentType(null)).toBe('other');
+    expect(classifyProbeContentType(undefined)).toBe('other');
+    expect(classifyProbeContentType('')).toBe('other');
+  });
+});
+```
+
+Key patterns to reuse when extending this suite or writing a similar
+classification test:
+
+1. **Cover the case axis explicitly.** Lower-case, Title-Case, and
+   ALL-CAPS variants each need their own case because a naive
+   `contentType === 'text/event-stream'` regression would pass one and
+   fail the others. The classifier normalises via
+   `contentType.split(';', 1)[0]?.trim().toLowerCase()`; that pipeline
+   must survive case-preserving proxies (`nginx`, Cloudflare, SAP AI
+   Core's fabric).
+2. **Cover the parameter-suffix axis explicitly.** RFC 7231 permits
+   arbitrary `; parameter=value` suffixes; the classifier splits on
+   the first `;` before matching. Assert with `text/event-stream ; charset=utf-8`
+   (note the space before `;`) so a regression that changes `split(';')`
+   to something case-sensitive on whitespace is caught.
+3. **Assert `null`, `undefined`, AND `''` for the "no header" branch.**
+   `response.headers.get('content-type')` returns `string | null`; the
+   classifier accepts `string | null | undefined` so both call-site
+   shapes (raw `.get()` and a pre-normalised local) exercise the same
+   fail-closed path. The empty-string case is what surfaces a proxy
+   that stripped the header rather than omitting it.
+4. **Keep the classifier pure.** No fs / network / config reads — the
+   suite runs in under a millisecond and is safe to co-locate with the
+   heavier `client.test.ts` / `client-timeout.test.ts` suites. If a
+   future refactor moves the media-type list into a config file, keep
+   the classifier a pure function of its input and load the list in a
+   separate module the classifier receives via injection.
+
+`isSseContentType` is a convenience wrapper around
+`classifyProbeContentType(contentType) === 'sse'`. Its two-case suite
+(true for any casing of `text/event-stream`, false for `application/json`
+/ `text/html` / `null`) is a smoke test that the wrapper does not drift
+from the underlying classifier — do NOT test wrapper-specific behaviour
+here; add it to the classifier suite so the two exports cannot diverge.
 
 ### Testing the Playwright MCP registration contract (`tests/mcp/playwright.test.ts`)
 

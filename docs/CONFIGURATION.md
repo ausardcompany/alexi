@@ -12,6 +12,7 @@ This document describes all configuration options available in Alexi, including 
 - [Instruction Files](#instruction-files)
 - [Project Context](#project-context)
 - [Session Storage](#session-storage)
+  - [Session Retention Policy](#session-retention-policy)
 - [Configuration Examples](#configuration-examples)
 
 ## Environment Variables
@@ -316,7 +317,19 @@ interface UserConfig {
   persistAuthTokens?: boolean;    // Cache SAP AI Core OAuth tokens on disk
   notifications?: 'allow' | 'deny' | 'ask';   // Desktop-notification consent —
                                               //   see Native Notifications below
+  retention?: SessionRetentionPolicy;         // Machine-wide session retention.
+                                              //   See [Session Retention Policy]
+                                              //   below for the semantics and
+                                              //   defer-until-runner contract.
   [key: string]: unknown;         // Extensible for custom settings
+}
+
+interface SessionRetentionPolicy {
+  enabled: boolean;               // Whether automatic deletion is enabled.
+                                  //   `false` (or missing) is a no-op even if
+                                  //   `maxAgeDays` is set.
+  maxAgeDays: number;             // Days a session is kept before retention
+                                  //   deletes it. Minimum 1. Default 30.
 }
 ```
 
@@ -1180,6 +1193,67 @@ Reconciliation rules (`resolveSessionModelPreference`):
 4. Fresh effort update (only `reasoningEffort` set) merges into an explicit choice without swapping the model.
 
 Legacy records (persisted before the `source` field existed) are migrated by treating a missing `source` as `"user-explicit"` — the conservative choice. The alternative (`"default"`) would silently downgrade a user's saved model on the next config reload. See [ARCHITECTURE.md — Session Model Preference Reconciliation](ARCHITECTURE.md#session-model-preference-reconciliation-srccoremodelpreferencets) for the design and [API.md — Session Model Preference API](API.md#session-model-preference-api-srccoremodelpreferencets) for the programmatic surface.
+
+### Session Retention Policy
+
+Introduced in the 2026-09-21 sync (ports upstream opencode `Info.retention`). The
+machine-wide `retention` key on `~/.alexi/config.json` declares whether — and how
+aggressively — Alexi is allowed to permanently delete old sessions in the
+background. Persistence lives in `src/config/userConfig.ts`; the on-disk shape is:
+
+```json
+{
+  "retention": {
+    "enabled": true,
+    "maxAgeDays": 30
+  }
+}
+```
+
+Semantics:
+
+- **`enabled`** (`boolean`, default `false`). Deletion is permanent, so the
+  feature is strictly opt-in. When `false` (or the key is missing entirely),
+  the retention runner is a no-op even if `maxAgeDays` is set.
+- **`maxAgeDays`** (`number`, default `30`, minimum `1`). Days a session is kept
+  before retention deletes it. Values that are not positive finite integers
+  fall back to the default rather than throwing, so a corrupt config never
+  wedges the CLI. Non-integer positive values are floored on read.
+
+Programmatic access (`src/config/userConfig.ts`):
+
+```typescript
+import {
+  getConfigSessionRetention,
+  setConfigSessionRetention,
+  type SessionRetentionPolicy,
+} from './config/userConfig.js';
+
+// Reads the policy. Returns { enabled: false, maxAgeDays: 30 } when the
+// `retention` key is absent or corrupt, so callers never null-check.
+const policy: SessionRetentionPolicy = getConfigSessionRetention();
+
+// Writes a partial policy. Preserves sibling fields on `retention` (spread
+// merge) and validates `maxAgeDays`: a value < 1 or non-finite throws with
+// `retention.maxAgeDays must be a positive integer >= 1 (got <value>)`
+// so a `config set` subcommand can surface a clear error to the user.
+setConfigSessionRetention({ enabled: true, maxAgeDays: 14 });
+```
+
+**Runner status.** Alexi 1.22.27 ships the schema, reader, and writer only.
+The actual background sweep is intentionally deferred — upstream centralises
+retention in a backend service that Alexi does not yet own, and shipping the
+schema now lets operators persist their intent before the runner lands. Until
+the runner ships, sessions must still be deleted manually via
+`alexi session-delete <id>` or by removing entries from
+`~/.alexi/sessions/`.
+
+**Design intent for the eventual runner** (documented so it does not drift when
+the port lands): the sweep MUST honour `enabled: false` as a hard veto (no
+side effects, no logs beyond debug), MUST compare against the session file's
+`updatedAt` (not `createdAt`) so an actively used session is never reaped, and
+MUST fail closed — any error reading a candidate session must skip that
+session rather than delete it.
 
 ### Draft Cache
 
