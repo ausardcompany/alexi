@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`.cline/` flat-layout rules directory recognised by `discoverRules`** (`src/config/rulesDiscovery.ts`, `tests/rulesDiscovery.test.ts`, commit `6ce4ab8c` `feat(config): verify .cline rules multi-location support`). Cross-compatibility with Cline-based workflows (mirrors Cline PR #14207) where markdown rules may live directly under `<workdir>/.cline/` instead of the nested `<workdir>/.cline/rules/`. Both locations are now scanned in the default project pass and both surface through the standard `RulesDiscoveryResult` (winning rules in `rules`, shadowed duplicates in `conflicts`, scanned roots in `scannedDirs`).
+
+  Precedence in the default project scan is unchanged for all pre-existing directories and is now formally:
+
+  1. `<workdir>/.alexi/rules/`
+  2. `<workdir>/.kilo/rules/`
+  3. `<workdir>/.kilocode/rules/`
+  4. `<workdir>/.opencode/rules/`
+  5. `<workdir>/.cline/rules/`
+  6. `<workdir>/.cline/` **(new — Cline flat layout)**
+  7. `<workdir>/rules/`
+
+  Custom `rulesPath` entries and user-level `~/.alexi/rules/` continue to bracket the list on the top and bottom respectively. The `DEFAULT_PROJECT_RULE_DIRS` export in `src/config/rulesDiscovery.ts` is the load-bearing source of truth — any consumer that pins the directory list (docs generators, `alexi doctor`, integration tests) should read from that export rather than re-listing paths by hand.
+
+  Test coverage (`tests/rulesDiscovery.test.ts`, 60 new lines / five new cases in the `discoverRules — default project paths` describe block):
+
+  1. `includes both .cline/rules/ and .cline/ in the default scan (Cline compat)` — direct membership assertion against `DEFAULT_PROJECT_RULE_DIRS` so a rename of either directory string is caught before any filesystem call.
+  2. `discovers rules placed directly under .cline/ (Cline flat layout)` — writes `<workdir>/.cline/flat.md` and asserts a single rule is discovered with `source: 'project'` and content preserved verbatim.
+  3. `discovers rules from both .cline/rules/ and .cline/ when both exist` — writes distinct-basename files under both paths (`nested.md` and `flat.md`) and asserts both survive because the conflict key is the basename, not the directory.
+  4. `.kilo/ overrides .cline/rules/ when the same rule key is present in both` and `.kilocode/rules/ overrides .cline/rules/ when the same rule key is present` — pin the pre-existing precedence chain against regressions: `.kilo/` and `.kilocode/rules/` win over `.cline/rules/`, with the shadowed file reported in `result.conflicts[0].shadowed`.
+  5. `.cline/rules/ overrides .cline/ when the same rule key is present` — pins the new precedence step: the nested `.cline/rules/` variant wins over the flat `.cline/` variant on same-basename conflicts, so migrating from flat to nested does not silently swap the effective rule text.
+
 ### Changed
 
 - **CLI command actions now dynamic-import their heavy runtime graphs** (`src/cli/commands/agent.ts`, `src/cli/commands/chat.ts`, `src/cli/commands/interactive.ts`, `src/cli/commands/models.ts`, `src/cli/commands/server.ts`, `tests/cli/lazyLoading.test.ts`, commit `2ae4611f` `perf(cli): lazy-load heavy command imports to reduce startup time`, merged via PR #1773; issue #1769). Registering the Commander metadata for a subcommand no longer transitively pulls in the modules the action needs to run. Instead, each `.action(async (opts) => { ... })` body opens with a `Promise.all([...])` of dynamic `import(...)` calls and destructures the used exports into locals. Value imports of the following modules were moved out of the top-level import graph of the corresponding command files:
