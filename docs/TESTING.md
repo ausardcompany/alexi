@@ -261,6 +261,68 @@ Key patterns for follow-on entries:
 3. **Exercise the case-insensitive and provider-prefixed forms of the reasoning-effort guard.** `modelSupportsReasoningEffort` normalises via `toLowerCase()` and matches on the `deepseek` substring, so `DEEPSEEK-V4.1-FLASH` and `sap-ai-core/deepseek-v4.1-flash` must both classify as `'levels'`. A regression that tightened the guard to an exact-id lookup would silently drop reasoning-effort on any envelope with a `sap-ai-core/` prefix — pin the two variants so the regression trips loudly.
 4. **Do NOT mock `modelCatalog.ts` in this suite.** Unlike the router / inline-override tests that need a controlled `isAvailableModel` return, this suite is validating the real module wiring (static list ↔ metadata map ↔ family guards) and MUST use the real exports so a broken export chain fails the suite. If the catalog's `refreshModelCatalog()` fetches something in a `beforeAll` hook, the suite is still correct because the static seed already contains the id — the assertion `getAvailableModels().includes('deepseek-v4.1-flash')` passes regardless of whether the live fetch has completed.
 
+##### Parametrised coverage for id families (Anthropic dated snapshots, Aider #5173)
+
+When a single feed adds several sibling ids at once — for example, the Aider PR #5173 port that added the five `anthropic--claude-*-YYYYMMDD` dated snapshots on 2026-09-21 — prefer a `describe` block that drives the same assertions across every id via `it.each` instead of duplicating the seven contract checks per id. The pattern in `src/providers/__tests__/modelCatalog.test.ts` for the Claude dated snapshots is the reference shape:
+
+```typescript
+describe('modelCatalog: recent Claude dated snapshots (Aider #5173)', () => {
+  const claudeSnapshots = [
+    'anthropic--claude-3-7-sonnet-20250219',
+    'anthropic--claude-opus-4-1-20250805',
+    'anthropic--claude-opus-4-5-20251101',
+    'anthropic--claude-opus-4-6-20260205',
+    'anthropic--claude-opus-4-7-20260416',
+  ] as const;
+
+  it.each(claudeSnapshots)('%s is present in the static ORCHESTRATION_MODELS list', (id) => {
+    expect((ORCHESTRATION_MODELS as readonly string[]).includes(id)).toBe(true);
+  });
+
+  it.each(claudeSnapshots)('%s is accepted by isOrchestrationModel()', (id) => {
+    expect(isOrchestrationModel(id)).toBe(true);
+  });
+
+  it.each(claudeSnapshots)('%s is exposed via getAvailableModels()', (id) => {
+    expect(getAvailableModels()).toContain(id);
+  });
+
+  it.each(claudeSnapshots)('%s is accepted by isAvailableModel()', (id) => {
+    expect(isAvailableModel(id)).toBe(true);
+  });
+
+  it.each(claudeSnapshots)('%s has a tool-calling metadata entry', (id) => {
+    const meta = ORCHESTRATION_MODEL_METADATA[id];
+    expect(meta).toBeDefined();
+    expect(meta?.capabilities).toEqual(['tools']);
+  });
+
+  it.each(claudeSnapshots)('%s exposes metadata through getModelMetadata()', (id) => {
+    const meta = getModelMetadata(id);
+    expect(meta).toBeDefined();
+    expect(meta?.capabilities).toContain('tools');
+  });
+
+  it.each(claudeSnapshots)('%s advertises the tools capability', (id) => {
+    expect(modelHasCapability(id, 'tools')).toBe(true);
+  });
+
+  it.each(claudeSnapshots)(
+    '%s advertises tools even when queried through the sap-ai-core/ prefix',
+    (id) => {
+      expect(modelHasCapability(`sap-ai-core/${id}`, 'tools')).toBe(true);
+    }
+  );
+});
+```
+
+Additional patterns worth internalising from this suite:
+
+1. **Group by feed / port, not by id.** The `describe` header cites the upstream source (Aider #5173) and the port date. When a future family-level regression fires, the failing suite name is enough to locate the originating change in the git log — no bisecting needed.
+2. **Freeze the id list with `as const`.** The tuple typing keeps the `it.each` callback parameters narrowed to the literal string union, so a typo in a later assertion (`expect(modelHasCapability('anthropic--claude-3-7-sonnet-2025021', 'tools'))` — trailing digit dropped) fails at typecheck instead of silently short-circuiting to `false`.
+3. **Pin the `sap-ai-core/` prefix form in the SAME suite.** The provider-prefix stripping in `modelHasCapability` is a separate code path from the raw-id lookup. A regression that tightened the guard to an exact match would pass every non-prefixed assertion and fail only the prefixed variants — asserting both shapes for every id catches the regression on the first sibling instead of after the router hot loop degrades in production.
+4. **Assert the exact `capabilities` array, not a superset.** `expect(meta?.capabilities).toEqual(['tools'])` fails if the metadata entry was accidentally seeded with extra tags (`['tools', 'image-generation']`). If the port ever legitimately adds a second capability to these ids, the intent-preserving update is to change the expected array in ONE place — the `it.each` factors the assertion out of the per-id loop for free.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
