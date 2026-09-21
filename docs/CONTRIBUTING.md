@@ -2209,6 +2209,94 @@ Also in the 2026-09-19 sync (upstream kilocode `f607bf0e0` + `030412ea0` + `e28e
 - `toolContentTokens` is for tool outputs that have landed since the last provider-reported usage (build logs, grep dumps, large `read` responses). If your caller keeps the tool outputs as regular messages with recorded `tokens.input` / `tokens.output`, they are already in `reportedUsage` on the next turn — do NOT double-count by also passing them via `toolContentTokens`.
 - Tests belong alongside existing compaction coverage in `tests/core/compaction.test.ts` (or the colocated `src/core/__tests__/`). See `docs/TESTING.md — Testing the compaction trigger projection` for the recommended case matrix.
 
+## MCP Remote-Transport Probe Content-Type Classification (`classifyProbeContentType`)
+
+Added in the 2026-09-21 sync. `src/mcp/sse-probe.ts` renders the
+"what kind of MCP endpoint is at this URL?" answer as a pure function of the
+HTTP `Content-Type` header. `src/mcp/client.ts`'s `connectRemote` uses it to
+reject `text/html` login pages and other reverse-proxy misconfigurations as
+permanent errors, while `classifyConnectError` in the same file maps the
+resulting error message to `'config'` so the retry budget is preserved. When
+adding a new call site that reads the probe header or extending the classifier:
+
+- **Never inline case-sensitive string comparisons on `Content-Type`.** Real
+  proxies (nginx, Cloudflare, SAP AI Core's fabric) freely rewrite the
+  casing of header names AND values. `contentType === 'text/event-stream'`
+  is a regression waiting to happen. Use `classifyProbeContentType(header)`
+  or the `isSseContentType(header)` boolean wrapper.
+- **Split on the first `;` before matching.** The classifier does
+  `contentType.split(';', 1)[0]?.trim().toLowerCase()` for a reason —
+  `text/event-stream; charset=utf-8` is a valid SSE advertisement and
+  MUST resolve to `'sse'`. If you add a new accepted media type, keep
+  the same split-then-lowercase pipeline; do NOT introduce a per-type
+  ad-hoc regex.
+- **Return `'other'` for `null` / `undefined` / `''` / non-strings.** The
+  fail-closed default is the whole point of the classifier — a peer that
+  answered without a `Content-Type` is not a transport Alexi can safely
+  handshake with. `connectRemote` deliberately does NOT throw when the
+  header is absent (it falls through to the "transport not yet
+  implemented" branch), but only because the classifier's `'other'`
+  result is opt-in for the caller. Do not change this to throw.
+- **Extend the `'other'` -> permanent config error mapping in `client.ts`
+  as one change.** The permanent-error path in `connectRemote` and the
+  `classifyConnectError` regex (`/unexpected Content-Type '/`) must stay
+  in sync — if either drifts, the CI retry loop or the operator-facing
+  "check the 'url' field in mcp-servers.json" hint stops firing.
+- **Tests belong in `tests/mcp/sse-probe.test.ts`.** The classifier is
+  pure and can be exercised without booting a transport; add a case for
+  every new media type in the same describe block. See
+  [TESTING.md — Testing the SSE probe content-type classifier](TESTING.md#testing-the-sse-probe-content-type-classifier-testsmcpsse-probetestts).
+- **Do NOT observe the `Content-Type` from inside the transport client.**
+  The probe is the last chance to reject a permanent misconfiguration
+  before entering the transport handshake, which is where the retry
+  budget starts being spent. Pushing the check into the transport layer
+  would defeat that separation.
+
+## Session Retention Policy (`getConfigSessionRetention` / `setConfigSessionRetention`)
+
+Added in the 2026-09-21 sync. `src/config/userConfig.ts` gained a
+`SessionRetentionPolicy` type plus paired reader / writer for the top-level
+`retention` key on `~/.alexi/config.json`. Alexi ships the schema only; the
+background retention runner is intentionally deferred. When touching this
+surface:
+
+- **Do NOT persist an empty object when nothing changed.**
+  `setConfigSessionRetention({})` is a valid no-op — the spread merge
+  preserves any prior `enabled` / `maxAgeDays` values. If you add a third
+  field, follow the same pattern: only write it when it appears in the
+  partial input, and preserve siblings otherwise. Never wipe the
+  `retention` object wholesale from a `config set` subcommand.
+- **Reject non-positive `maxAgeDays` at write time.** The writer already
+  throws `Error('retention.maxAgeDays must be a positive integer >= 1 ...')`
+  for negative / non-finite input. Reader-side robustness is the mirror
+  contract — a hand-edited config with a garbage `maxAgeDays` MUST fall
+  back to the 30-day default, not throw. If you add a new field with a
+  numeric constraint, follow the same asymmetric contract: strict at
+  the writer, lenient at the reader, so a corrupt config never wedges
+  the CLI.
+- **`enabled` MUST default to `false`.** Deletion is permanent, and the
+  feature is strictly opt-in. Never introduce a code path that treats an
+  unset `retention` key as "retention active with default 30d" — that
+  is a data-loss risk on any operator who has not yet noticed the
+  feature exists.
+- **When the runner lands, honour `enabled: false` as a hard veto.**
+  Even a debug-level log MUST NOT delete a session when `enabled` is
+  false. Compare against the session file's `updatedAt` (not
+  `createdAt`) so an actively used session is never reaped, and fail
+  closed on any I/O error (skip the candidate, do not delete).
+- **Do NOT read `retention` from outside `src/config/userConfig.ts`.**
+  Route all callers through `getConfigSessionRetention()` so any future
+  clamp / migration / validation logic lives in one place. The upstream
+  opencode schema is expected to grow additional fields (retention
+  cadence, per-directory overrides) and centralising the read is what
+  keeps the migration cheap.
+- **Tests.** The reader / writer are pure w.r.t. the filesystem and can
+  be exercised via a temp `HOME` (see `tests/config/` for the
+  established pattern). Cover both the missing-key branch (reader
+  returns defaults) and the corrupt-key branch (`retention: 42`,
+  `retention: []`, `retention: { maxAgeDays: 'foo' }`) so the fall-back
+  contract does not silently drift.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
