@@ -84,6 +84,32 @@ export interface SessionMetadata {
    * Ported from upstream kilocode commit f4cba053a.
    */
   agent?: string;
+  /**
+   * Persistent multi-turn goal for the session (issue #1804). When
+   * `armed === true`, the agentic chat loop injects a continuation
+   * system reminder after a text-only turn so the model keeps working
+   * toward the goal across multiple assistant turns. Cleared via the
+   * `alexi goal clear` CLI command or by explicitly setting `armed`
+   * back to `false`.
+   */
+  goal?: SessionGoal;
+}
+
+/**
+ * Persistent multi-turn goal attached to a session's metadata. Set via
+ * the `goal` tool (from within a model turn) or the `alexi goal set`
+ * CLI command. When `armed`, the agentic chat loop re-drives the model
+ * after each text-only turn until the goal is cleared.
+ */
+export interface SessionGoal {
+  /** High-level goal in plain language. */
+  description: string;
+  /** Optional concrete completion target (file path, PR number, etc.). */
+  target?: string;
+  /** True while the goal should trigger continuation loops. */
+  armed: boolean;
+  /** Unix epoch (ms) the goal was armed. Preserved across re-arm. */
+  createdAt: number;
 }
 
 export interface Session {

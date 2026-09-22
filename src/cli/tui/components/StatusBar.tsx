@@ -5,6 +5,7 @@ import {
   CompactionComplete,
   CompactionStarted,
   ProviderModelFellBack,
+  SessionGoalUpdated,
 } from '../../../bus/index.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { formatCwdShort } from '../utils/pathFormat.js';
@@ -41,7 +42,18 @@ export interface StatusBarProps {
    * streaming to avoid segment jitter next to the spinner.
    */
   cwd?: string;
+  /**
+   * Description of the currently armed multi-turn goal (issue #1804). When
+   * present AND non-empty, the StatusBar renders a `goal: <desc>` segment
+   * so users can see when the agent is self-driving. Left `undefined` when
+   * no goal is armed. The bar also subscribes to `SessionGoalUpdated` so
+   * goals armed mid-session light up without a prop change.
+   */
+  goalDescription?: string;
 }
+
+/** Maximum characters of goal text shown in the StatusBar before truncation. */
+const GOAL_SEGMENT_MAX_CHARS = 40;
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   USD: '$',
@@ -78,6 +90,7 @@ export function StatusBar({
   sessionId,
   topModelLabel,
   cwd,
+  goalDescription,
 }: StatusBarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -128,6 +141,41 @@ export function StatusBar({
     });
     return unsub;
   }, []);
+
+  // Issue #1804: active multi-turn goal for the current session. Seeded
+  // from the `goalDescription` prop (when the caller passed it in from
+  // session metadata at mount time) and kept in sync via the
+  // `SessionGoalUpdated` bus event. Cleared when an update arrives with
+  // `armed: false` or a null description.
+  const [activeGoal, setActiveGoal] = React.useState<string | null>(
+    goalDescription && goalDescription.length > 0 ? goalDescription : null
+  );
+  React.useEffect(() => {
+    setActiveGoal(goalDescription && goalDescription.length > 0 ? goalDescription : null);
+  }, [goalDescription]);
+  React.useEffect(() => {
+    const unsub = SessionGoalUpdated.subscribe((event) => {
+      if (sessionId && event.sessionId !== sessionId) {
+        return;
+      }
+      if (!event.armed || !event.description) {
+        setActiveGoal(null);
+        return;
+      }
+      setActiveGoal(event.description);
+    });
+    return unsub;
+  }, [sessionId]);
+
+  const goalSegmentText = React.useMemo(() => {
+    if (!activeGoal) {
+      return null;
+    }
+    if (activeGoal.length <= GOAL_SEGMENT_MAX_CHARS) {
+      return activeGoal;
+    }
+    return activeGoal.slice(0, GOAL_SEGMENT_MAX_CHARS - 1) + '…';
+  }, [activeGoal]);
 
   const currencySymbol = CURRENCY_SYMBOLS[cost.currency] ?? `${cost.currency} `;
   const costStr = `${currencySymbol}${cost.totalCost.toFixed(4)}`;
@@ -187,6 +235,12 @@ export function StatusBar({
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
             {' · '}
             {formatCwdShort(cwd)}
+          </Text>
+        )}
+        {goalSegmentText && (
+          <Text color={colors.info} backgroundColor={colors.backgroundDarker} bold>
+            {' · goal: '}
+            {goalSegmentText}
           </Text>
         )}
         {/* Live model catalog indicator: ● N live / ⟳ loading / ○ offline */}

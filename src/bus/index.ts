@@ -266,7 +266,7 @@ export const PermissionRequested = defineEvent(
   z.object({
     id: z.string(),
     toolName: z.string(),
-    action: z.enum(['read', 'write', 'execute', 'network', 'admin']),
+    action: z.enum(['read', 'write', 'execute', 'network', 'admin', 'goal']),
     resource: z.string(),
     description: z.string(),
     timestamp: z.number(),
@@ -367,6 +367,24 @@ export const SessionEnded = defineEvent(
   'session.ended',
   z.object({
     sessionId: z.string(),
+    timestamp: z.number(),
+  })
+);
+
+/**
+ * Emitted whenever a session's persistent multi-turn goal changes: armed
+ * (via the `goal` tool or `alexi goal set`), cleared (`alexi goal clear`),
+ * or superseded by a new arm. `description` is `null` when the goal was
+ * cleared. TUI surfaces subscribe to this event so the header/status bar
+ * can display the active goal without polling. See issue #1804.
+ */
+export const SessionGoalUpdated = defineEvent(
+  'session.goalUpdated',
+  z.object({
+    sessionId: z.string(),
+    description: z.string().nullable(),
+    target: z.string().nullable().optional(),
+    armed: z.boolean(),
     timestamp: z.number(),
   })
 );

@@ -52,6 +52,10 @@ import { isBoardEnabled } from '../../config/userConfig.js';
 // under `src/kilocode/wakeup/`.
 import { scheduleWakeupTool } from './schedule-wakeup.js';
 import { cancelWakeupTool } from './cancel-wakeup.js';
+// Alexi #1804: `goal` tool arms a persistent multi-turn objective on the
+// active session's metadata and lets the agentic chat loop self-drive
+// across text-only turns until the goal is cleared.
+import { goalTool } from './goal.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -114,6 +118,7 @@ export const builtInTools = [
   openPlanTool,
   scheduleWakeupTool, // kilocode_change
   cancelWakeupTool, // kilocode_change
+  goalTool, // alexi #1804
 ];
 
 /**
@@ -182,6 +187,7 @@ export {
   boardWriteTool,
   scheduleWakeupTool,
   cancelWakeupTool,
+  goalTool,
 };
 
 // Re-export UI utilities from specific tools

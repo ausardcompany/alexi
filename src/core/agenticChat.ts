@@ -358,6 +358,20 @@ export async function agenticChat(
     priority: 200,
   });
 
+  // Allow the `goal` tool to arm a persistent multi-turn goal on the
+  // active session's metadata (issue #1804). Same priority tier as the
+  // other agentic-* rules so the model can self-drive across turns
+  // without a user prompt gating every re-arm.
+  permissionManager.removeRule('agentic-allow-goal');
+  permissionManager.addRule({
+    id: 'agentic-allow-goal',
+    name: 'Agentic Goal Allow',
+    description: 'Allow arming a multi-turn goal on the current session',
+    actions: ['goal'],
+    decision: 'allow',
+    priority: 200,
+  });
+
   // Resolve the active agent (for model/tool/prompt preferences)
   let activeAgent: import('../agent/index.js').Agent | undefined;
   try {
@@ -604,6 +618,17 @@ export async function agenticChat(
   // synthetic assistant message so the caller can surface the failure.
   const MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3;
   let malformedToolCallCount = 0;
+
+  // Issue #1804: bound the number of goal-driven continuation loops
+  // triggered inside a single `agenticChat()` invocation. Each time the
+  // model returns a text-only turn with an armed goal on session
+  // metadata, we inject a continuation reminder and let the outer loop
+  // spin one more time. `maxIterations` already bounds total assistant
+  // turns; this cap is a defence-in-depth so a stuck goal (model keeps
+  // saying "done" while metadata stays armed) does not silently burn
+  // the whole iteration budget.
+  const MAX_GOAL_CONTINUATIONS = 5;
+  let goalContinuations = 0;
 
   while (iterations < maxIterations) {
     iterations++;
@@ -1204,7 +1229,50 @@ export async function agenticChat(
 
       // Continue loop to let LLM process tool results
     } else {
-      // No tool calls - LLM is done
+      // No tool calls - LLM is done with this turn.
+      //
+      // Issue #1804: if the active session has an armed multi-turn goal
+      // on its metadata, inject a continuation reminder and let the
+      // outer loop drive another assistant turn. The `goal` tool sets
+      // `session.metadata.goal = { description, target?, armed: true, ... }`;
+      // we re-drive up to `MAX_GOAL_CONTINUATIONS` times before falling
+      // through and returning the model's final text.
+      const activeGoal = options?.sessionManager?.getCurrentSession()?.metadata.goal;
+      if (
+        activeGoal &&
+        activeGoal.armed &&
+        goalContinuations < MAX_GOAL_CONTINUATIONS &&
+        iterations < maxIterations
+      ) {
+        goalContinuations += 1;
+
+        // Persist the model's current text as a real assistant turn so
+        // the next iteration sees a coherent transcript, then inject
+        // the continuation reminder as a synthetic user message. Using
+        // `<system-reminder>` matches the wrapper the rest of the
+        // agentic loop already uses for orchestrator-generated hints.
+        messages.push({
+          role: 'assistant',
+          content: result.text,
+        });
+
+        const targetPart = activeGoal.target ? ` (target: ${activeGoal.target})` : '';
+        const reminder =
+          `<system-reminder>Continue working toward goal: ` +
+          `${activeGoal.description}${targetPart}. ` +
+          `Run the next concrete step; do not repeat prior work. ` +
+          `If the goal is fully complete, say so explicitly and stop.` +
+          `</system-reminder>`;
+        messages.push({ role: 'user', content: reminder });
+
+        options?.onProgress?.({
+          type: 'iteration',
+          iteration: iterations,
+          message: `Goal armed — continuing (${goalContinuations}/${MAX_GOAL_CONTINUATIONS})`,
+        });
+        continue;
+      }
+
       finalText = result.text;
       break;
     }

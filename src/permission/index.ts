@@ -50,7 +50,15 @@ function hasGlobChars(value: string): boolean {
 }
 
 // Permission action types
-export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin';
+//
+// `goal` was added for the multi-turn agent goal system (issue #1804): the
+// `goal` tool requests permission to arm a persistent objective on the
+// active session's metadata. It is a session-scoped mutation (not a file
+// write or a shell command) so it deserves its own action rather than
+// riding on `write` / `admin`, which would over-broaden any allow-rule
+// that grants those. Operators who want goal-driven autonomy simply add a
+// rule with `actions: ['goal'], decision: 'allow'`.
+export type PermissionAction = 'read' | 'write' | 'execute' | 'network' | 'admin' | 'goal';
 
 // Permission decision
 export type PermissionDecision = 'allow' | 'deny' | 'ask';
@@ -176,7 +184,7 @@ export const PermissionRuleSchema = z
     description: z.string().optional(),
     // Matching criteria
     tools: z.array(z.string()).optional(), // Tool name patterns
-    actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin'])).optional(),
+    actions: z.array(z.enum(['read', 'write', 'execute', 'network', 'admin', 'goal'])).optional(),
     paths: z.array(z.string()).optional(), // File path patterns
     commands: z.array(z.string()).optional(), // Command patterns
     hosts: z.array(z.string()).optional(), // Network host patterns
