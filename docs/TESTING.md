@@ -2931,6 +2931,104 @@ Compaction and `sessionClose` are stubbed via `vi.mock` so `addMessage`'s auto-c
 
 A parallel suite in `tests/tool/tools/task-abort-propagation.test.ts` (236 lines) exercises the `task` tool's session-materialisation path: when the parent is already aborted at spawn time, the tool must refuse to start the subagent (returning `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of paying the cost of a provider request whose result no consumer will read. The `finally`-block `releaseSession` call is asserted for both the happy path and the cancellation path.
 
+### Testing Session Retention Lifecycle
+
+`tests/core/sessionManager-retention.test.ts` (257 lines, 9 cases across two describe blocks) pins the safety contract for `SessionManager.cleanupExpiredSessions` and the scheduler helpers in `src/core/retentionScheduler.ts`. The suite covers the opt-in gate, the three safety guards (active-run, recent-write, boundary), the cascade rule for expired children, and the 24h scheduler cooldown — the retention pipeline is destructive by construction (deletion is permanent) so every branch is exercised.
+
+**Fixture pattern.** Each case runs against a fresh temp directory for both the sessions store AND the fake `$HOME` used by the scheduler's state file. The `userConfig` module is mocked so tests can toggle the policy without touching `~/.alexi/config.json`:
+
+```typescript
+// Mock the userConfig module so tests can toggle the retention policy
+// without touching the real `~/.alexi/config.json`.
+vi.mock('../../src/config/userConfig.js', () => {
+  const state: { policy: { enabled: boolean; maxAgeDays: number } } = {
+    policy: { enabled: false, maxAgeDays: 30 },
+  };
+  return {
+    getConfigSessionRetention: vi.fn(() => state.policy),
+    __setPolicy: (policy: { enabled: boolean; maxAgeDays: number }) => {
+      state.policy = policy;
+    },
+  };
+});
+
+// Related modules are also stubbed so the addMessage / closeSession
+// paths do not surface unrelated compaction or persistence behaviour
+// inside a retention assertion.
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager, type Session } from '../../src/core/sessionManager.js';
+import * as userConfigMock from '../../src/config/userConfig.js';
+
+type PolicySetter = (policy: { enabled: boolean; maxAgeDays: number }) => void;
+const setPolicy = (userConfigMock as unknown as { __setPolicy: PolicySetter }).__setPolicy;
+```
+
+Sessions are written directly to disk with an explicitly-controlled mtime so the `updated` field / mtime fallback can be exercised independently of `SessionManager.saveSession` (which always stamps `Date.now()`):
+
+```typescript
+function writeSession(dir: string, session: Session, mtimeMs: number): string {
+  const filePath = path.join(dir, `${session.metadata.id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+  fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  return filePath;
+}
+```
+
+`beforeEach` / `afterEach` create and tear down two temp directories (the sessions dir and a fake `$HOME`) and restore `process.env.HOME` so tests remain parallel-safe:
+
+```typescript
+let tempDir: string;
+let homeDir: string;
+let originalHome: string | undefined;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-retention-'));
+  homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-home-'));
+  originalHome = process.env.HOME;
+  process.env.HOME = homeDir;
+  setPolicy({ enabled: false, maxAgeDays: 30 });
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(homeDir, { recursive: true, force: true });
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+});
+```
+
+**Assertion shape.** The suite pins these contract points:
+
+- **`retention.enabled: false` is a no-op.** A 60-day-old session survives the sweep when the policy is disabled — `{ deleted: 0, skipped: 0, errors: [] }` and the file remains on disk. This is the safety floor: users who have not opted in cannot lose data even if the scheduler fires.
+- **Expired sessions are deleted; young sessions survive.** With `maxAgeDays: 30`, sessions at 60d and 45d are removed and a 5d session survives — `deleted: 2`, no errors.
+- **Active-run guard.** A session with `beginSessionRun(id)` registered is never deleted even at 90d age — `deleted: 0`, `skipped: 1`. The test tears down the run via `endSessionRun` before its `afterEach` to avoid leaking abort listeners across cases.
+- **Recent-write guard.** A session whose `metadata.updated` is 90d old but whose last message `timestamp` is 10 minutes old is held back — `deleted: 0`, `skipped: 1`. The guard reads from `session.messages[messages.length - 1].timestamp`, not `metadata.updated`, so a stale metadata field cannot mask an active session.
+- **Cascade to expired children.** A parent + expired child + young child triple produces `deleted: 2` — the expired parent takes its expired child with it, the young child survives. The parent link is `metadata.parentSessionId === parentId`.
+- **`maxAgeDays: 365` boundary.** A 100d and 200d session both survive when `maxAgeDays: 365` — `deleted: 0`. Pins that the cutoff arithmetic (`now - maxAgeDays * MS_PER_DAY`) is not off-by-one.
+
+**Scheduler assertions.** The scheduler tests are in the same file under a separate `describe('retention scheduler', ...)` block:
+
+- `shouldRun` returns `true` on first run (state file absent).
+- `shouldRun` returns `false` within 24h of a previous recorded run.
+- `triggerRetentionSweep` records the timestamp and returns `true` on first run; a second call within the cooldown window returns `false` and does not overwrite the state file.
+
+The scheduler tests use dynamic `await import('../../src/core/retentionScheduler.js')` inside each case so the module reads the fresh `process.env.HOME` set in `beforeEach` — a top-level `import` would bind the state-file path at test-collection time and defeat the isolation.
+
 ### Testing subagent approval boundaries
 
 `tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.
