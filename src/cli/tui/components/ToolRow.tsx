@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 
 import { useTheme } from '../context/ThemeContext.js';
@@ -12,7 +12,10 @@ import {
   formatParamsPreview,
   truncateOutput,
 } from '../utils/formatToolOutput.js';
-import { linkify } from '../utils/linkify.js';
+import {
+  createIncrementalLinkifier,
+  type IncrementalLinkifier,
+} from '../utils/incrementalLinkify.js';
 
 export type ToolStatus = 'pending' | 'running' | 'completed' | 'failed';
 
@@ -128,6 +131,19 @@ export function ToolRow({
   const paramsPreview = formatParamsPreview(params);
   const icon = TOOL_ICONS[toolName] ?? '\u{1F527}';
 
+  // Incremental linkifier for streaming shell output. A single instance
+  // per ToolRow amortises the URL / path:line regex scans over the
+  // lifetime of the tool call: only the newly-appended tail is scanned
+  // on each render instead of the entire (potentially large) buffer.
+  // See `utils/incrementalLinkify.ts` for the caching contract.
+  const linkifierRef = useRef<IncrementalLinkifier | null>(null);
+  const linkifier = useMemo(() => {
+    if (linkifierRef.current === null) {
+      linkifierRef.current = createIncrementalLinkifier();
+    }
+    return linkifierRef.current;
+  }, []);
+
   const shouldShow = isExpanded || status === 'failed';
   const contentLines = estimateBodyLines({ toolName, params, output, error, diff });
 
@@ -183,7 +199,7 @@ export function ToolRow({
           <Text color={colors.toolOutput}>
             <Text bold>{commandLine}</Text>
             {'\n'}
-            {linkify(truncatedText)}
+            {linkifier(truncatedText)}
           </Text>
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
@@ -193,7 +209,7 @@ export function ToolRow({
       const { text: truncatedText, truncated, remaining } = truncateOutput(output);
       return (
         <Box flexDirection="column">
-          <Text color={colors.toolOutput}>{linkify(truncatedText)}</Text>
+          <Text color={colors.toolOutput}>{linkifier(truncatedText)}</Text>
           {truncated ? <Text color={colors.dimText}>... ({remaining} more lines)</Text> : null}
         </Box>
       );
