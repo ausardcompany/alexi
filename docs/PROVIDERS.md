@@ -1763,6 +1763,96 @@ resolveBedrockModelID('arn:aws:bedrock:us-east-1:123456789012:inference-profile/
 // → 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/x' (ARN passthrough)
 ```
 
+## Provider Utility Helpers
+
+`src/providers/` also hosts a handful of small utility modules that DO NOT define first-party providers — SAP AI Core Orchestration remains the sole LLM backend for Alexi — but exist so plugins and external integrations that layer additional providers on their own can import a hardened, tested helper instead of re-implementing subtle rules.
+
+### Cloudflare AI Gateway BYOK Scoping (`src/providers/cloudflare-ai-gateway.ts`)
+
+Introduced 1.22.28 (ports opencode `70a2469..fe3f3a4`, upstream security fix). Alexi does not ship a first-party Cloudflare AI Gateway provider — SAP AI Core is the primary routing target — but plugins and external integrations that layer Cloudflare AI Gateway on top of a Unified API upstream can use this helper to enforce the token-scoping rule.
+
+**The security invariant:** the Cloudflare API token must reach Cloudflare's own Workers AI upstream (the only first-party Cloudflare product on the Unified API) but MUST NOT reach third-party upstream providers routed through the gateway (OpenAI, Anthropic, Groq, ...). Third parties rely on the gateway's stored / BYOK credentials, and forwarding the Cloudflare token to them would leak BYOK secrets.
+
+The Unified API addresses Workers AI via two model-id shapes:
+
+- Explicit prefix: `workers-ai/<model>`
+- Bare model id: `@cf/<model>`
+
+Everything else is a third-party provider and MUST be constructed *without* the Cloudflare API token.
+
+```typescript
+/**
+ * True when `modelID` addresses Workers AI (the only first-party
+ * Cloudflare provider on the Unified API).
+ */
+export function isWorkersAiModel(modelID: string): boolean;
+
+export type UnifiedFactory = (opts: { apiKey?: string }) => (modelID: string) => unknown;
+export type GatewayWrapper = (upstream: unknown) => unknown;
+
+/**
+ * Build a `{ languageModel(modelID) }` SDK object for a Cloudflare AI
+ * Gateway integration, scoping the Cloudflare API token to Workers AI
+ * only.
+ */
+export function buildGatewaySdk(
+  cloudflareApiKey: string,
+  createUnified: UnifiedFactory,
+  gateway: GatewayWrapper
+): { languageModel(modelID: string): unknown };
+```
+
+Usage:
+
+```typescript
+import { buildGatewaySdk } from './providers/cloudflare-ai-gateway.js';
+import { createGatewayWrapper } from '@some/gateway-sdk';
+import { createUnifiedFactory } from '@some/unified-api';
+
+const sdk = buildGatewaySdk(
+  process.env.CLOUDFLARE_API_KEY!,
+  createUnifiedFactory,
+  createGatewayWrapper({ /* gateway config with stored keys */ })
+);
+
+const workersAi = sdk.languageModel('@cf/meta/llama-3.1-8b-instruct'); // token passed
+const openai = sdk.languageModel('openai/gpt-4o-mini');                // token withheld
+```
+
+The `UnifiedFactory` and `GatewayWrapper` types are intentionally generic (`unknown` in / `unknown` out) so this module has no hard dependency on any specific Unified-API package version.
+
+### Provider Allowlist Filter (`src/providers/enabled-filter.ts`)
+
+Introduced 1.22.28 (ports kilocode `9340d34f5`). Provider auth loaders must run only for providers the operator has actually enabled via `enabled_providers`. Loading auth for excluded providers wastes work and — more importantly for SAP AI Core deployments where only specific providers are approved — surfaces credential errors for providers the operator has explicitly disabled, which the UI and logs then treat as real failures.
+
+```typescript
+/**
+ * Filter a provider config map by an optional `enabled_providers`
+ * allowlist. Providers not in the allowlist are dropped from the result.
+ *
+ * When `enabled` is `undefined` or empty, the filter is a no-op — an
+ * empty allowlist means "no explicit allowlist configured", not "no
+ * providers allowed".
+ */
+export function filterEnabledProviders<T>(
+  providers: Record<string, T>,
+  enabled?: readonly string[]
+): Record<string, T>;
+```
+
+Callers use the helper BEFORE invoking any per-provider auth loader:
+
+```typescript
+import { filterEnabledProviders } from './providers/enabled-filter.js';
+
+const active = filterEnabledProviders(cfg.provider ?? {}, cfg.enabled_providers);
+for (const [id, prov] of Object.entries(active)) {
+  await loadAuth(id, prov);
+}
+```
+
+A fresh object is returned in every branch so callers can mutate the result without affecting the input. Object identity is not preserved even when nothing was filtered.
+
 ## OTLP Tracing Relay (Observability)
 
 Alexi ships an optional OpenTelemetry OTLP relay that emits AI SDK-style spans around every SAP AI Core Orchestration provider call. The relay is implemented in `src/utils/tracing.ts` and wired into `src/providers/sapOrchestration.ts` via three exported helpers (`startProviderSpan`, `finishProviderSpan`, `failProviderSpan`). Ported from Cline PR #13974.

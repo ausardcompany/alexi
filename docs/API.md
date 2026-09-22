@@ -1240,6 +1240,67 @@ function shouldCompact(
 
 `shouldCompact` accepts either the legacy positional `threshold?: number` third argument or the options bag. A positional number is normalised to `{ threshold: n }` and takes the pre-existing whole-transcript estimation path. See [ARCHITECTURE.md — Trigger Projection from Provider-Reported Usage](ARCHITECTURE.md#trigger-projection-from-provider-reported-usage) for the projection algorithm and the caller contract.
 
+### Session Retry (`src/core/session/retry.ts`)
+
+Classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core.
+
+```typescript
+export interface RetryOptions {
+  maxAttempts?: number; // Default: 8
+  baseMs?: number;      // Default: 500
+  maxMs?: number;       // Default: 30 000
+  jitter?: boolean;     // Default: true
+}
+
+export function computeDelay(attempt: number, opts?: RetryOptions): number;
+
+export function withRetry<T>(
+  fn: (attempt: number) => Promise<T>,
+  shouldRetry: (err: unknown) => boolean,
+  opts?: RetryOptions
+): Promise<T>;
+
+/**
+ * Regex allowlist of transient network / rate-limit / 5xx signatures.
+ * `readonly` — do not mutate in production code.
+ */
+export const RETRYABLE_NETWORK_PATTERNS: readonly RegExp[];
+
+/** Default `shouldRetry` predicate: matches RETRYABLE_NETWORK_PATTERNS or finishReason === 'unknown'. */
+export function isNetworkRetryable(err: unknown): boolean;
+```
+
+Semantics:
+
+- Delay formula: `delay(attempt) = min(maxMs, baseMs * 2^attempt)`; when `jitter !== false`, the actual sleep is `Math.floor(Math.random() * delay)` (full jitter, per AWS "Exponential Backoff and Jitter" 2015).
+- `withRetry` re-throws the final error when the retry budget is exhausted OR immediately when `shouldRetry(err)` returns `false`, so permanent failures propagate on the first throw.
+- `RETRYABLE_NETWORK_PATTERNS` was broadened in 1.22.28 to cover `ECONNREFUSED`, `EPIPE`, `EAGAIN`, `EBUSY`, generic connection-lifecycle wording (`connection.*(closed|reset|aborted)`), xAI `capacity` errors, `rate.?limit`, `overloaded`, `service unavailable`, `gateway timeout`, and bare `502` / `503` / `504` in error messages. See [ARCHITECTURE.md — Default transient-network classifier](ARCHITECTURE.md#default-transient-network-classifier).
+- Callers who need HTTP-status logic should compose `isNetworkRetryable` with `isRetryableError` from `src/core/error-backoff.ts`.
+
+### npm Package Entrypoint Resolution (`src/core/npm.ts`)
+
+Runtime shim used when loading plugin, MCP-server, or skill packages installed under a specific directory. Introduced in 1.22.28 (ports opencode `ba341c6`).
+
+```typescript
+/**
+ * Resolve the runtime entrypoint (as a file URL string) for the npm
+ * package `name` installed in / near `dir`. Returns `undefined` on any
+ * resolution failure.
+ */
+export function resolvePackageEntrypoint(name: string, dir: string): string | undefined;
+```
+
+Rationale: under Node, `import.meta.resolve(name, parent)` requires `--experimental-import-meta-resolve` and `import()` of a bare package *directory* fails with `ERR_UNSUPPORTED_DIR_IMPORT`. The shim uses `createRequire(<dir>/package.json).resolve(name)` and `pathToFileURL()` on Node, and the stable `import.meta.resolve(name, dir)` on Bun. Returning `undefined` (rather than throwing) on failure lets callers degrade gracefully — a single broken plugin package must not take the CLI down.
+
+```typescript
+import { resolvePackageEntrypoint } from '../core/npm.js';
+
+const entry = resolvePackageEntrypoint('some-plugin', pluginDir);
+if (entry) {
+  const mod = await import(entry);
+}
+```
+
 ### Hook Interfaces
 
 ```typescript
@@ -2405,6 +2466,101 @@ export interface PermissionResult {
 ```
 
 The tool-result string is built by `buildUserRejectedToolReason(toolName, reason)` in `src/permission/index.ts` and always ends with the guidance suffix so the model does not treat the rejection as a system failure. See [ARCHITECTURE.md — Permission-Rejection Feedback Flow](ARCHITECTURE.md#permission-rejection-feedback-flow).
+
+### MCP-Aware Ask Metadata
+
+Introduced in 1.22.28 (`src/permission/mcp-metadata.ts`, ports kilocode `17401e3bb` and `390b92cf9`). Provides the typed slice of the `PermissionRequested` event `metadata` bag used by MCP-flavoured asks. Import unconditionally at the ask construction site — the helper returns an empty envelope for every non-MCP kind so plain tools (shell, edit, …) no longer leak stale `server` / `tool` / `arguments` UI rows.
+
+```typescript
+import { buildAskMetadata, type AskMetadata } from '../permission/mcp-metadata.js';
+
+// MCP ask — surface the pending arguments in the prompt.
+const meta: AskMetadata = buildAskMetadata('mcp', {
+  server: 'context7',
+  tool: 'search',
+  arguments: { query: 'zod schemas' },
+});
+// meta === { mcp: { server: 'context7', tool: 'search', arguments: { query: 'zod schemas' } } }
+
+// Non-MCP ask — no MCP fields leak into the ask payload.
+buildAskMetadata('shell', undefined); // => {}
+buildAskMetadata('edit'); // => {}
+```
+
+Full type surface:
+
+```typescript
+export type AskKind = 'tool' | 'mcp' | 'shell' | 'edit';
+
+export interface McpAskMetadata {
+  server: string;
+  tool: string;
+  arguments: unknown;
+}
+
+export interface McpAskInput {
+  server: string;
+  tool: string;
+  arguments: unknown;
+}
+
+export interface AskMetadata {
+  mcp?: McpAskMetadata;
+}
+
+export function buildAskMetadata(kind: AskKind, input?: McpAskInput): AskMetadata;
+```
+
+### Permission Reply Retry
+
+Introduced in 1.22.28 (`src/permission/reply-retry.ts`, ports kilocode `675ed4b12` and `499a1ca5e`). Bounded exponential-backoff retry helper for delivering a permission reply on a transport that can drop messages during reconnect (the in-process bus, or a future WebSocket to an IDE extension). Transport-agnostic — the caller passes their own `publish` function.
+
+```typescript
+import { replyWithRetry, type ReplyPublisher, type PermissionReply } from '../permission/reply-retry.js';
+
+const publish: ReplyPublisher = async (askId, response) => {
+  await bus.publish('permission.response', { id: askId, response });
+};
+
+await replyWithRetry(publish, { askId: 'ask-123', response: { granted: true } });
+
+// With a narrower classifier (real transport):
+await replyWithRetry(publish, reply, {
+  maxAttempts: 5,
+  initialDelayMs: 200,
+  jitterMs: 100,
+  shouldRetry: (err) => err instanceof Error && /disconnected|EPIPE/.test(err.message),
+});
+```
+
+Contract:
+
+- `maxAttempts` default `3`; `initialDelayMs` default `100`; `jitterMs` default `50`; `shouldRetry` default `() => true`.
+- Delay formula: `initialDelayMs * 2^attempt + random(0..jitterMs)`. Full jitter avoids collision when multiple retriers race after a reconnect.
+- The final error re-throws once the retry budget is exhausted so callers can log or surface it. Each retry logs a `[permission] reply publish failed for <askId>` warning via `src/utils/logger.ts`.
+- The default `() => true` classifier is safe for the bus-drop failure mode. Callers using a real transport should pass a narrower classifier per `AGENTS.md#error-classification` to avoid retrying permanent errors (401, 403, 400, `ENOENT`, …).
+
+```typescript
+export interface PermissionReply {
+  askId: string;
+  response: unknown;
+}
+
+export type ReplyPublisher = (askId: string, response: unknown) => Promise<void>;
+
+export interface ReplyRetryOptions {
+  maxAttempts?: number;
+  initialDelayMs?: number;
+  jitterMs?: number;
+  shouldRetry?: (err: unknown) => boolean;
+}
+
+export function replyWithRetry(
+  publish: ReplyPublisher,
+  reply: PermissionReply,
+  opts?: ReplyRetryOptions
+): Promise<void>;
+```
 
 ### Agentic Permission Configuration
 

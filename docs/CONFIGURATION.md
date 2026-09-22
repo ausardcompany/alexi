@@ -1240,7 +1240,7 @@ const policy: SessionRetentionPolicy = getConfigSessionRetention();
 setConfigSessionRetention({ enabled: true, maxAgeDays: 14 });
 ```
 
-**Runner status.** Alexi 1.22.27 ships the schema, reader, and writer only.
+**Runner status.** Alexi 1.22.28 continues to ship the schema, reader, and writer only.
 The actual background sweep is intentionally deferred — upstream centralises
 retention in a backend service that Alexi does not yet own, and shipping the
 schema now lets operators persist their intent before the runner lands. Until
@@ -1254,6 +1254,29 @@ side effects, no logs beyond debug), MUST compare against the session file's
 `updatedAt` (not `createdAt`) so an actively used session is never reaped, and
 MUST fail closed — any error reading a candidate session must skip that
 session rather than delete it.
+
+### Provider Allowlist (`enabled_providers`)
+
+Introduced 1.22.28 (`src/providers/enabled-filter.ts`, ports kilocode `9340d34f5`). Applies to callers that layer additional providers on top of SAP AI Core (plugins, external integrations) — SAP AI Core Orchestration itself is always enabled.
+
+When a config surface exposes a `provider` map alongside an `enabled_providers` array, provider auth loaders must run only for the entries whose id appears in the allowlist. Loading auth for excluded providers wastes work and — more importantly for SAP AI Core deployments where only specific providers are approved by the enterprise — surfaces credential errors for providers the operator has explicitly disabled, which the UI and logs then treat as real failures.
+
+```json
+{
+  "provider": {
+    "openai": { "apiKey": "..." },
+    "anthropic": { "apiKey": "..." },
+    "cerebras": { "apiKey": "..." }
+  },
+  "enabled_providers": ["openai", "anthropic"]
+}
+```
+
+Semantics:
+
+- `enabled_providers` present and non-empty → auth is loaded only for those ids; other entries in `provider` are dropped from the working set.
+- `enabled_providers` absent or `[]` → no-op; every entry in `provider` is loaded. An empty array means "no explicit allowlist configured", not "no providers allowed", matching upstream semantics.
+- The filter is applied at every auth-loader entry point (`filterEnabledProviders(cfg.provider ?? {}, cfg.enabled_providers)`). See [PROVIDERS.md — Provider Allowlist Filter](PROVIDERS.md#provider-allowlist-filter-srcprovidersenabled-filterts) for the programmatic surface.
 
 ### Draft Cache
 

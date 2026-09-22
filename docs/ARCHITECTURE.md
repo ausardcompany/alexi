@@ -1376,6 +1376,34 @@ Context compaction manages conversation length when approaching token limits:
 | `sliding` | Sliding window keeping recent messages |
 | `smart` | Hybrid: importance scoring + summarization |
 
+### Summary Prompt
+
+Both compaction entry points (`src/compaction/index.ts` and the newer `src/core/compaction.ts`) share a short, prescriptive summary prompt. In 1.22.28 (ports opencode `dab263721` + follow-ups) the prompt was rewritten because the previous wording encouraged smaller models (e.g. DSv4 Flash routed via SAP AI Core) to continue the conversation instead of producing a structured summary — producing "compaction turns" that answered the last user message rather than compressing it:
+
+```text
+You are a context summarization agent. You are given a conversation between a
+user and an agent. Your goal is to produce a structured summary matching the
+format specified so another coding agent can continue the work.
+
+Always follow the exact output structure requested by the user prompt. Keep
+every section, preserve exact file paths and identifiers when known, and prefer
+terse bullets over paragraphs.
+
+Do not continue the conversation. Do not respond to any questions in the
+conversation. Only output the structured summary in the exact format requested
+by the user prompt. Respond in the same language as the conversation.
+
+CRITICAL: You MUST preserve the following verbatim in the summary — do not
+paraphrase or omit them:
+- User-specified coding preferences and constraints (indentation, naming, style rules)
+- Explicit instructions about what NOT to do or what to always do
+- API keys, endpoints, URLs, credentials, and environment configuration the user provided
+- Tool configuration, file paths, and project-specific settings
+- Any instruction the user marked as important, critical, or that they want remembered
+```
+
+The `Conversation to summarize:\n{messages}\n\nProvide a concise summary:` footer is preserved so callers can substitute `{messages}` with the formatted turn history. Verbatim-preservation invariants (user coding preferences, do/don't instructions, credentials, tool configuration, and any instruction the user marked as important) are non-negotiable and must not be dropped in future prompt rewrites.
+
 ### Reactive Seeding
 
 When context overflow is detected during LLM calls, the system calculates optimal summary size:
@@ -2442,6 +2470,68 @@ interface DoomLoopConfig {
 
 `src/permission/recovery.ts` reconciles pending `askUser()` prompts that were disrupted by an abort / hot-reload / provider re-init. Entries past their deadline resolve as denials with `reason: 'stalled_recovery'`; entries whose paired rule-save aborted are dropped with `reason: 'save_aborted'`. `SessionManager.createSession()` fires the sweep on every session creation via a fire-and-forget dynamic import so unit tests of `sessionManager` do not pull in the recovery module. See [Stalled Permission Approval Recovery](#stalled-permission-approval-recovery) for the sequence diagram and the full contract.
 
+### MCP-Aware Ask Metadata (`src/permission/mcp-metadata.ts`)
+
+The `PermissionManager` publishes a generic `PermissionRequested` event with an untyped `metadata` bag. `src/permission/mcp-metadata.ts` (introduced in 1.22.28, ports kilocode `17401e3bb` and `390b92cf9`) defines the shape of the MCP-specific slice and produces a metadata envelope callers can drop into the event payload directly:
+
+```typescript
+export type AskKind = 'tool' | 'mcp' | 'shell' | 'edit';
+
+export interface McpAskMetadata {
+  server: string;
+  tool: string;
+  arguments: unknown; // Pending arguments — surfaced in the UI so the operator
+                     // can review them before approving (kilocode 390b92cf9).
+}
+
+export interface AskMetadata {
+  mcp?: McpAskMetadata; // Present iff the ask type === 'mcp'.
+}
+
+export function buildAskMetadata(kind: AskKind, input?: McpAskInput): AskMetadata;
+```
+
+Two upstream fixes are consolidated here:
+
+- **Non-MCP asks were leaking MCP-shaped UI rows** (kilocode `17401e3bb`). Plain tools (shell, edit, …) received irrelevant "server / tool / arguments" rows because the ask payload carried MCP fields regardless of ask type. `buildAskMetadata()` now returns an empty envelope for every non-MCP kind so the UI renders only the fields that make sense for the ask.
+- **Pending MCP arguments were not surfaced in the prompt** (kilocode `390b92cf9`). Operators had to approve an MCP call without seeing what the model was about to send. `buildAskMetadata('mcp', { server, tool, arguments })` now embeds the pending `arguments` payload on the MCP block so the UI can render it before the user makes a decision.
+
+The helper is safe to call unconditionally at the ask construction site: non-MCP kinds ignore `input`, and an MCP kind with missing `input` degrades gracefully by returning `{}` (a defensive no-throw path so the permission pipeline never wedges on a caller bug).
+
+### Permission Reply Retry (`src/permission/reply-retry.ts`)
+
+Permission replies published on the bus could historically be dropped when the TUI / IDE client disconnected and reconnected between the `askUser()` publish and the operator's answer — the agent then got stuck waiting for a bus event that would never arrive. `src/permission/reply-retry.ts` (introduced in 1.22.28, ports kilocode `675ed4b12` and `499a1ca5e`) closes this window with a bounded exponential-backoff retry helper that is deliberately transport-agnostic (callers pass their own `publish` function):
+
+```typescript
+export interface PermissionReply {
+  askId: string;
+  response: unknown;
+}
+
+export type ReplyPublisher = (askId: string, response: unknown) => Promise<void>;
+
+export interface ReplyRetryOptions {
+  maxAttempts?: number;    // Default: 3
+  initialDelayMs?: number; // Default: 100
+  jitterMs?: number;       // Default: 50
+  shouldRetry?: (err: unknown) => boolean; // Default: () => true
+}
+
+export async function replyWithRetry(
+  publish: ReplyPublisher,
+  reply: PermissionReply,
+  opts?: ReplyRetryOptions
+): Promise<void>;
+```
+
+Semantics match the `AGENTS.md` error contract:
+
+- **Classifier delegated to caller.** The default `() => true` predicate is safe for the bus-drop case because that failure mode is inherently transient. Callers using a real transport (WebSocket, IPC) should pass a narrower classifier — see `AGENTS.md#error-classification`.
+- **Backoff.** `delay(attempt) = initialDelayMs * 2^attempt + random(0..jitterMs)`. Full jitter avoids collisions when several retriers race after a reconnect.
+- **Final error re-throws.** Once the budget is exhausted the last error propagates so callers can log or surface it. Each retry logs a `[permission] reply publish failed for <askId> (attempt N/max); retrying in Xms: <message>` warning via `src/utils/logger.ts`.
+
+Transport-agnosticism means the same helper is reusable if Alexi grows a second reply channel (e.g. an IDE-extension WebSocket) alongside the in-process bus.
+
 ## MCP Integration
 
 Model Context Protocol support allows external tool servers to be connected:
@@ -3204,6 +3294,104 @@ Custom agents support:
 - Tool allowlists and denylists
 - Model and temperature preferences
 
+## Package Entrypoint Resolution (`src/core/npm.ts`)
+
+`src/core/npm.ts` (introduced in 1.22.28, ports opencode `ba341c6`) provides a runtime shim used when loading plugin, MCP-server, or skill packages installed under a specific project directory. The shim exists because the naive `import(name)` and `import.meta.resolve(name, dir)` paths both fail under stock Node:
+
+- `import.meta.resolve(name, parent)` requires the `--experimental-import-meta-resolve` flag under Node (unlike Bun, where the two-argument form is stable).
+- `import()` of a bare package *directory* fails with `ERR_UNSUPPORTED_DIR_IMPORT` on Node — the runtime does not walk the target package's `exports` map on its own.
+
+CommonJS `require.resolve()` does the right thing: it picks the `require` / `default` export target declared in the package's `exports` map and returns a filesystem path that `pathToFileURL()` can convert into a `file://` URL that `import()` accepts.
+
+```typescript
+export function resolvePackageEntrypoint(name: string, dir: string): string | undefined {
+  try {
+    if (typeof Bun !== 'undefined') {
+      return import.meta.resolve(name, dir);
+    }
+    return pathToFileURL(createRequire(path.join(dir, 'package.json')).resolve(name)).href;
+  } catch {
+    return undefined;
+  }
+}
+```
+
+Callers use the helper when a plugin's install directory is known — typically the project root or a plugin subdirectory of the user config directory:
+
+```typescript
+const entry = resolvePackageEntrypoint('some-plugin', pluginDir);
+if (entry) {
+  const mod = await import(entry);
+}
+```
+
+Returning `undefined` on any resolution failure (missing package, broken `exports` map, invalid parent) lets callers fall back to graceful degradation instead of crashing on startup. This is important for plugin loading, MCP server discovery, and skill packages — a single broken package in `node_modules` must not take the CLI down.
+
+## Provider Utility Modules
+
+Alexi routes every LLM call through SAP AI Core Orchestration; provider modules that ship alongside `sapOrchestration.ts` in `src/providers/` are utility helpers for plugins and external integrations rather than first-party backends.
+
+### Cloudflare AI Gateway BYOK Scoping (`src/providers/cloudflare-ai-gateway.ts`)
+
+Introduced in 1.22.28 (ports opencode `70a2469..fe3f3a4`, an upstream security fix). Alexi does not ship a first-party Cloudflare AI Gateway provider — SAP AI Core is the primary routing target — but plugins and external integrations that layer Cloudflare AI Gateway on top of a Unified API upstream can import a hardened `buildGatewaySdk()` helper instead of re-implementing the (subtle) token-scoping rule themselves.
+
+**The security invariant:** the Cloudflare API token must reach Cloudflare's own Workers AI upstream (which is a first-party Cloudflare product) but MUST NOT reach third-party upstream providers routed through the gateway (OpenAI, Anthropic, Groq, …) — those rely on the gateway's stored / BYOK credentials, and forwarding the Cloudflare token would leak BYOK secrets to third parties.
+
+The Unified API addresses Workers AI via two model-id shapes: the explicit `workers-ai/<model>` prefix, and bare `@cf/<model>` ids. Every other model id addresses a third-party provider.
+
+```typescript
+export function isWorkersAiModel(modelID: string): boolean {
+  return modelID.startsWith('workers-ai/') || modelID.startsWith('@cf/');
+}
+
+export type UnifiedFactory = (opts: { apiKey?: string }) => (modelID: string) => unknown;
+export type GatewayWrapper = (upstream: unknown) => unknown;
+
+export function buildGatewaySdk(
+  cloudflareApiKey: string,
+  createUnified: UnifiedFactory,
+  gateway: GatewayWrapper
+): { languageModel(modelID: string): unknown } {
+  return {
+    languageModel(modelID: string): unknown {
+      const isWorkersAi = isWorkersAiModel(modelID);
+      const unified = createUnified(isWorkersAi ? { apiKey: cloudflareApiKey } : {});
+      return gateway(unified(modelID));
+    },
+  };
+}
+```
+
+The `UnifiedFactory` and `GatewayWrapper` types are intentionally generic (`unknown` in / `unknown` out) so this module has no hard dependency on any specific Unified-API package version. Callers wire in their own SDK factories.
+
+### Provider Allowlist Filter (`src/providers/enabled-filter.ts`)
+
+Introduced in 1.22.28 (ports kilocode `9340d34f5`). Provider auth loaders must run only for providers the operator has actually enabled via `enabled_providers`. Loading auth for excluded providers wastes work and — more importantly for SAP AI Core deployments where only specific providers are approved — surfaces credential errors for providers the operator has explicitly disabled, which the UI and logs then treat as real failures.
+
+```typescript
+export function filterEnabledProviders<T>(
+  providers: Record<string, T>,
+  enabled?: readonly string[]
+): Record<string, T> {
+  if (!enabled || enabled.length === 0) {
+    return { ...providers };
+  }
+  const allow = new Set(enabled);
+  return Object.fromEntries(Object.entries(providers).filter(([id]) => allow.has(id)));
+}
+```
+
+Callers use the helper before invoking any per-provider auth loader:
+
+```typescript
+const active = filterEnabledProviders(cfg.provider ?? {}, cfg.enabled_providers);
+for (const [id, prov] of Object.entries(active)) {
+  await loadAuth(id, prov);
+}
+```
+
+`enabled === undefined` and `enabled.length === 0` are both no-ops (returns a shallow copy of the full map), matching upstream semantics: an empty allowlist means "no explicit allowlist configured", not "no providers allowed". A fresh object is returned in every branch so callers can mutate the result without affecting the input.
+
 ## Optional Peer Dependencies
 
 Some features rely on native or heavy libraries whose install cost is not
@@ -3474,6 +3662,28 @@ Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line
 Formula: `delay(attempt) = min(maxMs, baseMs * 2^attempt)`, then full jitter (`Math.random() * delay`) — see AWS "Exponential Backoff and Jitter" (2015). Worst case with defaults: 8 attempts × 30s cap ≈ 4 minutes.
 
 The `shouldRetry` predicate is supplied by the caller so this module stays classifier-agnostic. The transient-vs-permanent contract lives in `AGENTS.md` and is implemented in `src/core/error-backoff.ts`.
+
+### Default transient-network classifier
+
+The module also ships `isNetworkRetryable(err)` — the default `shouldRetry` predicate used by callers that don't own an HTTP-status classifier. It returns `true` when either:
+
+1. `err.message` matches any entry in the `RETRYABLE_NETWORK_PATTERNS` `readonly RegExp[]` array; or
+2. `err.finishReason === 'unknown'` (opencode "continue on unknown finish" — a stream that never reported a proper finish reason is almost always a transient truncation, not a permanent classification failure).
+
+`RETRYABLE_NETWORK_PATTERNS` was broadened in 1.22.28 (ports opencode `e0b9e68`, `40282c1`, `71d08e9`, `61aefc0`) to cover the transient signatures SAP AI Core traffic exposes in production:
+
+| Pattern | Rationale |
+|---------|-----------|
+| `/ECONNRESET/i`, `/ETIMEDOUT/i`, `/ENOTFOUND/i`, `/EAI_AGAIN/i` | Node/undici socket-lifecycle errors |
+| `/ECONNREFUSED/i`, `/EPIPE/i`, `/EAGAIN/i`, `/EBUSY/i` | Additional Node-level transient signatures |
+| `/socket hang up/i`, `/network error/i`, `/fetch failed/i` | Fetch / undici wording |
+| `/terminated/i`, `/premature close/i` | undici stream terminated / truncated response body |
+| `/connection.*(closed\|reset\|aborted)/i` | Generic connection-lifecycle wording |
+| `/capacity/i` | xAI capacity errors — look like permanent 5xx but clear within seconds (see `error-backoff.isXAICapacityError`) |
+| `/rate.?limit/i`, `/overloaded/i`, `/service unavailable/i`, `/gateway timeout/i` | Rate-limit / overload wording |
+| `/\b(502\|503\|504)\b/` | Bare HTTP status codes in error messages |
+
+The array is `readonly` and intentionally not compiled once at module load so tests can override / extend it if a future SAP variant needs an additional pattern. It intentionally does NOT cover auth (`401`, `403`) or validation (`400`, `422`, `model_not_found`, `deployment_not_found`, `404`) errors — those are classified as permanent per `AGENTS.md#error-classification` and callers who need HTTP-status logic should compose `isNetworkRetryable` with a stricter predicate such as `isRetryableError` from `src/core/error-backoff.ts`.
 
 ## Config Instance Cache Invalidation
 
