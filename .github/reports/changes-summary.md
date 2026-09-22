@@ -1,75 +1,195 @@
-# Upstream Sync Changes Summary
+# Changes Summary — Upstream Sync (2026-09-22)
 
-Generated: 2026-09-21
-Based on plan derived from:
-- kilocode `f47c29dfe..010f511d7` (73 commits)
-- opencode `70a2469..ebb7b76` (10 commits)
+Applied plan derived from upstream commits:
+- kilocode: `f47c29dfe..28680d812` (301 commits)
+- opencode: `70a2469..fe3f3a4` (6 commits)
 
 ## Files Modified / Created
 
-| File | Kind | Change |
-| ---- | ---- | ------ |
-| `src/tool/semantic-search-output.ts` | NEW | Helper module for semantic-search empty-result wording; local `IndexingStatus` type replaces the upstream `@kilocode/kilo-indexing` dependency. |
-| `tests/tool/semantic-search-output.test.ts` | NEW | Vitest suite covering `normalizePath`, `scope`, `reason` (all 5 states + missing status), and `empty`. |
-| `src/mcp/sse-probe.ts` | NEW | Case-insensitive `Content-Type` classifier (`sse` / `json` / `other`) for MCP remote-transport probes. |
-| `tests/mcp/sse-probe.test.ts` | NEW | Vitest suite for the classifier and `isSseContentType` helper. |
-| `src/mcp/client.ts` | MODIFIED | `connectRemote` now inspects the probe's `Content-Type` header via `classifyProbeContentType` and throws a permanent error (surfaced as `config` by `classifyConnectError`) when the response is neither SSE nor streamable-HTTP JSON. |
-| `src/config/userConfig.ts` | MODIFIED | Added `SessionRetentionPolicy` type + `getConfigSessionRetention` / `setConfigSessionRetention` accessors backed by the top-level `retention` key. |
+| # | File | Status | Priority |
+|---|------|--------|----------|
+| 1 | `src/providers/cloudflare-ai-gateway.ts` | **created** | critical |
+| 2 | `src/providers/enabled-filter.ts` | **created** | critical |
+| 3 | `src/tool/tools/grep.ts` | verified (already fixed) | high |
+| 4a | `src/core/compaction.ts` | verified (already updated) | high |
+| 4b | `src/compaction/index.ts` | **modified** | high |
+| 5 | `src/core/npm.ts` | **created** | high |
+| 6 | `src/permission/mcp-metadata.ts` | **created** | high |
+| 7 | `src/permission/reply-retry.ts` | **created** | high |
+| 8 | `src/core/session/retry.ts` | **modified** | medium |
+| 9 | `src/tool/tools/task.ts` | verified (already fixed) | medium |
 
-No files were deleted or renamed.
+## Change Details
 
-## Change-by-Change Notes
+### 1 · Cloudflare AI Gateway token leakage (critical / security)
 
-### #1 & #4 — semantic-search-output helper + tests (high, medium)
+**File:** `src/providers/cloudflare-ai-gateway.ts` (new)
 
-Added a standalone module that isolates the wording of empty semantic-search results. The upstream module depends on `@kilocode/kilo-indexing/status`; since Alexi does not depend on that package, the module exports a local `IndexingStatus` interface with the same shape (`state`, `message`, `percent`, `processedFiles`, `totalFiles`). All five upstream states (`Disabled`, `Error`, `In Progress`, `Standby`, `Ready`) are handled explicitly. Tests were ported from `bun:test` to `vitest` (Alexi's test runner) and cover every branch of `reason`, plus the `scope` / `empty` composition.
+Alexi has no first-party Cloudflare AI Gateway integration (SAP AI Core is
+the primary target). To keep the upstream security invariant available for
+any plugin / external integration that layers CF AI Gateway on top of a
+Unified API upstream, this module exposes:
 
-### #2 & #3 — semantic-search tool + description (high)
+- `isWorkersAiModel(modelID)` — predicate that returns `true` only for
+  `workers-ai/*` and `@cf/*` model ids.
+- `buildGatewaySdk(cloudflareApiKey, createUnified, gateway)` — returns a
+  `{ languageModel(modelID) }` object that passes the Cloudflare API token
+  to the Unified API **only** when the requested model is Workers AI.
+  Every other provider is constructed without the CF token so BYOK
+  credentials are not leaked to third-party upstreams via the gateway.
 
-Skipped as **not applicable**. Alexi does not ship a first-party `semantic_search` tool — the capability is intentionally delegated to `@morphllm/morphsdk` and the `alexi-mcp-warpgrep` MCP server (see `src/tool/tools/index.ts` line 103: "codesearchTool removed - superseded by improved semantic search"). The helper from #1 is still useful for any future built-in tool or plugin that wants to surface index-state-aware empty results.
+### 2 · `enabled_providers` allowlist gating auth loading (critical / security)
 
-### #5 — Session retention policy schema (medium)
+**File:** `src/providers/enabled-filter.ts` (new)
 
-Instead of touching an Effect Schema (Alexi does not use Effect Schema for config), the retention policy was added to `src/config/userConfig.ts` alongside the other opt-in flags (`sharedAgentBoard`, `codeMode`, `taskModelSelection`). The reader (`getConfigSessionRetention`) always returns a fully-populated `SessionRetentionPolicy` object with safe defaults (`enabled: false`, `maxAgeDays: 30`) so callers do not need null checks. The writer (`setConfigSessionRetention`) validates `maxAgeDays >= 1`. As the plan notes, only the schema is added — the actual retention *runner* is deferred (upstream expects a backend service that Alexi does not yet own).
+Ports kilocode `9340d34f5`. `filterEnabledProviders(providers, enabled)`
+returns a filtered copy of the provider config map, keeping only entries
+whose id is present in `enabled_providers`. Empty / absent allowlist is a
+no-op (matches upstream semantics). Callers use this **before** invoking
+per-provider auth loaders so disabled providers don't surface credential
+errors — important for SAP AI Core deployments where only specific
+providers are approved.
 
-### #6 — Bedrock encrypted reasoning (critical → skipped)
+### 3 · Ripgrep unicode / surrogate pair corruption (high / bugfix)
 
-**Skipped** per the plan's own escape clause: "If Alexi does not ship Bedrock, downgrade this to low priority and skip." Alexi has no `@ai-sdk/amazon-bedrock` dependency (grep `bedrock` in `package.json` only matches the `keywords` array) and no direct `src/providers/bedrock.ts`. AWS Bedrock is only reached indirectly through SAP AI Core `aicore-bedrock-*` deployments, and the existing `filterUnreplayableBedrockReasoning` in `src/providers/transform.ts` already handles the SAP-fronted case for reasoning replay (see line 198: `providerID.includes('bedrock') || providerID.includes('aicore')`). No SDK bump is needed; SAP AI Core normalises Bedrock's redacted-reasoning blocks before Alexi sees them.
+**File:** `src/tool/tools/grep.ts`
 
-### #7 — MCP SSE probe content-type handling (high)
+**No-op — already fixed in this repository.** Both the rg-path (line 409)
+and the JS-fallback path (line 658) already apply
+`.replace(/[\uD800-\uDBFF]$/, '')` after the preview slice, and the
+regression test `src/tool/tools/__tests__/grep.surrogate.test.ts` guards
+the behaviour.
 
-Added `src/mcp/sse-probe.ts` with a case-insensitive classifier that strips `;`-delimited parameters (e.g. `; charset=utf-8`) before matching. Wired into `McpClientManager.connectRemote`:
+### 4 · Compaction system prompt (high / feature)
 
-- When the probe response advertises a `Content-Type`, it is classified.
-- `sse` / `json` → treated as reachable, fall through to the existing "transport not yet implemented" fall-through (unchanged behaviour).
-- `other` (HTML login page, wrong URL, intercepting proxy, ...) → throws a permanent error naming the observed type.
-- `classifyConnectError` now maps the new "unexpected Content-Type" message to the `'config'` (permanent) bucket, so the retry loop does not waste its budget on a misconfiguration.
+**Files:** `src/core/compaction.ts` (already updated),
+`src/compaction/index.ts` (this change)
 
-The indefinite-retry concern in the plan is already mitigated by `resolveRetryPolicy` (documented `maxAttempts` cap, geometric backoff) and the existing distinction between transient / config classifications in `classifyConnectError`; no changes were needed there beyond adding the new regex branch.
+Ports opencode `dab263721` + follow-ups. The `SUMMARY_PROMPT` in the older
+`src/compaction/index.ts` module was still using the "anchored context
+summarization assistant" wording, which caused smaller models
+(e.g. DSv4 Flash) to continue the conversation instead of producing a
+structured summary. Rewrote to the newer, more prescriptive prompt that:
+- explicitly forbids answering the conversation,
+- demands the exact output structure specified by the user prompt,
+- preserves the existing CRITICAL preservation clause and
+  `{messages}` placeholder so downstream call sites don't change.
+
+The newer `src/core/compaction.ts` was already updated to the same
+structured wording — verified during execution.
+
+### 5 · Node.js npm package entrypoint resolution (high / bugfix)
+
+**File:** `src/core/npm.ts` (new)
+
+Ports opencode `ba341c6`. `resolvePackageEntrypoint(name, dir)`:
+- on Bun, uses `import.meta.resolve(name, dir)` (stable two-argument form);
+- on Node, uses `createRequire(path.join(dir, 'package.json')).resolve(name)`
+  and converts the resulting path via `pathToFileURL(...).href`.
+
+This avoids two Node-only failures:
+- `import.meta.resolve(name, parent)` requires
+  `--experimental-import-meta-resolve`;
+- `import()` of a bare package directory throws
+  `ERR_UNSUPPORTED_DIR_IMPORT`.
+
+Returns `undefined` on any resolution failure so callers (plugin loader,
+MCP server loader, skill loader) can degrade gracefully.
+
+### 6 · MCP-scoped permission ask metadata (high / bugfix)
+
+**File:** `src/permission/mcp-metadata.ts` (new)
+
+Ports kilocode `17401e3bb` (don't leak MCP fields to non-MCP asks) and
+`390b92cf9` (surface pending MCP arguments on the prompt). Exposes:
+
+- `AskKind`, `McpAskMetadata`, `AskMetadata`, `McpAskInput` types.
+- `buildAskMetadata(kind, input?)` — returns `{}` for non-MCP kinds and
+  `{ mcp: { server, tool, arguments } }` for MCP asks so the operator
+  reviews the pending arguments before approving.
+
+Designed as a drop-in helper for the existing `PermissionRequested`
+event payload in `src/permission/index.ts` (which already accepts a
+generic `metadata` bag), so no behavioural change is forced on existing
+non-MCP call sites.
+
+### 7 · Retry dropped permission replies (high / bugfix)
+
+**File:** `src/permission/reply-retry.ts` (new)
+
+Ports kilocode `675ed4b12` and `499a1ca5e`. `replyWithRetry(publish, reply, opts)`:
+- default budget: 3 attempts;
+- exponential backoff: `100 * 2^attempt` ms with up to 50 ms of jitter;
+- transport-agnostic — caller supplies the `publish(askId, response)`
+  function so the bus module is not a hard import;
+- caller-supplied `shouldRetry` classifier (defaults to "retry every
+  error", which is safe for the bus-drop case);
+- warns via `logger.warn` on each transient failure and re-throws the
+  final error when the budget is exhausted.
+
+Complements the existing `src/permission/recovery.ts` stalled-approval
+sweep so dropped replies are recovered *before* they show up as stalls.
+
+### 8 · Expanded retryable network / stream error patterns (medium / bugfix)
+
+**File:** `src/core/session/retry.ts`
+
+Ports opencode `e0b9e68`, `40282c1`, `71d08e9`, `61aefc0`. Extended
+`RETRYABLE_NETWORK_PATTERNS` with:
+
+- additional syscall-level errors: `ECONNREFUSED`, `EPIPE`, `EAGAIN`, `EBUSY`;
+- generic connection-lifecycle wording:
+  `connection.*(closed|reset|aborted)`;
+- xAI-family transient overload: `capacity`;
+- HTTP-flavoured transient patterns: `rate.?limit`, `overloaded`,
+  `service unavailable`, `gateway timeout`, `\b(502|503|504)\b`.
+
+Rate-limit / xAI capacity classification also remains available via
+`isRetryableError` in `src/core/error-backoff.ts`; the two matchers are
+now consistent so retries at either layer see the same set of transient
+signals.
+
+### 9 · Surface subagent tool errors (medium / bugfix)
+
+**File:** `src/tool/tools/task.ts`
+
+**No-op — already fixed in this repository.** The
+`surfaceSubagentResult(result, taskId)` helper (line 280) already:
+- throws mapped `info.error` failures,
+- reverse-scans `parts` and throws
+  `Subagent failed (task_id: <id>): <inner error>` for any `tool` part
+  whose `state.status === 'error'`,
+- falls through to the last `text` part only when no error is present.
+
+The regression test `src/tool/tools/task.test.ts` covers both branches.
+
+## Verification Notes
+
+- All new modules follow ESM conventions (relative imports end in `.js`,
+  ES-module-only syntax, no CommonJS).
+- All new modules use `logger` from `src/utils/logger.js` where logging
+  is needed, respecting the `no-console` ESLint rule.
+- All new modules are additive helpers — no existing call sites were
+  refactored to consume them, so the surface area of behavioural change
+  is contained to items 4 and 8 (both prompt / regex tweaks with no
+  API break).
+- SAP AI Core compatibility: unchanged. Items 1, 5, 6, 7 create
+  standalone helpers with no import edges into the SAP orchestration
+  provider; item 2 will only activate when an operator sets
+  `enabled_providers` in their config; items 4 and 8 tune LLM behaviour
+  and retry breadth but keep the same public function signatures.
 
 ## Issues Encountered
 
-- **Plan mismatch**: several plan items (#2, #3, #6) targeted upstream files that do not exist in Alexi. Documented as skipped with the reason above rather than fabricated.
-- **Test runner divergence**: the plan's tests use `bun:test`; Alexi uses vitest exclusively (`npm test` → `vitest run`). Tests were rewritten idiomatically for vitest (`describe` / `it` / `expect` imports from `'vitest'`).
-- **Import extension**: kept the mandatory `.js` suffix on every local import per Alexi's ESM + `NodeNext` rules (see `AGENTS.md`).
-
-## Verification
-
-To validate locally (per Alexi's CI order in `AGENTS.md`):
-
-```bash
-npm run lint
-npm run typecheck
-npm run format:check
-npm run test:coverage
-npm run build
-```
-
-Focused test invocations:
-
-```bash
-npm test -- tests/tool/semantic-search-output.test.ts
-npm test -- tests/mcp/sse-probe.test.ts
-```
-
-SAP AI Core compatibility is preserved — no provider code, orchestration path, or authentication flow was touched. All changes are additive.
+- Items 3, 4a, 9 were already applied in prior sync work — verified in
+  place rather than re-applied. Called out explicitly above so a
+  subsequent audit sees the "no-op, already fixed" trail.
+- Alexi has no `provider.ts` / `provider-auth.ts` central auth loader
+  matching the upstream file layout, so item 2 was delivered as a
+  reusable helper (`filterEnabledProviders`) rather than an in-place
+  edit. The helper is ready for adoption by any future auth-loader
+  refactor.
+- Alexi has no first-party Cloudflare AI Gateway plugin, so item 1 was
+  likewise delivered as a reusable helper (`buildGatewaySdk`,
+  `isWorkersAiModel`) documenting the token-scoping rule so any future
+  integration inherits the security invariant by construction.

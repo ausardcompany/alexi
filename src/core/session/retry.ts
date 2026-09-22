@@ -81,11 +81,18 @@ export async function withRetry<T>(
 
 /**
  * Raw network-error patterns treated as transient by the default retry
- * classifier. Ports opencode `e0b9e68` and `40282c1` which broadened the
- * matcher to cover truncated streams and undici-side `terminated` /
- * `premature close` errors — both routinely surface when SAP AI Core
- * traffic is fronted by a corporate proxy that drops long-lived
- * connections mid-stream.
+ * classifier. Ports opencode `e0b9e68`, `40282c1`, `71d08e9`, and
+ * `61aefc0` which broadened the matcher to cover:
+ *
+ *   - truncated streams and undici-side `terminated` / `premature close`
+ *     errors — both routinely surface when SAP AI Core traffic is
+ *     fronted by a corporate proxy that drops long-lived connections
+ *     mid-stream;
+ *   - xAI (and xAI-family SAP proxy) "capacity" errors which look like
+ *     permanent 5xx but clear within seconds;
+ *   - additional generic connection-lifecycle wording ("connection
+ *     reset / closed / aborted", "service unavailable", "gateway
+ *     timeout", "overloaded", "rate limit") that upstream now retries.
  *
  * Kept as a plain array (not compiled once at module load) so tests can
  * override / extend it if a future SAP variant needs an additional
@@ -93,14 +100,25 @@ export async function withRetry<T>(
  */
 export const RETRYABLE_NETWORK_PATTERNS: readonly RegExp[] = [
   /ECONNRESET/i,
+  /ECONNREFUSED/i,
   /ETIMEDOUT/i,
   /ENOTFOUND/i,
   /EAI_AGAIN/i,
+  /EPIPE/i,
+  /EAGAIN/i,
+  /EBUSY/i,
   /socket hang up/i,
   /network error/i,
   /fetch failed/i,
   /terminated/i, // undici stream terminated
   /premature close/i, // truncated response body
+  /connection.*(closed|reset|aborted)/i,
+  /capacity/i, // xAI capacity exceeded — see error-backoff.isXAICapacityError
+  /rate.?limit/i,
+  /overloaded/i,
+  /service unavailable/i,
+  /gateway timeout/i,
+  /\b(502|503|504)\b/,
 ];
 
 /**

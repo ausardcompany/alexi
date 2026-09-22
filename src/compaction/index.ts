@@ -102,15 +102,17 @@ const DEFAULT_MAX_TOKENS = 100000;
 const DEFAULT_WARNING_THRESHOLD = 0.8;
 const DEFAULT_PRESERVE_RECENT = 4;
 
-const SUMMARY_PROMPT = `You are an anchored context summarization assistant for coding sessions.
-
-Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
-
-If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
+// Ports opencode `dab263721` + follow-ups: the previous prompt encouraged
+// smaller models (e.g. DSv4 Flash routed via SAP AI Core) to continue the
+// conversation instead of producing a structured summary. The new prompt
+// is short, prescriptive, and explicitly forbids answering the
+// conversation being summarized. See `src/core/compaction.ts` for the
+// twin copy used by the newer summarizer entry point.
+const SUMMARY_PROMPT = `You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary matching the format specified so another coding agent can continue the work.
 
 Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
 
-Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
+Do not continue the conversation. Do not respond to any questions in the conversation. Only output the structured summary in the exact format requested by the user prompt. Respond in the same language as the conversation.
 
 CRITICAL: You MUST preserve the following verbatim in the summary — do not paraphrase or omit them:
 - User-specified coding preferences and constraints (indentation, naming, style rules)
