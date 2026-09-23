@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Experimental self-context tools (`context_inspect`, `context_summarize`)** (`src/tool/tools/context.ts`, `src/config/userConfig.ts`, `src/tool/tools/index.ts`, commit `0f840b3d` `feat(sync): apply upstream changes (2026-09-23)`). Ports upstream opencode `feat(cli): add experimental self-context tools (#14268)`. Two new built-in tools let the agent introspect its own message / token budget so it can proactively decide to narrow scope or request compaction BEFORE the auto-compaction threshold fires abruptly. Useful in long SAP AI Core conversations where the operator pays per input token and a mid-turn compaction is disruptive.
+
+  Both tools are gated behind a new `experimental.contextTools` boolean in `~/.alexi/config.json` (default `false` — vanilla SAP AI Core sessions do not see the extra tool surface on upgrade). The flag is read once at `registerBuiltInTools()` time so a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn). New public config helpers on `src/config/userConfig.ts`:
+
+  - `getConfigContextTools(): boolean` — returns `false` for missing, non-object, array, or non-boolean values; a corrupt config never accidentally enables the feature.
+  - `setConfigContextTools(enabled: boolean): void` — merges the flag into the existing `experimental` object without clobbering sibling flags (e.g. `experimental.task_model_selection`, `experimental.code_mode`).
+
+  Tool contracts (`src/tool/tools/context.ts`):
+
+  - `context_inspect` — no parameters. Returns `{ messageCount, tokens, budget, utilization, nearThreshold }` where `tokens` is `estimateMessagesTokens(session.messages)`, `budget` is the session manager's `maxContextTokens` (or `null` if not exposed), `utilization` is `tokens / budget` (or `null`), and `nearThreshold` is `utilization >= 0.9`. Returns `{ success: false, error }` with a descriptive message when invoked without an active session manager or session.
+  - `context_summarize` — optional `reason: string`. Does NOT run compaction directly; instead records intent and returns the current `{ scheduled: true, reason?, messageCount, tokens }` so the model can confirm the state. Scheduling the actual compaction is left to the caller for now — compaction still happens between turns, never mid-response. Same session-required error semantics as `context_inspect`.
+
+  See [CONFIGURATION.md — Experimental Context Self-Inspection Tools](docs/CONFIGURATION.md#experimental-context-self-inspection-tools-experimentalcontexttools), [ARCHITECTURE.md — Context Self-Inspection Tools](docs/ARCHITECTURE.md#context-self-inspection-tools-experimentalcontexttools), and [API.md — Context Self-Inspection API](docs/API.md#context-self-inspection-api-experimentalcontexttools) for the runtime contract and public TypeScript surface.
+
+### Changed
+
+- **Compaction empty-summary guard preserves session state** (`src/core/compaction.ts`, commit `0f840b3d`). Ports upstream opencode `#14318`. When the LLM (or the deterministic fallback) returns an empty or whitespace-only summary, `compactConversation()` no longer silently discards the older history — it first tries the deterministic `createFallbackSummary()` as a last resort, and if even that is empty, returns the ORIGINAL messages unchanged with `compactionErrorMessage = 'compaction returned empty summary; keeping existing session state'` surfaced through the `CompactionResult` (`estimatedTokensSaved: 0`, `compactedMessages === originalMessages`, `summary: ''`). Prevents a rare-but-catastrophic failure mode where a flaky provider response would wipe multi-hour conversation context to a single empty system message.
+
+- **Compaction summary prompt reverted to explicit "context summarization agent" formulation** (`src/core/compaction.ts`, commit `0f840b3d`). Ports upstream opencode revert of the "anchored" summarization framing. The `SUMMARY_PROMPT` template now opens with `You are a context summarization agent. You are given a conversation between a user and an agent.` and drops the "coding agent" / "anchored" phrasing so smaller models (DSv4 Flash class) follow the structured-output requirement more reliably. The five-section extract-and-preserve list (`KEY DECISIONS`, `FILES CHANGED`, `CONTEXT`, `CURRENT STATE`, `USER INSTRUCTIONS`) is unchanged, so downstream reducers that parse the sectioned output continue to work; only the framing wrapper differs.
+
+- **Version bump `1.22.27` -> `1.22.28`** (`package.json`). Rolls up the 2026-09-23 upstream sync ports (experimental context self-inspection tools, compaction empty-summary guard, compaction prompt revert).
+
+- **Upstream sync watermark bump** (`.github/last-sync-commits.json`). Advances the tracked last-synced commits for the three upstream sources to `95b45e54` (kilocode), `18ef3cc7` (opencode), and `56f36532` (claude-code), with `last_synced_at: 2026-09-23T11:00:30Z` and `workflow_run: 35851479528`.
+
 - **`.cline/` flat-layout rules directory recognised by `discoverRules`** (`src/config/rulesDiscovery.ts`, `tests/rulesDiscovery.test.ts`, commit `6ce4ab8c` `feat(config): verify .cline rules multi-location support`). Cross-compatibility with Cline-based workflows (mirrors Cline PR #14207) where markdown rules may live directly under `<workdir>/.cline/` instead of the nested `<workdir>/.cline/rules/`. Both locations are now scanned in the default project pass and both surface through the standard `RulesDiscoveryResult` (winning rules in `rules`, shadowed duplicates in `conflicts`, scanned roots in `scannedDirs`).
 
   Precedence in the default project scan is unchanged for all pre-existing directories and is now formally:
