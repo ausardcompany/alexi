@@ -4368,6 +4368,134 @@ Key patterns to reuse when testing other optional/external MCP scaffolds:
 
 The test file is 369 lines and adds no new production code; it is a verification-only regression suite that locks in behaviour already delivered by the generic MCP client and config layers.
 
+### Testing the MCP git plugin resolver (`src/mcp/__tests__/git-resolver.test.ts`)
+
+Introduced by commit `d14b3716` (`feat(server): add MCP git plugin resolver with security hardening`). `src/mcp/git-resolver.ts` is a standalone module — it depends only on Node core APIs and `child_process` — so the entire 432-line suite runs without a live `git` binary, network access, or an SSH key. Every git invocation is intercepted via a single `vi.mock('child_process', () => ({ execFile: vi.fn() }))` declaration at the top of the file, and each test that exercises the clone / rev-parse / ls-remote paths programs the mock to return either a canned stdout or a synthetic `Error` with a Node-style `.code`.
+
+Suite layout — 8 describe blocks pinning the seven security-critical exports and the identity helper:
+
+1. **`parseGitUrl`** — public HTTPS with ref+subpath, trailing `.git` stripping, private SSH, POSIX `file://` with ref+subpath, URL without fragment, unrecognised scheme rejection, missing `<org>/<repo>` rejection, `../etc` and `/absolute` subpath traversal rejection.
+2. **`normalizeFileUrl`** — Windows drive-less collapse (`file:///C:/Users/alice/repo` → `file://C:/Users/alice/repo`), POSIX passthrough, non-`file://` passthrough.
+3. **`validateRef`** — accepts `main`, `v1.2.3`, `feature/foo`; rejects `--upload-pack=/bin/sh` and `-o` as option injection; rejects empty and whitespace-containing refs; rejects git-format violations (`foo..bar`, `foo^bar`, `.hidden`, `branch.lock`).
+4. **`getPluginIdentity`** — stability (same URL/ref/subpath triple → same identity), protocol separation (`https` vs `ssh` on the same host/org/repo differ), ref separation.
+5. **`cloneGitRepo`** — public HTTPS clone records the resolved commit and writes `.metadata.json`, argv contains `--depth 1 --branch main` and the `--` separator before the URL; SSH clone with `sshKey` sets `GIT_SSH_COMMAND` containing the key path and `accept-new`; local `file://` clone; failing clone cleans up any `.tmp-` sibling; option-injection ref rejected before shell-out.
+6. **`checkContainment`** — plain subpath resolves inside the repo, symlink resolving back inside the repo is accepted, symlink pointing outside is rejected with `escapes repository root`, non-existent traversal path (`../etc`) is rejected lexically.
+7. **`shouldRevalidate`** — missing metadata returns `true`, within-TTL returns `false`, past-TTL returns `true`, malformed JSON returns `true` (fail-open so a corrupt cache never wedges the resolver).
+8. **`revalidateMutableRef`** — remote commit differs → `true`, remote commit matches → `false`, empty `ls-remote` output → `true` (treated as changed so the caller triggers a fresh clone and surfaces the real failure), option-injection ref rejected before `git ls-remote` runs.
+
+The `programExecFile(fixture)` helper is the load-bearing piece of the fixture:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+vi.mock('child_process', () => ({
+  execFile: vi.fn(),
+}));
+
+import { execFile } from 'child_process';
+import { cloneGitRepo } from '../git-resolver.js';
+
+type ExecFileCallback = (
+  err: (Error & { code?: string | number }) | null,
+  stdout: string | Buffer,
+  stderr: string | Buffer
+) => void;
+
+interface Call {
+  file: string;
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+}
+
+interface Fixture {
+  handler: (call: Call) => { err?: Error; stdout?: string; stderr?: string };
+  calls: Call[];
+}
+
+function programExecFile(fixture: Fixture): void {
+  vi.mocked(execFile).mockImplementation(((
+    file: string,
+    args: string[],
+    optionsOrCb: unknown,
+    maybeCb?: ExecFileCallback
+  ) => {
+    const options =
+      typeof optionsOrCb === 'function'
+        ? {}
+        : (optionsOrCb as { env?: NodeJS.ProcessEnv; cwd?: string });
+    const callback = (
+      typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb
+    ) as ExecFileCallback;
+    const call: Call = { file, args, env: options?.env, cwd: options?.cwd };
+    fixture.calls.push(call);
+    const { err, stdout, stderr } = fixture.handler(call);
+    callback(err ?? null, stdout ?? '', stderr ?? '');
+    return undefined as unknown;
+  }) as unknown as typeof execFile);
+}
+
+let tmpRoot: string;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-git-resolver-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+  vi.resetAllMocks();
+});
+```
+
+A representative clone-path test uses the helper to program TWO responses (a `git clone` that materialises the temp directory on disk and a `git rev-parse HEAD` that returns a canned commit):
+
+```typescript
+it('clones a public HTTPS repo and records the resolved commit', async () => {
+  const fixture: Fixture = {
+    calls: [],
+    handler: (call) => {
+      if (call.args[0] === 'clone') {
+        // Simulate a successful clone by creating the tmp dir.
+        const tmp = call.args[call.args.length - 1];
+        fs.mkdirSync(tmp, { recursive: true });
+        return { stdout: '' };
+      }
+      if (call.args[0] === 'rev-parse') {
+        return { stdout: 'deadbeef1234567890\n' };
+      }
+      return { err: new Error(`unexpected call ${call.args.join(' ')}`) };
+    },
+  };
+  programExecFile(fixture);
+
+  const result = await cloneGitRepo('https://github.com/org/repo#main', undefined, tmpRoot);
+  expect(result.commit).toBe('deadbeef1234567890');
+  expect(fs.existsSync(path.join(result.path, '.metadata.json'))).toBe(true);
+
+  const cloneCall = fixture.calls.find((c) => c.args[0] === 'clone');
+  expect(cloneCall!.args).toContain('--branch');
+  expect(cloneCall!.args).toContain('main');
+  expect(cloneCall!.args).toContain('--depth');
+  expect(cloneCall!.args).toContain('1');
+  // The `--` separator ensures the URL cannot be misinterpreted as a flag.
+  expect(cloneCall!.args).toContain('--');
+});
+```
+
+Key patterns to reuse when extending this suite or building similar `child_process`-wrapping resolvers:
+
+1. **Mock `child_process.execFile` at the module boundary, not the git invocation.** The single `vi.mock('child_process')` at the top of the file replaces every `execFile` call in the module — clone, `rev-parse`, and `ls-remote` — via one entry point. This keeps the mock declaration small and the fixture handler responsible for routing by `args[0]`. Rewriting the module to import a wrapper function so tests can inject a fake would be net-negative complexity here.
+2. **The fixture is a `handler` plus a `calls` log.** `handler(call)` decides what each invocation returns (stdout, stderr, or error), and the test then asserts on `fixture.calls` after the fact. This is more flexible than the `.mockResolvedValueOnce(...)` chain when a single test needs to answer `clone`, `rev-parse`, AND write to disk between them.
+3. **Materialise the temp directory in the fixture.** `cloneGitRepo` runs a second `execFile('git', ['rev-parse', 'HEAD'], { cwd: tmpPath, ... })` and then `renameSync`s the temp dir into place. Both operations require the temp dir to exist on disk — the fixture handler for the `clone` case creates it with `fs.mkdirSync(tmp, { recursive: true })`. Skipping this is the most common way to break the suite when adding a new case.
+4. **Use `fs.mkdtempSync` per test, not a shared cache root.** Every test runs against a fresh `tmpRoot` under `os.tmpdir()`. This keeps `PLUGIN_CACHE_ROOT` (`~/.alexi/plugin-cache`) untouched by the suite so a developer running `npm test` locally does not accumulate cache directories from failed runs, and it makes the tests parallel-safe under Vitest workers.
+5. **Assert the `--` separator on `git clone`.** Even though the current URL parser filters `-`-prefixed values, the `--` marker in the argv is the second line of defence — a test that asserts on `expect(cloneCall!.args).toContain('--')` catches a regression where the marker is dropped from `cloneGitRepo` in favour of assuming the parser is sufficient.
+6. **Cover the `.tmp-<pid>-<random>` cleanup on failure.** The "cleans up the temp directory when clone fails" case is what guards against the plugin-cache directory accumulating stale `<identity>.tmp-*` siblings across failed clones. Asserting `fs.readdirSync(tmpRoot).filter((n) => n.includes('.tmp-'))` is empty after the throw pins that contract.
+7. **Cover the pre-shell-out validation in `revalidateMutableRef` AND `cloneGitRepo`.** Both entry points call `validateRef` before touching git; both cases (`await expect(...).rejects.toThrow(/parsed as an option/)` with `programExecFile({ calls: [], handler: () => ({ stdout: '' }) })` pre-programmed) exist in the suite. A regression that moved the check inside `execFileAsync` would still reject the ref but only after paying the process-spawn cost — pin the pre-flight explicitly.
+
 ## Test File Formatting
 
 Test files under `tests/` and co-located `src/**/*.test.ts` files are subject to
