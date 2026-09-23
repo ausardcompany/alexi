@@ -717,6 +717,65 @@ if (options?.signal?.aborted) {
 
 The `task` tool wires the child session lifecycle in `src/tool/tools/task.ts:574-677`. If the parent is already aborted at spawn time it refuses to start the subagent (returning `{ status: 'cancelled' }`) instead of wasting the cost tracker's provider budget on a request whose result no consumer will read.
 
+## Session Retention Lifecycle
+
+Session transcripts persisted to `~/.alexi/sessions/*.json` accumulate over time. Without a bounded lifetime an active operator's sessions directory grows without limit, slowing FTS index rebuilds, `alexi sessions` listings, and repo-map inference passes that scan the directory. The retention pipeline (schema in `src/config/userConfig.ts`, runner in `src/core/sessionManager.ts:828`, scheduler in `src/core/retentionScheduler.ts`, CLI surface in `src/cli/commands/sessions.ts`) deletes sessions older than a configured `maxAgeDays` while guaranteeing no in-flight or freshly-written transcript is touched.
+
+The pipeline has four collaborators, wired top-down from the CLI entry point:
+
+```mermaid
+graph TB
+    subgraph Startup["CLI Startup (src/cli/program.ts)"]
+        Program[program.ts]
+        Trigger[triggerRetentionSweep]
+    end
+
+    subgraph Scheduler["Scheduler (src/core/retentionScheduler.ts)"]
+        StateFile["~/.alexi/last-retention-run"]
+        ShouldRun[shouldRun]
+        SetImm[setImmediate]
+    end
+
+    subgraph Runner["Runner (src/core/sessionManager.ts)"]
+        Cleanup[cleanupExpiredSessions]
+        Guards["Guards:<br/>hasActiveRun<br/>hasRecentWrite"]
+        Cascade[Cascade children by parentSessionId]
+        Delete[deleteSession]
+    end
+
+    subgraph Config["Config (src/config/userConfig.ts)"]
+        Policy["retention.enabled<br/>retention.maxAgeDays"]
+    end
+
+    subgraph CLIFlag["Operator Override (src/cli/commands/sessions.ts)"]
+        Flag[alexi sessions --cleanup]
+    end
+
+    Program --> Trigger
+    Trigger --> ShouldRun
+    ShouldRun --> StateFile
+    Trigger -->|24h elapsed| SetImm
+    SetImm --> Cleanup
+    Cleanup --> Policy
+    Policy -->|enabled=false| Cleanup
+    Cleanup --> Guards
+    Guards --> Delete
+    Cleanup --> Cascade
+    Cascade --> Delete
+    Flag -->|force, ignores cooldown| Cleanup
+```
+
+Contract points, pinned by `tests/core/sessionManager-retention.test.ts`:
+
+- **Opt-in by construction.** `cleanupExpiredSessions` short-circuits with `{ deleted: 0, skipped: 0, errors: [] }` when `getConfigSessionRetention().enabled` is `false` — no directory scan is performed. The scheduler still fires and updates the state file so a subsequent `retention.enabled: true` flip does not immediately trigger a same-second sweep.
+- **Cooldown state.** `~/.alexi/last-retention-run` stores the last-run timestamp as a plain number. `readLastRun` returns `0` when the file is missing, empty, non-numeric, or contains a timestamp more than 24h in the future (guarding against clock drift / hostile edits). The scheduler treats `0` as "due now".
+- **Fire-and-forget.** `triggerRetentionSweep` writes the state file BEFORE dispatching the sweep so an unhandled error inside `cleanupExpiredSessions` does not cause the next startup to re-run immediately. The sweep runs via `setImmediate` on the CLI event loop, not a worker thread — the CLI startup path returns to the caller before the scan begins.
+- **Active-run guard.** `hasActiveRun(sessionId)` (populated by `beginSessionRun` / `endSessionRun` — see the abort-propagation contract above) protects sessions with an in-flight run from deletion even when they are past the age cutoff.
+- **Recent-write guard.** A session whose LAST message `timestamp` is within `RECENT_WRITE_WINDOW_MS` (1 hour) is held back regardless of `metadata.updated`. This catches the edge case where a session was actively receiving writes right up to the age boundary.
+- **Cascade to children.** After an expired root session is deleted, the runner walks the loaded map for sessions whose `metadata.parentSessionId` matches the deleted id and applies the same expiry check + guards. Young children of expired parents survive so an in-flight subagent whose parent aged out is not silently discarded.
+- **Best-effort per-session I/O.** Errors reading, parsing, or deleting an individual session file are captured in `summary.errors[]` and the sweep continues to the next candidate. A corrupted JSON blob cannot block cleanup of the rest of the directory.
+- **`--cleanup` bypasses the cooldown.** `alexi sessions --cleanup` instantiates a fresh `SessionManager` and calls `cleanupExpiredSessions` directly. The 24h scheduler cooldown does not gate this path — operators can force a sweep before running FTS reindex or a diagnostic pass. The exit code is `1` when `errors[]` is non-empty; otherwise `0`. When `retention.enabled` is `false`, the flag still runs the code path but the runner's own gate returns the empty summary immediately.
+
 ## Headless Exit and Session Drain
 
 Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.
@@ -3587,6 +3646,73 @@ Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line
 ### Non-supporting terminals
 
 `hyperlink()` short-circuits to plain text when `supportsHyperlinks()` returns false, so the linkifier is safe to apply unconditionally. On CI, when stdout is piped, or on a terminal without OSC-8 support, tool output is byte-identical to the pre-linkify text — the transform is invisible.
+
+### Incremental linkifier for streaming output (issue #1807)
+
+Since 2026-09-22 the bash tool row runs its output through an incremental linkifier (`src/cli/tui/utils/incrementalLinkify.ts`) rather than calling `linkify()` directly. The direct call is O(n) per render — good for a single completed row, but degrades to O(n^2) over the lifetime of a streaming command that emits thousands of chunks (`npm install --verbose`, `git log --all`, large `find` outputs) because every chunk arrival re-scans the entire accumulated buffer. This is the shell-side analogue of the Kilocode incremental syntax-highlighting optimisation (kilocode PR #14361).
+
+The cache is safe by construction: the URL and `path:line` regexes in `linkify` only match within a single line (their alternation stops at whitespace and `\n`), so any prefix that ends at a `\n` boundary is guaranteed to linkify to the same output regardless of what characters follow. The linkifier caches that prefix.
+
+```mermaid
+flowchart LR
+    Chunk[New chunk arrives]
+    Extend{Buffer is extension<br/>of cached prefix?}
+    Miss[Cache miss:<br/>reset + full linkify]
+    Tail[Slice text - cachedPrefix]
+    Newline{Tail contains ?}
+    Commit[Advance commit point<br/>to last in tail]
+    Concat[Return cachedTransformed<br/>+ linkify tail]
+    Terminal[Ink Text renderer]
+
+    Chunk --> Extend
+    Extend -- no --> Miss --> Terminal
+    Extend -- yes --> Tail
+    Tail --> Newline
+    Newline -- yes --> Commit --> Concat
+    Newline -- no --> Concat
+    Concat --> Terminal
+```
+
+Public surface:
+
+```typescript
+export interface IncrementalLinkifier {
+  (text: string): string;
+  reset(): void;
+  lastCachedChars(): number;
+}
+
+export function createIncrementalLinkifier(cwd?: string): IncrementalLinkifier;
+```
+
+`ToolRow` holds one instance per row via `useRef` + `useMemo`, so the cache persists across re-renders for the same tool call:
+
+```tsx
+// src/cli/tui/components/ToolRow.tsx
+const linkifierRef = useRef<IncrementalLinkifier | null>(null);
+const linkifier = useMemo(() => {
+  if (linkifierRef.current === null) {
+    linkifierRef.current = createIncrementalLinkifier();
+  }
+  return linkifierRef.current;
+}, []);
+// ...
+{linkifier(truncatedText)}
+```
+
+Cache contract (from the module docstring):
+
+| Case | Behaviour | `lastCachedChars()` |
+|------|-----------|---------------------|
+| First call | Full scan, freeze prefix up to last `\n` | `0` |
+| Extension with newline in tail | Reuse committed prefix, scan tail, advance commit point | prev committed length |
+| Extension without newline in tail | Reuse committed prefix, scan tail, commit point unchanged | prev committed length |
+| Buffer shrinks or diverges | Cache miss: reset and full scan | `0` |
+| Empty input | Return `''` | `0` |
+
+Correctness invariant: for any single call, `incrementalLinkifier(text)` is byte-identical to `linkify(text, cwd)`. The 174-line `tests/cli/tui/shell-output.test.ts` suite pins this equivalence plus the incremental-behaviour invariants (see `docs/TESTING.md#testing-the-incremental-linkifier-issue-1807`).
+
+Performance: on a synthetic 2000-chunk workload (mixed URL / `path:line` / progress lines), the incremental path is 5-20x faster than repeated `linkify()` calls; the test suite asserts a conservative 1.5x lower bound to stay stable under CI variance.
 
 ## Session Retry with Bounded Exponential Backoff
 
