@@ -18,9 +18,11 @@ import { estimateMessagesTokens } from '../../core/compaction.js';
 // context_inspect: report current session token/message usage
 // ---------------------------------------------------------------------------
 
-const ContextInspectParamsSchema = z.object({}).describe(
-  'Report current session token usage and distance to the compaction threshold. No parameters.'
-);
+const ContextInspectParamsSchema = z
+  .object({})
+  .describe(
+    'Report current session token usage and distance to the compaction threshold. No parameters.'
+  );
 
 interface ContextInspectResult {
   messageCount: number;
@@ -37,7 +39,7 @@ export const contextInspectTool = defineTool<
 >({
   name: 'context_inspect',
   description:
-    'Report the current session\'s approximate token usage, message count, and ' +
+    "Report the current session's approximate token usage, message count, and " +
     'distance to the compaction threshold. Use before large operations (repo scans, ' +
     'multi-file edits) to check whether the context window is close to overflow. ' +
     'Requires experimental.contextTools.',
