@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Incremental linkifier for streaming shell / bash tool output** (`src/cli/tui/utils/incrementalLinkify.ts`, `src/cli/tui/components/ToolRow.tsx`, `tests/cli/tui/shell-output.test.ts`, issue #1807). The bash tool row previously re-linkified its entire streaming buffer on every chunk arrival — a URL / `path:line` scan is O(n) per re-render, which degrades to O(n^2) over the lifetime of a streaming command that emits thousands of chunks (`npm install --verbose`, `git log --all`, large `find` outputs). This is the shell-side analogue of the Kilocode incremental syntax-highlighting optimisation in kilocode PR #14361.
+
+  New public surface in `src/cli/tui/utils/incrementalLinkify.ts`:
+  - `interface IncrementalLinkifier extends (text: string) => string` — call it like a function; the return value is byte-identical to `linkify(text, cwd)` for the same input.
+  - `IncrementalLinkifier.reset()` — discard the cached prefix. Called by `ToolRow` when the underlying tool row is reused.
+  - `IncrementalLinkifier.lastCachedChars(): number` — introspection for tests; returns the number of characters served from cache on the most recent invocation. `0` means the whole buffer was re-scanned (initial call or cache miss); a positive value proves the incremental path fired.
+  - `createIncrementalLinkifier(cwd?: string): IncrementalLinkifier` — build a linkifier bound to `cwd` (defaults to `process.cwd()`).
+
+  Cache contract: committed newline-terminated lines are frozen because `linkify`'s URL and `path:line` regexes only match within a single line. The linkifier caches `(committedRaw, committedTransformed)` pairs and, on each call, linkifies only `text.slice(committedRaw.length)`. When the tail contains a `\n` the commit point advances so future calls do not rescan the newly-committed line either. A cache miss (buffer shrank, buffer changed, or first call) resets to a full scan; the buffer must be a strict extension of the cached prefix to hit the fast path. Amortised cost is O(delta) per call, where `delta` is the number of characters appended since the last call.
+
+  `ToolRow` (`src/cli/tui/components/ToolRow.tsx`) now holds one `IncrementalLinkifier` per row via `useRef` + `useMemo` so the cache persists across re-renders for the same tool call. Both the bash-output branch (`ToolRow.tsx:202`) and the generic-output branch (`ToolRow.tsx:212`) call `linkifier(truncatedText)` in place of the previous `linkify(truncatedText)`.
+
+- **Streaming shell output test suite** (`tests/cli/tui/shell-output.test.ts`, 174 lines, 9 cases). Pins the incremental linkifier contract:
+  1. `produces byte-identical output to linkify() for a growing buffer` — five-line staged append; every intermediate result is `linkify(buf, CWD)`-equivalent.
+  2. `re-uses cache: appending a full line does not re-scan committed prefix` — asserts `lastCachedChars()` transitions from `0` on the first call to `first.length` on the second.
+  3. `handles chunk arrivals that split a line across calls` — five-part parts array where `https://` is split between two chunks; final buffer still matches `linkify()`.
+  4. `resets when the buffer shrinks or diverges from the cached prefix` — feeds a divergent buffer and asserts `lastCachedChars() === 0` plus output-byte equality with `linkify()`.
+  5. `does not re-process the entire output buffer on every chunk (perf invariant)` — 200 committed lines; asserts `lastCachedChars()` grows monotonically and the final value equals `buf.lastIndexOf('\n', buf.length - 2) + 1` (all but the final line committed).
+  6. `renders a 10k-line output faster than repeated full linkify() calls` — 2000-chunk benchmark; asserts `incMs < naiveMs` AND `naiveMs / incMs > 1.5x`. Empirically the ratio is 5-20x; the 1.5x lower bound is deliberately conservative for CI variance.
+  7. `reset() clears cache so next call is a fresh full scan` — after `reset()`, the next invocation has `lastCachedChars() === 0`.
+  8. `handles empty input without error` — `inc('')` returns `''` and does not touch the cache.
+  9. `handles output that never contains a newline` — three progress-bar-style calls that never commit a line; each result equals `linkify(text, CWD)`.
 - **MCP git plugin resolver with security hardening** (`src/mcp/git-resolver.ts`, `src/mcp/__tests__/git-resolver.test.ts`, commit `973d6cfc` `feat(server): add MCP git plugin resolver with security hardening`). Ports the security hardening in Kilocode PR #14485 (2026-09-23) as a self-contained module that parses, validates, clones, and revalidates MCP plugin git URLs for the upcoming `mcp install` CLI surface. Alexi ships the resolver today so the `mcp install` command can land in a follow-up PR without re-doing the security review. New public surface (all exported from `src/mcp/git-resolver.ts`):
 
   - `interface ParsedGitUrl { protocol: 'https' | 'ssh' | 'file'; host: string; org: string; repo: string; ref?: string; subpath?: string }` and `parseGitUrl(url): ParsedGitUrl` — parse public HTTPS (`https://host/org/repo#ref@subpath`), private SSH (`git@host:org/repo.git#ref@subpath`), and local file URLs (`file:///abs/path#ref@subpath`). Every unsupported scheme throws a specific message (`unsupported scheme`, `missing org/repo`, `no path`) so operator-facing errors are actionable rather than "malformed URL".
