@@ -1853,6 +1853,19 @@ Effective 2026-09-10, TUI features that emit terminal-specific escape sequences 
 4. **Wrap-once, apply late.** `linkify()` is applied as the LAST transform on tool-output text (after `truncateOutput`) so truncation math still runs on the raw string. When adding a new wrapper, apply it after every truncation, redaction, and word-wrap step so those upstream steps never have to know about the escape bytes.
 5. **Tests stub the env with `vi.stubEnv` and undo in `afterEach`.** See `docs/TESTING.md#testing-linkify--deterministic-osc-8-assertions` for the pattern. Do NOT `process.env.FORCE_HYPERLINK = '1'` directly — that leaks state across tests.
 
+### Streaming-friendly transforms on tool output (issue #1807)
+
+Effective 2026-09-22, any pure string transform applied per-render to a streaming tool output buffer (`linkify`, syntax highlight, redact, word-wrap) MUST be shaped so the cost is amortised across chunk arrivals — otherwise a long-running bash command that emits thousands of chunks (`npm install --verbose`, `git log --all`) degrades to O(n^2) over the lifetime of the row. The `src/cli/tui/utils/incrementalLinkify.ts` module is the reference for a line-boundary-safe cache; the same pattern extends to any transform whose regex or parser state cannot cross `\n`.
+
+Rules for adding a new streaming-friendly transform:
+
+1. **Verify the underlying transform is line-boundary-safe.** `linkify()` qualifies because its two regexes stop at whitespace (URLs) and require path characters bounded by a lookbehind (`path:line`). A syntax highlighter that tracks multi-line comment state does NOT qualify without extra work — cache at the block level instead.
+2. **Return an `IncrementalXxx` closure with a `reset()` method and a `lastCachedChars()` introspection hook.** `reset()` is called by parent components when the underlying row is reused; `lastCachedChars()` is what tests use to prove the fast path fired. Do not skip the introspection hook — a suite that only asserts output correctness cannot distinguish an incremental implementation from a full-rescan implementation that happens to produce the right bytes.
+3. **Cache-miss policy: reset when the incoming buffer is not a strict extension of the cached prefix.** Buffer shrunk, buffer diverged, or first call — all reset to a full scan. Never try to align partial prefixes; that is where correctness bugs live.
+4. **Hold one instance per component via `useRef` + `useMemo`.** `ToolRow.tsx` (`src/cli/tui/components/ToolRow.tsx:139`) is the reference: the ref survives React re-renders, `useMemo(() => ..., [])` initialises on first render, and the closure lives for the lifetime of the row. Do NOT put the factory in the module scope — a single shared instance across rows would swap cache state on every re-render.
+5. **Byte-identity tests are the correctness gate.** For any input the caller might pass, the incremental transform must produce the same output as calling the underlying transform on the whole buffer. Compare with the underlying function directly in the test (`expect(inc(buf)).toBe(linkify(buf, cwd))`) rather than reconstructing the expected output by hand. See `docs/TESTING.md#testing-the-incremental-linkifier-issue-1807`.
+6. **Benchmark with a ratio, not an absolute budget.** CI runners are too noisy for hardcoded ms thresholds. Use `naiveMs / incMs > 1.5` as a conservative lower bound; the actual speedup on `linkify` is 5-20x.
+
 ## Introducing Retry-Aware Modules
 
 Any new module that calls out to SAP AI Core (or another network dependency) should:

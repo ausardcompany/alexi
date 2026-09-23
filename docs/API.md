@@ -2822,6 +2822,53 @@ Two match categories are recognised, in the following precedence order:
 
 URL matches always win on overlap, so `https://example.com/foo/bar.ts:42` is treated as a single URL match and does not produce a nested `path:42` hyperlink.
 
+### `createIncrementalLinkifier` helper (`src/cli/tui/utils/incrementalLinkify.ts`)
+
+Streaming-friendly wrapper around `linkify()`. Added 2026-09-22 for issue #1807. `ToolRow` holds one instance per row so the bash-output branch amortises the URL / `path:line` regex scans over the lifetime of the tool call — only the newly-appended tail is scanned on each render instead of the entire (potentially large) buffer.
+
+```typescript
+export interface IncrementalLinkifier {
+  /** Run the linkifier over `text`, reusing the cached prefix when possible. */
+  (text: string): string;
+  /** Discard cache — useful when the underlying tool row is reused. */
+  reset(): void;
+  /**
+   * Introspection for tests: number of characters of `text` served from
+   * cache on the most recent invocation. `0` means the whole buffer was
+   * re-scanned (initial call or cache miss); a positive value proves
+   * incremental behaviour.
+   */
+  lastCachedChars(): number;
+}
+
+export function createIncrementalLinkifier(cwd?: string): IncrementalLinkifier;
+```
+
+Correctness invariant: for any single call, the returned linkifier is a drop-in replacement for `(text) => linkify(text, cwd)` — same output for the same input. Amortised cost is O(delta) per call, where `delta` is the number of characters appended since the last call.
+
+Cache behaviour:
+
+1. **Cache miss** — the incoming buffer is not a strict extension of the cached prefix (buffer shrank, first call, unrelated content). The linkifier does a full `linkify(text, cwd)` and freezes the prefix up to the last `\n`. `lastCachedChars()` returns `0`.
+2. **Cache hit** — the incoming buffer is a strict extension of the cached prefix. The linkifier concatenates the cached transformed prefix with `linkify(tail, cwd)` and advances the commit point to the last `\n` in the tail. `lastCachedChars()` returns the number of prefix characters served from cache.
+3. **Empty input** — returns `''` and does not touch the cache.
+4. **`reset()`** — clears both `committedRaw` and `committedTransformed`. Next call is a full scan.
+
+`ToolRow` usage (both the bash-output branch and the generic-output branch, `src/cli/tui/components/ToolRow.tsx:202` / `:212`):
+
+```tsx
+const linkifierRef = useRef<IncrementalLinkifier | null>(null);
+const linkifier = useMemo(() => {
+  if (linkifierRef.current === null) {
+    linkifierRef.current = createIncrementalLinkifier();
+  }
+  return linkifierRef.current;
+}, []);
+// ... inside render:
+<Text color={colors.toolOutput}>{linkifier(truncatedText)}</Text>
+```
+
+Safety: because `linkify`'s regexes only match within a single line, splitting at the last `\n` in the cached prefix is guaranteed to produce identical output to a full scan. The linkifier deliberately never caches an open (non-newline-terminated) tail — the still-growing final line is re-linkified on each call.
+
 ### `hyperlink` helper (`src/cli/tui/utils/hyperlink.ts`)
 
 OSC-8 escape sequence wrapper. Called by `linkify()` per match; consumers rarely need to call it directly.

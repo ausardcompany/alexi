@@ -3460,6 +3460,73 @@ Resolved URIs for `path:line` matches use the form `file://<absolute-path>#<line
 
 `hyperlink()` short-circuits to plain text when `supportsHyperlinks()` returns false, so the linkifier is safe to apply unconditionally. On CI, when stdout is piped, or on a terminal without OSC-8 support, tool output is byte-identical to the pre-linkify text — the transform is invisible.
 
+### Incremental linkifier for streaming output (issue #1807)
+
+Since 2026-09-22 the bash tool row runs its output through an incremental linkifier (`src/cli/tui/utils/incrementalLinkify.ts`) rather than calling `linkify()` directly. The direct call is O(n) per render — good for a single completed row, but degrades to O(n^2) over the lifetime of a streaming command that emits thousands of chunks (`npm install --verbose`, `git log --all`, large `find` outputs) because every chunk arrival re-scans the entire accumulated buffer. This is the shell-side analogue of the Kilocode incremental syntax-highlighting optimisation (kilocode PR #14361).
+
+The cache is safe by construction: the URL and `path:line` regexes in `linkify` only match within a single line (their alternation stops at whitespace and `\n`), so any prefix that ends at a `\n` boundary is guaranteed to linkify to the same output regardless of what characters follow. The linkifier caches that prefix.
+
+```mermaid
+flowchart LR
+    Chunk[New chunk arrives]
+    Extend{Buffer is extension<br/>of cached prefix?}
+    Miss[Cache miss:<br/>reset + full linkify]
+    Tail[Slice text - cachedPrefix]
+    Newline{Tail contains ?}
+    Commit[Advance commit point<br/>to last in tail]
+    Concat[Return cachedTransformed<br/>+ linkify tail]
+    Terminal[Ink Text renderer]
+
+    Chunk --> Extend
+    Extend -- no --> Miss --> Terminal
+    Extend -- yes --> Tail
+    Tail --> Newline
+    Newline -- yes --> Commit --> Concat
+    Newline -- no --> Concat
+    Concat --> Terminal
+```
+
+Public surface:
+
+```typescript
+export interface IncrementalLinkifier {
+  (text: string): string;
+  reset(): void;
+  lastCachedChars(): number;
+}
+
+export function createIncrementalLinkifier(cwd?: string): IncrementalLinkifier;
+```
+
+`ToolRow` holds one instance per row via `useRef` + `useMemo`, so the cache persists across re-renders for the same tool call:
+
+```tsx
+// src/cli/tui/components/ToolRow.tsx
+const linkifierRef = useRef<IncrementalLinkifier | null>(null);
+const linkifier = useMemo(() => {
+  if (linkifierRef.current === null) {
+    linkifierRef.current = createIncrementalLinkifier();
+  }
+  return linkifierRef.current;
+}, []);
+// ...
+{linkifier(truncatedText)}
+```
+
+Cache contract (from the module docstring):
+
+| Case | Behaviour | `lastCachedChars()` |
+|------|-----------|---------------------|
+| First call | Full scan, freeze prefix up to last `\n` | `0` |
+| Extension with newline in tail | Reuse committed prefix, scan tail, advance commit point | prev committed length |
+| Extension without newline in tail | Reuse committed prefix, scan tail, commit point unchanged | prev committed length |
+| Buffer shrinks or diverges | Cache miss: reset and full scan | `0` |
+| Empty input | Return `''` | `0` |
+
+Correctness invariant: for any single call, `incrementalLinkifier(text)` is byte-identical to `linkify(text, cwd)`. The 174-line `tests/cli/tui/shell-output.test.ts` suite pins this equivalence plus the incremental-behaviour invariants (see `docs/TESTING.md#testing-the-incremental-linkifier-issue-1807`).
+
+Performance: on a synthetic 2000-chunk workload (mixed URL / `path:line` / progress lines), the incremental path is 5-20x faster than repeated `linkify()` calls; the test suite asserts a conservative 1.5x lower bound to stay stable under CI variance.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:

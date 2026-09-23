@@ -4834,6 +4834,71 @@ Guidelines specific to `linkify` tests:
 3. For `path:line` assertions, always pass an explicit `cwd` argument to `linkify(text, cwd)`. Relying on `process.cwd()` makes assertions non-portable across worktrees and CI runners because the resulting `file://` URI embeds the absolute path.
 4. To exercise the non-supporting terminal fallback in the same file, flip the env stubs mid-test (`vi.stubEnv('FORCE_HYPERLINK', ''); vi.stubEnv('NO_HYPERLINK', '1');`) and re-invoke `linkify()` — the returned string should be byte-identical to the input for URL matches and should surface `label (url)` for `path:line` matches (because label !== url triggers the fallback branch in `hyperlink()`).
 
+### Testing the incremental linkifier (issue #1807)
+
+`tests/cli/tui/shell-output.test.ts` covers `createIncrementalLinkifier()` from `src/cli/tui/utils/incrementalLinkify.ts`. The suite pins two orthogonal contracts: **byte-identical equivalence** with `linkify()` for any input, and **incremental behaviour** — committed lines must not be re-scanned on subsequent calls.
+
+Key patterns:
+
+1. **Compare to `linkify(text, cwd)` at every intermediate step**, not just the final buffer. The linkifier is only useful if it produces the same output as the direct call for every input the caller might pass, including partial-line chunks. The `produces byte-identical output to linkify() for a growing buffer` case does this for a five-line staged append:
+
+   ```typescript
+   const inc = createIncrementalLinkifier(CWD);
+   let buf = '';
+   for (const line of lines) {
+     buf += line + '\n';
+     expect(inc(buf)).toBe(linkify(buf, CWD));
+   }
+   ```
+
+2. **Use `lastCachedChars()` to prove the fast path fired.** A test that only asserts output correctness cannot distinguish "fast path" from "always full rescan that happens to produce the right output". `lastCachedChars()` returns the number of characters served from cache on the most recent invocation; `0` means a cache miss, positive means a hit:
+
+   ```typescript
+   inc(first); // first call: full scan
+   expect(inc.lastCachedChars()).toBe(0);
+   inc(first + second); // second call: prefix hit
+   expect(inc.lastCachedChars()).toBe(first.length);
+   ```
+
+3. **Assert monotonic growth of `lastCachedChars()` across a long streaming session** to prove the commit point advances line-by-line rather than resetting on every chunk:
+
+   ```typescript
+   for (let i = 0; i < 200; i++) {
+     buf += `line ${i} https://example.com/${i}\n`;
+     inc(buf);
+     if (i > 0) {
+       expect(inc.lastCachedChars()).toBeGreaterThan(previousCached);
+     }
+     previousCached = inc.lastCachedChars();
+   }
+   const lastNl = buf.lastIndexOf('\n', buf.length - 2);
+   expect(inc.lastCachedChars()).toBe(lastNl + 1);
+   ```
+
+4. **Benchmark with a ratio, not an absolute budget.** The `renders a 10k-line output faster than repeated full linkify() calls` case runs 2000 chunk arrivals through both `linkify()` (naive) and the incremental linkifier, then asserts `incMs < naiveMs` AND `naiveMs / incMs > 1.5`. Empirically the ratio is 5-20x, but CI variance makes any absolute millisecond budget flaky; the 1.5x lower bound is deliberately conservative. Do NOT hardcode absolute ms thresholds in Vitest — the CI runner load is not stable enough for that.
+
+5. **Exercise the cache-miss branch.** Feed a divergent buffer after committing lines and assert both output correctness AND `lastCachedChars() === 0` — the linkifier must reset rather than silently return stale bytes:
+
+   ```typescript
+   inc('one\ntwo\nthree\n');
+   const out = inc('totally new content see src/x.ts:9\n');
+   expect(out).toBe(linkify('totally new content see src/x.ts:9\n', CWD));
+   expect(inc.lastCachedChars()).toBe(0);
+   ```
+
+6. **Cover the newline-free branch.** Progress-bar-style output (`progress: 10%`, `progress: 50%`, ...) never commits a line, so the linkifier re-scans the whole (short) tail on every call. Assert output correctness across three sequential calls to prove the "no commit" path stays correct:
+
+   ```typescript
+   const inc = createIncrementalLinkifier(CWD);
+   expect(inc('progress: 10%')).toBe(linkify('progress: 10%', CWD));
+   expect(inc('progress: 50%')).toBe(linkify('progress: 50%', CWD));
+   expect(inc('progress: 100%')).toBe(linkify('progress: 100%', CWD));
+   ```
+
+7. **Pass an explicit `cwd` argument** (the tests use `'/tmp/incremental-linkify-test'`). Both `linkify()` and `createIncrementalLinkifier()` default to `process.cwd()` for relative `path:line` resolution, which makes assertions non-portable across worktrees and CI runners because the resulting `file://` URI embeds the absolute path. Pin a synthetic cwd so both sides of the byte-identity comparison see the same base directory.
+
+8. **No env stubbing needed.** Unlike the `linkify` tests, the incremental linkifier tests compare against `linkify()` output directly rather than asserting on OSC-8 escape bytes, so `FORCE_HYPERLINK` does not need to be stubbed — both the reference and the incremental path run through the same `hyperlink()` capability probe and get the same off-TTY plain-text output under Vitest.
+
 ### Component-level tests with `ink-testing-library`
 
 `tests/cli/tui/ToolRow.test.tsx` renders `ToolRow` under `ink-testing-library` and asserts on the frame contents. This is the correct place to test row-level concerns:
