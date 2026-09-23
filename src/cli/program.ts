@@ -13,6 +13,7 @@ import { registerAllCommands } from './commands/index.js';
 import { killAllTracked } from '../tool/tools/background-process.js';
 import { installAbortGuard } from './utils/abortGuard.js';
 import { initTracing, shutdownTracing } from '../utils/tracing.js';
+import { triggerRetentionSweep } from '../core/retentionScheduler.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
@@ -47,6 +48,16 @@ process.on('beforeExit', () => {
 // sees the registered TracerProvider. `initTracing` is idempotent and a no-op
 // when tracing is disabled by env/config.
 void initTracing();
+
+// Fire-and-forget session retention sweep. Runs at most once per 24h
+// per user (state persisted in `~/.alexi/last-retention-run`). No-ops
+// when `retention.enabled` is `false` in `~/.alexi/config.json`.
+try {
+  triggerRetentionSweep();
+} catch {
+  // Retention is a housekeeping best-effort. A scheduler failure must
+  // never block CLI startup.
+}
 
 // Default fallback subscriber for non-TUI runs (CLI one-shots, scripts, tests).
 // The TUI subscribes its own handler in StatusBar.tsx and always renders,

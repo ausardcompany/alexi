@@ -319,10 +319,37 @@ alexi sessions --search "api refactor"
 | `--workdir <dir>` | string | Only list sessions created in the specified directory |
 | `--all` | flag | Default behaviour (explicit no-filter form) |
 | `--search <query>` | string | FTS5-ranked search across session titles (e.g. `"api refactor"`, `"openai OR anthropic"`, `"auth*"`) |
+| `--cleanup` | flag | Run the session retention sweep now (deletes sessions older than `retention.maxAgeDays`; ignores listing flags) |
 
 `--here` and `--workdir` are mutually exclusive and the command exits with `Error: --here and --workdir are mutually exclusive` when both are supplied.
 
 **Graceful degradation on scoping errors.** When the scoping/filter path fails — for example the SQLite FTS index is missing, or a workdir stat error is raised inside `sessionManager.listSessions(filter)` / `sessionManager.searchSessions(query, filter)` — the command no longer crashes. It logs `Warning: scoped session listing failed (<err>); falling back to all sessions` to stderr and re-issues an unfiltered `sessionManager.listSessions()` so the user still gets a usable listing across multi-project workspaces. This ports upstream opencode `627501673 fix(cli): list sessions across all projects instead of crashing`. The `--json` output shape is preserved on the fallback path.
+
+**`--cleanup` retention sweep.** When `--cleanup` is passed, all listing flags are ignored — the command dispatches straight to `SessionManager.cleanupExpiredSessions()` (`src/core/sessionManager.ts:828`), which reads the machine-wide policy from `~/.alexi/config.json`:
+
+```json
+{
+  "retention": {
+    "enabled": true,
+    "maxAgeDays": 30
+  }
+}
+```
+
+When `retention.enabled` is `false` (the default), the sweep is a no-op and prints `Deleted 0 expired sessions, skipped 0 active/recent sessions.`. When enabled, expired sessions (age > `maxAgeDays`) are deleted subject to two safety guards: a session with an active run tracked by `SessionManager.hasActiveRun` is skipped, and a session whose most recent message timestamp is within the last hour is skipped. Expired children of expired parents (matched by `metadata.parentSessionId`) cascade in the same sweep. The command exits with code `1` when per-session I/O errors are reported; otherwise `0`. Output shape:
+
+```text
+Deleted 3 expired sessions, skipped 1 active/recent sessions.
+```
+
+or with errors:
+
+```text
+Deleted 2 expired sessions, skipped 0 active/recent sessions, 1 errors.
+Failed to delete session <id>: EACCES: permission denied
+```
+
+The retention scheduler in `src/core/retentionScheduler.ts:88` also runs an automatic sweep at most once every 24 hours on CLI startup (state persisted to `~/.alexi/last-retention-run`). Use `--cleanup` to force a sweep now (for example, before rebuilding the FTS index or running a diagnostic pass) — the 24h cooldown does not gate the flag.
 
 ### session-export
 
@@ -1151,6 +1178,82 @@ interface Message {
    * user-facing transcripts. Introduced in 1.21.4 (issue #1466).
    */
   displayRole?: 'system' | 'user' | 'assistant';
+}
+```
+
+#### SessionRetentionPolicy
+
+Machine-wide session retention policy persisted at `~/.alexi/config.json`. Read via `getConfigSessionRetention()` and written via `setConfigSessionRetention()` (`src/config/userConfig.ts`).
+
+```typescript
+interface SessionRetentionPolicy {
+  /**
+   * Whether automatic deletion is enabled. `false` (or missing) means
+   * the retention runner is a no-op even if `maxAgeDays` is set.
+   */
+  enabled: boolean;
+  /**
+   * Days a session is kept before retention deletes it. Minimum 1.
+   * Defaults to 30 when the on-disk value is missing / non-finite /
+   * less than 1.
+   */
+  maxAgeDays: number;
+}
+
+function getConfigSessionRetention(): SessionRetentionPolicy;
+function setConfigSessionRetention(policy: Partial<SessionRetentionPolicy>): void;
+```
+
+`setConfigSessionRetention` validates that `maxAgeDays` is a positive integer >= 1 and throws `Error('retention.maxAgeDays must be a positive integer >= 1 (got <value>)')` on non-finite or below-one inputs. `enabled` and `maxAgeDays` may be updated independently — a partial write leaves the other field untouched.
+
+Consumed by `SessionManager.cleanupExpiredSessions` (below) and by the daily scheduler `triggerRetentionSweep` (`src/core/retentionScheduler.ts`). When `enabled` is `false` (the default), both paths short-circuit immediately without scanning the sessions directory.
+
+#### SessionManager.cleanupExpiredSessions
+
+Runs a one-shot sweep of `~/.alexi/sessions/` that permanently deletes sessions older than `retention.maxAgeDays`. Guarded by three safety checks (opt-in, active run, recent write) and cascades to expired children of expired parents.
+
+```typescript
+class SessionManager {
+  cleanupExpiredSessions(now?: number): {
+    deleted: number;
+    skipped: number;
+    errors: string[];
+  };
+}
+```
+
+- `now` (default `Date.now()`) is injected for deterministic tests.
+- Returns `{ deleted: 0, skipped: 0, errors: [] }` immediately when `retention.enabled` is `false` — no directory scan is performed.
+- `deleted` counts sessions actually removed by `deleteSession`.
+- `skipped` counts sessions held back by the active-run guard (`hasActiveRun(id)`) or the recent-write guard (last message timestamp within the last hour).
+- `errors` is a list of human-readable strings describing per-session failures (unreadable JSON, permission denied on delete, etc.). The sweep continues past errors so a single corrupted file does not block cleanup of the rest.
+
+Called synchronously by `alexi sessions --cleanup` (bypasses the 24h cooldown) and asynchronously by `triggerRetentionSweep` (respects the cooldown).
+
+#### retentionScheduler
+
+Fire-and-forget scheduler that triggers `cleanupExpiredSessions` at most once per 24 hours per user. Wired into `src/cli/program.ts` startup so every CLI invocation contributes to housekeeping without cost when the cooldown is active.
+
+```typescript
+// src/core/retentionScheduler.ts
+export function readLastRun(now?: number): number;
+export function shouldRun(now?: number): boolean;
+export function triggerRetentionSweep(now?: number): boolean;
+```
+
+- `readLastRun` returns the last-run timestamp recorded in `~/.alexi/last-retention-run`, or `0` when the file is missing / unreadable / corrupt / more than 24h in the future.
+- `shouldRun` returns `true` when at least 24h have elapsed since the last recorded sweep (including "never run" — a missing state file counts as `true`).
+- `triggerRetentionSweep` records the current timestamp BEFORE dispatching the sweep so an unhandled error inside `cleanupExpiredSessions` does not cause the next startup to re-run immediately. The actual sweep runs via `setImmediate` on the CLI event loop; the function returns `true` when a sweep was scheduled and `false` when the cooldown blocked it.
+
+The CLI startup path in `src/cli/program.ts` wraps the call in a `try/catch`:
+
+```typescript
+// src/cli/program.ts
+try {
+  triggerRetentionSweep();
+} catch {
+  // Retention is a housekeeping best-effort. A scheduler failure must
+  // never block CLI startup.
 }
 ```
 
