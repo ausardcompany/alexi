@@ -1503,6 +1503,55 @@ flowchart TD
     Compare -->|No| Skip[return false]
 ```
 
+### Empty-Summary Guard
+
+Ports upstream opencode `#14318` (2026-09-23 sync). When the LLM (or the deterministic fallback) returns an empty or whitespace-only summary, `compactConversation()` no longer silently discards the older history:
+
+```typescript
+// src/core/compaction.ts
+if (!summary || summary.trim().length === 0) {
+  const fallback = createFallbackSummary(messagesToSummarize);
+  if (fallback && fallback.trim().length > 0) {
+    summary = fallback;
+  } else {
+    compactionErrorMessage =
+      'compaction returned empty summary; keeping existing session state';
+    const noopResult: CompactionResult = {
+      originalMessages: messages.length,
+      compactedMessages: messages.length,
+      estimatedTokensSaved: 0,
+      summary: '',
+    };
+    return {
+      messages: [...messages],
+      result: noopResult,
+    };
+  }
+}
+```
+
+The deterministic `createFallbackSummary()` is preferred as a last resort; only if even that is empty does the function return the ORIGINAL messages unchanged. The no-op `CompactionResult` reports `compactedMessages === originalMessages`, `estimatedTokensSaved: 0`, and `summary: ''`, with `compactionErrorMessage` surfaced through the `CompactionComplete` bus event so subscribers can distinguish a truly successful compaction from a preserved-state one. This prevents a rare-but-catastrophic failure mode where a flaky provider response would wipe multi-hour context down to a single empty system message.
+
+### Summary Prompt
+
+The compaction summary prompt (`SUMMARY_PROMPT` in `src/core/compaction.ts`) was reverted in the 2026-09-23 sync to a simpler, more explicit "context summarization agent" formulation so smaller models (DSv4 Flash class) follow the structured-output requirement reliably:
+
+```typescript
+const SUMMARY_PROMPT = `You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary matching the format specified so another coding agent can continue the work.
+
+Extract and preserve:
+1. KEY DECISIONS: What was decided and why
+2. FILES CHANGED: List all files created/modified/deleted (preserve exact paths and identifiers)
+3. CONTEXT: Tech stack, constraints, requirements mentioned
+4. CURRENT STATE: What task is in progress, what's next
+5. USER INSTRUCTIONS: Preserve ALL user-specified preferences, constraints, and explicit instructions verbatim (coding style, API keys, endpoints, "always do X", "never do Y")
+...
+Conversation:
+{messages}`;
+```
+
+The five-section extract-and-preserve list is unchanged, so downstream reducers that parse the sectioned output continue to work; only the framing wrapper differs (dropping the earlier "anchored" / "coding agent" phrasing).
+
 ### Chunked Compaction
 
 Large contexts are split into chunks at natural boundaries (newlines, paragraphs) before compaction:
@@ -2947,6 +2996,85 @@ export async function loadCodeMode(): Promise<CodeMode | null>;
 ```
 
 The shim in `src/tool/code-mode.ts` unlocks the config gate; the actual sandbox implementation lands in follow-up commits as the upstream implementation stabilises. See [docs/CONFIGURATION.md — experimental.code_mode](CONFIGURATION.md#experimental-code_mode) for the config surface and interaction with `getConfigCodeMode()` / `setConfigCodeMode()`.
+
+## Context Self-Inspection Tools (`experimental.contextTools`)
+
+Introduced 2026-09-23 (`1.22.28`, ports upstream opencode `feat(cli): add experimental self-context tools (#14268)`). Two new built-in tools let the agent introspect its own message / token budget so it can proactively decide when to summarize or narrow scope BEFORE the auto-compaction threshold fires abruptly. Gated behind `experimental.contextTools` in `~/.alexi/config.json` (default `false`).
+
+### Registration
+
+`registerBuiltInTools()` in `src/tool/tools/index.ts` reads the flag once at process startup and only registers the two tools when it returns `true`:
+
+```typescript
+if (getConfigContextTools()) {
+  registerTool(contextInspectTool as Tool<any, any>);
+  registerTool(contextSummarizeTool as Tool<any, any>);
+}
+```
+
+The flag is not hot-reloaded; a config change picks up on the next process restart. When disabled, neither tool appears in the tool schema and the model cannot invoke it.
+
+### `context_inspect`
+
+Reports current session token usage and distance to the compaction threshold:
+
+```typescript
+interface ContextInspectResult {
+  messageCount: number;
+  tokens: number;
+  budget: number | null;
+  utilization: number | null;
+  /** Whether compaction is likely to fire on the next turn (utilization >= 0.9). */
+  nearThreshold: boolean;
+}
+```
+
+- `tokens` is computed via the shared `estimateMessagesTokens(session.messages)` helper from `src/core/compaction.ts`, so it uses recorded `tokens.input` / `tokens.output` when available and falls back to the `~4 chars / token` heuristic otherwise.
+- `budget` is read from `SessionManager.maxContextTokens` when present (structural cast — the field is private on the class), or `null` when the session manager does not expose it.
+- `utilization = tokens / budget` when `budget` is a positive number; otherwise `null`.
+- `nearThreshold = utilization !== null && utilization >= 0.9`.
+- Errors with `{ success: false, error: '<...> requires an active session manager; call this tool from within an agent turn.' }` when invoked without a session manager on the `ToolContext`, and with `{ success: false, error: 'No active session to inspect.' }` when the manager has no current session.
+
+### `context_summarize`
+
+Proactively hints the orchestrator to compact at the next safe point (between turns, never mid-response). The tool does NOT run compaction directly — it records intent and returns the current usage so the model can confirm the state:
+
+```typescript
+interface ContextSummarizeResult {
+  scheduled: boolean;
+  reason?: string;
+  messageCount: number;
+  tokens: number;
+}
+```
+
+The optional `reason` string is preserved verbatim in the result for debugging. Scheduling the actual compaction is left to the caller — this preserves the existing invariant that compaction happens between turns and never partially rewrites a response mid-stream. Same session-required error semantics as `context_inspect`.
+
+```mermaid
+sequenceDiagram
+    participant Agent as LLM Agent
+    participant Inspect as context_inspect
+    participant SessMgr as SessionManager
+    participant Summarize as context_summarize
+    participant Compact as compactConversation()
+
+    Agent->>Inspect: (no params)
+    Inspect->>SessMgr: getCurrentSession()
+    SessMgr-->>Inspect: session
+    Note over Inspect: estimateMessagesTokens(session.messages)
+    Inspect-->>Agent: { messageCount, tokens, budget, utilization, nearThreshold }
+    alt nearThreshold true
+        Agent->>Summarize: { reason: "before large repo scan" }
+        Summarize-->>Agent: { scheduled: true, tokens, messageCount }
+        Note over Agent: Agent completes turn
+        Agent->>Compact: (auto, between turns)
+        Compact-->>Agent: CompactionResult
+    else nearThreshold false
+        Note over Agent: Proceed with next tool call
+    end
+```
+
+See [docs/CONFIGURATION.md — Experimental Context Self-Inspection Tools](CONFIGURATION.md#experimental-context-self-inspection-tools-experimentalcontexttools) for the config surface and [docs/API.md — Context Self-Inspection API](API.md#context-self-inspection-api-experimentalcontexttools) for the public TypeScript surface.
 
 ## Directory Structure
 

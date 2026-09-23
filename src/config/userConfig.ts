@@ -701,6 +701,44 @@ export function setConfigCodeMode(enabled: boolean): void {
 }
 
 /**
+ * Experimental feature flag: `contextTools` — expose `context_inspect` and
+ * `context_summarize` tools so the agent can introspect its own token budget
+ * and proactively request compaction before overflow.
+ *
+ * Ports upstream opencode `feat(cli): add experimental self-context tools
+ * (#14268)`. Default is `false` so vanilla SAP AI Core sessions do not
+ * see the extra tool surface. Non-boolean or missing values fall back to
+ * `false`.
+ *
+ * Stored as `experimental.contextTools` inside the top-level `experimental`
+ * object of `~/.alexi/config.json`.
+ */
+export function getConfigContextTools(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return false;
+  }
+  const value = (experimental as Record<string, unknown>).contextTools;
+  return value === true;
+}
+
+/**
+ * Persist the `experimental.contextTools` flag.
+ */
+export function setConfigContextTools(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, contextTools: enabled };
+  saveFullConfig(config);
+}
+
+/**
  * Experimental feature flag: enable the task-scoped shared agent board.
  *
  * Ports upstream kilocode `experimental.sharedAgentBoard` (2026-08 sync,

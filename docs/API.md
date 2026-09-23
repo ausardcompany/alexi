@@ -1534,6 +1534,8 @@ cleanupToolOutputs(): void
 | `open_plan` | `path`, `title?` | Signal that an agent-authored plan markdown file is ready for review; publishes `plan.opened` on the shared bus (see [open_plan tool](#open_plan-tool) below) |
 | `schedule_wakeup` | `when`, `reason`, `payload?` | Schedule a future resume of the current session; `when` accepts an ISO-8601 timestamp or a relative duration (`"5m"`, `"1h"`, `"30s"`, `"2d"`). Requires an active session context. See [Wakeup tools](#wakeup-tools) below |
 | `cancel_wakeup` | `wakeupID` | Cancel a previously scheduled wakeup by id. Idempotent — returns `{ cancelled: false }` for unknown, already-fired, or foreign-session ids. See [Wakeup tools](#wakeup-tools) below |
+| `context_inspect` | (none) | Report current session token / message usage and distance to the compaction threshold. Gated behind `experimental.contextTools`. See [Context Self-Inspection API](#context-self-inspection-api-experimentalcontexttools) below |
+| `context_summarize` | `reason?` | Request that the current session be compacted at the next safe point (between turns). Does NOT run compaction directly. Gated behind `experimental.contextTools`. See [Context Self-Inspection API](#context-self-inspection-api-experimentalcontexttools) below |
 
 #### `todowrite` tool contract
 
@@ -4273,3 +4275,101 @@ if (prompt !== undefined) {
 ```
 
 The pluggable `DraftCacheStore` interface allows a future durable implementation without changing callers or tests. The default in-memory store is a plain `Map<string, string>`.
+
+## Context Self-Inspection API (`experimental.contextTools`)
+
+Introduced in 1.22.28 (2026-09-23 upstream sync, ports upstream opencode `feat(cli): add experimental self-context tools (#14268)`). See [ARCHITECTURE.md — Context Self-Inspection Tools](./ARCHITECTURE.md#context-self-inspection-tools-experimentalcontexttools) for the runtime contract and [CONFIGURATION.md — Experimental Context Self-Inspection Tools](./CONFIGURATION.md#experimental-context-self-inspection-tools-experimentalcontexttools) for the config surface.
+
+### Config helpers (`src/config/userConfig.ts`)
+
+```typescript
+/**
+ * Experimental feature flag: `contextTools` — expose `context_inspect` and
+ * `context_summarize` tools so the agent can introspect its own token
+ * budget and proactively request compaction before overflow.
+ *
+ * Stored as `experimental.contextTools` inside the top-level `experimental`
+ * object of `~/.alexi/config.json`. Default `false`.
+ */
+export function getConfigContextTools(): boolean;
+
+/** Persist the `experimental.contextTools` flag. Merges into the existing
+ *  `experimental` object without clobbering sibling flags. */
+export function setConfigContextTools(enabled: boolean): void;
+```
+
+Reader defends against corrupt configs — missing, non-object, array, or non-boolean values all resolve to `false`, so the feature is never accidentally enabled by a hand-edited config.
+
+### `context_inspect` tool (`src/tool/tools/context.ts`)
+
+```typescript
+// Parameters
+const ContextInspectParamsSchema = z.object({}).describe(
+  'Report current session token usage and distance to the compaction threshold. No parameters.'
+);
+
+// Result
+interface ContextInspectResult {
+  messageCount: number;
+  tokens: number;
+  budget: number | null;
+  utilization: number | null;
+  /** Whether compaction is likely to fire on the next turn (utilization >= 0.9). */
+  nearThreshold: boolean;
+}
+```
+
+Success result:
+
+```typescript
+{
+  success: true,
+  data: { messageCount, tokens, budget, utilization, nearThreshold }
+}
+```
+
+Failure results:
+
+- No session manager attached to the `ToolContext`: `{ success: false, error: 'context_inspect requires an active session manager; call this tool from within an agent turn.' }`
+- Manager has no current session: `{ success: false, error: 'No active session to inspect.' }`
+
+Token count uses the shared `estimateMessagesTokens()` helper from `src/core/compaction.ts`, so recorded per-message `tokens.input` / `tokens.output` values from the provider are preferred over the `~4 chars / token` heuristic.
+
+### `context_summarize` tool (`src/tool/tools/context.ts`)
+
+```typescript
+// Parameters
+const ContextSummarizeParamsSchema = z.object({
+  reason: z
+    .string()
+    .optional()
+    .describe(
+      'Optional explanation for why the summarization is requested (e.g. "before large repo scan"). ' +
+        'Recorded on the session for debugging.'
+    ),
+});
+
+// Result
+interface ContextSummarizeResult {
+  scheduled: boolean;
+  reason?: string;
+  messageCount: number;
+  tokens: number;
+}
+```
+
+The tool does NOT run compaction directly. It records intent and returns the current usage so the model can confirm the state; the actual compaction still happens between turns via the orchestrator's normal `shouldCompact()` path. Same session-required error semantics as `context_inspect`.
+
+### Registration contract
+
+Both tools are only registered when `getConfigContextTools()` returns `true`. When disabled, they do not appear in the tool schema and cannot be invoked:
+
+```typescript
+// src/tool/tools/index.ts
+if (getConfigContextTools()) {
+  registerTool(contextInspectTool as Tool<any, any>);
+  registerTool(contextSummarizeTool as Tool<any, any>);
+}
+```
+
+Both tools are exported by name (`contextInspectTool`, `contextSummarizeTool`) alongside the other built-ins from `src/tool/tools/index.ts` so callers that need to interrogate the surface directly (e.g. plugin authors, integration tests) can import them without going through the registry.

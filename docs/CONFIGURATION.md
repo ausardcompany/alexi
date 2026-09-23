@@ -1663,6 +1663,45 @@ The runtime module is intentionally NOT eagerly imported — `loadCodeMode()` dy
 
 See [ARCHITECTURE.md — Programmatic Tool Calling (`experimental.code_mode`)](ARCHITECTURE.md#programmatic-tool-calling-experimentalcode_mode) for the runtime contract and [API.md — Programmatic Tool Calling API](API.md#programmatic-tool-calling-api-experimentalcode_mode) for the surface exposed to callers.
 
+## Experimental Context Self-Inspection Tools (`experimental.contextTools`)
+
+Introduced 2026-09-23 (`1.22.28`, ports upstream opencode `feat(cli): add experimental self-context tools (#14268)`). Exposes two new built-in tools — `context_inspect` and `context_summarize` — that let the agent introspect its own message / token budget so it can proactively decide when to summarize or narrow scope BEFORE the auto-compaction threshold fires abruptly. Useful in long SAP AI Core conversations where the operator pays per input token and a mid-turn compaction is disruptive.
+
+Default is `false` so vanilla SAP AI Core sessions do not see the extra tool surface on upgrade.
+
+### Enabling
+
+Add the flag to `~/.alexi/config.json`:
+
+```json
+{
+  "experimental": {
+    "contextTools": true
+  }
+}
+```
+
+Or programmatically:
+
+```typescript
+import { setConfigContextTools } from './config/userConfig.js';
+
+setConfigContextTools(true);
+```
+
+### Runtime gate
+
+`registerBuiltInTools()` in `src/tool/tools/index.ts` calls `getConfigContextTools()` at registration time and only registers the two tools when it returns `true`. The read helper defends against corrupt configs — missing, non-object, array, or non-boolean values all resolve to `false`, so the feature is never accidentally enabled by a hand-edited config. The flag is read once per process; a config change picks up on the next process restart (Alexi does not hot-reload tools mid-turn).
+
+`setConfigContextTools(enabled)` merges the flag into the existing `experimental` object without clobbering sibling flags. `experimental.contextTools`, `experimental.code_mode`, and `experimental.task_model_selection` coexist without schema migration.
+
+### Tool behaviour
+
+- `context_inspect` — no parameters. Returns `{ messageCount, tokens, budget, utilization, nearThreshold }` where `tokens = estimateMessagesTokens(session.messages)`, `budget` is the session manager's `maxContextTokens` (or `null` if not exposed as a public field), `utilization = tokens / budget` (or `null` when the budget is unknown), and `nearThreshold = utilization >= 0.9`. Errors with `{ success: false, error }` when invoked without an active session manager or without a current session.
+- `context_summarize` — optional `reason: string`. Does NOT run compaction directly. Records intent and returns `{ scheduled: true, reason?, messageCount, tokens }` so the model can confirm the state. Scheduling the actual compaction is left to the caller; compaction always happens between turns, never mid-response.
+
+See [ARCHITECTURE.md — Context Self-Inspection Tools](ARCHITECTURE.md#context-self-inspection-tools-experimentalcontexttools) for the runtime contract and [API.md — Context Self-Inspection API](API.md#context-self-inspection-api-experimentalcontexttools) for the public TypeScript surface.
+
 ### JSON-encoded tool params tolerance (1.22.8)
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `02df76976`). The `agent_manager` tool's `config` field accepts either a native object or a JSON-encoded string:
