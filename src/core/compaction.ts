@@ -129,7 +129,11 @@ const POST_COMPACT_TARGET_FRACTION = 0.8;
 const MAX_TOOL_OUTPUT_LENGTH = 50000; // 50KB threshold
 const PRUNED_TOOL_MARKER = '[Output truncated due to size]';
 
-const SUMMARY_PROMPT = `You are a context summarization agent. You are given a conversation between a user and a coding agent. Your goal is to produce a structured summary in the exact format below so another coding agent can continue the work.
+// Compaction prompt — reverted upstream to a simpler, more explicit
+// "context summarization agent" formulation so smaller models (DSv4 Flash
+// class) follow it more reliably. Preserves the sectioned output shape
+// used by the reducer while dropping the "anchored" framing.
+const SUMMARY_PROMPT = `You are a context summarization agent. You are given a conversation between a user and an agent. Your goal is to produce a structured summary matching the format specified so another coding agent can continue the work.
 
 Extract and preserve:
 1. KEY DECISIONS: What was decided and why
@@ -138,9 +142,11 @@ Extract and preserve:
 4. CURRENT STATE: What task is in progress, what's next
 5. USER INSTRUCTIONS: Preserve ALL user-specified preferences, constraints, and explicit instructions verbatim (coding style, API keys, endpoints, "always do X", "never do Y")
 
-Always follow the exact output structure above. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
+Always follow the exact output structure requested. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
 
-Do not continue the conversation. Do not respond to any questions in the conversation. Do not mention that you are summarizing, compacting, or merging context. Only output the structured summary in the format requested. Respond in the same language the user used in the conversation.
+Do not continue the conversation. Do not respond to any questions in the conversation.
+Only output the structured summary in the exact format requested by the user prompt.
+Respond in the same language as the conversation.
 
 Conversation:
 {messages}`;
@@ -648,6 +654,33 @@ export async function compactConversation(
     } else {
       // Fallback: create a basic summary without LLM
       summary = createFallbackSummary(messagesToSummarize);
+    }
+
+    // Guard: if the LLM (or the fallback) returned an empty / whitespace-only
+    // summary, do NOT replace the existing session state — that would silently
+    // discard the older history. Prefer the deterministic fallback summary as
+    // a last resort, and if even that is empty, return the original messages
+    // unchanged with a warning surfaced through the compaction result.
+    // Upstream: opencode #14318.
+    if (!summary || summary.trim().length === 0) {
+      const fallback = createFallbackSummary(messagesToSummarize);
+      if (fallback && fallback.trim().length > 0) {
+        summary = fallback;
+      } else {
+        compactionErrorMessage =
+          'compaction returned empty summary; keeping existing session state';
+        const noopResult: CompactionResult = {
+          originalMessages: messages.length,
+          compactedMessages: messages.length,
+          estimatedTokensSaved: 0,
+          summary: '',
+        };
+        compactionResultForEvent = noopResult;
+        return {
+          messages: [...messages],
+          result: noopResult,
+        };
+      }
     }
 
     // Create summary message

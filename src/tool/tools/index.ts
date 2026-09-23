@@ -52,6 +52,10 @@ import { isBoardEnabled } from '../../config/userConfig.js';
 // under `src/kilocode/wakeup/`.
 import { scheduleWakeupTool } from './schedule-wakeup.js';
 import { cancelWakeupTool } from './cancel-wakeup.js';
+// Ports upstream opencode #14268: self-context tools (`context_inspect`,
+// `context_summarize`) gated behind `experimental.contextTools`.
+import { contextInspectTool, contextSummarizeTool } from './context.js';
+import { getConfigContextTools } from '../../config/userConfig.js';
 
 /**
  * When warpgrep (codebase_search) is unavailable, append a hint to the grep
@@ -137,6 +141,13 @@ export function registerBuiltInTools(): void {
     registerTool(boardReadTool as Tool<any, any>);
     registerTool(boardWriteTool as Tool<any, any>);
   }
+  // Ports upstream opencode #14268: gate context self-inspection tools
+  // behind `experimental.contextTools`. Fresh read on each call so a
+  // config change picks up on next process restart.
+  if (getConfigContextTools()) {
+    registerTool(contextInspectTool as Tool<any, any>);
+    registerTool(contextSummarizeTool as Tool<any, any>);
+  }
 }
 
 // Re-export individual tools
@@ -182,6 +193,8 @@ export {
   boardWriteTool,
   scheduleWakeupTool,
   cancelWakeupTool,
+  contextInspectTool,
+  contextSummarizeTool,
 };
 
 // Re-export UI utilities from specific tools
