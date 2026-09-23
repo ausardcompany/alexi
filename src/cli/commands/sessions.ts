@@ -39,6 +39,10 @@ export function registerSessionCommands(program: Command): void {
       '--search <query>',
       'FTS5-ranked search across session titles (empty query lists chronologically)'
     )
+    .option(
+      '--cleanup',
+      'Run the session retention sweep now (deletes sessions older than retention.maxAgeDays)'
+    )
     .action(
       async (opts: {
         json?: boolean;
@@ -46,8 +50,29 @@ export function registerSessionCommands(program: Command): void {
         workdir?: string;
         all?: boolean;
         search?: string;
+        cleanup?: boolean;
       }) => {
         try {
+          if (opts.cleanup) {
+            const sessionManager = new SessionManager();
+            const summary = sessionManager.cleanupExpiredSessions();
+            const parts = [
+              `Deleted ${summary.deleted} expired sessions`,
+              `skipped ${summary.skipped} active/recent sessions`,
+            ];
+            if (summary.errors.length > 0) {
+              parts.push(`${summary.errors.length} errors`);
+            }
+            console.log(`${parts.join(', ')}.`);
+            for (const err of summary.errors) {
+              console.error(err);
+            }
+            if (summary.errors.length > 0) {
+              process.exit(1);
+            }
+            return;
+          }
+
           if (opts.here && opts.workdir !== undefined) {
             console.error('Error: --here and --workdir are mutually exclusive');
             process.exit(1);

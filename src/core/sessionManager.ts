@@ -20,6 +20,8 @@ import {
   type SessionSearchOptions,
   type SessionSearchResult,
 } from '../session/search.js';
+import { getConfigSessionRetention } from '../config/userConfig.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
@@ -781,6 +783,167 @@ export class SessionManager {
       console.error(`Failed to delete session ${sessionId}:`, error);
       return false;
     }
+  }
+
+  /**
+   * Result summary produced by {@link cleanupExpiredSessions}.
+   *
+   * - `deleted`: number of expired session files actually removed.
+   * - `skipped`: number of candidate sessions that were held back by a
+   *   safety guard (running session or recent-writes window).
+   * - `errors`: human-readable descriptions of any per-session failures
+   *   that occurred during the sweep. The sweep continues past errors
+   *   so a single corrupted file does not block cleanup of the rest.
+   */
+  private static readonly RECENT_WRITE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+  private static readonly MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+  /**
+   * Sweep the on-disk sessions directory and permanently delete sessions
+   * whose `metadata.updated` timestamp (falling back to file mtime when
+   * the metadata field is missing) is older than the configured
+   * `retention.maxAgeDays`.
+   *
+   * Safety guards:
+   *   1. When `retention.enabled` is `false`, returns immediately with
+   *      an empty summary (no directory scan is performed). This makes
+   *      the daily scheduler a genuine no-op for users who have not
+   *      opted in.
+   *   2. Sessions with an active run tracked by this manager
+   *      (`hasActiveRun`) are never deleted.
+   *   3. Sessions whose most recent message timestamp is within the
+   *      last hour are held back — a session that was actively receiving
+   *      writes right up to the age boundary is almost certainly still
+   *      in use even if its `updated` field is stale.
+   *
+   * Cascade behaviour: deleting an expired root session performs a
+   * follow-up sweep to remove any of its persisted children that would
+   * also be expired if evaluated independently (same age check, same
+   * guards). This prevents orphaned subagent transcripts from
+   * accumulating in the sessions directory.
+   *
+   * Deletion is best-effort: I/O failures for a single session are
+   * captured in the returned `errors` array and do not stop the sweep.
+   */
+  cleanupExpiredSessions(now: number = Date.now()): {
+    deleted: number;
+    skipped: number;
+    errors: string[];
+  } {
+    const summary = { deleted: 0, skipped: 0, errors: [] as string[] };
+
+    const policy = getConfigSessionRetention();
+    if (!policy.enabled) {
+      return summary;
+    }
+
+    const maxAgeMs = policy.maxAgeDays * SessionManager.MS_PER_DAY;
+    const cutoff = now - maxAgeMs;
+    const recentWriteCutoff = now - SessionManager.RECENT_WRITE_WINDOW_MS;
+
+    let files: string[];
+    try {
+      files = fs.readdirSync(this.sessionsDir);
+    } catch (err) {
+      summary.errors.push(
+        `Failed to read sessions directory: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return summary;
+    }
+
+    // Load every session up-front (once) so cascade sweeps do not
+    // repeatedly re-read the directory.
+    const loaded = new Map<string, { session: Session; mtime: number }>();
+    for (const file of files) {
+      if (!file.endsWith('.json')) {
+        continue;
+      }
+      const sessionPath = path.join(this.sessionsDir, file);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(sessionPath);
+      } catch {
+        continue;
+      }
+      let parsed: Session;
+      try {
+        parsed = JSON.parse(fs.readFileSync(sessionPath, 'utf-8')) as Session;
+      } catch {
+        continue;
+      }
+      loaded.set(parsed.metadata.id, { session: parsed, mtime: stat.mtimeMs });
+    }
+
+    const isExpired = (entry: { session: Session; mtime: number }): boolean => {
+      const updated = entry.session.metadata.updated ?? entry.mtime;
+      return updated < cutoff;
+    };
+
+    const hasRecentWrite = (session: Session): boolean => {
+      const messages = session.messages;
+      if (!messages || messages.length === 0) {
+        return false;
+      }
+      const last = messages[messages.length - 1];
+      return typeof last.timestamp === 'number' && last.timestamp >= recentWriteCutoff;
+    };
+
+    const tryDelete = (sessionId: string, ageDays: number): void => {
+      if (this.hasActiveRun(sessionId)) {
+        summary.skipped++;
+        logger.debug(`Skipped expired session ${sessionId}: has active run`);
+        return;
+      }
+      const entry = loaded.get(sessionId);
+      if (entry && hasRecentWrite(entry.session)) {
+        summary.skipped++;
+        logger.debug(`Skipped expired session ${sessionId}: recent write within 1h`);
+        return;
+      }
+      try {
+        const deleted = this.deleteSession(sessionId);
+        if (deleted) {
+          summary.deleted++;
+          loaded.delete(sessionId);
+          logger.info(`Deleted expired session ${sessionId} (age: ${ageDays} days)`);
+        }
+      } catch (err) {
+        summary.errors.push(
+          `Failed to delete session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    };
+
+    // Root pass: consider every loaded session and remove the expired
+    // ones. Cascade children after each root deletion so an expired
+    // parent takes its expired descendants with it in one sweep.
+    for (const [sessionId, entry] of Array.from(loaded.entries())) {
+      // Session may have been removed by an earlier cascade in this loop.
+      if (!loaded.has(sessionId)) {
+        continue;
+      }
+      if (!isExpired(entry)) {
+        continue;
+      }
+      const updated = entry.session.metadata.updated ?? entry.mtime;
+      const ageDays = Math.floor((now - updated) / SessionManager.MS_PER_DAY);
+      tryDelete(sessionId, ageDays);
+
+      // Cascade: children that are ALSO expired should be dropped now.
+      for (const [childId, childEntry] of Array.from(loaded.entries())) {
+        if (childEntry.session.metadata.parentSessionId !== sessionId) {
+          continue;
+        }
+        if (!isExpired(childEntry)) {
+          continue;
+        }
+        const childUpdated = childEntry.session.metadata.updated ?? childEntry.mtime;
+        const childAgeDays = Math.floor((now - childUpdated) / SessionManager.MS_PER_DAY);
+        tryDelete(childId, childAgeDays);
+      }
+    }
+
+    return summary;
   }
 
   /**
