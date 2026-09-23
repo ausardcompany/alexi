@@ -2931,6 +2931,104 @@ Compaction and `sessionClose` are stubbed via `vi.mock` so `addMessage`'s auto-c
 
 A parallel suite in `tests/tool/tools/task-abort-propagation.test.ts` (236 lines) exercises the `task` tool's session-materialisation path: when the parent is already aborted at spawn time, the tool must refuse to start the subagent (returning `{ success: false, error: 'Operation aborted', data: { status: 'cancelled' } }`) instead of paying the cost of a provider request whose result no consumer will read. The `finally`-block `releaseSession` call is asserted for both the happy path and the cancellation path.
 
+### Testing Session Retention Lifecycle
+
+`tests/core/sessionManager-retention.test.ts` (257 lines, 9 cases across two describe blocks) pins the safety contract for `SessionManager.cleanupExpiredSessions` and the scheduler helpers in `src/core/retentionScheduler.ts`. The suite covers the opt-in gate, the three safety guards (active-run, recent-write, boundary), the cascade rule for expired children, and the 24h scheduler cooldown — the retention pipeline is destructive by construction (deletion is permanent) so every branch is exercised.
+
+**Fixture pattern.** Each case runs against a fresh temp directory for both the sessions store AND the fake `$HOME` used by the scheduler's state file. The `userConfig` module is mocked so tests can toggle the policy without touching `~/.alexi/config.json`:
+
+```typescript
+// Mock the userConfig module so tests can toggle the retention policy
+// without touching the real `~/.alexi/config.json`.
+vi.mock('../../src/config/userConfig.js', () => {
+  const state: { policy: { enabled: boolean; maxAgeDays: number } } = {
+    policy: { enabled: false, maxAgeDays: 30 },
+  };
+  return {
+    getConfigSessionRetention: vi.fn(() => state.policy),
+    __setPolicy: (policy: { enabled: boolean; maxAgeDays: number }) => {
+      state.policy = policy;
+    },
+  };
+});
+
+// Related modules are also stubbed so the addMessage / closeSession
+// paths do not surface unrelated compaction or persistence behaviour
+// inside a retention assertion.
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager, type Session } from '../../src/core/sessionManager.js';
+import * as userConfigMock from '../../src/config/userConfig.js';
+
+type PolicySetter = (policy: { enabled: boolean; maxAgeDays: number }) => void;
+const setPolicy = (userConfigMock as unknown as { __setPolicy: PolicySetter }).__setPolicy;
+```
+
+Sessions are written directly to disk with an explicitly-controlled mtime so the `updated` field / mtime fallback can be exercised independently of `SessionManager.saveSession` (which always stamps `Date.now()`):
+
+```typescript
+function writeSession(dir: string, session: Session, mtimeMs: number): string {
+  const filePath = path.join(dir, `${session.metadata.id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+  fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  return filePath;
+}
+```
+
+`beforeEach` / `afterEach` create and tear down two temp directories (the sessions dir and a fake `$HOME`) and restore `process.env.HOME` so tests remain parallel-safe:
+
+```typescript
+let tempDir: string;
+let homeDir: string;
+let originalHome: string | undefined;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-retention-'));
+  homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-home-'));
+  originalHome = process.env.HOME;
+  process.env.HOME = homeDir;
+  setPolicy({ enabled: false, maxAgeDays: 30 });
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(homeDir, { recursive: true, force: true });
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+});
+```
+
+**Assertion shape.** The suite pins these contract points:
+
+- **`retention.enabled: false` is a no-op.** A 60-day-old session survives the sweep when the policy is disabled — `{ deleted: 0, skipped: 0, errors: [] }` and the file remains on disk. This is the safety floor: users who have not opted in cannot lose data even if the scheduler fires.
+- **Expired sessions are deleted; young sessions survive.** With `maxAgeDays: 30`, sessions at 60d and 45d are removed and a 5d session survives — `deleted: 2`, no errors.
+- **Active-run guard.** A session with `beginSessionRun(id)` registered is never deleted even at 90d age — `deleted: 0`, `skipped: 1`. The test tears down the run via `endSessionRun` before its `afterEach` to avoid leaking abort listeners across cases.
+- **Recent-write guard.** A session whose `metadata.updated` is 90d old but whose last message `timestamp` is 10 minutes old is held back — `deleted: 0`, `skipped: 1`. The guard reads from `session.messages[messages.length - 1].timestamp`, not `metadata.updated`, so a stale metadata field cannot mask an active session.
+- **Cascade to expired children.** A parent + expired child + young child triple produces `deleted: 2` — the expired parent takes its expired child with it, the young child survives. The parent link is `metadata.parentSessionId === parentId`.
+- **`maxAgeDays: 365` boundary.** A 100d and 200d session both survive when `maxAgeDays: 365` — `deleted: 0`. Pins that the cutoff arithmetic (`now - maxAgeDays * MS_PER_DAY`) is not off-by-one.
+
+**Scheduler assertions.** The scheduler tests are in the same file under a separate `describe('retention scheduler', ...)` block:
+
+- `shouldRun` returns `true` on first run (state file absent).
+- `shouldRun` returns `false` within 24h of a previous recorded run.
+- `triggerRetentionSweep` records the timestamp and returns `true` on first run; a second call within the cooldown window returns `false` and does not overwrite the state file.
+
+The scheduler tests use dynamic `await import('../../src/core/retentionScheduler.js')` inside each case so the module reads the fresh `process.env.HOME` set in `beforeEach` — a top-level `import` would bind the state-file path at test-collection time and defeat the isolation.
+
 ### Testing subagent approval boundaries
 
 `tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.
@@ -5950,6 +6048,32 @@ Recommended cases:
 - **Empty or nil messages return false.** `shouldCompact([], anything, anything)` and `shouldCompact(null as unknown as Message[], ...)` must return `false` without throwing. The guard is at the top of the function.
 
 Do NOT test the projection with mocked `estimateTokens` — the calculation is deterministic under `estimateTokens(text) = Math.ceil(text.length / 4)`, so real inputs work fine and mocking obscures the intent.
+
+## Testing the MCP git plugin resolver (`src/mcp/__tests__/git-resolver.test.ts`)
+
+Added by commit `973d6cfc` (`feat(server): add MCP git plugin resolver with security hardening`). The suite lives colocated with the module under test at `src/mcp/__tests__/git-resolver.test.ts` (both `tests/**/*.test.ts` and `src/**/*.test.ts` are picked up by `vitest.config.ts`, so colocation is preferred when the SUT is a single self-contained module).
+
+The 457-line suite exercises seven describe blocks — `parseGitUrl`, `normalizeFileUrl`, `validateRef`, `getPluginIdentity + identityToCacheKey`, `cloneGitRepo`, `checkContainment`, `shouldRevalidate`, and `revalidateMutableRef`. Every heavy git operation is routed through the injectable `GitRunner` seam so the tests never touch the network or the real `git` binary; filesystem operations use per-test `fs.mkdtemp` tmpdirs torn down in `afterEach` for parallel safety.
+
+Key patterns to reuse when extending the suite or writing a similar "shells-out-to-external-tool" test:
+
+1. **Inject the transport, do not mock the module.** `git-resolver.ts` exports `setGitRunner(runner: GitRunner)` and `resetGitRunner()` as first-class test seams — the tests call `setGitRunner(mockRunner(...))` in the arrange step and `resetGitRunner()` in `afterEach`. Do NOT reach for `vi.mock('child_process', ...)` for this suite: mocking `execFile` at the module level would leak into every parallel test in the file and make the assertions about argv order fragile. The `GitRunner` shape (`(args, options) => Promise<{ stdout; stderr; code }>`) is deliberately narrow so mocks are one-line closures.
+2. **Record and assert on `argv`, not on the shell string.** The `cloneGitRepo` mock accumulates `calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }>` and the assertions use `expect(cloneCall?.args).toContain('--depth')` / `toContain('--branch')` / `toContain('main')` — this catches an accidental refactor that concatenates argv into a shell string (which would silently reopen option-injection). `execFile` splits argv correctly by design; the tests defend that boundary explicitly.
+3. **Attack surface first.** Every `validateRef` / `parseGitUrl` / `cloneGitRepo` / `revalidateMutableRef` describe block has an `it('rejects an option-injection ref before touching argv')` case that asserts `calls.length === 0` after the throw. The security invariant is "the ref never reaches argv", so the test must observe zero runner calls — not just an eventual failure. When adding a new entry point that accepts a caller-controlled ref, copy this pattern verbatim.
+4. **Materialise a real `.git` marker in the clone mock.** `cloneGitRepo` calls `git rev-parse HEAD` after `git clone`, which needs a `cwd`. The mock creates `<tempTarget>/.git` and a `README.md` inside the runner so the subsequent `rev-parse` has a real directory to run against. This keeps the mock honest — atomically renaming a non-existent directory would silently pass a broken implementation.
+5. **Exercise the atomic-rename swap.** `expect(path.dirname(result.path)).toBe(cacheDir)` and `expect((await fsPromises.stat(result.path)).isDirectory()).toBe(true)` are the observable evidence that the temp-clone + `rename` swap landed. The temp directory name (`<key>.tmp-<pid>-<epoch>`) is intentionally NOT asserted — it is an implementation detail that would make the test brittle across time. Assert the post-condition (final path exists and lives under `cacheDir`), not the transient state.
+6. **Exercise symlink escapes with a real symlink.** `checkContainment` is defended by an `it('rejects a symlink that points outside the repo')` case that `fs.symlink`s a sibling tmpdir into the repo tmpdir and asserts the throw. Do NOT stub `fs.realpath` — the whole point of `checkContainment` is that it consults the real filesystem, and mocking that away hides the escape. `it('resolves a subpath through a symlink that stays inside the repo')` is the negative counterpart so the containment logic does not overreach and reject legitimate internal symlinks.
+7. **Case-insensitive SHA compare, asserted explicitly.** `revalidateMutableRef` normalises both the remote and recorded SHAs with `.toLowerCase()`; the test suite includes an `it('is case-insensitive on commit SHA comparison')` case that feeds an ALL-CAPS remote SHA against a lower-case recorded value and asserts `changed === false`. When adding a new comparator, always add a case-mixing test — some git remotes echo `AAAA...` and others `aaaa...` depending on the transport layer.
+8. **Filesystem tmpdirs via `fs.mkdtemp`, torn down in `afterEach`.** `beforeEach` opens `await fsPromises.mkdtemp(path.join(os.tmpdir(), 'alexi-git-cache-'))`; `afterEach` calls `fsPromises.rm(cacheDir, { recursive: true, force: true })` AND `resetGitRunner()`. Two separate tmpdirs (`alexi-git-cache-` for the cache root, `alexi-git-cnt-` for containment) keep the describe blocks independent so a failure in one does not leak state into the next.
+9. **Assert distinct error messages.** Each rejection path (`empty URL`, `unsupported scheme`, `missing org/repo`, `no path`, `option-injection`, `whitespace`, `shell metacharacter`, `malformed`, `absolute subpath`, `does not exist`, `escapes repo root`, `git clone failed`, `git ls-remote failed`) is exercised with a regex `expect(...).toThrow(/absolute subpath/)` etc. Operator-facing error clarity is part of the security contract — a single generic `Error('bad input')` would pass a shape-only test but fail an operator triaging a failure in production.
+
+Run just this suite locally:
+
+```bash
+npm test -- src/mcp/__tests__/git-resolver.test.ts
+```
+
+The suite has no `AICORE_SERVICE_KEY` / network / native-module dependency — it runs on any Node install that can execute Vitest. Total wall-clock time is well under a second because every git call is a synchronous in-memory mock and the tmpdirs are shallow (single-file worktrees).
 
 ## Testing the CLI lazy-loading contract (issue #1769)
 
