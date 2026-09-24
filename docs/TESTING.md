@@ -6130,3 +6130,112 @@ npm test -- tests/cli/lazyLoading.test.ts
 ```
 
 The test does not depend on `tsx`, a working `AICORE_SERVICE_KEY`, or any native module — it runs on any Node install that can execute Vitest.
+
+## Testing the Worktree Status Registry
+
+Introduced by commit `8b372ad7` (issue #1826). The Agent Manager worktree status registry is covered by four Vitest suites totalling 371 lines. Together they pin the registry contract, the React binding, the icon glyph mapping, and the Sidebar panel-suppression rule. See [ARCHITECTURE.md - Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) and [API.md - Worktree Status Registry API](API.md#worktree-status-registry-api) for the runtime contract these tests defend.
+
+### Registry contract: `tests/agent/worktreeStatus.test.ts` (135 lines)
+
+Direct unit tests against `src/agent/worktreeStatus.ts`. Runs under the default `node` environment (no Ink, no React) so the suite finishes in a handful of milliseconds. Every test starts with `__resetWorktreeStatusRegistry()` in a `beforeEach` block so the module-scoped `Map` and `Set` do not leak state between cases.
+
+```typescript
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import {
+  __resetWorktreeStatusRegistry,
+  getWorktreeStatuses,
+  setWorktreeStatus,
+  removeWorktreeStatus,
+  subscribe,
+} from '../../src/agent/worktreeStatus.js';
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Invariants pinned:
+
+1. **Insertion-order iteration.** Sets three worktrees in a known order and asserts `getWorktreeStatuses().map((e) => e.id)` matches the insertion order.
+2. **No-op de-duplication.** `setWorktreeStatus('a', { label: 'a', status: 'idle' })` twice results in exactly one listener call (checked with a `vi.fn()` subscriber).
+3. **Emit on real change.** Changing `status`, `label`, or `detail` triggers exactly one emit per change.
+4. **Snapshot immutability.** Emitted entries are `Object.freeze`d; attempting `entry.status = 'error'` throws in strict mode, and `expect(Object.isFrozen(entry)).toBe(true)`.
+5. **Synchronous initial snapshot.** A brand-new `subscribe(listener)` call invokes the listener once synchronously before returning.
+6. **Explicit-removal-only for errors.** After `setWorktreeStatus('a', { label: 'a', status: 'error', detail: 'boom' })`, the entry stays present until `removeWorktreeStatus('a')` fires.
+7. **`getWorktreeStatus` returns `undefined` for unknown ids.** Distinct from a real entry with `status: 'unknown'`.
+
+Run just this suite:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts
+```
+
+### React binding: `tests/cli/tui/useWorktreeStatus.test.tsx` (72 lines)
+
+Exercises the `useWorktreeStatus` hook under `ink-testing-library`. Mounts a small consumer component that renders the current snapshot as JSON, drives registry updates from outside the render tree, and asserts the hook re-renders correctly.
+
+```typescript
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import React from 'react';
+import { beforeEach, describe, it, expect } from 'vitest';
+
+import { useWorktreeStatus } from '../../../src/cli/tui/hooks/useWorktreeStatus.js';
+import {
+  __resetWorktreeStatusRegistry,
+  setWorktreeStatus,
+} from '../../../src/agent/worktreeStatus.js';
+
+function Probe(): React.JSX.Element {
+  const entries = useWorktreeStatus();
+  return <Text>{JSON.stringify(entries.map((e) => `${e.id}:${e.status}`))}</Text>;
+}
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Cases:
+
+1. **Initial render is empty.** Fresh registry, fresh mount, `[]`.
+2. **Update after mount.** `setWorktreeStatus('a', { label: 'a', status: 'running' })` causes the probe to re-render with `["a:running"]`.
+3. **Unmount unsubscribes.** After `instance.unmount()`, a subsequent `setWorktreeStatus` does not throw (which it would if the listener still held a reference to a stale `setState`).
+
+### Icon rendering: `tests/cli/tui/StatusIcon.test.tsx` (73 lines)
+
+Locks the static-glyph mapping and the animation fallback. Every case renders under `ink-testing-library` with `animate={false}` unless the animated path is explicitly under test, so snapshot output stays deterministic.
+
+Cases:
+
+1. **`STATIC_STATUS_ICONS` mapping** — direct object-shape assertion (no render).
+2. **Each static status renders its expected glyph** — parametrised over `idle`, `error`, `blocked`, `unknown`.
+3. **`animate={false}` fallback for `running`** — asserts the rendered output contains `U+25D0` and NOT any spinner frame.
+4. **`animate={true}` for `running`** — asserts the rendered output does NOT contain the fallback glyph (the `ink-spinner` frame is timing-dependent, so the assertion is negative).
+5. **Theme-derived colour resolution** — passes a mock `ThemeColors` and asserts `statusColor(status, colors)` returns the expected key: `running -> warning`, `idle -> success`, `error -> error`, `blocked / unknown -> dimText`.
+6. **`color` prop override** — supplies an explicit `color="#ff00ff"` and asserts the theme-derived colour is bypassed.
+
+### Sidebar panel suppression: `tests/cli/tui/Sidebar.test.tsx` (91 lines)
+
+Ensures the new `worktrees` and `animateWorktreesf` props are strictly additive — legacy callers see no rendered change. Snapshot tests all pass `animateWorktrees={false}` so the frame is deterministic.
+
+Cases:
+
+1. **`worktrees` undefined -> no panel.** Renders the Sidebar without the new props and asserts the output does not contain the `Worktrees` header.
+2. **`worktrees` empty array -> no panel.** Same assertion with `worktrees={[]}`.
+3. **`worktrees` non-empty -> `Worktrees (N)` header + row per entry.** Renders three worktrees in three different states, asserts the header count, and asserts each row renders `<icon> <label>` in Map insertion order.
+4. **Empty file list still renders the panel.** Combines the `files: []` (No changes yet) branch with a non-empty `worktrees` array; asserts both regions co-exist.
+5. **`animateWorktrees={false}` produces a stable frame.** Snapshot-tests the render output for a `running` row with `animate={false}`, asserts the `U+25D0` fallback is present.
+
+### Isolation and parallel safety
+
+The registry is a module-scoped singleton. Suites that touch it MUST call `__resetWorktreeStatusRegistry()` in `beforeEach` and MUST NOT read `getWorktreeStatuses()` at the top level of a test file — the read would capture stale state from a previous suite in the same worker. Vitest's default parallelism (one worker per test file) keeps distinct files isolated; the `beforeEach` reset guards against interleaving inside a single file.
+
+Run the full worktree-status coverage:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts \
+  tests/cli/tui/StatusIcon.test.tsx \
+  tests/cli/tui/useWorktreeStatus.test.tsx \
+  tests/cli/tui/Sidebar.test.tsx
+```
