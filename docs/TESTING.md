@@ -6075,6 +6075,36 @@ npm test -- src/mcp/__tests__/git-resolver.test.ts
 
 The suite has no `AICORE_SERVICE_KEY` / network / native-module dependency — it runs on any Node install that can execute Vitest. Total wall-clock time is well under a second because every git call is a synchronous in-memory mock and the tmpdirs are shallow (single-file worktrees).
 
+## Testing the TUI transcript per-session staleness guard (issue #1815)
+
+`tests/cli/tui/MessageArea.session-switch.test.tsx` (132 lines, three cases) is Alexi's regression pin against the class of cross-session row-cache staleness Kilocode PR #14486 had to fix upstream. Alexi's TUI does not use a row-measuring virtualizer (no `virtua` / `react-window` / `react-virtualized` dependency) — `MessageArea` renders every run through Ink directly — so a `messages` prop swap on session switch cannot leak stale row measurements. The suite exists to make that property enforceable: a future refactor that re-introduces a row cache indexed by position rather than message id will fail these cases before it lands.
+
+Structure and reusable patterns:
+
+1. **Render `MessageArea` through the real `ThemeProvider`.** Do NOT stub `useTheme()` — the component reads foreground and dim-text colours from the theme context and asserting on `lastFrame()` after a colourless render loses the empty-state placeholder styling.
+
+   ```tsx
+   const { lastFrame, rerender } = render(
+     <ThemeProvider>
+       <MessageArea {...baseAreaProps} messages={sessionA} />
+     </ThemeProvider>
+   );
+   ```
+
+2. **Assert on frame content substrings, not on prop identity.** Ink's `lastFrame()` returns the rendered ANSI string; the tests use `toContain` / `not.toContain` on plain content markers (`session-A-user-line`, `long-1`, …, `Start a conversation`). This is deliberately implementation-agnostic — any refactor that keeps the visible output correct passes, and any regression that leaks stale content into the frame fails.
+3. **`rerender` to simulate a session switch, do not remount.** The whole point of the regression is to catch a stale row cache that would survive a prop update while the component instance stays mounted. Remounting via `render(...)` a second time bypasses the failure mode. Use the `rerender` return from the first `render(...)` call so the same component instance sees the new prop.
+4. **Cover three failure shapes explicitly.** The suite covers `sessionA -> sessionB` (equal-length swap), `populated -> []` (empty-state placeholder reappears), and `long -> short` (transcript strictly shrinks). The last case is the strongest signal for a position-indexed row cache: only one visible line remains, but a hypothetical cache would still surface `long-4` (or any of `long-1`..`long-3`) at position 0..3.
+5. **Typed fixtures against the real exported types.** The tests import `MessageDisplay` from `src/cli/tui/components/MessageArea.js` and `ToolCallState` from `src/cli/tui/context/ChatContext.js`, and build fixtures through a `makeMessage(id, content, role)` helper. When new required fields are added to `MessageDisplay`, the compiler flags the fixture — no accidental drift from the real prop shape.
+6. **`baseAreaProps` isolates the non-virtualization invariant from unrelated props.** `streamingText: ''`, `isStreaming: false`, `activeToolCalls: []`, and `onToggleToolCall: vi.fn()` keep every case focused on the `messages` prop swap. Live streaming and active tool-call rendering have their own dedicated suites.
+
+Run just this suite locally:
+
+```bash
+npm test -- tests/cli/tui/MessageArea.session-switch.test.tsx
+```
+
+The suite has no `AICORE_SERVICE_KEY`, network, or native-module dependency — it runs on any Node install that can execute Vitest. If this test starts failing after a refactor, the fix is NOT to relax the assertions: it is to (a) key any newly-introduced virtualizer by session id (`<Virtualizer key={sessionId} ... />`), (b) confirm every measured-row cache lives on the per-session instance, and (c) re-run the suite. See `docs/ARCHITECTURE.md` → "TUI Transcript Rendering Model (Non-Virtualized)" for the forward-looking contract.
+
 ## Testing the CLI lazy-loading contract (issue #1769)
 
 `tests/cli/lazyLoading.test.ts` defends the invariant that `alexi --help`, `alexi --version`, and unrelated subcommands do not pull the heavy runtime graph (TUI, orchestrator, agent loop, git, repo map, permission bus, SAP AI SDK) into memory. The test does NOT boot Commander or shell out — it parses each command file's source with a regex and asserts on the top-level import statements.
