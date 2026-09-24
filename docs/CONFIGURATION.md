@@ -1266,6 +1266,44 @@ Persistence is deliberately in-memory only:
 
 There is currently no user-facing configuration key for the draft cache — it is a runtime behaviour of the interactive TUI. See [API.md — Draft Cache API](API.md#draft-cache-api-srcsessiondraftts) for the programmatic surface.
 
+## Diagnostic Commands: Sharing Configuration Safely
+
+When troubleshooting SAP AI Core routing, MCP server wiring, or session behaviour, operators often need to paste the effective configuration into a GitHub issue. Directly dumping `~/.alexi/config.json` risks leaking `AICORE_SERVICE_KEY`, OAuth tokens, and MCP client secrets. Since the 2026-09-24 sync, Alexi ships an always-redacted dump command for this purpose:
+
+```bash
+alexi debug config
+```
+
+Behaviour:
+
+- Reads `~/.alexi/config.json` (and any project-level overlay) via `loadFullConfig()`.
+- Extracts only the alexi-relevant slice of `process.env` — entries whose KEY matches `^(AICORE|SAP_PROXY|ALEXI)_`. Other shell secrets (`GITHUB_TOKEN`, `NPM_TOKEN`, ...) are not included, so an accidental paste cannot leak them.
+- Walks the combined tree via `redact()` (`src/cli/commands/debug/redact.ts`) and replaces the value of every key matching one of the built-in secret patterns with `[REDACTED]`. Patterns are case-insensitive:
+  - `api[_-]?key`, `secret`, `token`, `password`, `credential`, `authorization`
+  - `client[_-]?secret`, `clientsecret` (SAP AI Core service-key nested fields)
+  - `serviceurl`
+- Emits the redacted snapshot to stdout as pretty-printed JSON.
+
+Example output (abridged):
+
+```json
+{
+  "config": {
+    "retention": { "enabled": true, "maxAgeDays": 30 },
+    "sharedAgentBoard": true,
+    "experimental": { "contextTools": true, "code_mode": false }
+  },
+  "env": {
+    "AICORE_RESOURCE_GROUP": "production",
+    "AICORE_SERVICE_KEY": "[REDACTED]",
+    "AICORE_MODEL": "gpt-4o",
+    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1"
+  }
+}
+```
+
+Only object KEY names are matched — string CONTENTS are never scanned, so legitimate configuration containing the word "key" or "token" in prose is not mangled. See [API.md — Debug Config Command](API.md#debug-config-command-api-alexi-debug-config) for the programmatic surface (`buildRedactedConfigSnapshot()`, `redact()`, `isSecretKey()`).
+
 > **Not a session-config surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`, version bump `1.18.11` → `1.18.12`) added a 4-line orphan file at `src/context/server-session-reducer.ts` declaring a non-exported `reduceSession(session: Session): Session` function that references two undeclared free identifiers (`Session` and `optimizeSessionData`) and has no `return` statement. It is **not** part of the session-persistence pipeline documented in this section — canonical session state is managed by the `SessionManager` class in `src/core/sessionManager.ts`, with checkpoint / undo semantics in `src/core/checkpoints.ts` and `src/undo/`. There is no reducer-shaped session pipeline in Alexi, and setting any environment variable or configuration key cannot activate this file because nothing imports it. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26. A companion 2026-07-26 orphan under `src/context/global-sync/bootstrap.ts` similarly declares a `bootstrapGlobalSync()` function against an undeclared `initializeContext()` identifier and is unrelated to Alexi's real upstream-sync entrypoint (the `.github/workflows/sync-upstream.yml` GitHub Actions workflow plus the tracked commits at `.github/last-sync-commits.json`).
 
 ## Configuration Examples
@@ -1564,56 +1602,25 @@ export ALEXI_EXPERIMENTAL_MCP_APPS=1
 
 See [ARCHITECTURE.md — MCP Apps (experimental)](ARCHITECTURE.md#mcp-apps-experimental) for design notes.
 
-## Experimental Per-Task Model Selection
+## Per-Task Model Selection (unconditional since 2026-09-24)
 
-Introduced 2026-08-31 (`1.22.7`, ports upstream opencode/kilocode `ab143253a`). Allows the `task` and `agent_manager` tools to pin a specific model, provider, and reasoning effort per invocation instead of inheriting Alexi's default SAP AI Core routing. Default is `false` so no subagent behaviour changes unless the operator opts in.
+Originally introduced 2026-08-31 (`1.22.7`) as an experimental feature gated behind `experimental.task_model_selection`. The 2026-09-24 upstream sync (`50e520adf`) removed the gate — **per-task model selection is now always enabled** in Alexi and no configuration is required.
 
-### Enabling
+### Migration from `experimental.task_model_selection`
 
-Add the flag to `~/.alexi/config.json`:
+- **Config schema.** Any `experimental.task_model_selection` entry in `~/.alexi/config.json` is now ignored. You may safely delete it; leaving it in place is harmless.
+- **Programmatic API.** `getConfigTaskModelSelection()` is retained as a `@deprecated` shim that always returns `true`. `setConfigTaskModelSelection()` is a no-op setter — writing to it does NOT persist anything. Callers that still import these helpers keep compiling; new code should not use them.
+- **Behavioural change on upgrade.** Operators who never set the flag see zero behavioural change: leaving `task.model` / `agent_manager` `config.model` unset preserves Alexi's SAP AI Core default routing. Operators who explicitly set the flag to `false` in the past will now see subagent model overrides succeed instead of being rejected — this is the intended upstream behaviour, but if a policy requires blocking subagent overrides, introduce a dedicated flag (see below).
 
-```json
-{
-  "experimental": {
-    "task_model_selection": true
-  }
-}
-```
+### Adding SAP-specific policy gating
 
-Or programmatically:
+If a SAP AI Core deployment must restrict which models subagents can select — for example an operator allow-list — do NOT reintroduce the removed `experimental.task_model_selection` gate. Add a dedicated flag such as `experimental.sap_task_model_allowlist` and enforce it inside the provider registration (`candidates()` in `src/tool/model-selection.ts`) or the `task` tool's execute handler. This keeps Alexi's shape aligned with upstream while carving out the SAP-specific policy in one place.
 
-```typescript
-import { setConfigTaskModelSelection } from './config/userConfig.js';
+### Public behaviour
 
-setConfigTaskModelSelection(true);
-```
-
-The read helper `getConfigTaskModelSelection()` returns `false` for missing, non-object, array, or non-boolean values, so a corrupt config never accidentally enables the feature.
-
-### Behaviour
-
-When enabled:
-
-- The `task` tool accepts optional `model`, `provider`, and `reasoning_effort` parameters. Resolution runs through `selectModel()` in `src/tool/model-selection.ts`; the resolved `(providerID, modelID)` pair is surfaced on the response.
-- The `agent_manager` tool `create` action accepts a `config.provider` field alongside `config.model` and enforces the invariant `provider requires model`.
-- The `agent_manager_models` discovery tool enumerates the model catalog for the LLM caller.
-
-When disabled (default):
-
-- Any of `model`, `provider`, or `reasoning_effort` on the `task` tool aborts the call with `Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json ...`.
-- The `agent_manager_models` tool returns `{ enabled: false, message: 'Model catalog listing is disabled. ...' }` and no rows.
-- The `agent_manager` `create` action ignores model resolution and falls through to Alexi's default routing.
-
-The flag lives inside a top-level `experimental` object so future experimental flags can coexist without schema migration:
-
-```json
-{
-  "experimental": {
-    "task_model_selection": true,
-    "background_tasks": false
-  }
-}
-```
+- The `task` tool always accepts optional `model`, `provider`, and `reasoning_effort` parameters. Resolution runs through `selectModel()` in `src/tool/model-selection.ts`; the resolved `(providerID, modelID)` pair is surfaced on the response.
+- The `agent_manager` tool `create` action always accepts a `config.provider` field alongside `config.model` and enforces the invariant `provider requires model`.
+- The `agent_manager_models` discovery tool always returns paginated `{ modelName, providers, ids }` rows — the historical `{ enabled: false, message: '...' }` short-circuit has been removed.
 
 See [ARCHITECTURE.md — Per-Task Model Selection](ARCHITECTURE.md#per-task-model-selection-srctoolmodel-selectionts) for the resolution flow diagram and public API.
 

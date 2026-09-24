@@ -6100,3 +6100,41 @@ npm test -- tests/cli/lazyLoading.test.ts
 ```
 
 The test does not depend on `tsx`, a working `AICORE_SERVICE_KEY`, or any native module — it runs on any Node install that can execute Vitest.
+
+## Testing the Agent Manager activity forwarder (`tests/core/agent-manager-forwarding.test.ts`)
+
+Added in the 2026-09-24 sync alongside `src/core/agent-manager/orchestration-api.ts` (port of kilocode PR #14487). The suite (245 lines, 6 cases across one `describe` block) pins the classifier contract of `ActivityEventForwarder`:
+
+1. **Forwards activity events for a BACKGROUND owned session** — the PR #14487 fix itself. A `status: completed` event on a session whose `worktreeDir` differs from `selectedWorktree` must still forward with `reason: 'activity-owned'`.
+2. **Forwards activity events for a SELECTED owned session (regression)** — the fix must not break the case where the session's worktree matches the selected worktree.
+3. **Drops activity events for sessions we do not own** — `reason: 'activity-not-owned'`, cheap in-memory `Set` lookup.
+4. **Every activity kind forwards for background owned sessions** — a `it.each([...])` matrix over `status | deleted | wakeup | turn-close | error | asked | replied`. Prevents a regression that silently narrowed the forwarded kinds list.
+5. **Keeps owner entry when status goes offline** — offline is a transient reconnect state, not terminal. After a `status: offline` event, `isOwned(sessionId)` must still return `true`.
+6. **Drops owner entry on explicit `deleted` event** — the only end-of-life signal. `handleActivity()` returns `forward: true` AND `isOwned(sessionId)` transitions to `false`.
+
+Test style: the classifier is pure and synchronous, so every case constructs a fresh `ActivityEventForwarder`, calls `addOwnedSession` / `setSelectedWorktree` in the arrange step, and asserts on the returned `ForwardingDecision` shape. No mocks, no async, no I/O. Run just this suite:
+
+```bash
+npm test -- tests/core/agent-manager-forwarding.test.ts
+```
+
+The suite is a companion to (not a replacement for) `tests/core/sessionManager-retention.test.ts`: retention deals with the on-disk lifecycle, forwarding deals with the in-memory event routing decision. They test disjoint concerns and can be run independently.
+
+## Testing the plan-followup event routing (`src/bus/plan-followup.ts`)
+
+The plan-followup routing module has no dedicated test file yet — the contract is exercised transitively by session-processor tests that publish `PlanFollowupEvent` and assert on the emitted payload shape. When adding coverage:
+
+- Use `PlanFollowupEvent.subscribe(handler)` in the arrange step, publish through `PlanFollowupEvent.publish({ question, sessionID, directory })`, and assert on the handler side.
+- Cover the `matchesDirectory` wildcard: a payload with `directory: '/a'` and a subscriber at `/b` must be dropped; a payload with an empty `directory` (would fail Zod, but if smuggled past the schema) must be treated as a wildcard by `matchesDirectory`.
+- Do NOT unsubscribe globally in `afterEach` — the bus module has its own teardown seam. See `tests/bus/*.test.ts` for existing subscribe/publish patterns.
+
+## Testing `alexi debug config` credential redaction
+
+The redaction helper (`src/cli/commands/debug/redact.ts`) is deliberately split from the Commander action so tests can assert on the redacted shape without spawning the CLI. When adding coverage:
+
+- Import `redact`, `isSecretKey`, `REDACTED`, and `buildRedactedConfigSnapshot` directly from the debug modules — no `vi.mock` required, no Commander instance.
+- For `redact`: build a plain object with a mix of secret and non-secret keys, assert on `redact(input)` structural equality with a hand-written expected tree. Cover arrays (walked element-wise), primitives (pass through unchanged), and `null` / `undefined` (returned unchanged).
+- For `isSecretKey`: assert on the full pattern list — `apiKey`, `api_key`, `API-KEY`, `client_secret`, `clientsecret`, `authorization`, `serviceurl`. All patterns are case-insensitive, so include mixed-case cases.
+- For `buildRedactedConfigSnapshot`: set relevant env vars (`AICORE_SERVICE_KEY`, `AICORE_MODEL`, `SAP_PROXY_BASE_URL`, `ALEXI_NO_NOTIFICATIONS`) in `beforeEach` and restore them in `afterEach`. Assert that `env.AICORE_SERVICE_KEY === '[REDACTED]'` and that unrelated env vars (`GITHUB_TOKEN`, `PATH`) are absent from the snapshot's `env` slice.
+
+The redaction contract is small enough that a single 60-line suite covers it exhaustively; do not over-engineer the setup.
