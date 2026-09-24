@@ -6184,6 +6184,36 @@ npm test -- src/mcp/__tests__/git-resolver.test.ts
 
 The suite has no `AICORE_SERVICE_KEY` / network / native-module dependency — it runs on any Node install that can execute Vitest. Total wall-clock time is well under a second because every git call is a synchronous in-memory mock and the tmpdirs are shallow (single-file worktrees).
 
+## Testing the TUI transcript per-session staleness guard (issue #1815)
+
+`tests/cli/tui/MessageArea.session-switch.test.tsx` (132 lines, three cases) is Alexi's regression pin against the class of cross-session row-cache staleness Kilocode PR #14486 had to fix upstream. Alexi's TUI does not use a row-measuring virtualizer (no `virtua` / `react-window` / `react-virtualized` dependency) — `MessageArea` renders every run through Ink directly — so a `messages` prop swap on session switch cannot leak stale row measurements. The suite exists to make that property enforceable: a future refactor that re-introduces a row cache indexed by position rather than message id will fail these cases before it lands.
+
+Structure and reusable patterns:
+
+1. **Render `MessageArea` through the real `ThemeProvider`.** Do NOT stub `useTheme()` — the component reads foreground and dim-text colours from the theme context and asserting on `lastFrame()` after a colourless render loses the empty-state placeholder styling.
+
+   ```tsx
+   const { lastFrame, rerender } = render(
+     <ThemeProvider>
+       <MessageArea {...baseAreaProps} messages={sessionA} />
+     </ThemeProvider>
+   );
+   ```
+
+2. **Assert on frame content substrings, not on prop identity.** Ink's `lastFrame()` returns the rendered ANSI string; the tests use `toContain` / `not.toContain` on plain content markers (`session-A-user-line`, `long-1`, …, `Start a conversation`). This is deliberately implementation-agnostic — any refactor that keeps the visible output correct passes, and any regression that leaks stale content into the frame fails.
+3. **`rerender` to simulate a session switch, do not remount.** The whole point of the regression is to catch a stale row cache that would survive a prop update while the component instance stays mounted. Remounting via `render(...)` a second time bypasses the failure mode. Use the `rerender` return from the first `render(...)` call so the same component instance sees the new prop.
+4. **Cover three failure shapes explicitly.** The suite covers `sessionA -> sessionB` (equal-length swap), `populated -> []` (empty-state placeholder reappears), and `long -> short` (transcript strictly shrinks). The last case is the strongest signal for a position-indexed row cache: only one visible line remains, but a hypothetical cache would still surface `long-4` (or any of `long-1`..`long-3`) at position 0..3.
+5. **Typed fixtures against the real exported types.** The tests import `MessageDisplay` from `src/cli/tui/components/MessageArea.js` and `ToolCallState` from `src/cli/tui/context/ChatContext.js`, and build fixtures through a `makeMessage(id, content, role)` helper. When new required fields are added to `MessageDisplay`, the compiler flags the fixture — no accidental drift from the real prop shape.
+6. **`baseAreaProps` isolates the non-virtualization invariant from unrelated props.** `streamingText: ''`, `isStreaming: false`, `activeToolCalls: []`, and `onToggleToolCall: vi.fn()` keep every case focused on the `messages` prop swap. Live streaming and active tool-call rendering have their own dedicated suites.
+
+Run just this suite locally:
+
+```bash
+npm test -- tests/cli/tui/MessageArea.session-switch.test.tsx
+```
+
+The suite has no `AICORE_SERVICE_KEY`, network, or native-module dependency — it runs on any Node install that can execute Vitest. If this test starts failing after a refactor, the fix is NOT to relax the assertions: it is to (a) key any newly-introduced virtualizer by session id (`<Virtualizer key={sessionId} ... />`), (b) confirm every measured-row cache lives on the per-session instance, and (c) re-run the suite. See `docs/ARCHITECTURE.md` → "TUI Transcript Rendering Model (Non-Virtualized)" for the forward-looking contract.
+
 ## Testing the CLI lazy-loading contract (issue #1769)
 
 `tests/cli/lazyLoading.test.ts` defends the invariant that `alexi --help`, `alexi --version`, and unrelated subcommands do not pull the heavy runtime graph (TUI, orchestrator, agent loop, git, repo map, permission bus, SAP AI SDK) into memory. The test does NOT boot Commander or shell out — it parses each command file's source with a regex and asserts on the top-level import statements.
@@ -6209,3 +6239,112 @@ npm test -- tests/cli/lazyLoading.test.ts
 ```
 
 The test does not depend on `tsx`, a working `AICORE_SERVICE_KEY`, or any native module — it runs on any Node install that can execute Vitest.
+
+## Testing the Worktree Status Registry
+
+Introduced by commit `8b372ad7` (issue #1826). The Agent Manager worktree status registry is covered by four Vitest suites totalling 371 lines. Together they pin the registry contract, the React binding, the icon glyph mapping, and the Sidebar panel-suppression rule. See [ARCHITECTURE.md - Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) and [API.md - Worktree Status Registry API](API.md#worktree-status-registry-api) for the runtime contract these tests defend.
+
+### Registry contract: `tests/agent/worktreeStatus.test.ts` (135 lines)
+
+Direct unit tests against `src/agent/worktreeStatus.ts`. Runs under the default `node` environment (no Ink, no React) so the suite finishes in a handful of milliseconds. Every test starts with `__resetWorktreeStatusRegistry()` in a `beforeEach` block so the module-scoped `Map` and `Set` do not leak state between cases.
+
+```typescript
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import {
+  __resetWorktreeStatusRegistry,
+  getWorktreeStatuses,
+  setWorktreeStatus,
+  removeWorktreeStatus,
+  subscribe,
+} from '../../src/agent/worktreeStatus.js';
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Invariants pinned:
+
+1. **Insertion-order iteration.** Sets three worktrees in a known order and asserts `getWorktreeStatuses().map((e) => e.id)` matches the insertion order.
+2. **No-op de-duplication.** `setWorktreeStatus('a', { label: 'a', status: 'idle' })` twice results in exactly one listener call (checked with a `vi.fn()` subscriber).
+3. **Emit on real change.** Changing `status`, `label`, or `detail` triggers exactly one emit per change.
+4. **Snapshot immutability.** Emitted entries are `Object.freeze`d; attempting `entry.status = 'error'` throws in strict mode, and `expect(Object.isFrozen(entry)).toBe(true)`.
+5. **Synchronous initial snapshot.** A brand-new `subscribe(listener)` call invokes the listener once synchronously before returning.
+6. **Explicit-removal-only for errors.** After `setWorktreeStatus('a', { label: 'a', status: 'error', detail: 'boom' })`, the entry stays present until `removeWorktreeStatus('a')` fires.
+7. **`getWorktreeStatus` returns `undefined` for unknown ids.** Distinct from a real entry with `status: 'unknown'`.
+
+Run just this suite:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts
+```
+
+### React binding: `tests/cli/tui/useWorktreeStatus.test.tsx` (72 lines)
+
+Exercises the `useWorktreeStatus` hook under `ink-testing-library`. Mounts a small consumer component that renders the current snapshot as JSON, drives registry updates from outside the render tree, and asserts the hook re-renders correctly.
+
+```typescript
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import React from 'react';
+import { beforeEach, describe, it, expect } from 'vitest';
+
+import { useWorktreeStatus } from '../../../src/cli/tui/hooks/useWorktreeStatus.js';
+import {
+  __resetWorktreeStatusRegistry,
+  setWorktreeStatus,
+} from '../../../src/agent/worktreeStatus.js';
+
+function Probe(): React.JSX.Element {
+  const entries = useWorktreeStatus();
+  return <Text>{JSON.stringify(entries.map((e) => `${e.id}:${e.status}`))}</Text>;
+}
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Cases:
+
+1. **Initial render is empty.** Fresh registry, fresh mount, `[]`.
+2. **Update after mount.** `setWorktreeStatus('a', { label: 'a', status: 'running' })` causes the probe to re-render with `["a:running"]`.
+3. **Unmount unsubscribes.** After `instance.unmount()`, a subsequent `setWorktreeStatus` does not throw (which it would if the listener still held a reference to a stale `setState`).
+
+### Icon rendering: `tests/cli/tui/StatusIcon.test.tsx` (73 lines)
+
+Locks the static-glyph mapping and the animation fallback. Every case renders under `ink-testing-library` with `animate={false}` unless the animated path is explicitly under test, so snapshot output stays deterministic.
+
+Cases:
+
+1. **`STATIC_STATUS_ICONS` mapping** — direct object-shape assertion (no render).
+2. **Each static status renders its expected glyph** — parametrised over `idle`, `error`, `blocked`, `unknown`.
+3. **`animate={false}` fallback for `running`** — asserts the rendered output contains `U+25D0` and NOT any spinner frame.
+4. **`animate={true}` for `running`** — asserts the rendered output does NOT contain the fallback glyph (the `ink-spinner` frame is timing-dependent, so the assertion is negative).
+5. **Theme-derived colour resolution** — passes a mock `ThemeColors` and asserts `statusColor(status, colors)` returns the expected key: `running -> warning`, `idle -> success`, `error -> error`, `blocked / unknown -> dimText`.
+6. **`color` prop override** — supplies an explicit `color="#ff00ff"` and asserts the theme-derived colour is bypassed.
+
+### Sidebar panel suppression: `tests/cli/tui/Sidebar.test.tsx` (91 lines)
+
+Ensures the new `worktrees` and `animateWorktreesf` props are strictly additive — legacy callers see no rendered change. Snapshot tests all pass `animateWorktrees={false}` so the frame is deterministic.
+
+Cases:
+
+1. **`worktrees` undefined -> no panel.** Renders the Sidebar without the new props and asserts the output does not contain the `Worktrees` header.
+2. **`worktrees` empty array -> no panel.** Same assertion with `worktrees={[]}`.
+3. **`worktrees` non-empty -> `Worktrees (N)` header + row per entry.** Renders three worktrees in three different states, asserts the header count, and asserts each row renders `<icon> <label>` in Map insertion order.
+4. **Empty file list still renders the panel.** Combines the `files: []` (No changes yet) branch with a non-empty `worktrees` array; asserts both regions co-exist.
+5. **`animateWorktrees={false}` produces a stable frame.** Snapshot-tests the render output for a `running` row with `animate={false}`, asserts the `U+25D0` fallback is present.
+
+### Isolation and parallel safety
+
+The registry is a module-scoped singleton. Suites that touch it MUST call `__resetWorktreeStatusRegistry()` in `beforeEach` and MUST NOT read `getWorktreeStatuses()` at the top level of a test file — the read would capture stale state from a previous suite in the same worker. Vitest's default parallelism (one worker per test file) keeps distinct files isolated; the `beforeEach` reset guards against interleaving inside a single file.
+
+Run the full worktree-status coverage:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts \
+  tests/cli/tui/StatusIcon.test.tsx \
+  tests/cli/tui/useWorktreeStatus.test.tsx \
+  tests/cli/tui/Sidebar.test.tsx
+```

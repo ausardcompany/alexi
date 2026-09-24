@@ -130,6 +130,97 @@ describe('Sidebar', () => {
     expect(frame).not.toContain('Usage');
   });
 
+  it('omits worktrees section when worktrees prop is undefined', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+      />
+    );
+    expect(lastFrame() ?? '').not.toContain('Worktrees');
+  });
+
+  it('omits worktrees section when worktrees array is empty', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        worktrees={[]}
+      />
+    );
+    expect(lastFrame() ?? '').not.toContain('Worktrees');
+  });
+
+  it('renders worktrees section with a status icon per entry', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={MOCK_FILES}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        animateWorktrees={false}
+        worktrees={[
+          { id: 'a', label: 'feature-x', status: 'running', updatedAt: 1 },
+          { id: 'b', label: 'main', status: 'idle', updatedAt: 2 },
+          { id: 'c', label: 'stale', status: 'error', updatedAt: 3 },
+          { id: 'd', label: 'waiting', status: 'blocked', updatedAt: 4 },
+        ]}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Worktrees (4)');
+    expect(frame).toContain('feature-x');
+    expect(frame).toContain('main');
+    expect(frame).toContain('stale');
+    expect(frame).toContain('waiting');
+    // Every non-running icon glyph should be present verbatim.
+    expect(frame).toContain('\u2713'); // idle
+    expect(frame).toContain('\u2717'); // error
+    expect(frame).toContain('\u23F8'); // blocked
+    // Running (static fallback since animate=false)
+    expect(frame).toContain('\u25D0');
+  });
+
+  it('renders worktrees section when there are no file changes', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={[]}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        animateWorktrees={false}
+        worktrees={[{ id: 'a', label: 'solo', status: 'idle', updatedAt: 1 }]}
+      />
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('No changes yet');
+    expect(frame).toContain('Worktrees (1)');
+    expect(frame).toContain('solo');
+  });
+
+  it('renders optional detail dimmed next to the label', () => {
+    const { lastFrame } = renderWithTheme(
+      <Sidebar
+        files={[]}
+        selectedIndex={0}
+        onSelect={vi.fn()}
+        onActivate={vi.fn()}
+        isFocused={false}
+        animateWorktrees={false}
+        worktrees={[{ id: 'a', label: 'solo', status: 'idle', detail: 'ready', updatedAt: 1 }]}
+      />
+    );
+    expect(lastFrame() ?? '').toContain('ready');
+  });
+
   it('renders usage section even when there are no file changes', () => {
     const { lastFrame } = renderWithTheme(
       <Sidebar
