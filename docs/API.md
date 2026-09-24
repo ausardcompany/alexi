@@ -247,6 +247,40 @@ alexi models --status RUNNING --json
 alexi models --resource-group production
 ```
 
+#### Error surfacing (issue #1824)
+
+Since `1.22.29`, both the AI Core path and the `--proxy` path route
+their fetch through `fetchWithRetry` (`src/providers/modelFetchErrors.ts`)
+so operator-facing errors are classified rather than raw:
+
+- **Permanent failures** (`400`, `401`, `403`, `404`, `422`) fail fast on
+  the first attempt with an actionable reason. Example:
+
+  ```
+  Error: Failed to fetch models: unauthorized (401) — check AICORE_SERVICE_KEY / credentials
+  ```
+
+  Exit code `1`. The proxy path surfaces the same message but points at
+  `SAP_PROXY_API_KEY` instead.
+
+- **Transient failures** (`429`, `500`, `502`, `503`, `504`, network
+  errors like `ECONNRESET` / `ETIMEDOUT`) are retried up to three times
+  with capped exponential backoff (`1s -> 2s -> 4s`, capped at `8s`).
+  Every retry logs to stderr so callers piping stdout to `jq` are
+  unaffected:
+
+  ```
+  Retry 1: HTTP 503 — retrying with backoff
+  Retry 2: HTTP 503 — retrying with backoff
+  ```
+
+  If the retry budget is exhausted, the last classification is
+  preserved in the thrown `ModelFetchError` and rendered as the exit
+  message.
+
+Full contract (classification precedence, retry policy, reason templates)
+in [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824).
+
 #### Dynamic model catalog
 
 Since v1.22.4, the interactive TUI and the `/model` slash command consult a **live catalog** maintained by `src/providers/modelCatalog.ts`. The catalog is refreshed at startup and every 5 minutes; live models show a `●` prefix in the picker, static-only models show `○`. The status bar shows `● N live`, `⟳` (loading), or `○ offline` depending on the catalog state. Set `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` for the catalog to succeed; without credentials it falls back silently to the static list embedded in `ORCHESTRATION_MODELS`.

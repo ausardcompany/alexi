@@ -202,6 +202,7 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 | Auth | `src/providers/auth.ts` | OAuth token management + typed auth error hierarchy for SAP AI Core (see [Authentication Error Classification](#authentication-error-classification)) |
 | Transform | `src/providers/transform.ts` | Message-format transforms (image chunks, reasoning replay, schema lowering) |
 | Model Catalog | `src/providers/modelCatalog.ts` | Live deployment discovery from SAP AI Core (5-minute TTL) |
+| Model Fetch Errors | `src/providers/modelFetchErrors.ts` | Classified fetch errors (`ModelFetchError`, `classifyFetchError`, `fetchWithRetry`) shared by the catalog refresh and `alexi models` — see [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824) |
 | Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
 | Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
 
