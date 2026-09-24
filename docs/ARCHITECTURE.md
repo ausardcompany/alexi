@@ -202,6 +202,7 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 | Auth | `src/providers/auth.ts` | OAuth token management + typed auth error hierarchy for SAP AI Core (see [Authentication Error Classification](#authentication-error-classification)) |
 | Transform | `src/providers/transform.ts` | Message-format transforms (image chunks, reasoning replay, schema lowering) |
 | Model Catalog | `src/providers/modelCatalog.ts` | Live deployment discovery from SAP AI Core (5-minute TTL) |
+| Model Fetch Errors | `src/providers/modelFetchErrors.ts` | Classified fetch errors (`ModelFetchError`, `classifyFetchError`, `fetchWithRetry`) shared by the catalog refresh and `alexi models` — see [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824) |
 | Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
 | Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
 
@@ -3562,6 +3563,38 @@ that need browser automation should install it explicitly.
 5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
 6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout
 
+## TUI Transcript Rendering Model (Non-Virtualized)
+
+Alexi's Ink transcript (`src/cli/tui/components/MessageArea.tsx`) is deliberately prop-driven and non-virtualized. Every completed run in `messages` is grouped by `collapseCompletedWork(visibleMessages, { isStreaming })` and rendered directly via `Box` / `Text` / `MessageBubble` / `ToolRow` / `WorkActivity`. There is no row-measuring virtualizer in the render path (`virtua`, `react-window`, and `react-virtualized` are NOT dependencies of Alexi, and none of them is imported by the TUI).
+
+This is a load-bearing architectural choice — not an oversight. Upstream Kilocode has already been bitten by a virtualizer that cached measured row sizes indexed by row position rather than by message identity, so when the user switched sessions the new transcript inherited stale row heights from the old one and the visible frame was silently misaligned (Kilocode issue → PR #14486). Alexi renders each run directly, so a `messages` prop swap unmounts and remounts the run subtree keyed by `run.id`; there is no measured row cache to invalidate.
+
+Forward-looking contract (documented on the component and enforced by the regression suite):
+
+- If a virtualizer is introduced later, it MUST be keyed by session id: `<Virtualizer key={sessionId} ... />`. That guarantees the entire virtualizer instance — including any measured-row cache — is torn down and rebuilt on a session switch.
+- Any measured-row cache MUST live on the per-session instance, never as module-level state.
+- The regression suite `tests/cli/tui/MessageArea.session-switch.test.tsx` (issue #1815) pins this contract. A future refactor that re-introduces cross-session state on the transcript surface will fail the suite before it lands.
+
+```mermaid
+flowchart TB
+    Session[Active session<br/>sessionManager.messages]
+    Props[MessageAreaProps<br/>messages: MessageDisplay[]]
+    Filter[Filter displayRole=='system'<br/>visibleMessages]
+    Collapse[collapseCompletedWork<br/>-> runs: RunDisplay[]]
+    Render{{"runs.map(run => ...)<br/>key={run.id}"}}
+    Bubble[MessageBubble<br/>ToolRow / WorkActivity]
+
+    Session -->|prop| Props
+    Props --> Filter
+    Filter --> Collapse
+    Collapse --> Render
+    Render -->|per run| Bubble
+
+    Note[No virtua / react-window / react-virtualized<br/>No module-level row cache<br/>Session switch = new messages prop = full re-render]
+
+    Render -. contract .-> Note
+```
+
 ## TUI Tool-Call Disclosure
 
 The Ink TUI renders tool calls through a two-layer component pair introduced in 1.20.2:
@@ -5136,3 +5169,142 @@ Contract on `DraftCache`:
 Persistence is deliberately in-memory (`InMemoryDraftStore`, a plain `Map<string, string>`). Alexi's interactive TUI holds a single process, and cross-process persistence would require a durable store that survives crashes AND respects the empty-draft eviction contract. The `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) is exported so a future persistent variant plugs in without changing callers or tests.
 
 The process-global `getDraftCache()` singleton is provided for CLI subcommand and TUI hook callers that have no natural lifetime to hang an instance off. Tests should construct their own `DraftCache` (or `new DraftCache(customStore)`) for isolation.
+
+## Agent Manager Worktree Status Registry (issue #1826)
+
+Introduced by commit `8b372ad7` `feat(agent): add visual status icons to Agent Manager TUI`. Ports the UI-state half of upstream kilocode PR #14487 (`fix(agent-manager): forward all owned session activity events`) into an Alexi-native, TUI-friendly shape. The registry (`src/agent/worktreeStatus.ts`) is a synchronous, in-process key/value store that maps a worktree id (or directory path — the registry treats it as an opaque string key) to its current lifecycle status, exposed to React consumers via a pub/sub API. It is deliberately decoupled from `src/core/agent-manager/orchestration-api.ts`, which is transport-layer forwarding: this module is UI state only.
+
+### Status vocabulary
+
+```mermaid
+stateDiagram-v2
+    [*] --> unknown : setWorktreeStatus first seen
+    unknown --> running : orchestrator publishes activity
+    running --> idle : model returns / turn ends
+    idle --> running : new turn starts
+    running --> blocked : permission prompt / question
+    blocked --> running : user answers
+    running --> error : provider or tool failure
+    idle --> error : delayed failure event
+    error --> running : operator retries turn
+    running --> [*] : removeWorktreeStatus (fully torn down)
+    idle --> [*] : removeWorktreeStatus
+    error --> [*] : removeWorktreeStatus
+    blocked --> [*] : removeWorktreeStatus
+```
+
+- `running` — session is actively producing output. The TUI renders an animated `ink-spinner` (`type: 'dots'`).
+- `idle` — session is alive but not currently working. Rendered with a static `U+2713` (checkmark) in the theme's `success` colour.
+- `error` — session terminated with a failure. Rendered with a static `U+2717` (cross) in `error`. Deliberately does NOT auto-remove the entry so the failure stays visible in the sidebar until the operator explicitly clears it via `removeWorktreeStatus`.
+- `blocked` — session is waiting on a permission prompt or a `question` tool call. Rendered with a static `U+23F8` (pause) in `dimText`.
+- `unknown` — default for a worktree that has never emitted a status event. Rendered with a `?` in `dimText`. The default is deliberately `unknown` rather than `idle` so a dead session cannot masquerade as ready.
+
+### Registry contract
+
+```mermaid
+sequenceDiagram
+    participant Publisher as Publisher (orchestrator / tool layer)
+    participant Registry as worktreeStatus.ts
+    participant Hook as useWorktreeStatus()
+    participant UI as Sidebar
+
+    Publisher->>Registry: setWorktreeStatus(id, { label, status, detail? })
+    alt no-op (fields unchanged)
+        Registry-->>Publisher: return without emit
+    else changed
+        Registry->>Registry: entries.set(id, { ..., updatedAt: Date.now() })
+        Registry->>Hook: listener(snapshot())
+        Hook->>UI: setState(snapshot)
+        UI->>UI: WorktreesSection renders row per entry
+    end
+
+    UI->>Hook: componentDidMount()
+    Hook->>Registry: subscribe(listener)
+    Registry-->>Hook: listener(snapshot())   -- synchronous seed
+    UI->>Hook: componentWillUnmount()
+    Hook->>Registry: unsubscribe()
+
+    Publisher->>Registry: removeWorktreeStatus(id)
+    Registry->>Hook: listener(snapshot())
+```
+
+Key invariants pinned by `tests/agent/worktreeStatus.test.ts`:
+
+1. **No-op de-duplication.** `setWorktreeStatus(id, { label, status, detail })` with values matching the current entry returns without calling `emit()`. This prevents re-render storms when the orchestrator publishes redundant `idle` events during a quiet period.
+2. **Snapshot immutability.** Every emitted entry is `Object.freeze`d before being handed to listeners, so accidental mutation surfaces immediately in tests rather than corrupting the registry silently.
+3. **Insertion-order iteration.** The registry backs onto a `Map`, and snapshots preserve Map iteration order, so newly-added worktrees stack at the bottom of the sidebar (matching Kilocode #14487).
+4. **Synchronous initial snapshot.** `subscribe(listener)` invokes the listener once synchronously with the current snapshot so React consumers can seed state without a separate `getSnapshot` call.
+5. **Explicit removal only.** `removeWorktreeStatus(id)` is the only path that drops an entry. Every other transition — including `error` — leaves the entry present so the failure stays visible.
+
+### Public TypeScript surface
+
+```typescript
+export type WorktreeStatus = 'running' | 'idle' | 'error' | 'blocked' | 'unknown';
+
+export interface WorktreeStatusEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly status: WorktreeStatus;
+  /** Optional detail string surfaced on hover / in a status tooltip. */
+  readonly detail?: string;
+  /** Wall-clock ms when the status was last updated. */
+  readonly updatedAt: number;
+}
+
+export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) => void;
+
+export function setWorktreeStatus(
+  id: string,
+  update: { label: string; status: WorktreeStatus; detail?: string }
+): void;
+export function removeWorktreeStatus(id: string): void;
+export function getWorktreeStatuses(): readonly WorktreeStatusEntry[];
+export function getWorktreeStatus(id: string): WorktreeStatusEntry | undefined;
+export function subscribe(listener: WorktreeStatusListener): () => void;
+```
+
+`__resetWorktreeStatusRegistry()` is a test-only helper that wipes both the entry Map and the listener Set. It is intentionally not re-exported through any barrel and must be imported directly from `src/agent/worktreeStatus.ts` under a test file.
+
+### TUI wiring
+
+Three components co-operate to render the sidebar panel:
+
+- **`src/cli/tui/components/StatusIcon.tsx`** — renders a single glyph inline (no wrapping `<Box>`) so callers control spacing. Exported constants and helpers:
+
+  ```typescript
+  export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
+    idle: '\u2713',    // U+2713 checkmark
+    error: '\u2717',   // U+2717 cross
+    blocked: '\u23F8', // U+23F8 pause
+    unknown: '?',
+  };
+  export function statusColor(status: WorktreeStatus, colors: ThemeColors): string;
+  ```
+
+  The `running` state uses `ink-spinner` when `animate` is `true` (the default) and falls back to a static `U+25D0` half-filled circle when `animate={false}` so snapshot tests stay deterministic. The default branch of the `statusColor` switch uses `const _exhaustive: never = status` so adding a new status to the union without updating the mapping fails compilation.
+
+- **`src/cli/tui/hooks/useWorktreeStatus.ts`** — plain `useState` + `useEffect` binding to the registry. Mirrors `useFileChanges` rather than `useSyncExternalStore` because the registry emits a synchronous initial snapshot on `subscribe`, making a `useSyncExternalStore` binding unnecessary and less testable under `ink-testing-library`.
+
+- **`src/cli/tui/components/Sidebar.tsx`** — accepts two new optional props on `SidebarProps`:
+
+  ```typescript
+  worktrees?: readonly WorktreeStatusEntry[];
+  animateWorktrees?: boolean; // default true
+  ```
+
+  When `worktrees` is `undefined` or empty, the sidebar renders exactly as before — legacy callers and existing snapshot tests are unaffected. When non-empty, `WorktreesSection` renders a `Worktrees (N)` header followed by one row per entry: `<StatusIcon status={wt.status} animate={animate} />` + label + optional dimmed detail, all with `wrap="truncate-end"` so long branch names cannot break the sidebar layout. The panel is placed above the existing `Usage` block and below the file list (including the empty-state "No changes yet" line).
+
+- **`src/cli/tui/pages/ChatPage.tsx`** — invokes `useWorktreeStatus()` and forwards the snapshot to `<Sidebar worktrees={worktreeStatuses} />`. An empty registry produces an empty array; `WorktreesSection` returns `null`, so operators see no change until a publisher starts pushing status events.
+
+### Publisher expectations
+
+The registry has no built-in publisher. Callers on the orchestrator, tool, or Agent Manager side are expected to:
+
+1. Call `setWorktreeStatus(id, { label, status: 'running', detail? })` when a worktree begins a turn.
+2. Downgrade to `'idle'` when the turn completes normally.
+3. Escalate to `'blocked'` when a permission prompt or `question` tool call is emitted, and back to `'running'` when the caller unblocks.
+4. Emit `'error'` on unrecoverable failure and leave the entry in place — do not remove it. Operators clear failed entries explicitly.
+5. Call `removeWorktreeStatus(id)` only when the worktree is fully torn down (worktree directory removed, session archived, or the operator dismisses the row).
+
+The `updatedAt` field on every entry is populated by the registry itself (`Date.now()`), so publishers do not need to pass a timestamp. A future headless orchestrator can drive the same pipeline in-process without any changes to the registry or the TUI.
+

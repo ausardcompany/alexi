@@ -85,15 +85,27 @@ async function listDeployments(options: {
 
   const resourceGroup = options.resourceGroup || 'default';
 
-  // Lazy import of the SAP AI SDK — see #1769. Keeps startup fast for
-  // callers that never run `alexi models`.
+  // Lazy imports (see #1769): both the SAP SDK and the classification
+  // helpers stay out of the startup graph for callers that never run
+  // `alexi models`.
   const { DeploymentApi } = await import('@sap-ai-sdk/ai-api');
+  const { fetchWithRetry } = await import('../../providers/modelFetchErrors.js');
 
-  // Fetch deployments
-  const response = await DeploymentApi.deploymentQuery(
-    {},
-    { 'AI-Resource-Group': resourceGroup }
-  ).execute();
+  // Fetch deployments with retry on transient errors (5xx/429/network),
+  // failing fast on permanent errors (401/403/400/404) so the user sees
+  // "Failed to fetch models: unauthorized (401) ..." instead of a silent
+  // empty list.
+  const response = await fetchWithRetry(
+    () => DeploymentApi.deploymentQuery({}, { 'AI-Resource-Group': resourceGroup }).execute(),
+    {
+      onRetry: (attempt, classification) => {
+        // Surface transient retries on stderr so operators watching the
+        // command see WHY it is taking longer than usual, without
+        // polluting stdout (which callers may pipe to `jq`).
+        console.error(c('yellow', `  Retry ${attempt}: ${classification.reason}`));
+      },
+    }
+  );
 
   const deployments: DeploymentInfo[] = (response.resources || []).map((d) => ({
     id: d.id,
@@ -192,9 +204,31 @@ async function listModelsProxy(): Promise<void> {
   const apiKey = env('SAP_PROXY_API_KEY');
   if (!baseURL || !apiKey) throw new Error('SAP proxy baseURL/API key missing');
   const u = baseURL.replace(/\/$/, '') + '/models';
-  const res = await fetch(u, { headers: { Authorization: `Bearer ${apiKey}` } });
-  if (!res.ok) throw new Error(`Failed to fetch models: ${res.status} ${res.statusText}`);
-  const text = await res.text();
+
+  // Retry transient network / 5xx failures; surface permanent auth
+  // failures (401/403) immediately with a classified message so the
+  // user knows to check `SAP_PROXY_API_KEY` rather than staring at an
+  // empty list.
+  const { fetchWithRetry } = await import('../../providers/modelFetchErrors.js');
+  const text = await fetchWithRetry(
+    async () => {
+      const res = await fetch(u, { headers: { Authorization: `Bearer ${apiKey}` } });
+      if (!res.ok) {
+        // Throw a shape that `classifyFetchError` understands (status +
+        // message) so the retry loop keeps transient 5xx and stops on
+        // permanent 4xx.
+        const err = new Error(`Failed to fetch models: ${res.status} ${res.statusText}`);
+        (err as Error & { status?: number }).status = res.status;
+        throw err;
+      }
+      return res.text();
+    },
+    {
+      onRetry: (attempt, classification) => {
+        console.error(c('yellow', `  Retry ${attempt}: ${classification.reason}`));
+      },
+    }
+  );
   console.log(text);
 }
 
@@ -220,7 +254,21 @@ export function registerModelsCommand(program: Command): void {
           });
         }
       } catch (e) {
-        console.error(c('red', `\n  Error: ${e instanceof Error ? e.message : String(e)}\n`));
+        // Prefer the classified reason from `ModelFetchError`
+        // (e.g. "unauthorized (401) — check AICORE_SERVICE_KEY /
+        // credentials") over the raw upstream message. The classifier
+        // is intentionally structural, not `instanceof`-based, so a
+        // module-boundary re-import still surfaces the right text.
+        const isModelFetchError =
+          e !== null &&
+          typeof e === 'object' &&
+          (e as { name?: unknown }).name === 'ModelFetchError';
+        const message = isModelFetchError
+          ? (e as Error).message
+          : e instanceof Error
+            ? e.message
+            : String(e);
+        console.error(c('red', `\n  Error: ${message}\n`));
         process.exit(1);
       }
     });

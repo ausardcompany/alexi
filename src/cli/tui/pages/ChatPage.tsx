@@ -11,6 +11,7 @@ import type { SlashCommand } from '../hooks/useCommands.js';
 import type { ToolCallState } from '../context/ChatContext.js';
 import type { SidebarContextValue } from '../context/SidebarContext.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { useWorktreeStatus } from '../hooks/useWorktreeStatus.js';
 import { getCostTracker } from '../../../core/costTracker.js';
 import type { UsageEntry } from '../utils/formatUsage.js';
 
@@ -99,6 +100,9 @@ export function ChatPage({
     () => buildSessionUsage(sessionId, cost.totalCost),
     [sessionId, cost.totalCost]
   );
+  // Live Agent Manager worktree status. When the registry is empty the
+  // Sidebar suppresses the section entirely — see `WorktreesSection`.
+  const worktreeStatuses = useWorktreeStatus();
 
   return (
     <>
@@ -123,6 +127,7 @@ export function ChatPage({
             }}
             isFocused={sidebar.visible && !leaderActive && !dialogIsOpen}
             usage={sidebarUsage}
+            worktrees={worktreeStatuses}
           />
         }
         sideVisible={sidebar.visible}

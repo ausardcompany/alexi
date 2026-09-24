@@ -35,6 +35,20 @@ if (env('AICORE_SERVICE_KEY')) {
 // Re-export connectivity check
 export { checkConnectivity, type ConnectivityResult } from './connectivity.js';
 
+// Re-export model-fetch error surfacing (issue #1824).
+export {
+  ModelFetchError,
+  classifyFetchError,
+  fetchWithRetry,
+  type FetchErrorClass,
+  type FetchRetryOptions,
+} from './modelFetchErrors.js';
+export {
+  fetchDeploymentCatalog,
+  type DeploymentFetchResult,
+  type RefreshCatalogOptions,
+} from './modelCatalog.js';
+
 // Re-export CA harvesting API for advanced consumers / diagnostics.
 export {
   detectPlatform,

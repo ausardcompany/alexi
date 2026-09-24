@@ -247,6 +247,40 @@ alexi models --status RUNNING --json
 alexi models --resource-group production
 ```
 
+#### Error surfacing (issue #1824)
+
+Since `1.22.29`, both the AI Core path and the `--proxy` path route
+their fetch through `fetchWithRetry` (`src/providers/modelFetchErrors.ts`)
+so operator-facing errors are classified rather than raw:
+
+- **Permanent failures** (`400`, `401`, `403`, `404`, `422`) fail fast on
+  the first attempt with an actionable reason. Example:
+
+  ```
+  Error: Failed to fetch models: unauthorized (401) — check AICORE_SERVICE_KEY / credentials
+  ```
+
+  Exit code `1`. The proxy path surfaces the same message but points at
+  `SAP_PROXY_API_KEY` instead.
+
+- **Transient failures** (`429`, `500`, `502`, `503`, `504`, network
+  errors like `ECONNRESET` / `ETIMEDOUT`) are retried up to three times
+  with capped exponential backoff (`1s -> 2s -> 4s`, capped at `8s`).
+  Every retry logs to stderr so callers piping stdout to `jq` are
+  unaffected:
+
+  ```
+  Retry 1: HTTP 503 — retrying with backoff
+  Retry 2: HTTP 503 — retrying with backoff
+  ```
+
+  If the retry budget is exhausted, the last classification is
+  preserved in the thrown `ModelFetchError` and rendered as the exit
+  message.
+
+Full contract (classification precedence, retry policy, reason templates)
+in [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824).
+
 #### Dynamic model catalog
 
 Since v1.22.4, the interactive TUI and the `/model` slash command consult a **live catalog** maintained by `src/providers/modelCatalog.ts`. The catalog is refreshed at startup and every 5 minutes; live models show a `●` prefix in the picker, static-only models show `○`. The status bar shows `● N live`, `⟳` (loading), or `○ offline` depending on the catalog state. Set `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` for the catalog to succeed; without credentials it falls back silently to the static list embedded in `ORCHESTRATION_MODELS`.
@@ -4663,3 +4697,163 @@ try {
 ```
 
 The sweep itself runs on the CLI's Node event loop via `setImmediate`, not a worker thread. The `SessionManager.cleanupExpiredSessions` call is synchronous but is wrapped in `setImmediate` so program startup returns to the caller before the scan begins.
+
+## Worktree Status Registry API
+
+Introduced by commit `8b372ad7` (issue #1826). Public TypeScript surface exposed by `src/agent/worktreeStatus.ts` for publishers (orchestrator, tool layer, tests) that need to push Agent Manager worktree lifecycle events into the TUI, plus the React binding under `src/cli/tui/hooks/useWorktreeStatus.ts` used by the Sidebar. See the [Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) section of the architecture doc for the runtime contract and status vocabulary.
+
+### Types
+
+```typescript
+export type WorktreeStatus = 'running' | 'idle' | 'error' | 'blocked' | 'unknown';
+
+export interface WorktreeStatusEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly status: WorktreeStatus;
+  /** Optional detail string surfaced on hover / in a status tooltip. */
+  readonly detail?: string;
+  /** Wall-clock ms when the status was last updated. */
+  readonly updatedAt: number;
+}
+
+export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) => void;
+```
+
+`WorktreeStatus` is a string-literal union deliberately so downstream mappings (icons, colours) can be checked for exhaustiveness at compile time. Every emitted `WorktreeStatusEntry` is `Object.freeze`d, so callers must not mutate fields in place — build a new update object and pass it back through `setWorktreeStatus` instead.
+
+### Registry functions
+
+```typescript
+export function setWorktreeStatus(
+  id: string,
+  update: { label: string; status: WorktreeStatus; detail?: string }
+): void;
+
+export function removeWorktreeStatus(id: string): void;
+
+export function getWorktreeStatuses(): readonly WorktreeStatusEntry[];
+
+export function getWorktreeStatus(id: string): WorktreeStatusEntry | undefined;
+
+export function subscribe(listener: WorktreeStatusListener): () => void;
+```
+
+Behaviour contract:
+
+- `setWorktreeStatus(id, update)` — inserts a new entry or replaces an existing one. The registry stamps `updatedAt = Date.now()` for the caller. When `(label, status, detail)` all match the current entry, the call is a no-op and does NOT emit; publishers may safely fire redundant `idle` events during a quiet period without triggering re-render storms.
+- `removeWorktreeStatus(id)` — removes an entry and emits once. Returns `void`; the underlying `Map.delete` return value is not exposed. This is the only path that drops an entry; every other transition — including `error` — leaves the entry visible so failures stay on-screen until the operator dismisses them.
+- `getWorktreeStatuses()` — returns an immutable snapshot in `Map` insertion order. Suitable for one-shot reads (CLI subcommands, tests). React consumers should use `subscribe` or the `useWorktreeStatus` hook instead so they receive future updates.
+- `getWorktreeStatus(id)` — returns a defensive copy of the single entry or `undefined` when the id has never been reported. An entry explicitly set to `status: 'unknown'` still returns a defined `WorktreeStatusEntry` — the `undefined` return distinguishes "never seen" from "known but not yet classified".
+- `subscribe(listener)` — registers the listener and immediately invokes it once with the current snapshot so consumers can seed state without a separate `getSnapshot` call. Returns an unsubscribe function; call it in `componentWillUnmount` / `useEffect` cleanup to avoid leaks.
+
+`__resetWorktreeStatusRegistry()` is exported for tests only. It clears both the entry Map and the listener Set and is NOT re-exported through any barrel — import it directly from `src/agent/worktreeStatus.ts` in test files.
+
+### React binding: `useWorktreeStatus`
+
+```typescript
+// src/cli/tui/hooks/useWorktreeStatus.ts
+import { useEffect, useState } from 'react';
+import { subscribe, type WorktreeStatusEntry } from '../../../agent/worktreeStatus.js';
+
+export function useWorktreeStatus(): readonly WorktreeStatusEntry[] {
+  const [entries, setEntries] = useState<readonly WorktreeStatusEntry[]>([]);
+
+  useEffect(() => {
+    const unsub = subscribe((snapshot) => {
+      setEntries(snapshot);
+    });
+    return unsub;
+  }, []);
+
+  return entries;
+}
+```
+
+Returns the current full snapshot. Callers project it into whatever shape their component needs — typically a list rendered next to `<StatusIcon />`. Because the registry emits a synchronous initial snapshot on `subscribe`, a plain `useState` + `useEffect` binding is sufficient; `useSyncExternalStore` is not required and is harder to test under `ink-testing-library`.
+
+### Sidebar props
+
+`SidebarProps` (`src/cli/tui/components/Sidebar.tsx`) gains two optional fields:
+
+```typescript
+export interface SidebarProps {
+  // ...existing fields (files, focusable, isCollapsed, onActivate, isFocused, usage)...
+
+  /**
+   * Optional Agent Manager worktree list. When provided (and non-empty),
+   * the Sidebar renders a compact "Worktrees" section with a StatusIcon
+   * next to each entry. Empty arrays and `undefined` both suppress the
+   * section so tests / legacy callers see no change.
+   */
+  worktrees?: readonly WorktreeStatusEntry[];
+
+  /**
+   * When false, disable the animated spinner for `running` worktrees.
+   * Defaults to true. Snapshot tests should pass `false` to keep the
+   * rendered frame deterministic.
+   */
+  animateWorktrees?: boolean;
+}
+```
+
+### StatusIcon component
+
+```typescript
+// src/cli/tui/components/StatusIcon.tsx
+export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
+  idle: '\u2713',    // U+2713 checkmark
+  error: '\u2717',   // U+2717 cross
+  blocked: '\u23F8', // U+23F8 pause
+  unknown: '?',
+};
+
+export function statusColor(status: WorktreeStatus, colors: ThemeColors): string;
+
+export interface StatusIconProps {
+  status: WorktreeStatus;
+  /** When true (default), `running` renders an animated ink-spinner. */
+  animate?: boolean;
+  /** Optional colour override; falls back to statusColor(status, colors). */
+  color?: string;
+}
+
+export function StatusIcon(props: StatusIconProps): React.JSX.Element;
+```
+
+`StatusIcon` renders inline with no wrapping `<Box>` so callers compose it with a label on the same row: `<StatusIcon status={s} /><Text> {label}</Text>`. A trailing space is intentionally NOT emitted; the caller controls spacing.
+
+### Usage example: publishing status from a background task
+
+```typescript
+import {
+  setWorktreeStatus,
+  removeWorktreeStatus,
+} from './agent/worktreeStatus.js';
+
+async function runWorktreeTurn(id: string, label: string): Promise<void> {
+  setWorktreeStatus(id, { label, status: 'running', detail: 'agent turn' });
+  try {
+    const result = await agent.runTurn(id);
+    if (result.blockedOnPermission) {
+      setWorktreeStatus(id, { label, status: 'blocked', detail: 'awaiting user' });
+      await result.userAnswered;
+    }
+    setWorktreeStatus(id, { label, status: 'idle' });
+  } catch (err) {
+    setWorktreeStatus(id, {
+      label,
+      status: 'error',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    // Deliberately do NOT call removeWorktreeStatus here — leave the failure
+    // visible so the operator can inspect and dismiss it explicitly.
+  }
+}
+
+function tearDownWorktree(id: string): void {
+  removeWorktreeStatus(id);
+}
+```
+
+Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`) are safe and free: they short-circuit before touching the listener set.

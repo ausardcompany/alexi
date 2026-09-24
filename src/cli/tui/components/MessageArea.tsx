@@ -58,6 +58,17 @@ export interface MessageAreaProps {
  *
  * Renders both completed messages (history) and the live streaming area
  * inside the dynamic viewport so messages remain visible on screen.
+ *
+ * Rendering model: prop-driven, non-virtualized. Every run in the
+ * transcript is rendered directly via `Box`/`Text`. Alexi does not use
+ * a row-measuring virtualizer (no `virtua`, `react-window`, or
+ * `react-virtualized` dependency), so it is NOT vulnerable to the
+ * cross-session row-size staleness Kilocode PR #14486 fixed (see issue
+ * #1815). If a virtualizer is introduced later, it MUST be keyed by
+ * session id (`<Virtualizer key={sessionId} ... />`) and any measured
+ * row cache must live on the per-session instance — the regression
+ * suite in `tests/cli/tui/MessageArea.session-switch.test.tsx` guards
+ * this contract.
  */
 export function MessageArea({
   messages,

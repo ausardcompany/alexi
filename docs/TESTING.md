@@ -323,6 +323,115 @@ Additional patterns worth internalising from this suite:
 3. **Pin the `sap-ai-core/` prefix form in the SAME suite.** The provider-prefix stripping in `modelHasCapability` is a separate code path from the raw-id lookup. A regression that tightened the guard to an exact match would pass every non-prefixed assertion and fail only the prefixed variants — asserting both shapes for every id catches the regression on the first sibling instead of after the router hot loop degrades in production.
 4. **Assert the exact `capabilities` array, not a superset.** `expect(meta?.capabilities).toEqual(['tools'])` fails if the metadata entry was accidentally seeded with extra tags (`['tools', 'image-generation']`). If the port ever legitimately adds a second capability to these ids, the intent-preserving update is to change the expected array in ONE place — the `it.each` factors the assertion out of the per-id loop for free.
 
+### Testing model-fetch error classification (`tests/providers/modelFetchErrors.test.ts`)
+
+`src/providers/modelFetchErrors.ts` is a pure module — no SAP SDK, no
+environment, no network — so its tests are straight unit tests with
+synthetic errors. The suite pins two contracts:
+
+1. **`classifyFetchError` precedence.** For every status code Alexi
+   knows how to classify, assert both `transient` and the `reason`
+   substring so a regression that flipped the transient flag OR
+   silently changed the actionable text (e.g. dropped the
+   `AICORE_SERVICE_KEY` hint from the 401 reason) trips loudly.
+2. **`fetchWithRetry` control flow.** Drive the retry loop with the
+   injectable `sleep` seam instead of `vi.useFakeTimers()` so the test
+   run stays parallel-safe and does not perturb Node's timer queue.
+
+```typescript
+import { describe, expect, it, vi } from 'vitest';
+import {
+  ModelFetchError,
+  classifyFetchError,
+  fetchWithRetry,
+} from '../../src/providers/modelFetchErrors.js';
+
+describe('classifyFetchError', () => {
+  it('classifies 401 as permanent with an actionable reason', () => {
+    const err = Object.assign(new Error('boom'), { status: 401 });
+    const cls = classifyFetchError(err);
+    expect(cls.transient).toBe(false);
+    expect(cls.statusCode).toBe(401);
+    expect(cls.reason).toMatch(/unauthorized/i);
+    expect(cls.reason).toMatch(/AICORE_SERVICE_KEY/);
+  });
+
+  it('classifies 429 as transient with a rate-limit reason', () => {
+    const err = Object.assign(new Error('too many'), { status: 429 });
+    const cls = classifyFetchError(err);
+    expect(cls.transient).toBe(true);
+    expect(cls.reason).toMatch(/rate limit/i);
+  });
+
+  it('reads nested response.status (axios / http-client shape)', () => {
+    const err = Object.assign(new Error('wrapped'), { response: { status: 503 } });
+    expect(classifyFetchError(err).transient).toBe(true);
+    expect(classifyFetchError(err).statusCode).toBe(503);
+  });
+});
+
+describe('fetchWithRetry', () => {
+  it('retries transient failures and eventually succeeds', async () => {
+    let attempts = 0;
+    const op = vi.fn(async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw Object.assign(new Error('flaky'), { status: 503 });
+      }
+      return 'ok';
+    });
+    const sleep = vi.fn(async () => {}); // instant
+
+    const result = await fetchWithRetry(op, { sleep });
+    expect(result).toBe('ok');
+    expect(op).toHaveBeenCalledTimes(3);
+    // Two sleeps (before attempts 2 and 3), 1000ms then 2000ms.
+    expect(sleep).toHaveBeenNthCalledWith(1, 1000);
+    expect(sleep).toHaveBeenNthCalledWith(2, 2000);
+  });
+
+  it('throws ModelFetchError on the first attempt for permanent failures', async () => {
+    const op = vi.fn(async () => {
+      throw Object.assign(new Error('bad key'), { status: 401 });
+    });
+    await expect(fetchWithRetry(op)).rejects.toBeInstanceOf(ModelFetchError);
+    expect(op).toHaveBeenCalledTimes(1);
+  });
+});
+```
+
+Patterns worth internalising:
+
+1. **Assert both `transient` AND `reason` for every classified status.**
+   The `reason` field is user-facing — a regression that flipped a
+   status from permanent to transient often preserves the numeric
+   status but silently drops the actionable text. Pinning both catches
+   the regression before it reaches operators.
+2. **Cover every status-code lookup shape.** `extractStatus` walks
+   `err.status`, `err.statusCode`, `err.response.status`,
+   `err.cause.status`, `err.rootCause.status`, and a message-regex
+   fallback. Include at least one case per shape so a refactor that
+   silently drops one path (say, breaks the `err.cause.status` walk)
+   trips a specific test rather than every downstream integration test
+   that happens to route through that shape.
+3. **Use the `sleep` seam, not `vi.useFakeTimers()`.** `fetchWithRetry`
+   deliberately accepts an injectable `sleep` so the retry loop is
+   testable without perturbing Node's global timer queue. `vi.fn(async () => {})`
+   makes the retries effectively instant and lets you assert the
+   requested delay values directly (`toHaveBeenNthCalledWith(2, 2000)`)
+   rather than measuring elapsed wall-clock time.
+4. **Distinguish `ModelFetchError` structurally.** In tests that cross
+   a module boundary (e.g. mocking `src/providers/index.ts` and then
+   asserting the error surfaced by `src/cli/commands/models.ts`), match
+   on `err.name === 'ModelFetchError'` rather than `instanceof
+   ModelFetchError` — the CLI code path uses the structural check for
+   the same reason and the tests should match the runtime contract.
+5. **Do NOT hit the real SAP SDK from this suite.** The classifier
+   and retry helpers must be provable in isolation. Integration between
+   `fetchWithRetry` and `DeploymentApi.deploymentQuery` is covered in
+   `tests/providers/modelCatalog.test.ts` where `@sap-ai-sdk/ai-api` is
+   mocked via `vi.mock` at the module level.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
@@ -6075,6 +6184,36 @@ npm test -- src/mcp/__tests__/git-resolver.test.ts
 
 The suite has no `AICORE_SERVICE_KEY` / network / native-module dependency — it runs on any Node install that can execute Vitest. Total wall-clock time is well under a second because every git call is a synchronous in-memory mock and the tmpdirs are shallow (single-file worktrees).
 
+## Testing the TUI transcript per-session staleness guard (issue #1815)
+
+`tests/cli/tui/MessageArea.session-switch.test.tsx` (132 lines, three cases) is Alexi's regression pin against the class of cross-session row-cache staleness Kilocode PR #14486 had to fix upstream. Alexi's TUI does not use a row-measuring virtualizer (no `virtua` / `react-window` / `react-virtualized` dependency) — `MessageArea` renders every run through Ink directly — so a `messages` prop swap on session switch cannot leak stale row measurements. The suite exists to make that property enforceable: a future refactor that re-introduces a row cache indexed by position rather than message id will fail these cases before it lands.
+
+Structure and reusable patterns:
+
+1. **Render `MessageArea` through the real `ThemeProvider`.** Do NOT stub `useTheme()` — the component reads foreground and dim-text colours from the theme context and asserting on `lastFrame()` after a colourless render loses the empty-state placeholder styling.
+
+   ```tsx
+   const { lastFrame, rerender } = render(
+     <ThemeProvider>
+       <MessageArea {...baseAreaProps} messages={sessionA} />
+     </ThemeProvider>
+   );
+   ```
+
+2. **Assert on frame content substrings, not on prop identity.** Ink's `lastFrame()` returns the rendered ANSI string; the tests use `toContain` / `not.toContain` on plain content markers (`session-A-user-line`, `long-1`, …, `Start a conversation`). This is deliberately implementation-agnostic — any refactor that keeps the visible output correct passes, and any regression that leaks stale content into the frame fails.
+3. **`rerender` to simulate a session switch, do not remount.** The whole point of the regression is to catch a stale row cache that would survive a prop update while the component instance stays mounted. Remounting via `render(...)` a second time bypasses the failure mode. Use the `rerender` return from the first `render(...)` call so the same component instance sees the new prop.
+4. **Cover three failure shapes explicitly.** The suite covers `sessionA -> sessionB` (equal-length swap), `populated -> []` (empty-state placeholder reappears), and `long -> short` (transcript strictly shrinks). The last case is the strongest signal for a position-indexed row cache: only one visible line remains, but a hypothetical cache would still surface `long-4` (or any of `long-1`..`long-3`) at position 0..3.
+5. **Typed fixtures against the real exported types.** The tests import `MessageDisplay` from `src/cli/tui/components/MessageArea.js` and `ToolCallState` from `src/cli/tui/context/ChatContext.js`, and build fixtures through a `makeMessage(id, content, role)` helper. When new required fields are added to `MessageDisplay`, the compiler flags the fixture — no accidental drift from the real prop shape.
+6. **`baseAreaProps` isolates the non-virtualization invariant from unrelated props.** `streamingText: ''`, `isStreaming: false`, `activeToolCalls: []`, and `onToggleToolCall: vi.fn()` keep every case focused on the `messages` prop swap. Live streaming and active tool-call rendering have their own dedicated suites.
+
+Run just this suite locally:
+
+```bash
+npm test -- tests/cli/tui/MessageArea.session-switch.test.tsx
+```
+
+The suite has no `AICORE_SERVICE_KEY`, network, or native-module dependency — it runs on any Node install that can execute Vitest. If this test starts failing after a refactor, the fix is NOT to relax the assertions: it is to (a) key any newly-introduced virtualizer by session id (`<Virtualizer key={sessionId} ... />`), (b) confirm every measured-row cache lives on the per-session instance, and (c) re-run the suite. See `docs/ARCHITECTURE.md` → "TUI Transcript Rendering Model (Non-Virtualized)" for the forward-looking contract.
+
 ## Testing the CLI lazy-loading contract (issue #1769)
 
 `tests/cli/lazyLoading.test.ts` defends the invariant that `alexi --help`, `alexi --version`, and unrelated subcommands do not pull the heavy runtime graph (TUI, orchestrator, agent loop, git, repo map, permission bus, SAP AI SDK) into memory. The test does NOT boot Commander or shell out — it parses each command file's source with a regex and asserts on the top-level import statements.
@@ -6138,3 +6277,112 @@ The redaction helper (`src/cli/commands/debug/redact.ts`) is deliberately split 
 - For `buildRedactedConfigSnapshot`: set relevant env vars (`AICORE_SERVICE_KEY`, `AICORE_MODEL`, `SAP_PROXY_BASE_URL`, `ALEXI_NO_NOTIFICATIONS`) in `beforeEach` and restore them in `afterEach`. Assert that `env.AICORE_SERVICE_KEY === '[REDACTED]'` and that unrelated env vars (`GITHUB_TOKEN`, `PATH`) are absent from the snapshot's `env` slice.
 
 The redaction contract is small enough that a single 60-line suite covers it exhaustively; do not over-engineer the setup.
+
+## Testing the Worktree Status Registry
+
+Introduced by commit `8b372ad7` (issue #1826). The Agent Manager worktree status registry is covered by four Vitest suites totalling 371 lines. Together they pin the registry contract, the React binding, the icon glyph mapping, and the Sidebar panel-suppression rule. See [ARCHITECTURE.md - Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) and [API.md - Worktree Status Registry API](API.md#worktree-status-registry-api) for the runtime contract these tests defend.
+
+### Registry contract: `tests/agent/worktreeStatus.test.ts` (135 lines)
+
+Direct unit tests against `src/agent/worktreeStatus.ts`. Runs under the default `node` environment (no Ink, no React) so the suite finishes in a handful of milliseconds. Every test starts with `__resetWorktreeStatusRegistry()` in a `beforeEach` block so the module-scoped `Map` and `Set` do not leak state between cases.
+
+```typescript
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import {
+  __resetWorktreeStatusRegistry,
+  getWorktreeStatuses,
+  setWorktreeStatus,
+  removeWorktreeStatus,
+  subscribe,
+} from '../../src/agent/worktreeStatus.js';
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Invariants pinned:
+
+1. **Insertion-order iteration.** Sets three worktrees in a known order and asserts `getWorktreeStatuses().map((e) => e.id)` matches the insertion order.
+2. **No-op de-duplication.** `setWorktreeStatus('a', { label: 'a', status: 'idle' })` twice results in exactly one listener call (checked with a `vi.fn()` subscriber).
+3. **Emit on real change.** Changing `status`, `label`, or `detail` triggers exactly one emit per change.
+4. **Snapshot immutability.** Emitted entries are `Object.freeze`d; attempting `entry.status = 'error'` throws in strict mode, and `expect(Object.isFrozen(entry)).toBe(true)`.
+5. **Synchronous initial snapshot.** A brand-new `subscribe(listener)` call invokes the listener once synchronously before returning.
+6. **Explicit-removal-only for errors.** After `setWorktreeStatus('a', { label: 'a', status: 'error', detail: 'boom' })`, the entry stays present until `removeWorktreeStatus('a')` fires.
+7. **`getWorktreeStatus` returns `undefined` for unknown ids.** Distinct from a real entry with `status: 'unknown'`.
+
+Run just this suite:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts
+```
+
+### React binding: `tests/cli/tui/useWorktreeStatus.test.tsx` (72 lines)
+
+Exercises the `useWorktreeStatus` hook under `ink-testing-library`. Mounts a small consumer component that renders the current snapshot as JSON, drives registry updates from outside the render tree, and asserts the hook re-renders correctly.
+
+```typescript
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import React from 'react';
+import { beforeEach, describe, it, expect } from 'vitest';
+
+import { useWorktreeStatus } from '../../../src/cli/tui/hooks/useWorktreeStatus.js';
+import {
+  __resetWorktreeStatusRegistry,
+  setWorktreeStatus,
+} from '../../../src/agent/worktreeStatus.js';
+
+function Probe(): React.JSX.Element {
+  const entries = useWorktreeStatus();
+  return <Text>{JSON.stringify(entries.map((e) => `${e.id}:${e.status}`))}</Text>;
+}
+
+beforeEach(() => {
+  __resetWorktreeStatusRegistry();
+});
+```
+
+Cases:
+
+1. **Initial render is empty.** Fresh registry, fresh mount, `[]`.
+2. **Update after mount.** `setWorktreeStatus('a', { label: 'a', status: 'running' })` causes the probe to re-render with `["a:running"]`.
+3. **Unmount unsubscribes.** After `instance.unmount()`, a subsequent `setWorktreeStatus` does not throw (which it would if the listener still held a reference to a stale `setState`).
+
+### Icon rendering: `tests/cli/tui/StatusIcon.test.tsx` (73 lines)
+
+Locks the static-glyph mapping and the animation fallback. Every case renders under `ink-testing-library` with `animate={false}` unless the animated path is explicitly under test, so snapshot output stays deterministic.
+
+Cases:
+
+1. **`STATIC_STATUS_ICONS` mapping** — direct object-shape assertion (no render).
+2. **Each static status renders its expected glyph** — parametrised over `idle`, `error`, `blocked`, `unknown`.
+3. **`animate={false}` fallback for `running`** — asserts the rendered output contains `U+25D0` and NOT any spinner frame.
+4. **`animate={true}` for `running`** — asserts the rendered output does NOT contain the fallback glyph (the `ink-spinner` frame is timing-dependent, so the assertion is negative).
+5. **Theme-derived colour resolution** — passes a mock `ThemeColors` and asserts `statusColor(status, colors)` returns the expected key: `running -> warning`, `idle -> success`, `error -> error`, `blocked / unknown -> dimText`.
+6. **`color` prop override** — supplies an explicit `color="#ff00ff"` and asserts the theme-derived colour is bypassed.
+
+### Sidebar panel suppression: `tests/cli/tui/Sidebar.test.tsx` (91 lines)
+
+Ensures the new `worktrees` and `animateWorktreesf` props are strictly additive — legacy callers see no rendered change. Snapshot tests all pass `animateWorktrees={false}` so the frame is deterministic.
+
+Cases:
+
+1. **`worktrees` undefined -> no panel.** Renders the Sidebar without the new props and asserts the output does not contain the `Worktrees` header.
+2. **`worktrees` empty array -> no panel.** Same assertion with `worktrees={[]}`.
+3. **`worktrees` non-empty -> `Worktrees (N)` header + row per entry.** Renders three worktrees in three different states, asserts the header count, and asserts each row renders `<icon> <label>` in Map insertion order.
+4. **Empty file list still renders the panel.** Combines the `files: []` (No changes yet) branch with a non-empty `worktrees` array; asserts both regions co-exist.
+5. **`animateWorktrees={false}` produces a stable frame.** Snapshot-tests the render output for a `running` row with `animate={false}`, asserts the `U+25D0` fallback is present.
+
+### Isolation and parallel safety
+
+The registry is a module-scoped singleton. Suites that touch it MUST call `__resetWorktreeStatusRegistry()` in `beforeEach` and MUST NOT read `getWorktreeStatuses()` at the top level of a test file — the read would capture stale state from a previous suite in the same worker. Vitest's default parallelism (one worker per test file) keeps distinct files isolated; the `beforeEach` reset guards against interleaving inside a single file.
+
+Run the full worktree-status coverage:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts \
+  tests/cli/tui/StatusIcon.test.tsx \
+  tests/cli/tui/useWorktreeStatus.test.tsx \
+  tests/cli/tui/Sidebar.test.tsx
+```

@@ -5,6 +5,8 @@ import { useTheme } from '../context/ThemeContext.js';
 import type { ThemeColors } from '../theme/types.js';
 import type { FileChange } from '../types/props.js';
 import { formatUsageBlock, type UsageEntry } from '../utils/formatUsage.js';
+import { StatusIcon } from './StatusIcon.js';
+import type { WorktreeStatusEntry } from '../../../agent/worktreeStatus.js';
 
 export interface SidebarProps {
   files: FileChange[];
@@ -22,6 +24,21 @@ export interface SidebarProps {
    * When omitted, the sidebar renders files only (legacy behaviour).
    */
   usage?: UsageEntry[];
+  /**
+   * Optional Agent Manager worktree list. When provided (and non-empty),
+   * the Sidebar renders a compact "Worktrees" section with a
+   * {@link StatusIcon} next to each entry. Empty arrays and `undefined`
+   * both suppress the section so tests / legacy callers see no change.
+   *
+   * Ports Kilocode PR #14487's status-icon panel — see issue #1826.
+   */
+  worktrees?: readonly WorktreeStatusEntry[];
+  /**
+   * When false, disable the animated spinner for `running` worktrees.
+   * Defaults to true. Snapshot tests should pass `false` to keep the
+   * rendered frame deterministic.
+   */
+  animateWorktrees?: boolean;
 }
 
 /** Status indicator character and color mapping */
@@ -82,6 +99,50 @@ function UsageSection({
 }
 
 /**
+ * WorktreesSection — compact Agent Manager worktree status list.
+ *
+ * Rendered inside the Sidebar between the file list and the Usage
+ * section. Each row is `<StatusIcon /> <label>` with the optional
+ * detail string dimmed to the right. See issue #1826 / Kilocode #14487.
+ */
+function WorktreesSection({
+  worktrees,
+  colors,
+  animate,
+}: {
+  worktrees: readonly WorktreeStatusEntry[];
+  colors: ThemeColors;
+  animate: boolean;
+}): React.JSX.Element | null {
+  if (worktrees.length === 0) {
+    return null;
+  }
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color={colors.text} bold>
+        Worktrees ({worktrees.length})
+      </Text>
+      {worktrees.map((wt) => (
+        <Box key={wt.id}>
+          <StatusIcon status={wt.status} animate={animate} />
+          <Text color={colors.text} wrap="truncate-end">
+            {' '}
+            {wt.label}
+          </Text>
+          {wt.detail !== undefined && wt.detail !== '' && (
+            <Text color={colors.dimText} wrap="truncate-end">
+              {' '}
+              {wt.detail}
+            </Text>
+          )}
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+/**
  * Sidebar — file changes panel showing files modified by the agent.
  *
  * Displays file paths with status indicators (+added, ~modified, -deleted).
@@ -89,6 +150,9 @@ function UsageSection({
  *
  * When `usage` is provided, also renders a compact per-model
  * token/cost breakdown beneath the files list.
+ *
+ * When `worktrees` is provided and non-empty, renders an Agent Manager
+ * worktree status panel with animated status icons — see issue #1826.
  */
 export function Sidebar({
   files,
@@ -97,6 +161,8 @@ export function Sidebar({
   onActivate,
   isFocused,
   usage,
+  worktrees,
+  animateWorktrees = true,
 }: SidebarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -127,6 +193,8 @@ export function Sidebar({
   );
 
   const hasUsage = usage !== undefined && usage.length > 0;
+  const hasWorktrees = worktrees !== undefined && worktrees.length > 0;
+  const worktreesForRender: readonly WorktreeStatusEntry[] = worktrees ?? [];
 
   if (files.length === 0) {
     return (
@@ -135,6 +203,13 @@ export function Sidebar({
           Files
         </Text>
         <Text color={colors.dimText}>No changes yet</Text>
+        {hasWorktrees && (
+          <WorktreesSection
+            worktrees={worktreesForRender}
+            colors={colors}
+            animate={animateWorktrees}
+          />
+        )}
         {hasUsage && <UsageSection entries={usage} colors={colors} />}
       </Box>
     );
@@ -172,6 +247,13 @@ export function Sidebar({
           </Box>
         );
       })}
+      {hasWorktrees && (
+        <WorktreesSection
+          worktrees={worktreesForRender}
+          colors={colors}
+          animate={animateWorktrees}
+        />
+      )}
       {hasUsage && <UsageSection entries={usage} colors={colors} />}
     </Box>
   );
