@@ -23,6 +23,13 @@ import {
   _registerCatalogGuard,
   type OrchestrationModelMetadata,
 } from './sapOrchestration.js';
+import {
+  ModelFetchError,
+  classifyFetchError,
+  fetchWithRetry,
+  type FetchErrorClass,
+  type FetchRetryOptions,
+} from './modelFetchErrors.js';
 
 // ============================================================================
 // Constants
@@ -133,21 +140,46 @@ function extractModelId(configurationName: string | undefined): string | null {
 // ============================================================================
 
 /**
+ * Options accepted by {@link refreshModelCatalog} and
+ * {@link fetchModelCatalog}. Exposed primarily so tests can drive the
+ * retry loop with a fake clock; callers in the runtime path pass
+ * `undefined` and inherit the defaults.
+ */
+export interface RefreshCatalogOptions {
+  /** Retry policy for transient fetch failures. See {@link FetchRetryOptions}. */
+  retry?: FetchRetryOptions;
+}
+
+/**
  * Perform a single fetch from SAP AI Core and merge results with the static
  * catalog. Idempotent — safe to call concurrently (second call is a no-op
  * while one is in flight).
+ *
+ * Transient errors (5xx, 429, network resets, DNS failures) are retried
+ * with capped exponential backoff via {@link fetchWithRetry}; permanent
+ * errors (401/403/400/404) surface immediately and set the catalog state
+ * to `error` with a user-facing message. The static seed remains
+ * available through {@link getAvailableModels} regardless of the fetch
+ * outcome, so callers are never blocked.
  */
-export async function refreshModelCatalog(resourceGroup = 'default'): Promise<void> {
+export async function refreshModelCatalog(
+  resourceGroup = 'default',
+  options: RefreshCatalogOptions = {}
+): Promise<void> {
   if (_refreshInProgress) return;
   _refreshInProgress = true;
 
   setState({ status: 'loading' });
 
   try {
-    const response = await DeploymentApi.deploymentQuery(
-      { status: 'RUNNING' },
-      { 'AI-Resource-Group': resourceGroup }
-    ).execute();
+    const response = await fetchWithRetry(
+      () =>
+        DeploymentApi.deploymentQuery(
+          { status: 'RUNNING' },
+          { 'AI-Resource-Group': resourceGroup }
+        ).execute(),
+      options.retry
+    );
 
     const liveDeployments = response.resources ?? [];
 
@@ -196,10 +228,19 @@ export async function refreshModelCatalog(resourceGroup = 'default'): Promise<vo
       entries,
       lastRefreshedAt: Date.now(),
       resourceGroup,
+      errorMessage: undefined,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // `ModelFetchError.reason` carries the classified, user-facing
+    // message; for non-classified errors fall back to the raw message.
     // Keep existing entries (static or previous live), just mark as error
+    // so `alexi models` (and the TUI status indicator) can surface it.
+    const msg =
+      err instanceof ModelFetchError
+        ? err.reason
+        : err instanceof Error
+          ? err.message
+          : String(err);
     setState({
       status: 'error',
       errorMessage: msg,
@@ -332,6 +373,69 @@ export function invalidateCatalog(): void {
     errorMessage: undefined,
   });
 }
+
+/**
+ * Result of a direct SAP AI Core deployment fetch. Callers that want the
+ * raw list (e.g. the `alexi models` command) use this instead of the
+ * static-merged {@link CatalogEntry} view: it preserves every deployment
+ * regardless of whether the model id matches one of the known prefixes,
+ * and it fails LOUD on network / auth errors instead of falling back to
+ * the static seed.
+ */
+export interface DeploymentFetchResult {
+  resources: readonly {
+    id: string;
+    configurationId: string;
+    configurationName?: string;
+    scenarioId?: string;
+    status?: string;
+    targetStatus?: string;
+    statusMessage?: string;
+    deploymentUrl?: string;
+    createdAt: string;
+    modifiedAt: string;
+  }[];
+}
+
+/**
+ * Fetch the SAP AI Core deployment list directly, THROWING on failure.
+ *
+ * Unlike {@link refreshModelCatalog} — which is a fire-and-forget
+ * background refresh that MUST NOT crash the app on a bad
+ * `AICORE_SERVICE_KEY` — this helper is intended for interactive
+ * commands (`alexi models`) that want to surface a "Failed to fetch
+ * models: ..." message when the fetch fails.
+ *
+ * Transient errors (5xx, 429, network resets, DNS failures) are retried
+ * with capped exponential backoff via {@link fetchWithRetry}; permanent
+ * errors (401/403/400/404) surface immediately as a
+ * {@link ModelFetchError} whose `.reason` is safe to render to a user.
+ *
+ * @param options.status         optional deployment status filter passed to `deploymentQuery`
+ * @param options.resourceGroup  AI Core resource group header, default 'default'
+ * @param options.retry          retry policy override; defaults match {@link fetchWithRetry}
+ */
+export async function fetchDeploymentCatalog(
+  options: {
+    status?: 'RUNNING' | 'PENDING' | 'STOPPED' | 'DEAD' | 'UNKNOWN';
+    resourceGroup?: string;
+    retry?: FetchRetryOptions;
+  } = {}
+): Promise<DeploymentFetchResult> {
+  const resourceGroup = options.resourceGroup ?? 'default';
+  const query = options.status ? { status: options.status } : {};
+  const response = await fetchWithRetry(
+    () => DeploymentApi.deploymentQuery(query, { 'AI-Resource-Group': resourceGroup }).execute(),
+    options.retry
+  );
+  return { resources: response.resources ?? [] };
+}
+
+// Re-export the classification helpers so callers only import from one
+// module. Keeping the raw error type on the barrel makes the public
+// surface easier to discover from `src/providers/index.ts`.
+export { ModelFetchError, classifyFetchError, fetchWithRetry };
+export type { FetchErrorClass, FetchRetryOptions };
 
 // Export catalog TTL for tests
 export { CATALOG_TTL_MS };
