@@ -3485,6 +3485,38 @@ that need browser automation should install it explicitly.
 5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
 6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout
 
+## TUI Transcript Rendering Model (Non-Virtualized)
+
+Alexi's Ink transcript (`src/cli/tui/components/MessageArea.tsx`) is deliberately prop-driven and non-virtualized. Every completed run in `messages` is grouped by `collapseCompletedWork(visibleMessages, { isStreaming })` and rendered directly via `Box` / `Text` / `MessageBubble` / `ToolRow` / `WorkActivity`. There is no row-measuring virtualizer in the render path (`virtua`, `react-window`, and `react-virtualized` are NOT dependencies of Alexi, and none of them is imported by the TUI).
+
+This is a load-bearing architectural choice — not an oversight. Upstream Kilocode has already been bitten by a virtualizer that cached measured row sizes indexed by row position rather than by message identity, so when the user switched sessions the new transcript inherited stale row heights from the old one and the visible frame was silently misaligned (Kilocode issue → PR #14486). Alexi renders each run directly, so a `messages` prop swap unmounts and remounts the run subtree keyed by `run.id`; there is no measured row cache to invalidate.
+
+Forward-looking contract (documented on the component and enforced by the regression suite):
+
+- If a virtualizer is introduced later, it MUST be keyed by session id: `<Virtualizer key={sessionId} ... />`. That guarantees the entire virtualizer instance — including any measured-row cache — is torn down and rebuilt on a session switch.
+- Any measured-row cache MUST live on the per-session instance, never as module-level state.
+- The regression suite `tests/cli/tui/MessageArea.session-switch.test.tsx` (issue #1815) pins this contract. A future refactor that re-introduces cross-session state on the transcript surface will fail the suite before it lands.
+
+```mermaid
+flowchart TB
+    Session[Active session<br/>sessionManager.messages]
+    Props[MessageAreaProps<br/>messages: MessageDisplay[]]
+    Filter[Filter displayRole=='system'<br/>visibleMessages]
+    Collapse[collapseCompletedWork<br/>-> runs: RunDisplay[]]
+    Render{{"runs.map(run => ...)<br/>key={run.id}"}}
+    Bubble[MessageBubble<br/>ToolRow / WorkActivity]
+
+    Session -->|prop| Props
+    Props --> Filter
+    Filter --> Collapse
+    Collapse --> Render
+    Render -->|per run| Bubble
+
+    Note[No virtua / react-window / react-virtualized<br/>No module-level row cache<br/>Session switch = new messages prop = full re-render]
+
+    Render -. contract .-> Note
+```
+
 ## TUI Tool-Call Disclosure
 
 The Ink TUI renders tool calls through a two-layer component pair introduced in 1.20.2:
