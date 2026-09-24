@@ -323,6 +323,115 @@ Additional patterns worth internalising from this suite:
 3. **Pin the `sap-ai-core/` prefix form in the SAME suite.** The provider-prefix stripping in `modelHasCapability` is a separate code path from the raw-id lookup. A regression that tightened the guard to an exact match would pass every non-prefixed assertion and fail only the prefixed variants — asserting both shapes for every id catches the regression on the first sibling instead of after the router hot loop degrades in production.
 4. **Assert the exact `capabilities` array, not a superset.** `expect(meta?.capabilities).toEqual(['tools'])` fails if the metadata entry was accidentally seeded with extra tags (`['tools', 'image-generation']`). If the port ever legitimately adds a second capability to these ids, the intent-preserving update is to change the expected array in ONE place — the `it.each` factors the assertion out of the per-id loop for free.
 
+### Testing model-fetch error classification (`tests/providers/modelFetchErrors.test.ts`)
+
+`src/providers/modelFetchErrors.ts` is a pure module — no SAP SDK, no
+environment, no network — so its tests are straight unit tests with
+synthetic errors. The suite pins two contracts:
+
+1. **`classifyFetchError` precedence.** For every status code Alexi
+   knows how to classify, assert both `transient` and the `reason`
+   substring so a regression that flipped the transient flag OR
+   silently changed the actionable text (e.g. dropped the
+   `AICORE_SERVICE_KEY` hint from the 401 reason) trips loudly.
+2. **`fetchWithRetry` control flow.** Drive the retry loop with the
+   injectable `sleep` seam instead of `vi.useFakeTimers()` so the test
+   run stays parallel-safe and does not perturb Node's timer queue.
+
+```typescript
+import { describe, expect, it, vi } from 'vitest';
+import {
+  ModelFetchError,
+  classifyFetchError,
+  fetchWithRetry,
+} from '../../src/providers/modelFetchErrors.js';
+
+describe('classifyFetchError', () => {
+  it('classifies 401 as permanent with an actionable reason', () => {
+    const err = Object.assign(new Error('boom'), { status: 401 });
+    const cls = classifyFetchError(err);
+    expect(cls.transient).toBe(false);
+    expect(cls.statusCode).toBe(401);
+    expect(cls.reason).toMatch(/unauthorized/i);
+    expect(cls.reason).toMatch(/AICORE_SERVICE_KEY/);
+  });
+
+  it('classifies 429 as transient with a rate-limit reason', () => {
+    const err = Object.assign(new Error('too many'), { status: 429 });
+    const cls = classifyFetchError(err);
+    expect(cls.transient).toBe(true);
+    expect(cls.reason).toMatch(/rate limit/i);
+  });
+
+  it('reads nested response.status (axios / http-client shape)', () => {
+    const err = Object.assign(new Error('wrapped'), { response: { status: 503 } });
+    expect(classifyFetchError(err).transient).toBe(true);
+    expect(classifyFetchError(err).statusCode).toBe(503);
+  });
+});
+
+describe('fetchWithRetry', () => {
+  it('retries transient failures and eventually succeeds', async () => {
+    let attempts = 0;
+    const op = vi.fn(async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw Object.assign(new Error('flaky'), { status: 503 });
+      }
+      return 'ok';
+    });
+    const sleep = vi.fn(async () => {}); // instant
+
+    const result = await fetchWithRetry(op, { sleep });
+    expect(result).toBe('ok');
+    expect(op).toHaveBeenCalledTimes(3);
+    // Two sleeps (before attempts 2 and 3), 1000ms then 2000ms.
+    expect(sleep).toHaveBeenNthCalledWith(1, 1000);
+    expect(sleep).toHaveBeenNthCalledWith(2, 2000);
+  });
+
+  it('throws ModelFetchError on the first attempt for permanent failures', async () => {
+    const op = vi.fn(async () => {
+      throw Object.assign(new Error('bad key'), { status: 401 });
+    });
+    await expect(fetchWithRetry(op)).rejects.toBeInstanceOf(ModelFetchError);
+    expect(op).toHaveBeenCalledTimes(1);
+  });
+});
+```
+
+Patterns worth internalising:
+
+1. **Assert both `transient` AND `reason` for every classified status.**
+   The `reason` field is user-facing — a regression that flipped a
+   status from permanent to transient often preserves the numeric
+   status but silently drops the actionable text. Pinning both catches
+   the regression before it reaches operators.
+2. **Cover every status-code lookup shape.** `extractStatus` walks
+   `err.status`, `err.statusCode`, `err.response.status`,
+   `err.cause.status`, `err.rootCause.status`, and a message-regex
+   fallback. Include at least one case per shape so a refactor that
+   silently drops one path (say, breaks the `err.cause.status` walk)
+   trips a specific test rather than every downstream integration test
+   that happens to route through that shape.
+3. **Use the `sleep` seam, not `vi.useFakeTimers()`.** `fetchWithRetry`
+   deliberately accepts an injectable `sleep` so the retry loop is
+   testable without perturbing Node's global timer queue. `vi.fn(async () => {})`
+   makes the retries effectively instant and lets you assert the
+   requested delay values directly (`toHaveBeenNthCalledWith(2, 2000)`)
+   rather than measuring elapsed wall-clock time.
+4. **Distinguish `ModelFetchError` structurally.** In tests that cross
+   a module boundary (e.g. mocking `src/providers/index.ts` and then
+   asserting the error surfaced by `src/cli/commands/models.ts`), match
+   on `err.name === 'ModelFetchError'` rather than `instanceof
+   ModelFetchError` — the CLI code path uses the structural check for
+   the same reason and the tests should match the runtime contract.
+5. **Do NOT hit the real SAP SDK from this suite.** The classifier
+   and retry helpers must be provable in isolation. Integration between
+   `fetchWithRetry` and `DeploymentApi.deploymentQuery` is covered in
+   `tests/providers/modelCatalog.test.ts` where `@sap-ai-sdk/ai-api` is
+   mocked via `vi.mock` at the module level.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):

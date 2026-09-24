@@ -734,6 +734,263 @@ seed, which is the reset hook used in the `beforeEach` of catalog
 tests. `CATALOG_TTL_MS` is re-exported so tests can assert the
 schedule-next-refresh window without hard-coding the number.
 
+## Model-Fetch Error Surfacing (issue #1824)
+
+Prior to `1.22.29`, a broken `AICORE_SERVICE_KEY`, an unreachable AI
+Core endpoint, or a rate-limited proxy caused both `alexi models` and
+the background catalog refresh to fail silently: the catalog fell back
+to the static seed and the CLI printed `No deployments found`, leaving
+the operator unable to tell an empty tenant apart from a broken
+credential or an unreachable endpoint.
+
+`src/providers/modelFetchErrors.ts` centralises three primitives that
+`refreshModelCatalog`, `fetchDeploymentCatalog`, and the `alexi models`
+command all share so both the background path and the interactive path
+agree on a single classification contract:
+
+```typescript
+// src/providers/modelFetchErrors.ts
+
+export interface FetchErrorClass {
+  /** Whether the caller should retry this error under exponential backoff. */
+  transient: boolean;
+  /** HTTP status code, when the underlying error carried one. */
+  statusCode?: number;
+  /** Machine-readable code (`ECONNRESET`, `ENOTFOUND`, ...) when known. */
+  code?: string;
+  /** Short user-facing reason. */
+  reason: string;
+}
+
+export class ModelFetchError extends Error {
+  readonly reason: string;
+  readonly statusCode?: number;
+  readonly code?: string;
+  readonly transient: boolean;
+  readonly cause?: unknown;
+}
+
+export function classifyFetchError(err: unknown): FetchErrorClass;
+
+export interface FetchRetryOptions {
+  /** Maximum number of attempts including the first. Default 3. */
+  maxAttempts?: number;
+  /** Base delay in ms before the first retry. Default 1000. */
+  initialDelayMs?: number;
+  /** Cap on the delay between retries. Default 8000. */
+  maxDelayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  onRetry?: (attempt: number, classification: FetchErrorClass) => void;
+}
+
+export async function fetchWithRetry<T>(
+  op: () => Promise<T>,
+  options?: FetchRetryOptions
+): Promise<T>;
+```
+
+### Classification precedence
+
+`classifyFetchError` folds the many shapes of upstream failures (native
+`fetch`, `@sap-cloud-sdk/http-client`, `AICORE_SERVICE_KEY` mis-parse,
+proxy responses) into one `{ transient, statusCode?, code?, reason }`
+tuple with the following documented precedence:
+
+1. **HTTP status is authoritative when present.** Permanent for
+   `400/401/403/404/422`; transient for `429/500/502/503/504`.
+   Statuses outside those sets are treated as permanent.
+2. **Node.js error codes.** `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`,
+   `ENOTFOUND`, `EPIPE`, `EAGAIN`, `EBUSY`, `UND_ERR_SOCKET`,
+   `UND_ERR_CONNECT_TIMEOUT` -> transient. `ENOENT`, `EACCES`,
+   `ENOTDIR`, `EPERM` -> permanent.
+3. **Message-regex transient detection.** The regex
+   `/socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|EAGAIN|EBUSY|fetch failed|rate limit/i`
+   matches the same set as the CI workflow retry loop
+   (`.github/workflows/*.yml`) so a manual re-run of a failing agent
+   workflow makes the same retry decision the runtime does.
+4. **Unknown -> permanent.** Retrying an unclassified failure only
+   wastes budget and delays the human diagnostic.
+
+Status-code lookup walks several shapes:
+
+| Location             | Consumer                                              |
+| -------------------- | ----------------------------------------------------- |
+| `err.status`         | Native `fetch` Response-like errors                   |
+| `err.statusCode`     | SAP-provided rate-limit errors                        |
+| `err.response.status`| `@sap-cloud-sdk/http-client`, axios-style             |
+| `err.cause.status`   | `@sap-cloud-sdk` request-layer wrapping               |
+| `err.rootCause.status` | Other wrapping shapes                               |
+| `/status[:\s]+([45]\d{2})/` in message | Last-resort message parsing         |
+
+Reasons are pinned to actionable strings so the CLI can render a
+targeted message instead of a raw upstream stack trace:
+
+| Status | `reason` template                                                             |
+| ------ | ----------------------------------------------------------------------------- |
+| 401    | `unauthorized (401) — check AICORE_SERVICE_KEY / credentials`                 |
+| 403    | `unauthorized (403) — check AICORE_SERVICE_KEY / credentials`                 |
+| 404    | `endpoint not found (404) — check AI_API_URL / resource group`                |
+| 400    | `bad request (400) — <message>`                                               |
+| 422    | `bad request (422) — <message>`                                               |
+| 429    | `rate limit (429) — retrying with backoff`                                    |
+| 5xx    | `HTTP <NNN> — retrying with backoff`                                          |
+| ECONNRESET/... | `network error (<code>) — retrying with backoff`                      |
+
+### Retry policy
+
+`fetchWithRetry` runs the operation with capped exponential backoff on
+transient failures and surfaces permanent failures on the FIRST
+attempt. The contract:
+
+- Permanent failures (per `classifyFetchError`) are wrapped in a
+  `ModelFetchError` and thrown immediately — no retry.
+- Transient failures are wrapped in a `ModelFetchError` and thrown only
+  after `maxAttempts` is exhausted; the last classification is
+  preserved so callers can display `err.reason` verbatim.
+- Success returns the raw operation result.
+
+Defaults: `maxAttempts: 3`, `initialDelayMs: 1000`, `maxDelayMs: 8000`.
+The delay formula is `delay = min(initialDelayMs * 2^(attempt-1), maxDelayMs)`,
+matching the `KILO_RETRIES=2` (three total attempts) budget in the CI
+workflows.
+
+The `onRetry(attempt, classification)` callback fires after every
+transient retry so callers can surface progress. Errors thrown from the
+callback are swallowed so a broken logger cannot mask a retry. The
+`sleep` seam lets tests drive the timer without `vi.useFakeTimers()`.
+
+### Consumer wiring
+
+`alexi models` (`src/cli/commands/models.ts`) routes both the direct
+AI Core path (`listDeployments`) and the proxy path (`listModelsProxy`)
+through `fetchWithRetry`:
+
+```typescript
+// src/cli/commands/models.ts (excerpt)
+const { fetchWithRetry } = await import('../../providers/modelFetchErrors.js');
+const response = await fetchWithRetry(
+  () => DeploymentApi.deploymentQuery({}, { 'AI-Resource-Group': resourceGroup }).execute(),
+  {
+    onRetry: (attempt, classification) => {
+      // stderr so callers piping stdout to `jq` are unaffected.
+      console.error(c('yellow', `  Retry ${attempt}: ${classification.reason}`));
+    },
+  }
+);
+```
+
+The command's `catch` block classifies structurally rather than via
+`instanceof` because a module-boundary re-import can produce two
+distinct `ModelFetchError` constructor identities:
+
+```typescript
+const isModelFetchError =
+  e !== null &&
+  typeof e === 'object' &&
+  (e as { name?: unknown }).name === 'ModelFetchError';
+const message = isModelFetchError
+  ? (e as Error).message
+  : e instanceof Error
+    ? e.message
+    : String(e);
+```
+
+`refreshModelCatalog(resourceGroup?, options?: RefreshCatalogOptions)`
+now accepts a retry-policy override (primarily for tests driving a
+fake clock) and, on failure, records `err.reason` in
+`state.errorMessage` when the thrown error is a `ModelFetchError` —
+otherwise it falls back to the raw message. On success, `errorMessage`
+is cleared so a stale error from a previous failure does not survive
+a subsequent successful refresh.
+
+`fetchDeploymentCatalog(options?)` is a new helper for callers that
+want the raw deployment list AND want a thrown error on failure
+(instead of the fire-and-forget background-refresh semantics of
+`refreshModelCatalog`). Return shape:
+
+```typescript
+export interface DeploymentFetchResult {
+  resources: readonly {
+    id: string;
+    configurationId: string;
+    configurationName?: string;
+    scenarioId?: string;
+    status?: string;
+    targetStatus?: string;
+    statusMessage?: string;
+    deploymentUrl?: string;
+    createdAt: string;
+    modifiedAt: string;
+  }[];
+}
+```
+
+### Sequence: `alexi models` under a bad service key
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Cmd as alexi models
+    participant Retry as fetchWithRetry
+    participant SDK as DeploymentApi
+    participant AICore as SAP AI Core
+    participant Cls as classifyFetchError
+
+    U->>Cmd: alexi models
+    Cmd->>Retry: fetchWithRetry(() => deploymentQuery(...))
+    Retry->>SDK: deploymentQuery({}, {AI-Resource-Group})
+    SDK->>AICore: GET /v2/lm/deployments
+    AICore-->>SDK: HTTP 401
+    SDK-->>Retry: throw Error(status=401)
+    Retry->>Cls: classifyFetchError(err)
+    Cls-->>Retry: { transient: false, statusCode: 401,<br/>reason: "unauthorized (401) —<br/>check AICORE_SERVICE_KEY / credentials" }
+    Retry-->>Cmd: throw ModelFetchError(cls)
+    Cmd-->>U: stderr: "Error: Failed to fetch models:<br/>unauthorized (401) — check AICORE_SERVICE_KEY..."
+    Cmd-->>U: exit 1
+```
+
+Contrast with a transient 503:
+
+```mermaid
+sequenceDiagram
+    participant Cmd as alexi models
+    participant Retry as fetchWithRetry
+    participant SDK as DeploymentApi
+
+    Cmd->>Retry: fetchWithRetry(op)
+    Retry->>SDK: attempt 1
+    SDK-->>Retry: throw Error(status=503)
+    Note over Retry: classify -> transient
+    Retry-->>Cmd: onRetry(1, "HTTP 503 — retrying with backoff")
+    Note over Retry: sleep 1000ms
+    Retry->>SDK: attempt 2
+    SDK-->>Retry: throw Error(status=503)
+    Retry-->>Cmd: onRetry(2, "HTTP 503 — retrying with backoff")
+    Note over Retry: sleep 2000ms
+    Retry->>SDK: attempt 3
+    SDK-->>Retry: resolve({ resources })
+    Retry-->>Cmd: return response
+```
+
+### Design notes
+
+- `classifyFetchError` is intentionally structural. The check
+  `(e as { name?: unknown }).name === 'ModelFetchError'` in
+  `src/cli/commands/models.ts` survives module-boundary re-imports;
+  an `instanceof ModelFetchError` check would fail when the CLI and
+  the provider layer are loaded through different `import()` sites in
+  a bundled build.
+- The retry policy deliberately does NOT depend on
+  `src/core/error-backoff.ts`. `ErrorBackoff` is a stateful circuit
+  breaker for the chat / streaming hot path; the model-list fetch
+  runs at most a few times per session and needs a stateless "try N
+  times" loop. Duplicating a small amount of policy is cheaper than
+  coupling providers to core through a stateful helper.
+- The permanent status set (`400`, `401`, `403`, `404`, `422`) matches
+  the "permanent" bucket in `AGENTS.md -> error handling`, so a bad
+  `AICORE_SERVICE_KEY` fails fast with an actionable message rather
+  than after three retries.
+
 ## Configuration
 
 ### Environment Variables
