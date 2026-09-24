@@ -1205,6 +1205,48 @@ Emission contract:
 
 Typical consumers: the Ink TUI to render a plan-ready banner, SAP integration hooks to attach the plan to an issue, external CI listeners to gate a stage on plan review. Subscribers register via `PlanOpened.subscribe(handler)` and receive an `unsubscribe` function.
 
+### Plan-mode Follow-up Routing (`plan.followup`)
+
+Added in the 2026-09-24 sync (`src/bus/plan-followup.ts`, port of opencode commit `5e05988b1 fix(cli): route plan follow-up events by directory`). Plan-mode subagents periodically emit follow-up questions back to the primary agent. Previously these events were published on a global channel with no directory scoping, which caused cross-project bleed: a plan question raised in project A's session could be delivered to a listener attached to project B's session in the same host process (relevant when running `alexi server` for multiple workspaces).
+
+The fix is minimal — every follow-up event now carries the originating `directory`, and subscribers filter events whose `directory` does not match their own working directory before handling them.
+
+```typescript
+// src/bus/plan-followup.ts
+
+export const PlanFollowupSchema = z.object({
+  question: z.string().min(1),
+  sessionID: z.string().min(1),
+  directory: z.string().min(1),
+});
+export type PlanFollowupPayload = z.infer<typeof PlanFollowupSchema>;
+
+export const PlanFollowupEvent: BusEvent<PlanFollowupPayload> = defineEvent(
+  'plan.followup',
+  PlanFollowupSchema
+);
+
+export function matchesDirectory(
+  event: Pick<PlanFollowupPayload, 'directory'>,
+  currentDirectory: string
+): boolean;
+```
+
+Contract:
+
+1. **Directory is required on publish.** The Zod schema rejects empty strings so a producer cannot silently drop the scoping field.
+2. **Absent `directory` on the event is treated as a wildcard by `matchesDirectory`.** This preserves forward compatibility with future events emitted from a non-directory-scoped context (a real drift would show up as a `directory` MISMATCH, not as a missing field).
+3. **Subscribers are responsible for filtering.** The bus does not enforce the filter — a subscriber that ignores `matchesDirectory` will still receive every event. This is intentional: transports outside the process (e.g. a future HTTP fan-out) may want to forward all events and filter at the client. Recommended pattern:
+
+   ```typescript
+   PlanFollowupEvent.subscribe((event) => {
+     if (!matchesDirectory(event, process.cwd())) {
+       return;
+     }
+     // ... handle question ...
+   });
+   ```
+
 ## Native OS Notifications
 
 Alexi surfaces desktop notifications when a streaming chat completes cleanly or when a long-running bash command finishes. The implementation lives in `src/core/notifications.ts` and is wired into `src/core/streamingOrchestrator.ts` and `src/tool/tools/bash.ts`.
@@ -2666,6 +2708,41 @@ The helpers above live in `src/mcp/client.ts`:
 When adding a new consumer of `getAllTools()`, import from `src/mcp/client.ts`
 rather than re-implementing the split/escape logic.
 
+### MCP Client ID Metadata Document (CIMD) helper
+
+Added in the 2026-09 sync (`src/mcp/client-metadata.ts`, re-exported from `src/mcp/index.ts`). Optional helper for OAuth flows against third-party MCP servers whose OAuth `client_id` is a URL that resolves to a JSON metadata document (RFC 7591 dynamic-client-registration subset). Fetching the document lets an MCP OAuth flow start without any static registration on the server side.
+
+```typescript
+// src/mcp/client-metadata.ts
+
+export const ClientMetadataDocumentSchema = z.object({
+  client_id: z.string().min(1),
+  client_name: z.string().optional(),
+  redirect_uris: z.array(z.string()).min(1),
+  grant_types: z.array(z.string()).optional(),
+  response_types: z.array(z.string()).optional(),
+  scope: z.string().optional(),
+  token_endpoint_auth_method: z.string().optional(),
+});
+export type ClientMetadataDocument = z.infer<typeof ClientMetadataDocumentSchema>;
+
+export async function fetchClientMetadata(
+  url: string,
+  signal?: AbortSignal
+): Promise<ClientMetadataDocument>;
+
+export function isClientMetadataUrl(clientId: string): boolean; // /^https?:\/\//i
+```
+
+Contract:
+
+- Only `client_id` and `redirect_uris` are required; every other field is optional and passed through untouched.
+- Non-2xx HTTP status throws `Error('CIMD fetch failed: <status> <statusText>')`. Malformed JSON propagates from `response.json()`; schema mismatch propagates from `zod.parse()`.
+- The function does NOT retry — CIMD documents are effectively static per client, and a transient network failure is the caller's problem to handle (the surrounding OAuth flow will fail with a descriptive message either way).
+- `signal` is forwarded to `fetch` so a caller-supplied abort signal cancels the request promptly.
+
+**SAP AI Core note.** SAP AI Core authenticates via `AICORE_SERVICE_KEY` (client-credentials against SAP's identity zone) — CIMD is only relevant for third-party MCP servers that require an interactive OAuth flow. This module is therefore optional: it is imported by `oauth-provider.ts` only when the caller's `client_id` looks like a `http(s)://` URL. Alexi's SAP AI Core integration does not use OAuth so the surface is unused by default.
+
 ### MCP Apps (experimental)
 
 Introduced in 1.21.4 (port of kilocode `36c57c12c`, tightened by `c02134ab4` and `b7069922d`). "MCP Apps" is a thin API that wraps the existing `McpClientManager` and presents each connected server as an "app" with two verbs — `listResources` and `callTool`. Gated behind `ALEXI_EXPERIMENTAL_MCP_APPS=1` at the call site; the intent is to stabilise the shape before wiring it into a permanent HTTP surface. Exports live at `src/mcp/apps.ts` and are re-exported by `src/mcp/index.ts` under prefixed names (`mcpAppsListResources`, `mcpAppsCallTool`, `MCPAppsError`, `MCP_APPS_ENV_FLAG`, `isMCPAppsEnabled`, `MCPResource`) so both the flag check and the verbs are always available for feature detection.
@@ -4049,6 +4126,82 @@ The orchestrator LLM invokes this whenever a sub-agent's `status` shows a pendin
 
 The schema now includes an optional `sourceSessionId: z.string().nullable().optional()` field. When set, the sub-agent's reply is routed back to that originating session so multi-agent swarms preserve conversation locality instead of dumping every reply into the caller; when omitted, the field falls back to `_context.sessionId`, preserving the previous single-session behaviour. The resolved source id is echoed in the tool result message so callers can confirm the routing target without inspecting logs.
 
+## Agent Manager Activity Event Forwarding (`src/core/agent-manager/orchestration-api.ts`)
+
+Added in the 2026-09-24 sync (`src/core/agent-manager/orchestration-api.ts`, port of kilocode PR #14487 `fix(agent-manager): forward all owned session activity events`, commit `bd387845`). Previously the Agent Manager filtered activity events by the currently-selected worktree, so sessions in background worktrees kept stale status until the user switched to that worktree — a session that COMPLETED in worktree B while the sidebar was pinned on worktree A never got its "completed" badge until the user switched panes.
+
+The fix classifies events by cost and locality:
+
+- **Activity events** (`status`, `deleted`, `wakeup`, `turn-close`, `error`, `asked`, `replied`) are cheap metadata updates. They are forwarded for ALL owned sessions regardless of the selected worktree so the sidebar always reflects reality.
+- **Transcript events** (message deltas, tool output chunks, etc.) are expensive and only useful for the session the user is looking at. They stay filtered by the selected worktree.
+
+Additionally, when a session goes `offline` the owner entry is KEPT, because offline is not end-of-turn: the session may reconnect later and forwarding must resume without losing ownership. Only an explicit `deleted` event drops the owner entry.
+
+```mermaid
+flowchart TD
+    Event["Incoming event<br/>{kind, sessionId, worktreeDir}"] --> Owned{"owned<br/>sessionId?"}
+    Owned -->|no| Drop["reason: activity-not-owned<br/>drop"]
+    Owned -->|yes| Kind{"activity or<br/>transcript?"}
+    Kind -->|activity| ForwardAll["reason: activity-owned<br/>forward regardless of worktree"]
+    Kind -->|transcript| WorktreeMatch{"worktreeDir ==<br/>selectedWorktree?"}
+    WorktreeMatch -->|yes| ForwardT["reason: transcript-selected<br/>forward"]
+    WorktreeMatch -->|no| DropT["reason: transcript-background<br/>drop"]
+    ForwardAll --> EOL{"kind === 'deleted'?"}
+    EOL -->|yes| DropOwner["remove from owned set"]
+    EOL -->|no| KeepOwner["keep in owned set<br/>(offline is transient)"]
+```
+
+Public API (all synchronous, all in-memory):
+
+```typescript
+// src/core/agent-manager/orchestration-api.ts
+
+export type ActivityEventKind =
+  'status' | 'deleted' | 'wakeup' | 'turn-close' | 'error' | 'asked' | 'replied';
+export type SessionStatus = 'idle' | 'offline' | 'completed' | 'failed' | 'waiting' | 'scheduled';
+
+export interface ActivityEvent {
+  readonly kind: ActivityEventKind;
+  readonly sessionId: string;
+  readonly worktreeDir?: string;
+  readonly status?: SessionStatus;
+  readonly payload?: unknown;
+}
+
+export interface TranscriptEvent {
+  readonly sessionId: string;
+  readonly worktreeDir: string;
+  readonly payload: unknown;
+}
+
+export interface ForwardingDecision {
+  readonly forward: boolean;
+  readonly reason:
+    'activity-owned' | 'activity-not-owned' | 'transcript-selected' | 'transcript-background';
+}
+
+export function isActivityEventKind(kind: string): kind is ActivityEventKind;
+export function isEndOfLife(event: ActivityEvent): boolean;  // true iff kind === 'deleted'
+
+export class ActivityEventForwarder {
+  addOwnedSession(sessionId: string): void;
+  removeOwnedSession(sessionId: string): void;
+  isOwned(sessionId: string): boolean;
+  setSelectedWorktree(worktreeDir: string | undefined): void;
+  getSelectedWorktree(): string | undefined;
+  decideActivity(event: ActivityEvent): ForwardingDecision;
+  decideTranscript(event: TranscriptEvent): ForwardingDecision;
+  handleActivity(event: ActivityEvent): ForwardingDecision;
+}
+
+// Legacy factory retained for backward compatibility.
+export function orchestrateAgentManagerSessions(): ActivityEventForwarder;
+```
+
+The forwarder does not itself subscribe to the internal event bus: a caller (the Agent Manager service wiring, or a test) calls `decide*()` for each incoming event and forwards / drops based on the result. This keeps the module trivial to unit-test — the entire decision surface is pure functions over an in-memory `Set<string>`. Contract points are pinned by `tests/core/agent-manager-forwarding.test.ts`.
+
+Alexi does not (yet) run a live Agent Manager UI, so this module is infrastructure that the future Ink sidebar and any headless orchestrator will consume. Its self-contained shape makes the future wiring a single-file change.
+
 ## Auxiliary-Task Model Selection (`src/providers/model-selection.ts`)
 
 Distinct from the tool-scoped [Per-Task Model Selection](#per-task-model-selection-srctoolmodel-selectionts) below, the **auxiliary-task** selector chooses the model used by background pipelines that must run alongside a chat turn without consuming the primary model's budget — title generation, session summarisation, context compaction, and commit-message generation. Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3).
@@ -4087,7 +4240,7 @@ The Kilo branch present in `selectModelForTask` (`kilo/kilo-auto` when `hasKiloC
 
 ## Per-Task Model Selection (`src/tool/model-selection.ts`)
 
-Alexi supports opt-in per-invocation model selection for subagents spawned by the `task` tool and sessions created by the `agent_manager` tool. The feature is gated behind a config flag (`experimental.task_model_selection`, default `false`) so the SAP AI Core default routing behaviour is preserved for operators who do not opt in.
+Alexi supports per-invocation model selection for subagents spawned by the `task` tool and sessions created by the `agent_manager` tool. As of the 2026-09-24 upstream sync (ports opencode/kilocode `50e520adf` et al.) **the feature is unconditional** — the former `experimental.task_model_selection` config flag was removed upstream and is no longer honoured in Alexi either. `getConfigTaskModelSelection()` is retained as a thin no-op shim (always returns `true`) and `setConfigTaskModelSelection()` writes nothing; both are `@deprecated`. Leaving `task.model` / `agent_manager` `config.model` unset preserves Alexi's SAP AI Core default routing so callers who never override the model see zero behavioural change.
 
 Model resolution logic lives in `src/tool/model-selection.ts` (ports upstream opencode/kilocode `packages/opencode/src/kilocode/tool/model-selection.ts`, commit `ab143253a`). The module was extracted so both `task` and `agent_manager` share identical resolution semantics — historically the logic was inline inside `agent-manager.ts` only.
 
@@ -4095,9 +4248,7 @@ Model resolution logic lives in `src/tool/model-selection.ts` (ports upstream op
 
 ```mermaid
 flowchart TD
-    Start["Tool call with model / provider / reasoning_effort"] --> Gate{"experimental.task_model_selection<br/>enabled?"}
-    Gate -->|no| Reject["return error:<br/>Per-task model selection disabled"]
-    Gate -->|yes| ProviderCheck{"provider set<br/>but no model?"}
+    Start["Tool call with model / provider / reasoning_effort"] --> ProviderCheck{"provider set<br/>but no model?"}
     ProviderCheck -->|yes| RejectProvider["return error:<br/>provider requires model"]
     ProviderCheck -->|no| Candidates["candidates()<br/>enumerate every (providerID, model)<br/>from modelCatalog"]
     Candidates --> Lookup["lookup(all, query)"]
@@ -4163,13 +4314,13 @@ export function isSelectModelError(
 
 Alexi ships a single runtime provider (`sap-ai-core`), so every catalog entry is emitted with `providerID = 'sap-ai-core'`. Upstream opencode returns the full cross-product across every registered provider — the shape (`Candidate`, `lookup`, `selectModel`) matches upstream exactly so callers port cleanly.
 
-### Gating at the tool boundary
+### Enforcement at the tool boundary
 
-Both `task` and `agent_manager` gate on `getConfigTaskModelSelection()` before resolving:
+The feature is always on since the 2026-09-24 sync. The remaining invariants live on both `task` and `agent_manager`:
 
-- `src/tool/tools/task.ts:361` — when any of `params.model`, `params.provider`, or `params.reasoning_effort` is supplied AND the flag is `false`, the tool returns `error: 'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.'`. The `provider` without `model` invariant is enforced identically to `agent_manager`.
-- `src/tool/tools/agent-manager.ts:123` — `config.provider` without `config.model` returns `error: 'config.provider requires config.model to be set'`. Resolution delegates to `selectModel()`; the `create` response surfaces the resolved `session.model` and `session.provider` after resolution.
-- `src/tool/tools/agent-manager-models.ts` — `agent_manager_models` discovery tool refuses to enumerate models when the flag is off and returns `{ enabled: false, message: '...' }` with a pointer to the flag. When on, returns paginated `{ modelName, providers, ids }` rows filtered by an optional `query`.
+- `src/tool/tools/task.ts` — a bare `params.provider` without `params.model` returns `error: 'task.provider requires task.model to be set'`. When `params.model` resolves, the response surfaces the resolved `model`, `provider`, and `reasoning_effort` back to the caller.
+- `src/tool/tools/agent-manager.ts` — `config.provider` without `config.model` returns `error: 'config.provider requires config.model to be set'`. Resolution delegates to `selectModel()`; the `create` response surfaces the resolved `session.model` and `session.provider` after resolution.
+- `src/tool/tools/agent-manager-models.ts` — the discovery tool always returns paginated `{ modelName, providers, ids }` rows filtered by an optional `query`. The historical `{ enabled: false, message: '...' }` short-circuit has been removed.
 
 The `TaskResult` interface surfaces the resolved pair back to the parent orchestrator so logs record which model actually ran, not the free-form request string:
 

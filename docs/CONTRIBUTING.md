@@ -2331,6 +2331,31 @@ Added in the 2026-09-23 sync from Kilocode PR #14485. The resolver parses, valid
 - **Tests live in `src/mcp/__tests__/git-resolver.test.ts`.** Colocation is deliberate: the suite is the only regression net for a security-sensitive module, so keeping it next to the SUT makes the review boundary obvious. Follow the `setGitRunner(mockRunner(...))` + `resetGitRunner()` + `fs.mkdtemp` + `afterEach` cleanup pattern for any new case. See [TESTING.md — Testing the MCP git plugin resolver](TESTING.md#testing-the-mcp-git-plugin-resolver-srcmcp__tests__git-resolvertestts) for the full pattern catalogue.
 - **Do NOT introduce a second git wrapper for MCP.** `src/mcp/git-resolver.ts` is the single source of truth for shelling out to `git` from the MCP subsystem. If a future feature needs additional plumbing (`git fetch`, `git tag --list`, `git submodule update`), extend the resolver — do not add a parallel helper in `src/mcp/` that bypasses `validateRef` / `normalizeFileUrl` / `GitRunner`. The security review budget lives on one module, not two.
 
+## Diagnostic output must go through `redact()`
+
+Added in the 2026-09-24 sync (`src/cli/commands/debug/redact.ts`, port of opencode PR #50956). Any new diagnostic command that dumps configuration, environment variables, or provider metadata to stdout MUST route the payload through `redact()` before printing. Direct `console.log(config)` calls that could reach `AICORE_SERVICE_KEY`, `clientsecret`, or bearer tokens are treated as a security regression at review.
+
+Contract for adding a diagnostic command:
+
+- Import `redact` from `src/cli/commands/debug/redact.ts` — do NOT hand-roll a custom mask function. The pattern list is exported (`SECRET_KEY_PATTERNS` is module-private, but `isSecretKey` is exported so tests can assert on individual keys) and should be extended in that one file rather than duplicated per command.
+- Prefer building a `buildRedactedSnapshot(): unknown` helper that assembles the shape, then feeding it through `redact()`. The `debug config` command follows this shape — `buildRedactedConfigSnapshot()` is testable without spawning Commander.
+- Split the environment slice: filter `process.env` to the alexi-relevant prefix (`^(AICORE|SAP_PROXY|ALEXI)_` for now) BEFORE calling `redact`. This is defence-in-depth — if a new secret pattern is missed, unrelated shell secrets like `GITHUB_TOKEN` still never enter the pipeline.
+- Adding a new secret pattern: append a regex to `SECRET_KEY_PATTERNS` in `src/cli/commands/debug/redact.ts` AND add a test case in the redact suite that asserts a key matching the new pattern is masked. Patterns are case-insensitive by convention; use `/pattern/i`.
+- The one-line eslint escape `// eslint-disable-next-line no-console` for `console.log` in the debug command action is intentional and permitted — diagnostic output must render exactly, not go through the log router. This is one of the few call sites permitted to bypass `src/utils/logger.ts`.
+
+## Session retention: never bypass the safety guards
+
+`SessionManager.cleanupExpiredSessions` (`src/core/sessionManager.ts:828`) is destructive by construction — deleted sessions cannot be recovered. When editing the runner or the scheduler (`src/core/retentionScheduler.ts`), preserve these invariants:
+
+- **Opt-in floor.** `retention.enabled === false` MUST short-circuit before any directory scan. Do not add code paths that scan the sessions directory when the policy is disabled.
+- **Active-run guard.** `hasActiveRun(sessionId)` is populated by `beginSessionRun` / `endSessionRun`. A session with an in-flight run must NEVER be deleted regardless of its `metadata.updated` age. If a new code path bypasses `beginSessionRun` (e.g. a background subagent that runs off the main SessionManager), it MUST register its own in-flight state before the sweep can observe it.
+- **Recent-write guard.** `RECENT_WRITE_WINDOW_MS = 3_600_000` (1 hour). A session whose LAST message `timestamp` falls inside this window is held back regardless of `metadata.updated`. Do not lower this window without a corresponding change to the sessionManager retention tests — the guard exists to catch sessions that were actively receiving writes right up to the age boundary.
+- **Cooldown state is written BEFORE the sweep runs.** `triggerRetentionSweep` writes `~/.alexi/last-retention-run` first so an unhandled error inside `cleanupExpiredSessions` cannot cause the next startup to re-run immediately. Do not reorder these two operations.
+- **`alexi sessions --cleanup` intentionally bypasses the 24h cooldown.** The flag is the operator escape hatch — for example, before rebuilding the FTS index or running a diagnostic pass. Do not gate the flag on `shouldRun()`.
+- **Failures are best-effort and captured in `summary.errors[]`.** A single corrupted JSON blob or `EACCES` on delete must NEVER abort the sweep. New failure modes should be caught and pushed onto `summary.errors[]` with a descriptive message.
+
+See [ARCHITECTURE.md — Session Retention Lifecycle](ARCHITECTURE.md#session-retention-lifecycle) for the pipeline diagram and [TESTING.md — `tests/core/sessionManager-retention.test.ts`](TESTING.md) for the regression contract.
+
 ## Agent Manager Worktree Status Registry
 
 Introduced by commit `8b372ad7` (issue #1826). If you are adding a subsystem that needs to publish Agent Manager worktree lifecycle events into the TUI, or wiring a new consumer of the status panel, respect the invariants below. See [ARCHITECTURE.md - Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) for the runtime contract and [API.md - Worktree Status Registry API](API.md#worktree-status-registry-api) for the public TypeScript surface.

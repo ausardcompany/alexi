@@ -3028,7 +3028,7 @@ When `supportsHyperlinks()` returns `false`, `hyperlink(url)` returns `url` and 
 
 ## Per-Task Model Selection API
 
-Introduced 2026-08-31 (ports upstream opencode/kilocode `ab143253a`). Shared model-resolution helpers reused by the `task` and `agent_manager` tools. Gated on `experimental.task_model_selection` in `~/.alexi/config.json` (default `false`).
+Introduced 2026-08-31 (ports upstream opencode/kilocode `ab143253a`). Shared model-resolution helpers reused by the `task` and `agent_manager` tools. As of the 2026-09-24 upstream sync (`50e520adf`), the feature is **unconditional** — the former `experimental.task_model_selection` gate has been removed. `getConfigTaskModelSelection()` is now a `@deprecated` no-op shim that always returns `true`; `setConfigTaskModelSelection()` writes nothing. Callers that omit `model` / `provider` / `reasoning_effort` continue to inherit Alexi's SAP AI Core default routing so no observable change reaches operators who never override the model.
 
 ```typescript
 // src/tool/model-selection.ts
@@ -3084,40 +3084,32 @@ export function isSelectModelError(
 ): r is SelectModelError;
 ```
 
-Config helpers in `src/config/userConfig.ts`:
+Config helpers in `src/config/userConfig.ts` (both `@deprecated` since the 2026-09-24 sync — retained so external callers keep compiling):
 
 ```typescript
 /**
- * Read the experimental.task_model_selection flag. Non-boolean or
- * missing values fall back to false.
+ * @deprecated The `experimental.task_model_selection` flag has been
+ * removed upstream — per-task model selection is always enabled.
+ * Returns `true` unconditionally.
  */
 export function getConfigTaskModelSelection(): boolean;
 
 /**
- * Persist the experimental.task_model_selection flag. Merges into
- * the existing `experimental` object without clobbering other flags.
+ * @deprecated No-op setter retained for backwards compatibility with
+ * older tooling. Does NOT write to `~/.alexi/config.json`.
  */
-export function setConfigTaskModelSelection(enabled: boolean): void;
+export function setConfigTaskModelSelection(_enabled: boolean): void;
 ```
 
 ### `task` tool parameters
 
-The `task` tool (`src/tool/tools/task.ts`) accepts three optional nullable fields alongside the existing `prompt`, `description`, `subagent_type`, `task_id`, and `background`:
+The `task` tool (`src/tool/tools/task.ts`) accepts three optional nullable fields alongside the existing `prompt`, `description`, `subagent_type`, `task_id`, and `background`. All three are unconditionally available since the 2026-09-24 sync:
 
-| Parameter          | Type                          | Description                                                                 |
-| ------------------ | ----------------------------- | --------------------------------------------------------------------------- |
-| `model`            | `string \| null`              | Model name or `provider/id`. Requires `experimental.task_model_selection`.  |
-| `provider`         | `string \| null`              | Provider ID to disambiguate. Requires `model` to be set.                    |
-| `reasoning_effort` | `'low' \| 'medium' \| 'high'` | Reasoning-effort hint for reasoning-capable models. Requires the flag.      |
-
-Error contract when the flag is off:
-
-```typescript
-{
-  success: false,
-  error: 'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.'
-}
-```
+| Parameter          | Type                          | Description                                                                                    |
+| ------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `model`            | `string \| null`              | Model name or `provider/id`. Leaving unset inherits Alexi's SAP AI Core default routing.       |
+| `provider`         | `string \| null`              | Provider ID to disambiguate when the model is offered by multiple providers. Requires `model`. |
+| `reasoning_effort` | `'low' \| 'medium' \| 'high'` | Reasoning-effort hint for reasoning-capable models.                                            |
 
 Error contract when `provider` is supplied without `model`:
 
@@ -3241,16 +3233,7 @@ Discovery tool for enumerating models available to subagents. Registered in `src
 | `offset`  | `number \| null`  | `0`     | Pagination offset.                                                                             |
 | `limit`   | `number \| null`  | `50`    | Pagination limit (max 50).                                                                     |
 
-**Response when the flag is off:**
-
-```typescript
-{
-  enabled: false,
-  message: 'Model catalog listing is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to enable per-task model selection.'
-}
-```
-
-**Response when the flag is on:**
+**Response (feature is always on since the 2026-09-24 sync — the historical `{ enabled: false, message: '...' }` short-circuit has been removed):**
 
 ```typescript
 {
@@ -4407,6 +4390,313 @@ if (getConfigContextTools()) {
 ```
 
 Both tools are exported by name (`contextInspectTool`, `contextSummarizeTool`) alongside the other built-ins from `src/tool/tools/index.ts` so callers that need to interrogate the surface directly (e.g. plugin authors, integration tests) can import them without going through the registry.
+
+## Debug Config Command API (`alexi debug config`)
+
+Added in the 2026-09-24 sync (`src/cli/commands/debug/config.ts`, `src/cli/commands/debug/redact.ts`, port of opencode PR #50956 `fix(opencode): redact credentials in debug config`). Diagnostic subcommand that prints the effective Alexi configuration and the alexi-relevant slice of `process.env` to stdout as JSON, with every credential-shaped field replaced by `[REDACTED]`.
+
+### Command usage
+
+```bash
+alexi debug config
+```
+
+The command takes no options. Output shape:
+
+```json
+{
+  "config": {
+    "notifications": "allow",
+    "sharedAgentBoard": true,
+    "retention": { "enabled": true, "maxAgeDays": 30 },
+    "experimental": { "contextTools": true, "code_mode": false },
+    "routing": { "..." }
+  },
+  "env": {
+    "AICORE_RESOURCE_GROUP": "production",
+    "AICORE_SERVICE_KEY": "[REDACTED]",
+    "AICORE_MODEL": "gpt-4o",
+    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1",
+    "ALEXI_NO_NOTIFICATIONS": "1"
+  }
+}
+```
+
+Only environment variables whose KEY matches `^(AICORE|SAP_PROXY|ALEXI)_` are included so arbitrary shell secrets (`GITHUB_TOKEN`, `NPM_TOKEN`, ...) never leak into the output. Values are then redacted the same way as config fields — any KEY matching the secret patterns list has its value replaced with `[REDACTED]`.
+
+### Redaction helper API (`src/cli/commands/debug/redact.ts`)
+
+```typescript
+// Placeholder written in place of any redacted value.
+export const REDACTED = '[REDACTED]';
+
+/**
+ * Returns true when the supplied object key matches at least one
+ * secret pattern (case-insensitive). Patterns match on KEY names
+ * only — string contents are never scanned, so legitimate config
+ * containing the word "key" is not mangled.
+ *
+ * Built-in patterns: api[_-]?key, secret, token, password, credential,
+ * authorization, client[_-]?secret, clientsecret, serviceurl.
+ */
+export function isSecretKey(key: string): boolean;
+
+/**
+ * Recursively walk `value` and return a structurally equivalent
+ * deep-cloned copy in which any property whose KEY matches a secret
+ * pattern has its value replaced with `REDACTED`. Arrays are walked
+ * element-wise. Primitives are returned unchanged. Circular structures
+ * are not supported (a RangeError from the JS engine signals the
+ * caller must sanitize before calling `redact`).
+ */
+export function redact(value: unknown): unknown;
+```
+
+### Snapshot builder (`src/cli/commands/debug/config.ts`)
+
+```typescript
+/**
+ * Build a snapshot of what `alexi debug config` would print, with
+ * credentials masked. Split out from the CLI action so unit tests
+ * can assert on the redacted shape without spawning Commander.
+ */
+export function buildRedactedConfigSnapshot(): unknown;
+
+/**
+ * Register the `debug config` subcommand under the (auto-created)
+ * `debug` command group.
+ */
+export function registerDebugConfigCommand(program: Command): void;
+```
+
+The command action writes the snapshot to stdout via `console.log(JSON.stringify(snapshot, null, 2))` so a user can pipe the output directly into a bug report. This is one of the few call sites permitted to bypass `src/utils/logger.ts` — the exception is annotated with an `eslint-disable-next-line no-console` because the command is diagnostic output that must render exactly, not go through the log router.
+
+## Plan-mode Follow-up Event API (`plan.followup`)
+
+Added in the 2026-09-24 sync (`src/bus/plan-followup.ts`, port of opencode `5e05988b1`). Directory-scoped bus event that plan-mode subagents use to route follow-up questions back to the primary agent without cross-project bleed.
+
+```typescript
+// src/bus/plan-followup.ts
+
+export const PlanFollowupSchema = z.object({
+  question: z.string().min(1),
+  sessionID: z.string().min(1),
+  directory: z.string().min(1),  // absolute working directory of the emitter
+});
+export type PlanFollowupPayload = z.infer<typeof PlanFollowupSchema>;
+
+export const PlanFollowupEvent: BusEvent<PlanFollowupPayload>;
+
+/**
+ * Returns true when the event's `directory` matches (or is absent
+ * from) the subscriber's `currentDirectory`. Absence is a wildcard
+ * for forward compatibility with events emitted from a
+ * non-directory-scoped context.
+ */
+export function matchesDirectory(
+  event: Pick<PlanFollowupPayload, 'directory'>,
+  currentDirectory: string
+): boolean;
+```
+
+Recommended subscription pattern:
+
+```typescript
+import { PlanFollowupEvent, matchesDirectory } from './bus/plan-followup.js';
+
+const unsub = PlanFollowupEvent.subscribe((event) => {
+  if (!matchesDirectory(event, process.cwd())) {
+    return; // event belongs to another workspace running in the same host process
+  }
+  // ... handle event.question for event.sessionID ...
+});
+```
+
+## Agent Manager Activity Forwarding API (`src/core/agent-manager/orchestration-api.ts`)
+
+Added in the 2026-09-24 sync (port of kilocode PR #14487). Pure in-memory classifier that decides which session events an Agent Manager UI should forward. Not wired into a live UI yet — infrastructure for the future Ink sidebar.
+
+```typescript
+// src/core/agent-manager/orchestration-api.ts
+
+export type ActivityEventKind =
+  'status' | 'deleted' | 'wakeup' | 'turn-close' | 'error' | 'asked' | 'replied';
+export type SessionStatus =
+  'idle' | 'offline' | 'completed' | 'failed' | 'waiting' | 'scheduled';
+
+export interface ActivityEvent {
+  readonly kind: ActivityEventKind;
+  readonly sessionId: string;
+  readonly worktreeDir?: string;
+  readonly status?: SessionStatus;
+  readonly payload?: unknown;
+}
+
+export interface TranscriptEvent {
+  readonly sessionId: string;
+  readonly worktreeDir: string;
+  readonly payload: unknown;
+}
+
+export interface ForwardingDecision {
+  readonly forward: boolean;
+  readonly reason:
+    'activity-owned' | 'activity-not-owned' | 'transcript-selected' | 'transcript-background';
+}
+
+export function isActivityEventKind(kind: string): kind is ActivityEventKind;
+export function isEndOfLife(event: ActivityEvent): boolean; // true iff kind === 'deleted'
+
+export class ActivityEventForwarder {
+  addOwnedSession(sessionId: string): void;
+  removeOwnedSession(sessionId: string): void;
+  isOwned(sessionId: string): boolean;
+  setSelectedWorktree(worktreeDir: string | undefined): void;
+  getSelectedWorktree(): string | undefined;
+  decideActivity(event: ActivityEvent): ForwardingDecision;
+  decideTranscript(event: TranscriptEvent): ForwardingDecision;
+  handleActivity(event: ActivityEvent): ForwardingDecision;
+}
+
+/** Legacy factory retained for backward compatibility. */
+export function orchestrateAgentManagerSessions(): ActivityEventForwarder;
+```
+
+See [ARCHITECTURE.md — Agent Manager Activity Event Forwarding](ARCHITECTURE.md#agent-manager-activity-event-forwarding-srccoreagent-managerorchestration-apits) for the decision matrix and the offline-is-not-terminal contract.
+
+## MCP CIMD Helper API (`src/mcp/client-metadata.ts`)
+
+Added in the 2026-09 sync. Optional helper for OAuth flows against third-party MCP servers whose OAuth `client_id` is a URL that resolves to a JSON metadata document.
+
+```typescript
+// src/mcp/client-metadata.ts (re-exported from src/mcp/index.ts)
+
+export const ClientMetadataDocumentSchema: z.ZodObject<...>;
+export type ClientMetadataDocument = z.infer<typeof ClientMetadataDocumentSchema>;
+
+/**
+ * Fetch a Client ID Metadata Document from `url` and validate it
+ * against the CIMD schema. `signal` is forwarded to `fetch` so a
+ * caller-supplied abort signal cancels the network request promptly.
+ *
+ * Errors:
+ *   - Non-2xx HTTP status → Error('CIMD fetch failed: <status> <statusText>')
+ *   - Malformed JSON      → propagated from response.json()
+ *   - Schema mismatch     → propagated from zod.parse()
+ *
+ * Does NOT retry — CIMD documents are effectively static per client.
+ */
+export async function fetchClientMetadata(
+  url: string,
+  signal?: AbortSignal
+): Promise<ClientMetadataDocument>;
+
+/**
+ * Shape check: returns true when `clientId` looks like an
+ * `http(s)://` URL and should be resolved as CIMD.
+ */
+export function isClientMetadataUrl(clientId: string): boolean;
+```
+
+Alexi's SAP AI Core integration authenticates via `AICORE_SERVICE_KEY` (client-credentials), so this surface is only exercised for third-party MCP servers that require an interactive OAuth flow. Importing `src/mcp/client-metadata.ts` from Alexi's own code paths is opt-in — `oauth-provider.ts` calls into it only when the caller's `client_id` matches `isClientMetadataUrl`.
+
+## Incremental Linkifier API (`src/cli/tui/utils/incrementalLinkify.ts`)
+
+Added in the 2026-09-22 sync (issue #1807). Drop-in replacement for `linkify(text, cwd)` that amortises URL / `path:line` regex scans over the lifetime of a streaming bash tool call.
+
+```typescript
+// src/cli/tui/utils/incrementalLinkify.ts
+
+export interface IncrementalLinkifier {
+  /** Run the linkifier over `text`, reusing the cached prefix when possible. */
+  (text: string): string;
+  /** Discard cache — useful when the underlying tool row is reused. */
+  reset(): void;
+  /**
+   * Introspection for tests: returns the number of characters of
+   * `text` that were served from cache on the most recent
+   * invocation. `0` means the whole buffer was re-scanned (initial
+   * call or cache miss); a positive value proves the incremental
+   * path fired.
+   */
+  lastCachedChars(): number;
+}
+
+/**
+ * Build a fresh incremental linkifier bound to `cwd`. The returned
+ * function is a drop-in replacement for `(t) => linkify(t, cwd)` —
+ * same output for the same input — but amortises to O(delta) per
+ * call when invoked repeatedly with growing text.
+ */
+export function createIncrementalLinkifier(cwd?: string): IncrementalLinkifier;
+```
+
+Consumer pattern (`src/cli/tui/components/ToolRow.tsx`):
+
+```typescript
+const linkifierRef = useRef<IncrementalLinkifier | null>(null);
+const linkifier = useMemo(() => {
+  if (linkifierRef.current === null) {
+    linkifierRef.current = createIncrementalLinkifier();
+  }
+  return linkifierRef.current;
+}, []);
+// ... later ...
+<Text color={colors.toolOutput}>{linkifier(truncatedText)}</Text>
+```
+
+Cache contract:
+
+- Committed newline-terminated lines are frozen because `linkify`'s regexes only match within a single line.
+- A cache miss (buffer shrank, buffer changed, or first call) triggers a full rescan and resets the cached prefix.
+- The buffer must be a strict extension of the cached prefix to hit the fast path.
+- Amortised cost is O(delta) per call, where `delta` is the number of characters appended since the last call.
+
+See [ARCHITECTURE.md — Incremental linkifier for streaming output](ARCHITECTURE.md#incremental-linkifier-for-streaming-output-issue-1807).
+
+## Session Retention Scheduler API (`src/core/retentionScheduler.ts`)
+
+Added in the 2026-09-22 sync. Fire-and-forget scheduler that triggers `SessionManager.cleanupExpiredSessions()` at most once per 24h per user.
+
+```typescript
+// src/core/retentionScheduler.ts
+
+/**
+ * Return the last-run timestamp (milliseconds since epoch) recorded
+ * in ~/.alexi/last-retention-run, or 0 when the file is missing /
+ * unreadable / corrupt / more than 24h in the future. Never throws.
+ */
+export function readLastRun(now?: number): number;
+
+/**
+ * Return true when at least 24h have elapsed since the last recorded
+ * sweep. Also returns true when the state file is missing (first
+ * run on this host).
+ */
+export function shouldRun(now?: number): boolean;
+
+/**
+ * Trigger a retention pass in the background if the 24h cooldown has
+ * elapsed. Returns true when a sweep was scheduled, false when the
+ * cooldown is still active. The state file is written BEFORE the
+ * sweep runs so an unhandled error inside cleanupExpiredSessions
+ * does not cause the next startup to re-run immediately.
+ */
+export function triggerRetentionSweep(now?: number): boolean;
+```
+
+Called from `src/cli/program.ts` once per process start:
+
+```typescript
+try {
+  triggerRetentionSweep();
+} catch {
+  // Retention is a housekeeping best-effort. A scheduler failure must
+  // never block CLI startup.
+}
+```
+
+The sweep itself runs on the CLI's Node event loop via `setImmediate`, not a worker thread. The `SessionManager.cleanupExpiredSessions` call is synchronous but is wrapped in `setImmediate` so program startup returns to the caller before the scan begins.
 
 ## Worktree Status Registry API
 

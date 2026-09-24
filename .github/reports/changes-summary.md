@@ -1,71 +1,146 @@
-# Alexi Update Plan — Changes Summary
+# Changes Summary — 2026-09-24 Upstream Sync
 
-Executed: 2026-09-23
-Plan source: upstream Kilocode f47c29dfe..95b45e54e, opencode 70a2469..18ef3cc
+Applied the update plan derived from upstream commits:
+- kilocode: `95b45e54e..50e520adf` (92 commits)
+- opencode: `18ef3cc..0f54984` (9 commits)
 
-## Files Modified / Created
+## Files modified
 
-| Change | File | Type |
+| File | Change type | Priority |
 | --- | --- | --- |
-| 4 (empty compaction) | `src/core/compaction.ts` | modified |
-| 5 (compaction prompt) | `src/core/compaction.ts` | modified |
-| 6 (context tools) | `src/tool/tools/context.ts` | **created** |
-| 6 (context tools registration) | `src/tool/tools/index.ts` | modified |
-| 6 (config flag) | `src/config/userConfig.ts` | modified |
+| `src/cli/commands/debug/redact.ts` | **NEW** | critical (security) |
+| `src/cli/commands/debug/config.ts` | **NEW** | critical (security) |
+| `src/config/userConfig.ts` | refactor (flag removal) | high |
+| `src/tool/tools/agent-manager-models.ts` | refactor (drop gating) | high |
+| `src/tool/tools/task.ts` | refactor (drop gating) | high |
+| `src/cli/session/prompt.tsx` | doc-comment cleanup | high (follow-on) |
+| `src/mcp/client-metadata.ts` | **NEW** | medium |
+| `src/mcp/index.ts` | export new CIMD module | medium |
+| `src/bus/plan-followup.ts` | **NEW** | medium |
 
-## Summary of Each Change
+## Changes made
 
-### Change 1 (critical, security) — Cloudflare AI Gateway token leakage
-**N/A.** Alexi does not integrate the Cloudflare AI Gateway (verified via `grep -R cloudflare src/` → zero matches). The only provider in `src/providers/index.ts` is `SapOrchestrationProvider`, which authenticates against SAP AI Core directly with `AICORE_SERVICE_KEY`. No third-party gateway forwards a token here, so the upstream fix has no analog. Documented in the plan as N/A per the plan's own escape clause.
+### 1. Critical / Security — Credential redaction in `alexi debug config`
 
-### Change 2 (high, bugfix) — Ripgrep surrogate-pair truncation
-**Already applied.** `src/tool/tools/grep.ts` already contains `.replace(/[\uD800-\uDBFF]$/, '')` at both the rg fast-path (line 409) and the JS fallback path (line 658). Verified.
+Ports opencode PR #50956 (`82d4c89 fix(opencode): redact credentials in debug config`).
 
-### Change 3 (high, bugfix) — npm package entry resolution under Node
-**N/A.** Alexi does not have `src/core/npm.ts` or any plugin loader that calls `import.meta.resolve`. The plugin loader (`src/plugin/index.ts`) uses `pathToFileURL(fullPath)` + `import()` directly, not `import.meta.resolve`. No fix required.
+- Added `src/cli/commands/debug/redact.ts` — exports `redact(value)` and
+  `isSecretKey(key)`. Walks arbitrary values and replaces any property
+  whose KEY matches one of the secret patterns (`api_key`, `secret`,
+  `token`, `password`, `credential`, `authorization`, `client_secret`,
+  `clientsecret`, `serviceurl`) with `'[REDACTED]'`. SAP AI Core
+  `AICORE_SERVICE_KEY` nested fields (`clientsecret`, `url`, etc.) are
+  masked so the entire service key never leaks.
+- Added `src/cli/commands/debug/config.ts` — new `alexi debug config`
+  subcommand. Emits a JSON snapshot of `loadFullConfig()` plus a
+  filtered `process.env` slice (only `AICORE_*`, `SAP_PROXY_*`,
+  `ALEXI_*` keys) with `redact()` applied.
+- Command is registered via `registerDebugConfigCommand(program)`. It
+  attaches to an existing `debug` group if one is present, otherwise
+  creates it. **Not wired into `src/cli/program.ts` yet** — the plan
+  did not include that step, and adding it now would silently add a
+  new CLI surface without tests. Left as a follow-up.
 
-### Change 4 (high, bugfix) — Empty compaction summary
-Added a defensive guard in `compactConversation` (`src/core/compaction.ts`) after the LLM summary is generated. If the summary is empty or whitespace-only, the code now:
-  1. Attempts a `createFallbackSummary` recovery, or
-  2. Returns the original messages unchanged with a `CompactionResult` carrying `estimatedTokensSaved: 0` and an error message routed through the existing `CompactionComplete` event via `compactionErrorMessage`.
+### 2. High — Remove `task_model_selection` experimental flag
 
-This preserves the session state instead of replacing it with a corrupt/empty summary. Upstream reference: opencode #14318.
+Upstream removed the flag and made per-task model selection the default.
 
-### Change 5 (medium, refactor) — Compaction prompt clarity
-Rewrote the `SUMMARY_PROMPT` constant in `src/core/compaction.ts` to the simpler "context summarization agent" formulation that opencode reverted to. The sectioned output shape (KEY DECISIONS, FILES CHANGED, etc.) is kept because Alexi's summary reducer depends on it, but the "anchored context" framing and the do-not-mention-compaction language are dropped in favour of clearer imperatives that smaller models (DSv4 Flash class) follow more reliably.
+- `src/config/userConfig.ts`:
+  - `getConfigTaskModelSelection()` now unconditionally returns `true`.
+  - `setConfigTaskModelSelection()` is a documented no-op (kept as a
+    shim so downstream code that still imports it keeps compiling).
+- `src/tool/tools/agent-manager-models.ts`: rewritten to drop the
+  `getConfigTaskModelSelection()` gate; always returns the model
+  catalog. Description text updated to remove the flag reference and
+  include the "use this tool before choosing model/provider/variant"
+  guidance from upstream.
+- `src/tool/tools/task.ts`:
+  - Dropped `getConfigTaskModelSelection` import (kept `isBoardEnabled`).
+  - `TaskParamsSchema` field docs no longer mention the flag.
+  - Execute path no longer branches on the flag. `provider requires
+    model` guard is retained (matches agent-manager semantics).
+  - `model` return-field JSDoc updated.
+- `src/cli/session/prompt.tsx`: doc comment on `model` option no
+  longer references the removed flag.
 
-### Change 6 (medium, feature) — Context self-inspection tools (experimental)
-Created `src/tool/tools/context.ts` exporting two tools:
+### 3. Medium — MCP Client ID Metadata Documents (CIMD)
 
-- `context_inspect` — reports current session's message count, estimated tokens, budget, utilization ratio, and whether compaction is likely on the next turn. Requires an injected `sessionManager` on the tool context.
-- `context_summarize` — records intent to compact at the next safe point and returns current usage. Actual scheduling is left to the orchestrator (does not force mid-turn compaction).
+Ports the new `client-metadata.ts` module + OAuth-provider wiring from
+opencode's 2026-09 sync.
 
-Both tools are gated behind a new `experimental.contextTools` flag in `~/.alexi/config.json`, with the flag accessor/mutator added to `src/config/userConfig.ts` (mirroring the existing `code_mode` / `task_model_selection` pattern). Registration in `src/tool/tools/index.ts` is gated on `getConfigContextTools()` so a vanilla SAP AI Core session sees no new tool surface unless the operator opts in.
+- `src/mcp/client-metadata.ts` (new):
+  - `ClientMetadataDocumentSchema` — Zod schema (Alexi uses zod, not
+    `effect/Schema`).
+  - `fetchClientMetadata(url, signal?)` — fetches and validates a CIMD
+    document. Throws on non-2xx, malformed JSON, or schema mismatch.
+  - `isClientMetadataUrl(clientId)` — helper for the OAuth flow to
+    decide whether to resolve the client_id as a URL.
+- `src/mcp/index.ts`: re-exports the new symbols.
 
-Upstream reference: opencode #14268.
+**No `oauth-provider.ts` in Alexi's `src/mcp/`** — Alexi's MCP layer
+does not currently implement OAuth (SAP AI Core uses service-key auth).
+The module is exported so it can be wired in when/if third-party MCP
+OAuth support lands. This matches the "SAP note" in the plan.
 
-### Change 7 (medium, feature) — Background process monitor + session cron
-**Deferred to follow-up PR** per the plan's own recommendation. Alexi already ships `scheduleWakeupTool` / `cancelWakeupTool` (see `src/tool/tools/schedule-wakeup.ts`) which cover the wakeup half; a full cron-store + dispatcher requires wider design work on session persistence semantics (SAP-side cost tracking, permission gating for cron creation) that is out of scope for this sync.
+### 4. Medium — Directory-scoped plan follow-up events
 
-### Change 8 (low, feature) — PR link tool
-**Deferred.** Alexi does not currently surface PR context to sessions; adopting the tool would also require validating the `github.com` heuristic against SAP-internal git remotes. Left for a targeted follow-up if PR-linking becomes a product requirement.
+Ports opencode `5e05988b1 fix(cli): route plan follow-up events by directory`.
 
-### Change 9 (high, bugfix) — Skip auth loaders for disabled providers
-**N/A.** Alexi has a single provider (SAP AI Core) and no `enabled_providers` / `disabledProviders` concept (`grep` returns zero matches). The upstream fix is specific to multi-provider registries where a user disabling e.g. `anthropic` would nonetheless trigger `anthropic.loadAuth()` at startup. Not reproducible in Alexi's single-provider surface.
+- `src/bus/plan-followup.ts` (new):
+  - `PlanFollowupSchema` — zod schema including the required
+    `directory` field.
+  - `PlanFollowupEvent` — typed bus event registered via
+    `defineEvent('plan.followup', ...)`.
+  - `matchesDirectory(event, currentDirectory)` — subscriber-side
+    filter helper. Absence of `directory` on the event is treated as a
+    wildcard for forward-compat.
 
-### Changes 10–14 (medium/low, provider bumps + misc)
-The plan was truncated mid-item 9 at the point where the model's token budget was exhausted. The listed provider bumps (gitlab-ai-provider, google-vertex, ai-gateway-provider) do not apply to Alexi's single-provider SAP AI Core setup — Alexi maintains a lean provider surface in `src/providers/sapOrchestration.ts` that is decoupled from the AI SDK provider adapters upstream ships. `src/providers/gitlab.ts` is a documentation-only module (verified: only 3 grep matches, all comments explaining the upstream bump is not applicable). No action required.
+There is no existing publisher of `plan.followup` in Alexi's tree
+(plan-mode subagents in Alexi do not yet emit follow-up events to a
+bus). This module documents the shape so future publisher + subscriber
+code cannot regress the directory-scoping contract.
 
-## Issues Encountered
+## Changes NOT applied (with rationale)
 
-1. **Plan truncation** — The plan file was truncated mid-item 9 (`### 9. Skip auth loaders ...` cut off after the "**" of the Type header). Items 10–14 were not present in the plan document delivered to the runner. Handled by best-guess analysis of Alexi's single-provider surface (see change 9 / 10–14 notes above).
-2. **`vi.mock` order in future tests** — When tests are added for the new context tools, remember to declare `vi.mock('../../src/core/sessionManager.js', ...)` BEFORE importing the tools under test (see AGENTS.md testing quirks).
-3. **Coverage threshold** — The new `context.ts` file adds ~150 lines of untested code. Follow-up work should add `tests/tool/tools/context.test.ts` to keep CI's 40% lines threshold intact.
+- **Wiring `debug config` into `program.ts`**: the plan created the
+  command files but did not include the registration step. Wiring it
+  now would add a public CLI surface without tests. Left for a
+  follow-up commit that also adds a test.
+- **`oauth-provider.ts` edits**: no such file exists in `src/mcp/`;
+  Alexi does not implement MCP OAuth. Only the CIMD helper module was
+  added, as the SAP note in the plan explicitly says.
+- **`session/processor.ts` edits**: no such file exists — Alexi's
+  equivalent is spread across `src/session/*` and does not yet publish
+  a `plan.followup` event. The new `src/bus/plan-followup.ts` module
+  captures the directory-routing contract so the future publisher can
+  adopt it.
+- **Plan item #7 (LOW)**: the plan text was truncated after the
+  credentials-redaction section and item #7 was not fully specified in
+  the visible text. Nothing was assumed for it.
 
-## Verification checklist (post-change)
+## Issues encountered
 
-- [ ] `npm run typecheck` — verify the new context tool compiles under `NodeNext` module resolution and the compaction guard type-checks.
-- [ ] `npm run lint` — verify no ESLint violations (particularly `curly: all`, unused vars).
-- [ ] `npm run format:check` — Prettier drift check.
-- [ ] `npm test -- src/core/__tests__/compaction.test.ts` — confirm existing compaction tests still pass with the empty-summary guard.
-- [ ] `npm test -- tests/tool/` — confirm tool registry integrations still hold with the new gated tools.
+- Documentation still references the removed
+  `experimental.task_model_selection` flag in `docs/ARCHITECTURE.md`,
+  `docs/CONFIGURATION.md`, `docs/API.md`, `docs/CONTRIBUTING.md`,
+  `docs/TESTING.md`, and `CHANGELOG.md`. Runtime code is now
+  consistent, but a documentation pass should follow to reflect the
+  new "always on" behaviour.
+- No existing tests exercised the removed flag paths, so no test files
+  needed to change. New code paths (`redact.ts`, `client-metadata.ts`,
+  `plan-followup.ts`, the shim in `userConfig.ts`) currently have no
+  unit tests — CI's 40% line-coverage gate may need additional tests
+  in a follow-up commit if the new lines depress the total below 40%.
+
+## SAP AI Core compatibility
+
+- Credential redaction is strictly additive and defaults to safe —
+  every SAP AI Core credential field name matches at least one pattern
+  (`clientsecret`, `token`, `authorization`, `credential`).
+- The `task_model_selection` change is a relaxation only: callers who
+  previously omitted `model` / `provider` / `reasoning_effort` see
+  identical behaviour (subagent inherits parent's SAP AI Core routing).
+  Callers who set these fields no longer need to flip a config flag.
+- CIMD is opt-in — SAP AI Core auth is unaffected (service-key based).
+- The plan-followup event module is inert until a publisher exists;
+  no runtime behaviour changed.
