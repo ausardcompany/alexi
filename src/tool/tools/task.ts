@@ -37,7 +37,7 @@ import { deriveSubagentSessionPermission } from '../../agent/subagent-permission
 import type { PermissionRule } from '../../permission/index.js';
 import { getCostTracker, type TaskUsageSummary } from '../../core/costTracker.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
-import { getConfigTaskModelSelection, isBoardEnabled } from '../../config/userConfig.js';
+import { isBoardEnabled } from '../../config/userConfig.js';
 import { SessionManager } from '../../core/sessionManager.js';
 import { BoardStore } from '../../core/database/boardStore.js';
 import { BoardContext } from '../../core/database/boardContext.js';
@@ -83,18 +83,16 @@ const TaskParamsSchema = z.object({
     .describe(
       'Run task in background (experimental, requires ALEXI_EXPERIMENTAL_BACKGROUND_TASKS)'
     ),
-  // Ports upstream opencode/kilocode task-model-selection (2026-08 sync).
-  // Requires `experimental.task_model_selection` to be set to `true` in
-  // `~/.alexi/config.json`; otherwise providing any of these fields
-  // aborts the task with a config-hint error so buggy calls never
-  // silently ignore the caller's intent.
+  // Per-task model selection (opencode/kilocode 2026-09 sync). The former
+  // `experimental.task_model_selection` gate has been removed upstream and
+  // in Alexi — subagents may always override model / provider /
+  // reasoning_effort. Leaving any of these fields unset preserves the
+  // parent turn's routing (Alexi's SAP AI Core defaults).
   model: z
     .string()
     .nullable()
     .optional()
-    .describe(
-      'Optional model name (or provider/id) for the subagent. Requires experimental.task_model_selection.'
-    ),
+    .describe('Optional model name (or provider/id) for the subagent.'),
   provider: z
     .string()
     .nullable()
@@ -106,9 +104,7 @@ const TaskParamsSchema = z.object({
     .enum(['low', 'medium', 'high'])
     .nullable()
     .optional()
-    .describe(
-      'Optional reasoning effort hint for reasoning-capable models. Requires experimental.task_model_selection.'
-    ),
+    .describe('Optional reasoning effort hint for reasoning-capable models.'),
   // Explicit approval boundary for the spawned subagent. When provided,
   // the subagent's session permission is narrowed to this list plus a
   // safe baseline (read/glob/grep/list). Parent-session approvals are
@@ -317,8 +313,8 @@ interface TaskResult {
   usage?: TaskUsageSummary;
   /**
    * Resolved (providerID, modelID) pair when the caller supplied
-   * `params.model` and `experimental.task_model_selection` is enabled.
-   * Absent when the subagent inherits Alexi's default routing.
+   * `params.model`. Absent when the subagent inherits Alexi's default
+   * routing.
    */
   model?: string;
   provider?: string;
@@ -452,12 +448,11 @@ Usage:
       };
     }
 
-    // Experimental per-task model selection (ports upstream 2026-08 sync).
-    // Only resolve when the caller actually asked for a model / provider /
-    // reasoning_effort AND the operator has opted in via
-    // `experimental.task_model_selection`. This preserves default
-    // behaviour for the vast majority of subagent calls: no config
-    // change means the subagent inherits Alexi's SAP AI Core routing.
+    // Per-task model selection (upstream 2026-09 sync — flag removed,
+    // feature now unconditional). When the caller supplies any of
+    // model / provider / reasoning_effort we resolve them against the
+    // provider registry; otherwise the subagent inherits Alexi's SAP AI
+    // Core default routing from the parent turn.
     let resolvedModelID: string | undefined;
     let resolvedProviderID: string | undefined;
     let resolvedReasoningEffort: 'low' | 'medium' | 'high' | undefined;
@@ -465,13 +460,6 @@ Usage:
     const requestedProvider = params.provider?.trim();
     const requestedReasoning = params.reasoning_effort ?? undefined;
     if (requestedModel || requestedProvider || requestedReasoning) {
-      if (!getConfigTaskModelSelection()) {
-        return {
-          success: false,
-          error:
-            'Per-task model selection is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to allow subagents to override model/provider/reasoning_effort.',
-        };
-      }
       // Mirror agent-manager: `provider` requires `model` — otherwise the
       // provider hint has nothing to bind to and would be silently dropped.
       if (requestedProvider && !requestedModel) {

@@ -621,46 +621,31 @@ export function setConfigAdditionalExtensions(extensions: string[]): void {
 // ============ Experimental flags ============
 
 /**
- * Experimental feature flag: allow `task` subagents to select their own
- * model / provider / reasoning_effort.
+ * Per-task model selection is now the DEFAULT behaviour, matching upstream
+ * opencode/kilocode (2026-09 sync — the experimental `task_model_selection`
+ * flag was removed and the feature enabled unconditionally). The former
+ * `getConfigTaskModelSelection()` / `setConfigTaskModelSelection()` helpers
+ * are retained as thin no-op shims so any external caller that still
+ * imports them (docs, downstream tooling) keeps compiling; both always
+ * report the feature as ON.
  *
- * Mirrors the upstream opencode/kilocode `experimental.task_model_selection`
- * config flag (2026-08 sync). Default is `false` so Alexi's SAP AI Core
- * defaults are preserved for every subagent unless the operator opts in.
- *
- * Stored as `experimental.task_model_selection` inside the top-level
- * `experimental` object of `~/.alexi/config.json`, matching the upstream
- * serialized shape:
- *
- * ```json
- * { "experimental": { "task_model_selection": true } }
- * ```
- *
- * Non-boolean or missing values fall back to `false`.
+ * If SAP-specific gating is required in the future (for example, an
+ * operator policy that only allows SAP-approved models), add a dedicated
+ * `experimental.sap_task_model_allowlist` flag instead of reintroducing
+ * the removed gate.
  */
 export function getConfigTaskModelSelection(): boolean {
-  const config = loadFullConfig();
-  const experimental = config.experimental;
-  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
-    return false;
-  }
-  const value = (experimental as Record<string, unknown>).task_model_selection;
-  return value === true;
+  return true;
 }
 
 /**
- * Persist the `experimental.task_model_selection` flag.
+ * @deprecated The `experimental.task_model_selection` flag no longer exists
+ * — task subagent model selection is always enabled. This setter is a
+ * no-op retained for backwards compatibility with older tooling; it does
+ * NOT write anything to `~/.alexi/config.json`.
  */
-export function setConfigTaskModelSelection(enabled: boolean): void {
-  const config = loadFullConfig();
-  const existing =
-    config.experimental &&
-    typeof config.experimental === 'object' &&
-    !Array.isArray(config.experimental)
-      ? (config.experimental as Record<string, unknown>)
-      : {};
-  config.experimental = { ...existing, task_model_selection: enabled };
-  saveFullConfig(config);
+export function setConfigTaskModelSelection(_enabled: boolean): void {
+  // no-op — feature is unconditionally on. See getConfigTaskModelSelection.
 }
 
 /**

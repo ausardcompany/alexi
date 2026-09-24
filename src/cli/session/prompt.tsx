@@ -13,9 +13,8 @@ export interface SendPromptOptions {
   /** The prompt text as entered by the user (post-trim). */
   text: string;
   /**
-   * Optional model override — when the operator has opted in via
-   * `experimental.task_model_selection`, subagent prompts can pin a
-   * specific model. Ignored otherwise (see `getConfigTaskModelSelection`).
+   * Optional model override — subagent prompts may pin a specific model
+   * (per-task model selection is always available; see the `task` tool).
    */
   model?: string;
   /** Optional provider hint accompanying `model`. */

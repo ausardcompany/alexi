@@ -1,33 +1,26 @@
 /**
  * Agent Manager Models Tool — model catalog discovery for subagents.
  *
- * Ports the upstream opencode `agent-manager-models` tool (2026-08 sync,
- * refactored ab143253a to depend on `Config.Service` and gate on the
- * experimental `task_model_selection` flag). Alexi adapts the Effect-
- * based upstream shape to the local `defineTool` contract.
- *
- * Behaviour
- * ---------
- * - When `experimental.task_model_selection` is `false` (the default),
- *   the tool refuses to enumerate models and returns a hint pointing at
- *   the flag. This preserves Alexi's SAP AI Core-only defaults for
- *   users who have not opted in to subagent model selection.
- * - When the flag is enabled, the tool returns a paginated list of
- *   `{ modelName, providers, ids }` rows filtered by the optional
- *   `query`. Callers pass the `modelName` (or a `provider/id` string)
- *   as the `agent_manager` task `model` field, and optionally the
- *   `provider` field to force a specific provider when the same model
- *   name is offered by more than one.
+ * Ports the upstream opencode `agent-manager-models` tool. In the 2026-09
+ * sync (upstream `50e520adf` et al.), the experimental
+ * `task_model_selection` flag was removed and the tool always advertises
+ * the model catalog. Alexi mirrors that: this tool no longer gates on any
+ * config flag and always returns paginated `{ modelName, providers, ids }`
+ * rows.
  *
  * The shared `AGENT_MANAGER_MODELS_HINT` is still exported so the
  * `agent_manager` tool description and any future TUI surface can stay
  * consistent about the `provider` field.
+ *
+ * SAP note: if a SAP AI Core deployment needs to restrict which models
+ * subagents can select (for example an operator allow-list), add the
+ * filter inside `candidates()` / provider registration rather than
+ * reintroducing the removed gate.
  */
 
 import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { candidates } from '../model-selection.js';
-import { getConfigTaskModelSelection } from '../../config/userConfig.js';
 
 export const AGENT_MANAGER_MODELS_HINT =
   'Pass a model name (or one of its providers/IDs) as the agent_manager task `model`. ' +
@@ -121,28 +114,16 @@ export const agentManagerModelsTool = defineTool<typeof ParamsSchema, AgentManag
 
   description: `List models available for agent_manager task subagents to select.
 
-Requires the experimental config flag \`experimental.task_model_selection\` (default: off).
-When the flag is off, this tool returns a hint pointing at the flag and no rows.
-When the flag is on, returns a paginated list of \`{ modelName, providers, ids }\`.
+Returns a paginated list of \`{ modelName, providers, ids }\`. Use this tool
+before choosing the model, provider, or variant for the task subagent tool.
+You may choose these settings to suit the subagent task without creating an
+Agent Manager session.
 
 ${AGENT_MANAGER_MODELS_HINT}`,
 
   parameters: ParamsSchema,
 
   async execute(params, _context): Promise<ToolResult<AgentManagerModelsResult>> {
-    // Gate on the experimental flag. Matches upstream ab143253a: the
-    // tool is disabled/hidden when the operator has not opted in.
-    if (!getConfigTaskModelSelection()) {
-      return {
-        success: true,
-        data: {
-          enabled: false,
-          message:
-            'Model catalog listing is disabled. Set experimental.task_model_selection=true in ~/.alexi/config.json to enable per-task model selection.',
-        },
-      };
-    }
-
     const all = aggregate();
     const query = params.query?.trim() ?? '';
     const matches = query
