@@ -6386,3 +6386,68 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/useWorktreeStatus.test.tsx \
   tests/cli/tui/Sidebar.test.tsx
 ```
+
+## Testing the Stream-Silence Connectivity Probe (issue #1836)
+
+Two dedicated suites lock the contract behind the `[waiting for network]` classification path (see [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836) and [API.md — Stream Watchdog and Connectivity Probe API](API.md#stream-watchdog-and-connectivity-probe-api)):
+
+- `tests/core/streamProbe.test.ts` (337 lines) — covers the probe module in isolation.
+- `tests/core/streamWatchdog.test.ts` (+177 lines net) — adds a `stream-silence connectivity probe (#1836)` describe block that exercises the watchdog's integration with a mock probe.
+
+Neither suite touches the real network: the remote HEAD probe is stubbed via the `remoteProbe` DI hook and the local TCP probe uses an ephemeral `net.createServer` listener so the test controls whether the port accepts connections.
+
+### `tests/core/streamProbe.test.ts` (337 lines)
+
+Directly exercises the pure classification and resolution helpers, plus the never-throws contract of `probeStreamConnectivity`:
+
+1. **`isLocalEndpoint` classification.** Loopback (`127.0.0.1`, `localhost`, `[::1]`), RFC1918 (`10/8`, `192.168/16`, `172.16/12`, `172.31.x`), link-local (`169.254/16`, `[fe80::]`), unique-local IPv6 (`[fc00::]`, `[fd12::]`), and bare hostnames without a dot (`sap-ai-core`, `my-proxy`) are local. Boundary IPv4 addresses (`172.15.x` and `172.32.x` outside the 172.16/12 range) and public FQDNs / public IPv6 are remote. Malformed URLs default to remote (safer HEAD probe).
+2. **`resolveProviderBaseUrl` env resolution.** `SAP_PROXY_BASE_URL` wins over `AICORE_SERVICE_KEY.serviceurls.AI_API_URL`; malformed JSON in `AICORE_SERVICE_KEY` returns `undefined`; env-var references (`${VAR}`, `$VAR`) expand at probe time.
+3. **`tcpConnect` behaviour.** Uses `net.createServer` to spin up an ephemeral listener; asserts `{ reachable: true }` on connect, `{ reachable: false, error }` on refused / timeout / DNS failure. Never rejects.
+4. **`probeStreamConnectivity` dispatch.** Local endpoints route to the local probe; remote endpoints route to the injected `remoteProbe`. `baseUrl: undefined` (unresolved) returns `{ reachable: false, error: 'No provider base URL configured...' }`. Invalid URLs return `{ reachable: false, error: 'Invalid provider base URL "...": ...' }`.
+5. **`NetworkDisconnectedError` shape.** Asserts `name === 'NetworkDisconnectedError'`, `code === 'NETWORK_DISCONNECTED'`, `isNetworkDisconnected === true`, and the message format `Network disconnected: <detail>`. `isNetworkDisconnectedError` matches both `instanceof` and duck-typed `{ isNetworkDisconnected: true }` values.
+
+### `tests/core/streamWatchdog.test.ts` — probe integration
+
+A `stream-silence connectivity probe (#1836)` describe block pins the watchdog's decision at idle timeout:
+
+```typescript
+it('surfaces NetworkDisconnectedError when the probe reports unreachable', async () => {
+  const { factory } = stalledAsyncSource();
+  const iter = createStreamWatchdog(factory, {
+    idleTimeoutMs: 50,
+    probe: async () => ({
+      reachable: false,
+      error: 'TCP connect to localhost:8080 failed: ECONNREFUSED',
+      kind: 'local',
+      url: 'http://localhost:8080',
+    }),
+  });
+  await iter.next();
+  let caught: unknown;
+  try { await iter.next(); } catch (err) { caught = err; }
+  expect(caught).toBeInstanceOf(NetworkDisconnectedError);
+  expect((caught as NetworkDisconnectedError).kind).toBe('local');
+  expect((caught as NetworkDisconnectedError).url).toBe('http://localhost:8080');
+});
+```
+
+Cases covered:
+
+1. **Unreachable probe → `NetworkDisconnectedError`.** The watchdog aborts with the probe's `error` / `url` / `kind` metadata attached.
+2. **Reachable probe → falls back to `StreamStalledError`.** A probe returning `{ reachable: true }` means the server is slow, not disconnected; the pre-#1836 stall path runs.
+3. **Probe throws → falls back to `StreamStalledError`.** An over-eager probe must never mask a genuine stall. The watchdog swallows the probe's exception and surfaces the plain stall.
+4. **Chunks arrive → probe never fires.** A stream that yields chunks steadily consumes each pull before the idle timer arms; the probe callable is not invoked. Prevents every slow-but-alive turn from burning a network round-trip.
+5. **Long-running tool extends the window, holding the probe silent.** A `bash` tool-call delta extends the idle window from short to long; the probe must not fire during the extended window. Asserts `probeCalled === false` after 300 ms with an `idleTimeoutMs: 100` / `toolExtensionMs: 5_000` watchdog.
+6. **`probe: false` and unconfigured probe preserve pre-#1836 behaviour.** Locks the "unit tests that construct a watchdog directly are not affected by ambient env configuration" contract — the plain `StreamStalledError` path still runs.
+
+### Testing patterns to reuse
+
+- **DI-injected probe callable.** Pass `probe: async () => ({ reachable: false, ... })` to test the branch without touching the real network. The watchdog treats a function-valued `probe` the same as it treats the default env-derived probe.
+- **`stalledAsyncSource()` helper.** Yields an initial chunk then parks on the abort signal, mirroring a stalled SAP AI Core SSE stream. Records teardown state so the test can assert that `return()` was forwarded to the source's finally-block.
+- **`net.createServer` ephemeral listener.** For `tcpConnect` tests, bind `127.0.0.1:0`, capture the assigned port, and `close()` in `afterEach`. Avoids ambient port collisions across parallel workers.
+
+Run the full probe / watchdog coverage:
+
+```bash
+npm test -- tests/core/streamProbe.test.ts tests/core/streamWatchdog.test.ts
+```
