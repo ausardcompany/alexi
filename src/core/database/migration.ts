@@ -58,9 +58,7 @@ export interface LegacyMigrationRow {
  * This module exports the helper predicate below so adapter-specific code
  * can share the detection logic.
  */
-export function legacyDrizzleHasNameColumn(
-  columns: ReadonlyArray<{ name: string }>
-): boolean {
+export function legacyDrizzleHasNameColumn(columns: ReadonlyArray<{ name: string }>): boolean {
   return columns.some((column) => column.name === 'name');
 }
 

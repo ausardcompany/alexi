@@ -77,10 +77,7 @@ describe('reportNetworkDisconnect', () => {
     const handler = vi.fn();
     const unsub = NetworkDisconnectEvent.subscribe(handler);
     try {
-      const result = reportNetworkDisconnect(
-        new Error('read ECONNRESET'),
-        'aicore-anthropic'
-      );
+      const result = reportNetworkDisconnect(new Error('read ECONNRESET'), 'aicore-anthropic');
       expect(result).toEqual({ reason: 'socket', retriable: true });
       expect(handler).toHaveBeenCalledTimes(1);
       expect(handler).toHaveBeenCalledWith(

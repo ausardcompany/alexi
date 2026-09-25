@@ -63,10 +63,7 @@ export type NetworkDisconnectPayloadT = z.infer<typeof NetworkDisconnectPayload>
  * Subscribers: the TUI status bar, headless CLI logger, and the session
  * queue drain that pauses new requests while a reconnect is in flight.
  */
-export const NetworkDisconnectEvent = defineEvent(
-  'network.disconnected',
-  NetworkDisconnectPayload
-);
+export const NetworkDisconnectEvent = defineEvent('network.disconnected', NetworkDisconnectPayload);
 
 /**
  * Classify an unknown error value as a network disconnect, or return

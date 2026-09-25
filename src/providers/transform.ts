@@ -897,9 +897,9 @@ function isToolCallPart(part: AnthropicMessagePart): boolean {
  * NEVER mutates its input. Returns a new message when a re-bind occurs;
  * otherwise returns the input by reference.
  */
-export function bindThinkingToToolCall<
-  T extends { role: string; parts?: AnthropicMessagePart[] },
->(msg: T): T {
+export function bindThinkingToToolCall<T extends { role: string; parts?: AnthropicMessagePart[] }>(
+  msg: T
+): T {
   if (msg.role !== 'assistant' || !Array.isArray(msg.parts)) {
     return msg;
   }
