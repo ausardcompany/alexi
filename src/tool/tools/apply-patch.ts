@@ -148,6 +148,32 @@ interface ApplyPatchResult {
   path: string;
   diff: string;
   linesChanged: number;
+  /**
+   * Optional destination path when the patch renames the file.
+   *
+   * Only populated when the move target is a non-empty string; an empty
+   * `move_path` in the patch is treated as "no move" to guard against
+   * upstream kilocode bug `f7da00f35` where an empty move path was
+   * serialized and caused patch application to fail on files that were
+   * not actually being renamed.
+   */
+  movePath?: string;
+}
+
+/**
+ * Normalize a patch move-path field: treat both `undefined` and the empty
+ * string as "no move", returning `undefined` in both cases. Any non-empty
+ * string is returned verbatim.
+ *
+ * Ports upstream kilocode `f7da00f35` (PR #45329) — an empty `move_path`
+ * previously survived serialization and caused patch application to fail
+ * when a file was not actually being renamed.
+ */
+export function normalizeMovePath(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  return value;
 }
 
 /**

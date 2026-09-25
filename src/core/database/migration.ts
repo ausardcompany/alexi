@@ -31,6 +31,60 @@ export interface Migration {
  * narrow so this module doesn't hard-couple to a specific SQL adapter
  * (better-sqlite3, effect-sql, or raw pg).
  */
+export interface LegacyMigrationRow {
+  /** Original id/name of the legacy migration (may be undefined if column missing). */
+  name?: string;
+  /** Legacy `created_at` timestamp in ms (only present on very old Drizzle DBs). */
+  created_at?: number;
+}
+
+/**
+ * Legacy Drizzle migration importer guard.
+ *
+ * Ports upstream opencode `b72b50006` (fix: guard legacy `__drizzle_migrations`
+ * import against DBs that never had a `name` column). Older Drizzle-based
+ * installations only stored `created_at`. Blindly running
+ * `SELECT name FROM __drizzle_migrations` on those DBs fails with
+ * `no such column: name`, breaking the whole migration bootstrap.
+ *
+ * Callers that need to import a legacy Drizzle journal MUST first probe
+ * `pragma_table_info('__drizzle_migrations')` and route to the appropriate
+ * branch:
+ *  - `name` column present: `SELECT name FROM __drizzle_migrations WHERE name IS NOT NULL`.
+ *  - `name` column absent: `SELECT created_at FROM __drizzle_migrations WHERE created_at IS NOT NULL`
+ *    and match each row's `created_at` timestamp against the known migration
+ *    id prefix (`strftime('%Y%m%d%H%M%S', created_at / 1000, 'unixepoch')`).
+ *
+ * This module exports the helper predicate below so adapter-specific code
+ * can share the detection logic.
+ */
+export function legacyDrizzleHasNameColumn(
+  columns: ReadonlyArray<{ name: string }>
+): boolean {
+  return columns.some((column) => column.name === 'name');
+}
+
+/**
+ * Given a Drizzle legacy `created_at` timestamp (ms since epoch), compute
+ * the `YYYYMMDDhhmmss` prefix Alexi migrations use as their id prefix so
+ * a legacy row can be reconciled against the current migration list.
+ *
+ * Mirrors upstream opencode's `strftime('%Y%m%d%H%M%S', created_at / 1000,
+ * 'unixepoch')`.
+ */
+export function legacyMigrationIdPrefix(createdAtMs: number): string {
+  const d = new Date(createdAtMs);
+  const pad = (n: number): string => n.toString().padStart(2, '0');
+  return (
+    `${d.getUTCFullYear()}` +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds())
+  );
+}
+
 export interface MigrationTx {
   /**
    * Return true if a migration id has already been recorded inside this
