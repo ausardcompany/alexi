@@ -2723,6 +2723,130 @@ Key coverage points for future changes to `worktreeId` handling:
 
 All cases route through `agentManagerTool.executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path and the handler's capability check from permission behaviour. When the managed-worktree registry lands in a future release, the fourth case should be split into a happy-path assertion (successful directory resolution) and a not-found assertion (unknown `worktreeId` still fails loudly).
 
+### Testing `apply_patch` `move_path` Normalization
+
+Introduced 2026-09-25 (ports upstream kilocode `f7da00f35`, PR #45329).
+An empty `move_path` previously survived serialization and caused
+patch application to fail on files that were NOT actually being
+renamed. The `normalizeMovePath` helper on
+`src/tool/tools/apply-patch.ts` treats both `undefined` and the empty
+string as "no move" and returns `undefined` in both cases; any
+non-empty string is returned verbatim.
+
+Reference regression suite:
+`src/tool/tools/__tests__/apply-patch.move-path.test.ts` (30 lines,
+four cases). The pattern is a pure-function test — no filesystem, no
+mocks required:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeMovePath } from '../apply-patch.js';
+
+describe('normalizeMovePath', () => {
+  it('returns undefined for an undefined input', () => {
+    expect(normalizeMovePath(undefined)).toBeUndefined();
+  });
+
+  it('treats the empty string as absent (regression: kilocode f7da00f35)', () => {
+    expect(normalizeMovePath('')).toBeUndefined();
+  });
+
+  it('preserves a non-empty destination path verbatim', () => {
+    expect(normalizeMovePath('src/renamed.ts')).toBe('src/renamed.ts');
+  });
+
+  it('preserves a whitespace-only string (not our concern to trim)', () => {
+    expect(normalizeMovePath('  ')).toBe('  ');
+  });
+});
+```
+
+The whitespace-only case is deliberate — the upstream fix targeted
+the empty-string case only. Trimming whitespace-only paths is the
+caller's responsibility.
+
+### Testing Network Disconnect Classification (`network.disconnected`)
+
+Introduced 2026-09-25 (ports upstream opencode/kilocode `d6bb0ef05`,
+PR #13523). The classifier in `src/session/network.ts` folds
+well-known Node.js socket / DNS error codes into a small
+discriminated union and publishes on the `NetworkDisconnectEvent` bus
+so the TUI can render a "reconnecting…" line instead of hanging on
+the spinner. The suite lives in `src/session/__tests__/network.test.ts`
+(109 lines, two describe blocks) and is a pure-unit test — no network,
+no real timers, no filesystem.
+
+Key patterns:
+
+```typescript
+import { describe, expect, it, vi } from 'vitest';
+import {
+  classifyNetworkError,
+  NetworkDisconnectEvent,
+  reportNetworkDisconnect,
+} from '../network.js';
+
+describe('classifyNetworkError', () => {
+  it('classifies AbortError as non-retriable abort', () => {
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    expect(classifyNetworkError(err)).toEqual({ reason: 'abort', retriable: false });
+  });
+
+  it('classifies ETIMEDOUT / ECONNRESET / ENOTFOUND / fetch failed', () => {
+    expect(classifyNetworkError(new Error('connect ETIMEDOUT ...')))
+      .toEqual({ reason: 'timeout', retriable: true });
+    expect(classifyNetworkError(new Error('read ECONNRESET')))
+      .toEqual({ reason: 'socket', retriable: true });
+    expect(classifyNetworkError(new Error('getaddrinfo ENOTFOUND api.example.com')))
+      .toEqual({ reason: 'dns', retriable: true });
+    expect(classifyNetworkError(new Error('fetch failed')))
+      .toEqual({ reason: 'unknown', retriable: true });
+  });
+
+  it('returns null for non-Error and non-network errors', () => {
+    expect(classifyNetworkError('boom')).toBeNull();
+    expect(classifyNetworkError(new Error('unauthorized'))).toBeNull();
+  });
+});
+
+describe('reportNetworkDisconnect', () => {
+  it('publishes a network.disconnected event when classified', () => {
+    const handler = vi.fn();
+    const unsub = NetworkDisconnectEvent.subscribe(handler);
+    try {
+      const result = reportNetworkDisconnect(new Error('read ECONNRESET'), 'aicore-anthropic');
+      expect(result).toEqual({ reason: 'socket', retriable: true });
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: 'socket',
+          retriable: true,
+          provider: 'aicore-anthropic',
+        })
+      );
+    } finally {
+      unsub();
+    }
+  });
+});
+```
+
+Coverage priorities for future extensions to `NetworkDisconnectReason`:
+
+1. **Every branch of the classifier gets its own case.** Adding a new
+   reason (for example, `'tls'` for `CERT_HAS_EXPIRED`) requires a
+   positive case that maps to it AND a negative case (non-matching
+   error still classifies to the pre-existing branch).
+2. **Assert the retriable flag alongside the reason.** A future reason
+   that is added with the wrong retriable default would cascade into
+   incorrect retry decisions elsewhere; asserting both fields per
+   case pins the contract.
+3. **Bus subscribers use `vi.fn()` + `subscribe` / unsubscribe in a
+   `try/finally`.** Never leak a subscriber across tests — the
+   `NetworkDisconnectEvent` is a module-level singleton, so a leaked
+   listener will fire on subsequent tests and produce cross-test
+   noise.
+
 ### Testing JSON-encodable Tool Result Payloads
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `f7da00f`). The `apply_patch` tool's success payload is now constructed defensively so no field carries `undefined`. `JSON.stringify` silently drops keys whose value is `undefined`, which historically caused downstream permission metadata / event bus consumers to lose information they were told they would receive.
