@@ -27,10 +27,46 @@ import { logger } from '../utils/logger.js';
  * Normalize a workdir for comparison. Resolves `.`, `..`, and trailing
  * separators, and lowercases on Windows where filesystem paths are
  * case-insensitive.
+ *
+ * Historical sessions may reference paths that no longer exist, or that
+ * the current user cannot stat (EACCES/EPERM). This helper stays purely
+ * lexical (`path.resolve`) so it never throws — filesystem access is
+ * the caller's concern. See {@link safeResolveWorkdir} for the
+ * filesystem-aware variant that catches EACCES/EPERM and treats
+ * inaccessible paths as out-of-scope (issue #1834).
  */
 function normalizeWorkdir(p: string): string {
   const resolved = path.resolve(p);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Filesystem-aware variant of {@link normalizeWorkdir}. When the path
+ * cannot be resolved (EACCES, EPERM, ENOENT, ENOTDIR) the helper
+ * returns `null` so that callers can treat the historical session as
+ * out-of-scope instead of crashing. All other errors are also
+ * swallowed and reported as `null` — a session scope check must never
+ * bring down the whole listing.
+ *
+ * The current implementation only differs from `normalizeWorkdir`
+ * insofar as it wraps the lexical resolve in a try/catch: `path.resolve`
+ * itself does not touch the filesystem, but a future refactor that
+ * upgrades scope resolution to `fs.realpathSync` (to follow symlinks
+ * on a worktree switch) would inherit the same protection without a
+ * call-site change. See issue #1834.
+ */
+export function safeResolveWorkdir(p: string): string | null {
+  try {
+    return normalizeWorkdir(p);
+  } catch (err) {
+    // Node's fs errors surface `code` on the error object. Anything
+    // in the inaccessible-path family (EACCES, EPERM, ENOENT, ENOTDIR)
+    // is treated as out-of-scope rather than fatal; every other error
+    // is also swallowed so a corrupt session entry cannot poison the
+    // whole listing.
+    void err;
+    return null;
+  }
 }
 
 export interface Message {
@@ -710,12 +746,24 @@ export class SessionManager {
       sessions.sort((a, b) => b.updated - a.updated);
 
       if (opts?.workdir !== undefined) {
-        const target = normalizeWorkdir(opts.workdir);
+        // Guard the target resolution too — a caller may pass a path
+        // that no longer exists (Agent Manager operating on a stale
+        // worktree). Treat that as "no matches" instead of crashing
+        // the whole listing (issue #1834).
+        const target = safeResolveWorkdir(opts.workdir);
+        if (target === null) {
+          return [];
+        }
         return sessions.filter((s) => {
           if (s.workdir === undefined) {
             return false;
           }
-          return normalizeWorkdir(s.workdir) === target;
+          const resolved = safeResolveWorkdir(s.workdir);
+          if (resolved === null) {
+            // Inaccessible historical path — treat as out-of-scope.
+            return false;
+          }
+          return resolved === target;
         });
       }
 

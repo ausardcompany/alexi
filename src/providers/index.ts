@@ -5,6 +5,7 @@
  * for all LLM operations through SAP AI Core.
  */
 
+import path from 'path';
 import { ProviderModelFellBack } from '../bus/index.js';
 
 // Integrate new SDK changes from upstream
@@ -146,18 +147,119 @@ export {
 } from './sapOrchestration.js';
 
 /**
+ * Project-scoped provider cache.
+ *
+ * Keyed by `<resolved-project-path>::<modelId>::<resourceGroup>` so that
+ * switching worktrees (e.g. via Agent Manager) does NOT reuse a provider
+ * instantiated against a different project's credentials or resource
+ * group. Prior to this cache, `getProviderForModel` allocated a brand
+ * new `SapOrchestrationProvider` on every call — which was safe but
+ * expensive — and any future memoisation without project scoping would
+ * silently leak worktree A's credentials into worktree B.
+ *
+ * The map is keyed by the resolved project path so callers do not need
+ * to normalize `cwd` themselves; `path.resolve()` handles `.`, `..`, and
+ * trailing separators. On Windows the path is lowercased before hashing
+ * to mirror filesystem case-insensitivity.
+ *
+ * See issue #1834.
+ */
+const providerCache = new Map<string, SapOrchestrationProvider>();
+
+/**
+ * Normalize a project path to a stable cache key segment. Mirrors
+ * `normalizeWorkdir` in `sessionManager.ts` — kept local to avoid an
+ * import cycle.
+ */
+function normalizeProjectPath(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/**
+ * Compose the composite cache key. The resource group is part of the
+ * key because two projects sharing a `cwd` but with different
+ * `AICORE_RESOURCE_GROUP` values (e.g. via a `.env`-driven override)
+ * must not collide.
+ */
+function providerCacheKey(
+  projectPath: string,
+  modelId: string,
+  resourceGroup: string | undefined
+): string {
+  return `${normalizeProjectPath(projectPath)}::${modelId}::${resourceGroup ?? ''}`;
+}
+
+/**
  * Get the SAP Orchestration provider for the specified model
  *
+ * The returned instance is cached per (project path, modelId,
+ * resourceGroup) tuple. When callers switch projects (Agent Manager
+ * worktree switch) they must invoke {@link clearProviderCache} — either
+ * globally, or for the outgoing project only — so a subsequent lookup
+ * rebuilds the provider against the new project's environment.
+ *
  * @param modelId - The model identifier (e.g., 'gpt-4o', 'anthropic--claude-3.7-sonnet')
+ * @param projectPath - Optional project path override (defaults to `process.cwd()`)
  * @returns SapOrchestrationProvider instance configured for the model
  */
-export function getProviderForModel(modelId: string): SapOrchestrationProvider {
+export function getProviderForModel(
+  modelId: string,
+  projectPath?: string
+): SapOrchestrationProvider {
   const resourceGroup = env('AICORE_RESOURCE_GROUP');
+  const scope = projectPath ?? process.cwd();
+  const key = providerCacheKey(scope, modelId, resourceGroup);
 
-  return new SapOrchestrationProvider({
+  const cached = providerCache.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const provider = new SapOrchestrationProvider({
     modelName: modelId,
     resourceGroup: resourceGroup || undefined,
   });
+  providerCache.set(key, provider);
+  return provider;
+}
+
+/**
+ * Clear the project-scoped provider cache.
+ *
+ * When `projectPath` is provided, only entries keyed to that project
+ * are dropped — this is the surgical path used by Agent Manager on
+ * worktree switch so that background worktrees keep their warm
+ * providers. When called without arguments the entire cache is
+ * flushed; that path is used by tests and by explicit "reload
+ * everything" operator commands.
+ *
+ * Safe to call when the cache is empty. Never throws.
+ */
+export function clearProviderCache(projectPath?: string): void {
+  if (projectPath === undefined) {
+    providerCache.clear();
+    return;
+  }
+  const scope = normalizeProjectPath(projectPath);
+  const prefix = `${scope}::`;
+  for (const key of Array.from(providerCache.keys())) {
+    if (key.startsWith(prefix)) {
+      providerCache.delete(key);
+    }
+  }
+}
+
+/**
+ * Diagnostic hook: number of provider instances currently cached.
+ *
+ * Exposed for tests and for future observability. Not part of a
+ * stable public API — do not rely on this from production code.
+ *
+ * @internal
+ */
+export function _providerCacheSize(): number {
+  return providerCache.size;
 }
 
 /**
@@ -226,11 +328,12 @@ function resolveFallbackModelId(fallbackModel?: string): string {
  */
 export function getProviderForModelWithFallback(
   modelId: string,
-  fallbackModel?: string
+  fallbackModel?: string,
+  projectPath?: string
 ): ProviderResolution {
   if (isOrchestrationModel(modelId)) {
     return {
-      provider: getProviderForModel(modelId),
+      provider: getProviderForModel(modelId, projectPath),
       effectiveModelId: modelId,
       usedFallback: false,
     };
@@ -248,7 +351,7 @@ export function getProviderForModelWithFallback(
   }
 
   return {
-    provider: getProviderForModel(fallbackId),
+    provider: getProviderForModel(fallbackId, projectPath),
     effectiveModelId: fallbackId,
     usedFallback: true,
   };

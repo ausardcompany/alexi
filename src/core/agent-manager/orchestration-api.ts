@@ -30,6 +30,9 @@
  * free — subscribing to the internal event bus is the caller's job.
  */
 
+import path from 'path';
+import { clearProviderCache } from '../../providers/index.js';
+
 /**
  * Activity event kinds forwarded for ALL owned sessions.
  *
@@ -126,9 +129,40 @@ export interface ForwardingDecision {
  * `decide()` for each incoming event and forwards / drops based on
  * the result. This keeps the module trivial to unit-test.
  */
+/**
+ * Result of a worktree bootstrap attempt tracked by
+ * {@link ActivityEventForwarder}. Consumers use this to decide whether
+ * the next activation must retry provider/config initialization.
+ */
+export interface WorktreeBootstrapState {
+  /** Normalized (resolved) worktree directory. */
+  readonly worktreeDir: string;
+  /** `true` when the last bootstrap succeeded. */
+  readonly bootstrapped: boolean;
+  /** Last error observed, if any. Kept purely for diagnostics. */
+  readonly lastError?: string;
+}
+
+/**
+ * Normalize a worktree path for use as a cache key. Mirrors
+ * `normalizeProjectPath` in `src/providers/index.ts` — kept local to
+ * avoid a mutual import.
+ */
+function normalizeWorktreeDir(dir: string): string {
+  const resolved = path.resolve(dir);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 export class ActivityEventForwarder {
   private readonly owned = new Set<string>();
   private selectedWorktree: string | undefined;
+
+  /**
+   * Per-worktree bootstrap state. Populated by {@link markWorktreeBootstrap}
+   * and consumed by {@link activateWorktree} to decide whether a retry
+   * is required.
+   */
+  private readonly worktreeState = new Map<string, WorktreeBootstrapState>();
 
   /** Mark a session as owned by this Agent Manager instance. */
   addOwnedSession(sessionId: string): void {
@@ -144,13 +178,112 @@ export class ActivityEventForwarder {
     return this.owned.has(sessionId);
   }
 
-  /** Set (or clear with `undefined`) the currently-selected worktree. */
+  /**
+   * Set (or clear with `undefined`) the currently-selected worktree.
+   *
+   * When the selection changes to a DIFFERENT worktree (issue #1834),
+   * the project-scoped provider cache for the OUTGOING worktree is
+   * dropped so its resolved credentials, resource group, and model
+   * catalog are not silently reused after the switch. This mirrors
+   * Kilocode #14557 (project-scoped config caching): providers must
+   * rebuild against the new worktree's environment on first use.
+   *
+   * Selecting the same worktree twice is a no-op (no cache flush).
+   * Clearing the selection (`undefined`) drops the previous
+   * worktree's cache but does NOT flush the entire process — other
+   * projects keep their warm providers.
+   */
   setSelectedWorktree(worktreeDir: string | undefined): void {
-    this.selectedWorktree = worktreeDir;
+    const previous = this.selectedWorktree;
+    const next = worktreeDir;
+
+    if (previous === next) {
+      return;
+    }
+
+    // Drop the outgoing worktree's provider cache so credentials do
+    // not leak into it if it is reselected later after an env change.
+    if (previous !== undefined) {
+      clearProviderCache(previous);
+    }
+
+    this.selectedWorktree = next;
   }
 
   getSelectedWorktree(): string | undefined {
     return this.selectedWorktree;
+  }
+
+  /**
+   * Record the outcome of a worktree bootstrap. Callers invoke this
+   * from the worktree spawn / hydrate path with `ok=true` after a
+   * successful provider/config init, or `ok=false` with the error
+   * message when init throws. The stored state drives the
+   * retry-on-activation behaviour of {@link activateWorktree}.
+   */
+  markWorktreeBootstrap(worktreeDir: string, ok: boolean, error?: string): void {
+    const key = normalizeWorktreeDir(worktreeDir);
+    this.worktreeState.set(key, {
+      worktreeDir: key,
+      bootstrapped: ok,
+      lastError: ok ? undefined : (error ?? 'unknown error'),
+    });
+  }
+
+  /**
+   * Inspect the stored bootstrap state for a worktree.
+   *
+   * Returns `undefined` when the worktree has never been bootstrapped.
+   * Consumers should treat that as "cold" — the same as a failed
+   * bootstrap for the purpose of retry logic.
+   */
+  getWorktreeBootstrap(worktreeDir: string): WorktreeBootstrapState | undefined {
+    return this.worktreeState.get(normalizeWorktreeDir(worktreeDir));
+  }
+
+  /**
+   * Activate a worktree: select it, clear stale provider state for it,
+   * and run `bootstrap` when the worktree has never been initialized or
+   * its previous bootstrap failed.
+   *
+   * The `bootstrap` callback is expected to (re-)initialise providers,
+   * routing config, and the model catalog for the target worktree. It
+   * may be async; any thrown error is captured on the bootstrap state
+   * and re-thrown so the caller can surface it — the next
+   * `activateWorktree` call for the same worktree will retry.
+   *
+   * When the previous bootstrap already succeeded, this method still
+   * flushes any cached providers for the OUTGOING worktree (via
+   * {@link setSelectedWorktree}) but does NOT re-run bootstrap.
+   * Callers that need an unconditional refresh should call
+   * {@link markWorktreeBootstrap}`(worktreeDir, false)` before invoking
+   * `activateWorktree`.
+   */
+  async activateWorktree(
+    worktreeDir: string,
+    bootstrap: () => Promise<void> | void
+  ): Promise<void> {
+    const key = normalizeWorktreeDir(worktreeDir);
+    this.setSelectedWorktree(key);
+
+    const state = this.worktreeState.get(key);
+    if (state?.bootstrapped === true) {
+      return;
+    }
+
+    // Also drop the incoming worktree's cache — a failed previous
+    // bootstrap may have left partially-initialised providers that
+    // reference broken credentials.
+    clearProviderCache(key);
+
+    try {
+      await bootstrap();
+      this.markWorktreeBootstrap(key, true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.markWorktreeBootstrap(key, false, msg);
+      throw err;
+    }
   }
 
   /**
