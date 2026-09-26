@@ -151,6 +151,84 @@ describe('CostTracker', () => {
       expect(record.cacheWriteTokens).toBeUndefined();
     });
 
+    it('should record reasoning tokens when provided', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      const record = tracker.recordUsage(
+        'anthropic--claude-4.7-opus',
+        1000,
+        200,
+        'session-r',
+        undefined,
+        512
+      );
+      expect(record.reasoningTokens).toBe(512);
+    });
+
+    it('should preserve reasoning tokens alongside cache tokens', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      const record = tracker.recordUsage(
+        'anthropic--claude-4.7-opus',
+        1000,
+        200,
+        'session-rc',
+        { read: 400, write: 20 },
+        128
+      );
+      expect(record.reasoningTokens).toBe(128);
+      expect(record.cacheReadTokens).toBe(400);
+      expect(record.cacheWriteTokens).toBe(20);
+    });
+
+    it('should leave reasoning tokens undefined when not provided', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      const record = tracker.recordUsage('gpt-4o', 100, 50);
+      expect(record.reasoningTokens).toBeUndefined();
+    });
+
+    it('should record reasoning tokens equal to 0 when provider explicitly reports no reasoning', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      // 0 is a meaningful "no reasoning performed" signal, distinct from
+      // `undefined` ("provider did not report reasoning usage").
+      const record = tracker.recordUsage(
+        'anthropic--claude-4.7-opus',
+        1000,
+        200,
+        undefined,
+        undefined,
+        0
+      );
+      expect(record.reasoningTokens).toBe(0);
+    });
+
+    it('should aggregate reasoning tokens in summary only from reporting records', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      // Records WITHOUT reasoning field (legacy / non-thinking provider)
+      tracker.recordUsage('gpt-4o', 1000, 500);
+      tracker.recordUsage('gpt-4o', 2000, 1000);
+      // Records WITH reasoning field
+      tracker.recordUsage('anthropic--claude-4.7-opus', 500, 200, undefined, undefined, 300);
+      tracker.recordUsage('anthropic--claude-4.7-opus', 600, 250, undefined, undefined, 150);
+
+      const summary = tracker.getSummary();
+      expect(summary.callCount).toBe(4);
+      expect(summary.totalReasoningTokens).toBe(450);
+    });
+
+    it('should return zero totalReasoningTokens when no records report reasoning', () => {
+      const tracker = new CostTracker({ dataDir: testDir });
+
+      tracker.recordUsage('gpt-4o', 1000, 500);
+      tracker.recordUsage('gpt-4o', 2000, 1000);
+
+      const summary = tracker.getSummary();
+      expect(summary.totalReasoningTokens).toBe(0);
+    });
+
     it('should aggregate cache tokens in summary only from reporting records', () => {
       const tracker = new CostTracker({ dataDir: testDir });
 
