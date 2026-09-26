@@ -1105,6 +1105,27 @@ export function isOrchestrationModel(modelId: string): boolean {
 
 Advantages over the `require` shim: no lint pragmas needed, no CJS interop path in a `"type": "module"` package, no runtime resolver work on every call, and TypeScript type-checks the registered function signature at both use sites.
 
+### Additive optional fields on observability records
+
+`UsageRecord` (`src/core/costTracker.ts:23`) and `CostSummary` (`src/core/costTracker.ts:60`) are persisted to `~/.alexi/cost-history.json` and read by every consumer of the cost tracker (`/cost`, `/stats`, `alexi log`, the TUI usage widgets). When adding a new provider-reported metric — cache tokens (`cacheReadTokens` / `cacheWriteTokens`, kilocode #13018), reasoning tokens (`reasoningTokens`, commit `87394c16`), or any future field — follow the additive contract that both existing fields established:
+
+1. **Declare the record field as `?: number` and let the summary aggregate default to `0`.** Reserve `undefined` for "provider did not report this metric" and `0` for "provider reported an explicit zero". Do NOT collapse the two into a single `0` sentinel — legacy records in a user's `cost-history.json` predate the field and MUST NOT be silently reinterpreted as "explicit zero" on the next `getSummary()` call.
+2. **Write the field to the record only when the caller supplied a value.** The reference guard lives at `src/core/costTracker.ts:353-355`:
+
+   ```typescript
+   if (reasoningTokens !== undefined) {
+     record.reasoningTokens = reasoningTokens;
+   }
+   ```
+
+   The paired cache guards at `:347-352` are identical in shape. Do NOT write `record.field = value ?? 0` — that path erases the three-state distinction the very next line of code needs.
+3. **Aggregate only over reporting records.** `getSummary()` iterates `records` and increments the summary total only when the field is defined (`src/core/costTracker.ts:448-450`). Legacy records contribute `0` implicitly because they never enter the branch. Do NOT flatten the aggregation to `.reduce((a, r) => a + r.field, 0)` — a single `undefined` field produces `NaN` and pollutes every downstream metric that reads the summary.
+4. **Extend the `recordUsage` signature at the tail, not the middle.** Every existing call site (`src/core/orchestrator.ts:308`, `src/core/agenticChat.ts:1224`, `src/core/streamingOrchestrator.ts:346`, plus the image path in `orchestrator.ts:183`) must keep compiling and behaving identically without touching the call site. `reasoningTokens?: number` was added as the 6th positional parameter after `cacheTokens` (`src/core/costTracker.ts:329-336`) for exactly this reason.
+5. **Extend every `CostSummary` fixture in `src/core/__tests__/stats.test.ts` at the same time.** The interface is a required shape for `computeCacheHitRate` inputs, so a new field widens every inline fixture. The three touched cases at `src/core/__tests__/stats.test.ts:296-338` add `totalReasoningTokens: 0` — no behaviour change, purely type-level accommodation. Do NOT cast to `as CostSummary` to duck the widen; the whole point of the required field is to catch a downstream metric that forgot to sum the new bucket.
+6. **Pin the three-state contract in tests.** Six cases in `src/core/__tests__/costTracker.test.ts:154-231` cover the reasoning field: positive count, cache co-existence, `undefined` when absent, `0` as a valid distinct signal, mixed-reporting aggregation, and all-legacy aggregation returning `0`. Follow the same six-case template for any future observability field so a future refactor cannot collapse the three-state semantics without a red suite.
+
+See [`docs/ARCHITECTURE.md#reasoning-token-observability-costtracker`](./ARCHITECTURE.md#reasoning-token-observability-costtracker) for the runtime contract, [`docs/API.md#usagerecord-and-costsummary`](./API.md#usagerecord-and-costsummary) for the public TypeScript surface, and [`docs/TESTING.md#testing-reasoning-token-accounting`](./TESTING.md#testing-reasoning-token-accounting) for the six-case reference suite.
+
 ### Process-local stores (require explicit teardown)
 
 Modules that maintain process-local mutable state MUST expose an explicit
