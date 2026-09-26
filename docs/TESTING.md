@@ -3262,6 +3262,97 @@ afterEach(() => {
 
 The scheduler tests use dynamic `await import('../../src/core/retentionScheduler.js')` inside each case so the module reads the fresh `process.env.HOME` set in `beforeEach` — a top-level `import` would bind the state-file path at test-collection time and defeat the isolation.
 
+### Testing the Session Retention Engine
+
+`tests/core/sessionRetention.test.ts` (220 lines, 12 cases across three `describe` blocks) and `tests/core/sessionScanner.test.ts` (160 lines) pin the manual retention path used by `alexi sessions-clean`. The engine is intentionally split into a **pure decision phase** (`selectCandidates`) and a **disk-touching apply phase** (`applyRetentionPolicy`); both surfaces are exercised because a bug in the decision phase is silently absorbed by dry-run mode but destructive under a real sweep.
+
+**Fixture pattern.** Each case runs against a fresh `fs.mkdtemp` sessions directory. No `vi.mock` is required — the retention engine exposes a `sessionsDir` override so tests do not touch `~/.alexi/sessions/` or `process.env.HOME`:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  selectCandidates,
+} from '../../src/core/sessionRetention.js';
+import { scanSessions } from '../../src/core/sessionScanner.js';
+import type { Session } from '../../src/core/sessionManager.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-retention-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function writeSession(
+  id: string,
+  overrides: Partial<Session['metadata']> = {},
+  mtimeMs?: number
+): string {
+  const now = Date.now();
+  const session: Session = {
+    metadata: {
+      id,
+      created: overrides.created ?? now,
+      updated: overrides.updated ?? now,
+      totalTokens: 0,
+      messageCount: 0,
+      ...overrides,
+    },
+    messages: [],
+  };
+  const filePath = path.join(tempDir, `${id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+  if (mtimeMs !== undefined) {
+    fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  }
+  return filePath;
+}
+```
+
+**Contract points asserted by `selectCandidates`** (7 cases):
+
+- **Empty policy is a no-op.** `selectCandidates(scanned, {}, now)` returns `{ toDelete: [], toSkip: [] }` even when the input contains a 60-day-old session — the engine does not delete anything the caller did not explicitly ask for.
+- **Age filter targets `updatedAt`.** With `maxAgeDays: 30`, a 60-day-old session is queued for deletion while a 1-day-old session survives.
+- **Count filter is per-project.** Given three sessions in `/tmp/alpha` and one in `/tmp/beta`, `maxCountPerProject: 2` deletes only the oldest alpha session — beta's single session is untouched because it fits inside its own bucket's cap.
+- **Exclude by id.** `excludePatterns: ['important-*']` moves the matching session from `toDelete` into `toSkip` even when it fails the age check. The junk companion session is still deleted.
+- **Exclude by title.** Same short-circuit but matched against `metadata.title` — the pattern `Keep*` protects the session whose title starts with `Keep me`, deleting only the other.
+- **Project filter.** `project: 'alpha'` restricts the working set to the alpha bucket; sessions in `/tmp/beta` land in `toSkip` regardless of age.
+- **Union of age + count.** With both policies active (`maxAgeDays: 30, maxCountPerProject: 1`), a session is a candidate if it fails **either** check. The suite asserts on a sorted id list so the union is compared insensitively to internal ordering.
+
+**Contract points asserted by `applyRetentionPolicy`** (4 cases):
+
+- **Real deletion writes the filesystem.** `applyRetentionPolicy({ maxAgeDays: 30 }, { sessionsDir: tempDir, now })` reports `deleted: [oldPath]`, `dryRun: false`, `bytesFreed > 0`, and `fs.existsSync(oldPath) === false`.
+- **Dry-run leaves the filesystem intact.** With `dryRun: true` the same input reports the same `deleted` list but the file remains on disk. The test asserts on both the response shape AND the survival of the file so a regression that silently ignores `dryRun` fails.
+- **Empty policy is a no-op end-to-end.** A 365-day-old session survives `applyRetentionPolicy({}, ...)` — the engine does not fall through to a default `maxAgeDays`.
+- **Zod rejects invalid shapes.** `applyRetentionPolicy({ maxAgeDays: -5 }, ...)` rejects synchronously — the test uses `expect(...).rejects.toThrow()` with a `@ts-expect-error` above the invalid input so the compiler is on the same page as the runtime.
+
+**`formatBytes` contract** (3 cases): `0`, small byte counts (`<1024`), and non-finite / negative input render as `0 B` or `<n> B`; `1024`, `1024**2`, `1024**3` render as `1.0 KB`, `1.0 MB`, `1.0 GB`.
+
+**Scanner contract** (`tests/core/sessionScanner.test.ts`, ~10 cases):
+
+- Valid session files produce `ScannedSession` records with `project = basename(metadata.workdir)`.
+- Malformed JSON is skipped with a `logger.warn` — the sweep continues past the corrupt file.
+- Missing `created` / `updated` fields fall back to file `mtimeMs` so age math never operates on `undefined`.
+- Sessions without a `workdir` field land in `UNKNOWN_PROJECT` (`__unknown__`).
+- `groupSessionsByProject` returns per-project buckets in `Map` insertion order.
+
+Key patterns to reuse when extending the suite:
+
+1. **Use the `sessionsDir` / `now` injection points instead of stubbing `Date.now` or `process.env.HOME`.** The engine accepts both as arguments precisely so tests can be pure functions of their fixtures.
+2. **Assert on `.map((s) => s.id)`, not on the full `ScannedSession` object.** The record carries filesystem-dependent fields (`filePath`, `size`, `mtime`) that shift between hosts; comparing id lists keeps the assertion portable.
+3. **Sort ids when the assertion is order-insensitive.** The union case uses `.sort()` because the engine does not commit to an ordering for combined age + count expiry.
+4. **Do not mock `logger`.** The scanner's tolerance path (`logger.warn` on malformed JSON) is exercised for behaviour, not for its log output — a spy would couple the test to the log format.
+
 ### Testing subagent approval boundaries
 
 `tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.
@@ -6509,4 +6600,69 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/StatusIcon.test.tsx \
   tests/cli/tui/useWorktreeStatus.test.tsx \
   tests/cli/tui/Sidebar.test.tsx
+```
+
+## Testing the Stream-Silence Connectivity Probe (issue #1836)
+
+Two dedicated suites lock the contract behind the `[waiting for network]` classification path (see [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836) and [API.md — Stream Watchdog and Connectivity Probe API](API.md#stream-watchdog-and-connectivity-probe-api)):
+
+- `tests/core/streamProbe.test.ts` (337 lines) — covers the probe module in isolation.
+- `tests/core/streamWatchdog.test.ts` (+177 lines net) — adds a `stream-silence connectivity probe (#1836)` describe block that exercises the watchdog's integration with a mock probe.
+
+Neither suite touches the real network: the remote HEAD probe is stubbed via the `remoteProbe` DI hook and the local TCP probe uses an ephemeral `net.createServer` listener so the test controls whether the port accepts connections.
+
+### `tests/core/streamProbe.test.ts` (337 lines)
+
+Directly exercises the pure classification and resolution helpers, plus the never-throws contract of `probeStreamConnectivity`:
+
+1. **`isLocalEndpoint` classification.** Loopback (`127.0.0.1`, `localhost`, `[::1]`), RFC1918 (`10/8`, `192.168/16`, `172.16/12`, `172.31.x`), link-local (`169.254/16`, `[fe80::]`), unique-local IPv6 (`[fc00::]`, `[fd12::]`), and bare hostnames without a dot (`sap-ai-core`, `my-proxy`) are local. Boundary IPv4 addresses (`172.15.x` and `172.32.x` outside the 172.16/12 range) and public FQDNs / public IPv6 are remote. Malformed URLs default to remote (safer HEAD probe).
+2. **`resolveProviderBaseUrl` env resolution.** `SAP_PROXY_BASE_URL` wins over `AICORE_SERVICE_KEY.serviceurls.AI_API_URL`; malformed JSON in `AICORE_SERVICE_KEY` returns `undefined`; env-var references (`${VAR}`, `$VAR`) expand at probe time.
+3. **`tcpConnect` behaviour.** Uses `net.createServer` to spin up an ephemeral listener; asserts `{ reachable: true }` on connect, `{ reachable: false, error }` on refused / timeout / DNS failure. Never rejects.
+4. **`probeStreamConnectivity` dispatch.** Local endpoints route to the local probe; remote endpoints route to the injected `remoteProbe`. `baseUrl: undefined` (unresolved) returns `{ reachable: false, error: 'No provider base URL configured...' }`. Invalid URLs return `{ reachable: false, error: 'Invalid provider base URL "...": ...' }`.
+5. **`NetworkDisconnectedError` shape.** Asserts `name === 'NetworkDisconnectedError'`, `code === 'NETWORK_DISCONNECTED'`, `isNetworkDisconnected === true`, and the message format `Network disconnected: <detail>`. `isNetworkDisconnectedError` matches both `instanceof` and duck-typed `{ isNetworkDisconnected: true }` values.
+
+### `tests/core/streamWatchdog.test.ts` — probe integration
+
+A `stream-silence connectivity probe (#1836)` describe block pins the watchdog's decision at idle timeout:
+
+```typescript
+it('surfaces NetworkDisconnectedError when the probe reports unreachable', async () => {
+  const { factory } = stalledAsyncSource();
+  const iter = createStreamWatchdog(factory, {
+    idleTimeoutMs: 50,
+    probe: async () => ({
+      reachable: false,
+      error: 'TCP connect to localhost:8080 failed: ECONNREFUSED',
+      kind: 'local',
+      url: 'http://localhost:8080',
+    }),
+  });
+  await iter.next();
+  let caught: unknown;
+  try { await iter.next(); } catch (err) { caught = err; }
+  expect(caught).toBeInstanceOf(NetworkDisconnectedError);
+  expect((caught as NetworkDisconnectedError).kind).toBe('local');
+  expect((caught as NetworkDisconnectedError).url).toBe('http://localhost:8080');
+});
+```
+
+Cases covered:
+
+1. **Unreachable probe → `NetworkDisconnectedError`.** The watchdog aborts with the probe's `error` / `url` / `kind` metadata attached.
+2. **Reachable probe → falls back to `StreamStalledError`.** A probe returning `{ reachable: true }` means the server is slow, not disconnected; the pre-#1836 stall path runs.
+3. **Probe throws → falls back to `StreamStalledError`.** An over-eager probe must never mask a genuine stall. The watchdog swallows the probe's exception and surfaces the plain stall.
+4. **Chunks arrive → probe never fires.** A stream that yields chunks steadily consumes each pull before the idle timer arms; the probe callable is not invoked. Prevents every slow-but-alive turn from burning a network round-trip.
+5. **Long-running tool extends the window, holding the probe silent.** A `bash` tool-call delta extends the idle window from short to long; the probe must not fire during the extended window. Asserts `probeCalled === false` after 300 ms with an `idleTimeoutMs: 100` / `toolExtensionMs: 5_000` watchdog.
+6. **`probe: false` and unconfigured probe preserve pre-#1836 behaviour.** Locks the "unit tests that construct a watchdog directly are not affected by ambient env configuration" contract — the plain `StreamStalledError` path still runs.
+
+### Testing patterns to reuse
+
+- **DI-injected probe callable.** Pass `probe: async () => ({ reachable: false, ... })` to test the branch without touching the real network. The watchdog treats a function-valued `probe` the same as it treats the default env-derived probe.
+- **`stalledAsyncSource()` helper.** Yields an initial chunk then parks on the abort signal, mirroring a stalled SAP AI Core SSE stream. Records teardown state so the test can assert that `return()` was forwarded to the source's finally-block.
+- **`net.createServer` ephemeral listener.** For `tcpConnect` tests, bind `127.0.0.1:0`, capture the assigned port, and `close()` in `afterEach`. Avoids ambient port collisions across parallel workers.
+
+Run the full probe / watchdog coverage:
+
+```bash
+npm test -- tests/core/streamProbe.test.ts tests/core/streamWatchdog.test.ts
 ```

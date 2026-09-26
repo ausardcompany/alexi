@@ -22,6 +22,9 @@ import {
   StreamStalledError,
   isStreamStalledError,
   resolveDefaultStreamIdleTimeoutMs,
+  NetworkDisconnectedError,
+  isNetworkDisconnectedError,
+  type ProbeResult,
 } from '../../src/core/streamWatchdog.js';
 import type { StreamChunk } from '../../src/providers/index.js';
 
@@ -435,6 +438,180 @@ describe('createStreamWatchdog', () => {
         out.push(c.text);
       }
       expect(out).toEqual(['x', 'y']);
+    });
+  });
+
+  describe('stream-silence connectivity probe (#1836)', () => {
+    it('surfaces NetworkDisconnectedError when the probe reports unreachable', async () => {
+      const { factory } = stalledAsyncSource();
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 50,
+        probe: async () => ({
+          reachable: false,
+          error: 'TCP connect to localhost:8080 failed: ECONNREFUSED',
+          kind: 'local',
+          url: 'http://localhost:8080',
+        }),
+      });
+      await iter.next();
+
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(NetworkDisconnectedError);
+      expect(isNetworkDisconnectedError(caught)).toBe(true);
+      expect((caught as NetworkDisconnectedError).kind).toBe('local');
+      expect((caught as NetworkDisconnectedError).url).toBe('http://localhost:8080');
+      expect((caught as Error).message).toMatch(/TCP connect to localhost:8080/);
+    });
+
+    it('falls back to StreamStalledError when the probe reports reachable (server slow, not disconnected)', async () => {
+      const { factory } = stalledAsyncSource();
+      let probeCalled = false;
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 50,
+        probe: async () => {
+          probeCalled = true;
+          return { reachable: true, kind: 'remote', url: 'https://api.example.com' };
+        },
+      });
+      await iter.next();
+
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      expect(probeCalled).toBe(true);
+      expect(caught).toBeInstanceOf(StreamStalledError);
+      expect(isStreamStalledError(caught)).toBe(true);
+    });
+
+    it('falls back to StreamStalledError when the probe itself throws', async () => {
+      const { factory } = stalledAsyncSource();
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 50,
+        probe: async () => {
+          throw new Error('probe blew up');
+        },
+      });
+      await iter.next();
+
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(StreamStalledError);
+    });
+
+    it('does NOT probe when a chunk arrives before the idle window elapses', async () => {
+      // A stream that yields chunks steadily should never trip the
+      // probe — otherwise every slow-but-alive turn would burn a
+      // network round-trip for no reason.
+      let probeCalled = false;
+      const factory = (): AsyncIterable<StreamChunk> => {
+        async function* gen(): AsyncGenerator<StreamChunk> {
+          yield { text: 'a' };
+          yield { text: 'b' };
+          yield { text: 'c' };
+        }
+        return gen();
+      };
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 1_000,
+        probe: async (): Promise<ProbeResult> => {
+          probeCalled = true;
+          return { reachable: false };
+        },
+      });
+      // Drive to completion.
+      for await (const _chunk of iter) {
+        /* consume */
+      }
+      expect(probeCalled).toBe(false);
+    });
+
+    it('holds the probe timer while a long-running tool call is streaming', async () => {
+      // A `bash` tool-call delta extends the idle window from short to
+      // long; the probe must not fire during that extended window.
+      let probeCalled = false;
+      const factory = (signal: AbortSignal): AsyncIterable<StreamChunk> => {
+        async function* gen(): AsyncGenerator<StreamChunk> {
+          yield {
+            text: '',
+            toolCalls: [
+              {
+                index: 0,
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'bash', arguments: '{}' },
+              },
+            ],
+          };
+          await new Promise<void>((_r, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true }
+            );
+          });
+        }
+        return gen();
+      };
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 100,
+        toolExtensionMs: 5_000,
+        probe: async (): Promise<ProbeResult> => {
+          probeCalled = true;
+          return { reachable: false };
+        },
+      });
+      await iter.next(); // tool-call chunk extends idle window
+      // Race the second pull against a short delay — the extended
+      // window (5s) should keep the probe silent for ~300ms.
+      const pull = iter.next();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(probeCalled).toBe(false);
+      await iter.return();
+      await expect(pull).rejects.toBeInstanceOf(Error);
+    });
+
+    it('is disabled by default so unit-test doubles are not affected by env config', async () => {
+      // No `probe` option => the pre-#1836 behaviour: idle timeout
+      // aborts with StreamStalledError, no probe is invoked.
+      const { factory } = stalledAsyncSource();
+      const iter = createStreamWatchdog(factory, { idleTimeoutMs: 50 });
+      await iter.next();
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(StreamStalledError);
+      expect(isNetworkDisconnectedError(caught)).toBe(false);
+    });
+
+    it('probe: false explicitly disables the probe', async () => {
+      const { factory } = stalledAsyncSource();
+      const iter = createStreamWatchdog(factory, {
+        idleTimeoutMs: 50,
+        probe: false,
+      });
+      await iter.next();
+      let caught: unknown;
+      try {
+        await iter.next();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(StreamStalledError);
     });
   });
 

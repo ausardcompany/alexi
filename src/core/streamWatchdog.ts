@@ -31,6 +31,25 @@
  */
 
 import type { StreamChunk } from '../providers/index.js';
+import {
+  NetworkDisconnectedError,
+  probeStreamConnectivity,
+  type ProbeResult,
+  type StreamProbeOptions,
+} from './streamProbe.js';
+
+// Re-export the disconnect error + guard so consumers can import a single
+// symbol from this module without reaching into `streamProbe.ts`. This
+// mirrors the pattern used for `StreamStalledError` above.
+export {
+  NetworkDisconnectedError,
+  isNetworkDisconnectedError,
+  probeStreamConnectivity,
+  resolveProviderBaseUrl,
+  isLocalEndpoint,
+  type ProbeResult,
+  type StreamProbeOptions,
+} from './streamProbe.js';
 
 /**
  * Error raised when the streaming watchdog detects a stalled provider
@@ -151,6 +170,31 @@ export interface StreamWatchdogOptions {
    * parent or watchdog triggers the source's teardown.
    */
   signal?: AbortSignal;
+  /**
+   * Stream-silence connectivity probe (issue #1836).
+   *
+   * When set to a callable, the watchdog invokes it on idle timeout
+   * BEFORE surfacing the stall. If the probe reports the endpoint as
+   * unreachable, the pending `next()` rejects with a
+   * {@link NetworkDisconnectedError} so the TUI can render a distinct
+   * `[waiting for network]` inline error rather than the generic stall
+   * message. If the probe passes (endpoint reachable, but the stream
+   * is silent), the watchdog falls back to the normal
+   * {@link StreamStalledError} path.
+   *
+   * Set to `true` to enable the default env-derived probe
+   * ({@link probeStreamConnectivity}). Set to a function to inject a
+   * custom probe (tests/DI). Default: `false` (pre-#1836 behaviour)
+   * so unit tests that construct a watchdog directly are not affected
+   * by ambient env configuration. The streaming orchestrator opts in
+   * explicitly on every real chat stream.
+   */
+  probe?: ((options?: StreamProbeOptions) => Promise<ProbeResult>) | boolean;
+  /**
+   * Options forwarded to the default probe when {@link probe} is
+   * `true`. Ignored when `probe` is a custom callable or `false`.
+   */
+  probeOptions?: StreamProbeOptions;
 }
 
 /**
@@ -205,6 +249,18 @@ export function createStreamWatchdog(
   const idleTimeoutMs = options?.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
   const toolExtensionMs = options?.toolExtensionMs ?? DEFAULT_STREAM_TOOL_EXTENSION_MS;
   const longRunningToolNames = options?.longRunningToolNames ?? DEFAULT_LONG_RUNNING_TOOL_NAMES;
+  // Stream-silence connectivity probe (#1836). Callers opt in via
+  // `probe: true` (default env-derived probe) or `probe: (opts) => ...`
+  // (custom callable, useful for tests/DI). `probe: false` or omitted
+  // preserves the pre-#1836 behaviour where the idle timer aborts with
+  // a plain `StreamStalledError`.
+  const probeOptions = options?.probeOptions;
+  const probeFn: ((opts?: StreamProbeOptions) => Promise<ProbeResult>) | null =
+    typeof options?.probe === 'function'
+      ? options.probe
+      : options?.probe === true
+        ? probeStreamConnectivity
+        : null;
 
   // Internal controller: aborted on idle timeout, on preemptive return(), or
   // when the parent signal fires. Its signal is what we forward to the
@@ -259,15 +315,61 @@ export function createStreamWatchdog(
     const armedWindowMs = currentWindowMs;
     idleTimer = setTimeout(() => {
       idleTimer = null;
-      if (!finished && !controller.signal.aborted) {
-        controller.abort(new StreamStalledError(armedWindowMs));
+      if (finished || controller.signal.aborted) {
+        return;
       }
+      // Fire-and-forget: the timer callback cannot itself be async
+      // without leaking an unhandled rejection on the next-tick
+      // scheduler, so we wrap the probe call in a self-invoked async
+      // IIFE. Any error inside `handleIdleTimeout` is caught and
+      // downgraded to the plain stall path.
+      void handleIdleTimeout(armedWindowMs);
     }, currentWindowMs);
     // Do not keep the Node event loop alive solely for a watchdog timer.
     // If the user has explicitly abandoned the process, the timer should
     // not delay exit.
     if (typeof (idleTimer as { unref?: () => void }).unref === 'function') {
       (idleTimer as { unref: () => void }).unref();
+    }
+  }
+
+  /**
+   * Resolve the stall vs. disconnect distinction (#1836) at the moment
+   * the idle timer fires. When a probe is configured AND the endpoint
+   * reports unreachable, we abort with {@link NetworkDisconnectedError}
+   * so the TUI can render "[waiting for network]" inline. Otherwise we
+   * fall back to the pre-#1836 {@link StreamStalledError} path.
+   *
+   * The probe itself is best-effort: any exception is swallowed and
+   * treated as "probe inconclusive", which means we surface the plain
+   * stall rather than a misleading disconnect.
+   */
+  async function handleIdleTimeout(armedWindowMs: number): Promise<void> {
+    if (finished || controller.signal.aborted) {
+      return;
+    }
+    if (probeFn) {
+      let result: ProbeResult | null = null;
+      try {
+        result = await probeFn(probeOptions);
+      } catch {
+        // Probe threw despite its own error handling — treat as stall.
+      }
+      if (finished || controller.signal.aborted) {
+        return;
+      }
+      if (result && !result.reachable) {
+        controller.abort(
+          new NetworkDisconnectedError(result.error ?? 'endpoint unreachable', {
+            url: result.url,
+            kind: result.kind,
+          })
+        );
+        return;
+      }
+    }
+    if (!finished && !controller.signal.aborted) {
+      controller.abort(new StreamStalledError(armedWindowMs));
     }
   }
 
