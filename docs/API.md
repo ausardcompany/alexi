@@ -4857,3 +4857,152 @@ function tearDownWorktree(id: string): void {
 ```
 
 Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`) are safe and free: they short-circuit before touching the listener set.
+
+## Network Transport Classification
+
+`classifyNetworkError(err)` (`src/core/network.ts`, added in the 2026-09-26 upstream sync) folds a suspected socket-layer failure into a small, UI-renderable classification. Used by the TUI status bar, CLI stderr writer, and provider layer to surface disconnects instead of hanging on a never-resolving fetch promise.
+
+```typescript
+import { classifyNetworkError, type NetworkErrorInfo } from './core/network.js';
+
+export interface NetworkErrorInfo {
+  kind: 'offline' | 'timeout' | 'dns' | 'reset' | 'unknown';
+  message: string;    // "<original> [CODE]" — always includes the raw code
+  retriable: boolean; // Always true for recognized transport codes
+}
+
+export function classifyNetworkError(err: unknown): NetworkErrorInfo | undefined;
+```
+
+Semantics:
+
+- Returns `undefined` for non-errors, error codes outside the pinned `OFFLINE_CODES` set, and error shapes where no `code` can be extracted from either `err.code` or `err.cause.code`. Callers fall through to their normal error path.
+- The `code` walk goes `err.code` first, then `err.cause.code`. Node's built-in `fetch` wraps the underlying libuv code inside `cause`, so the fallback is essential for handling `fetch failed` errors correctly.
+- The `[CODE]` suffix on `message` is intentional. Do not strip it before rendering — operators need it to diagnose whether the outage is DNS, proxy, or the SAP AI Core endpoint itself.
+- Recognized codes and their `kind`:
+
+  | Code           | `kind`    |
+  | -------------- | --------- |
+  | `ENOTFOUND`    | `dns`     |
+  | `EAI_AGAIN`    | `dns`     |
+  | `ETIMEDOUT`    | `timeout` |
+  | `ECONNREFUSED` | `offline` |
+  | `ECONNRESET`   | `reset`   |
+  | `EHOSTUNREACH` | `offline` |
+  | `ENETUNREACH`  | `offline` |
+  | `EPIPE`        | `reset`   |
+
+Example — surface a DNS failure in the CLI:
+
+```typescript
+import { classifyNetworkError } from './core/network.js';
+
+try {
+  await sendChatToProvider(request);
+} catch (err) {
+  const info = classifyNetworkError(err);
+  if (info) {
+    process.stderr.write(`Network ${info.kind}: ${info.message}\n`);
+    process.exit(info.retriable ? 75 /* EX_TEMPFAIL */ : 1);
+  }
+  throw err;
+}
+```
+
+## Safe URL Opener (`openUrl`)
+
+`openUrl` (`src/core/open.ts`, added in the 2026-09-26 upstream sync) is the single sanctioned entry point for opening a URL in the user's default browser. Enforces a strict `http:` / `https:` scheme allow-list to defend against arbitrary-scheme injection from LLM output (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC paths (`\\server\share`, `//server/share`).
+
+```typescript
+import { openUrl, type OpenUrlOptions } from './core/open.js';
+
+export interface OpenUrlOptions {
+  /**
+   * When true, resolve immediately after spawning the launcher without
+   * waiting for it to exit. Default true — matches `open` package
+   * behavior and avoids blocking the TUI on a browser launch.
+   */
+  detached?: boolean;
+}
+
+export function openUrl(input: string, options?: OpenUrlOptions): Promise<void>;
+```
+
+Behavior:
+
+- Rejects (does not throw synchronously — returns a rejecting promise) when `input` is not a string, is empty, is a UNC path, is unparseable as a URL, or has a protocol other than `http:` / `https:`. Error message: `Only http and https links can be opened in the browser: <input>`.
+- Rejects when the platform is unsupported: `Unsupported platform for openUrl: <process.platform>`.
+- Launcher choice: macOS → `open`; Windows → `cmd /c start ""`; Linux and other → `xdg-open`.
+- `detached: true` (default) `unref()`s the child and resolves immediately; the browser tab opens even if the caller exits.
+- `detached: false` waits for the launcher to exit and rejects if the exit code is non-zero (`Browser launcher exited with code <n>`).
+
+Example:
+
+```typescript
+import { openUrl } from './core/open.js';
+
+// From the TUI: the user clicked a share link
+try {
+  await openUrl(shareUrl);
+} catch (err) {
+  writeStatus(`Cannot open link: ${err instanceof Error ? err.message : String(err)}`);
+}
+```
+
+Never spawn `xdg-open` / `open` directly — always route through `openUrl` so the scheme allow-list is enforced.
+
+## Legacy Drizzle Journal Import
+
+`importLegacyDrizzleJournal` (`src/core/database/migration.ts`, added in the 2026-09-26 upstream sync) is an optional bootstrap step for SQLite-backed installations that previously ran Drizzle-based migrations. It reads the older `__drizzle_migrations` table and mirrors each already-applied migration into Alexi's own `migration` journal so a fresh Alexi install does not replay migrations that were already applied.
+
+```typescript
+import {
+  importLegacyDrizzleJournal,
+  type LegacySqliteBridge,
+  type SqliteColumnInfo,
+  type Migration,
+} from './core/database/migration.js';
+
+export interface SqliteColumnInfo {
+  name: string;
+}
+
+export interface LegacySqliteBridge {
+  tableExists(name: string): Promise<boolean>;
+  tableColumns(name: string): Promise<readonly SqliteColumnInfo[]>;
+  fetchLegacyJournal(): Promise<
+    ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  >;
+  recordCompleted(id: string, timeCompletedMs: number): Promise<void>;
+}
+
+export function importLegacyDrizzleJournal(
+  bridge: LegacySqliteBridge,
+  migrations: readonly Migration[]
+): Promise<void>;
+```
+
+Adapter checklist:
+
+- `tableExists(name)` should query `sqlite_master` (`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`).
+- `tableColumns(name)` should return the result of `PRAGMA table_info(<name>)` — only the `name` column is inspected; other fields are ignored.
+- `fetchLegacyJournal()` should return every row from `__drizzle_migrations`. `name` may be absent on very old schemas; `created_at` should be a unix-millis integer.
+- `recordCompleted(id, timeCompletedMs)` MUST have `INSERT OR IGNORE` semantics so re-running the import after a partial failure is safe.
+
+Behavior:
+
+- No-op when `__drizzle_migrations` does not exist.
+- When the `name` column is present, rows with a truthy `name` are recorded verbatim; null / empty names are skipped.
+- When the `name` column is absent, each row's `created_at` (unix millis) is formatted as `YYYYMMDDHHMMSS` UTC and matched against the known migration id prefix. An unmatched timestamp throws `Legacy migration timestamp <ms> does not match any known migration` — a deliberate loud failure so schema drift is caught at boot, not silently forgotten.
+- Rows with neither a usable `name` nor a `created_at` are skipped.
+
+Example — wire it before `applyMigrations`:
+
+```typescript
+import { applyMigrations, importLegacyDrizzleJournal } from './core/database/migration.js';
+import { sqliteBridge } from './core/database/adapters/betterSqlite.js';
+import { ALL_MIGRATIONS } from './core/database/migrations/index.js';
+
+await importLegacyDrizzleJournal(sqliteBridge, ALL_MIGRATIONS);
+await applyMigrations(sqliteBridge, ALL_MIGRATIONS);
+```

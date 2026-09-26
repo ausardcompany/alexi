@@ -6386,3 +6386,105 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/useWorktreeStatus.test.tsx \
   tests/cli/tui/Sidebar.test.tsx
 ```
+
+## Testing `classifyNetworkError`
+
+`src/core/network.test.ts` is a pure-unit suite — no mocks, no fake timers, no filesystem. Each case constructs an `Error` with a specific `code` (or `cause.code`) and asserts the returned `NetworkErrorInfo`. The classifier is shape-based, so tests exercise the shape, not any transport.
+
+Key cases pinned:
+
+1. **Non-error inputs return `undefined`.** `null`, `undefined`, a bare string, a number, and `new Error('plain')` (no `code`) all return `undefined` — callers must be able to fall through to their normal error path.
+2. **Each recognized code maps to the documented `kind`.** `ENOTFOUND` -> `dns`, `ETIMEDOUT` -> `timeout`, `ECONNRESET` -> `reset`, `ECONNREFUSED` / `EHOSTUNREACH` -> `offline`.
+3. **`err.cause.code` fallback.** An outer error with a `cause` whose `.code` is `ENOTFOUND` classifies as `dns` — Node's `fetch` wraps the libuv code inside `cause`, so missing this walk would leave `fetch failed` errors permanently unrecognized.
+4. **Unknown codes return `undefined`.** `ERR_INVALID_ARG_TYPE` is not in `OFFLINE_CODES`, so the classifier does not falsely upgrade a validation error to a transport failure.
+5. **`message` preserves the code suffix.** The `[CODE]` suffix must always be present; regression tests grep for `[ENOTFOUND]` on the DNS case.
+
+Recipe for a new code:
+
+```typescript
+import { classifyNetworkError } from './network.js';
+
+it('classifies EAI_AGAIN as dns and retriable', () => {
+  const err = Object.assign(new Error('getaddrinfo EAI_AGAIN'), { code: 'EAI_AGAIN' });
+  const info = classifyNetworkError(err);
+  expect(info?.kind).toBe('dns');
+  expect(info?.retriable).toBe(true);
+  expect(info?.message).toContain('EAI_AGAIN');
+});
+```
+
+When adding a new code, update the `OFFLINE_CODES` set AND the `KIND_MAP` in `src/core/network.ts` and the transient regex in AGENTS.md so the TUI, `ErrorBackoff`, and the workflow retry loop stay in agreement.
+
+## Testing `openUrl` (Safe URL Opener)
+
+`src/core/open.test.ts` covers ONLY the scheme allow-list. Actually spawning `xdg-open` in CI would be flaky and platform-specific, so the launcher path is not exercised in unit tests — it is validated by the manual smoke test on the release matrix.
+
+Contract locked by the suite:
+
+1. **Non-URL inputs reject.** Empty string, `'not a url'` — both reject with `Only http and https links`.
+2. **Dangerous schemes reject.** `file:///etc/hosts`, `javascript:alert(1)`, `ms-msdt:/id PCWDiagnostic`, `data:text/html,<script>alert(1)</script>`, `vbscript:msgbox(1)`.
+3. **UNC-style paths reject.** `\\\\server\\share\\file.html` and `//server/share/file.html` — some Node versions on Windows implicitly coerce these into `file:` URLs; the pre-parse check catches both.
+
+Recipe for a new hostile scheme:
+
+```typescript
+import { openUrl } from './open.js';
+
+it('rejects intent: URLs', async () => {
+  await expect(openUrl('intent://scan/#Intent;scheme=zxing;end')).rejects.toThrow(
+    /Only http and https links/
+  );
+});
+```
+
+To validate the launcher path locally without spawning a real browser, inject a fake `spawn` via `vi.mock('child_process', ...)` and assert the launcher command and args match the platform table in `src/core/open.ts` (`open` on darwin, `cmd /c start ""` on win32, `xdg-open` elsewhere). The unit suite deliberately does not do this — the risk of a leaked child process outweighs the coverage gain — but the recipe is available for local debugging.
+
+## Testing the Legacy Drizzle Journal Import
+
+`src/core/database/migration.legacy-journal.test.ts` uses an in-memory `FakeBridge` implementing `LegacySqliteBridge` — no real SQLite driver, no filesystem. Every case exercises `importLegacyDrizzleJournal` and asserts the calls made to `recordCompleted`.
+
+`FakeBridge` shape:
+
+```typescript
+class FakeBridge implements LegacySqliteBridge {
+  public readonly recorded: Array<{ id: string; timeCompletedMs: number }> = [];
+  constructor(
+    private readonly tables: Set<string>,
+    private readonly columns: Map<string, readonly SqliteColumnInfo[]>,
+    private readonly journal: ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  ) {}
+  async tableExists(name: string): Promise<boolean> { return this.tables.has(name); }
+  async tableColumns(name: string): Promise<readonly SqliteColumnInfo[]> {
+    return this.columns.get(name) ?? [];
+  }
+  async fetchLegacyJournal() { return this.journal; }
+  async recordCompleted(id: string, timeCompletedMs: number): Promise<void> {
+    this.recorded.push({ id, timeCompletedMs });
+  }
+}
+```
+
+Cases pinned:
+
+1. **No-op when `__drizzle_migrations` does not exist.** `tables = new Set()`, `recorded` stays empty.
+2. **`name` column present -> records by name.** Two rows with `name` present are recorded in order.
+3. **`name` column present but row `name` is null/empty -> skipped.** Only the row with a non-empty `name` is recorded; the null and empty-string rows are dropped silently.
+4. **`name` column absent -> fall back to `created_at` prefix match.** `Date.UTC(2026, 7, 28, 7, 41, 39)` maps to the `20260828074139_kilocode_board` migration id via the `YYYYMMDDHHMMSS_*` prefix.
+5. **Unmatched `created_at` throws.** A far-future timestamp with no matching migration rejects with `/Legacy migration timestamp/`. This is the deliberate loud-failure path — catch schema drift at boot, not silently.
+6. **`name` absent AND `created_at` absent -> skipped.** No usable data to match on; the row is dropped without a throw.
+
+Recipe for a new legacy schema variant:
+
+```typescript
+it('records nothing when the journal is empty even if the table exists', async () => {
+  const bridge = new FakeBridge(
+    new Set(['__drizzle_migrations']),
+    new Map([['__drizzle_migrations', [{ name: 'name' }, { name: 'created_at' }]]]),
+    []
+  );
+  await importLegacyDrizzleJournal(bridge, []);
+  expect(bridge.recorded).toEqual([]);
+});
+```
+
+Real SQLite integration is intentionally left to the adapter layer's own tests — this suite locks the pure decision logic only.

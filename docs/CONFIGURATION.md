@@ -1450,6 +1450,16 @@ For example, with default settings: 1s, 2s, 4s, 8s, 16s (capped at 30s).
 | `reconnect:success` | `{}` | Successfully reconnected |
 | `reconnect:failed` | `{ error }` | All retry attempts exhausted |
 
+### Network Transport Classification
+
+`classifyNetworkError(err)` (`src/core/network.ts`) folds a suspected socket-level failure into a small, UI-renderable classification `{ kind, message, retriable }`. Recognized transport codes are fixed in the runtime — there is no configuration to tune them; the set is deliberately unified with the transient-retry regex in `AGENTS.md` so `ErrorBackoff`, the GitHub Actions workflow retry loop, and the TUI classifier stay in agreement.
+
+Recognized codes: `ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, `EPIPE`. Everything else returns `undefined` so callers fall through to their normal error path. See [API.md — Network Transport Classification](API.md#network-transport-classification) for the full contract.
+
+### Safe URL Opener
+
+`openUrl(input, options?)` (`src/core/open.ts`) is the single sanctioned browser-open entry point. Only `http:` and `https:` URLs are permitted; every other scheme (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC-style path is rejected. There is no allow-list to configure — the two-scheme policy is fixed by design. Options: `{ detached?: boolean }` (default `true`). See [API.md — Safe URL Opener](API.md#safe-url-opener-openurl).
+
 ## Reference System Configuration
 
 External repository references allow agents to access code from other repositories:
