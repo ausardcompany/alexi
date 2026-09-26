@@ -4,7 +4,7 @@ import { useChat } from '../context/ChatContext.js';
 import { useSession } from '../context/SessionContext.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { buildUserMessage, type MultimodalContentItem } from '../../../utils/multimodal.js';
-import { isStreamStalledError } from '../../../core/streamWatchdog.js';
+import { isNetworkDisconnectedError, isStreamStalledError } from '../../../core/streamWatchdog.js';
 import { isAbortError } from '../../../core/streamingOrchestrator.js';
 
 export interface UseStreamChatReturn {
@@ -84,6 +84,13 @@ export function useStreamChat(): UseStreamChatReturn {
         // the catch as `code === 'ABORT_ERR'` (issue #1319).
         if (isAbortError(err)) {
           // Aborted by user; no error to display
+        } else if (isNetworkDisconnectedError(err)) {
+          // Stream-silence probe classified the stall as a network
+          // disconnect (issue #1836). Surface a distinct inline error
+          // so the user knows to check connectivity rather than staring
+          // at an infinite spinner. The `[waiting for network]` prefix
+          // matches the Kilocode #13523 pattern.
+          chat.setError(`[waiting for network] ${err.message}`);
         } else if (isStreamStalledError(err)) {
           // Stalled provider stream (issue #1164). Surface a friendly,
           // retry-oriented message instead of the raw watchdog text.
