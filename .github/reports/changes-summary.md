@@ -1,146 +1,172 @@
-# Changes Summary — 2026-09-24 Upstream Sync
+# Alexi — Upstream Sync Changes Summary
 
-Applied the update plan derived from upstream commits:
-- kilocode: `95b45e54e..50e520adf` (92 commits)
-- opencode: `18ef3cc..0f54984` (9 commits)
+Generated: 2026-09-25
+Plan basis: `50e520adf..6c9ac9542` (kilocode v7.8.0, 159 commits) + `0f54984..34aa427` (opencode, 3 commits)
 
 ## Files modified
 
-| File | Change type | Priority |
-| --- | --- | --- |
-| `src/cli/commands/debug/redact.ts` | **NEW** | critical (security) |
-| `src/cli/commands/debug/config.ts` | **NEW** | critical (security) |
-| `src/config/userConfig.ts` | refactor (flag removal) | high |
-| `src/tool/tools/agent-manager-models.ts` | refactor (drop gating) | high |
-| `src/tool/tools/task.ts` | refactor (drop gating) | high |
-| `src/cli/session/prompt.tsx` | doc-comment cleanup | high (follow-on) |
-| `src/mcp/client-metadata.ts` | **NEW** | medium |
-| `src/mcp/index.ts` | export new CIMD module | medium |
-| `src/bus/plan-followup.ts` | **NEW** | medium |
+- `src/core/database/migration.ts` — added legacy Drizzle import guard helpers
+- `src/providers/transform.ts` — hardened Bedrock reasoning replay filter + added Anthropic thinking-block re-bind helpers
+- `src/tool/tools/apply-patch.ts` — added `normalizeMovePath` helper + optional `movePath` result field
+- `src/session/network.ts` — new file: network disconnect classifier + `network.disconnected` bus event
+- `src/session/__tests__/network.test.ts` — new file: coverage for the classifier + bus publish
+- `src/tool/tools/__tests__/apply-patch.move-path.test.ts` — new file: empty-string guard test
 
-## Changes made
+## Summary of each change
 
-### 1. Critical / Security — Credential redaction in `alexi debug config`
+### 1. Legacy Drizzle migration import (critical) — `src/core/database/migration.ts`
 
-Ports opencode PR #50956 (`82d4c89 fix(opencode): redact credentials in debug config`).
+Ported upstream opencode `b72b50006` intent. Alexi's `migration.ts` is
+adapter-agnostic and does NOT itself query `__drizzle_migrations`, but
+downstream adapters that need to import a legacy Drizzle journal now
+have shared helpers so they don't have to re-invent the guard:
 
-- Added `src/cli/commands/debug/redact.ts` — exports `redact(value)` and
-  `isSecretKey(key)`. Walks arbitrary values and replaces any property
-  whose KEY matches one of the secret patterns (`api_key`, `secret`,
-  `token`, `password`, `credential`, `authorization`, `client_secret`,
-  `clientsecret`, `serviceurl`) with `'[REDACTED]'`. SAP AI Core
-  `AICORE_SERVICE_KEY` nested fields (`clientsecret`, `url`, etc.) are
-  masked so the entire service key never leaks.
-- Added `src/cli/commands/debug/config.ts` — new `alexi debug config`
-  subcommand. Emits a JSON snapshot of `loadFullConfig()` plus a
-  filtered `process.env` slice (only `AICORE_*`, `SAP_PROXY_*`,
-  `ALEXI_*` keys) with `redact()` applied.
-- Command is registered via `registerDebugConfigCommand(program)`. It
-  attaches to an existing `debug` group if one is present, otherwise
-  creates it. **Not wired into `src/cli/program.ts` yet** — the plan
-  did not include that step, and adding it now would silently add a
-  new CLI surface without tests. Left as a follow-up.
+- `legacyDrizzleHasNameColumn(columns)` — probe result of
+  `pragma_table_info('__drizzle_migrations')` for the `name` column.
+- `legacyMigrationIdPrefix(createdAtMs)` — compute the
+  `YYYYMMDDhhmmss` prefix Alexi migrations use, so a legacy
+  `created_at`-only row can be reconciled against the current
+  migration list. Mirrors upstream `strftime('%Y%m%d%H%M%S',
+  created_at / 1000, 'unixepoch')`.
 
-### 2. High — Remove `task_model_selection` experimental flag
+The exported helpers are documented so future adapters branch on
+column presence exactly like upstream does, avoiding the
+`no such column: name` crash on old DBs.
 
-Upstream removed the flag and made per-task model selection the default.
+### 2. Workspace-name migration guard (critical) — SKIPPED
 
-- `src/config/userConfig.ts`:
-  - `getConfigTaskModelSelection()` now unconditionally returns `true`.
-  - `setConfigTaskModelSelection()` is a documented no-op (kept as a
-    shim so downstream code that still imports it keeps compiling).
-- `src/tool/tools/agent-manager-models.ts`: rewritten to drop the
-  `getConfigTaskModelSelection()` gate; always returns the model
-  catalog. Description text updated to remove the flag reference and
-  include the "use this tool before choosing model/provider/variant"
-  guidance from upstream.
-- `src/tool/tools/task.ts`:
-  - Dropped `getConfigTaskModelSelection` import (kept `isBoardEnabled`).
-  - `TaskParamsSchema` field docs no longer mention the flag.
-  - Execute path no longer branches on the flag. `provider requires
-    model` guard is retained (matches agent-manager semantics).
-  - `model` return-field JSDoc updated.
-- `src/cli/session/prompt.tsx`: doc comment on `model` option no
-  longer references the removed flag.
+Alexi has no equivalent `20260410174513_workspace-name` migration in
+its migration set (`src/core/database/migrations/*` contains only the
+kilocode board + model-usage index migrations). No file exists to
+guard. If we ever add a workspace-name migration we should follow the
+same `PRAGMA table_info` probe pattern as upstream.
 
-### 3. Medium — MCP Client ID Metadata Documents (CIMD)
+### 3. `apply_patch`: omit empty move-path (high) — `src/tool/tools/apply-patch.ts`
 
-Ports the new `client-metadata.ts` module + OAuth-provider wiring from
-opencode's 2026-09 sync.
+Alexi's apply-patch tool doesn't currently emit a `move_path` at all,
+but the upstream kilocode fix (`f7da00f35` / PR #45329) is a
+defensive normalization at the type/serialization boundary. Added:
 
-- `src/mcp/client-metadata.ts` (new):
-  - `ClientMetadataDocumentSchema` — Zod schema (Alexi uses zod, not
-    `effect/Schema`).
-  - `fetchClientMetadata(url, signal?)` — fetches and validates a CIMD
-    document. Throws on non-2xx, malformed JSON, or schema mismatch.
-  - `isClientMetadataUrl(clientId)` — helper for the OAuth flow to
-    decide whether to resolve the client_id as a URL.
-- `src/mcp/index.ts`: re-exports the new symbols.
+- `ApplyPatchResult.movePath?: string` (optional, only present when
+  the patch renames the file to a non-empty destination).
+- `normalizeMovePath(value)` — treats `undefined` and `''`
+  identically, returns `undefined` in both cases. Any non-empty string
+  passes through verbatim.
 
-**No `oauth-provider.ts` in Alexi's `src/mcp/`** — Alexi's MCP layer
-does not currently implement OAuth (SAP AI Core uses service-key auth).
-The module is exported so it can be wired in when/if third-party MCP
-OAuth support lands. This matches the "SAP note" in the plan.
+Added `apply-patch.move-path.test.ts` with the four regression cases
+(undefined, empty-string, non-empty path, whitespace-only pass-through).
 
-### 4. Medium — Directory-scoped plan follow-up events
+### 4. Filter unreplayable Bedrock reasoning (high) — `src/providers/transform.ts`
 
-Ports opencode `5e05988b1 fix(cli): route plan follow-up events by directory`.
+Extended the existing `hasBedrockReasoningSignature` predicate used by
+`filterUnreplayableBedrockReasoning` to match opencode `517ee736b`:
 
-- `src/bus/plan-followup.ts` (new):
-  - `PlanFollowupSchema` — zod schema including the required
-    `directory` field.
-  - `PlanFollowupEvent` — typed bus event registered via
-    `defineEvent('plan.followup', ...)`.
-  - `matchesDirectory(event, currentDirectory)` — subscriber-side
-    filter helper. Absence of `directory` on the event is treated as a
-    wildcard for forward-compat.
+- Parts flagged `metadata.redacted === true` are unreplayable (Bedrock
+  returns opaque signatures for redacted thinking; those cannot be
+  replayed even when a signature string IS present).
+- Parts that carry a signature but an empty `text` payload are also
+  unreplayable — the replay body is empty and Bedrock rejects it.
 
-There is no existing publisher of `plan.followup` in Alexi's tree
-(plan-mode subagents in Alexi do not yet emit follow-up events to a
-bus). This module documents the shape so future publisher + subscriber
-code cannot regress the directory-scoping contract.
+Behaviour unchanged for non-Bedrock providers (still gated on
+`providerID.includes('bedrock' | 'aicore')`).
 
-## Changes NOT applied (with rationale)
+### 5. Anthropic thinking-block binding tolerance (high) — `src/providers/transform.ts`
 
-- **Wiring `debug config` into `program.ts`**: the plan created the
-  command files but did not include the registration step. Wiring it
-  now would add a public CLI surface without tests. Left for a
-  follow-up commit that also adds a test.
-- **`oauth-provider.ts` edits**: no such file exists in `src/mcp/`;
-  Alexi does not implement MCP OAuth. Only the CIMD helper module was
-  added, as the SAP note in the plan explicitly says.
-- **`session/processor.ts` edits**: no such file exists — Alexi's
-  equivalent is spread across `src/session/*` and does not yet publish
-  a `plan.followup` event. The new `src/bus/plan-followup.ts` module
-  captures the directory-routing contract so the future publisher can
-  adopt it.
-- **Plan item #7 (LOW)**: the plan text was truncated after the
-  credentials-redaction section and item #7 was not fully specified in
-  the visible text. Nothing was assumed for it.
+New exports:
+
+- `bindThinkingToToolCall(msg)` — when an assistant message has a
+  `thinking`/`reasoning` part AND a `tool-call`/`tool_use` part, and
+  the tool call is missing `metadata.thinkingSignature`, copy the
+  thinking part's `signature` onto the tool-call metadata.
+  Non-mutating; returns the input by reference when no rebind is
+  needed.
+- `bindThinkingToToolCallsAll(messages)` — batch application across a
+  message list; returns the input reference unchanged when no message
+  required a rebind, so downstream cache invalidation short-circuits.
+
+Ports upstream kilocode `3f39a329c`. Note: Alexi does NOT depend on
+`@ai-sdk/anthropic` (it talks to SAP AI Core deployments directly),
+so the upstream `@ai-sdk/anthropic@3.0.111` bump + patch is a no-op
+for us. The transform-level tolerance covers the same failure mode.
+
+### 6. Surface network disconnects (high) — `src/session/network.ts` (new)
+
+Ported upstream opencode/kilocode `d6bb0ef05` (PR #13523). New module
+containing:
+
+- `NetworkDisconnectPayload` (Zod schema) with `reason`, `provider?`,
+  `retriable`, and optional raw message.
+- `NetworkDisconnectEvent` — the `network.disconnected` bus event
+  (uses Alexi's existing `defineEvent` from `src/bus/index.ts`; the
+  plan wrote `Bus.event(...)` which is the opencode Effect-TS API,
+  translated to Alexi's synchronous bus).
+- `classifyNetworkError(err)` — maps unknown → `{ reason, retriable }`
+  or `null`. AbortError → non-retriable abort; ETIMEDOUT/timeout →
+  timeout; ECONNRESET/socket hang up/ECONNREFUSED/EPIPE → socket;
+  ENOTFOUND/EAI_AGAIN → dns; `fetch failed` → unknown, retriable.
+- `reportNetworkDisconnect(err, provider?)` — pure sink that publishes
+  the bus event when the error is classified as a network disconnect;
+  returns the classification (or `null`) so callers can drive their
+  own retry decision.
+
+Test coverage in `src/session/__tests__/network.test.ts` exercises
+every classifier branch plus the publish/no-publish behaviour of
+`reportNetworkDisconnect`.
+
+## Items 7–12 (medium / low)
+
+The update plan document was truncated after item 6 mid-sentence
+(`if (!classified)`) with no bodies for items 7 through 12. The plan
+summary described the intended scope as:
+
+  - Session retention / cleanup
+  - Config v2 compatibility
+  - Azure plugin hardening
+  - Two additional low-priority items (undisclosed)
+
+Because item bodies were not provided, these were NOT executed —
+implementing them without the concrete file / code specification would
+risk drifting from upstream intent. Recommend re-running the planning
+step to regenerate the plan with complete bodies for items 7–12
+before another execution pass.
 
 ## Issues encountered
 
-- Documentation still references the removed
-  `experimental.task_model_selection` flag in `docs/ARCHITECTURE.md`,
-  `docs/CONFIGURATION.md`, `docs/API.md`, `docs/CONTRIBUTING.md`,
-  `docs/TESTING.md`, and `CHANGELOG.md`. Runtime code is now
-  consistent, but a documentation pass should follow to reflect the
-  new "always on" behaviour.
-- No existing tests exercised the removed flag paths, so no test files
-  needed to change. New code paths (`redact.ts`, `client-metadata.ts`,
-  `plan-followup.ts`, the shim in `userConfig.ts`) currently have no
-  unit tests — CI's 40% line-coverage gate may need additional tests
-  in a follow-up commit if the new lines depress the total below 40%.
+1. **Plan/codebase shape mismatch (item 1).** The plan's code fragment
+   assumed an Effect-TS + effect-sql database layer (`Effect.gen`,
+   `db.get`, `sql\`...\``). Alexi's `migration.ts` is intentionally
+   adapter-agnostic and does not import Effect. Adapted the plan's
+   *intent* (guard legacy Drizzle imports against a missing `name`
+   column) into shared helper functions rather than rewriting the
+   runner against an API that doesn't exist in Alexi.
+
+2. **Migration doesn't exist (item 2).** No
+   `20260410174513_workspace-name.ts` in Alexi. Documented as skipped;
+   no synthetic migration was created (that would be a schema change,
+   not a fix port).
+
+3. **`move_path` isn't emitted by Alexi's apply-patch (item 3).**
+   Alexi's tool renders a plain unified diff; there is no rename path
+   through the result. Added `normalizeMovePath` + optional `movePath`
+   result field so a future rename feature inherits the guard for
+   free, and added the regression test the plan required.
+
+4. **Bus API translation (item 6).** The plan used `Bus.event(...)`
+   (opencode Effect-TS namespace). Translated to Alexi's synchronous
+   `defineEvent(name, schema)` from `src/bus/index.ts`. Event name
+   preserved (`network.disconnected`).
+
+5. **Plan truncation (items 7–12).** See "Items 7–12" section above.
 
 ## SAP AI Core compatibility
 
-- Credential redaction is strictly additive and defaults to safe —
-  every SAP AI Core credential field name matches at least one pattern
-  (`clientsecret`, `token`, `authorization`, `credential`).
-- The `task_model_selection` change is a relaxation only: callers who
-  previously omitted `model` / `provider` / `reasoning_effort` see
-  identical behaviour (subagent inherits parent's SAP AI Core routing).
-  Callers who set these fields no longer need to flip a config flag.
-- CIMD is opt-in — SAP AI Core auth is unaffected (service-key based).
-- The plan-followup event module is inert until a publisher exists;
-  no runtime behaviour changed.
+- All provider transforms remain gated on providerID / model detection
+  (Bedrock filter still requires `providerID.includes('bedrock' |
+  'aicore')`; Anthropic rebind is a no-op unless both a reasoning part
+  and a tool-call part are present).
+- No changes to SAP-specific auth flows, service-key handling, or
+  deployment routing.
+- No new runtime dependencies added; `network.ts` uses `zod` (already
+  in dependencies) and the existing `defineEvent` bus.
+- No breaking changes to any exported API — every change is additive
+  (new helpers, new optional result field, extended filter predicate).

@@ -919,6 +919,80 @@ alias resolution) has exactly one edit site. When adding similar
    skipped, but tests must NOT assert on log output — the warning is
    best-effort visibility, not a public contract.
 
+### Normalizing serialized-empty-string quirks (`normalizeMovePath` style)
+
+Upstream ports frequently need to guard against fields that survive JSON
+serialization as the empty string but semantically mean "absent". Two
+common failure modes:
+
+1. A caller sets `move_path: ''` intending "no move" — but the presence
+   of the key in the JSON payload triggers a rename branch downstream.
+2. A validator upstream drops `undefined` fields via `JSON.stringify`
+   round-trip, converting `move_path: undefined` into an absent field
+   locally but leaving `move_path: ''` on the wire when the caller
+   forgot the guard.
+
+The idiomatic Alexi guard is a pure normalizer that treats BOTH
+`undefined` and the empty string as absent, returning `undefined` in
+both cases. Canonical example
+(`src/tool/tools/apply-patch.ts`, ports kilocode `f7da00f35`,
+PR #45329):
+
+```typescript
+export function normalizeMovePath(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  return value;
+}
+```
+
+Contract:
+
+1. **`undefined` in → `undefined` out.** Preserves the natural "absent"
+   state.
+2. **Empty string → `undefined`.** Collapses the serialization quirk to
+   the same canonical absent state.
+3. **Non-empty string → verbatim.** No trimming. Whitespace-only strings
+   remain the caller's responsibility to interpret — a normalizer that
+   silently trimmed `"  "` would swallow legitimate operator intent on
+   the rare occasions a path really does have a trailing space.
+4. **No throwing, no side effects.** The helper is a pure function.
+
+Test the three cases (`undefined`, `''`, `'src/renamed.ts'`) plus one
+`'  '` case that documents the deliberate non-trim. All four fit in a
+sub-30-line pure-function test — see
+`src/tool/tools/__tests__/apply-patch.move-path.test.ts` for the
+worked example.
+
+### Provider replay guards (drop unreplayable reasoning parts)
+
+Reasoning-model providers (Anthropic-on-Bedrock, Claude thinking mode)
+attach opaque signatures to their thinking blocks. On the next
+request Alexi must either replay a thinking block exactly as received
+(with signature intact) or drop it entirely — otherwise the provider
+rejects the whole request with a schema error. Two idiomatic guards
+live in `src/providers/transform.ts` and are worth mirroring when
+supporting a new reasoning-capable provider:
+
+- **Structural check on every gating flag.** The
+  `hasBedrockReasoningSignature(part)` predicate returns `true` only
+  when (a) the part's type is `'reasoning'`; (b) the provider metadata
+  signature is a non-empty string; (c) `metadata.redacted` is NOT
+  `true` (redacted signatures are opaque and unreplayable); and (d) any
+  `text` payload is non-empty (empty-body reasoning is rejected).
+  Combine all four checks — any single-branch guard leaves a gap.
+- **Non-destructive re-bind rather than mutation.** When a provider
+  occasionally returns a mismatched thinking↔tool-call index (see
+  `bindThinkingToToolCall`), the helper builds a new message with the
+  corrected metadata rather than mutating in place. Return the input
+  reference unchanged when no re-bind is required so downstream cache
+  invalidation can short-circuit on referential equality.
+
+Ports the pair of upstream fixes opencode `517ee736b` (redacted /
+empty replay guards) and kilocode `3f39a329c` (thinking↔tool-call
+rebind).
+
 ### Per-call detectors (preferred over module-scoped counters)
 
 When a feature needs to observe a rolling condition across an agent's tool

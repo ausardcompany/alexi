@@ -1998,6 +1998,77 @@ class NetworkManager extends EventEmitter {
 
 Events emitted: `reconnect:attempt`, `reconnect:success`, `reconnect:failed`.
 
+### Network Disconnect Classification (`network.disconnected`)
+
+Complementing `NetworkManager` is a stateless classification surface in
+`src/session/network.ts` that folds low-level socket / DNS error codes
+into a small discriminated union and emits a discrete
+`network.disconnected` bus event. Before this module landed, a socket
+drop mid-stream caused the TUI to hang silently on the spinner — users
+on flaky SAP corporate VPNs had no indication that the underlying
+connection had died. The classifier lets subscribers (TUI status bar,
+headless CLI logger, session queue drain) surface a "reconnecting…" UI
+instead of the indefinite spinner.
+
+Reason union:
+
+| Reason    | Match                                        | Retriable |
+| --------- | -------------------------------------------- | --------- |
+| `abort`   | `err.name === 'AbortError'`                  | `false`   |
+| `timeout` | `ETIMEDOUT`, `"timeout"`                     | `true`    |
+| `socket`  | `ECONNRESET`, `EPIPE`, `ECONNREFUSED`, `"socket hang up"` | `true`    |
+| `dns`     | `ENOTFOUND`, `EAI_AGAIN`                     | `true`    |
+| `unknown` | `"fetch failed"` (undici wrapper)            | `true`    |
+
+Public helpers:
+
+```typescript
+export function classifyNetworkError(
+  err: unknown
+): { reason: NetworkDisconnectReason; retriable: boolean } | null;
+
+export function reportNetworkDisconnect(
+  err: unknown,
+  provider?: string
+): { reason: NetworkDisconnectReason; retriable: boolean } | null;
+
+export const NetworkDisconnectEvent: BusEvent<NetworkDisconnectPayloadT>;
+```
+
+`classifyNetworkError` returns `null` when the error does not look like a
+network disconnect — callers propagate non-network errors normally
+through their existing error path. `reportNetworkDisconnect` classifies
+AND publishes on the bus (swallowing subscriber errors so a broken
+listener cannot mask the underlying failure) and returns the
+classification synchronously so callers that need retry semantics do not
+have to subscribe. The payload carries an optional `provider` field so
+the UI can surface WHICH deployment dropped when a chat is fanned out
+across multiple SAP AI Core deployments.
+
+```mermaid
+sequenceDiagram
+    participant Caller as Session / Streaming loop
+    participant Classifier as classifyNetworkError
+    participant Bus as NetworkDisconnectEvent
+    participant UI as TUI status bar
+
+    Caller->>Classifier: err (unknown)
+    alt not a network error
+        Classifier-->>Caller: null (propagate original err)
+    else classified
+        Classifier-->>Caller: { reason, retriable }
+        Caller->>Bus: publish { reason, retriable, provider, raw }
+        Bus->>UI: render "reconnecting… (reason: socket)"
+        alt retriable === true
+            Caller->>Caller: schedule reconnect via NetworkManager
+        else retriable === false (abort)
+            Caller->>Caller: propagate cancel, no reconnect
+        end
+    end
+```
+
+Ports opencode/kilocode `d6bb0ef05` (PR #13523).
+
 ## Error Handling
 
 Alexi classifies runtime errors into two categories and applies different
@@ -3112,6 +3183,40 @@ await configureConnection({ run: (sql) => db.exec(sql) });
 ### Persistent snapshot-disable
 
 `src/core/snapshot.ts` persists the "snapshots disabled" flag under `~/.alexi/state/snapshot.json` (JSON key: `disabled`) so the choice survives CLI restart. A missing or unreadable file is treated as "not disabled" (snapshots on by default) so an unwritable state directory degrades gracefully rather than silently disabling snapshots. Public API: `disableSnapshots()`, `enableSnapshots()`, `shouldSnapshot()`, `SNAPSHOT_DISABLE_STATE_KEY` (`kilocode.snapshot.disabled`). The paired `pruneSnapshots(sessionId, keep = 20)` helper cleans stale snapshot / truncation files by `mtime`, oldest first.
+
+### Legacy Drizzle migration importer guard
+
+Older Drizzle-based installations only stored `created_at` in the
+`__drizzle_migrations` journal. Blindly running
+`SELECT name FROM __drizzle_migrations` on those DBs fails with
+`no such column: name`, breaking the whole migration bootstrap.
+`src/core/database/migration.ts` exposes two helpers so any adapter
+that needs to import a legacy Drizzle journal branches on the actual
+column set instead of assuming the modern shape.
+
+```typescript
+export interface LegacyMigrationRow {
+  name?: string;
+  created_at?: number;
+}
+
+export function legacyDrizzleHasNameColumn(
+  columns: ReadonlyArray<{ name: string }>
+): boolean;
+
+export function legacyMigrationIdPrefix(createdAtMs: number): string;
+```
+
+Callers first probe `pragma_table_info('__drizzle_migrations')` and
+dispatch:
+
+- `name` column present → `SELECT name FROM __drizzle_migrations WHERE name IS NOT NULL`.
+- `name` column absent → `SELECT created_at FROM __drizzle_migrations WHERE created_at IS NOT NULL`, then reconcile each row's `created_at` timestamp against the current migration id list via `legacyMigrationIdPrefix(createdAtMs)`, which returns the `YYYYMMDDhhmmss` UTC prefix Alexi migrations use.
+
+Mirrors upstream opencode `b72b50006`. Alexi does not use effect-sql,
+so both helpers are pure functions with no adapter coupling — a
+better-sqlite3, node:sqlite, or raw pg backend can share the same
+detection logic.
 
 ## Shell Permission Pattern Masking
 

@@ -2858,6 +2858,61 @@ manager.getState();        // NetworkState
 manager.cancelReconnect(); // Cancel in-progress reconnection
 ```
 
+### Network Disconnect Classification API
+
+Complementing `NetworkManager` is a stateless classifier in
+`src/session/network.ts` (2026-09-25, ports opencode/kilocode
+`d6bb0ef05`, PR #13523). Callers that catch an unknown error thrown
+from a network read can classify it into a small discriminated union
+and emit a discrete `network.disconnected` bus event so the TUI can
+render a "reconnecting…" line instead of hanging on the spinner.
+
+```typescript
+import {
+  classifyNetworkError,
+  reportNetworkDisconnect,
+  NetworkDisconnectEvent,
+  type NetworkDisconnectReason,
+  type NetworkDisconnectPayloadT,
+} from './session/network.js';
+
+// Pure classification — returns null when not a network error.
+const classified = classifyNetworkError(err);
+if (classified === null) {
+  throw err; // propagate normally
+}
+const { reason, retriable } = classified;
+// reason: 'timeout' | 'abort' | 'socket' | 'dns' | 'unknown'
+// retriable: boolean (false only for 'abort')
+
+// Or classify AND publish in one call:
+const result = reportNetworkDisconnect(err, 'aicore-anthropic');
+// result === null when not a network error
+// otherwise result === { reason, retriable } AND the event has been
+// published on NetworkDisconnectEvent with an optional `provider` field.
+
+// Subscribe to the bus event from the TUI:
+const unsub = NetworkDisconnectEvent.subscribe((payload) => {
+  // payload: { reason, retriable, provider?, raw? }
+  statusBar.setDisconnected(payload.reason);
+});
+```
+
+Behaviour contract:
+
+- `classifyNetworkError` returns `null` for non-`Error` values,
+  authentication / validation errors, and any error whose message does
+  not match one of the well-known socket / DNS / timeout patterns.
+- `AbortError` (user-initiated cancel) is classified with
+  `retriable: false` so upstream retry logic does NOT try to reconnect
+  against a cancelled request.
+- `reportNetworkDisconnect` NEVER re-throws. A subscriber that throws
+  from its handler is swallowed so the underlying network error is not
+  masked.
+- The `raw` field on the payload carries the best-effort raw error
+  message for logs but callers MUST NOT render it verbatim to
+  end-users — it can leak internal URLs.
+
 ## Enhanced Tool Registry
 
 The `EnhancedToolRegistry` supports dynamic prompt-based tool resolution:
