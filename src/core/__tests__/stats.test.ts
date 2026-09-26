@@ -296,6 +296,7 @@ describe('StatsManager', () => {
         totalCacheWriteTokens: 0,
         cacheReportingCallCount: 0,
         cacheReportingInputTokens: 0,
+        totalReasoningTokens: 0,
       });
       expect(rate).toBeUndefined();
     });
@@ -313,6 +314,7 @@ describe('StatsManager', () => {
         totalCacheWriteTokens: 0,
         cacheReportingCallCount: 1,
         cacheReportingInputTokens: 0,
+        totalReasoningTokens: 0,
       });
       expect(rate).toBeUndefined();
     });
@@ -329,6 +331,7 @@ describe('StatsManager', () => {
         totalCacheWriteTokens: 60,
         cacheReportingCallCount: 2,
         cacheReportingInputTokens: 300,
+        totalReasoningTokens: 0,
       });
       // 700 / (700 + 300) = 0.7
       expect(rate).toBeCloseTo(0.7, 5);

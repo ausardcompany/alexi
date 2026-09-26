@@ -1224,6 +1224,116 @@ interface TokenUsage {
 }
 ```
 
+#### UsageRecord and CostSummary
+
+`src/core/costTracker.ts` records one immutable `UsageRecord` per provider call and aggregates them via `getSummary()`. The tracker persists records to `~/.alexi/cost-history.json` and is consumed by `/cost`, `/stats`, `alexi log`, and the TUI `ChatPage` / `LogsPage` usage widgets.
+
+```typescript
+interface UsageRecord {
+  timestamp: number;
+  sessionId?: string;
+  modelId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  /**
+   * Tokens served from the provider prompt cache. `undefined` means the
+   * provider did not report cache usage; `0` means a true miss.
+   */
+  cacheReadTokens?: number;
+  /**
+   * Tokens written to the provider prompt cache. `undefined` means the
+   * provider did not report cache usage.
+   */
+  cacheWriteTokens?: number;
+  /**
+   * Reasoning tokens consumed during extended thinking (billed at output
+   * rate). `undefined` means the provider did not report reasoning tokens
+   * (older records or providers without extended thinking). `0` means
+   * the provider reported "no reasoning was performed" for this call.
+   */
+  reasoningTokens?: number;
+}
+
+interface CostSummary {
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  callCount: number;
+  byModel: Record<
+    string,
+    { cost: number; calls: number; inputTokens: number; outputTokens: number }
+  >;
+  byDate: Record<string, number>;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  cacheReportingCallCount: number;
+  cacheReportingInputTokens: number;
+  /**
+   * Total reasoning tokens across all records in the summary window.
+   * Sums only records that reported a numeric `reasoningTokens` value;
+   * legacy records without the field contribute 0.
+   */
+  totalReasoningTokens: number;
+}
+```
+
+The three-state semantics of `cacheReadTokens`, `cacheWriteTokens`, and `reasoningTokens` must be preserved by every caller — see [`docs/ARCHITECTURE.md` — Reasoning Token Observability](ARCHITECTURE.md#reasoning-token-observability-costtracker) for the runtime contract and why `undefined` must not be coerced to `0`.
+
+##### CostTracker.recordUsage
+
+```typescript
+class CostTracker {
+  recordUsage(
+    modelId: string,
+    inputTokens: number,
+    outputTokens: number,
+    sessionId?: string,
+    cacheTokens?: { read?: number; write?: number },
+    reasoningTokens?: number
+  ): UsageRecord;
+}
+```
+
+Optional trailing parameters are backwards-compatible with every existing call site (`src/core/orchestrator.ts:183`, `:308`, `src/core/agenticChat.ts:1224`, `src/core/streamingOrchestrator.ts:346`). Pass `cacheTokens` when the provider reported prompt-cache usage (`extractCacheTokens` in `src/providers/sapOrchestration.ts:416`). Pass `reasoningTokens` when the provider reported extended-thinking usage. Leave either `undefined` when the provider did not report it — do NOT coerce to `0`, because `0` is a meaningful "cache miss" / "no reasoning performed" signal distinct from "provider did not report".
+
+```typescript
+import { getCostTracker } from './core/costTracker.js';
+
+// Non-thinking, non-cache provider — omit optional parameters.
+getCostTracker().recordUsage('gpt-4o', 1000, 500, sessionId);
+
+// Cache-reporting provider (SAP AI Core Orchestration + Anthropic).
+getCostTracker().recordUsage('anthropic--claude-4.7-opus', 1000, 200, sessionId, {
+  read: 800,
+  write: 25,
+});
+
+// Reasoning-capable provider — every field populated.
+getCostTracker().recordUsage(
+  'anthropic--claude-4.7-opus',
+  1000,
+  200,
+  sessionId,
+  { read: 400, write: 20 },
+  128 // reasoningTokens
+);
+```
+
+##### CostTracker.getSummary
+
+```typescript
+class CostTracker {
+  getSummary(options?: { since?: number; sessionId?: string }): CostSummary;
+  getTodaySummary(): CostSummary;
+  getMonthSummary(): CostSummary;
+  getSessionSummary(sessionId: string): CostSummary;
+  getAllTimeSummary(): CostSummary;
+}
+```
+
+`totalReasoningTokens` is summed only over records that reported a numeric `reasoningTokens` value. Legacy records without the field contribute `0`, so the metric never inflates or dilutes a genuine reasoning bill. `cacheReportingCallCount` and `cacheReportingInputTokens` continue to gate the cache-hit-rate calculation on records that carried a cache field; reasoning presence does NOT flip a record into the cache-reporting bucket.
+
 #### ToolCall
 
 ```typescript

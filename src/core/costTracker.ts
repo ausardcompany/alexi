@@ -44,6 +44,17 @@ export interface UsageRecord {
    * `undefined` means the provider did not report cache usage.
    */
   cacheWriteTokens?: number;
+  /**
+   * Reasoning tokens consumed during extended thinking (billed at output
+   * rate). `undefined` means the provider did not report reasoning tokens
+   * (older records or providers without extended thinking). 0 means the
+   * provider reported "no reasoning was performed" for this call.
+   *
+   * Recorded separately from `outputTokens` for observability: extended
+   * thinking is conceptually distinct from the final response and users
+   * benefit from being able to see the composition of their spend.
+   */
+  reasoningTokens?: number;
 }
 
 export interface CostSummary {
@@ -86,6 +97,12 @@ export interface CostSummary {
    * not dilute the metric.
    */
   cacheReportingInputTokens: number;
+  /**
+   * Total reasoning tokens across all records in the summary window.
+   * Sums only records that reported a numeric `reasoningTokens` value;
+   * legacy records without the field contribute 0.
+   */
+  totalReasoningTokens: number;
 }
 
 export interface TaskUsageSummary {
@@ -302,13 +319,20 @@ export class CostTracker {
    * `extractCacheTokens` in `src/providers/sapOrchestration.ts`). Leave
    * them `undefined` when the provider did not report cache usage — do NOT
    * coerce to 0, because 0 is a meaningful "cache miss" signal.
+   *
+   * `reasoningTokens` is optional. Pass it when the upstream provider
+   * reported extended-thinking tokens on the response. Leave it
+   * `undefined` for providers that do not expose reasoning usage so the
+   * record does not falsely claim "0 reasoning tokens" for calls that
+   * simply had no visibility into reasoning.
    */
   recordUsage(
     modelId: string,
     inputTokens: number,
     outputTokens: number,
     sessionId?: string,
-    cacheTokens?: { read?: number; write?: number }
+    cacheTokens?: { read?: number; write?: number },
+    reasoningTokens?: number
   ): UsageRecord {
     const cost = this.calculateCost(modelId, inputTokens, outputTokens);
 
@@ -325,6 +349,9 @@ export class CostTracker {
     }
     if (cacheTokens?.write !== undefined) {
       record.cacheWriteTokens = cacheTokens.write;
+    }
+    if (reasoningTokens !== undefined) {
+      record.reasoningTokens = reasoningTokens;
     }
 
     this.records.push(record);
@@ -377,6 +404,7 @@ export class CostTracker {
       totalCacheWriteTokens: 0,
       cacheReportingCallCount: 0,
       cacheReportingInputTokens: 0,
+      totalReasoningTokens: 0,
     };
 
     for (const record of filtered) {
@@ -416,6 +444,9 @@ export class CostTracker {
       }
       if (record.cacheWriteTokens !== undefined) {
         summary.totalCacheWriteTokens += record.cacheWriteTokens;
+      }
+      if (record.reasoningTokens !== undefined) {
+        summary.totalReasoningTokens += record.reasoningTokens;
       }
     }
 

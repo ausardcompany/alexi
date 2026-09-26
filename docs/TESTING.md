@@ -6806,6 +6806,67 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/Sidebar.test.tsx
 ```
 
+## Testing reasoning-token accounting
+
+`src/core/costTracker.ts` exposes a three-state `reasoningTokens` bucket on `UsageRecord` and a `totalReasoningTokens` aggregate on `CostSummary`. Because the semantics are subtly asymmetric — `undefined` (not reported), `0` (explicitly no reasoning), and `> 0` (positive count) all mean different things — the regression suite in `src/core/__tests__/costTracker.test.ts` pins six cases that a naive refactor would flatten.
+
+Run the reasoning-token cases in isolation:
+
+```bash
+npm test -- src/core/__tests__/costTracker.test.ts \
+  -t "reasoning tokens"
+```
+
+Vitest matches the `-t` name pattern against the concatenated `describe` + `it` titles, so the six new cases run together with the existing cache-aggregation cases in the `recordUsage` block.
+
+### Cases pinned (`src/core/__tests__/costTracker.test.ts:154-231`)
+
+1. **Positive reasoning count is recorded** (`should record reasoning tokens when provided`) — passes `reasoningTokens=512` as the 6th positional argument; asserts `record.reasoningTokens === 512`.
+2. **Reasoning + cache co-exist on the same record** (`should preserve reasoning tokens alongside cache tokens`) — supplies both `cacheTokens={ read: 400, write: 20 }` and `reasoningTokens=128`; asserts all three fields survive and none displaces the other.
+3. **Absent reasoning stays `undefined`** (`should leave reasoning tokens undefined when not provided`) — omits the 6th argument; asserts `record.reasoningTokens === undefined`. Pins the "do not coerce to 0" invariant.
+4. **Zero is a valid, distinct signal** (`should record reasoning tokens equal to 0 when provider explicitly reports no reasoning`) — passes `reasoningTokens=0`; asserts `record.reasoningTokens === 0`. Together with case 3 this pins the three-state contract.
+5. **Aggregation skips non-reporting records** (`should aggregate reasoning tokens in summary only from reporting records`) — mixes two records without reasoning and two with reasoning (`300` + `150`); asserts `summary.totalReasoningTokens === 450` and `summary.callCount === 4` (all four records contribute to `callCount`, only reporting records contribute to the total).
+6. **All-legacy aggregation returns `0`** (`should return zero totalReasoningTokens when no records report reasoning`) — records two non-reasoning calls; asserts `summary.totalReasoningTokens === 0`. Pins that legacy records contribute `0` rather than tripping a `NaN` from an unwrapped `undefined + number`.
+
+### `CostSummary` shape widening (`src/core/__tests__/stats.test.ts`)
+
+`computeCacheHitRate` accepts a `CostSummary` argument. When the interface gained `totalReasoningTokens`, three inline fixtures in `src/core/__tests__/stats.test.ts:296-338` had to widen to include the new field so the fixture typechecks against the widened `CostSummary` shape:
+
+```typescript
+const rate = computeCacheHitRate({
+  totalCost: 0,
+  totalInputTokens: 1000,
+  totalOutputTokens: 500,
+  callCount: 1,
+  byModel: {},
+  byDate: {},
+  totalCacheReadTokens: 0,
+  totalCacheWriteTokens: 0,
+  cacheReportingCallCount: 0,
+  cacheReportingInputTokens: 0,
+  totalReasoningTokens: 0,
+});
+expect(rate).toBeUndefined();
+```
+
+The value is always `0` in these fixtures because the cache-hit-rate calculation does NOT read `totalReasoningTokens` — the widening is purely a type-level accommodation. If you add a new numeric field to `CostSummary`, extend these fixtures the same way rather than casting to `as CostSummary`.
+
+### Fresh tracker per test (parallel-safety)
+
+`CostTracker` writes `~/.alexi/cost-history.json` on every `recordUsage`. To keep tests parallel-safe, every reasoning-token test constructs a fresh tracker with a temp `dataDir`:
+
+```typescript
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+
+const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'costTracker-test-'));
+const tracker = new CostTracker({ dataDir: testDir });
+// ... exercise recordUsage / getSummary ...
+```
+
+Follow the same pattern in any new suite so cost history from one test does not leak into another. Do NOT reuse `getCostTracker()` across suites without an explicit `resetCostTracker()` in `beforeEach`.
+
 ## Testing `classifyNetworkError`
 
 `src/core/network.test.ts` is a pure-unit suite — no mocks, no fake timers, no filesystem. Each case constructs an `Error` with a specific `code` (or `cause.code`) and asserts the returned `NetworkErrorInfo`. The classifier is shape-based, so tests exercise the shape, not any transport.
