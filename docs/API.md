@@ -1258,6 +1258,15 @@ interface Session {
   updatedAt: string;
   modelId: string;
   totalTokens: number;
+  /**
+   * Cumulative reasoning-token count across the session. Populated only
+   * when at least one message carries `tokens.reasoning`; omitted from
+   * on-disk JSON otherwise so legacy sessions serialise identically to
+   * before the field was introduced. Reasoning tokens are ALSO included
+   * in `totalTokens` — this field exists purely for observability.
+   * Introduced 2026-09-26 (issue #1846).
+   */
+  totalReasoningTokens?: number;
   messageCount: number;
   messages: Message[];
 }
@@ -1266,7 +1275,22 @@ interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp?: number;
-  tokens?: { input: number; output: number };
+  tokens?: {
+    input?: number;
+    output?: number;
+    /**
+     * Reasoning tokens consumed by extended-thinking models (Claude
+     * Opus/Sonnet with thinking, OpenAI o-series, DeepSeek reasoning
+     * tiers). The provider layer (`src/providers/sapOrchestration.ts`)
+     * subtracts this count out of `completion_tokens` before the message
+     * reaches `SessionManager.addMessage`, so `output` and `reasoning`
+     * are disjoint and both may be accumulated into `totalTokens`
+     * without double-counting. Optional and backwards-compatible: absent
+     * from messages produced by non-reasoning models. Introduced
+     * 2026-09-26 (issue #1846).
+     */
+    reasoning?: number;
+  };
   /**
    * Optional metadata that overrides how the message is presented to the
    * user in transcripts (TUI rendering, `sessions export`, and session
@@ -1279,6 +1303,8 @@ interface Message {
   displayRole?: 'system' | 'user' | 'assistant';
 }
 ```
+
+**Reasoning-token accumulation contract.** `SessionManager.addMessage(role, content, tokens)` folds `tokens.input`, `tokens.output`, and `tokens.reasoning` into `metadata.totalTokens` in a single pass. The provider layer has already subtracted `reasoning` out of `completion_tokens`, so no adjustment is required here. When `reasoning > 0`, `metadata.totalReasoningTokens` is initialised lazily and incremented; when `reasoning` is missing or `0`, the field stays `undefined` so the on-disk JSON matches the pre-field shape byte-for-byte. `createSession({ initialMessages })` performs the same fold across every seeded message. See `tests/core/sessionManager-reasoning-tokens.test.ts` for the pinned contract.
 
 #### SessionRetentionPolicy
 

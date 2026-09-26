@@ -718,6 +718,55 @@ if (options?.signal?.aborted) {
 
 The `task` tool wires the child session lifecycle in `src/tool/tools/task.ts:574-677`. If the parent is already aborted at spawn time it refuses to start the subagent (returning `{ status: 'cancelled' }`) instead of wasting the cost tracker's provider budget on a request whose result no consumer will read.
 
+## Reasoning-Token Accounting
+
+Extended-thinking models (Claude Opus/Sonnet with thinking, OpenAI o-series, DeepSeek reasoning tiers) report **reasoning tokens** as a subset of the `completion_tokens` figure returned by the SAP AI Core Orchestration API, not as an addition to it. Naive accumulation — `total += input + output; total += reasoning` — would double-count every thinking token on every turn. Alexi's session pipeline (issue #1846, commit `3f9edb5a`) resolves this once at the provider boundary and treats the fields as disjoint from that point on.
+
+```mermaid
+sequenceDiagram
+    participant Model as Extended-Thinking Model
+    participant Orch as SAP AI Core Orchestration
+    participant Prov as sapOrchestration.ts<br/>(provider layer)
+    participant Sess as SessionManager.addMessage
+    participant Meta as SessionMetadata
+
+    Model->>Orch: usage { completion_tokens: 80, reasoning_tokens: 20 }
+    Orch->>Prov: usage { completion_tokens: 80, reasoning_tokens: 20 }
+    Note over Prov: subtract reasoning from completion:<br/>output = 80 - 20 = 60<br/>reasoning = 20 (now disjoint)
+    Prov->>Sess: addMessage(role, content,<br/>{ input: 100, output: 60, reasoning: 20 })
+    Note over Sess: totals fold in one pass:<br/>totalTokens += 100 + 60 + 20 = 180<br/>totalReasoningTokens += 20
+    Sess->>Meta: totalTokens = 180<br/>totalReasoningTokens = 20
+```
+
+The `Message.tokens.reasoning?: number` field on the transcript and the `SessionMetadata.totalReasoningTokens?: number` field on the session envelope carry the contract. Both are `?:` optional and backwards-compatible:
+
+- On sessions that never see a reasoning-emitting model, neither field is ever populated. `totalReasoningTokens` stays `undefined` and is dropped from the persisted JSON by `JSON.stringify`, so legacy session files on disk are byte-identical to their pre-issue-#1846 shape.
+- On mixed sessions (a router that falls back to a cheap non-thinking model for some turns), only the reasoning-carrying turns contribute to `totalReasoningTokens`; the non-reasoning turns accumulate `input + output` as before with no observability side-effect.
+- An explicit `reasoning: 0` is treated as a no-op — `totalReasoningTokens` is NOT initialised. Reasoning-capable providers that report `reasoning_tokens: 0` on every plain turn would otherwise leak the observability field into every session on disk.
+
+The addMessage fold is the single source of truth:
+
+```typescript
+// src/core/sessionManager.ts (addMessage, tokens block)
+if (tokens) {
+  // Reasoning tokens are disjoint from `output` at this point (the
+  // provider layer subtracts them out of `completion_tokens` before
+  // forwarding), so adding both fields into `totalTokens` does not
+  // double-count.
+  const reasoning = tokens.reasoning ?? 0;
+  this.activeSession!.metadata.totalTokens +=
+    (tokens.input || 0) + (tokens.output || 0) + reasoning;
+  if (reasoning > 0) {
+    this.activeSession!.metadata.totalReasoningTokens =
+      (this.activeSession!.metadata.totalReasoningTokens ?? 0) + reasoning;
+  }
+}
+```
+
+`createSession({ initialMessages })` applies the same fold across every seeded message, so replaying a persisted transcript through the constructor yields identical totals to the incremental `addMessage` path. Regression coverage lives in `tests/core/sessionManager-reasoning-tokens.test.ts` — the suite pins the no-double-count invariant on single-turn, multi-turn, mixed-turn, seeded, persisted, and legacy-reload paths.
+
+The dedicated `totalReasoningTokens` field exists purely for observability (surfacing extended-thinking usage in `sessions list`, telemetry spans, and cost reports). Because reasoning tokens are already inside `totalTokens`, a caller answering `"how many tokens has this session used?"` reads `totalTokens` alone and never needs to add the two fields together.
+
 ## Session Retention Lifecycle
 
 Session transcripts persisted to `~/.alexi/sessions/*.json` accumulate over time. Without a bounded lifetime an active operator's sessions directory grows without limit, slowing FTS index rebuilds, `alexi sessions` listings, and repo-map inference passes that scan the directory. The retention pipeline (schema in `src/config/userConfig.ts`, runner in `src/core/sessionManager.ts:828`, scheduler in `src/core/retentionScheduler.ts`, CLI surface in `src/cli/commands/sessions.ts`) deletes sessions older than a configured `maxAgeDays` while guaranteeing no in-flight or freshly-written transcript is touched.

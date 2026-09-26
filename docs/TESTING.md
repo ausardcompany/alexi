@@ -3262,6 +3262,51 @@ afterEach(() => {
 
 The scheduler tests use dynamic `await import('../../src/core/retentionScheduler.js')` inside each case so the module reads the fresh `process.env.HOME` set in `beforeEach` — a top-level `import` would bind the state-file path at test-collection time and defeat the isolation.
 
+### Testing Reasoning-Token Accumulation
+
+`tests/core/sessionManager-reasoning-tokens.test.ts` (226 lines, 9 cases in a single describe block) pins the disjoint-fields contract for extended-thinking token accounting (issue #1846, commit `3f9edb5a`). Reasoning tokens are subtracted out of `completion_tokens` at the provider boundary (`src/providers/sapOrchestration.ts`) before they reach `SessionManager.addMessage`, so the session manager can safely fold `input + output + reasoning` into `metadata.totalTokens` without double-counting. The suite locks that invariant on single-turn, multi-turn, mixed-turn, seeded, persisted, and legacy-reload paths.
+
+**Fixture pattern.** The suite mocks `compaction.ts` and `sessionClose.ts` for the same reason as the retention suite — so a compaction pass or a close-hook does not fire mid-assertion and mutate the transcript under the assertion. Each test runs against a fresh temp directory created in `beforeEach` and cleaned up in `afterEach`:
+
+```typescript
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager, type Message, type Session } from '../../src/core/sessionManager.js';
+
+let tempDir: string;
+beforeEach(() => {
+  vi.clearAllMocks();
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-reasoning-'));
+});
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+```
+
+**Assertion shape.** The suite pins these contract points:
+
+- **Legacy no-reasoning path is unchanged.** A session that adds `{ input: 10 }` and `{ output: 20 }` messages ends up with `totalTokens: 30` and `totalReasoningTokens: undefined`. Consumers that never see a reasoning-emitting model cannot observe a behaviour change.
+- **Single reasoning turn: added exactly once.** `addMessage('assistant', 'Response', { input: 100, output: 60, reasoning: 20 })` produces `totalTokens: 180` (100 + 60 + 20, not 100 + 60 + 60 + 20). `totalReasoningTokens: 20`.
+- **Two-turn accumulation.** Following the worked example in the plan for issue #1846 — turn 1 `{ input: 100, output: 60, reasoning: 20 }`, turn 2 `{ input: 150, output: 80, reasoning: 30 }` — the totals decompose exactly as `250 + 140 + 50 = 440` with `totalReasoningTokens: 50`. The suite asserts the decomposition directly so an off-by-one regression in one of the three fields fails loudly.
+- **Mixed reasoning / non-reasoning turns.** A session that alternates a non-thinking turn, a reasoning turn, and another non-thinking turn tallies correctly and never treats a `reasoning: undefined` message as inheriting the previous turn's reasoning count.
+- **`reasoning: 0` is a no-op.** An explicit zero on a non-thinking turn does NOT initialise `totalReasoningTokens`. This pin exists because reasoning-capable providers commonly report `reasoning_tokens: 0` on every plain turn; without this guard the observability field would leak into every session on disk.
+- **`initialMessages` seeding.** `createSession('gpt-x', undefined, { initialMessages: [...] })` seeds both `totalTokens` and `totalReasoningTokens` in the same fold used by `addMessage`. A seeded transcript replayed through the constructor yields identical totals to the same transcript replayed incrementally.
+- **Persisted JSON omits `totalReasoningTokens` when unused.** A session that never sees reasoning tokens has `Object.prototype.hasOwnProperty.call(parsed.metadata, 'totalReasoningTokens') === false` after a disk round-trip — `JSON.stringify` drops the `undefined` property, so legacy consumers see the pre-field shape byte-for-byte.
+- **Reload preserves the field.** A reasoning-carrying session round-tripped through a fresh `SessionManager` instance reloads with `totalTokens: 45` and `totalReasoningTokens: 25` intact.
+- **Legacy on-disk files load without the field.** The suite writes a hand-crafted legacy session (no `totalReasoningTokens`, no `reasoning` subfield anywhere) directly to disk, loads it, and then appends a reasoning turn. The loaded session shows `totalReasoningTokens: undefined`, and the subsequent append initialises the field lazily to `12` without corrupting the pre-existing `totalTokens: 42`.
+
+Reuse the fixture pattern verbatim when adding new session-level assertions that must not race with compaction or persistence side-effects.
+
 ### Testing the Session Retention Engine
 
 `tests/core/sessionRetention.test.ts` (220 lines, 12 cases across three `describe` blocks) and `tests/core/sessionScanner.test.ts` (160 lines) pin the manual retention path used by `alexi sessions-clean`. The engine is intentionally split into a **pure decision phase** (`selectCandidates`) and a **disk-touching apply phase** (`applyRetentionPolicy`); both surfaces are exercised because a bug in the decision phase is silently absorbed by dry-run mode but destructive under a real sweep.
