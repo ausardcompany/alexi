@@ -1260,6 +1260,112 @@ export function prepareRequest<T extends { prompt: LanguageModelV2Prompt }>(
 
 Cache-token accounting on the response path is handled by the paired `extractCacheTokens(usage)` helper (`src/providers/sapOrchestration.ts:416`), which normalises both Anthropic-style top-level `cache_read_input_tokens` / `cache_creation_input_tokens` and OpenAI/SAP-Orchestration-style `prompt_tokens_details.cached_tokens` into a single shape consumed by `getCostTracker().recordUsage(...)`.
 
+### Reasoning-Token Accounting (issue #1844)
+
+Extended-thinking models — Anthropic Claude Opus/Sonnet 4.x, OpenAI GPT-5.6+ with `reasoning_effort`, Gemini thinking mode, DeepSeek R1 — report the tokens spent on internal reasoning as a **subset** of `completion_tokens`, not as an additional counter. If the caller totals `prompt_tokens + completion_tokens` naively over a session, reasoning tokens are double-counted against the visible output. The provider layer normalises this in one place so both the streaming and non-streaming call sites stay in sync.
+
+The `TokenUsage` shape carries a `reasoningTokenCount?: number` field whose value is **already subtracted from `completion_tokens`** (`src/providers/sapOrchestration.ts:127-150`):
+
+```typescript
+export interface TokenUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  /**
+   * Reasoning tokens consumed during extended thinking (already subtracted
+   * from `completion_tokens`). `undefined` means the provider did not
+   * report a reasoning breakdown; `0` is preserved as a meaningful value.
+   */
+  reasoningTokenCount?: number;
+}
+```
+
+Semantics for consumers:
+
+- `undefined` — the provider did not report a reasoning breakdown (model does not do extended thinking, or the payload shape was unknown). Do NOT synthesise a `0`.
+- `0` — the model checked and did not think this turn. Meaningful; preserve it.
+- `N > 0` — subtract N from `completion_tokens` when computing "visible output". The raw completion count is `completion_tokens + reasoningTokenCount`.
+
+#### `extractReasoningTokens(usage)`
+
+Pure classifier that folds the three known SDK payload shapes into a single number:
+
+```typescript
+// src/providers/sapOrchestration.ts
+export function extractReasoningTokens(usage: unknown): number | undefined;
+```
+
+| Payload shape | Field consulted                                      | Producer                                    |
+| ------------- | ---------------------------------------------------- | ------------------------------------------- |
+| OpenAI        | `usage.completion_tokens_details.reasoning_tokens`   | GPT-5.6+, `reasoning_effort` API            |
+| Anthropic     | `usage.thinking_tokens` (preferred alias)            | Claude Opus/Sonnet 4.x extended thinking    |
+| Anthropic     | `usage.reasoning_tokens` (portable alias)            | Routers that surface Anthropic as `reasoning_tokens` |
+| AI SDK v4     | `usage.outputTokens.reasoning` (nested object)       | Vercel AI SDK v4 wrappers                   |
+
+Precedence order (fixed, must not change without a coordinated port):
+
+1. OpenAI shape inspected first.
+2. Anthropic top-level `thinking_tokens` next.
+3. Anthropic top-level `reasoning_tokens` next (SAP-side alias).
+4. AI SDK v4 nested `outputTokens.reasoning` last.
+5. `undefined` when no field matches.
+
+The function returns `undefined` for non-objects (`undefined`, `null`, strings, numbers) and for non-numeric field values (a stringified `"50"` is NOT parsed) so a malformed payload cannot silently synthesise a count.
+
+#### `normalizeTokenUsage(rawUsage)`
+
+Single entry point that both `SapOrchestrationProvider.complete()` and `SapOrchestrationProvider.stream()` route through. Handles three concerns in one place:
+
+```typescript
+// src/providers/sapOrchestration.ts
+export function normalizeTokenUsage(rawUsage: unknown): TokenUsage | undefined;
+```
+
+1. Copies `prompt_tokens` / `completion_tokens` / `total_tokens` verbatim.
+2. Folds in cache token fields via `extractCacheTokens(rawUsage)`.
+3. Extracts the reasoning count via `extractReasoningTokens(rawUsage)`, subtracts it from `completion_tokens` (clamped at 0 when the payload is inconsistent, e.g. reasoning > completion), and exposes it as `reasoningTokenCount`.
+
+`total_tokens` is passed through unchanged — billing surfaces still show the full completion incl. reasoning; only the split reported to consumers changed. Returns `undefined` for falsy input so provider call sites keep their `usage: undefined` branches unchanged.
+
+Provider integration (`src/providers/sapOrchestration.ts:1712`, `:1869`):
+
+```typescript
+// Both complete() and stream() converge on this single line.
+const usage: TokenUsage | undefined = normalizeTokenUsage(tokenUsage);
+```
+
+The `mergeUsage(a, b)` aggregator (`src/providers/sapOrchestration.ts:825`) sums `reasoningTokenCount` alongside the existing fields, so the empty-response retry loop (`withEmptyResponseRetry`, issue #1279) and session-total tracking add up correctly across multiple provider attempts.
+
+#### End-to-end call flow (extended-thinking turn)
+
+```mermaid
+sequenceDiagram
+    participant App as Consumer
+    participant Prov as SapOrchestrationProvider
+    participant Norm as normalizeTokenUsage
+    participant Extract as extractReasoningTokens
+    participant SDK as @sap-ai-sdk/orchestration
+
+    App->>Prov: complete([{ role: 'user', ... }])
+    Prov->>SDK: chatCompletion(...)
+    SDK-->>Prov: response.getTokenUsage() = { prompt_tokens: 100, completion_tokens: 200, thinking_tokens: 75 }
+    Prov->>Norm: normalizeTokenUsage(raw)
+    Norm->>Extract: extractReasoningTokens(raw)
+    Extract-->>Norm: 75 (Anthropic thinking_tokens)
+    Note over Norm: completion_tokens = max(0, 200 - 75) = 125
+    Norm-->>Prov: { prompt_tokens: 100, completion_tokens: 125, reasoningTokenCount: 75, total_tokens: 300 }
+    Prov-->>App: CompletionResult { usage }
+```
+
+#### Design notes
+
+- **Why subtract in the provider, not the consumer?** Every consumer that renders "output tokens" would otherwise have to know the reasoning-token rule for every model family. Doing the subtraction at the provider boundary means cost trackers, session totals, and the TUI status bar can treat `completion_tokens` as "visible output" uniformly.
+- **Why clamp at 0?** A provider payload that reports `completion_tokens: 10, thinking_tokens: 500` is internally inconsistent (the SDK bug is unlikely but observed once in the wild). Clamping to `0` and preserving `reasoningTokenCount: 500` keeps totals monotonic and lets a downstream diagnostic still see the raw reasoning number.
+- **Why not extract from `total_tokens`?** `total_tokens` is the billing surface and MUST match what SAP AI Core actually invoiced. Recomputing it locally would drift from the invoice on the first payload where `total_tokens != prompt_tokens + completion_tokens + reasoning`.
+- **Why is `0` preserved but `undefined` returned when the field is missing?** `0` means "the model checked and did not think"; `undefined` means "no data" — collapsing them would erase the difference between a model that opted out of reasoning this turn and a model that does not support reasoning at all.
+
 ### Provider Completion-Token Hard Caps
 
 Some providers routed through the SAP AI Core orchestration API hard-cap `max_completion_tokens` at a value BELOW the model's advertised context window. Alexi's generic normalization step recomputes `max_completion_tokens = contextWindow - promptTokens`, which silently overwrites that cap and causes the provider to reject the request with a 400 at its edge.
