@@ -317,6 +317,12 @@ export function streamChat(
         // `STREAM_STALL_TIMEOUT_MS` env change takes effect immediately.
         idleTimeoutMs: options?.streamIdleTimeoutMs ?? resolveDefaultStreamIdleTimeoutMs(),
         toolExtensionMs: options?.streamToolExtensionMs ?? DEFAULT_STREAM_TOOL_EXTENSION_MS,
+        // Enable the stream-silence connectivity probe (#1836). On idle
+        // timeout the watchdog first probes the configured provider
+        // base URL; unreachable → NetworkDisconnectedError so the TUI
+        // can render "[waiting for network]" instead of the generic
+        // stall message.
+        probe: true,
       }
     );
   }
