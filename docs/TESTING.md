@@ -432,6 +432,126 @@ Patterns worth internalising:
    `tests/providers/modelCatalog.test.ts` where `@sap-ai-sdk/ai-api` is
    mocked via `vi.mock` at the module level.
 
+### Testing reasoning-token accounting (`tests/providers/sapOrchestration-reasoningTokens.test.ts`)
+
+`extractReasoningTokens` and `normalizeTokenUsage` in `src/providers/sapOrchestration.ts` are pure classifiers — no SAP SDK, no network — so their tests are direct unit tests over synthetic payloads. The `SapOrchestrationProvider.complete()` / `.stream()` end-to-end assertions mock the SAP SDK at the module boundary so the reasoning-token plumbing can be exercised without live credentials.
+
+Three contracts are pinned by the suite:
+
+1. **Extraction precedence.** OpenAI shape (`completion_tokens_details.reasoning_tokens`) wins over Anthropic top-level fields (`thinking_tokens`, `reasoning_tokens`), which win over AI SDK v4 (`outputTokens.reasoning`). Within the Anthropic pair, `thinking_tokens` wins over `reasoning_tokens`. A regression that reordered the guards would flip the extracted count on payloads that carry more than one shape.
+2. **`0` is meaningful, `undefined` is "no data".** `expect(extractReasoningTokens({ completion_tokens_details: { reasoning_tokens: 0 } })).toBe(0)` catches a regression that collapses both cases to `undefined` (or, worse, `0`).
+3. **`normalizeTokenUsage` subtracts and clamps.** `completion_tokens = max(0, raw.completion_tokens - reasoning)`. The clamp is asserted with a `reasoning > completion` payload so a regression that removed the `Math.max(0, ...)` guard would trip.
+
+```typescript
+// tests/providers/sapOrchestration-reasoningTokens.test.ts (excerpt)
+import { describe, it, expect } from 'vitest';
+import {
+  extractReasoningTokens,
+  normalizeTokenUsage,
+} from '../../src/providers/sapOrchestration.js';
+
+describe('extractReasoningTokens', () => {
+  it('prefers OpenAI shape when multiple shapes are present', () => {
+    expect(
+      extractReasoningTokens({
+        completion_tokens_details: { reasoning_tokens: 10 },
+        thinking_tokens: 99,
+        reasoning_tokens: 88,
+      })
+    ).toBe(10);
+  });
+
+  it('preserves 0 as a meaningful value (no thinking this turn)', () => {
+    expect(
+      extractReasoningTokens({
+        completion_tokens_details: { reasoning_tokens: 0 },
+      })
+    ).toBe(0);
+  });
+
+  it('ignores non-numeric reasoning fields', () => {
+    expect(
+      extractReasoningTokens({
+        thinking_tokens: '50',
+        reasoning_tokens: null,
+      })
+    ).toBeUndefined();
+  });
+});
+
+describe('normalizeTokenUsage', () => {
+  it('subtracts reasoning tokens from completion_tokens', () => {
+    const usage = normalizeTokenUsage({
+      prompt_tokens: 100,
+      completion_tokens: 200,
+      total_tokens: 300,
+      completion_tokens_details: { reasoning_tokens: 75 },
+    });
+    expect(usage!.completion_tokens).toBe(125);
+    expect(usage!.reasoningTokenCount).toBe(75);
+    // total_tokens is passed through unchanged.
+    expect(usage!.total_tokens).toBe(300);
+  });
+
+  it('clamps completion_tokens at 0 when reasoning exceeds completion', () => {
+    const usage = normalizeTokenUsage({
+      prompt_tokens: 100,
+      completion_tokens: 10,
+      thinking_tokens: 999,
+    });
+    expect(usage!.completion_tokens).toBe(0);
+    expect(usage!.reasoningTokenCount).toBe(999);
+  });
+});
+```
+
+The end-to-end provider assertions mock `@sap-ai-sdk/orchestration` at the module boundary so the mocked `getTokenUsage()` can return each of the four SDK shapes in turn:
+
+```typescript
+let mockUsage: Record<string, unknown> | undefined = {};
+
+vi.mock('@sap-ai-sdk/orchestration', () => {
+  class MockOrchestrationClient {
+    async chatCompletion() {
+      return {
+        getContent: () => 'ok',
+        getFinishReason: () => 'stop',
+        getTokenUsage: () => mockUsage,
+        getToolCalls: () => [],
+        getAllMessages: () => [],
+      };
+    }
+    // stream() is mocked similarly with an async generator.
+  }
+  return { OrchestrationClient: MockOrchestrationClient, /* ... */ };
+});
+
+import { SapOrchestrationProvider } from '../../src/providers/sapOrchestration.js';
+
+it('complete() surfaces reasoningTokenCount and subtracts from completion (OpenAI shape)', async () => {
+  mockUsage = {
+    prompt_tokens: 100,
+    completion_tokens: 200,
+    total_tokens: 300,
+    completion_tokens_details: { reasoning_tokens: 75 },
+  };
+  const provider = new SapOrchestrationProvider({
+    modelName: 'gpt-5',
+    deploymentId: 'test-deployment',
+  });
+  const result = await provider.complete([{ role: 'user', content: 'hi' }]);
+  expect(result.usage?.reasoningTokenCount).toBe(75);
+  expect(result.usage?.completion_tokens).toBe(125);
+});
+```
+
+Patterns worth internalising:
+
+1. **Assert both `reasoningTokenCount` AND the reduced `completion_tokens` on every end-to-end case.** A regression that stopped subtracting would leave `reasoningTokenCount` correct but overreport `completion_tokens` — pinning both catches the exact class of bug this feature exists to prevent.
+2. **Mock at the SDK boundary, not at `normalizeTokenUsage`.** The point of the end-to-end assertions is to prove that both the streaming and non-streaming call sites route through `normalizeTokenUsage`. Mocking the helper itself would pass even after a regression that reverted `complete()` to the pre-2026-09-26 inline shape.
+3. **Test `mergeUsage` sums reasoning tokens** when validating the empty-response retry loop (issue #1279) so cumulative attempts stay correct.
+4. **Do NOT set `AICORE_SERVICE_KEY` in these tests.** The provider constructor accepts an explicit `deploymentId`; `env('AICORE_RESOURCE_GROUP')` is mocked via `vi.mock('../../src/config/env.js', ...)` so the suite runs identically on a laptop with no credentials and in CI.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
