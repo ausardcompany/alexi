@@ -927,6 +927,80 @@ alias resolution) has exactly one edit site. When adding similar
    skipped, but tests must NOT assert on log output — the warning is
    best-effort visibility, not a public contract.
 
+### Normalizing serialized-empty-string quirks (`normalizeMovePath` style)
+
+Upstream ports frequently need to guard against fields that survive JSON
+serialization as the empty string but semantically mean "absent". Two
+common failure modes:
+
+1. A caller sets `move_path: ''` intending "no move" — but the presence
+   of the key in the JSON payload triggers a rename branch downstream.
+2. A validator upstream drops `undefined` fields via `JSON.stringify`
+   round-trip, converting `move_path: undefined` into an absent field
+   locally but leaving `move_path: ''` on the wire when the caller
+   forgot the guard.
+
+The idiomatic Alexi guard is a pure normalizer that treats BOTH
+`undefined` and the empty string as absent, returning `undefined` in
+both cases. Canonical example
+(`src/tool/tools/apply-patch.ts`, ports kilocode `f7da00f35`,
+PR #45329):
+
+```typescript
+export function normalizeMovePath(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') {
+    return undefined;
+  }
+  return value;
+}
+```
+
+Contract:
+
+1. **`undefined` in → `undefined` out.** Preserves the natural "absent"
+   state.
+2. **Empty string → `undefined`.** Collapses the serialization quirk to
+   the same canonical absent state.
+3. **Non-empty string → verbatim.** No trimming. Whitespace-only strings
+   remain the caller's responsibility to interpret — a normalizer that
+   silently trimmed `"  "` would swallow legitimate operator intent on
+   the rare occasions a path really does have a trailing space.
+4. **No throwing, no side effects.** The helper is a pure function.
+
+Test the three cases (`undefined`, `''`, `'src/renamed.ts'`) plus one
+`'  '` case that documents the deliberate non-trim. All four fit in a
+sub-30-line pure-function test — see
+`src/tool/tools/__tests__/apply-patch.move-path.test.ts` for the
+worked example.
+
+### Provider replay guards (drop unreplayable reasoning parts)
+
+Reasoning-model providers (Anthropic-on-Bedrock, Claude thinking mode)
+attach opaque signatures to their thinking blocks. On the next
+request Alexi must either replay a thinking block exactly as received
+(with signature intact) or drop it entirely — otherwise the provider
+rejects the whole request with a schema error. Two idiomatic guards
+live in `src/providers/transform.ts` and are worth mirroring when
+supporting a new reasoning-capable provider:
+
+- **Structural check on every gating flag.** The
+  `hasBedrockReasoningSignature(part)` predicate returns `true` only
+  when (a) the part's type is `'reasoning'`; (b) the provider metadata
+  signature is a non-empty string; (c) `metadata.redacted` is NOT
+  `true` (redacted signatures are opaque and unreplayable); and (d) any
+  `text` payload is non-empty (empty-body reasoning is rejected).
+  Combine all four checks — any single-branch guard leaves a gap.
+- **Non-destructive re-bind rather than mutation.** When a provider
+  occasionally returns a mismatched thinking↔tool-call index (see
+  `bindThinkingToToolCall`), the helper builds a new message with the
+  corrected metadata rather than mutating in place. Return the input
+  reference unchanged when no re-bind is required so downstream cache
+  invalidation can short-circuit on referential equality.
+
+Ports the pair of upstream fixes opencode `517ee736b` (redacted /
+empty replay guards) and kilocode `3f39a329c` (thinking↔tool-call
+rebind).
+
 ### Per-call detectors (preferred over module-scoped counters)
 
 When a feature needs to observe a rolling condition across an agent's tool
@@ -2364,6 +2438,22 @@ Contract for adding a diagnostic command:
 
 See [ARCHITECTURE.md — Session Retention Lifecycle](ARCHITECTURE.md#session-retention-lifecycle) for the pipeline diagram and [TESTING.md — `tests/core/sessionManager-retention.test.ts`](TESTING.md) for the regression contract.
 
+## Manual retention engine (`src/core/sessionRetention.ts`, `alexi sessions-clean`)
+
+Added in commit `e6953a49`. The manual retention path is intentionally **separate** from the automatic sweep — the two pipelines share no state and MUST NOT reach into each other. When touching this surface:
+
+- **Keep the decision / apply split.** `selectCandidates(sessions, policy, now)` is a pure function; `applyRetentionPolicy(policy, options?)` is the disk-touching wrapper that composes `scanSessions` + `selectCandidates` + `fs.unlink`. Do NOT merge the two — the pure function is what makes retention behaviour testable without a temp directory, and dry-run mode relies on being able to skip the apply half.
+- **Every new policy field goes through `RetentionPolicySchema`.** The schema is `z.object(...).strict()` — unknown fields are rejected at parse time. Adding a field means: (1) extend the Zod schema with the appropriate constraint (`.int().min(N)` etc.), (2) add a branch in `selectCandidates`, (3) surface a CLI flag in `src/cli/commands/sessions.ts` under the `sessions-clean` command, (4) document the flag in `docs/API.md#sessions-clean` and the invariant in `docs/ARCHITECTURE.md#manual-session-retention-alexi-sessions-clean`, (5) add both a pure-function test in `tests/core/sessionRetention.test.ts` (via `selectCandidates`) and an end-to-end test (via `applyRetentionPolicy` with a temp `sessionsDir`).
+- **`dryRun` MUST leave the filesystem untouched.** The `if (dryRun) { … continue; }` branch inside the apply loop is load-bearing. A new deletion-adjacent side effect (e.g. rewriting an index, updating a manifest) that skips the dry-run check is a regression. Add the same `if (dryRun)` short-circuit to any new mutation.
+- **Bytes-freed reporting is populated in dry-run too.** Operators expect the preview to tell them how much space a real run would reclaim. When adding a new deletion path, increment `result.bytesFreed` from the scanned `ScannedSession.size` BEFORE the `dryRun` short-circuit, not after — otherwise dry-run reports `0 B` and the operator can't compare policies.
+- **Union, not intersection.** `maxAgeDays` and `maxCountPerProject` are OR-ed: a session is a candidate if it fails **either** check. Do not introduce a code path that requires both checks to fail before deletion — that would silently retain old-and-few sessions that the operator explicitly asked to prune.
+- **Exclude patterns win over both age and count.** `isExcluded(session, patterns)` is evaluated **after** the union has produced a deletion candidate, and always moves the session into `toSkip`. Do not short-circuit the age / count checks based on the pattern list; the pipeline expects `toSkip` to enumerate the explicit protections.
+- **Project bucketing uses `basename(metadata.workdir)`.** The scanner is the single source of truth for the bucket derivation (`src/core/sessionScanner.ts:deriveProject`). Callers MUST NOT re-derive the bucket from a different heuristic (`sessionId` prefix, `metadata.title`, etc.) or per-project logic in `selectCandidates` will diverge from the CLI's `--project` flag.
+- **Never `fs.unlink` outside the retention engine.** `applyRetentionPolicy` is the ONLY path in `src/core/` that removes files from `~/.alexi/sessions/` on demand. The scheduler-driven `SessionManager.cleanupExpiredSessions` uses `deleteSession` on the loaded map (different invariant: it also cascades children). Do NOT introduce a third deletion call site — extend one of the two existing pipelines.
+- **Scanner tolerates corruption; do not tighten it.** `scanSessions` skips malformed JSON, missing metadata, and unreadable files with a `logger.warn` and continues. A stricter contract would let one corrupt file wedge the whole cleanup, which is the opposite of the design intent. New scanner fields should follow the same "fall back to a sensible default, log at `debug`, keep scanning" shape.
+- **The engine does not update `last-retention-run`.** `alexi sessions-clean` does NOT touch the scheduler's state file — running an on-demand sweep must not shift the 24h cooldown for the automatic path. If a future feature needs to unify the two, add an explicit call site rather than coupling the modules.
+- **Tests use `{ sessionsDir, now }` injection.** `applyRetentionPolicy(policy, { sessionsDir: tempDir, now: fixedNow })` is the documented pattern for isolating each case. Do NOT stub `process.env.HOME` or mock `Date` — the injection points exist precisely so tests remain pure functions of their fixtures. See [TESTING.md — Testing the Session Retention Engine](TESTING.md#testing-the-session-retention-engine).
+
 ## Agent Manager Worktree Status Registry
 
 Introduced by commit `8b372ad7` (issue #1826). If you are adding a subsystem that needs to publish Agent Manager worktree lifecycle events into the TUI, or wiring a new consumer of the status panel, respect the invariants below. See [ARCHITECTURE.md - Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) for the runtime contract and [API.md - Worktree Status Registry API](API.md#worktree-status-registry-api) for the public TypeScript surface.
@@ -2377,6 +2467,50 @@ Introduced by commit `8b372ad7` (issue #1826). If you are adding a subsystem tha
 - **Snapshot tests MUST pass `animateWorktrees={false}` to `<Sidebar />`.** The `ink-spinner` frame cycle is timing-dependent and would produce non-deterministic snapshot output. Follow the pattern in `tests/cli/tui/Sidebar.test.tsx` when adding new snapshot coverage that involves a `running` worktree.
 - **Tests reset the registry in `beforeEach`.** The registry is a module-scoped singleton, so `beforeEach(() => __resetWorktreeStatusRegistry())` is required in every test file that touches it. Importing `__resetWorktreeStatusRegistry` directly from `src/agent/worktreeStatus.ts` (not through a barrel) is the documented pattern — it exists solely for tests and should never be reached from runtime code. See [TESTING.md - Testing the Worktree Status Registry](TESTING.md#testing-the-worktree-status-registry) for the full suite recipe.
 - **Publisher on the orchestrator side handles the lifecycle transitions.** A minimal publisher publishes `running` at turn start, `blocked` around permission prompts / `question` tool calls, `idle` on normal completion, and `error` on unrecoverable failure — leaving the error entry in place until the operator dismisses it via `removeWorktreeStatus(id)`. Do NOT split the state machine across multiple publishers; if a new subsystem needs to influence a worktree's status, funnel its signal through the existing publisher rather than emitting from a second call site.
+
+## Network Transport Classification (`classifyNetworkError`)
+
+Added in the 2026-09-26 upstream sync (`src/core/network.ts:223`, ports kilocode fix `d6bb0ef05`). If you are adding a new UI-adjacent code path that catches an unknown thrown value and needs to decide whether it is a socket-layer failure, ALWAYS classify through `classifyNetworkError(err)` — do not sniff `err.code` inline.
+
+- **Extend `OFFLINE_CODES`, `KIND_MAP`, and the AGENTS.md transient regex together.** All three surfaces MUST agree on the set of transport codes. A code added to `OFFLINE_CODES` without a matching `KIND_MAP` entry falls back to `kind: 'unknown'`, which is a code smell — every real code has a semantic bucket, so add the mapping.
+- **Never `instanceof NetworkError` for classification purposes.** The classifier is intentionally shape-based (reads `err.code` and `err.cause.code`) so it works across ESM module boundaries where `instanceof` is fragile. If you need to raise a typed error for callers, wrap AFTER classification, not before.
+- **The `[CODE]` suffix on `NetworkErrorInfo.message` is contract.** Do not strip it in downstream renderers — operators diagnose outages by that suffix.
+- **New tests belong in `src/core/network.test.ts`.** The suite is pure unit — no mocks, no timers. Follow the existing `Object.assign(new Error('...'), { code: '...' })` recipe when adding a new code case; see [TESTING.md — Testing `classifyNetworkError`](TESTING.md#testing-classifynetworkerror).
+
+## Safe URL Opener (`openUrl`)
+
+Added in the 2026-09-26 upstream sync (`src/core/open.ts`, ports the upstream opencode commit). `openUrl` is the ONLY sanctioned browser-open entry point in Alexi. New CLI subcommands, TUI affordances, MCP integrations, or share-link handlers that need to spawn a browser MUST use it.
+
+- **Never spawn `xdg-open` / `open` / `cmd /c start` directly.** Every direct spawn re-opens the arbitrary-scheme injection class of bug that `openUrl` exists to close. A code review WILL flag `spawn('xdg-open', ...)`.
+- **The scheme allow-list is fixed at `http:` and `https:`.** Do not add a `schemes?: string[]` option to `openUrl` — the two-scheme policy is the security contract. If a future integration truly needs a different scheme (e.g. `mailto:`), open a dedicated helper next to it (`sendMailto`) with its own review; do not widen `openUrl`.
+- **UNC-style paths are rejected explicitly.** Some Node versions on Windows implicitly coerce `\\server\share\file.html` into `file:` URLs. The pre-parse `startsWith('\\\\')` / `startsWith('//')` guard in `safeParseUrl` catches both — do not remove it in a "simplification" pass.
+- **`OpenUrlOptions.detached` defaults to `true`.** The `unref()`'d spawn is what lets the browser tab open even after Alexi exits. Do NOT change the default; callers who want to wait on the launcher (e.g. an integration test) can pass `detached: false` explicitly.
+- **New tests belong in `src/core/open.test.ts`.** Actually spawning `xdg-open` in CI is flaky, so the scheme allow-list is what the unit suite covers. Hostile-scheme cases belong here; launcher-path validation stays as a manual smoke test on the release matrix.
+
+## Legacy Drizzle Journal Import (`importLegacyDrizzleJournal`)
+
+Added in the 2026-09-26 upstream sync (`src/core/database/migration.ts:135`). If you are adding a new SQLite-backed adapter or a bootstrap step that touches the migration journal:
+
+- **Wire `importLegacyDrizzleJournal(bridge, migrations)` BEFORE `applyMigrations(...)`.** Reversing the order allows `applyMigrations` to replay already-applied migrations because the bridge has not yet mirrored the Drizzle journal into Alexi's journal.
+- **`recordCompleted` MUST have `INSERT OR IGNORE` semantics.** The import calls `recordCompleted` once per legacy row; a straight `INSERT` would blow up on a primary-key collision if the caller retries after a partial failure. Idempotency is the contract.
+- **Never silently swallow the "unknown timestamp" throw.** When the `name` column is absent and a `created_at` does not match any known migration id prefix, `importLegacyDrizzleJournal` throws `Legacy migration timestamp <ms> does not match any known migration`. This is a schema-drift signal that MUST reach the operator — do not `try / catch` it away in adapter code.
+- **The `SqliteColumnInfo` shape is intentionally minimal.** Only `name` is inspected. If a future feature needs another `PRAGMA table_info` column (`type`, `notnull`, `dflt_value`, `pk`), extend the interface — do not stringify the whole PRAGMA row and regex-scan it.
+- **New tests belong in `src/core/database/migration.legacy-journal.test.ts`.** The suite uses a `FakeBridge` — no real SQLite driver, no filesystem. See [TESTING.md — Testing the Legacy Drizzle Journal Import](TESTING.md#testing-the-legacy-drizzle-journal-import).
+
+## Stream-Silence Connectivity Probe
+
+Introduced by commit `9047bab9` (issue #1836). If you are adding a new streaming path, a new error surface, or a new probe consumer, respect the invariants below. See [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836) for the runtime contract, [API.md — Stream Watchdog and Connectivity Probe API](API.md#stream-watchdog-and-connectivity-probe-api) for the public TypeScript surface, and [TESTING.md — Testing the Stream-Silence Connectivity Probe](TESTING.md#testing-the-stream-silence-connectivity-probe-issue-1836) for the regression contract.
+
+- **`streamProbe.ts` is the source of truth for "disconnected".** The `NetworkDisconnectedError` class lives in `src/core/streamProbe.ts` and is re-exported from `src/core/streamWatchdog.ts` for consumer convenience. Do NOT declare a second disconnect-error type elsewhere; every new call site should import the existing class and the `isNetworkDisconnectedError` type guard.
+- **The probe must never throw.** `probeStreamConnectivity`, `tcpConnect`, and `resolveProviderBaseUrl` all catch their own errors and return `{ reachable: false, error: <detail> }` (or `undefined` for a missing base URL). A new probe callable passed via `StreamWatchdogOptions.probe` MUST honour the same contract — the watchdog calls it from a `setTimeout` callback and cannot handle an unhandled rejection. If you need a fallback in your callable, wrap it in a `try/catch` that resolves to `{ reachable: false, error }`.
+- **New consumers check `isNetworkDisconnectedError` BEFORE `isStreamStalledError`.** The two errors are mutually exclusive at the source (the watchdog surfaces exactly one), but a `NetworkDisconnectedError` also satisfies the `Error` prototype checks that the stall branches rely on downstream. Ordering the disconnect branch first keeps the branch semantics unambiguous. Follow the pattern in `src/cli/interactive.ts:159` (`handleStreamingError`) and `src/cli/tui/hooks/useStreamChat.ts:84` when writing a new consumer.
+- **Never retry on `NetworkDisconnectedError`.** The provider-layer `retryEmptyResponse`, the turn-level `retryProviderCall`, the session-level `ErrorBackoff`, and the route-level `classifyRouteError` all deliberately do NOT match the disconnect error. Adding a new retry driver? Consult `isNetworkDisconnectedError` first and short-circuit — a replayed request costs an expensive model call on a broken input and, more importantly, `hasEmittedContent()` may already be `true` because the stream started producing chunks before the disconnect.
+- **Route health stays clean on disconnect.** `classifyRouteError` returns `{ kind: 'unknown' }` for a disconnect, which `recordRouteOutcome` does not fold into route-health counters. Do NOT add a `permanent`-classification for disconnect errors — that would disable the route after 3 disconnects and leave the operator staring at a healthy provider marked "unavailable" for the rest of the session.
+- **Probe budgets are short on purpose.** `DEFAULT_LOCAL_PROBE_TIMEOUT_MS = 2_000` and `DEFAULT_REMOTE_PROBE_TIMEOUT_MS = 3_000`. If you need to override them, prefer `StreamProbeOptions.localTimeoutMs` / `remoteTimeoutMs` on a per-call basis over changing the exported defaults; the shorter budgets are the whole point of the probe vs. `checkConnectivity`'s 15 s startup default.
+- **Base URL resolution mirrors the provider.** `resolveProviderBaseUrl` intentionally follows `SapOrchestrationProvider.resolveApiBaseUrl`'s order (`SAP_PROXY_BASE_URL` first, then `AICORE_SERVICE_KEY.serviceurls.AI_API_URL`). If the provider ever grows a new resolution source, update both files together — the probe MUST hit the same endpoint the failing stream is attached to, otherwise the classification is a lie.
+- **The `[waiting for network]` prefix is a UX contract.** Both CLI (`src/cli/interactive.ts`) and TUI (`src/cli/tui/hooks/useStreamChat.ts`) render the prefix verbatim. The upstream Kilocode #13523 users match this exact string in support flows; do not rename it to a fancier variant without coordinating with the sync team.
+- **Test with the `probe` DI hook, not a network mock.** The watchdog accepts `probe: async (opts) => { ... }` specifically so the suite can inject a fake without any `nock` / `msw` machinery. See `tests/core/streamWatchdog.test.ts` — the `stream-silence connectivity probe (#1836)` describe block is the canonical pattern.
+- **`STREAM_STALL_TIMEOUT_MS` is read on every stream.** `resolveDefaultStreamIdleTimeoutMs()` is called from `src/core/streamingOrchestrator.ts:318` on each new watchdog so a mid-session env change takes effect on the next request. Do NOT cache the result at import time — the env-var-aware reload is a documented behaviour and users rely on it.
 
 ## License
 

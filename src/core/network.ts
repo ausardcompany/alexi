@@ -152,3 +152,102 @@ export class NetworkError extends Error {
     this.name = 'NetworkError';
   }
 }
+
+/**
+ * Classification for a suspected network-transport failure. Used by the
+ * TUI/CLI to surface disconnects as a user-visible error instead of
+ * silently hanging on a never-resolving fetch promise.
+ *
+ * Ports kilocode fix `d6bb0ef05` — silent hangs on network disconnect
+ * hide SAP AI Core outages behind a spinner that never advances.
+ */
+export interface NetworkErrorInfo {
+  /**
+   * High-level bucket for the failure. `unknown` means we recognized the
+   * error code family (see `OFFLINE_CODES`) but the specific code doesn't
+   * map to a more precise kind.
+   */
+  kind: 'offline' | 'timeout' | 'dns' | 'reset' | 'unknown';
+  /**
+   * Human-readable message suitable for surfacing in the TUI status bar
+   * or CLI stderr. Callers should NOT strip the underlying error code —
+   * it's the fastest way to diagnose whether the outage is DNS, proxy,
+   * or the SAP AI Core endpoint itself.
+   */
+  message: string;
+  /**
+   * Whether the caller should retry (transient) or bubble up as a hard
+   * error (permanent). All entries in `OFFLINE_CODES` are transient.
+   */
+  retriable: boolean;
+}
+
+/**
+ * Node/libuv error codes we treat as transport-level failures. Matches
+ * the transient regex documented in AGENTS.md so `ErrorBackoff` and the
+ * agent-workflow retry loop agree with the TUI's classification.
+ */
+const OFFLINE_CODES: ReadonlySet<string> = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+]);
+
+const KIND_MAP: Readonly<Record<string, NetworkErrorInfo['kind']>> = {
+  ENOTFOUND: 'dns',
+  EAI_AGAIN: 'dns',
+  ETIMEDOUT: 'timeout',
+  ECONNREFUSED: 'offline',
+  ECONNRESET: 'reset',
+  EHOSTUNREACH: 'offline',
+  ENETUNREACH: 'offline',
+  EPIPE: 'reset',
+};
+
+/**
+ * Attempt to classify an unknown thrown value as a network-transport
+ * failure. Returns `undefined` when the error clearly isn't one so the
+ * caller can fall through to its normal error path.
+ *
+ * Walks `err.code` and `err.cause.code` (Node's fetch wraps the
+ * underlying `UND_ERR_SOCKET` and libuv codes inside `cause`).
+ *
+ * alexi_change: surface network disconnects to the TUI/CLI instead of
+ * hanging forever on an unresolved SAP AI Core request.
+ */
+export function classifyNetworkError(err: unknown): NetworkErrorInfo | undefined {
+  const code = extractErrorCode(err);
+  if (!code || !OFFLINE_CODES.has(code)) {
+    return undefined;
+  }
+  const kind = KIND_MAP[code] ?? 'unknown';
+  const baseMessage =
+    err instanceof Error && err.message ? err.message : `Network transport failure (${code})`;
+  return {
+    kind,
+    message: `${baseMessage} [${code}]`,
+    retriable: true,
+  };
+}
+
+function extractErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') {
+    return undefined;
+  }
+  const record = err as { code?: unknown; cause?: unknown };
+  if (typeof record.code === 'string') {
+    return record.code;
+  }
+  if (record.cause && typeof record.cause === 'object') {
+    const inner = record.cause as { code?: unknown };
+    if (typeof inner.code === 'string') {
+      return inner.code;
+    }
+  }
+  return undefined;
+}

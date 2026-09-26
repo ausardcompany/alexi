@@ -385,6 +385,70 @@ Failed to delete session <id>: EACCES: permission denied
 
 The retention scheduler in `src/core/retentionScheduler.ts:88` also runs an automatic sweep at most once every 24 hours on CLI startup (state persisted to `~/.alexi/last-retention-run`). Use `--cleanup` to force a sweep now (for example, before rebuilding the FTS index or running a diagnostic pass) — the 24h cooldown does not gate the flag.
 
+### sessions-clean
+
+Manual, on-demand retention cleanup. Complements the age-only automatic sweep exposed by `alexi sessions --cleanup` with a policy language that supports **count-based** deletion (bound the number of sessions retained per project), a **dry-run preview** mode, **per-project scoping**, and **glob-based exclusions** by session id or title.
+
+```bash
+alexi sessions-clean --dry-run
+alexi sessions-clean --max-age 14
+alexi sessions-clean --max-count 50
+alexi sessions-clean --max-age 30 --max-count 100
+alexi sessions-clean --project alexi --exclude 'important-*'
+alexi sessions-clean --dry-run --json
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--dry-run` | flag | Preview candidates without invoking `fs.unlink`. `result.deleted` and `result.bytesFreed` are still populated so operators can see exactly what a real run would remove. |
+| `--max-age <days>` | integer | Delete sessions whose `updatedAt` is older than `now - days * 86400000`. Default `30`. Pass `0` to disable age-based cleanup. Non-negative integers are required. |
+| `--max-count <n>` | integer | After age filtering, group sessions by project bucket and keep only the `n` most-recently-updated in each bucket. Default `100`. Pass `0` to disable count-based cleanup. |
+| `--project <name>` | string | Restrict the sweep to sessions whose project bucket equals this value. Buckets are derived from `basename(metadata.workdir)`; sessions with no workdir land in `__unknown__`. |
+| `--exclude <pattern>` | string (repeatable) | `minimatch` glob matched against **both** `session.id` and `metadata.title`. A match on either short-circuits deletion. Repeat the flag to add multiple patterns. |
+| `--json` | flag | Emit the full `RetentionResult` shape as JSON instead of the text summary. Still exits with code `1` when `errors[]` is non-empty. |
+
+The two policies are **unioned**, not intersected: a session is a deletion candidate if it fails **either** the age check **or** the count check. Exclude patterns win in either case.
+
+**Text output (default).** One-line summary; dry-run mode adds one line per candidate:
+
+```text
+Deleted 3 sessions (12.4 KB), skipped 1.
+```
+
+```text
+Would delete 5 sessions (48.2 KB), skipped 0.
+  would delete: /home/alice/.alexi/sessions/abc123.json
+  would delete: /home/alice/.alexi/sessions/def456.json
+  would delete: /home/alice/.alexi/sessions/ghi789.json
+  would delete: /home/alice/.alexi/sessions/jkl012.json
+  would delete: /home/alice/.alexi/sessions/mno345.json
+```
+
+**JSON output (`--json`).** The full `RetentionResult` shape defined in `src/core/sessionRetention.ts`:
+
+```json
+{
+  "deleted": [
+    "/home/alice/.alexi/sessions/abc123.json"
+  ],
+  "skipped": [
+    "/home/alice/.alexi/sessions/important-notes.json"
+  ],
+  "errors": [],
+  "bytesFreed": 4096,
+  "dryRun": false
+}
+```
+
+**Exit codes.**
+
+- `0` — sweep completed with no per-file errors.
+- `1` — `result.errors` is non-empty, **or** both `--max-age` and `--max-count` were set to `0` (nothing to do), **or** a policy validation failure was raised by Zod (`RetentionPolicySchema.parse` rejected the input).
+
+**Relationship to `alexi sessions --cleanup`.** `--cleanup` invokes `SessionManager.cleanupExpiredSessions()` which is age-only, reads its policy from `~/.alexi/config.json`, respects the active-run and recent-write safety guards, and cascades expired children. `sessions-clean` invokes `applyRetentionPolicy()` which takes its policy from CLI flags, supports per-project count caps and dry-run, and does **not** cascade children — the count filter already implicitly retains the most-recent per project. Use `sessions --cleanup` for scheduled housekeeping and `sessions-clean` for scoped, preview-first cleanup.
+
+See [ARCHITECTURE.md — Manual Session Retention (`alexi sessions-clean`)](ARCHITECTURE.md#manual-session-retention-alexi-sessions-clean) for the pipeline diagram and the decision/apply split, and [TESTING.md — Testing the Session Retention Engine](TESTING.md#testing-the-session-retention-engine) for the fixture pattern.
+
 ### session-export
 
 Export a session to markdown format.
@@ -1120,6 +1184,7 @@ Review the changes in @$1 and summarize.
 | `ALEXI_OTEL_SERVICE_NAME` | `alexi` | `service.name` resource attribute on every emitted span. |
 | `ALEXI_TRACE_SAMPLE_PERCENT` | `0` | Session-level sampling percentage `[0, 100]`. Deterministic per `sessionId` via FNV-1a. |
 | `ALEXI_TRACE_RECORD_CONTENT` | -- | When exactly `true`, attach the (truncated, 8 KiB max) assistant response as `gen_ai.response.content`. Any other value keeps content off. |
+| `STREAM_STALL_TIMEOUT_MS` | `30000` | Idle-timeout window (ms) before the streaming watchdog aborts a silent provider stream. Read on every stream via `resolveDefaultStreamIdleTimeoutMs()` so a mid-session change takes effect on the next request. Values `<= 0` or non-numeric fall back to the default. See [Stream Watchdog and Connectivity Probe API](#stream-watchdog-and-connectivity-probe-api). |
 
 ### AICORE_SERVICE_KEY Format
 
@@ -2819,6 +2884,61 @@ manager.getState();        // NetworkState
 manager.cancelReconnect(); // Cancel in-progress reconnection
 ```
 
+### Network Disconnect Classification API
+
+Complementing `NetworkManager` is a stateless classifier in
+`src/session/network.ts` (2026-09-25, ports opencode/kilocode
+`d6bb0ef05`, PR #13523). Callers that catch an unknown error thrown
+from a network read can classify it into a small discriminated union
+and emit a discrete `network.disconnected` bus event so the TUI can
+render a "reconnecting…" line instead of hanging on the spinner.
+
+```typescript
+import {
+  classifyNetworkError,
+  reportNetworkDisconnect,
+  NetworkDisconnectEvent,
+  type NetworkDisconnectReason,
+  type NetworkDisconnectPayloadT,
+} from './session/network.js';
+
+// Pure classification — returns null when not a network error.
+const classified = classifyNetworkError(err);
+if (classified === null) {
+  throw err; // propagate normally
+}
+const { reason, retriable } = classified;
+// reason: 'timeout' | 'abort' | 'socket' | 'dns' | 'unknown'
+// retriable: boolean (false only for 'abort')
+
+// Or classify AND publish in one call:
+const result = reportNetworkDisconnect(err, 'aicore-anthropic');
+// result === null when not a network error
+// otherwise result === { reason, retriable } AND the event has been
+// published on NetworkDisconnectEvent with an optional `provider` field.
+
+// Subscribe to the bus event from the TUI:
+const unsub = NetworkDisconnectEvent.subscribe((payload) => {
+  // payload: { reason, retriable, provider?, raw? }
+  statusBar.setDisconnected(payload.reason);
+});
+```
+
+Behaviour contract:
+
+- `classifyNetworkError` returns `null` for non-`Error` values,
+  authentication / validation errors, and any error whose message does
+  not match one of the well-known socket / DNS / timeout patterns.
+- `AbortError` (user-initiated cancel) is classified with
+  `retriable: false` so upstream retry logic does NOT try to reconnect
+  against a cancelled request.
+- `reportNetworkDisconnect` NEVER re-throws. A subscriber that throws
+  from its handler is swallowed so the underlying network error is not
+  masked.
+- The `raw` field on the payload carries the best-effort raw error
+  message for logs but callers MUST NOT render it verbatim to
+  end-users — it can leak internal URLs.
+
 ## Enhanced Tool Registry
 
 The `EnhancedToolRegistry` supports dynamic prompt-based tool resolution:
@@ -2888,6 +3008,138 @@ try {
   }
 }
 ```
+
+## Stream Watchdog and Connectivity Probe API
+
+Introduced in the 2026-09 sync (issue #1836). Full flow: [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836).
+
+### `NetworkDisconnectedError`
+
+Exported from `src/core/streamProbe.ts` and re-exported from `src/core/streamWatchdog.ts` so consumers can import a single symbol.
+
+```typescript
+export class NetworkDisconnectedError extends Error {
+  readonly isNetworkDisconnected: true;      // Discriminator for the type guard
+  readonly code: 'NETWORK_DISCONNECTED';     // Machine-readable code, stable across message revisions
+  readonly url?: string;                     // Endpoint URL that failed the probe (post env-var expansion)
+  readonly kind?: 'local' | 'remote';        // Probe kind that produced the failure
+  constructor(detail: string, meta?: { url?: string; kind?: 'local' | 'remote' });
+}
+
+export function isNetworkDisconnectedError(err: unknown): err is NetworkDisconnectedError;
+```
+
+The type guard also matches duck-typed errors carrying the `isNetworkDisconnected: true` marker — defensive against cross-module-boundary `instanceof` failures, same pattern as `isStreamStalledError`.
+
+`err.message` is always `` `Network disconnected: ${detail}` ``.
+
+### `ProbeResult` / `StreamProbeOptions`
+
+```typescript
+export interface ProbeResult {
+  reachable: boolean;
+  error?: string;                // Set when reachable === false
+  kind?: 'local' | 'remote';     // Classification used
+  url?: string;                  // URL actually probed (post env-var expansion)
+}
+
+export interface StreamProbeOptions {
+  baseUrl?: string;              // Override; else resolveProviderBaseUrl()
+  localTimeoutMs?: number;       // TCP-connect budget (default 2000)
+  remoteTimeoutMs?: number;      // HTTP HEAD budget (default 3000)
+  remoteProbe?: (url: string, timeoutMs?: number) => Promise<ConnectivityResult>;
+  localProbe?: (host: string, port: number, timeoutMs: number) => Promise<ProbeResult>;
+}
+```
+
+`remoteProbe` and `localProbe` are DI seams — production callers omit them and inherit `checkConnectivity` / `tcpConnect`.
+
+### `probeStreamConnectivity(options?)`
+
+```typescript
+export async function probeStreamConnectivity(
+  options?: StreamProbeOptions
+): Promise<ProbeResult>;
+```
+
+Contract:
+
+- Returns `{ reachable: true }` when the endpoint responds (TCP for local, HTTP HEAD for remote).
+- Returns `{ reachable: false, error }` when the endpoint is unreachable OR the base URL cannot be resolved.
+- Never throws. Never rejects. The consumer (the watchdog) uses the boolean to decide whether to surface a `NetworkDisconnectedError` (probe failed → network is down) or the usual `StreamStalledError` (probe passed → server is slow / stuck).
+
+### `resolveProviderBaseUrl()` / `expandEnvVars(input)` / `isLocalEndpoint(url)`
+
+```typescript
+export function resolveProviderBaseUrl(): string | undefined;
+export function expandEnvVars(input: string): string;
+export function isLocalEndpoint(url: string): boolean;
+```
+
+- `resolveProviderBaseUrl` mirrors `SapOrchestrationProvider.resolveApiBaseUrl`: `SAP_PROXY_BASE_URL` wins, then `serviceurls.AI_API_URL` inside `AICORE_SERVICE_KEY`, else `undefined`. Both sources pass through `expandEnvVars` so `${VAR}` and `$VAR` shell-style references resolve at probe time.
+- `isLocalEndpoint(url)` returns `true` for loopback, RFC1918, link-local, unique-local IPv6, and bare hostnames without a dot. Everything else is remote. Malformed URLs return `false` (safer remote HEAD probe).
+
+### `tcpConnect(host, port, timeoutMs?)`
+
+```typescript
+export function tcpConnect(
+  host: string,
+  port: number,
+  timeoutMs?: number
+): Promise<ProbeResult>;
+```
+
+TCP handshake with an explicit timeout. Resolves to `{ reachable: true, kind: 'local' }` on connect; resolves to `{ reachable: false, error, kind: 'local' }` on timeout, refused, or DNS failure. Never rejects. The timer is `.unref()`ed so the probe never delays process exit.
+
+### Watchdog options
+
+```typescript
+export interface StreamWatchdogOptions {
+  idleTimeoutMs?: number;         // Default: DEFAULT_STREAM_IDLE_TIMEOUT_MS (30_000)
+  toolExtensionMs?: number;       // Default: DEFAULT_STREAM_TOOL_EXTENSION_MS (600_000)
+  longRunningToolNames?: ReadonlySet<string>;
+  signal?: AbortSignal;
+  probe?: ((options?: StreamProbeOptions) => Promise<ProbeResult>) | boolean;
+  probeOptions?: StreamProbeOptions;
+}
+```
+
+Values for `probe`:
+
+- Omitted / `false` — pre-#1836 behaviour. Idle timeout aborts with `StreamStalledError`.
+- `true` — enable the default env-derived probe (`probeStreamConnectivity`). The streaming orchestrator opts in on every real chat stream.
+- A callable — inject a custom probe (tests / DI).
+
+`probeOptions` is forwarded to the default probe when `probe === true`; ignored when `probe` is a custom callable or `false`.
+
+### Consumer example
+
+```typescript
+import { isNetworkDisconnectedError, isStreamStalledError } from '../core/streamWatchdog.js';
+import { isAbortError } from '../core/streamingOrchestrator.js';
+
+try {
+  for await (const chunk of streamChat(messages, { signal })) {
+    render(chunk);
+  }
+} catch (err) {
+  if (isAbortError(err)) {
+    return; // User pressed Ctrl+C; caller re-prompts.
+  }
+  if (isNetworkDisconnectedError(err)) {
+    // Check `err.url` / `err.kind` for the classified endpoint.
+    console.error(`[waiting for network] ${err.message}`);
+    return;
+  }
+  if (isStreamStalledError(err)) {
+    console.error(`${err.message} You can retry or switch models.`);
+    return;
+  }
+  throw err;
+}
+```
+
+The branch order matters: check `isNetworkDisconnectedError` BEFORE `isStreamStalledError`. A disconnect never displays the retry-oriented stall message; the two are mutually exclusive.
 
 ## Logging
 
@@ -4724,6 +4976,132 @@ try {
 
 The sweep itself runs on the CLI's Node event loop via `setImmediate`, not a worker thread. The `SessionManager.cleanupExpiredSessions` call is synchronous but is wrapped in `setImmediate` so program startup returns to the caller before the scan begins.
 
+## Session Retention Engine API (`src/core/sessionRetention.ts` + `src/core/sessionScanner.ts`)
+
+Added in commit `e6953a49`. Public TypeScript surface for the manual retention path used by `alexi sessions-clean`. Independent from `SessionManager.cleanupExpiredSessions` — see [ARCHITECTURE.md — Manual Session Retention](ARCHITECTURE.md#manual-session-retention-alexi-sessions-clean) for the runtime contract and the pipeline diagram.
+
+### Scanner: `scanSessions` / `groupSessionsByProject`
+
+```typescript
+// src/core/sessionScanner.ts
+
+export const UNKNOWN_PROJECT = '__unknown__';
+
+export interface ScannedSession {
+  id: string;
+  filePath: string;
+  size: number;
+  mtime: number;
+  createdAt: number;
+  updatedAt: number;
+  /**
+   * Project bucket. Derived from `metadata.project` (reserved future
+   * field) or `basename(metadata.workdir)`. Empty basenames (`/`, `.`,
+   * `..`) fall back to UNKNOWN_PROJECT.
+   */
+  project: string;
+  metadata: SessionMetadata;
+}
+
+export function scanSessions(sessionsDir: string): Promise<ScannedSession[]>;
+
+export function groupSessionsByProject(
+  sessions: ScannedSession[]
+): Map<string, ScannedSession[]>;
+```
+
+Behaviour:
+
+- **Never throws for per-file issues.** Malformed JSON, missing `metadata.id`, missing `metadata` block, `stat` failures, and read failures are logged and the file is skipped. A single corrupt session cannot block the sweep.
+- **Directory-level errors.** `ENOENT` on `sessionsDir` returns `[]` (nothing to clean). Other directory errors reject the promise so the caller can surface "cannot access sessions directory".
+- **Timestamp fallbacks.** `createdAt = metadata.created ?? mtimeMs`, `updatedAt = metadata.updated ?? mtimeMs`. Age-based checks always have a numeric value to compare against.
+- **`groupSessionsByProject`** preserves `Map` insertion order. Bucket order is filesystem-dependent (matches `fs.readdir` order); callers that need a stable order must sort explicitly.
+
+### Engine: `applyRetentionPolicy` / `selectCandidates`
+
+```typescript
+// src/core/sessionRetention.ts
+
+export const RetentionPolicySchema: z.ZodType<RetentionPolicy>;
+
+export interface RetentionPolicy {
+  /** Sessions older than `now - maxAgeDays * 86400000` become candidates. `>= 1` when provided. */
+  maxAgeDays?: number;
+  /** After age filtering, keep only the N most-recently-updated per project. `>= 0` when provided. */
+  maxCountPerProject?: number;
+  /** minimatch globs matched against session id AND title. Match short-circuits deletion. */
+  excludePatterns?: string[];
+  /** Restrict the sweep to sessions whose project bucket equals this value. */
+  project?: string;
+  /** Preview mode. When true, no `fs.unlink` calls are made. */
+  dryRun?: boolean;
+}
+
+export interface RetentionResult {
+  deleted: string[];   // absolute file paths that were (or would be) removed
+  skipped: string[];   // paths held back by exclude patterns or project filter
+  errors: string[];    // human-readable per-file failure messages
+  bytesFreed: number;  // total size in bytes across `deleted`
+  dryRun: boolean;     // mirrors the policy flag so callers can format without keeping input
+}
+
+export function defaultSessionsDir(): string;
+
+export function selectCandidates(
+  sessions: ScannedSession[],
+  policy: RetentionPolicy,
+  now?: number
+): { toDelete: ScannedSession[]; toSkip: ScannedSession[] };
+
+export function applyRetentionPolicy(
+  policy: RetentionPolicy,
+  options?: { sessionsDir?: string; now?: number }
+): Promise<RetentionResult>;
+
+export function formatBytes(bytes: number): string;
+```
+
+Contract points:
+
+- **Zod-validated inputs.** `RetentionPolicySchema` is `.strict()` — unknown fields are rejected. `applyRetentionPolicy` re-parses on every call so callers do not need to pre-validate. A rejected policy throws synchronously (before any disk I/O).
+- **Decision / apply split.** `selectCandidates` is a pure function suitable for unit testing with in-memory `ScannedSession` fixtures. `applyRetentionPolicy` is the disk-touching wrapper.
+- **Empty policy is a no-op.** `selectCandidates(sessions, {})` returns `{ toDelete: [], toSkip: [] }`. The CLI enforces the stricter rule that at least one of `--max-age` / `--max-count` must be positive.
+- **Union semantics.** A session is a deletion candidate if it fails **either** the age check **or** the count check. `excludePatterns` short-circuits deletion in either case, moving the session from `toDelete` to `toSkip`.
+- **`now` injection.** Both `selectCandidates(sessions, policy, now)` and `applyRetentionPolicy(policy, { now })` accept an explicit `now` for deterministic tests. Defaults to `Date.now()` when omitted.
+- **`sessionsDir` injection.** `applyRetentionPolicy(policy, { sessionsDir })` overrides the default `~/.alexi/sessions/` path so tests can run against temp directories without touching `process.env.HOME`.
+- **Errors are best-effort.** Per-file `fs.unlink` failures are captured in `result.errors` with the shape `Failed to delete <path>: <message>`; the sweep continues past errors. A `logger.warn` entry is emitted for each failure.
+- **`formatBytes`** renders `0 B` for zero and non-finite input, `<1024> B` verbatim for byte-scale values, and `<value.toFixed(1)> <unit>` (`KB`, `MB`, `GB`, `TB`) for larger values.
+
+### Usage example: scripted retention check
+
+```typescript
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  type RetentionPolicy,
+} from './core/sessionRetention.js';
+
+async function previewCleanup(): Promise<void> {
+  const policy: RetentionPolicy = {
+    maxAgeDays: 30,
+    maxCountPerProject: 50,
+    excludePatterns: ['keep-*', '*-baseline'],
+    dryRun: true,
+  };
+
+  const result = await applyRetentionPolicy(policy);
+  console.log(
+    `Would remove ${result.deleted.length} sessions freeing ${formatBytes(result.bytesFreed)}, ` +
+      `skipped ${result.skipped.length} (protected).`
+  );
+
+  if (result.errors.length > 0) {
+    for (const err of result.errors) console.error(err);
+    process.exit(1);
+  }
+}
+```
+
 ## Worktree Status Registry API
 
 Introduced by commit `8b372ad7` (issue #1826). Public TypeScript surface exposed by `src/agent/worktreeStatus.ts` for publishers (orchestrator, tool layer, tests) that need to push Agent Manager worktree lifecycle events into the TUI, plus the React binding under `src/cli/tui/hooks/useWorktreeStatus.ts` used by the Sidebar. See the [Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) section of the architecture doc for the runtime contract and status vocabulary.
@@ -4883,3 +5261,152 @@ function tearDownWorktree(id: string): void {
 ```
 
 Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`) are safe and free: they short-circuit before touching the listener set.
+
+## Network Transport Classification
+
+`classifyNetworkError(err)` (`src/core/network.ts`, added in the 2026-09-26 upstream sync) folds a suspected socket-layer failure into a small, UI-renderable classification. Used by the TUI status bar, CLI stderr writer, and provider layer to surface disconnects instead of hanging on a never-resolving fetch promise.
+
+```typescript
+import { classifyNetworkError, type NetworkErrorInfo } from './core/network.js';
+
+export interface NetworkErrorInfo {
+  kind: 'offline' | 'timeout' | 'dns' | 'reset' | 'unknown';
+  message: string;    // "<original> [CODE]" — always includes the raw code
+  retriable: boolean; // Always true for recognized transport codes
+}
+
+export function classifyNetworkError(err: unknown): NetworkErrorInfo | undefined;
+```
+
+Semantics:
+
+- Returns `undefined` for non-errors, error codes outside the pinned `OFFLINE_CODES` set, and error shapes where no `code` can be extracted from either `err.code` or `err.cause.code`. Callers fall through to their normal error path.
+- The `code` walk goes `err.code` first, then `err.cause.code`. Node's built-in `fetch` wraps the underlying libuv code inside `cause`, so the fallback is essential for handling `fetch failed` errors correctly.
+- The `[CODE]` suffix on `message` is intentional. Do not strip it before rendering — operators need it to diagnose whether the outage is DNS, proxy, or the SAP AI Core endpoint itself.
+- Recognized codes and their `kind`:
+
+  | Code           | `kind`    |
+  | -------------- | --------- |
+  | `ENOTFOUND`    | `dns`     |
+  | `EAI_AGAIN`    | `dns`     |
+  | `ETIMEDOUT`    | `timeout` |
+  | `ECONNREFUSED` | `offline` |
+  | `ECONNRESET`   | `reset`   |
+  | `EHOSTUNREACH` | `offline` |
+  | `ENETUNREACH`  | `offline` |
+  | `EPIPE`        | `reset`   |
+
+Example — surface a DNS failure in the CLI:
+
+```typescript
+import { classifyNetworkError } from './core/network.js';
+
+try {
+  await sendChatToProvider(request);
+} catch (err) {
+  const info = classifyNetworkError(err);
+  if (info) {
+    process.stderr.write(`Network ${info.kind}: ${info.message}\n`);
+    process.exit(info.retriable ? 75 /* EX_TEMPFAIL */ : 1);
+  }
+  throw err;
+}
+```
+
+## Safe URL Opener (`openUrl`)
+
+`openUrl` (`src/core/open.ts`, added in the 2026-09-26 upstream sync) is the single sanctioned entry point for opening a URL in the user's default browser. Enforces a strict `http:` / `https:` scheme allow-list to defend against arbitrary-scheme injection from LLM output (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC paths (`\\server\share`, `//server/share`).
+
+```typescript
+import { openUrl, type OpenUrlOptions } from './core/open.js';
+
+export interface OpenUrlOptions {
+  /**
+   * When true, resolve immediately after spawning the launcher without
+   * waiting for it to exit. Default true — matches `open` package
+   * behavior and avoids blocking the TUI on a browser launch.
+   */
+  detached?: boolean;
+}
+
+export function openUrl(input: string, options?: OpenUrlOptions): Promise<void>;
+```
+
+Behavior:
+
+- Rejects (does not throw synchronously — returns a rejecting promise) when `input` is not a string, is empty, is a UNC path, is unparseable as a URL, or has a protocol other than `http:` / `https:`. Error message: `Only http and https links can be opened in the browser: <input>`.
+- Rejects when the platform is unsupported: `Unsupported platform for openUrl: <process.platform>`.
+- Launcher choice: macOS → `open`; Windows → `cmd /c start ""`; Linux and other → `xdg-open`.
+- `detached: true` (default) `unref()`s the child and resolves immediately; the browser tab opens even if the caller exits.
+- `detached: false` waits for the launcher to exit and rejects if the exit code is non-zero (`Browser launcher exited with code <n>`).
+
+Example:
+
+```typescript
+import { openUrl } from './core/open.js';
+
+// From the TUI: the user clicked a share link
+try {
+  await openUrl(shareUrl);
+} catch (err) {
+  writeStatus(`Cannot open link: ${err instanceof Error ? err.message : String(err)}`);
+}
+```
+
+Never spawn `xdg-open` / `open` directly — always route through `openUrl` so the scheme allow-list is enforced.
+
+## Legacy Drizzle Journal Import
+
+`importLegacyDrizzleJournal` (`src/core/database/migration.ts`, added in the 2026-09-26 upstream sync) is an optional bootstrap step for SQLite-backed installations that previously ran Drizzle-based migrations. It reads the older `__drizzle_migrations` table and mirrors each already-applied migration into Alexi's own `migration` journal so a fresh Alexi install does not replay migrations that were already applied.
+
+```typescript
+import {
+  importLegacyDrizzleJournal,
+  type LegacySqliteBridge,
+  type SqliteColumnInfo,
+  type Migration,
+} from './core/database/migration.js';
+
+export interface SqliteColumnInfo {
+  name: string;
+}
+
+export interface LegacySqliteBridge {
+  tableExists(name: string): Promise<boolean>;
+  tableColumns(name: string): Promise<readonly SqliteColumnInfo[]>;
+  fetchLegacyJournal(): Promise<
+    ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  >;
+  recordCompleted(id: string, timeCompletedMs: number): Promise<void>;
+}
+
+export function importLegacyDrizzleJournal(
+  bridge: LegacySqliteBridge,
+  migrations: readonly Migration[]
+): Promise<void>;
+```
+
+Adapter checklist:
+
+- `tableExists(name)` should query `sqlite_master` (`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`).
+- `tableColumns(name)` should return the result of `PRAGMA table_info(<name>)` — only the `name` column is inspected; other fields are ignored.
+- `fetchLegacyJournal()` should return every row from `__drizzle_migrations`. `name` may be absent on very old schemas; `created_at` should be a unix-millis integer.
+- `recordCompleted(id, timeCompletedMs)` MUST have `INSERT OR IGNORE` semantics so re-running the import after a partial failure is safe.
+
+Behavior:
+
+- No-op when `__drizzle_migrations` does not exist.
+- When the `name` column is present, rows with a truthy `name` are recorded verbatim; null / empty names are skipped.
+- When the `name` column is absent, each row's `created_at` (unix millis) is formatted as `YYYYMMDDHHMMSS` UTC and matched against the known migration id prefix. An unmatched timestamp throws `Legacy migration timestamp <ms> does not match any known migration` — a deliberate loud failure so schema drift is caught at boot, not silently forgotten.
+- Rows with neither a usable `name` nor a `created_at` are skipped.
+
+Example — wire it before `applyMigrations`:
+
+```typescript
+import { applyMigrations, importLegacyDrizzleJournal } from './core/database/migration.js';
+import { sqliteBridge } from './core/database/adapters/betterSqlite.js';
+import { ALL_MIGRATIONS } from './core/database/migrations/index.js';
+
+await importLegacyDrizzleJournal(sqliteBridge, ALL_MIGRATIONS);
+await applyMigrations(sqliteBridge, ALL_MIGRATIONS);
+```

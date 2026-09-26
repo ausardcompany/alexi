@@ -2723,6 +2723,130 @@ Key coverage points for future changes to `worktreeId` handling:
 
 All cases route through `agentManagerTool.executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path and the handler's capability check from permission behaviour. When the managed-worktree registry lands in a future release, the fourth case should be split into a happy-path assertion (successful directory resolution) and a not-found assertion (unknown `worktreeId` still fails loudly).
 
+### Testing `apply_patch` `move_path` Normalization
+
+Introduced 2026-09-25 (ports upstream kilocode `f7da00f35`, PR #45329).
+An empty `move_path` previously survived serialization and caused
+patch application to fail on files that were NOT actually being
+renamed. The `normalizeMovePath` helper on
+`src/tool/tools/apply-patch.ts` treats both `undefined` and the empty
+string as "no move" and returns `undefined` in both cases; any
+non-empty string is returned verbatim.
+
+Reference regression suite:
+`src/tool/tools/__tests__/apply-patch.move-path.test.ts` (30 lines,
+four cases). The pattern is a pure-function test — no filesystem, no
+mocks required:
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeMovePath } from '../apply-patch.js';
+
+describe('normalizeMovePath', () => {
+  it('returns undefined for an undefined input', () => {
+    expect(normalizeMovePath(undefined)).toBeUndefined();
+  });
+
+  it('treats the empty string as absent (regression: kilocode f7da00f35)', () => {
+    expect(normalizeMovePath('')).toBeUndefined();
+  });
+
+  it('preserves a non-empty destination path verbatim', () => {
+    expect(normalizeMovePath('src/renamed.ts')).toBe('src/renamed.ts');
+  });
+
+  it('preserves a whitespace-only string (not our concern to trim)', () => {
+    expect(normalizeMovePath('  ')).toBe('  ');
+  });
+});
+```
+
+The whitespace-only case is deliberate — the upstream fix targeted
+the empty-string case only. Trimming whitespace-only paths is the
+caller's responsibility.
+
+### Testing Network Disconnect Classification (`network.disconnected`)
+
+Introduced 2026-09-25 (ports upstream opencode/kilocode `d6bb0ef05`,
+PR #13523). The classifier in `src/session/network.ts` folds
+well-known Node.js socket / DNS error codes into a small
+discriminated union and publishes on the `NetworkDisconnectEvent` bus
+so the TUI can render a "reconnecting…" line instead of hanging on
+the spinner. The suite lives in `src/session/__tests__/network.test.ts`
+(109 lines, two describe blocks) and is a pure-unit test — no network,
+no real timers, no filesystem.
+
+Key patterns:
+
+```typescript
+import { describe, expect, it, vi } from 'vitest';
+import {
+  classifyNetworkError,
+  NetworkDisconnectEvent,
+  reportNetworkDisconnect,
+} from '../network.js';
+
+describe('classifyNetworkError', () => {
+  it('classifies AbortError as non-retriable abort', () => {
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    expect(classifyNetworkError(err)).toEqual({ reason: 'abort', retriable: false });
+  });
+
+  it('classifies ETIMEDOUT / ECONNRESET / ENOTFOUND / fetch failed', () => {
+    expect(classifyNetworkError(new Error('connect ETIMEDOUT ...')))
+      .toEqual({ reason: 'timeout', retriable: true });
+    expect(classifyNetworkError(new Error('read ECONNRESET')))
+      .toEqual({ reason: 'socket', retriable: true });
+    expect(classifyNetworkError(new Error('getaddrinfo ENOTFOUND api.example.com')))
+      .toEqual({ reason: 'dns', retriable: true });
+    expect(classifyNetworkError(new Error('fetch failed')))
+      .toEqual({ reason: 'unknown', retriable: true });
+  });
+
+  it('returns null for non-Error and non-network errors', () => {
+    expect(classifyNetworkError('boom')).toBeNull();
+    expect(classifyNetworkError(new Error('unauthorized'))).toBeNull();
+  });
+});
+
+describe('reportNetworkDisconnect', () => {
+  it('publishes a network.disconnected event when classified', () => {
+    const handler = vi.fn();
+    const unsub = NetworkDisconnectEvent.subscribe(handler);
+    try {
+      const result = reportNetworkDisconnect(new Error('read ECONNRESET'), 'aicore-anthropic');
+      expect(result).toEqual({ reason: 'socket', retriable: true });
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: 'socket',
+          retriable: true,
+          provider: 'aicore-anthropic',
+        })
+      );
+    } finally {
+      unsub();
+    }
+  });
+});
+```
+
+Coverage priorities for future extensions to `NetworkDisconnectReason`:
+
+1. **Every branch of the classifier gets its own case.** Adding a new
+   reason (for example, `'tls'` for `CERT_HAS_EXPIRED`) requires a
+   positive case that maps to it AND a negative case (non-matching
+   error still classifies to the pre-existing branch).
+2. **Assert the retriable flag alongside the reason.** A future reason
+   that is added with the wrong retriable default would cascade into
+   incorrect retry decisions elsewhere; asserting both fields per
+   case pins the contract.
+3. **Bus subscribers use `vi.fn()` + `subscribe` / unsubscribe in a
+   `try/finally`.** Never leak a subscriber across tests — the
+   `NetworkDisconnectEvent` is a module-level singleton, so a leaked
+   listener will fire on subsequent tests and produce cross-test
+   noise.
+
 ### Testing JSON-encodable Tool Result Payloads
 
 Introduced 2026-09-01 (`1.22.8`, ports upstream kilocode `f7da00f`). The `apply_patch` tool's success payload is now constructed defensively so no field carries `undefined`. `JSON.stringify` silently drops keys whose value is `undefined`, which historically caused downstream permission metadata / event bus consumers to lose information they were told they would receive.
@@ -3182,6 +3306,97 @@ afterEach(() => {
 - **Legacy on-disk files load without the field.** The suite writes a hand-crafted legacy session (no `totalReasoningTokens`, no `reasoning` subfield anywhere) directly to disk, loads it, and then appends a reasoning turn. The loaded session shows `totalReasoningTokens: undefined`, and the subsequent append initialises the field lazily to `12` without corrupting the pre-existing `totalTokens: 42`.
 
 Reuse the fixture pattern verbatim when adding new session-level assertions that must not race with compaction or persistence side-effects.
+
+### Testing the Session Retention Engine
+
+`tests/core/sessionRetention.test.ts` (220 lines, 12 cases across three `describe` blocks) and `tests/core/sessionScanner.test.ts` (160 lines) pin the manual retention path used by `alexi sessions-clean`. The engine is intentionally split into a **pure decision phase** (`selectCandidates`) and a **disk-touching apply phase** (`applyRetentionPolicy`); both surfaces are exercised because a bug in the decision phase is silently absorbed by dry-run mode but destructive under a real sweep.
+
+**Fixture pattern.** Each case runs against a fresh `fs.mkdtemp` sessions directory. No `vi.mock` is required — the retention engine exposes a `sessionsDir` override so tests do not touch `~/.alexi/sessions/` or `process.env.HOME`:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  selectCandidates,
+} from '../../src/core/sessionRetention.js';
+import { scanSessions } from '../../src/core/sessionScanner.js';
+import type { Session } from '../../src/core/sessionManager.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-retention-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function writeSession(
+  id: string,
+  overrides: Partial<Session['metadata']> = {},
+  mtimeMs?: number
+): string {
+  const now = Date.now();
+  const session: Session = {
+    metadata: {
+      id,
+      created: overrides.created ?? now,
+      updated: overrides.updated ?? now,
+      totalTokens: 0,
+      messageCount: 0,
+      ...overrides,
+    },
+    messages: [],
+  };
+  const filePath = path.join(tempDir, `${id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+  if (mtimeMs !== undefined) {
+    fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  }
+  return filePath;
+}
+```
+
+**Contract points asserted by `selectCandidates`** (7 cases):
+
+- **Empty policy is a no-op.** `selectCandidates(scanned, {}, now)` returns `{ toDelete: [], toSkip: [] }` even when the input contains a 60-day-old session — the engine does not delete anything the caller did not explicitly ask for.
+- **Age filter targets `updatedAt`.** With `maxAgeDays: 30`, a 60-day-old session is queued for deletion while a 1-day-old session survives.
+- **Count filter is per-project.** Given three sessions in `/tmp/alpha` and one in `/tmp/beta`, `maxCountPerProject: 2` deletes only the oldest alpha session — beta's single session is untouched because it fits inside its own bucket's cap.
+- **Exclude by id.** `excludePatterns: ['important-*']` moves the matching session from `toDelete` into `toSkip` even when it fails the age check. The junk companion session is still deleted.
+- **Exclude by title.** Same short-circuit but matched against `metadata.title` — the pattern `Keep*` protects the session whose title starts with `Keep me`, deleting only the other.
+- **Project filter.** `project: 'alpha'` restricts the working set to the alpha bucket; sessions in `/tmp/beta` land in `toSkip` regardless of age.
+- **Union of age + count.** With both policies active (`maxAgeDays: 30, maxCountPerProject: 1`), a session is a candidate if it fails **either** check. The suite asserts on a sorted id list so the union is compared insensitively to internal ordering.
+
+**Contract points asserted by `applyRetentionPolicy`** (4 cases):
+
+- **Real deletion writes the filesystem.** `applyRetentionPolicy({ maxAgeDays: 30 }, { sessionsDir: tempDir, now })` reports `deleted: [oldPath]`, `dryRun: false`, `bytesFreed > 0`, and `fs.existsSync(oldPath) === false`.
+- **Dry-run leaves the filesystem intact.** With `dryRun: true` the same input reports the same `deleted` list but the file remains on disk. The test asserts on both the response shape AND the survival of the file so a regression that silently ignores `dryRun` fails.
+- **Empty policy is a no-op end-to-end.** A 365-day-old session survives `applyRetentionPolicy({}, ...)` — the engine does not fall through to a default `maxAgeDays`.
+- **Zod rejects invalid shapes.** `applyRetentionPolicy({ maxAgeDays: -5 }, ...)` rejects synchronously — the test uses `expect(...).rejects.toThrow()` with a `@ts-expect-error` above the invalid input so the compiler is on the same page as the runtime.
+
+**`formatBytes` contract** (3 cases): `0`, small byte counts (`<1024`), and non-finite / negative input render as `0 B` or `<n> B`; `1024`, `1024**2`, `1024**3` render as `1.0 KB`, `1.0 MB`, `1.0 GB`.
+
+**Scanner contract** (`tests/core/sessionScanner.test.ts`, ~10 cases):
+
+- Valid session files produce `ScannedSession` records with `project = basename(metadata.workdir)`.
+- Malformed JSON is skipped with a `logger.warn` — the sweep continues past the corrupt file.
+- Missing `created` / `updated` fields fall back to file `mtimeMs` so age math never operates on `undefined`.
+- Sessions without a `workdir` field land in `UNKNOWN_PROJECT` (`__unknown__`).
+- `groupSessionsByProject` returns per-project buckets in `Map` insertion order.
+
+Key patterns to reuse when extending the suite:
+
+1. **Use the `sessionsDir` / `now` injection points instead of stubbing `Date.now` or `process.env.HOME`.** The engine accepts both as arguments precisely so tests can be pure functions of their fixtures.
+2. **Assert on `.map((s) => s.id)`, not on the full `ScannedSession` object.** The record carries filesystem-dependent fields (`filePath`, `size`, `mtime`) that shift between hosts; comparing id lists keeps the assertion portable.
+3. **Sort ids when the assertion is order-insensitive.** The union case uses `.sort()` because the engine does not commit to an ordering for combined age + count expiry.
+4. **Do not mock `logger`.** The scanner's tolerance path (`logger.warn` on malformed JSON) is exercised for behaviour, not for its log output — a spy would couple the test to the log format.
 
 ### Testing subagent approval boundaries
 
@@ -4645,7 +4860,7 @@ contributors do not re-introduce them by hand:
    the line fits within the 100-column `printWidth`.** Prettier will reflow
    multi-line imports and multi-line chained expressions to a single line
    whenever they fit; hand-authored multi-line breaks that could fit on one line
-   are removed by the auto-fix. Two canonical worked examples:
+   are removed by the auto-fix. Three canonical worked examples:
 
    ```typescript
    // tests/providers/reasoning-variants.test.ts:9
@@ -4653,6 +4868,11 @@ contributors do not re-introduce them by hand:
 
    // tests/session/retry.test.ts:56
    await expect(withRetry(fn, () => true, { maxAttempts: 3, baseMs: 1 })).rejects.toBe(err);
+
+   // src/core/open.test.ts:19 (canonical form after the 2026-09-26 auto-fix
+   // pass in commit 8ea08827 — the previous three-line break fit within 100
+   // columns once the first argument sat at 98 columns)
+   await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
    ```
 
    Only break these onto multiple lines when the resulting single line would
@@ -4796,6 +5016,40 @@ contributors do not re-introduce them by hand:
    **Session Model Preferences**). Diff statistics for that pass:
    `2 files changed, 7 insertions(+), 4 deletions(-)`. Running
    `npm run format` before committing avoids the `style(ci)` follow-up.
+
+7. **Break `new Map([[key, [array-literal]]])` fixtures onto multiple lines
+   when the single-line form crosses `printWidth: 100`, one array element per
+   line.** Prettier's reflow policy for a `Map` constructor whose entries
+   contain nested array literals mirrors its policy for object literals: keep
+   the whole call on one line while it fits under 100 columns; the moment it
+   overflows, break inside the outer `[[...]]` array with one entry-tuple per
+   line and let the inner array literal wrap independently. The canonical
+   worked example from the 2026-09-26 auto-fix pass in commit `8ea08827` is
+   `src/core/database/migration.legacy-journal.test.ts:52`, which feeds a
+   single `[table, columns]` entry into the `FakeBridge` `tableColumns()`
+   mock for the "uses the `name` column when it is present" case:
+
+   ```typescript
+   // Anti-pattern — 103-column single-line form (overflowed printWidth: 100)
+   new Map([['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]]]),
+
+   // Canonical form after auto-fix — the outer array wraps, the inner
+   // column-info array stays on one line because it fits under 100 columns
+   new Map([
+     ['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]],
+   ]),
+   ```
+
+   The exported `LegacySqliteBridge`, `Migration`, and `SqliteColumnInfo`
+   types re-imported from `src/core/database/migration.js` are unchanged, and
+   the two-migration ordered expectation on `bridge.recorded`
+   (`['20260828074139_kilocode_board', '20260907102000_model_usage_index']`)
+   still fires against `importLegacyDrizzleJournal` with byte-identical
+   inputs. Only reach for the multi-line form when the resulting single line
+   would exceed 100 columns; a hand-authored multi-line `Map` fixture that
+   already fits on one line will be re-collapsed by the next `prettier
+   --write` pass. Running `npm run format` before committing avoids the
+   `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up.
 
 ### Registry-contract pinning tests
 
@@ -6430,4 +6684,171 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/StatusIcon.test.tsx \
   tests/cli/tui/useWorktreeStatus.test.tsx \
   tests/cli/tui/Sidebar.test.tsx
+```
+
+## Testing `classifyNetworkError`
+
+`src/core/network.test.ts` is a pure-unit suite — no mocks, no fake timers, no filesystem. Each case constructs an `Error` with a specific `code` (or `cause.code`) and asserts the returned `NetworkErrorInfo`. The classifier is shape-based, so tests exercise the shape, not any transport.
+
+Key cases pinned:
+
+1. **Non-error inputs return `undefined`.** `null`, `undefined`, a bare string, a number, and `new Error('plain')` (no `code`) all return `undefined` — callers must be able to fall through to their normal error path.
+2. **Each recognized code maps to the documented `kind`.** `ENOTFOUND` -> `dns`, `ETIMEDOUT` -> `timeout`, `ECONNRESET` -> `reset`, `ECONNREFUSED` / `EHOSTUNREACH` -> `offline`.
+3. **`err.cause.code` fallback.** An outer error with a `cause` whose `.code` is `ENOTFOUND` classifies as `dns` — Node's `fetch` wraps the libuv code inside `cause`, so missing this walk would leave `fetch failed` errors permanently unrecognized.
+4. **Unknown codes return `undefined`.** `ERR_INVALID_ARG_TYPE` is not in `OFFLINE_CODES`, so the classifier does not falsely upgrade a validation error to a transport failure.
+5. **`message` preserves the code suffix.** The `[CODE]` suffix must always be present; regression tests grep for `[ENOTFOUND]` on the DNS case.
+
+Recipe for a new code:
+
+```typescript
+import { classifyNetworkError } from './network.js';
+
+it('classifies EAI_AGAIN as dns and retriable', () => {
+  const err = Object.assign(new Error('getaddrinfo EAI_AGAIN'), { code: 'EAI_AGAIN' });
+  const info = classifyNetworkError(err);
+  expect(info?.kind).toBe('dns');
+  expect(info?.retriable).toBe(true);
+  expect(info?.message).toContain('EAI_AGAIN');
+});
+```
+
+When adding a new code, update the `OFFLINE_CODES` set AND the `KIND_MAP` in `src/core/network.ts` and the transient regex in AGENTS.md so the TUI, `ErrorBackoff`, and the workflow retry loop stay in agreement.
+
+## Testing `openUrl` (Safe URL Opener)
+
+`src/core/open.test.ts` covers ONLY the scheme allow-list. Actually spawning `xdg-open` in CI would be flaky and platform-specific, so the launcher path is not exercised in unit tests — it is validated by the manual smoke test on the release matrix.
+
+Contract locked by the suite:
+
+1. **Non-URL inputs reject.** Empty string, `'not a url'` — both reject with `Only http and https links`.
+2. **Dangerous schemes reject.** `file:///etc/hosts`, `javascript:alert(1)`, `ms-msdt:/id PCWDiagnostic`, `data:text/html,<script>alert(1)</script>`, `vbscript:msgbox(1)`.
+3. **UNC-style paths reject.** `\\\\server\\share\\file.html` and `//server/share/file.html` — some Node versions on Windows implicitly coerce these into `file:` URLs; the pre-parse check catches both.
+
+Recipe for a new hostile scheme:
+
+```typescript
+import { openUrl } from './open.js';
+
+it('rejects intent: URLs', async () => {
+  await expect(openUrl('intent://scan/#Intent;scheme=zxing;end')).rejects.toThrow(
+    /Only http and https links/
+  );
+});
+```
+
+To validate the launcher path locally without spawning a real browser, inject a fake `spawn` via `vi.mock('child_process', ...)` and assert the launcher command and args match the platform table in `src/core/open.ts` (`open` on darwin, `cmd /c start ""` on win32, `xdg-open` elsewhere). The unit suite deliberately does not do this — the risk of a leaked child process outweighs the coverage gain — but the recipe is available for local debugging.
+
+## Testing the Legacy Drizzle Journal Import
+
+`src/core/database/migration.legacy-journal.test.ts` uses an in-memory `FakeBridge` implementing `LegacySqliteBridge` — no real SQLite driver, no filesystem. Every case exercises `importLegacyDrizzleJournal` and asserts the calls made to `recordCompleted`.
+
+`FakeBridge` shape:
+
+```typescript
+class FakeBridge implements LegacySqliteBridge {
+  public readonly recorded: Array<{ id: string; timeCompletedMs: number }> = [];
+  constructor(
+    private readonly tables: Set<string>,
+    private readonly columns: Map<string, readonly SqliteColumnInfo[]>,
+    private readonly journal: ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  ) {}
+  async tableExists(name: string): Promise<boolean> { return this.tables.has(name); }
+  async tableColumns(name: string): Promise<readonly SqliteColumnInfo[]> {
+    return this.columns.get(name) ?? [];
+  }
+  async fetchLegacyJournal() { return this.journal; }
+  async recordCompleted(id: string, timeCompletedMs: number): Promise<void> {
+    this.recorded.push({ id, timeCompletedMs });
+  }
+}
+```
+
+Cases pinned:
+
+1. **No-op when `__drizzle_migrations` does not exist.** `tables = new Set()`, `recorded` stays empty.
+2. **`name` column present -> records by name.** Two rows with `name` present are recorded in order.
+3. **`name` column present but row `name` is null/empty -> skipped.** Only the row with a non-empty `name` is recorded; the null and empty-string rows are dropped silently.
+4. **`name` column absent -> fall back to `created_at` prefix match.** `Date.UTC(2026, 7, 28, 7, 41, 39)` maps to the `20260828074139_kilocode_board` migration id via the `YYYYMMDDHHMMSS_*` prefix.
+5. **Unmatched `created_at` throws.** A far-future timestamp with no matching migration rejects with `/Legacy migration timestamp/`. This is the deliberate loud-failure path — catch schema drift at boot, not silently.
+6. **`name` absent AND `created_at` absent -> skipped.** No usable data to match on; the row is dropped without a throw.
+
+Recipe for a new legacy schema variant:
+
+```typescript
+it('records nothing when the journal is empty even if the table exists', async () => {
+  const bridge = new FakeBridge(
+    new Set(['__drizzle_migrations']),
+    new Map([['__drizzle_migrations', [{ name: 'name' }, { name: 'created_at' }]]]),
+    []
+  );
+  await importLegacyDrizzleJournal(bridge, []);
+  expect(bridge.recorded).toEqual([]);
+});
+```
+
+Real SQLite integration is intentionally left to the adapter layer's own tests — this suite locks the pure decision logic only.
+
+## Testing the Stream-Silence Connectivity Probe (issue #1836)
+
+Two dedicated suites lock the contract behind the `[waiting for network]` classification path (see [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836) and [API.md — Stream Watchdog and Connectivity Probe API](API.md#stream-watchdog-and-connectivity-probe-api)):
+
+- `tests/core/streamProbe.test.ts` (337 lines) — covers the probe module in isolation.
+- `tests/core/streamWatchdog.test.ts` (+177 lines net) — adds a `stream-silence connectivity probe (#1836)` describe block that exercises the watchdog's integration with a mock probe.
+
+Neither suite touches the real network: the remote HEAD probe is stubbed via the `remoteProbe` DI hook and the local TCP probe uses an ephemeral `net.createServer` listener so the test controls whether the port accepts connections.
+
+### `tests/core/streamProbe.test.ts` (337 lines)
+
+Directly exercises the pure classification and resolution helpers, plus the never-throws contract of `probeStreamConnectivity`:
+
+1. **`isLocalEndpoint` classification.** Loopback (`127.0.0.1`, `localhost`, `[::1]`), RFC1918 (`10/8`, `192.168/16`, `172.16/12`, `172.31.x`), link-local (`169.254/16`, `[fe80::]`), unique-local IPv6 (`[fc00::]`, `[fd12::]`), and bare hostnames without a dot (`sap-ai-core`, `my-proxy`) are local. Boundary IPv4 addresses (`172.15.x` and `172.32.x` outside the 172.16/12 range) and public FQDNs / public IPv6 are remote. Malformed URLs default to remote (safer HEAD probe).
+2. **`resolveProviderBaseUrl` env resolution.** `SAP_PROXY_BASE_URL` wins over `AICORE_SERVICE_KEY.serviceurls.AI_API_URL`; malformed JSON in `AICORE_SERVICE_KEY` returns `undefined`; env-var references (`${VAR}`, `$VAR`) expand at probe time.
+3. **`tcpConnect` behaviour.** Uses `net.createServer` to spin up an ephemeral listener; asserts `{ reachable: true }` on connect, `{ reachable: false, error }` on refused / timeout / DNS failure. Never rejects.
+4. **`probeStreamConnectivity` dispatch.** Local endpoints route to the local probe; remote endpoints route to the injected `remoteProbe`. `baseUrl: undefined` (unresolved) returns `{ reachable: false, error: 'No provider base URL configured...' }`. Invalid URLs return `{ reachable: false, error: 'Invalid provider base URL "...": ...' }`.
+5. **`NetworkDisconnectedError` shape.** Asserts `name === 'NetworkDisconnectedError'`, `code === 'NETWORK_DISCONNECTED'`, `isNetworkDisconnected === true`, and the message format `Network disconnected: <detail>`. `isNetworkDisconnectedError` matches both `instanceof` and duck-typed `{ isNetworkDisconnected: true }` values.
+
+### `tests/core/streamWatchdog.test.ts` — probe integration
+
+A `stream-silence connectivity probe (#1836)` describe block pins the watchdog's decision at idle timeout:
+
+```typescript
+it('surfaces NetworkDisconnectedError when the probe reports unreachable', async () => {
+  const { factory } = stalledAsyncSource();
+  const iter = createStreamWatchdog(factory, {
+    idleTimeoutMs: 50,
+    probe: async () => ({
+      reachable: false,
+      error: 'TCP connect to localhost:8080 failed: ECONNREFUSED',
+      kind: 'local',
+      url: 'http://localhost:8080',
+    }),
+  });
+  await iter.next();
+  let caught: unknown;
+  try { await iter.next(); } catch (err) { caught = err; }
+  expect(caught).toBeInstanceOf(NetworkDisconnectedError);
+  expect((caught as NetworkDisconnectedError).kind).toBe('local');
+  expect((caught as NetworkDisconnectedError).url).toBe('http://localhost:8080');
+});
+```
+
+Cases covered:
+
+1. **Unreachable probe → `NetworkDisconnectedError`.** The watchdog aborts with the probe's `error` / `url` / `kind` metadata attached.
+2. **Reachable probe → falls back to `StreamStalledError`.** A probe returning `{ reachable: true }` means the server is slow, not disconnected; the pre-#1836 stall path runs.
+3. **Probe throws → falls back to `StreamStalledError`.** An over-eager probe must never mask a genuine stall. The watchdog swallows the probe's exception and surfaces the plain stall.
+4. **Chunks arrive → probe never fires.** A stream that yields chunks steadily consumes each pull before the idle timer arms; the probe callable is not invoked. Prevents every slow-but-alive turn from burning a network round-trip.
+5. **Long-running tool extends the window, holding the probe silent.** A `bash` tool-call delta extends the idle window from short to long; the probe must not fire during the extended window. Asserts `probeCalled === false` after 300 ms with an `idleTimeoutMs: 100` / `toolExtensionMs: 5_000` watchdog.
+6. **`probe: false` and unconfigured probe preserve pre-#1836 behaviour.** Locks the "unit tests that construct a watchdog directly are not affected by ambient env configuration" contract — the plain `StreamStalledError` path still runs.
+
+### Testing patterns to reuse
+
+- **DI-injected probe callable.** Pass `probe: async () => ({ reachable: false, ... })` to test the branch without touching the real network. The watchdog treats a function-valued `probe` the same as it treats the default env-derived probe.
+- **`stalledAsyncSource()` helper.** Yields an initial chunk then parks on the abort signal, mirroring a stalled SAP AI Core SSE stream. Records teardown state so the test can assert that `return()` was forwarded to the source's finally-block.
+- **`net.createServer` ephemeral listener.** For `tcpConnect` tests, bind `127.0.0.1:0`, capture the assigned port, and `close()` in `afterEach`. Avoids ambient port collisions across parallel workers.
+
+Run the full probe / watchdog coverage:
+
+```bash
+npm test -- tests/core/streamProbe.test.ts tests/core/streamWatchdog.test.ts
 ```

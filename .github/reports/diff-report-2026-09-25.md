@@ -1,58 +1,14 @@
-# Planning Task: Analyze Upstream Changes for Alexi
-
-You are a senior software architect analyzing upstream changes from three AI coding assistant repositories:
-- **kilocode** (Kilo-Org/kilocode) - Kilo AI coding assistant
-- **opencode** (anomalyco/opencode) - OpenCode AI terminal assistant  
-- **claude-code** (anthropics/claude-code) - Anthropic's Claude Code CLI
-
-## Diff Report
-
 # Upstream Changes Report
-Generated: 2026-09-26 10:57:08
+Generated: 2026-09-25 11:19:40
 
 ## Summary
-- kilocode: 201 commits, 527 files changed
-- opencode: 7 commits, 65 files changed
+- kilocode: 159 commits, 414 files changed
+- opencode: 3 commits, 26 files changed
 
-## kilocode Changes (50e520adf..c26779478)
+## kilocode Changes (50e520adf..6c9ac9542)
 
 ### Commits
 
-- c26779478 - docs: auto-sync cloud-mobile with merged PRs (through 2026-09-25) (#14554) (github-actions[bot], 2026-09-26)
-- 24167bd70 - Merge pull request #14580 from magiccodelab/fix-indexing-openai-compatible-dimension (Anil Kulkarni, 2026-09-25)
-- 9622dca61 - Merge branch 'main' into fix-indexing-openai-compatible-dimension (Anil Kulkarni, 2026-09-25)
-- 49e9e7047 - Merge pull request #14587 from Kilo-Org/jetbrains/release/v7.1.8 (Kirill Kalishev, 2026-09-25)
-- 798c8c309 - docs(jetbrains): edit changelog for v7.1.8 (Kirill Kalishev, 2026-09-25)
-- 56331dd47 - release(jetbrains): v7.1.8 (kilo-maintainer[bot], 2026-09-25)
-- cb67014ff - Merge pull request #14583 from Kilo-Org/jolly-sequoia (Kirill Kalishev, 2026-09-25)
-- 70c3f5ebd - Merge pull request #14581 from Kilo-Org/chore/jetbrains-cli-pin-v7.8.1 (Kirill Kalishev, 2026-09-25)
-- 517763711 - fix(jetbrains): await overlapping run shutdowns (kirillk, 2026-09-25)
-- a86348612 - Merge pull request #14586 from Kilo-Org/fix/jetbrains-signature-verification (Kirill Kalishev, 2026-09-25)
-- a599f2508 - fix(jetbrains): assign overlapping cleanup owner (kirillk, 2026-09-25)
-- ecdddc421 - fix(jetbrains): serialize overlapping run cleanup (kirillk, 2026-09-25)
-- a5ba0a9d5 - fix(jetbrains): verify published plugin signatures (kirillk, 2026-09-25)
-- 1de876dd2 - Merge pull request #14582 from Kilo-Org/jetbrains/release/v7.1.8-rc.2 (Kirill Kalishev, 2026-09-25)
-- 966facab7 - fix(jetbrains): preserve session model override state (kirillk, 2026-09-25)
-- 1255733ba - docs(jetbrains): edit changelog for v7.1.8-rc.2 (Kirill Kalishev, 2026-09-25)
-- a91a3add0 - fix(jetbrains): isolate model selection by session (kirillk, 2026-09-25)
-- 4c745d5b0 - release(jetbrains): v7.1.8-rc.2 (kilo-maintainer[bot], 2026-09-25)
-- 66d45de22 - chore(jetbrains): bump CLI pin to v7.8.1 (kilo-maintainer[bot], 2026-09-25)
-- 8d2318ac3 - Merge pull request #14512 from Kilo-Org/clever-keyboard (Kirill Kalishev, 2026-09-25)
-- a8d47e169 - Merge pull request #14548 from Kilo-Org/quiet-raccoon (Kirill Kalishev, 2026-09-25)
-- aeb085825 - Merge pull request #14577 from Kilo-Org/restless-wombat (Kirill Kalishev, 2026-09-25)
-- 408919754 - release: v7.8.1 (kilo-maintainer[bot], 2026-09-25)
-- 451e12ae5 - fix(jetbrains): retain latest left dialog action (kirillk, 2026-09-25)
-- 2e2b6096b - fix(jetbrains): align revert dialog actions (kirillk, 2026-09-25)
-- 463cbedaa - fix(indexing): pass configured dimension to OpenAI-compatible embedder (MagicCodeLab, 2026-09-25)
-- df9636576 - fix(jetbrains): use standard revert settings action (kirillk, 2026-09-25)
-- cd29f525e - Merge pull request #14525 from Kilo-Org/feat/jetbrains-marketplace-companion-skills (Kirill Kalishev, 2026-09-25)
-- 82eb5b01c - fix(jetbrains): propagate CLI preview channel (kirillk, 2026-09-25)
-- f1e9a8e78 - fix(jetbrains): bump CLI pin for pre-releases (kirillk, 2026-09-25)
-- f98c299dd - chore: merge main into checkpoint settings (kirillk, 2026-09-25)
-- 4f7e1d24f - Merge branch 'main' into feat/jetbrains-marketplace-companion-skills (Kirill Kalishev, 2026-09-25)
-- 5a6a57b18 - Merge branch 'main' into quiet-raccoon (Kirill Kalishev, 2026-09-25)
-- b8dd4b49d - Merge pull request #14513 from Kilo-Org/glowing-ferret (Kirill Kalishev, 2026-09-25)
-- fda6b9ae9 - fix(jetbrains): harden session strip hover behavior (kirillk, 2026-09-25)
 - 6c9ac9542 - release: v7.8.0 (kilo-maintainer[bot], 2026-09-25)
 - c3c1de12e - Merge pull request #14506 from Kilo-Org/feat/dependabot-security-automation (Bruno Agatão, 2026-09-25)
 - f6affd984 - chore: update nix node_modules hashes (kilo-maintainer[bot], 2026-09-25)
@@ -76,22 +32,13 @@ Generated: 2026-09-26 10:57:08
 - 8f80a09c2 - fix(agent-manager): evict stale worktree pool slots and cold-create (marius-kilocode, 2026-09-25)
 - 249cd7259 - fix(cli): keep sub-agents of a chat in use during session cleanup (#14502) (hdcode.dev, 2026-09-25)
 - b1ea859d2 - fix(cli): align settings validation with config compatibility (marius-kilocode, 2026-09-25)
-- c5c36fc8a - fix(jetbrains): unify session strip interactions (kirillk, 2026-09-24)
 - 8b02b7a1e - docs: sync cloud-web with merged PRs (2026-09-24) (#14527) (github-actions[bot], 2026-09-24)
 - 0b671da46 - Merge pull request #14545 from Kilo-Org/jetbrains/release/v7.1.8-rc.1 (Kirill Kalishev, 2026-09-24)
 - 62a35274b - docs(jetbrains): edit changelog for v7.1.8-rc.1 (Kirill Kalishev, 2026-09-24)
 - c31ab563f - release(jetbrains): v7.1.8-rc.1 (kilo-maintainer[bot], 2026-09-24)
-- fb59799f2 - fix(jetbrains): keep manual cleanup enabled for drafts (kirillk, 2026-09-24)
-- 027b6d6a4 - fix(jetbrains): decouple manual session cleanup (kirillk, 2026-09-24)
-- 22fbf94a2 - fix(jetbrains): address checkpoint review feedback (kirillk, 2026-09-24)
-- 81972e34d - feat(jetbrains): add automatic session cleanup (kirillk, 2026-09-24)
-- 65f692e41 - test(jetbrains): stabilize background job poller test (kirillk, 2026-09-24)
-- f7ee5ef7c - fix(jetbrains): sync checkpoint locale keys (kirillk, 2026-09-24)
 - 14e754653 - release: v7.7.12 (kilo-maintainer[bot], 2026-09-24)
 - 8e842f1c9 - Merge pull request #14543 from Kilo-Org/feat/ev-code-signing (Zeke Fralish, 2026-09-24)
 - b2fed39df - fix(ci): restore signed-artifact wiring for downstream publish jobs (Zeke Fralish, 2026-09-24)
-- c481ff5dc - feat(jetbrains): add checkpoint settings (kirillk, 2026-09-24)
-- 7b5f75022 - fix(sbom): delegate schema validation to the CycloneDX library (kirillk, 2026-09-24)
 - 3921c6144 - Merge remote-tracking branch 'origin/main' into feat/ev-code-signing (Zeke Fralish, 2026-09-24)
 - ef02ab3fb - fix(ci): force tar to treat RUNNER_TEMP as a local path on Windows (Zeke Fralish, 2026-09-24)
 - cb4dafad7 - Merge pull request #14520 from Kilo-Org/perf/jetbrains-transcript-tab-switch (Kirill Kalishev, 2026-09-24)
@@ -108,19 +55,10 @@ Generated: 2026-09-26 10:57:08
 - 891d7b893 - fix(vscode): allow optional OAuth prompts in provider connect (marius-kilocode, 2026-09-24)
 - b90c350c9 - fix(vscode): deduplicate OAuth prompt rendering and format host handler (marius-kilocode, 2026-09-24)
 - f677743b9 - fix: resolve Azure Entra endpoint prompts and nested MCP headers (marius-kilocode, 2026-09-24)
-- de7df7d6b - feat(jetbrains): support marketplace MCP companion skills (marius-kilocode, 2026-09-24)
-- bab38030e - fix(sbom): prune stale licence gaps and stop borrowing per-platform metadata (kirillk, 2026-09-23)
-- f1de0d8df - fix(sbom): resolve JetBrains cross-platform licences and surface JVM gaps (kirillk, 2026-09-23)
 - 8481a19d3 - fix(jetbrains): restore ActiveListView's animation delegate on re-attach (kirillk, 2026-09-23)
-- 6b83615b1 - fix(sbom): resolve licences from Bun's isolated-linker store (kirillk, 2026-09-23)
 - 8e83b74e4 - fix(jetbrains): address PR review suggestions in tab-switch perf change (kirillk, 2026-09-23)
 - ceb83ea1a - perf(jetbrains): speed up transcript tab switching and list painting (kirillk, 2026-09-23)
-- a1a8172af - fix(sbom): restore ociImage doc comment and unpin LanceDB edge test (kirillk, 2026-09-23)
-- c64cca817 - fix(sbom): address review findings on graph integrity and evidence coverage (kirillk, 2026-09-23)
-- a882dde49 - Update packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/RevertBanner.kt (Kirill Kalishev, 2026-09-23)
 - dfa67d022 - fix(jetbrains): avoid crash when vfs kind service is unresolvable during plugin unload (kirillk, 2026-09-23)
-- 03b560634 - feat(cli,vscode,jetbrains): generate CycloneDX SBOMs for release artifacts (kirillk, 2026-09-23)
-- b3da592cf - fix(jetbrains): explain why file checkpoints weren't restored after revert (kirillk, 2026-09-23)
 - 5f702c357 - Merge remote-tracking branch 'origin/feat/dependabot-security-automation' into feat/dependabot-security-automation (Bruno Agatao, 2026-09-23)
 - a08e5dee3 - fix(security): restrict auto-merge to kilo-owned paths (Bruno Agatao, 2026-09-23)
 - c18438c52 - Merge branch 'main' into feat/dependabot-security-automation (Bruno Agatão, 2026-09-23)
@@ -219,6 +157,17 @@ Generated: 2026-09-26 10:57:08
 - 1cc53890d - chore: update nix node_modules hashes (opencode-agent[bot], 2026-08-26)
 - ae2ea3c72 - fix map inaccuracy (Frank, 2026-08-26)
 - 3f31551fa - fix map inaccuracy (Frank, 2026-08-26)
+- 13c27598d - Merge branch 'dev' of github.com:anomalyco/opencode into dev (Frank, 2026-08-26)
+- 2564a4f17 - remove map (Frank, 2026-08-26)
+- fd9bd448a - docs: mention Exa and Parallel as web search backends (#38395) (Ravitez Dondeti, 2026-08-25)
+- b72b50006 - fix(core): recover legacy database migration history (#45061) (opencode-agent[bot], 2026-08-25)
+- ac1c048e6 - docs(go): add Grok 4.6 (#45042) (Jack, 2026-08-26)
+- 8615731d4 - fix(console): rate limit checkout session creation (#45007) (Dax, 2026-08-25)
+- a7444bf94 - fix(ui): restore focus in stacked dialogs (#44928) (OpeOginni, 2026-08-25)
+- d0ceaef6a - docs(console): prohibit abusive multi-account use (Dax Raad, 2026-08-24)
+- 3ef72fe8f - fix(provider): route non-native Cloudflare AI Gateway providers via the REST API (#44828) (Charlie Gleason, 2026-08-24)
+- 51070b6f5 - docs: clarify prompt data handling (#44854) (opencode-agent[bot], 2026-08-24)
+- 18b4cb681 - docs(github): correct action token configuration (#44793) (Filip, 2026-08-25)
 
 ### Changed Files by Category
 
@@ -253,36 +202,26 @@ Generated: 2026-09-26 10:57:08
 #### Other Changes
 - `.changeset/agent-manager-browser-preserve.md` (+0, -5)
 - `.changeset/agent-manager-recovery-reconnect.md` (+0, -5)
-- `.changeset/calm-strips-toggle.md` (+5, -0)
 - `.changeset/fix-local-project-switch.md` (+0, -5)
-- `.changeset/jetbrains-overlapping-run-stops.md` (+5, -0)
-- `.changeset/jetbrains-revert-not-a-git-repo-notice.md` (+5, -0)
-- `.changeset/jetbrains-session-model-selection.md` (+5, -0)
 - `.changeset/mcp-client-metadata.md` (+0, -5)
 - `.changeset/mcp-companion-skills.md` (+0, -7)
-- `.changeset/openai-compatible-embedding-dimensions.md` (+5, -0)
 - `.changeset/route-plan-followup-questions.md` (+0, -5)
 - `.changeset/session-tab-title-rename.md` (+0, -5)
 - `.changeset/smooth-tool-motion.md` (+0, -5)
 - `.changeset/task-model-selection-default.md` (+0, -6)
 - `.changeset/transcript-virtual-clip.md` (+0, -5)
 - `.changeset/worktree-pool-no-dir-when-disabled.md` (+0, -5)
-- `.github/actions/setup-sbom/action.yml` (+60, -0)
 - `.github/dependabot.yml` (+68, -0)
 - `.github/workflows/README.md` (+22, -0)
 - `.github/workflows/dependabot-auto-merge.yml` (+58, -0)
-- `.github/workflows/publish-jetbrains-bundled.yml` (+72, -1)
-- `.github/workflows/publish-jetbrains.yml` (+78, -16)
-- `.github/workflows/publish.yml` (+68, -1)
+- `.github/workflows/publish.yml` (+3, -1)
 - `.github/workflows/security-findings-notify.yml` (+134, -0)
 - `.github/workflows/stale-bot-pr-notify.yml` (+73, -0)
-- `.kilo/skills/release-jetbrains/SKILL.md` (+4, -0)
-- `.kilo/skills/release-jetbrains/script/set-pin.ts` (+25, -11)
 - `.opencode-version` (+1, -1)
 - `artifacts/glm52-rise-video/package.json` (+1, -1)
-- `bun.lock` (+79, -55)
+- `bun.lock` (+45, -53)
 - `nix/hashes.json` (+4, -4)
-- `package.json` (+12, -2)
+- `package.json` (+6, -2)
 - `packages/client/package.json` (+1, -1)
 - `packages/codemode/package.json` (+1, -1)
 - `packages/effect-drizzle-sqlite/package.json` (+1, -1)
@@ -294,58 +233,19 @@ Generated: 2026-09-26 10:57:08
 - `packages/kilo-docs/package.json` (+1, -1)
 - `packages/kilo-docs/pages/code-with-ai/features/checkpoints.md` (+3, -0)
 - `packages/kilo-docs/pages/code-with-ai/platforms/cli-reference.md` (+0, -4)
-- `packages/kilo-docs/pages/code-with-ai/platforms/mobile.md` (+8, -0)
-- `packages/kilo-docs/pages/collaborate/enterprise/sso.md` (+6, -0)
+- `packages/kilo-docs/pages/collaborate/enterprise/sso.md` (+7, -0)
 - `packages/kilo-docs/source-links.md` (+2, -0)
 - `packages/kilo-gateway/package.json` (+1, -1)
 - `packages/kilo-i18n/package.json` (+1, -1)
 - `packages/kilo-indexing/package.json` (+1, -1)
-- `packages/kilo-indexing/src/indexing/service-factory.ts` (+2, -0)
-- `packages/kilo-indexing/test/kilocode/indexing/service-factory.test.ts` (+56, -0)
-- `packages/kilo-jetbrains/AGENTS.md` (+5, -2)
-- `packages/kilo-jetbrains/CHANGELOG.md` (+64, -0)
-- `packages/kilo-jetbrains/RELEASING.md` (+1, -1)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendAppService.kt` (+1, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendModelStateManager.kt` (+0, -8)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendRetentionManager.kt` (+58, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendRetentionScheduler.kt` (+66, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/app/KiloBackendSessionManager.kt` (+11, -3)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/cli/KiloCliDataParser.kt` (+17, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/marketplace/KiloBackendMarketplaceManager.kt` (+18, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/rpc/KiloAppRpcApiImpl.kt` (+5, -5)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/rpc/KiloWorkspaceRpcApiImpl.kt` (+39, -0)
-- `packages/kilo-jetbrains/backend/src/main/kotlin/ai/kilocode/backend/run/WorktreeRunManager.kt` (+40, -4)
-- `packages/kilo-jetbrains/backend/src/main/resources/kilo.jetbrains.backend.xml` (+1, -0)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendAppServiceTest.kt` (+54, -0)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendModelStateManagerTest.kt` (+0, -13)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendRetentionSchedulerTest.kt` (+37, -0)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendSessionManagerBackgroundJobsTest.kt` (+45, -14)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendSessionManagerTest.kt` (+2, -1)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/cli/KiloCliDataParserTest.kt` (+67, -1)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/rpc/KiloMarketplaceRpcApiImplTest.kt` (+44, -15)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/rpc/KiloWorkspaceRpcApiImplTest.kt` (+15, -0)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/run/WorktreeRunManagerTest.kt` (+43, -0)
-- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/testing/MockCliServer.kt` (+11, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/app/KiloAppService.kt` (+51, -13)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/app/KiloWorkspaceService.kt` (+25, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/SessionUi.kt` (+19, -1)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/controller/SessionController.kt` (+24, -13)
+- `packages/kilo-jetbrains/AGENTS.md` (+3, -0)
+- `packages/kilo-jetbrains/CHANGELOG.md` (+21, -0)
+- `packages/kilo-jetbrains/backend/src/test/kotlin/ai/kilocode/backend/app/KiloBackendSessionManagerBackgroundJobsTest.kt` (+29, -13)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/FileLinkText.kt` (+0, -14)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/RevertBanner.kt` (+39, -7)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/attachment/AttachmentCard.kt` (+4, -2)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/header/BackgroundAgentStrip.kt` (+5, -8)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/header/Strip.kt` (+92, -11)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/views/TextView.kt` (+6, -3)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/views/base/AbstractSessionPartView.kt` (+11, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/views/base/DialogView.kt` (+34, -0)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/views/todo/TodoListPanel.kt` (+15, -19)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/KiloSettingsConfigurable.kt` (+10, -1)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/base/BaseSettingsUi.kt` (+31, -3)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsConfigurable.kt` (+23, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsSettingsState.kt` (+34, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsSettingsUi.kt` (+367, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/marketplace/MarketplaceInstallDialog.kt` (+22, -1)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/settings/marketplace/MarketplaceSettingsUi.kt` (+6, -2)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/PlainLabel.kt` (+95, -0)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/layout/Align.kt` (+8, -4)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/layout/LayoutPass.kt` (+68, -0)
@@ -354,36 +254,9 @@ Generated: 2026-09-26 10:57:08
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/list/ActiveListRenderer.kt` (+9, -1)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/list/ActiveListView.kt` (+37, -0)
 - `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/vfs/KiloVirtualFile.kt` (+5, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/kilo.jetbrains.frontend.xml` (+10, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle.properties` (+36, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_ar.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_bs.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_da.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_de.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_es.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_fr.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_ja.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_ko.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_nl.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_no.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_pl.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_pt_BR.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_ru.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_th.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_tr.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_uk.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_zh_CN.properties` (+33, -2)
-- `packages/kilo-jetbrains/frontend/src/main/resources/messages/KiloBundle_zh_TW.properties` (+33, -2)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/agentManager/AgentManagerPanelTest.kt` (+12, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/plugin/KiloBundleLocaleTest.kt` (+58, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/controller/ConfigSelectionTest.kt` (+44, -17)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/controller/SessionControllerSelectionTest.kt` (+2, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/ModifiedFilesViewTest.kt` (+6, -3)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/SessionMessageListPanelTest.kt` (+113, -10)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/SessionUiUpdateTest.kt` (+2, -2)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/header/BackgroundAgentStripStressTest.kt` (+4, -3)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/header/BackgroundAgentStripTest.kt` (+20, -7)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/header/StripTest.kt` (+49, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/EditToolViewTest.kt` (+6, -3)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/PromptAttachmentViewTest.kt` (+4, -3)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/ReadToolViewTest.kt` (+1, -1)
@@ -391,40 +264,19 @@ Generated: 2026-09-26 10:57:08
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/TextViewTest.kt` (+14, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/ToolViewTest.kt` (+23, -3)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/base/AbstractSessionPartViewTest.kt` (+31, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/base/DialogViewTest.kt` (+40, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/views/todo/TodoWriteViewTest.kt` (+26, -4)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/KiloSettingsConfigurableTest.kt` (+6, -1)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsConfigurableTest.kt` (+23, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsSettingsStateTest.kt` (+62, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/checkpoints/CheckpointsSettingsUiTest.kt` (+282, -0)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/marketplace/MarketplaceInstallDialogTest.kt` (+47, -1)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/settings/marketplace/MarketplaceSettingsUiTest.kt` (+79, -5)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/testing/FakeAppRpcApi.kt` (+30, -8)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/testing/FakeWorkspaceRpcApi.kt` (+19, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/ui/PlainLabelTest.kt` (+158, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/ui/layout/LayoutPassTest.kt` (+85, -0)
 - `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/ui/list/ActiveListPaintCostTest.kt` (+152, -0)
 - `packages/kilo-jetbrains/gradle.properties` (+1, -1)
-- `packages/kilo-jetbrains/package.json` (+1, -1)
-- `packages/kilo-jetbrains/script/sbom.ts` (+338, -0)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/KiloAppRpcApi.kt` (+7, -3)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/KiloWorkspaceRpcApi.kt` (+8, -0)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/dto/KiloAppStateDto.kt` (+20, -0)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/dto/MarketplaceDto.kt` (+7, -0)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/dto/RetentionDto.kt` (+36, -0)
-- `packages/kilo-jetbrains/shared/src/main/kotlin/ai/kilocode/rpc/dto/SessionDto.kt` (+2, -0)
 - `packages/kilo-memory/package.json` (+1, -1)
 - `packages/kilo-sandbox/package.json` (+3, -2)
 - `packages/kilo-sandbox/src/destination.ts` (+4, -0)
 - `packages/kilo-sandbox/test/destination.test.ts` (+7, -1)
 - `packages/kilo-telemetry/package.json` (+1, -1)
 - `packages/kilo-ui/package.json` (+1, -1)
-- `packages/kilo-vscode/CHANGELOG.md` (+63, -0)
+- `packages/kilo-vscode/CHANGELOG.md` (+57, -0)
 - `packages/kilo-vscode/package.json` (+12, -1)
-- `packages/kilo-vscode/script/build.ts` (+9, -0)
-- `packages/kilo-vscode/script/ffmpeg-helper.ts` (+2, -1)
-- `packages/kilo-vscode/script/publish.ts` (+27, -2)
-- `packages/kilo-vscode/script/sbom.ts` (+193, -0)
 - `packages/kilo-vscode/src/KiloProvider.ts` (+46, -1)
 - `packages/kilo-vscode/src/agent-manager/AgentManagerProvider.ts` (+2, -2)
 - `packages/kilo-vscode/src/agent-manager/browser-lifecycle.ts` (+40, -17)
@@ -546,11 +398,8 @@ Generated: 2026-09-26 10:57:08
 - `packages/kilo-vscode/webview-ui/src/utils/local-tabs.ts` (+21, -0)
 - `packages/kilo-web-ui/package.json` (+1, -1)
 - `packages/llm/package.json` (+1, -1)
-- `packages/opencode/CHANGELOG.md` (+55, -0)
+- `packages/opencode/CHANGELOG.md` (+49, -0)
 - `packages/opencode/package.json` (+4, -4)
-- `packages/opencode/script/build.ts` (+11, -1)
-- `packages/opencode/script/kilocode/sbom.ts` (+537, -0)
-- `packages/opencode/script/publish.ts` (+148, -4)
 - `packages/opencode/src/account/account.ts` (+9, -1)
 - `packages/opencode/src/auth/index.ts` (+1, -0)
 - `packages/opencode/src/cli/cmd/github.handler.ts` (+12, -5)
@@ -646,7 +495,6 @@ Generated: 2026-09-26 10:57:08
 - `packages/opencode/test/kilocode/project-sandbox.test.ts` (+66, -0)
 - `packages/opencode/test/kilocode/provider/text-verbosity.test.ts` (+52, -0)
 - `packages/opencode/test/kilocode/sandbox/http-tools.test.ts` (+108, -2)
-- `packages/opencode/test/kilocode/sbom.test.ts` (+241, -0)
 - `packages/opencode/test/kilocode/server/config-overlay.test.ts` (+51, -0)
 - `packages/opencode/test/kilocode/server/httpapi-exercise-scenarios.ts` (+11, -0)
 - `packages/opencode/test/kilocode/session/offline-guard.test.ts` (+203, -0)
@@ -749,18 +597,6 @@ Generated: 2026-09-26 10:57:08
 - `patches/@ai-sdk%2Fanthropic@3.0.111.patch` (+528, -0)
 - `script/check-workflows.ts` (+3, -0)
 - `script/extract-source-links.ts` (+2, -0)
-- `script/kilocode/sbom-products.test.ts` (+285, -0)
-- `script/kilocode/sbom.test.ts` (+986, -0)
-- `script/kilocode/sbom.ts` (+106, -0)
-- `script/kilocode/sbom/artifact.ts` (+19, -0)
-- `script/kilocode/sbom/deps.ts` (+440, -0)
-- `script/kilocode/sbom/index.ts` (+16, -0)
-- `script/kilocode/sbom/manifest.ts` (+176, -0)
-- `script/kilocode/sbom/model.ts` (+382, -0)
-- `script/kilocode/sbom/policy.ts` (+84, -0)
-- `script/kilocode/sbom/scan.ts` (+112, -0)
-- `script/kilocode/sbom/validate.ts` (+165, -0)
-- `script/publish.ts` (+4, -7)
 - `script/upstream/package.json` (+1, -1)
 - `turbo.json` (+3, -0)
 
@@ -769,14 +605,14 @@ Generated: 2026-09-26 10:57:08
 #### packages/core/package.json
 ```diff
 diff --git a/packages/core/package.json b/packages/core/package.json
-index e57911d34..17ab8af73 100644
+index e57911d34..eeebe74d0 100644
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
 @@ -1,6 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
 -  "version": "7.7.9",
-+  "version": "7.8.1",
++  "version": "7.8.0",
    "name": "@opencode-ai/core",
    "type": "module",
    "license": "MIT",
@@ -946,14 +782,10 @@ index aefe07658..2a8f94772 100644
 
 *... and more files (showing first 5)*
 
-## opencode Changes (0f54984..696f41b)
+## opencode Changes (0f54984..34aa427)
 
 ### Commits
 
-- 696f41b - chore: update nix node_modules hashes (opencode-agent[bot], 2026-09-25)
-- 29f07e0 - refactor(core): share a browser opener across opencode and tui (#51414) (Aiden Cline, 2026-09-25)
-- adee738 - chore: generate (opencode-agent[bot], 2026-09-25)
-- 543c686 - fix(go): make DeepSeek $60 allowance permanent (#51364) (Jack, 2026-09-26)
 - 34aa427 - docs(zen): document Qwen3.8 Max (#51321) (Jack, 2026-09-25)
 - 16c56fe - fix(ci): use GPT-6 Luna for issue automation (#51261) (opencode-agent[bot], 2026-09-24)
 - 6df0d5d - fix(stats): use capability fallbacks in comparison radar (#51161) (Adam, 2026-09-24)
@@ -973,71 +805,33 @@ index aefe07658..2a8f94772 100644
 (no changes)
 
 #### Core (**/core/)
-- `packages/core/package.json` (+1, -0)
-- `packages/core/src/open.ts` (+8, -0)
-- `packages/core/test/open.test.ts` (+16, -0)
+(no changes)
 
 #### Other Changes
 - `.github/actions/setup-bun/action.yml` (+11, -15)
 - `.github/workflows/duplicate-issues.yml` (+2, -2)
 - `.github/workflows/triage.yml` (+1, -1)
-- `bun.lock` (+8, -16)
-- `nix/hashes.json` (+4, -4)
-- `package.json` (+2, -1)
-- `packages/console/app/src/component/go-models.ts` (+0, -3)
-- `packages/console/app/src/component/limits-graph.tsx` (+0, -9)
-- `packages/console/app/src/routes/workspace/[id]/go/lite-section.tsx` (+1, -1)
-- `packages/opencode/package.json` (+0, -1)
-- `packages/opencode/src/cli/cmd/account.ts` (+2, -2)
-- `packages/opencode/src/cli/cmd/web.ts` (+3, -3)
-- `packages/opencode/src/mcp/browser.ts` (+2, -2)
-- `packages/opencode/src/mcp/oauth-provider.ts` (+4, -0)
-- `packages/opencode/src/plugin/digitalocean.ts` (+2, -2)
-- `packages/opencode/src/plugin/snowflake-cortex.ts` (+2, -2)
-- `packages/opencode/test/mcp/oauth-provider.test.ts` (+31, -0)
 - `packages/stats/app/src/routes/compare-radar.tsx` (+47, -12)
 - `packages/stats/app/src/routes/index.css` (+5, -6)
 - `packages/stats/app/src/routes/model-catalog.ts` (+27, -6)
 - `packages/stats/app/test/compare-radar.test.ts` (+74, -0)
-- `packages/tui/package.json` (+0, -1)
-- `packages/tui/src/app.tsx` (+2, -2)
-- `packages/tui/src/component/dialog-retry-action.tsx` (+2, -2)
-- `packages/tui/src/ui/link.tsx` (+2, -2)
-- `packages/web/src/content/docs/ar/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/ar/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/bs/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/bs/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/da/go.mdx` (+36, -36)
 - `packages/web/src/content/docs/da/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/de/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/de/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/es/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/es/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/fr/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/fr/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/go.mdx` (+79, -79)
-- `packages/web/src/content/docs/it/go.mdx` (+36, -36)
 - `packages/web/src/content/docs/it/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/ja/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/ja/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/ko/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/ko/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/nb/go.mdx` (+36, -36)
 - `packages/web/src/content/docs/nb/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/pl/go.mdx` (+36, -36)
 - `packages/web/src/content/docs/pl/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/pt-br/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/pt-br/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/ru/go.mdx` (+36, -36)
 - `packages/web/src/content/docs/ru/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/th/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/th/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/tr/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/tr/zen.mdx` (+2, -0)
 - `packages/web/src/content/docs/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/zh-cn/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/zh-cn/zen.mdx` (+2, -0)
-- `packages/web/src/content/docs/zh-tw/go.mdx` (+79, -79)
 - `packages/web/src/content/docs/zh-tw/zen.mdx` (+2, -0)
 
 ### Key Diffs
@@ -1057,66 +851,6 @@ index 11c4c81..638f4d5 100644
  color: "#44BA81"
  tools:
    "*": false
-```
-
-#### packages/core/package.json
-```diff
-diff --git a/packages/core/package.json b/packages/core/package.json
-index 0a7e0ea..fbcbfc3 100644
---- a/packages/core/package.json
-+++ b/packages/core/package.json
-@@ -119,6 +119,7 @@
-     "mime-types": "3.0.2",
-     "minimatch": "10.2.5",
-     "npm-package-arg": "13.0.2",
-+    "open": "11.0.4",
-     "semver": "^7.6.3",
-     "turndown": "7.2.0",
-     "venice-ai-sdk-provider": "2.1.1",
-```
-
-#### packages/core/src/open.ts
-```diff
-diff --git a/packages/core/src/open.ts b/packages/core/src/open.ts
-new file mode 100644
-index 0000000..296982f
---- /dev/null
-+++ b/packages/core/src/open.ts
-@@ -0,0 +1,8 @@
-+import open from "open"
-+
-+export function openUrl(input: string) {
-+  const url = URL.canParse(input) ? new URL(input) : undefined
-+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:"))
-+    return Promise.reject(new Error(`Only http and https links can be opened in the browser: ${input}`))
-+  return open(url.href)
-+}
-```
-
-#### packages/core/test/open.test.ts
-```diff
-diff --git a/packages/core/test/open.test.ts b/packages/core/test/open.test.ts
-new file mode 100644
-index 0000000..b40222e
---- /dev/null
-+++ b/packages/core/test/open.test.ts
-@@ -0,0 +1,16 @@
-+import { describe, expect, test } from "bun:test"
-+import { openUrl } from "@opencode-ai/core/open"
-+
-+describe("openUrl", () => {
-+  test("rejects values that are not URLs", async () => {
-+    await expect(openUrl("not a url")).rejects.toThrow("Only http and https links")
-+    await expect(openUrl("")).rejects.toThrow("Only http and https links")
-+  })
-+
-+  test("rejects non-http schemes", async () => {
-+    await expect(openUrl("file:///etc/hosts")).rejects.toThrow("Only http and https links")
-+    await expect(openUrl("javascript:alert(1)")).rejects.toThrow("Only http and https links")
-+    await expect(openUrl("ms-msdt:/id PCWDiagnostic")).rejects.toThrow("Only http and https links")
-+    await expect(openUrl("\\\\server\\share\\file.html")).rejects.toThrow("Only http and https links")
-+  })
-+})
 ```
 
 
@@ -1140,73 +874,3 @@ Based on the changes, the following files in Alexi should be reviewed:
 - `src/tool/apply_patch.ts` - update based on kilocode packages/opencode/src/tool/apply_patch.ts changes
 - `src/tool/browser-open.ts` - update based on kilocode packages/opencode/src/kilocode/tool/browser-open.ts changes
 - `src/tool/browser-open.txt.ts` - update based on kilocode packages/opencode/src/kilocode/tool/browser-open.txt changes
-
-## Your Task
-
-Create a **detailed update plan** for Alexi based on the changes above.
-
-### File Mapping
-- Tool system changes → `src/tool/`
-- Agent system changes → `src/agent/`
-- Permission system changes → `src/permission/`
-- Event bus changes → `src/bus/`
-- Core orchestration changes → `src/core/`
-- Provider changes → `src/providers/`
-- Router changes → `src/router/`
-- CLI changes → `src/cli/`
-
-### For Each Change, Provide:
-1. **File path** to modify (or create)
-2. **Function/class** to change
-3. **Code snippet** showing the exact change (before/after or new code)
-4. **Priority**: critical | high | medium | low
-5. **Reasoning**: Why this change is needed
-
-### Important Considerations
-- Maintain compatibility with SAP AI Core integration
-- Preserve existing SAP-specific customizations
-- Follow existing code style and patterns
-- Prioritize: security fixes > bug fixes > features > refactoring
-- Do NOT include changes that would break existing functionality
-
-### Output Format
-
-```markdown
-# Update Plan for Alexi
-
-Generated: [date]
-Based on upstream commits: [list commits analyzed]
-
-## Summary
-- Total changes planned: X
-- Critical: X | High: X | Medium: X | Low: X
-
-## Changes
-
-### 1. [Brief description]
-**File**: `src/path/to/file.ts`
-**Priority**: high
-**Type**: feature | bugfix | security | refactor
-**Reason**: [Why this change is needed]
-
-**Current code** (if modifying):
-```typescript
-// existing code
-```
-
-**New code**:
-```typescript
-// code to add or replace with
-```
-
-### 2. [Next change...]
-...
-
-## Testing Recommendations
-- [What to test after applying these changes]
-
-## Potential Risks
-- [Any breaking changes or risks to be aware of]
-```
-
-Output ONLY the plan in the format above. No conversational text.
