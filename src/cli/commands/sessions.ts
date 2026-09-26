@@ -4,6 +4,11 @@
 
 import type { Command } from 'commander';
 import { SessionManager } from '../../core/sessionManager.js';
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  type RetentionPolicy,
+} from '../../core/sessionRetention.js';
 
 /**
  * JSON output shape for `alexi sessions --json` (public contract):
@@ -280,6 +285,135 @@ export function registerSessionCommands(program: Command): void {
         process.exit(1);
       }
     });
+
+  // Manual retention cleanup. Complements the automatic age-only sweep in
+  // `SessionManager.cleanupExpiredSessions`: this subcommand supports
+  // age-based AND count-based cleanup plus a dry-run preview mode, so
+  // operators can reclaim disk space on demand without waiting for the
+  // 24h scheduler cooldown. Uses `sessions-clean` (hyphenated) to match
+  // the shape of the existing `sessions-search`, `session-export`, and
+  // `session-delete` subcommands registered above.
+  program
+    .command('sessions-clean')
+    .description(
+      'Delete expired sessions from ~/.alexi/sessions/ using age and/or count policies. ' +
+        'Use --dry-run to preview what would be deleted. Use --max-age to delete sessions ' +
+        'older than N days (default: 30). Use --max-count to keep only the N most recent ' +
+        'sessions per project (default: 100). Use --project to limit cleanup to a single ' +
+        'project bucket. Use --exclude to protect sessions whose id or title matches a glob.'
+    )
+    .option('--dry-run', 'Preview deletions without removing any files')
+    .option(
+      '--max-age <days>',
+      'Delete sessions older than N days (default: 30). Pass 0 to skip age-based cleanup.',
+      (v) => parseInt(v, 10),
+      30
+    )
+    .option(
+      '--max-count <n>',
+      'Keep only the N most recent sessions per project (default: 100). Pass 0 to skip count-based cleanup.',
+      (v) => parseInt(v, 10),
+      100
+    )
+    .option('--project <name>', 'Limit cleanup to a specific project bucket')
+    .option(
+      '--exclude <pattern>',
+      'Glob to exclude sessions by id or title (repeatable)',
+      (value: string, previous: string[] = []) => previous.concat([value]),
+      [] as string[]
+    )
+    .option('--json', 'Emit the retention result as JSON')
+    .action(
+      async (opts: {
+        dryRun?: boolean;
+        maxAge?: number;
+        maxCount?: number;
+        project?: string;
+        exclude?: string[];
+        json?: boolean;
+      }) => {
+        try {
+          const policy: RetentionPolicy = {};
+
+          if (typeof opts.maxAge === 'number' && Number.isFinite(opts.maxAge) && opts.maxAge > 0) {
+            policy.maxAgeDays = Math.floor(opts.maxAge);
+          } else if (opts.maxAge !== undefined && opts.maxAge !== 0) {
+            console.error(
+              `Error: --max-age must be a non-negative integer (got '${String(opts.maxAge)}')`
+            );
+            process.exit(1);
+          }
+
+          if (
+            typeof opts.maxCount === 'number' &&
+            Number.isFinite(opts.maxCount) &&
+            opts.maxCount > 0
+          ) {
+            policy.maxCountPerProject = Math.floor(opts.maxCount);
+          } else if (opts.maxCount !== undefined && opts.maxCount !== 0) {
+            console.error(
+              `Error: --max-count must be a non-negative integer (got '${String(opts.maxCount)}')`
+            );
+            process.exit(1);
+          }
+
+          if (typeof opts.project === 'string' && opts.project.trim().length > 0) {
+            policy.project = opts.project.trim();
+          }
+
+          if (Array.isArray(opts.exclude) && opts.exclude.length > 0) {
+            policy.excludePatterns = opts.exclude;
+          }
+
+          if (opts.dryRun) {
+            policy.dryRun = true;
+          }
+
+          if (policy.maxAgeDays === undefined && policy.maxCountPerProject === undefined) {
+            console.error(
+              'Error: at least one of --max-age or --max-count must be positive (both were 0)'
+            );
+            process.exit(1);
+          }
+
+          const result = await applyRetentionPolicy(policy);
+
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+            if (result.errors.length > 0) {
+              process.exit(1);
+            }
+            return;
+          }
+
+          const verb = result.dryRun ? 'Would delete' : 'Deleted';
+          const kept = result.skipped.length;
+          console.log(
+            `${verb} ${result.deleted.length} sessions (${formatBytes(result.bytesFreed)})` +
+              (kept > 0 ? `, skipped ${kept}` : '') +
+              (result.errors.length > 0 ? `, ${result.errors.length} errors` : '') +
+              '.'
+          );
+
+          if (result.dryRun && result.deleted.length > 0) {
+            for (const filePath of result.deleted) {
+              console.log(`  would delete: ${filePath}`);
+            }
+          }
+
+          for (const err of result.errors) {
+            console.error(err);
+          }
+
+          if (result.errors.length > 0) {
+            process.exit(1);
+          }
+        } catch (e) {
+          console.error(String(e));
+          process.exit(1);
+        }
+      }
+    );
 
   // Delete session
   program

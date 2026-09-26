@@ -385,6 +385,70 @@ Failed to delete session <id>: EACCES: permission denied
 
 The retention scheduler in `src/core/retentionScheduler.ts:88` also runs an automatic sweep at most once every 24 hours on CLI startup (state persisted to `~/.alexi/last-retention-run`). Use `--cleanup` to force a sweep now (for example, before rebuilding the FTS index or running a diagnostic pass) — the 24h cooldown does not gate the flag.
 
+### sessions-clean
+
+Manual, on-demand retention cleanup. Complements the age-only automatic sweep exposed by `alexi sessions --cleanup` with a policy language that supports **count-based** deletion (bound the number of sessions retained per project), a **dry-run preview** mode, **per-project scoping**, and **glob-based exclusions** by session id or title.
+
+```bash
+alexi sessions-clean --dry-run
+alexi sessions-clean --max-age 14
+alexi sessions-clean --max-count 50
+alexi sessions-clean --max-age 30 --max-count 100
+alexi sessions-clean --project alexi --exclude 'important-*'
+alexi sessions-clean --dry-run --json
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--dry-run` | flag | Preview candidates without invoking `fs.unlink`. `result.deleted` and `result.bytesFreed` are still populated so operators can see exactly what a real run would remove. |
+| `--max-age <days>` | integer | Delete sessions whose `updatedAt` is older than `now - days * 86400000`. Default `30`. Pass `0` to disable age-based cleanup. Non-negative integers are required. |
+| `--max-count <n>` | integer | After age filtering, group sessions by project bucket and keep only the `n` most-recently-updated in each bucket. Default `100`. Pass `0` to disable count-based cleanup. |
+| `--project <name>` | string | Restrict the sweep to sessions whose project bucket equals this value. Buckets are derived from `basename(metadata.workdir)`; sessions with no workdir land in `__unknown__`. |
+| `--exclude <pattern>` | string (repeatable) | `minimatch` glob matched against **both** `session.id` and `metadata.title`. A match on either short-circuits deletion. Repeat the flag to add multiple patterns. |
+| `--json` | flag | Emit the full `RetentionResult` shape as JSON instead of the text summary. Still exits with code `1` when `errors[]` is non-empty. |
+
+The two policies are **unioned**, not intersected: a session is a deletion candidate if it fails **either** the age check **or** the count check. Exclude patterns win in either case.
+
+**Text output (default).** One-line summary; dry-run mode adds one line per candidate:
+
+```text
+Deleted 3 sessions (12.4 KB), skipped 1.
+```
+
+```text
+Would delete 5 sessions (48.2 KB), skipped 0.
+  would delete: /home/alice/.alexi/sessions/abc123.json
+  would delete: /home/alice/.alexi/sessions/def456.json
+  would delete: /home/alice/.alexi/sessions/ghi789.json
+  would delete: /home/alice/.alexi/sessions/jkl012.json
+  would delete: /home/alice/.alexi/sessions/mno345.json
+```
+
+**JSON output (`--json`).** The full `RetentionResult` shape defined in `src/core/sessionRetention.ts`:
+
+```json
+{
+  "deleted": [
+    "/home/alice/.alexi/sessions/abc123.json"
+  ],
+  "skipped": [
+    "/home/alice/.alexi/sessions/important-notes.json"
+  ],
+  "errors": [],
+  "bytesFreed": 4096,
+  "dryRun": false
+}
+```
+
+**Exit codes.**
+
+- `0` — sweep completed with no per-file errors.
+- `1` — `result.errors` is non-empty, **or** both `--max-age` and `--max-count` were set to `0` (nothing to do), **or** a policy validation failure was raised by Zod (`RetentionPolicySchema.parse` rejected the input).
+
+**Relationship to `alexi sessions --cleanup`.** `--cleanup` invokes `SessionManager.cleanupExpiredSessions()` which is age-only, reads its policy from `~/.alexi/config.json`, respects the active-run and recent-write safety guards, and cascades expired children. `sessions-clean` invokes `applyRetentionPolicy()` which takes its policy from CLI flags, supports per-project count caps and dry-run, and does **not** cascade children — the count filter already implicitly retains the most-recent per project. Use `sessions --cleanup` for scheduled housekeeping and `sessions-clean` for scoped, preview-first cleanup.
+
+See [ARCHITECTURE.md — Manual Session Retention (`alexi sessions-clean`)](ARCHITECTURE.md#manual-session-retention-alexi-sessions-clean) for the pipeline diagram and the decision/apply split, and [TESTING.md — Testing the Session Retention Engine](TESTING.md#testing-the-session-retention-engine) for the fixture pattern.
+
 ### session-export
 
 Export a session to markdown format.
@@ -4830,6 +4894,132 @@ try {
 ```
 
 The sweep itself runs on the CLI's Node event loop via `setImmediate`, not a worker thread. The `SessionManager.cleanupExpiredSessions` call is synchronous but is wrapped in `setImmediate` so program startup returns to the caller before the scan begins.
+
+## Session Retention Engine API (`src/core/sessionRetention.ts` + `src/core/sessionScanner.ts`)
+
+Added in commit `e6953a49`. Public TypeScript surface for the manual retention path used by `alexi sessions-clean`. Independent from `SessionManager.cleanupExpiredSessions` — see [ARCHITECTURE.md — Manual Session Retention](ARCHITECTURE.md#manual-session-retention-alexi-sessions-clean) for the runtime contract and the pipeline diagram.
+
+### Scanner: `scanSessions` / `groupSessionsByProject`
+
+```typescript
+// src/core/sessionScanner.ts
+
+export const UNKNOWN_PROJECT = '__unknown__';
+
+export interface ScannedSession {
+  id: string;
+  filePath: string;
+  size: number;
+  mtime: number;
+  createdAt: number;
+  updatedAt: number;
+  /**
+   * Project bucket. Derived from `metadata.project` (reserved future
+   * field) or `basename(metadata.workdir)`. Empty basenames (`/`, `.`,
+   * `..`) fall back to UNKNOWN_PROJECT.
+   */
+  project: string;
+  metadata: SessionMetadata;
+}
+
+export function scanSessions(sessionsDir: string): Promise<ScannedSession[]>;
+
+export function groupSessionsByProject(
+  sessions: ScannedSession[]
+): Map<string, ScannedSession[]>;
+```
+
+Behaviour:
+
+- **Never throws for per-file issues.** Malformed JSON, missing `metadata.id`, missing `metadata` block, `stat` failures, and read failures are logged and the file is skipped. A single corrupt session cannot block the sweep.
+- **Directory-level errors.** `ENOENT` on `sessionsDir` returns `[]` (nothing to clean). Other directory errors reject the promise so the caller can surface "cannot access sessions directory".
+- **Timestamp fallbacks.** `createdAt = metadata.created ?? mtimeMs`, `updatedAt = metadata.updated ?? mtimeMs`. Age-based checks always have a numeric value to compare against.
+- **`groupSessionsByProject`** preserves `Map` insertion order. Bucket order is filesystem-dependent (matches `fs.readdir` order); callers that need a stable order must sort explicitly.
+
+### Engine: `applyRetentionPolicy` / `selectCandidates`
+
+```typescript
+// src/core/sessionRetention.ts
+
+export const RetentionPolicySchema: z.ZodType<RetentionPolicy>;
+
+export interface RetentionPolicy {
+  /** Sessions older than `now - maxAgeDays * 86400000` become candidates. `>= 1` when provided. */
+  maxAgeDays?: number;
+  /** After age filtering, keep only the N most-recently-updated per project. `>= 0` when provided. */
+  maxCountPerProject?: number;
+  /** minimatch globs matched against session id AND title. Match short-circuits deletion. */
+  excludePatterns?: string[];
+  /** Restrict the sweep to sessions whose project bucket equals this value. */
+  project?: string;
+  /** Preview mode. When true, no `fs.unlink` calls are made. */
+  dryRun?: boolean;
+}
+
+export interface RetentionResult {
+  deleted: string[];   // absolute file paths that were (or would be) removed
+  skipped: string[];   // paths held back by exclude patterns or project filter
+  errors: string[];    // human-readable per-file failure messages
+  bytesFreed: number;  // total size in bytes across `deleted`
+  dryRun: boolean;     // mirrors the policy flag so callers can format without keeping input
+}
+
+export function defaultSessionsDir(): string;
+
+export function selectCandidates(
+  sessions: ScannedSession[],
+  policy: RetentionPolicy,
+  now?: number
+): { toDelete: ScannedSession[]; toSkip: ScannedSession[] };
+
+export function applyRetentionPolicy(
+  policy: RetentionPolicy,
+  options?: { sessionsDir?: string; now?: number }
+): Promise<RetentionResult>;
+
+export function formatBytes(bytes: number): string;
+```
+
+Contract points:
+
+- **Zod-validated inputs.** `RetentionPolicySchema` is `.strict()` — unknown fields are rejected. `applyRetentionPolicy` re-parses on every call so callers do not need to pre-validate. A rejected policy throws synchronously (before any disk I/O).
+- **Decision / apply split.** `selectCandidates` is a pure function suitable for unit testing with in-memory `ScannedSession` fixtures. `applyRetentionPolicy` is the disk-touching wrapper.
+- **Empty policy is a no-op.** `selectCandidates(sessions, {})` returns `{ toDelete: [], toSkip: [] }`. The CLI enforces the stricter rule that at least one of `--max-age` / `--max-count` must be positive.
+- **Union semantics.** A session is a deletion candidate if it fails **either** the age check **or** the count check. `excludePatterns` short-circuits deletion in either case, moving the session from `toDelete` to `toSkip`.
+- **`now` injection.** Both `selectCandidates(sessions, policy, now)` and `applyRetentionPolicy(policy, { now })` accept an explicit `now` for deterministic tests. Defaults to `Date.now()` when omitted.
+- **`sessionsDir` injection.** `applyRetentionPolicy(policy, { sessionsDir })` overrides the default `~/.alexi/sessions/` path so tests can run against temp directories without touching `process.env.HOME`.
+- **Errors are best-effort.** Per-file `fs.unlink` failures are captured in `result.errors` with the shape `Failed to delete <path>: <message>`; the sweep continues past errors. A `logger.warn` entry is emitted for each failure.
+- **`formatBytes`** renders `0 B` for zero and non-finite input, `<1024> B` verbatim for byte-scale values, and `<value.toFixed(1)> <unit>` (`KB`, `MB`, `GB`, `TB`) for larger values.
+
+### Usage example: scripted retention check
+
+```typescript
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  type RetentionPolicy,
+} from './core/sessionRetention.js';
+
+async function previewCleanup(): Promise<void> {
+  const policy: RetentionPolicy = {
+    maxAgeDays: 30,
+    maxCountPerProject: 50,
+    excludePatterns: ['keep-*', '*-baseline'],
+    dryRun: true,
+  };
+
+  const result = await applyRetentionPolicy(policy);
+  console.log(
+    `Would remove ${result.deleted.length} sessions freeing ${formatBytes(result.bytesFreed)}, ` +
+      `skipped ${result.skipped.length} (protected).`
+  );
+
+  if (result.errors.length > 0) {
+    for (const err of result.errors) console.error(err);
+    process.exit(1);
+  }
+}
+```
 
 ## Worktree Status Registry API
 
