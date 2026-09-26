@@ -5691,3 +5691,128 @@ The registry has no built-in publisher. Callers on the orchestrator, tool, or Ag
 
 The `updatedAt` field on every entry is populated by the registry itself (`Date.now()`), so publishers do not need to pass a timestamp. A future headless orchestrator can drive the same pipeline in-process without any changes to the registry or the TUI.
 
+## Network Transport Classification (`classifyNetworkError`)
+
+Added in the 2026-09-26 upstream sync (`src/core/network.ts:223`). Ports kilocode fix `d6bb0ef05` — before this commit, a socket-level disconnect during a streaming SAP AI Core call would leave the TUI spinner running forever because the underlying fetch promise never resolved and never rejected in a way the streaming orchestrator could distinguish from "slow response". `classifyNetworkError(err)` is the shared classifier all UI-adjacent code paths use to decide whether a thrown value is a transport failure worth surfacing.
+
+Contract:
+
+```typescript
+export interface NetworkErrorInfo {
+  kind: 'offline' | 'timeout' | 'dns' | 'reset' | 'unknown';
+  message: string;    // "<original> [<CODE>]" — never strips the raw code
+  retriable: boolean; // Always true for entries in OFFLINE_CODES
+}
+
+export function classifyNetworkError(err: unknown): NetworkErrorInfo | undefined;
+```
+
+Recognized codes (`OFFLINE_CODES`, unified with the transient-retry regex in AGENTS.md so the TUI, `ErrorBackoff`, and the GitHub Actions workflow agents all classify the same failures the same way):
+
+| Code            | `kind`     |
+| --------------- | ---------- |
+| `ENOTFOUND`     | `dns`      |
+| `EAI_AGAIN`     | `dns`      |
+| `ETIMEDOUT`     | `timeout`  |
+| `ECONNREFUSED`  | `offline`  |
+| `ECONNRESET`    | `reset`    |
+| `EHOSTUNREACH`  | `offline`  |
+| `ENETUNREACH`   | `offline`  |
+| `EPIPE`         | `reset`    |
+
+Any code not in the set (or a non-error thrown value) returns `undefined` so callers fall through to their normal error path. The classifier walks `err.code` first and then `err.cause.code`, because Node's built-in `fetch` wraps the underlying libuv code inside `cause` rather than exposing it at the top level. The `message` field always appends the raw `[CODE]` suffix — operators debugging an outage need to see whether it's DNS, proxy, or the SAP AI Core endpoint itself, and stripping the code would hide that.
+
+The classification is deliberately shape-based, not `instanceof`-based, so an error thrown across an ESM module boundary (where `instanceof NetworkError` may fail) still classifies correctly.
+
+## Safe URL Opener (`openUrl`)
+
+Added in the 2026-09-26 upstream sync (`src/core/open.ts`). Ports the upstream opencode commit that centralizes URL opening behind a scheme allow-list. Alexi surfaces links from LLM output in the TUI (chat markdown), from `alexi share` links, and from MCP tool responses; before this helper the codebase had two ad-hoc `spawn('xdg-open', ...)` call sites and no scheme validation, which is a real vulnerability class — an attacker who can control an LLM response can inject `file:///etc/hosts`, `javascript:...`, `ms-msdt:/id PCWDiagnostic` (a Windows attack surface), `data:text/html,<script>...`, or `vbscript:` and have it opened as if the user clicked it.
+
+`openUrl` is now the ONLY sanctioned browser-open entry point. New call sites MUST use it instead of shelling out to `xdg-open` / `open` directly.
+
+```typescript
+export interface OpenUrlOptions {
+  /**
+   * When true, resolve immediately after spawning the launcher without
+   * waiting for it to exit. Default true — matches `open` package
+   * behavior and avoids blocking the TUI on a browser launch.
+   */
+  detached?: boolean;
+}
+
+export function openUrl(input: string, options?: OpenUrlOptions): Promise<void>;
+```
+
+Validation pipeline:
+
+1. Reject non-strings and empty strings.
+2. Reject UNC-style paths outright (`\\server\share`, `//server/share`) — some Node versions on Windows implicitly normalize these into `file:` URLs, which would otherwise bypass the scheme check.
+3. Require `URL.canParse(input)` (when available) and successful `new URL(input)` construction.
+4. Require `protocol === 'http:'` OR `protocol === 'https:'`. Everything else rejects with `Error("Only http and https links can be opened in the browser: <input>")`.
+
+Platform launcher (deliberately Node built-ins, no `open` npm package, to keep the dependency surface small):
+
+| Platform | Command | Args                     |
+| -------- | ------- | ------------------------ |
+| `darwin` | `open`  | `[href]`                 |
+| `win32`  | `cmd`   | `['/c', 'start', '', href]` — the empty `""` is the window title so a URL containing spaces isn't consumed as the title arg |
+| other    | `xdg-open` | `[href]`              |
+
+When `detached: true` (the default) the child is `unref()`'d and `openUrl` resolves immediately, so quitting Alexi before the browser tab opens does not kill the launcher. `detached: false` waits for exit and rejects if the launcher exits non-zero.
+
+## Legacy Drizzle Journal Import (`importLegacyDrizzleJournal`)
+
+Added in the 2026-09-26 upstream sync (`src/core/database/migration.ts:135`). Defensive port of the upstream kilocode fix that hardens the legacy journal import against older Drizzle schemas whose `__drizzle_migrations` table predates the `name` column. On an older SAP AI Core deployment, a naive `SELECT name FROM __drizzle_migrations` crashed with an obscure SQL error the first time Alexi booted; this helper inspects `PRAGMA table_info` before selecting and falls back to matching by `created_at` prefix when `name` is absent.
+
+```typescript
+export interface SqliteColumnInfo {
+  name: string;
+}
+
+export interface LegacySqliteBridge {
+  tableExists(name: string): Promise<boolean>;
+  tableColumns(name: string): Promise<readonly SqliteColumnInfo[]>;
+  fetchLegacyJournal(): Promise<
+    ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  >;
+  recordCompleted(id: string, timeCompletedMs: number): Promise<void>;
+}
+
+export function importLegacyDrizzleJournal(
+  bridge: LegacySqliteBridge,
+  migrations: readonly Migration[]
+): Promise<void>;
+```
+
+Decision flow:
+
+```mermaid
+flowchart TD
+    A[importLegacyDrizzleJournal called] --> B{tableExists<br/>__drizzle_migrations?}
+    B -->|no| Z[return: no-op]
+    B -->|yes| C[fetch PRAGMA table_info]
+    C --> D{has &quot;name&quot; column?}
+    D -->|yes| E[iterate journal rows]
+    E --> F{name<br/>truthy?}
+    F -->|no| E
+    F -->|yes| G[recordCompleted&#40;name, now&#41;]
+    G --> E
+    D -->|no| H[iterate journal rows<br/>fallback: created_at prefix]
+    H --> I{created_at<br/>present?}
+    I -->|no| H
+    I -->|yes| J[format YYYYMMDDHHMMSS]
+    J --> K{prefix matches<br/>known migration?}
+    K -->|no| L[throw: unknown timestamp]
+    K -->|yes| M[recordCompleted&#40;migration.id, now&#41;]
+    M --> H
+```
+
+Semantics pinned by `src/core/database/migration.legacy-journal.test.ts`:
+
+- **No-op when the legacy table is absent.** New installations without a Drizzle history skip the import cleanly.
+- **`name` column present.** Each row with a non-empty `name` is passed straight to `recordCompleted`; null and empty names are silently dropped (they were invalid at write time and would fail the journal PRIMARY KEY otherwise).
+- **`name` column absent.** Each row's `created_at` (unix millis) is formatted as `YYYYMMDDHHMMSS` via UTC parts and matched against the known migration id prefix (`<prefix>_*`). No match is a loud `throw` — a schema drift MUST be caught at boot rather than silently forgotten. Rows missing both `name` and `created_at` are skipped because there is nothing to match on.
+- **`recordCompleted` is idempotent.** Adapters implement it with `INSERT OR IGNORE` semantics so re-running the import after a partial failure is safe.
+
+`importLegacyDrizzleJournal` is exported alongside `applyMigrations` from `src/core/database/migration.ts`. Adapters that do not back onto SQLite (or that never shipped a Drizzle-based schema) can leave `LegacySqliteBridge` unimplemented — `applyMigrations` still works without it.
+

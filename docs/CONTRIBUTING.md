@@ -2460,6 +2460,35 @@ Introduced by commit `8b372ad7` (issue #1826). If you are adding a subsystem tha
 - **Tests reset the registry in `beforeEach`.** The registry is a module-scoped singleton, so `beforeEach(() => __resetWorktreeStatusRegistry())` is required in every test file that touches it. Importing `__resetWorktreeStatusRegistry` directly from `src/agent/worktreeStatus.ts` (not through a barrel) is the documented pattern — it exists solely for tests and should never be reached from runtime code. See [TESTING.md - Testing the Worktree Status Registry](TESTING.md#testing-the-worktree-status-registry) for the full suite recipe.
 - **Publisher on the orchestrator side handles the lifecycle transitions.** A minimal publisher publishes `running` at turn start, `blocked` around permission prompts / `question` tool calls, `idle` on normal completion, and `error` on unrecoverable failure — leaving the error entry in place until the operator dismisses it via `removeWorktreeStatus(id)`. Do NOT split the state machine across multiple publishers; if a new subsystem needs to influence a worktree's status, funnel its signal through the existing publisher rather than emitting from a second call site.
 
+## Network Transport Classification (`classifyNetworkError`)
+
+Added in the 2026-09-26 upstream sync (`src/core/network.ts:223`, ports kilocode fix `d6bb0ef05`). If you are adding a new UI-adjacent code path that catches an unknown thrown value and needs to decide whether it is a socket-layer failure, ALWAYS classify through `classifyNetworkError(err)` — do not sniff `err.code` inline.
+
+- **Extend `OFFLINE_CODES`, `KIND_MAP`, and the AGENTS.md transient regex together.** All three surfaces MUST agree on the set of transport codes. A code added to `OFFLINE_CODES` without a matching `KIND_MAP` entry falls back to `kind: 'unknown'`, which is a code smell — every real code has a semantic bucket, so add the mapping.
+- **Never `instanceof NetworkError` for classification purposes.** The classifier is intentionally shape-based (reads `err.code` and `err.cause.code`) so it works across ESM module boundaries where `instanceof` is fragile. If you need to raise a typed error for callers, wrap AFTER classification, not before.
+- **The `[CODE]` suffix on `NetworkErrorInfo.message` is contract.** Do not strip it in downstream renderers — operators diagnose outages by that suffix.
+- **New tests belong in `src/core/network.test.ts`.** The suite is pure unit — no mocks, no timers. Follow the existing `Object.assign(new Error('...'), { code: '...' })` recipe when adding a new code case; see [TESTING.md — Testing `classifyNetworkError`](TESTING.md#testing-classifynetworkerror).
+
+## Safe URL Opener (`openUrl`)
+
+Added in the 2026-09-26 upstream sync (`src/core/open.ts`, ports the upstream opencode commit). `openUrl` is the ONLY sanctioned browser-open entry point in Alexi. New CLI subcommands, TUI affordances, MCP integrations, or share-link handlers that need to spawn a browser MUST use it.
+
+- **Never spawn `xdg-open` / `open` / `cmd /c start` directly.** Every direct spawn re-opens the arbitrary-scheme injection class of bug that `openUrl` exists to close. A code review WILL flag `spawn('xdg-open', ...)`.
+- **The scheme allow-list is fixed at `http:` and `https:`.** Do not add a `schemes?: string[]` option to `openUrl` — the two-scheme policy is the security contract. If a future integration truly needs a different scheme (e.g. `mailto:`), open a dedicated helper next to it (`sendMailto`) with its own review; do not widen `openUrl`.
+- **UNC-style paths are rejected explicitly.** Some Node versions on Windows implicitly coerce `\\server\share\file.html` into `file:` URLs. The pre-parse `startsWith('\\\\')` / `startsWith('//')` guard in `safeParseUrl` catches both — do not remove it in a "simplification" pass.
+- **`OpenUrlOptions.detached` defaults to `true`.** The `unref()`'d spawn is what lets the browser tab open even after Alexi exits. Do NOT change the default; callers who want to wait on the launcher (e.g. an integration test) can pass `detached: false` explicitly.
+- **New tests belong in `src/core/open.test.ts`.** Actually spawning `xdg-open` in CI is flaky, so the scheme allow-list is what the unit suite covers. Hostile-scheme cases belong here; launcher-path validation stays as a manual smoke test on the release matrix.
+
+## Legacy Drizzle Journal Import (`importLegacyDrizzleJournal`)
+
+Added in the 2026-09-26 upstream sync (`src/core/database/migration.ts:135`). If you are adding a new SQLite-backed adapter or a bootstrap step that touches the migration journal:
+
+- **Wire `importLegacyDrizzleJournal(bridge, migrations)` BEFORE `applyMigrations(...)`.** Reversing the order allows `applyMigrations` to replay already-applied migrations because the bridge has not yet mirrored the Drizzle journal into Alexi's journal.
+- **`recordCompleted` MUST have `INSERT OR IGNORE` semantics.** The import calls `recordCompleted` once per legacy row; a straight `INSERT` would blow up on a primary-key collision if the caller retries after a partial failure. Idempotency is the contract.
+- **Never silently swallow the "unknown timestamp" throw.** When the `name` column is absent and a `created_at` does not match any known migration id prefix, `importLegacyDrizzleJournal` throws `Legacy migration timestamp <ms> does not match any known migration`. This is a schema-drift signal that MUST reach the operator — do not `try / catch` it away in adapter code.
+- **The `SqliteColumnInfo` shape is intentionally minimal.** Only `name` is inspected. If a future feature needs another `PRAGMA table_info` column (`type`, `notnull`, `dflt_value`, `pk`), extend the interface — do not stringify the whole PRAGMA row and regex-scan it.
+- **New tests belong in `src/core/database/migration.legacy-journal.test.ts`.** The suite uses a `FakeBridge` — no real SQLite driver, no filesystem. See [TESTING.md — Testing the Legacy Drizzle Journal Import](TESTING.md#testing-the-legacy-drizzle-journal-import).
+
 ## Stream-Silence Connectivity Probe
 
 Introduced by commit `9047bab9` (issue #1836). If you are adding a new streaming path, a new error surface, or a new probe consumer, respect the invariants below. See [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836) for the runtime contract, [API.md — Stream Watchdog and Connectivity Probe API](API.md#stream-watchdog-and-connectivity-probe-api) for the public TypeScript surface, and [TESTING.md — Testing the Stream-Silence Connectivity Probe](TESTING.md#testing-the-stream-silence-connectivity-probe-issue-1836) for the regression contract.
