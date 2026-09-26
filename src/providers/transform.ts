@@ -212,11 +212,33 @@ export function ensureDeepSeekReasoning(messages: Message[], model: string): Mes
  *
  * Structural type: the caller passes anything shaped like a message part;
  * we look only at `type === 'reasoning'` + `providerMetadata.bedrock.signature`.
+ *
+ * Ports upstream opencode `517ee736b`: also treat parts flagged
+ * `metadata.redacted: true` as unreplayable (Bedrock returns opaque
+ * signatures for redacted thinking; those cannot be replayed even when
+ * a signature string is present), and drop parts that carry a signature
+ * but no visible `text` payload (empty replay body).
  */
 function hasBedrockReasoningSignature(part: Record<string, unknown>): boolean {
+  // Upstream opencode 517ee736b: parts marked as redacted are opaque and
+  // cannot be replayed regardless of any signature they may carry.
+  const metadata = (part as { metadata?: { redacted?: unknown } }).metadata;
+  if (metadata?.redacted === true) {
+    return false;
+  }
   const meta = (part as { providerMetadata?: { bedrock?: { signature?: unknown } } })
     .providerMetadata?.bedrock;
-  return typeof meta?.signature === 'string' && meta.signature.length > 0;
+  const signature = meta?.signature;
+  if (typeof signature !== 'string' || signature.length === 0) {
+    return false;
+  }
+  // A signature with no accompanying text is unreplayable — Bedrock rejects
+  // reasoning replays whose body is empty (opencode 517ee736b).
+  const text = (part as { text?: unknown }).text;
+  if (typeof text === 'string' && text.length === 0) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -819,4 +841,107 @@ export function preserveCompletionLimit(provider: string, computed: number): num
     return Math.max(0, computed);
   }
   return Math.max(0, Math.min(computed, cap));
+}
+
+// ============================================================================
+// Anthropic thinking-block tolerance (kilocode 3f39a329c)
+// ============================================================================
+//
+// Ports upstream kilocode `3f39a329c` — tolerate Anthropic occasionally
+// returning `thinking` (reasoning) blocks bound to tool calls with a
+// slightly different index than the accompanying `tool-call` part. When
+// this happens the SDK-level binding between a tool call and its
+// thinking signature is lost, and the next replay drops the signature —
+// which Bedrock/Anthropic then rejects with a schema error.
+//
+// The kilocode fix is a defensive re-bind: for each assistant message,
+// if we can identify a reasoning part AND a tool-call part but the
+// tool-call is missing its `thinkingSignature`, copy the reasoning
+// part's `signature` onto the tool call. Non-destructive; existing
+// metadata is preserved.
+//
+// Upstream also bumps `@ai-sdk/anthropic` to `3.0.111` with a matching
+// patch — Alexi does not depend on `@ai-sdk/anthropic` (it talks to SAP
+// AI Core deployments directly), so the SDK bump is a no-op for us.
+
+interface AnthropicMessagePart {
+  type?: unknown;
+  signature?: unknown;
+  metadata?: { thinkingSignature?: unknown; [k: string]: unknown };
+  [k: string]: unknown;
+}
+
+/**
+ * Return true when a message part is an Anthropic-style thinking/reasoning block.
+ */
+function isThinkingPart(part: AnthropicMessagePart): boolean {
+  return part.type === 'reasoning' || part.type === 'thinking';
+}
+
+/**
+ * Return true when a message part is a tool call.
+ */
+function isToolCallPart(part: AnthropicMessagePart): boolean {
+  return part.type === 'tool-call' || part.type === 'tool_use';
+}
+
+/**
+ * Defensively re-associate an Anthropic thinking block with its tool
+ * call when the SDK-level binding was lost (kilocode `3f39a329c`).
+ *
+ * When an assistant message contains exactly one thinking part and one
+ * tool-call part, and the tool-call has no `thinkingSignature`, copy
+ * the thinking part's `signature` onto the tool call's metadata. All
+ * other cases pass through unchanged.
+ *
+ * NEVER mutates its input. Returns a new message when a re-bind occurs;
+ * otherwise returns the input by reference.
+ */
+export function bindThinkingToToolCall<T extends { role: string; parts?: AnthropicMessagePart[] }>(
+  msg: T
+): T {
+  if (msg.role !== 'assistant' || !Array.isArray(msg.parts)) {
+    return msg;
+  }
+  const thinking = msg.parts.find(isThinkingPart);
+  const toolCall = msg.parts.find(isToolCallPart);
+  if (!thinking || !toolCall) {
+    return msg;
+  }
+  const signature = thinking.signature;
+  if (typeof signature !== 'string' || signature.length === 0) {
+    return msg;
+  }
+  const existing = toolCall.metadata?.thinkingSignature;
+  if (typeof existing === 'string' && existing.length > 0) {
+    return msg;
+  }
+  const rebuiltToolCall: AnthropicMessagePart = {
+    ...toolCall,
+    metadata: {
+      ...(toolCall.metadata ?? {}),
+      thinkingSignature: signature,
+    },
+  };
+  const newParts = msg.parts.map((p) => (p === toolCall ? rebuiltToolCall : p));
+  return { ...msg, parts: newParts };
+}
+
+/**
+ * Apply {@link bindThinkingToToolCall} across a message list. Returns the
+ * input reference unchanged when no message required a rebind, so callers
+ * can cheaply short-circuit downstream cache invalidation.
+ */
+export function bindThinkingToToolCallsAll<
+  T extends { role: string; parts?: AnthropicMessagePart[] },
+>(messages: T[]): T[] {
+  let changed = false;
+  const out = messages.map((m) => {
+    const next = bindThinkingToToolCall(m);
+    if (next !== m) {
+      changed = true;
+    }
+    return next;
+  });
+  return changed ? out : messages;
 }

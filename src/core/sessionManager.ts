@@ -40,6 +40,23 @@ export interface Message {
   tokens?: {
     input?: number;
     output?: number;
+    /**
+     * Reasoning tokens consumed by extended-thinking models (Claude Opus/
+     * Sonnet with thinking, OpenAI o-series, DeepSeek reasoning tiers).
+     *
+     * Upstream providers report reasoning tokens as a SUBSET of the
+     * `completion_tokens` figure, not as an addition to it. The Alexi
+     * provider layer (`src/providers/sapOrchestration.ts`) subtracts the
+     * extracted reasoning count out of `completion_tokens` before it is
+     * forwarded to the session manager, so by the time this field is
+     * populated it is already disjoint from `output` — accumulating both
+     * `output` and `reasoning` into `SessionMetadata.totalTokens` does
+     * NOT double-count.
+     *
+     * Optional and backwards-compatible: sessions and callers that never
+     * populate the field behave exactly as before.
+     */
+    reasoning?: number;
   };
   /**
    * Optional metadata that overrides how the message is presented to the
@@ -60,6 +77,18 @@ export interface SessionMetadata {
   updated: number;
   modelId?: string;
   totalTokens: number;
+  /**
+   * Cumulative reasoning-token count across the session. Populated only
+   * when at least one message carries `tokens.reasoning`; otherwise the
+   * field is omitted so legacy sessions serialise identically to before.
+   *
+   * Reasoning tokens are ALSO included in `totalTokens` so a single
+   * "how many tokens has this session used?" query does not need to add
+   * the two fields together; this dedicated field exists purely for
+   * observability (e.g. surfacing extended-thinking usage in `sessions
+   * list` output or telemetry).
+   */
+  totalReasoningTokens?: number;
   messageCount: number;
   title?: string;
   /**
@@ -196,7 +225,12 @@ export class SessionManager {
 
     const initialMessages = options?.initialMessages ?? [];
     const totalTokens = initialMessages.reduce(
-      (sum, m) => sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0),
+      (sum, m) =>
+        sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0) + (m.tokens?.reasoning ?? 0),
+      0
+    );
+    const seededReasoningTokens = initialMessages.reduce(
+      (sum, m) => sum + (m.tokens?.reasoning ?? 0),
       0
     );
     // Auto-generate a title from the first seeded user message so
@@ -212,6 +246,7 @@ export class SessionManager {
         updated: Date.now(),
         modelId,
         totalTokens,
+        ...(seededReasoningTokens > 0 ? { totalReasoningTokens: seededReasoningTokens } : {}),
         messageCount: initialMessages.length,
         workdir: process.cwd(),
         parentSessionId,
@@ -632,7 +667,19 @@ export class SessionManager {
     this.activeSession!.metadata.messageCount++;
 
     if (tokens) {
-      this.activeSession!.metadata.totalTokens += (tokens.input || 0) + (tokens.output || 0);
+      // Reasoning tokens are disjoint from `output` at this point (the
+      // provider layer subtracts them out of `completion_tokens` before
+      // forwarding), so adding both fields into `totalTokens` does not
+      // double-count. Sessions that never see a reasoning-emitting
+      // model keep `totalReasoningTokens` undefined and their
+      // `totalTokens` behaviour unchanged.
+      const reasoning = tokens.reasoning ?? 0;
+      this.activeSession!.metadata.totalTokens +=
+        (tokens.input || 0) + (tokens.output || 0) + reasoning;
+      if (reasoning > 0) {
+        this.activeSession!.metadata.totalReasoningTokens =
+          (this.activeSession!.metadata.totalReasoningTokens ?? 0) + reasoning;
+      }
     }
 
     // Auto-generate title from first user message. Skip messages that

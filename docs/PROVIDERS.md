@@ -2072,6 +2072,64 @@ export function mergeProviderModels<T>(
 
 The structural `ModelInfoLike` type is deliberately loose so callers using either the SAP orchestration model records or a custom `ModelInfo` shape can both use these helpers without a coercion.
 
+## Reasoning Replay Guards (`hasBedrockReasoningSignature`, `bindThinkingToToolCall`)
+
+Reasoning-model providers (Anthropic-on-Bedrock, Claude thinking mode)
+embed a signature on every assistant reasoning block so the model can
+prove it was the one that produced the prior thought. When Alexi
+replays a conversation, an unreplayable reasoning part MUST be dropped
+before the next request — otherwise the provider rejects the whole
+request with a schema error. Two helpers in
+`src/providers/transform.ts` gate this.
+
+### `hasBedrockReasoningSignature(part)`
+
+Structural check on a message part. Returns `true` only when ALL of the
+following hold, so the reasoning body is safe to replay:
+
+- `part.type === 'reasoning'`.
+- `part.providerMetadata.bedrock.signature` is a non-empty string.
+- `part.metadata.redacted` is NOT `true`. Bedrock returns opaque
+  signatures for redacted thinking; those cannot be replayed even when
+  a signature string is present.
+- `part.text` is either absent or a non-empty string. A signature with
+  an empty `text` payload is an unreplayable empty replay body —
+  Bedrock rejects reasoning replays with an empty body.
+
+Ports opencode `517ee736b`.
+
+### `bindThinkingToToolCall(msg)` / `bindThinkingToToolCallsAll(messages)`
+
+Defensive re-bind for Anthropic responses. Anthropic occasionally
+returns `thinking` (reasoning) blocks bound to tool calls with a
+slightly different index than the accompanying `tool-call` part. When
+this happens the SDK-level binding between a tool call and its
+thinking signature is lost, and the next replay drops the signature —
+which Bedrock/Anthropic then rejects with a schema error.
+
+For each assistant message, if a reasoning part AND a tool-call part
+both exist but the tool-call has no `thinkingSignature`, the helper
+copies the reasoning part's `signature` onto the tool call's metadata.
+Non-destructive; returns a new message on rebind and the input
+reference otherwise, so downstream cache invalidation can cheaply
+short-circuit.
+
+```typescript
+export function bindThinkingToToolCall<
+  T extends { role: string; parts?: AnthropicMessagePart[] },
+>(msg: T): T;
+
+export function bindThinkingToToolCallsAll<
+  T extends { role: string; parts?: AnthropicMessagePart[] },
+>(messages: T[]): T[];
+```
+
+Ports kilocode `3f39a329c`. Alexi does not depend on
+`@ai-sdk/anthropic` (it talks to SAP AI Core Orchestration directly),
+so the paired upstream `@ai-sdk/anthropic 3.0.111` bump is a no-op for
+us — the helpers ship as pure functions for anything that might replay
+Anthropic-shaped assistant messages through the transform pipeline.
+
 ## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
 
 Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone helper that classifies Amazon Bedrock model IDs and applies the correct cross-region prefix policy. Alexi has no direct Bedrock provider — every LLM call still goes through SAP AI Core Orchestration — but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments (see the `aicore-bedrock-*` references in `src/providers/transform.ts`). This helper is exported so any future direct Bedrock integration or SAP AI Core deployment mapping code can use a single, tested classifier instead of re-deriving the prefix rules.
