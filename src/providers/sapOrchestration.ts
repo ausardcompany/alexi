@@ -132,6 +132,21 @@ export interface TokenUsage {
   cache_read_input_tokens?: number;
   /** Tokens written to the provider prompt cache (Anthropic charges ~1.25x). */
   cache_creation_input_tokens?: number;
+  /**
+   * Reasoning tokens consumed during extended thinking (already subtracted
+   * from `completion_tokens`).
+   *
+   * Providers (OpenAI, Anthropic, AI SDK v4) report reasoning tokens as a
+   * subset of `completion_tokens`. To prevent double-counting in session
+   * totals and cost trackers, the provider layer extracts the reasoning
+   * count, subtracts it from `completion_tokens` (clamped at 0), and
+   * surfaces it here. Consumers that want the raw completion count MUST
+   * add `reasoningTokenCount` back to `completion_tokens`. `undefined`
+   * means the provider did not report a reasoning breakdown (either
+   * because the model does not do extended thinking, or the payload
+   * shape was unknown).
+   */
+  reasoningTokenCount?: number;
 }
 
 /**
@@ -625,6 +640,116 @@ export function extractCacheTokens(usage: unknown): {
   return out;
 }
 
+/**
+ * Extract the reasoning-token count from a raw SDK TokenUsage payload.
+ *
+ * Reasoning tokens are the subset of `completion_tokens` a model spent on
+ * extended thinking (Anthropic Claude Opus/Sonnet 4.x, OpenAI GPT-5.6+
+ * with `reasoning_effort`, Gemini thinking mode). Providers report them
+ * in three known shapes:
+ *
+ *  - OpenAI:      `usage.completion_tokens_details.reasoning_tokens`
+ *  - Anthropic:   `usage.thinking_tokens` OR `usage.reasoning_tokens`
+ *  - AI SDK v4:   `usage.outputTokens.reasoning` (nested object)
+ *
+ * When none of the shapes are present we return `undefined` — a `0` is
+ * meaningful (the model checked and did not think) and must not be
+ * synthesised. Non-object inputs are treated as "no data".
+ *
+ * See Cline PR #14426 (2026-09-26) for the upstream fix this mirrors.
+ */
+export function extractReasoningTokens(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+  const u = usage as Record<string, unknown>;
+
+  // OpenAI shape: completion_tokens_details.reasoning_tokens.
+  const details = u.completion_tokens_details;
+  if (details && typeof details === 'object') {
+    const d = details as Record<string, unknown>;
+    if (typeof d.reasoning_tokens === 'number') {
+      return d.reasoning_tokens;
+    }
+  }
+
+  // Anthropic-style top-level fields. `thinking_tokens` is the SAP-side
+  // rendering of the Anthropic extended-thinking metric; `reasoning_tokens`
+  // is the more portable alias some routers surface. Preserve the same
+  // precedence order as upstream (thinking wins when both are present).
+  if (typeof u.thinking_tokens === 'number') {
+    return u.thinking_tokens;
+  }
+  if (typeof u.reasoning_tokens === 'number') {
+    return u.reasoning_tokens;
+  }
+
+  // AI SDK v4 nested shape: outputTokens.reasoning.
+  const outputTokens = u.outputTokens;
+  if (outputTokens && typeof outputTokens === 'object') {
+    const o = outputTokens as Record<string, unknown>;
+    if (typeof o.reasoning === 'number') {
+      return o.reasoning;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Build a normalised {@link TokenUsage} from a raw SDK payload.
+ *
+ * Handles three concerns in one place so both the streaming and
+ * non-streaming call sites stay in sync:
+ *
+ *   1. Copy the raw `prompt_tokens` / `completion_tokens` / `total_tokens`.
+ *   2. Extract cache token fields via {@link extractCacheTokens}.
+ *   3. Extract the reasoning-token count via {@link extractReasoningTokens},
+ *      subtract it from `completion_tokens` (clamped at 0), and expose it
+ *      as `reasoningTokenCount` so cumulative totals do NOT double-count.
+ *
+ * Returns `undefined` when the raw payload itself is falsy so callers can
+ * keep their `usage: undefined` branches unchanged.
+ */
+export function normalizeTokenUsage(rawUsage: unknown): TokenUsage | undefined {
+  if (!rawUsage || typeof rawUsage !== 'object') {
+    return undefined;
+  }
+  const u = rawUsage as Record<string, unknown>;
+  const usage: TokenUsage = {};
+
+  if (typeof u.prompt_tokens === 'number') {
+    usage.prompt_tokens = u.prompt_tokens;
+  }
+  if (typeof u.completion_tokens === 'number') {
+    usage.completion_tokens = u.completion_tokens;
+  }
+  if (typeof u.total_tokens === 'number') {
+    usage.total_tokens = u.total_tokens;
+  }
+
+  const cache = extractCacheTokens(rawUsage);
+  if (cache.cache_read_input_tokens !== undefined) {
+    usage.cache_read_input_tokens = cache.cache_read_input_tokens;
+  }
+  if (cache.cache_creation_input_tokens !== undefined) {
+    usage.cache_creation_input_tokens = cache.cache_creation_input_tokens;
+  }
+
+  const reasoning = extractReasoningTokens(rawUsage);
+  if (reasoning !== undefined) {
+    usage.reasoningTokenCount = reasoning;
+    // Providers fold reasoning tokens into `completion_tokens`. Subtract
+    // to prevent double-counting in session totals / cost tracking; clamp
+    // at 0 in case the payload is inconsistent (reasoning > completion).
+    if (usage.completion_tokens !== undefined) {
+      usage.completion_tokens = Math.max(0, usage.completion_tokens - reasoning);
+    }
+  }
+
+  return usage;
+}
+
 // ============================================================================
 // Empty-Response Retry (issue #1279)
 // ============================================================================
@@ -733,6 +858,10 @@ export function mergeUsage(
   const cc = addField(a.cache_creation_input_tokens, b.cache_creation_input_tokens);
   if (cc !== undefined) {
     out.cache_creation_input_tokens = cc;
+  }
+  const rt = addField(a.reasoningTokenCount, b.reasoningTokenCount);
+  if (rt !== undefined) {
+    out.reasoningTokenCount = rt;
   }
   return out;
 }
@@ -1580,14 +1709,7 @@ export class SapOrchestrationProvider {
     const allMessages = response.getAllMessages();
     const content = response.getContent() ?? '';
     const finishReason = response.getFinishReason() ?? undefined;
-    const usage: TokenUsage | undefined = tokenUsage
-      ? {
-          prompt_tokens: tokenUsage.prompt_tokens,
-          completion_tokens: tokenUsage.completion_tokens,
-          total_tokens: tokenUsage.total_tokens,
-          ...extractCacheTokens(tokenUsage),
-        }
-      : undefined;
+    const usage: TokenUsage | undefined = normalizeTokenUsage(tokenUsage);
 
     finishProviderSpan(span, {
       usage,
@@ -1744,14 +1866,7 @@ export class SapOrchestrationProvider {
     // After streaming completes, get final metadata
     const finishReason = response.getFinishReason();
     const tokenUsage = response.getTokenUsage();
-    const usage: TokenUsage | undefined = tokenUsage
-      ? {
-          prompt_tokens: tokenUsage.prompt_tokens,
-          completion_tokens: tokenUsage.completion_tokens,
-          total_tokens: tokenUsage.total_tokens,
-          ...extractCacheTokens(tokenUsage),
-        }
-      : undefined;
+    const usage: TokenUsage | undefined = normalizeTokenUsage(tokenUsage);
 
     finishProviderSpan(span, {
       usage,
