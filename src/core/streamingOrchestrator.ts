@@ -11,6 +11,11 @@ import {
 import { formatProviderError, classifyProviderError } from '../providers/format.js';
 import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
 import { NothingToCompactError } from './compaction.js';
+import {
+  confirmMaxTokensRecovery,
+  isMaxTokensError,
+  planMaxTokensRecovery,
+} from './maxTokensRecovery.js';
 import { logger } from '../utils/logger.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
@@ -201,6 +206,16 @@ export function streamChat(
   // When true, the next tick of the iterator loop reruns setup after a
   // successful compaction. Cleared once setup completes.
   let pendingOverflowRetry = false;
+  // Max-tokens recovery is also one-shot per streamChat() invocation.
+  // Second failure of the same kind is terminal.
+  let maxTokensRetried = false;
+  // Snapshot of the last-dispatched provider messages array. Populated in
+  // setup() so `tryMaxTokensRecovery` can estimate the current prompt
+  // tokens without re-reading session history.
+  let lastDispatchedMessages: Array<{ role: string; content: string | unknown[] }> = [];
+  // Mutable `maxTokens` for the current stream. Updated by the max-tokens
+  // recovery path before rearming setup.
+  let activeMaxTokens: number | undefined = options?.maxTokens ?? effortConfig.maxTokens;
 
   async function setup(): Promise<void> {
     if (setupDone && !pendingOverflowRetry) {
@@ -288,8 +303,14 @@ export function streamChat(
     const effectiveReasoning = options?.reasoning ?? routeReasoning;
     const reasoningParams = effectiveReasoning ? resolveReasoning(modelId, effectiveReasoning) : {};
 
+    // Snapshot the dispatched messages so the max-tokens recovery path
+    // can estimate the current prompt cost without reaching back into
+    // the session (which may have been mutated in the interim by a
+    // parallel compaction).
+    lastDispatchedMessages = messages;
+
     const merged: CompletionOptions = {
-      maxTokens: options?.maxTokens ?? effortConfig.maxTokens,
+      maxTokens: activeMaxTokens,
       temperature: options?.temperature,
       // Note: the watchdog splices its own signal in via sourceFactory,
       // combining the caller signal with an idle-timeout controller. Do
@@ -415,7 +436,7 @@ export function streamChat(
       await sm.compact({
         overflowRecovery: true,
         maxContextTokens: sm.getMaxContextTokens(),
-        reserveOutputTokens: options?.maxTokens ?? effortConfig.maxTokens,
+        reserveOutputTokens: activeMaxTokens ?? options?.maxTokens ?? effortConfig.maxTokens,
       });
     } catch (compactErr) {
       if (compactErr instanceof NothingToCompactError) {
@@ -431,6 +452,71 @@ export function streamChat(
     }
 
     // Rearm setup on the next tick so the compacted session is reloaded.
+    setupDone = false;
+    pendingOverflowRetry = true;
+    if (watchdog) {
+      void watchdog.return();
+      watchdog = null;
+    }
+    return true;
+  }
+
+  /**
+   * Attempt to recover from a `max_tokens_exceeded` / context-length
+   * error by reducing `maxTokens` and retrying once. This is
+   * complementary to `tryOverflowRecovery`: it targets the *response*
+   * budget rather than the *prompt* history.
+   *
+   * Returns `true` when the caller should re-drive the loop, `false`
+   * when the error is not recoverable via this path (a distinct
+   * compaction path or terminal rethrow may still apply).
+   */
+  async function tryMaxTokensRecovery(err: unknown): Promise<boolean> {
+    if (maxTokensRetried) {
+      return false;
+    }
+    if (!isMaxTokensError(err)) {
+      return false;
+    }
+    // Build a plan from the current provider messages and active
+    // maxTokens. If the plan does not actually reduce maxTokens (e.g.
+    // the prompt already fills the entire window), fall through so
+    // compaction can try instead.
+    const messagesForEstimate = lastDispatchedMessages
+      .filter((m) => typeof m.content === 'string')
+      .map((m) => ({
+        role: m.role as 'user' | 'assistant' | 'system',
+        content: m.content as string,
+        timestamp: 0,
+      }));
+    const plan = planMaxTokensRecovery({
+      err,
+      modelId,
+      originalMaxTokens: activeMaxTokens ?? 4096,
+      messages: messagesForEstimate,
+    });
+    if (!plan.reducedFromOriginal) {
+      return false;
+    }
+    const accepted = await confirmMaxTokensRecovery(plan);
+    if (!accepted) {
+      return false;
+    }
+    maxTokensRetried = true;
+
+    fullText +=
+      `\n\n[status] max_tokens exceeded, retrying with reduced maxTokens=${plan.safeMaxTokens} ` +
+      `(context window=${plan.contextWindow}${plan.contextWindowExtracted ? '' : ', estimated'})...\n\n`;
+    logger.info(
+      `max_tokens exceeded; retrying with maxTokens=${plan.safeMaxTokens} ` +
+        `(context window=${plan.contextWindow}, prompt~${plan.estimatedPromptTokens})`
+    );
+
+    activeMaxTokens = plan.safeMaxTokens;
+
+    // Rearm setup so the next tick re-dispatches with the reduced
+    // maxTokens. We keep the compacted-session flag independent so a
+    // subsequent overflow can still trigger compaction on its own budget.
     setupDone = false;
     pendingOverflowRetry = true;
     if (watchdog) {
@@ -464,7 +550,10 @@ export function streamChat(
         return { value: chunk, done: false };
       } catch (err) {
         // Context-overflow recovery: one-shot compaction + retry per run.
-        // Only attempt when we have a sessionManager to compact.
+        // Attempted BEFORE max-tokens reduction because compaction is
+        // the more thorough fix when the *prompt* (not the response
+        // budget) is what pushed the request over the window. Only
+        // attempts when a sessionManager is available.
         try {
           const recovered = await tryOverflowRecovery(err);
           if (recovered) {
@@ -477,6 +566,24 @@ export function streamChat(
         } catch (recoveryErr) {
           // Compaction itself failed with a terminal error (nothing to
           // compact). Fall through with the wrapped error.
+          finished = true;
+          if (watchdog) {
+            void watchdog.return();
+          }
+          throw recoveryErr;
+        }
+
+        // Max-tokens recovery: one-shot maxTokens reduction + retry per
+        // run. Runs AFTER the compaction path so a session-attached
+        // caller still gets prompt-history compaction first; this path
+        // covers headless / agent callers with no session manager, or
+        // errors that classified as max-tokens but not context-overflow.
+        try {
+          const recovered = await tryMaxTokensRecovery(err);
+          if (recovered) {
+            return { value: { text: '' }, done: false };
+          }
+        } catch (recoveryErr) {
           finished = true;
           if (watchdog) {
             void watchdog.return();
