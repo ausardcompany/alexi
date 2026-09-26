@@ -85,6 +85,130 @@ export function isBoardMigration(name: string): boolean {
 }
 
 /**
+ * Row shape returned by `PRAGMA table_info(<table>)` on SQLite. Only the
+ * `name` column is used here; the rest are ignored.
+ */
+export interface SqliteColumnInfo {
+  name: string;
+}
+
+/**
+ * Optional low-level SQLite hook used by `importLegacyDrizzleJournal` to
+ * bridge older installations that used Drizzle's `__drizzle_migrations`
+ * table into Alexi's own `migration` journal. Adapters that don't back
+ * onto SQLite (or that never shipped a Drizzle-based schema) can leave
+ * this unimplemented — `applyMigrations` still works without it.
+ *
+ * Ports the intent of upstream kilocode fix that hardens the legacy
+ * journal import against older Drizzle schemas whose `__drizzle_migrations`
+ * table lacks the `name` column (older Drizzle versions only stored
+ * `created_at`). Without this guard, importing that legacy journal on an
+ * older SAP AI Core deployment crashes with an obscure SQL error the
+ * first time Alexi boots.
+ */
+export interface LegacySqliteBridge {
+  /**
+   * Return true if a table with the given name exists (checked against
+   * `sqlite_master`).
+   */
+  tableExists(name: string): Promise<boolean>;
+  /**
+   * Return the column list for a table via `PRAGMA table_info(<table>)`.
+   */
+  tableColumns(name: string): Promise<readonly SqliteColumnInfo[]>;
+  /**
+   * Fetch legacy Drizzle journal rows. Only `created_at` is guaranteed to
+   * exist across all historical schema versions; `name` may be absent on
+   * older installations and is therefore optional.
+   */
+  fetchLegacyJournal(): Promise<
+    ReadonlyArray<{ name?: string | null; created_at?: number | null }>
+  >;
+  /**
+   * Insert a single migration id into Alexi's own `migration` journal
+   * (idempotent — `INSERT OR IGNORE` semantics).
+   */
+  recordCompleted(id: string, timeCompletedMs: number): Promise<void>;
+}
+
+/**
+ * Best-effort import of an older `__drizzle_migrations` journal into
+ * Alexi's `migration` journal, so a fresh Alexi install on a database
+ * that previously ran Drizzle-based migrations doesn't replay migrations
+ * that were already applied.
+ *
+ * The upstream kilocode bug this guards against: if
+ * `__drizzle_migrations` exists but predates the schema version that
+ * added the `name` column, a naive `SELECT name FROM __drizzle_migrations`
+ * fails hard. We now inspect `PRAGMA table_info` first and fall back to
+ * matching by `created_at` timestamp against known migration id prefixes
+ * (`YYYYMMDDHHMMSS_*`) when `name` is absent.
+ *
+ * No-op when the legacy table doesn't exist, when no known migrations
+ * were listed, or when the caller's adapter didn't provide a
+ * `LegacySqliteBridge`.
+ *
+ * alexi_change: defensive port of kilocode's legacy Drizzle journal
+ * import — handle older schemas that lack a `name` column instead of
+ * crashing at boot.
+ */
+export async function importLegacyDrizzleJournal(
+  bridge: LegacySqliteBridge,
+  migrations: readonly Migration[]
+): Promise<void> {
+  if (!(await bridge.tableExists('__drizzle_migrations'))) {
+    return;
+  }
+
+  const columns = await bridge.tableColumns('__drizzle_migrations');
+  const hasNameColumn = columns.some((column) => column.name === 'name');
+  const entries = await bridge.fetchLegacyJournal();
+  const nowMs = Date.now();
+
+  if (hasNameColumn) {
+    for (const entry of entries) {
+      if (entry.name && entry.name.length > 0) {
+        await bridge.recordCompleted(entry.name, nowMs);
+      }
+    }
+    return;
+  }
+
+  // Fallback: no `name` column, match by `created_at` -> migration id prefix.
+  for (const entry of entries) {
+    if (entry.created_at === undefined || entry.created_at === null) {
+      continue;
+    }
+    const prefix = formatDrizzleTimestampPrefix(entry.created_at);
+    const migration = migrations.find((item) => item.id.startsWith(`${prefix}_`));
+    if (!migration) {
+      throw new Error(
+        `Legacy migration timestamp ${entry.created_at} does not match any known migration`
+      );
+    }
+    await bridge.recordCompleted(migration.id, nowMs);
+  }
+}
+
+/**
+ * Format a Drizzle `created_at` (unix millis) as a `YYYYMMDDHHMMSS`
+ * prefix, matching the shape of Alexi migration ids like
+ * `20260907102000_model_usage_index`.
+ */
+function formatDrizzleTimestampPrefix(unixMs: number): string {
+  const d = new Date(unixMs);
+  const pad = (n: number, width = 2): string => String(n).padStart(width, '0');
+  return (
+    `${d.getUTCFullYear()}` +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds())
+  );
+}
+
+/**
  * Apply the given migrations against `db` in order, skipping those already
  * recorded. Safe to run concurrently in multiple processes: each
  * migration is applied inside an IMMEDIATE transaction and re-checked
