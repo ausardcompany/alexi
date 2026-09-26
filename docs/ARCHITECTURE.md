@@ -777,6 +777,73 @@ Contract points, pinned by `tests/core/sessionManager-retention.test.ts`:
 - **Best-effort per-session I/O.** Errors reading, parsing, or deleting an individual session file are captured in `summary.errors[]` and the sweep continues to the next candidate. A corrupted JSON blob cannot block cleanup of the rest of the directory.
 - **`--cleanup` bypasses the cooldown.** `alexi sessions --cleanup` instantiates a fresh `SessionManager` and calls `cleanupExpiredSessions` directly. The 24h scheduler cooldown does not gate this path — operators can force a sweep before running FTS reindex or a diagnostic pass. The exit code is `1` when `errors[]` is non-empty; otherwise `0`. When `retention.enabled` is `false`, the flag still runs the code path but the runner's own gate returns the empty summary immediately.
 
+## Manual Session Retention (`alexi sessions-clean`)
+
+`SessionManager.cleanupExpiredSessions` covers the automatic housekeeping case — a single, age-only policy, opt-in via `retention.enabled`, guarded by an active-run check and a one-hour recent-write window. Operators occasionally need something more surgical: bound the per-project transcript count to keep the sessions listing manageable, preview a sweep before running it, or scope a deletion to one workspace bucket. Those needs are served by a separate pipeline (`src/core/sessionRetention.ts`, `src/core/sessionScanner.ts`, `src/cli/commands/sessions.ts:296` — `sessions-clean` subcommand). The two pipelines are deliberately independent so a bug in the on-demand path cannot desync the daily scheduler.
+
+```mermaid
+graph TB
+    subgraph CLI["CLI (src/cli/commands/sessions.ts)"]
+        Cmd[alexi sessions-clean]
+        ParseFlags[parse --max-age / --max-count / --project / --exclude / --dry-run]
+        Format[format summary]
+    end
+
+    subgraph Engine["Retention Engine (src/core/sessionRetention.ts)"]
+        Apply[applyRetentionPolicy]
+        Zod[RetentionPolicySchema.parse]
+        Select[selectCandidates<br/>pure decision phase]
+        Unlink["fs.unlink per candidate<br/>(dry-run: skip)"]
+    end
+
+    subgraph Scanner["Scanner (src/core/sessionScanner.ts)"]
+        Scan[scanSessions]
+        Read[readdir + stat + readFile + JSON.parse]
+        Derive["deriveProject:<br/>basename(metadata.workdir)<br/>or UNKNOWN_PROJECT"]
+    end
+
+    subgraph FS["~/.alexi/sessions/"]
+        Files[*.json]
+    end
+
+    Cmd --> ParseFlags
+    ParseFlags --> Apply
+    Apply --> Zod
+    Apply --> Scan
+    Scan --> Read
+    Read --> Files
+    Read --> Derive
+    Derive --> Select
+    Select -->|toDelete| Unlink
+    Select -->|toSkip| Format
+    Unlink --> Format
+```
+
+Contract points, pinned by `tests/core/sessionRetention.test.ts` and `tests/core/sessionScanner.test.ts`:
+
+- **Decision / apply split.** `selectCandidates(sessions, policy, now)` is a pure function that takes a pre-scanned list and returns `{ toDelete, toSkip }`. `applyRetentionPolicy(policy, options?)` performs the scan + decision + `fs.unlink` sequence. The split means retention *policy* logic is testable with in-memory fixtures — no temp directory is required for the pure branch.
+- **Empty policy is a no-op.** A `RetentionPolicy` with neither `maxAgeDays` nor `maxCountPerProject` set returns `{ toDelete: [], toSkip: [] }`. The CLI enforces the stricter rule that at least one of the two must be positive (both flags default to a non-zero value; passing `--max-age 0 --max-count 0` exits with code `1`).
+- **Zod validation is strict.** `RetentionPolicySchema` is a `z.object(...).strict()` schema: unknown fields are rejected, `maxAgeDays >= 1`, `maxCountPerProject >= 0` (0 means "delete everything in the group"). `applyRetentionPolicy` re-parses the policy on every call — the CLI does not need to pre-validate.
+- **Project bucketing.** Scanner-derived. `metadata.project` (reserved future-use string field) wins; otherwise `basename(metadata.workdir)` after trimming. `.` and `..` basenames and empty strings fall back to `UNKNOWN_PROJECT` (`__unknown__`) so a legacy session or a session created at the filesystem root does not silently share a bucket with an unrelated project.
+- **Age filter uses `updatedAt`, not `createdAt`.** `updatedAt = metadata.updated ?? file.mtimeMs`. A long-lived session that has been touched recently is preserved even when its `created` timestamp is old — matches the behaviour of `SessionManager.cleanupExpiredSessions`, which also compares against `metadata.updated`.
+- **Count filter is per-project.** After (optional) age filtering, sessions are grouped by `ScannedSession.project` and sorted by `updatedAt DESC`; entries beyond the first `maxCountPerProject` are marked for deletion. Combined with the age filter, a session is a deletion candidate when it fails **either** check — the two policies are unioned, not intersected.
+- **Exclude patterns short-circuit deletion.** `excludePatterns: string[]` is walked with `minimatch` against both `session.id` **and** (when present) `session.metadata.title`. A match on either moves the session from `toDelete` into `toSkip`. Empty pattern strings are ignored.
+- **Best-effort per-file I/O.** Per-file `fs.unlink` failures are captured in `result.errors` and the sweep continues to the next candidate. A directory-level failure (unreadable sessions dir with a code other than `ENOENT`) does throw so the caller can surface a clear "cannot access sessions directory" message. `ENOENT` on the directory returns an empty result — a fresh install has nothing to clean.
+- **Tolerant scanner.** `scanSessions` skips malformed JSON, missing metadata blocks, missing `metadata.id`, and unreadable files with a `logger.warn` / `logger.debug` entry. One corrupt transcript cannot block cleanup of the rest of the directory. `size` falls back to `0` when `fs.stat` fails; `createdAt` / `updatedAt` fall back to `mtimeMs` when the metadata timestamps are missing.
+- **`dryRun` reports would-be-deletions.** Even in dry-run mode, `result.deleted` and `result.bytesFreed` are populated so the operator sees exactly what a real run would remove. The CLI enumerates each candidate on stdout after the summary line so shell pipelines can capture the list.
+
+Complements the automatic path in three ways:
+
+| Concern            | `SessionManager.cleanupExpiredSessions`       | `applyRetentionPolicy` (via `alexi sessions-clean`) |
+| ------------------ | --------------------------------------------- | --------------------------------------------------- |
+| Policy shape       | age-only, `retention.maxAgeDays`              | age + per-project count + project filter + exclude  |
+| Preview            | not supported                                 | `dryRun: true` returns candidates + bytes-freed     |
+| Config source      | `~/.alexi/config.json`                        | CLI flags (each `sessions-clean` invocation)        |
+| Invocation         | scheduler (once per 24h) or `--cleanup` flag  | operator on demand                                  |
+| Safety guards      | active-run, recent-write, opt-in via `enabled`| exclude patterns, dry-run, project scope            |
+
+Neither path invokes the other — the scheduler continues to run its age-only sweep even when the operator uses `sessions-clean`, and `sessions-clean` does not touch the `last-retention-run` state file.
+
 ## Headless Exit and Session Drain
 
 Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.

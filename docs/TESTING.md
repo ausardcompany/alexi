@@ -3138,6 +3138,97 @@ afterEach(() => {
 
 The scheduler tests use dynamic `await import('../../src/core/retentionScheduler.js')` inside each case so the module reads the fresh `process.env.HOME` set in `beforeEach` — a top-level `import` would bind the state-file path at test-collection time and defeat the isolation.
 
+### Testing the Session Retention Engine
+
+`tests/core/sessionRetention.test.ts` (220 lines, 12 cases across three `describe` blocks) and `tests/core/sessionScanner.test.ts` (160 lines) pin the manual retention path used by `alexi sessions-clean`. The engine is intentionally split into a **pure decision phase** (`selectCandidates`) and a **disk-touching apply phase** (`applyRetentionPolicy`); both surfaces are exercised because a bug in the decision phase is silently absorbed by dry-run mode but destructive under a real sweep.
+
+**Fixture pattern.** Each case runs against a fresh `fs.mkdtemp` sessions directory. No `vi.mock` is required — the retention engine exposes a `sessionsDir` override so tests do not touch `~/.alexi/sessions/` or `process.env.HOME`:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import {
+  applyRetentionPolicy,
+  formatBytes,
+  selectCandidates,
+} from '../../src/core/sessionRetention.js';
+import { scanSessions } from '../../src/core/sessionScanner.js';
+import type { Session } from '../../src/core/sessionManager.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-retention-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function writeSession(
+  id: string,
+  overrides: Partial<Session['metadata']> = {},
+  mtimeMs?: number
+): string {
+  const now = Date.now();
+  const session: Session = {
+    metadata: {
+      id,
+      created: overrides.created ?? now,
+      updated: overrides.updated ?? now,
+      totalTokens: 0,
+      messageCount: 0,
+      ...overrides,
+    },
+    messages: [],
+  };
+  const filePath = path.join(tempDir, `${id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf-8');
+  if (mtimeMs !== undefined) {
+    fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  }
+  return filePath;
+}
+```
+
+**Contract points asserted by `selectCandidates`** (7 cases):
+
+- **Empty policy is a no-op.** `selectCandidates(scanned, {}, now)` returns `{ toDelete: [], toSkip: [] }` even when the input contains a 60-day-old session — the engine does not delete anything the caller did not explicitly ask for.
+- **Age filter targets `updatedAt`.** With `maxAgeDays: 30`, a 60-day-old session is queued for deletion while a 1-day-old session survives.
+- **Count filter is per-project.** Given three sessions in `/tmp/alpha` and one in `/tmp/beta`, `maxCountPerProject: 2` deletes only the oldest alpha session — beta's single session is untouched because it fits inside its own bucket's cap.
+- **Exclude by id.** `excludePatterns: ['important-*']` moves the matching session from `toDelete` into `toSkip` even when it fails the age check. The junk companion session is still deleted.
+- **Exclude by title.** Same short-circuit but matched against `metadata.title` — the pattern `Keep*` protects the session whose title starts with `Keep me`, deleting only the other.
+- **Project filter.** `project: 'alpha'` restricts the working set to the alpha bucket; sessions in `/tmp/beta` land in `toSkip` regardless of age.
+- **Union of age + count.** With both policies active (`maxAgeDays: 30, maxCountPerProject: 1`), a session is a candidate if it fails **either** check. The suite asserts on a sorted id list so the union is compared insensitively to internal ordering.
+
+**Contract points asserted by `applyRetentionPolicy`** (4 cases):
+
+- **Real deletion writes the filesystem.** `applyRetentionPolicy({ maxAgeDays: 30 }, { sessionsDir: tempDir, now })` reports `deleted: [oldPath]`, `dryRun: false`, `bytesFreed > 0`, and `fs.existsSync(oldPath) === false`.
+- **Dry-run leaves the filesystem intact.** With `dryRun: true` the same input reports the same `deleted` list but the file remains on disk. The test asserts on both the response shape AND the survival of the file so a regression that silently ignores `dryRun` fails.
+- **Empty policy is a no-op end-to-end.** A 365-day-old session survives `applyRetentionPolicy({}, ...)` — the engine does not fall through to a default `maxAgeDays`.
+- **Zod rejects invalid shapes.** `applyRetentionPolicy({ maxAgeDays: -5 }, ...)` rejects synchronously — the test uses `expect(...).rejects.toThrow()` with a `@ts-expect-error` above the invalid input so the compiler is on the same page as the runtime.
+
+**`formatBytes` contract** (3 cases): `0`, small byte counts (`<1024`), and non-finite / negative input render as `0 B` or `<n> B`; `1024`, `1024**2`, `1024**3` render as `1.0 KB`, `1.0 MB`, `1.0 GB`.
+
+**Scanner contract** (`tests/core/sessionScanner.test.ts`, ~10 cases):
+
+- Valid session files produce `ScannedSession` records with `project = basename(metadata.workdir)`.
+- Malformed JSON is skipped with a `logger.warn` — the sweep continues past the corrupt file.
+- Missing `created` / `updated` fields fall back to file `mtimeMs` so age math never operates on `undefined`.
+- Sessions without a `workdir` field land in `UNKNOWN_PROJECT` (`__unknown__`).
+- `groupSessionsByProject` returns per-project buckets in `Map` insertion order.
+
+Key patterns to reuse when extending the suite:
+
+1. **Use the `sessionsDir` / `now` injection points instead of stubbing `Date.now` or `process.env.HOME`.** The engine accepts both as arguments precisely so tests can be pure functions of their fixtures.
+2. **Assert on `.map((s) => s.id)`, not on the full `ScannedSession` object.** The record carries filesystem-dependent fields (`filePath`, `size`, `mtime`) that shift between hosts; comparing id lists keeps the assertion portable.
+3. **Sort ids when the assertion is order-insensitive.** The union case uses `.sort()` because the engine does not commit to an ordering for combined age + count expiry.
+4. **Do not mock `logger`.** The scanner's tolerance path (`logger.warn` on malformed JSON) is exercised for behaviour, not for its log output — a spy would couple the test to the log format.
+
 ### Testing subagent approval boundaries
 
 `tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.
