@@ -14,6 +14,7 @@ import {
   isAbortError,
   isStreamStalledError,
 } from '../core/streamingOrchestrator.js';
+import { isNetworkDisconnectedError } from '../core/streamWatchdog.js';
 import { classifyProviderError } from '../providers/format.js';
 import { isOrchestrationModel } from '../providers/sapOrchestration.js';
 import { SessionManager } from '../core/sessionManager.js';
@@ -162,6 +163,19 @@ export function handleStreamingError(err: unknown): void {
     // fetch rejecting with `code === 'ABORT_ERR'`). Log a user-friendly
     // message. Never `process.exit()` — the REPL owns re-prompting.
     console.log(c('yellow', '\n  Request cancelled\n'));
+    return;
+  }
+  if (isNetworkDisconnectedError(err)) {
+    // Stream-silence probe classified the stall as a network
+    // disconnect (issue #1836). Surface a distinct hint so the user
+    // knows to check connectivity rather than the model.
+    console.log();
+    console.log(
+      c(
+        'red',
+        `\n  [waiting for network] ${err.message}\n  Check your connection and retry the request.\n`
+      )
+    );
     return;
   }
   if (isStreamStalledError(err)) {

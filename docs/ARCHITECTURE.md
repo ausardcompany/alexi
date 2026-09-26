@@ -2451,6 +2451,217 @@ export function retryProviderCall<T>(
 ): Promise<T>;
 ```
 
+### Stream-Silence Connectivity Probe (issue #1836)
+
+`src/core/streamProbe.ts` + `src/core/streamWatchdog.ts` classify a
+silent provider stream as either a network disconnect or a genuine
+provider stall, so the TUI can render a distinct `[waiting for network]`
+inline error instead of the pre-#1836 generic `Stream stalled. No
+response for Ns.` message.
+
+The watchdog's idle-timeout timer historically fired a single
+`StreamStalledError`. That collapsed two very different failure modes
+into one message:
+
+- the model is thinking hard on a difficult tool call and legitimately
+  produced no chunk within the window;
+- the network cable was unplugged, a corporate proxy dropped the TCP
+  connection mid-stream, or the SAP AI Core endpoint became unreachable.
+
+The user sees the same error and cannot tell whether to wait, retry,
+switch models, or check connectivity. The stream-silence probe closes
+that gap by running a cheap connectivity check at the moment of stall.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller as streamChat
+    participant WD as StreamWatchdog<br/>(streamWatchdog.ts)
+    participant Timer as idle timer
+    participant Probe as probeStreamConnectivity<br/>(streamProbe.ts)
+    participant Endpoint as Provider endpoint
+
+    Caller->>WD: createStreamWatchdog(sourceFactory,<br/>{ probe: true, idleTimeoutMs })
+    WD->>Timer: armIdleTimer(idleTimeoutMs)
+    Note over WD,Timer: no chunk arrives<br/>within window
+    Timer->>WD: handleIdleTimeout(armedWindowMs)
+    alt probe configured
+        WD->>Probe: probeStreamConnectivity(probeOptions)
+        Probe->>Probe: resolveProviderBaseUrl()<br/>expand ${VAR} / $VAR
+        alt isLocalEndpoint(url)
+            Probe->>Endpoint: tcpConnect(host, port, 2000ms)
+        else remote
+            Probe->>Endpoint: checkConnectivity(url, 3000ms)
+        end
+        Endpoint-->>Probe: reachable / error
+        Probe-->>WD: ProbeResult
+        alt reachable === false
+            WD->>WD: controller.abort(<br/>new NetworkDisconnectedError(...))
+        else reachable === true
+            WD->>WD: controller.abort(<br/>new StreamStalledError(...))
+        end
+    else no probe
+        WD->>WD: controller.abort(<br/>new StreamStalledError(...))
+    end
+    WD-->>Caller: pending next() rejects
+    Caller->>Caller: handleStreamingError(err)
+    alt isNetworkDisconnectedError
+        Caller-->>Caller: print [waiting for network] hint
+    else isStreamStalledError
+        Caller-->>Caller: print retry-oriented stall hint
+    end
+```
+
+**Endpoint classification.** `isLocalEndpoint(url)` returns `true` for
+loopback (`127.0.0.0/8`, `::1`), RFC1918 private (`10.0.0.0/8`,
+`192.168.0.0/16`, `172.16.0.0/12`), link-local (`169.254.0.0/16`,
+`fe80::/10`), unique-local IPv6 (`fc00::/7`), and bare hostnames without
+a dot (typical corporate LAN pattern: `sap-ai-core`, `my-proxy`
+resolved via `/etc/hosts`, dnsmasq, or Docker DNS). Everything else is
+remote. Malformed URLs are treated as remote so the safer public HEAD
+probe is used instead of skipping the check entirely.
+
+**Probe selection.** Local endpoints get a TCP-connect probe with a
+2000 ms budget (`DEFAULT_LOCAL_PROBE_TIMEOUT_MS`). A hung local proxy
+must not compound the perceived stall, so the budget is deliberately
+short — two seconds is generous for a loopback or LAN handshake and
+matches the "quickly surface a disconnect" intent behind Kilocode
+#13523. Remote endpoints get the shared `checkConnectivity` HTTP HEAD
+probe with a 3000 ms budget (`DEFAULT_REMOTE_PROBE_TIMEOUT_MS`) — a
+shorter budget than `checkConnectivity`'s own 15 s startup default so a
+mid-stream stall does not stack up another 15 seconds of dead air
+before the TUI can react.
+
+**Base URL resolution** (`resolveProviderBaseUrl`) mirrors
+`SapOrchestrationProvider.resolveApiBaseUrl`'s order so the probe hits
+the same endpoint the failing stream is attached to:
+
+1. `SAP_PROXY_BASE_URL` env var (winning override).
+2. `serviceurls.AI_API_URL` inside `AICORE_SERVICE_KEY` JSON.
+3. `undefined` when neither is present — the probe reports `reachable:
+   false` with the message `"No provider base URL configured (...)"` and
+   the watchdog surfaces `NetworkDisconnectedError` so the operator
+   learns their env is unset.
+
+Both sources are passed through `expandEnvVars(input)`, which expands
+`${VAR}` and `$VAR` shell references. Unset variables expand to the
+empty string — a partial expansion degrades to a bad URL that the probe
+reports as unreachable, which is exactly the signal the watchdog wants.
+
+**Never-throws contract.** `probeStreamConnectivity` catches every
+error path internally (bad URL, DNS failure, TCP refused, timeout,
+`AICORE_SERVICE_KEY` JSON parse failure) and returns `{ reachable:
+false, error: <detail> }`. `tcpConnect` never rejects either — it
+resolves with `{ reachable: false, error }` on timeout, refused, or DNS
+failure. The watchdog can therefore call the probe from inside a
+`setTimeout` callback without leaking an unhandled rejection.
+
+**Watchdog composition.** `StreamWatchdogOptions` gains two fields:
+
+```typescript
+export interface StreamWatchdogOptions {
+  // ... existing fields ...
+  probe?: ((options?: StreamProbeOptions) => Promise<ProbeResult>) | boolean;
+  probeOptions?: StreamProbeOptions;
+}
+```
+
+- `probe: false` (or omitted): pre-#1836 behaviour. Idle timeout aborts
+  with `StreamStalledError`. Unit tests that construct a watchdog
+  directly are not affected by ambient env configuration.
+- `probe: true`: default env-derived probe (`probeStreamConnectivity`).
+  The streaming orchestrator opts in on every real chat stream.
+- `probe: (opts) => ...`: custom callable. Useful for tests/DI so the
+  suite drives the probe with a fake without touching the network.
+
+On idle timeout the watchdog runs `handleIdleTimeout(armedWindowMs)`:
+if a probe is configured AND its result is `reachable: false`, the
+watchdog aborts the source controller with `new
+NetworkDisconnectedError(result.error, { url, kind })`. Otherwise it
+aborts with `new StreamStalledError(armedWindowMs)`. Any exception
+thrown from the probe (defensively, since the probe itself is
+never-throws) is swallowed and treated as "probe inconclusive", falling
+back to the plain stall path — an over-eager probe must never mask a
+genuine stall.
+
+**Orchestrator wiring** (`src/core/streamingOrchestrator.ts:308+`):
+
+```typescript
+watchdog = createStreamWatchdog(
+  (effectiveSignal) =>
+    retryEmptyResponse(
+      () => provider.streamComplete(messages, { ...providerOpts, signal: effectiveSignal }),
+      { maxAttempts: emptyRetryMax }
+    ),
+  {
+    signal: options?.signal,
+    idleTimeoutMs: options?.streamIdleTimeoutMs ?? resolveDefaultStreamIdleTimeoutMs(),
+    toolExtensionMs: options?.streamToolExtensionMs ?? DEFAULT_STREAM_TOOL_EXTENSION_MS,
+    // Enable the stream-silence connectivity probe (#1836). On idle
+    // timeout the watchdog first probes the configured provider
+    // base URL; unreachable -> NetworkDisconnectedError so the TUI
+    // can render "[waiting for network]" instead of the generic
+    // stall message.
+    probe: true,
+  }
+);
+```
+
+`retryEmptyResponse` still wraps the raw provider stream, so the
+empty-response retry loop and the disconnect probe compose without
+duplicated work — the retry loop restarts the stream on an empty turn,
+and the watchdog rearms its idle timer on every restart.
+
+**Error surfacing.** Callers that already handled `StreamStalledError`
+now handle `NetworkDisconnectedError` first because the disconnect
+message is more actionable ("check your connection" vs "retry"):
+
+```typescript
+// src/cli/interactive.ts:159 - handleStreamingError
+if (isAbortError(err)) { /* ... */ return; }
+if (isNetworkDisconnectedError(err)) {
+  console.log(c('red',
+    `\n  [waiting for network] ${err.message}\n` +
+    `  Check your connection and retry the request.\n`));
+  return;
+}
+if (isStreamStalledError(err)) {
+  console.log(c('red',
+    `\n  ${err.message} You can retry the request or switch models with /model.\n`));
+  return;
+}
+```
+
+`src/cli/tui/hooks/useStreamChat.ts` mirrors the same branch order
+inside the TUI's streaming loop, calling `chat.setError('[waiting for
+network] ' + err.message)` so the user sees a distinct inline error
+instead of an infinite spinner. The `[waiting for network]` prefix
+matches the Kilocode #13523 upstream pattern for the same UX contract.
+
+**Interaction with existing retry layers.**
+
+- `retryEmptyResponse` (provider layer) does NOT retry on a
+  `NetworkDisconnectedError` — the error is thrown from the watchdog,
+  not from a completed empty turn, and the retry wrapper's contract is
+  to only retry genuinely empty turns.
+- `retryProviderCall` (turn layer) does NOT retry on a
+  `NetworkDisconnectedError`. The error is raised AFTER the stream
+  started producing chunks (or at least the watchdog armed), so the
+  streaming guard (`hasEmittedContent()`) short-circuits any turn-level
+  retry — a replayed request would produce duplicate output.
+- `ErrorBackoff` (provider layer) is not consulted because
+  `NetworkDisconnectedError` has no status code and does not match
+  `extractStatusCode`.
+- `classifyRouteError` (session-level route health) is NOT triggered.
+  Route auto-disable is reserved for permanent server-side failures
+  (401/403/404, `model_not_found`); a network disconnect is
+  operator-side and must not poison route health for the rest of the
+  session.
+
+The net effect: a disconnect surfaces the classified error exactly
+once, no expensive model is retried on the same broken input, and the
+route stays healthy for when the network comes back.
+
 ### MCP connection retry policy
 
 MCP has TWO independent timeout budgets and a separate retry policy on top:

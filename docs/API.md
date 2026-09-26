@@ -1184,6 +1184,7 @@ Review the changes in @$1 and summarize.
 | `ALEXI_OTEL_SERVICE_NAME` | `alexi` | `service.name` resource attribute on every emitted span. |
 | `ALEXI_TRACE_SAMPLE_PERCENT` | `0` | Session-level sampling percentage `[0, 100]`. Deterministic per `sessionId` via FNV-1a. |
 | `ALEXI_TRACE_RECORD_CONTENT` | -- | When exactly `true`, attach the (truncated, 8 KiB max) assistant response as `gen_ai.response.content`. Any other value keeps content off. |
+| `STREAM_STALL_TIMEOUT_MS` | `30000` | Idle-timeout window (ms) before the streaming watchdog aborts a silent provider stream. Read on every stream via `resolveDefaultStreamIdleTimeoutMs()` so a mid-session change takes effect on the next request. Values `<= 0` or non-numeric fall back to the default. See [Stream Watchdog and Connectivity Probe API](#stream-watchdog-and-connectivity-probe-api). |
 
 ### AICORE_SERVICE_KEY Format
 
@@ -2926,6 +2927,138 @@ try {
   }
 }
 ```
+
+## Stream Watchdog and Connectivity Probe API
+
+Introduced in the 2026-09 sync (issue #1836). Full flow: [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836).
+
+### `NetworkDisconnectedError`
+
+Exported from `src/core/streamProbe.ts` and re-exported from `src/core/streamWatchdog.ts` so consumers can import a single symbol.
+
+```typescript
+export class NetworkDisconnectedError extends Error {
+  readonly isNetworkDisconnected: true;      // Discriminator for the type guard
+  readonly code: 'NETWORK_DISCONNECTED';     // Machine-readable code, stable across message revisions
+  readonly url?: string;                     // Endpoint URL that failed the probe (post env-var expansion)
+  readonly kind?: 'local' | 'remote';        // Probe kind that produced the failure
+  constructor(detail: string, meta?: { url?: string; kind?: 'local' | 'remote' });
+}
+
+export function isNetworkDisconnectedError(err: unknown): err is NetworkDisconnectedError;
+```
+
+The type guard also matches duck-typed errors carrying the `isNetworkDisconnected: true` marker — defensive against cross-module-boundary `instanceof` failures, same pattern as `isStreamStalledError`.
+
+`err.message` is always `` `Network disconnected: ${detail}` ``.
+
+### `ProbeResult` / `StreamProbeOptions`
+
+```typescript
+export interface ProbeResult {
+  reachable: boolean;
+  error?: string;                // Set when reachable === false
+  kind?: 'local' | 'remote';     // Classification used
+  url?: string;                  // URL actually probed (post env-var expansion)
+}
+
+export interface StreamProbeOptions {
+  baseUrl?: string;              // Override; else resolveProviderBaseUrl()
+  localTimeoutMs?: number;       // TCP-connect budget (default 2000)
+  remoteTimeoutMs?: number;      // HTTP HEAD budget (default 3000)
+  remoteProbe?: (url: string, timeoutMs?: number) => Promise<ConnectivityResult>;
+  localProbe?: (host: string, port: number, timeoutMs: number) => Promise<ProbeResult>;
+}
+```
+
+`remoteProbe` and `localProbe` are DI seams — production callers omit them and inherit `checkConnectivity` / `tcpConnect`.
+
+### `probeStreamConnectivity(options?)`
+
+```typescript
+export async function probeStreamConnectivity(
+  options?: StreamProbeOptions
+): Promise<ProbeResult>;
+```
+
+Contract:
+
+- Returns `{ reachable: true }` when the endpoint responds (TCP for local, HTTP HEAD for remote).
+- Returns `{ reachable: false, error }` when the endpoint is unreachable OR the base URL cannot be resolved.
+- Never throws. Never rejects. The consumer (the watchdog) uses the boolean to decide whether to surface a `NetworkDisconnectedError` (probe failed → network is down) or the usual `StreamStalledError` (probe passed → server is slow / stuck).
+
+### `resolveProviderBaseUrl()` / `expandEnvVars(input)` / `isLocalEndpoint(url)`
+
+```typescript
+export function resolveProviderBaseUrl(): string | undefined;
+export function expandEnvVars(input: string): string;
+export function isLocalEndpoint(url: string): boolean;
+```
+
+- `resolveProviderBaseUrl` mirrors `SapOrchestrationProvider.resolveApiBaseUrl`: `SAP_PROXY_BASE_URL` wins, then `serviceurls.AI_API_URL` inside `AICORE_SERVICE_KEY`, else `undefined`. Both sources pass through `expandEnvVars` so `${VAR}` and `$VAR` shell-style references resolve at probe time.
+- `isLocalEndpoint(url)` returns `true` for loopback, RFC1918, link-local, unique-local IPv6, and bare hostnames without a dot. Everything else is remote. Malformed URLs return `false` (safer remote HEAD probe).
+
+### `tcpConnect(host, port, timeoutMs?)`
+
+```typescript
+export function tcpConnect(
+  host: string,
+  port: number,
+  timeoutMs?: number
+): Promise<ProbeResult>;
+```
+
+TCP handshake with an explicit timeout. Resolves to `{ reachable: true, kind: 'local' }` on connect; resolves to `{ reachable: false, error, kind: 'local' }` on timeout, refused, or DNS failure. Never rejects. The timer is `.unref()`ed so the probe never delays process exit.
+
+### Watchdog options
+
+```typescript
+export interface StreamWatchdogOptions {
+  idleTimeoutMs?: number;         // Default: DEFAULT_STREAM_IDLE_TIMEOUT_MS (30_000)
+  toolExtensionMs?: number;       // Default: DEFAULT_STREAM_TOOL_EXTENSION_MS (600_000)
+  longRunningToolNames?: ReadonlySet<string>;
+  signal?: AbortSignal;
+  probe?: ((options?: StreamProbeOptions) => Promise<ProbeResult>) | boolean;
+  probeOptions?: StreamProbeOptions;
+}
+```
+
+Values for `probe`:
+
+- Omitted / `false` — pre-#1836 behaviour. Idle timeout aborts with `StreamStalledError`.
+- `true` — enable the default env-derived probe (`probeStreamConnectivity`). The streaming orchestrator opts in on every real chat stream.
+- A callable — inject a custom probe (tests / DI).
+
+`probeOptions` is forwarded to the default probe when `probe === true`; ignored when `probe` is a custom callable or `false`.
+
+### Consumer example
+
+```typescript
+import { isNetworkDisconnectedError, isStreamStalledError } from '../core/streamWatchdog.js';
+import { isAbortError } from '../core/streamingOrchestrator.js';
+
+try {
+  for await (const chunk of streamChat(messages, { signal })) {
+    render(chunk);
+  }
+} catch (err) {
+  if (isAbortError(err)) {
+    return; // User pressed Ctrl+C; caller re-prompts.
+  }
+  if (isNetworkDisconnectedError(err)) {
+    // Check `err.url` / `err.kind` for the classified endpoint.
+    console.error(`[waiting for network] ${err.message}`);
+    return;
+  }
+  if (isStreamStalledError(err)) {
+    console.error(`${err.message} You can retry or switch models.`);
+    return;
+  }
+  throw err;
+}
+```
+
+The branch order matters: check `isNetworkDisconnectedError` BEFORE `isStreamStalledError`. A disconnect never displays the retry-oriented stall message; the two are mutually exclusive.
 
 ## Logging
 
