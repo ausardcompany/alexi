@@ -375,6 +375,14 @@ Non-command files should NOT copy this pattern. Dynamic imports have a real ergo
 
 15. **Tool Registry Resolution**: Register dynamic tool resolvers via `EnhancedToolRegistry.registerPromptResolver()` for tools that need session/agent context to resolve.
 
+16. **Additive schema evolution for persisted state.** Anything Alexi writes to `~/.alexi/` (sessions, config, retention state, wakeups) is potentially read back by an older CLI build during a downgrade or a stale-worktree scenario. New fields on persisted interfaces (`SessionMetadata`, `Message.tokens`, `WakeupRecord`, ...) MUST be `?:` optional and MUST NOT be assumed present by any read path. Pair every new field with these three rules:
+
+    1. **Skip the write when the value is defaulted.** `JSON.stringify` drops `undefined` properties, so a session that never populates the field serialises byte-identical to the pre-field shape. Legacy readers cannot observe the addition. See `SessionMetadata.totalReasoningTokens` in `src/core/sessionManager.ts:80-91` for the reference pattern — the writer initialises the field lazily (`if (reasoning > 0) { metadata.totalReasoningTokens = (metadata.totalReasoningTokens ?? 0) + reasoning }`) instead of unconditionally setting `0`.
+    2. **Treat "zero" and "absent" differently in the writer.** A field that flips into the persisted JSON on every turn — even when the payload is `0` — leaks the observability surface into every legacy session on disk. The reasoning-token guard (`if (reasoning > 0)`) is the pattern here; the retention `lastRun` state file uses the same discipline.
+    3. **Pin the legacy-load path with a test.** Write a hand-crafted legacy JSON file to the temp dir, load it through a fresh `SessionManager`, and assert that the missing field reads as `undefined` and that subsequent writes initialise it correctly without corrupting the pre-existing totals. `tests/core/sessionManager-reasoning-tokens.test.ts` has the reference case ("remains backwards compatible with sessions saved before the field existed"): it writes a session with no `totalReasoningTokens` and no `reasoning` subfield, appends a reasoning-carrying turn, and asserts the pre-existing `totalTokens` was not corrupted (`42 + 8 + 12 = 62`).
+
+    Do NOT introduce a schema version field to solve this — every downgrade path that has to look at the version to decide whether to read a field is a downgrade path that will silently regress when someone forgets. Additive-optional plus a legacy-load test is cheaper and more durable.
+
 ### ESLint Rules
 
 Key rules enforced:
