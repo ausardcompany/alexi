@@ -521,6 +521,71 @@ const { messages: compactedMessages } = await checkAndCompact(
 
 The `overflowTokens` parameter seeds the target summary length so the compacted context fits within limits.
 
+### Max-Tokens Recovery (`maxTokensRecovery`)
+
+Complementary to compaction (issue #1850, commit `816bc24a`). Where compaction reduces the *prompt* by summarising older messages, `src/core/maxTokensRecovery.ts` reduces the *response budget* (`maxTokens`) so a retry fits inside the model's context window. Both the non-streaming `sendChat` orchestrator (`src/core/orchestrator.ts:225-256`) and the streaming `streamChat` orchestrator (`src/core/streamingOrchestrator.ts:474-519`) integrate the recovery path, one-shot per invocation.
+
+Handled failure modes:
+
+- `HTTP 413 "Request Entity Too Large"` — structural, always qualifies.
+- `HTTP 400` with `max_tokens_exceeded` / `context_length_exceeded` markers in the response body (a bare 400 could be any validation error and is deliberately NOT auto-retried).
+- Provider phrasings of the form `"maximum context length is X tokens"`, `"model supports up to X tokens"`, `"context window: X"`, `"context_window: X"`, `"limit of X tokens"`, and `"X tokens allowed"` in `err.message`, `err.responseBody`, `err.body`, or up to two levels of `err.cause`.
+
+Free-form phrases like `"prompt too long"` are deliberately excluded so they continue routing through compaction (`isContextOverflowError` in `src/core/contextOverflow.ts`) rather than through `maxTokens` reduction.
+
+#### Recovery formula
+
+The recovery plan is a pure function of the classified error, the current model id, the currently active `maxTokens`, and the dispatched messages. `planMaxTokensRecovery` composes four steps:
+
+1. **Extract or fall back on the context window.** `extractContextWindow(err)` runs seven regex patterns ordered from most-specific to least-specific. Miss → `getModelContextWindow(modelId)` returns a curated per-family fallback (Anthropic Claude 200K, GPT-4/4o/o-series 128K, Gemini 1.5+/2 1M, DeepSeek v4 128K, Llama 3.1+ 128K, Mistral Large 2 128K; conservative legacy fallbacks for older Gemini/DeepSeek/Llama/Mistral). Unknown model ids fall through to `DEFAULT_CONTEXT_WINDOW_TOKENS = 32_000`.
+2. **Estimate the prompt cost.** `estimateMessagesTokens` (from `src/core/compaction.ts`) applies the chars/4 heuristic — same estimate that drives compaction, so the two systems agree on the current prompt size.
+3. **Compute the safety margin.** `max(DEFAULT_SAFETY_MARGIN_TOKENS = 1_000, floor(contextWindow * 0.1))` — the larger of a flat 1K and 10% of the window. Guards against tokenizer drift between our chars/4 estimate and the provider's real BPE count.
+4. **Solve for a safe `maxTokens`.** `safeMaxTokens = max(MIN_SAFE_MAX_TOKENS, min(originalMaxTokens, contextWindow - estimatedPromptTokens - safetyMargin))`. `MIN_SAFE_MAX_TOKENS = 100` is the floor — a retry that produces zero output tokens is worse than a hard error because the user has no feedback and the caller cannot make progress. When the prompt already fills the entire window the formula degenerates to `MIN_SAFE_MAX_TOKENS`; `plan.reducedFromOriginal === false` in that case and the caller MUST surface a terminal error rather than issue the retry.
+
+#### Decision flow
+
+```mermaid
+flowchart TB
+    Err([Provider error caught]) --> IsMax{isMaxTokensError?}
+    IsMax -- no --> Fallthrough[Route to compaction /<br/>rate-limit / permanent<br/>error paths]
+    IsMax -- yes --> Retried{maxTokensRetried<br/>already?}
+    Retried -- yes --> Terminal[Terminal:<br/>rethrow error]
+    Retried -- no --> Extract[extractContextWindow<br/>from error text]
+    Extract --> Fallback{Extracted?}
+    Fallback -- no --> ModelWin[getModelContextWindow<br/>per-family fallback]
+    Fallback -- yes --> Plan[planMaxTokensRecovery]
+    ModelWin --> Plan
+    Plan --> Reduced{reducedFromOriginal?}
+    Reduced -- no --> Terminal
+    Reduced -- yes --> Confirm[confirmMaxTokensRecovery]
+    Confirm --> Headless{RecoveryPromptFn<br/>registered?}
+    Headless -- no --> Accept[Auto-accept<br/>headless mode]
+    Headless -- yes --> Prompt[Invoke callback]
+    Prompt --> Decision{Callback<br/>returned true?}
+    Decision -- no --> Terminal
+    Decision -- yes --> Accept
+    Accept --> Retry[Set activeMaxTokens = plan.safeMaxTokens<br/>maxTokensRetried = true<br/>logger.info breadcrumb]
+    Retry --> Dispatch([Re-dispatch provider call])
+```
+
+#### Interactive vs headless behaviour
+
+`confirmMaxTokensRecovery(plan)` gates the retry:
+
+- **Headless / agent mode** (no `RecoveryPromptFn` registered): auto-accept. Autonomous callers — agent workflows, CI runs, plain CLI — never block on a missing UI. Blocking would defeat the whole point of graceful degradation.
+- **Interactive TUI mode**: the TUI registers a callback at startup via `setRecoveryPrompt(fn)` and clears it (`setRecoveryPrompt(null)`) at teardown so the module can round-trip between interactive and headless mode within a single process. The callback receives the full `MaxTokensRecoveryPlan` and returns `true` to accept the retry or `false` to decline (which surfaces a terminal error). A callback that itself throws is treated as a decline (never wedges recovery into a retry loop).
+
+#### Interaction with compaction (`streamingOrchestrator.ts`)
+
+Both recovery paths are independent one-shot state on a single `streamChat()` invocation (`overflowRetried` and `maxTokensRetried` in `src/core/streamingOrchestrator.ts:205-211`). This matters because the two are semantically distinct:
+
+- `tryOverflowRecovery` runs when `classifyProviderError(err) === 'context_overflow'` — reduces the *prompt* via `sessionManager.compact(...)`.
+- `tryMaxTokensRecovery` runs when `isMaxTokensError(err)` — reduces the *response budget* via `computeSafeMaxTokens(...)`.
+
+A single provider error may trip only one of these gates on a given call. If reducing `maxTokens` still hits a max-tokens error on the retry, the second failure is terminal (retries against the same broken prompt just waste budget); the operator must switch to a larger-window model, shorten the message, or resume in a fresh session.
+
+The `logger.info` breadcrumb (`max_tokens exceeded; retrying with maxTokens=<n> (context window=<w>, prompt~<p>)`) fires before every retry so operators running `LOG_LEVEL=debug` can grep the exact plan out of logs, and the streaming orchestrator additionally emits a visible `[status] max_tokens exceeded, retrying...` marker into `fullText` so the CLI/TUI surfaces the recovery inline with the stream.
+
 ### Environment Details Fence
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.
