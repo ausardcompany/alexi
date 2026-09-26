@@ -49,7 +49,9 @@ describe('importLegacyDrizzleJournal', () => {
   it('uses the `name` column when it is present', async () => {
     const bridge = new FakeBridge(
       new Set(['__drizzle_migrations']),
-      new Map([['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]]]),
+      new Map([
+        ['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]],
+      ]),
       [
         { name: '20260828074139_kilocode_board', created_at: 1_700_000_000_000 },
         { name: '20260907102000_model_usage_index', created_at: 1_700_000_001_000 },

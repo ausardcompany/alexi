@@ -16,9 +16,7 @@ describe('openUrl', () => {
   it('rejects dangerous schemes', async () => {
     await expect(openUrl('file:///etc/hosts')).rejects.toThrow(/Only http and https links/);
     await expect(openUrl('javascript:alert(1)')).rejects.toThrow(/Only http and https links/);
-    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(
-      /Only http and https links/
-    );
+    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
     await expect(openUrl('data:text/html,<script>alert(1)</script>')).rejects.toThrow(
       /Only http and https links/
     );
@@ -29,8 +27,6 @@ describe('openUrl', () => {
     await expect(openUrl('\\\\server\\share\\file.html')).rejects.toThrow(
       /Only http and https links/
     );
-    await expect(openUrl('//server/share/file.html')).rejects.toThrow(
-      /Only http and https links/
-    );
+    await expect(openUrl('//server/share/file.html')).rejects.toThrow(/Only http and https links/);
   });
 });
