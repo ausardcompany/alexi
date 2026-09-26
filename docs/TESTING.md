@@ -4600,7 +4600,7 @@ contributors do not re-introduce them by hand:
    the line fits within the 100-column `printWidth`.** Prettier will reflow
    multi-line imports and multi-line chained expressions to a single line
    whenever they fit; hand-authored multi-line breaks that could fit on one line
-   are removed by the auto-fix. Two canonical worked examples:
+   are removed by the auto-fix. Three canonical worked examples:
 
    ```typescript
    // tests/providers/reasoning-variants.test.ts:9
@@ -4608,6 +4608,11 @@ contributors do not re-introduce them by hand:
 
    // tests/session/retry.test.ts:56
    await expect(withRetry(fn, () => true, { maxAttempts: 3, baseMs: 1 })).rejects.toBe(err);
+
+   // src/core/open.test.ts:19 (canonical form after the 2026-09-26 auto-fix
+   // pass in commit 8ea08827 — the previous three-line break fit within 100
+   // columns once the first argument sat at 98 columns)
+   await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
    ```
 
    Only break these onto multiple lines when the resulting single line would
@@ -4751,6 +4756,40 @@ contributors do not re-introduce them by hand:
    **Session Model Preferences**). Diff statistics for that pass:
    `2 files changed, 7 insertions(+), 4 deletions(-)`. Running
    `npm run format` before committing avoids the `style(ci)` follow-up.
+
+7. **Break `new Map([[key, [array-literal]]])` fixtures onto multiple lines
+   when the single-line form crosses `printWidth: 100`, one array element per
+   line.** Prettier's reflow policy for a `Map` constructor whose entries
+   contain nested array literals mirrors its policy for object literals: keep
+   the whole call on one line while it fits under 100 columns; the moment it
+   overflows, break inside the outer `[[...]]` array with one entry-tuple per
+   line and let the inner array literal wrap independently. The canonical
+   worked example from the 2026-09-26 auto-fix pass in commit `8ea08827` is
+   `src/core/database/migration.legacy-journal.test.ts:52`, which feeds a
+   single `[table, columns]` entry into the `FakeBridge` `tableColumns()`
+   mock for the "uses the `name` column when it is present" case:
+
+   ```typescript
+   // Anti-pattern — 103-column single-line form (overflowed printWidth: 100)
+   new Map([['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]]]),
+
+   // Canonical form after auto-fix — the outer array wraps, the inner
+   // column-info array stays on one line because it fits under 100 columns
+   new Map([
+     ['__drizzle_migrations', [{ name: 'id' }, { name: 'name' }, { name: 'created_at' }]],
+   ]),
+   ```
+
+   The exported `LegacySqliteBridge`, `Migration`, and `SqliteColumnInfo`
+   types re-imported from `src/core/database/migration.js` are unchanged, and
+   the two-migration ordered expectation on `bridge.recorded`
+   (`['20260828074139_kilocode_board', '20260907102000_model_usage_index']`)
+   still fires against `importLegacyDrizzleJournal` with byte-identical
+   inputs. Only reach for the multi-line form when the resulting single line
+   would exceed 100 columns; a hand-authored multi-line `Map` fixture that
+   already fits on one line will be re-collapsed by the next `prettier
+   --write` pass. Running `npm run format` before committing avoids the
+   `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up.
 
 ### Registry-contract pinning tests
 
