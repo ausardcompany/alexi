@@ -6,12 +6,14 @@ import { useDialog } from '../context/DialogContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { Spinner } from '../components/Spinner.js';
 import {
+  getCatalogState,
   getCatalogStatus,
   getCatalogEntries,
   subscribeCatalog,
   type CatalogStatus,
   type CatalogEntry,
 } from '../../../providers/modelCatalog.js';
+import { hintForErrorMessage } from '../../../providers/modelFetchErrors.js';
 import { ORCHESTRATION_MODELS } from '../../../providers/sapOrchestration.js';
 
 export interface ModelOption {
@@ -77,16 +79,23 @@ function buildGroupsFromStatic(): ModelGroup[] {
  * Status badge shown at the top of the picker.
  * idle/loading → spinner + "Fetching live models…"
  * ready        → "● N live"  (green dot + count)
- * error        → "⚠ offline (static list)"
+ * error        → "⚠ Model list unavailable: <classified reason>"
+ *                followed by an actionable hint on a second line
+ *                (issue #1851 — surface why the fetch failed, not just
+ *                that it failed).
  */
 function CatalogBadge({
   status,
   liveCount,
   totalCount,
+  errorMessage,
+  errorHint,
 }: {
   status: CatalogStatus;
   liveCount: number;
   totalCount: number;
+  errorMessage?: string;
+  errorHint?: string;
 }): React.JSX.Element {
   const {
     theme: { colors },
@@ -102,10 +111,17 @@ function CatalogBadge({
   }
 
   if (status === 'error') {
+    // Show the classified reason on line 1 and the actionable hint on
+    // line 2. Falls back to the pre-1851 generic message when no reason
+    // was captured (older code paths / test seams may leave it empty).
+    const reason = errorMessage && errorMessage.length > 0 ? errorMessage : 'AI Core unreachable';
     return (
-      <Text color={colors.warning}>
-        ⚠ AI Core unreachable — showing static catalog ({totalCount} models)
-      </Text>
+      <Box flexDirection="column">
+        <Text color={colors.warning}>
+          {`⚠ Model list unavailable: ${reason} (showing static catalog · ${totalCount} models)`}
+        </Text>
+        {errorHint && <Text color={colors.dimText}>{`  → ${errorHint}`}</Text>}
+      </Box>
     );
   }
 
@@ -120,10 +136,7 @@ function CatalogBadge({
   );
 }
 
-export function ModelPicker({
-  currentModel,
-  modelGroups,
-}: ModelPickerProps): React.JSX.Element {
+export function ModelPicker({ currentModel, modelGroups }: ModelPickerProps): React.JSX.Element {
   const dialog = useDialog();
   const {
     theme: { colors },
@@ -140,6 +153,9 @@ export function ModelPicker({
       ? buildGroupsFromEntries(getCatalogEntries())
       : buildGroupsFromStatic();
   });
+  const [catalogErrorMessage, setCatalogErrorMessage] = React.useState<string | undefined>(
+    () => getCatalogState().errorMessage
+  );
 
   React.useEffect(() => {
     if (propGroupsProvided) return; // caller supplied groups; don't listen
@@ -149,9 +165,15 @@ export function ModelPicker({
       setCatalogGroups(
         status === 'ready' ? buildGroupsFromEntries(getCatalogEntries()) : buildGroupsFromStatic()
       );
+      setCatalogErrorMessage(getCatalogState().errorMessage);
     });
     return unsub;
   }, [propGroupsProvided]);
+
+  const catalogErrorHint = React.useMemo(
+    () => hintForErrorMessage(catalogErrorMessage),
+    [catalogErrorMessage]
+  );
 
   useInput((_input, key) => {
     if (key.escape) dialog.cancel();
@@ -215,7 +237,13 @@ export function ModelPicker({
 
       {/* Catalog status badge (only when using the live catalog) */}
       {!propGroupsProvided && (
-        <CatalogBadge status={catalogStatus} liveCount={liveCount} totalCount={totalCount} />
+        <CatalogBadge
+          status={catalogStatus}
+          liveCount={liveCount}
+          totalCount={totalCount}
+          errorMessage={catalogErrorMessage}
+          errorHint={catalogErrorHint}
+        />
       )}
 
       {/* Divider */}
