@@ -21,6 +21,7 @@ import {
   type SessionSearchResult,
 } from '../session/search.js';
 import { getConfigSessionRetention } from '../config/userConfig.js';
+import { onWorkdirChange } from '../config/projectCache.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -239,6 +240,7 @@ export class SessionManager {
     const title = firstUser
       ? firstUser.content.slice(0, 50) + (firstUser.content.length > 50 ? '...' : '')
       : undefined;
+    const workdir = process.cwd();
     const session: Session = {
       metadata: {
         id: randomUUID(),
@@ -248,7 +250,7 @@ export class SessionManager {
         totalTokens,
         ...(seededReasoningTokens > 0 ? { totalReasoningTokens: seededReasoningTokens } : {}),
         messageCount: initialMessages.length,
-        workdir: process.cwd(),
+        workdir,
         parentSessionId,
         title,
       },
@@ -256,6 +258,17 @@ export class SessionManager {
     };
 
     this.activeSession = session;
+    // Issue #1848: mark the session's workdir as the current project
+    // scope so any subsequent workdir switch (e.g. resuming a session
+    // from another project) purges the previous project's cached
+    // rules / routing / MCP / agents / skills / hooks. Best-effort:
+    // the tracker swallows unknown-path errors internally.
+    try {
+      onWorkdirChange(workdir);
+    } catch {
+      // Non-fatal — cache-scoping is a performance optimisation, not a
+      // correctness prerequisite for session creation.
+    }
     // Persist immediately. When `initialMessages` is provided this is what
     // guarantees seeded history is durable across hub restarts (issue
     // #1330). For empty sessions this preserves the historical
@@ -589,6 +602,18 @@ export class SessionManager {
       const session = JSON.parse(content) as Session;
 
       this.activeSession = session;
+      // Issue #1848: a resumed session may have been created in a
+      // different worktree than the current process; treat that as a
+      // workdir transition so the previous project's cached config is
+      // purged before the resumed session starts issuing routing / MCP
+      // / rules lookups. Legacy sessions without a recorded workdir
+      // fall through to `process.cwd()`, matching pre-#1848 behaviour.
+      try {
+        const targetWorkdir = session.metadata.workdir ?? process.cwd();
+        onWorkdirChange(targetWorkdir);
+      } catch {
+        // Non-fatal — cache-scoping is a performance optimisation.
+      }
       return session;
     } catch (error) {
       console.error(`Failed to load session ${sessionId}:`, error);

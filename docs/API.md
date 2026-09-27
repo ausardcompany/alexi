@@ -1383,6 +1383,22 @@ interface Session {
    */
   totalReasoningTokens?: number;
   messageCount: number;
+  /**
+   * Working directory where the session was created (captured from
+   * `process.cwd()` at `createSession` time). Optional because legacy
+   * sessions written before this field was introduced have no recorded
+   * workdir. Consumed by `SessionManager.loadSession` to announce a
+   * workdir transition to the project-scoped config cache when a session
+   * is resumed from a different worktree (issue #1848 — see
+   * [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848)).
+   */
+  workdir?: string;
+  /**
+   * ID of the parent session that spawned this one as a subagent. Absent
+   * for top-level user sessions and for legacy sessions. Used by
+   * `getSessionParentChain` to compute the current subagent nesting depth.
+   */
+  parentSessionId?: string;
   messages: Message[];
 }
 
@@ -1420,6 +1436,8 @@ interface Message {
 ```
 
 **Reasoning-token accumulation contract.** `SessionManager.addMessage(role, content, tokens)` folds `tokens.input`, `tokens.output`, and `tokens.reasoning` into `metadata.totalTokens` in a single pass. The provider layer has already subtracted `reasoning` out of `completion_tokens`, so no adjustment is required here. When `reasoning > 0`, `metadata.totalReasoningTokens` is initialised lazily and incremented; when `reasoning` is missing or `0`, the field stays `undefined` so the on-disk JSON matches the pre-field shape byte-for-byte. `createSession({ initialMessages })` performs the same fold across every seeded message. See `tests/core/sessionManager-reasoning-tokens.test.ts` for the pinned contract.
+
+**Session workdir contract (issue #1848).** `SessionManager.createSession` captures `process.cwd()` once into `metadata.workdir` and announces it to the project-scoped config cache via `onWorkdirChange(workdir)`. `SessionManager.loadSession` reads the persisted `metadata.workdir` from the on-disk transcript and announces THAT value (not the ambient `process.cwd()`) so a fresh manager resuming a cross-worktree session fires the workdir transition against the session's original project. Legacy transcripts without the field fall through to `process.cwd()`, matching pre-#1848 behaviour. Both call sites swallow tracker errors — cache-scoping is a performance optimisation, not a correctness prerequisite for a session boundary. See `tests/core/sessionManager-workdir-cache.test.ts` for the pinned contract and [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848) for the runtime sequence.
 
 #### SessionRetentionPolicy
 
