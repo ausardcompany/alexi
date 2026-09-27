@@ -269,6 +269,28 @@ export function registerModelsCommand(program: Command): void {
             ? e.message
             : String(e);
         console.error(c('red', `\n  Error: ${message}\n`));
+
+        // Print the actionable hint on stderr as a second line so
+        // operators see WHAT to fix, not just what failed (issue
+        // #1851). Best-effort: never fail the CLI just because the
+        // hint helper is missing.
+        try {
+          const { formatCatalogErrorHint, hintForErrorMessage } =
+            await import('../../providers/modelFetchErrors.js');
+          const hint = isModelFetchError
+            ? formatCatalogErrorHint({
+                statusCode: (e as { statusCode?: number }).statusCode,
+                code: (e as { code?: string }).code,
+                reason: (e as { reason?: string }).reason ?? message,
+              })
+            : hintForErrorMessage(message);
+          if (hint) {
+            console.error(c('yellow', `  Hint: ${hint}\n`));
+          }
+        } catch {
+          // Import failure is not fatal — the error message is already printed.
+        }
+
         process.exit(1);
       }
     });

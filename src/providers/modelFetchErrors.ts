@@ -385,3 +385,121 @@ export async function fetchWithRetry<T>(
     lastError
   );
 }
+
+/**
+ * Turn a classified fetch error into a short, actionable one-line hint
+ * suitable for display next to the reason in the TUI model picker and
+ * `alexi models` CLI output (issue #1851).
+ *
+ * Callers already render `classification.reason` (which reads like
+ * "unauthorized (401) — check AICORE_SERVICE_KEY / credentials"); this
+ * helper produces a companion sentence that tells the operator WHAT to
+ * do next, e.g. "Re-check AICORE_SERVICE_KEY and re-run `alexi models`."
+ *
+ * The mapping is intentionally small and deterministic:
+ *
+ *   - `401`, `403`              → auth: re-check `AICORE_SERVICE_KEY`
+ *   - `404`                     → wrong URL / resource group; can also
+ *                                  mean the provider does not expose a
+ *                                  model list — suggest passing
+ *                                  `--model <id>` directly
+ *   - `400`, `422`              → payload / config problem
+ *   - `429`                     → rate-limited, retried automatically
+ *   - `5xx`                     → upstream outage, retried automatically
+ *   - `ECONNRESET`/`ETIMEDOUT`/
+ *     `ENOTFOUND`/network msg   → check network / proxy / VPN
+ *   - `ENOENT`/`EACCES`         → local file / permission issue
+ *   - anything else             → generic "check credentials / logs"
+ *
+ * Returns `undefined` when no meaningful hint can be produced so
+ * consumers can render the reason alone without a trailing empty line.
+ */
+export function formatCatalogErrorHint(
+  classification: Pick<FetchErrorClass, 'statusCode' | 'code' | 'reason'>
+): string | undefined {
+  const { statusCode, code, reason } = classification;
+
+  if (statusCode === 401 || statusCode === 403) {
+    return 'Re-check AICORE_SERVICE_KEY and token expiry, then re-run `alexi models`.';
+  }
+  if (statusCode === 404) {
+    return 'Verify AI_API_URL / resource group, or pass `-m <model-id>` to skip discovery.';
+  }
+  if (statusCode === 400 || statusCode === 422) {
+    return 'The request payload was rejected — check `AICORE_RESOURCE_GROUP` and provider config.';
+  }
+  if (statusCode === 429) {
+    return 'Rate-limited by SAP AI Core — retry in a few seconds.';
+  }
+  if (typeof statusCode === 'number' && statusCode >= 500 && statusCode < 600) {
+    return 'SAP AI Core is degraded — retrying with backoff. If it persists, check the status page.';
+  }
+
+  const transientNetworkCodes = new Set([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'EPIPE',
+    'EAGAIN',
+    'EBUSY',
+    'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT',
+  ]);
+  if (code && transientNetworkCodes.has(code)) {
+    return 'Provider endpoint unreachable — check network, proxy, and VPN, then retry.';
+  }
+  if (code === 'ENOENT' || code === 'EACCES' || code === 'ENOTDIR' || code === 'EPERM') {
+    return 'A local file / permission error blocked the request — check AICORE_SERVICE_KEY path.';
+  }
+
+  // Fall back to keyword scan on the reason for classifier paths that
+  // did not carry an explicit status or code (e.g. bare "fetch failed").
+  if (reason && /fetch failed|network|econnrefused|enotfound|etimedout/i.test(reason)) {
+    return 'Provider endpoint unreachable — check network, proxy, and VPN, then retry.';
+  }
+  if (reason && /rate limit/i.test(reason)) {
+    return 'Rate-limited by SAP AI Core — retry in a few seconds.';
+  }
+
+  return undefined;
+}
+
+/**
+ * Convenience wrapper around {@link formatCatalogErrorHint} for callers
+ * that only have the stringified reason (the catalog state stores
+ * `errorMessage: string`, not the original {@link FetchErrorClass}).
+ *
+ * Recovers a lightweight classification by keyword-scanning the reason
+ * for the shapes {@link classifyFetchError} produces (e.g.
+ * `"unauthorized (401) — ..."`, `"endpoint not found (404) — ..."`,
+ * `"rate limit (429)"`, `"network error (ECONNRESET) — ..."`) so the
+ * hint stays consistent with what the classifier itself would emit.
+ */
+export function hintForErrorMessage(errorMessage: string | undefined): string | undefined {
+  if (!errorMessage) {
+    return undefined;
+  }
+
+  // First: try to lift a status/code out of the stored reason.
+  const statusMatch = errorMessage.match(/\((\d{3})\)/);
+  const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : undefined;
+
+  const codeMatch = errorMessage.match(
+    /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|EAGAIN|EBUSY|ENOENT|EACCES|ENOTDIR|EPERM)\b/
+  );
+  const code = codeMatch ? codeMatch[1] : undefined;
+
+  const hint = formatCatalogErrorHint({
+    statusCode,
+    code,
+    reason: errorMessage,
+  });
+  if (hint) {
+    return hint;
+  }
+
+  // Final fallback: the reason had no recognisable status/code, so
+  // give a generic pointer instead of returning nothing.
+  return 'Check `AICORE_SERVICE_KEY`, network, and provider config, then re-run `alexi models`.';
+}

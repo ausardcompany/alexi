@@ -254,14 +254,19 @@ their fetch through `fetchWithRetry` (`src/providers/modelFetchErrors.ts`)
 so operator-facing errors are classified rather than raw:
 
 - **Permanent failures** (`400`, `401`, `403`, `404`, `422`) fail fast on
-  the first attempt with an actionable reason. Example:
+  the first attempt with an actionable reason. Since `1.22.30` (issue
+  #1851), the reason is followed on a second stderr line by a `Hint:`
+  telling the operator WHAT to fix, not just what failed. Example:
 
   ```
   Error: Failed to fetch models: unauthorized (401) — check AICORE_SERVICE_KEY / credentials
+  Hint: Re-check AICORE_SERVICE_KEY and token expiry, then re-run `alexi models`.
   ```
 
   Exit code `1`. The proxy path surfaces the same message but points at
-  `SAP_PROXY_API_KEY` instead.
+  `SAP_PROXY_API_KEY` instead. The full hint-to-classification table
+  lives in
+  [`docs/PROVIDERS.md#actionable-hints-issue-1851`](./PROVIDERS.md#actionable-hints-issue-1851).
 
 - **Transient failures** (`429`, `500`, `502`, `503`, `504`, network
   errors like `ECONNRESET` / `ETIMEDOUT`) are retried up to three times
