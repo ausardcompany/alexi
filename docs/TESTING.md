@@ -432,6 +432,142 @@ Patterns worth internalising:
    `tests/providers/modelCatalog.test.ts` where `@sap-ai-sdk/ai-api` is
    mocked via `vi.mock` at the module level.
 
+#### Testing hint helpers (issue #1851)
+
+`formatCatalogErrorHint` and `hintForErrorMessage` are pure functions
+and live in the same suite as `classifyFetchError`. Pin one case per
+branch so a refactor that reorders the guard ladder (e.g. moves the
+`404` branch below the generic 4xx branch, or drops the message-based
+fallback) trips a specific test rather than an incidental one.
+
+```typescript
+import { formatCatalogErrorHint, hintForErrorMessage } from '../../src/providers/modelFetchErrors.js';
+
+describe('formatCatalogErrorHint', () => {
+  it('returns the AICORE_SERVICE_KEY hint on 401', () => {
+    expect(formatCatalogErrorHint({ statusCode: 401, reason: '' })).toMatch(/AICORE_SERVICE_KEY/);
+  });
+  it('returns the AI_API_URL / -m fallback hint on 404', () => {
+    const hint = formatCatalogErrorHint({ statusCode: 404, reason: '' });
+    expect(hint).toMatch(/AI_API_URL/);
+    expect(hint).toMatch(/-m/);
+  });
+  it('returns the network hint on ECONNRESET', () => {
+    expect(formatCatalogErrorHint({ code: 'ECONNRESET', reason: '' })).toMatch(/network|proxy|VPN/);
+  });
+  it('returns undefined for an unclassified failure', () => {
+    expect(formatCatalogErrorHint({ reason: 'weird upstream thing' })).toBeUndefined();
+  });
+});
+
+describe('hintForErrorMessage', () => {
+  it('recovers the 401 hint from a stringified reason', () => {
+    expect(hintForErrorMessage('unauthorized (401) — check AICORE_SERVICE_KEY / credentials'))
+      .toMatch(/AICORE_SERVICE_KEY/);
+  });
+  it('falls back to a generic pointer when no status or code was captured', () => {
+    expect(hintForErrorMessage('mystery failure')).toMatch(/AICORE_SERVICE_KEY|network|provider config/);
+  });
+  it('returns undefined for an empty message', () => {
+    expect(hintForErrorMessage(undefined)).toBeUndefined();
+  });
+});
+```
+
+Patterns worth internalising:
+
+1. **Pin the hint by regex, not by full-string equality.** Every hint
+   is user-visible copy; a future editorial tweak to the wording should
+   NOT force a test churn as long as the actionable keyword
+   (`AICORE_SERVICE_KEY`, `AI_API_URL`, `network`, `proxy`, `VPN`, `-m`)
+   still lands in the string. `toMatch(/AICORE_SERVICE_KEY/)` catches
+   the regression that matters — "does the operator still see WHICH
+   env var to fix?" — without pinning prose.
+2. **Assert the fallback branch of `hintForErrorMessage`.** The final
+   generic pointer exists so the operator always gets some guidance
+   even when the classifier had no status or code to work with. A
+   regression that returned `undefined` from the fallback would
+   silently degrade the CLI to the pre-#1851 behaviour with no compile
+   error, so pin the branch explicitly.
+3. **Do not fake `errorClass` shape in catalog tests.** The catalog
+   test suite (`tests/providers/modelCatalog.test.ts`) drives
+   `refreshModelCatalog` end-to-end and asserts `getCatalogState().errorClass`
+   against the real classifier output so a divergence between the
+   thrown `ModelFetchError` and the persisted state is caught on the
+   spot.
+
+#### Testing the TUI model picker error path (`tests/cli/tui/ModelPicker.test.tsx`)
+
+The Ink `ModelPicker` renders a two-line error badge (reason + hint)
+when the live catalog is in `status === 'error'`. Drive the catalog
+into an error state by mocking `@sap-ai-sdk/ai-api` and rejecting the
+`DeploymentApi.deploymentQuery` promise, then render the picker under
+the same `DialogProvider` / `ThemeProvider` context wrapper the app
+uses:
+
+```tsx
+const { executeMock, deploymentQueryMock } = vi.hoisted(() => {
+  const executeMock = vi.fn();
+  const deploymentQueryMock = vi.fn(() => ({ execute: executeMock }));
+  return { executeMock, deploymentQueryMock };
+});
+
+vi.mock('@sap-ai-sdk/ai-api', () => ({
+  DeploymentApi: { deploymentQuery: deploymentQueryMock },
+}));
+
+const noSleep = (): Promise<void> => Promise.resolve();
+
+beforeEach(() => {
+  executeMock.mockReset();
+  deploymentQueryMock.mockClear();
+  invalidateCatalog();
+});
+afterEach(() => {
+  invalidateCatalog();
+});
+
+it('renders the classified reason and actionable hint on a 401 failure', async () => {
+  executeMock.mockRejectedValue(Object.assign(new Error('boom'), { status: 401 }));
+  await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+
+  const { lastFrame } = render(
+    <Wrapper>
+      <ModelPicker currentModel="claude-sonnet-id" />
+    </Wrapper>
+  );
+  const frame = lastFrame() ?? '';
+  expect(frame).toContain('Model list unavailable');
+  expect(frame).toMatch(/unauthorized/i);
+  expect(frame).toMatch(/AICORE_SERVICE_KEY/);
+});
+```
+
+Patterns worth internalising:
+
+1. **`invalidateCatalog()` in both `beforeEach` and `afterEach`.** The
+   catalog is module-level singleton state; without the reset the
+   error state from one test leaks into the next `ready` assertion and
+   the tests only fail when the file order changes.
+2. **Inject `retry: { sleep: noSleep }` on `refreshModelCatalog`.** The
+   default retry loop sleeps for `1000ms` / `2000ms` between attempts,
+   which would balloon the picker test file into multi-second runs.
+   `sleep: () => Promise.resolve()` makes the retries effectively
+   instant. For the `ECONNRESET` case set `maxAttempts: 1` too so the
+   test does not exercise the exponential backoff at all.
+3. **Assert both lines of the two-line badge.** Line 1 (`Model list
+   unavailable`) proves the picker read the classified reason from
+   `getCatalogState().errorMessage`; line 2 (the hint regex, e.g.
+   `AICORE_SERVICE_KEY`, `AI_API_URL|-m`, or `network|proxy|VPN`)
+   proves the picker also called `hintForErrorMessage` and rendered
+   the result. A regression that dropped the hint line would still pass
+   a line-1-only assertion.
+4. **Pin the ready-state as a control.** The suite also asserts the
+   success path (`executeMock.mockResolvedValueOnce({ resources: [...] })`)
+   renders the `live` count and does NOT contain `Model list
+   unavailable`. Without the control, a regression that hard-coded the
+   error badge into every render would only fail one direction.
+
 ### Testing reasoning-token accounting (`tests/providers/sapOrchestration-reasoningTokens.test.ts`)
 
 `extractReasoningTokens` and `normalizeTokenUsage` in `src/providers/sapOrchestration.ts` are pure classifiers — no SAP SDK, no network — so their tests are direct unit tests over synthetic payloads. The `SapOrchestrationProvider.complete()` / `.stream()` end-to-end assertions mock the SAP SDK at the module boundary so the reasoning-token plumbing can be exercised without live credentials.
