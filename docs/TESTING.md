@@ -2885,6 +2885,162 @@ The whitespace-only case is deliberate — the upstream fix targeted
 the empty-string case only. Trimming whitespace-only paths is the
 caller's responsibility.
 
+### Testing max-tokens recovery
+
+Introduced with issue #1850 (commit `816bc24a`). The recovery module in `src/core/maxTokensRecovery.ts` splits into two suites:
+
+1. **`tests/core/maxTokensRecovery.test.ts`** (302 lines, ten describe blocks) — pure unit tests. No network, no timers, no filesystem. Verifies the classifier, the extractor, the per-family fallbacks, the safety-margin formula, the reducer floor, the plan composition, and the headless-vs-callback behaviour of `confirmMaxTokensRecovery`.
+2. **`tests/core/streamingOrchestrator.maxTokens.test.ts`** (249 lines) — integration tests. Mocks `getProviderForModelWithFallback` and `getDefaultModel`, drives `streamChat` end-to-end, and pins the one-shot recovery contract.
+
+#### Classifier and extractor patterns (unit suite)
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
+  MIN_SAFE_MAX_TOKENS,
+  computeSafeMaxTokens,
+  extractContextWindow,
+  getModelContextWindow,
+  isMaxTokensError,
+  planMaxTokensRecovery,
+} from '../../src/core/maxTokensRecovery.js';
+
+describe('isMaxTokensError', () => {
+  it('detects HTTP 413 by status code alone', () => {
+    const err = Object.assign(new Error('Request Entity Too Large'), { statusCode: 413 });
+    expect(isMaxTokensError(err)).toBe(true);
+  });
+
+  it('detects HTTP 400 combined with a max-tokens marker in the body', () => {
+    const err = Object.assign(new Error('Bad Request'), {
+      statusCode: 400,
+      responseBody: { error: { code: 'context_length_exceeded' } },
+    });
+    expect(isMaxTokensError(err)).toBe(true);
+  });
+
+  it('rejects a bare HTTP 400 without a max-tokens marker', () => {
+    const err = Object.assign(new Error('missing required field: model'), { statusCode: 400 });
+    expect(isMaxTokensError(err)).toBe(false);
+  });
+});
+
+describe('extractContextWindow', () => {
+  it('extracts from "maximum context length is X tokens"', () => {
+    expect(
+      extractContextWindow(new Error('maximum context length is 128000 tokens'))
+    ).toBe(128000);
+  });
+});
+
+describe('computeSafeMaxTokens', () => {
+  it('clamps to MIN_SAFE_MAX_TOKENS when the prompt already fills the window', () => {
+    expect(
+      computeSafeMaxTokens({
+        originalMaxTokens: 4096,
+        contextWindow: 8000,
+        estimatedPromptTokens: 7900,
+        safetyMargin: 1000,
+      })
+    ).toBe(MIN_SAFE_MAX_TOKENS);
+  });
+});
+```
+
+#### Headless-vs-callback contract for `confirmMaxTokensRecovery`
+
+```typescript
+import { setRecoveryPrompt, confirmMaxTokensRecovery } from '../../src/core/maxTokensRecovery.js';
+
+afterEach(() => {
+  setRecoveryPrompt(null); // Never leak a callback across tests.
+});
+
+it('auto-accepts in headless mode', async () => {
+  const plan = {
+    contextWindow: 128000,
+    contextWindowExtracted: true,
+    estimatedPromptTokens: 100000,
+    safetyMargin: 12800,
+    safeMaxTokens: 15200,
+    originalMaxTokens: 4096,
+    reducedFromOriginal: true,
+  };
+  expect(await confirmMaxTokensRecovery(plan)).toBe(true);
+});
+
+it('routes through a registered TUI callback and honours its decision', async () => {
+  const callback = vi.fn(async () => false);
+  setRecoveryPrompt(callback);
+  const plan = { /* ...same shape, reducedFromOriginal: true... */ };
+  expect(await confirmMaxTokensRecovery(plan)).toBe(false);
+  expect(callback).toHaveBeenCalledWith(plan);
+});
+```
+
+#### Integration-level orchestrator suite
+
+The `streamChat` integration test builds a fake provider that throws on the first call and yields chunks on the second. Two invariants worth pinning per case:
+
+1. **Recovery is one-shot.** Two successive `max_tokens_exceeded` errors surface the second unchanged; the retry counter is not reset between them.
+2. **The `logger.info` breadcrumb is emitted before the retry.** Grep-friendly log output is part of the contract — operators running `LOG_LEVEL=debug` in autonomous mode rely on it to diagnose why an agent turn produced a shorter response than expected.
+
+```typescript
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    setLevel: vi.fn(), debug: vi.fn(), info: vi.fn(),
+    warn: vi.fn(), error: vi.fn(), print: vi.fn(),
+  },
+}));
+
+import { streamChat } from '../../src/core/streamingOrchestrator.js';
+import { getProviderForModelWithFallback } from '../../src/providers/index.js';
+import { logger } from '../../src/utils/logger.js';
+import { setRecoveryPrompt } from '../../src/core/maxTokensRecovery.js';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  setRecoveryPrompt(null);
+});
+
+afterEach(() => {
+  setRecoveryPrompt(null); // Guard against leaked callbacks across suites.
+});
+
+it('retries once with reduced maxTokens and logs a breadcrumb', async () => {
+  const err = Object.assign(new Error('max_tokens_exceeded'), { statusCode: 400 });
+  const { provider, getCalls } = makeMaxTokensProvider(err, 1, [
+    { type: 'text', text: 'ok' },
+  ]);
+  vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+    provider, effectiveModelId: 'gpt-4o', usedFallback: false,
+  });
+
+  const chunks: unknown[] = [];
+  for await (const c of streamChat('hello')) chunks.push(c);
+
+  const calls = getCalls();
+  expect(calls).toHaveLength(2);
+  expect(calls[1].maxTokens).toBeLessThan(calls[0].maxTokens!);
+  expect(logger.info).toHaveBeenCalledWith(
+    expect.stringMatching(/^max_tokens exceeded; retrying with maxTokens=/)
+  );
+});
+```
+
+Coverage priorities for future extensions:
+
+1. **Every new fallback in `MODEL_CONTEXT_WINDOWS` gets a positive case.** Add the case in the `getModelContextWindow` describe block alongside a negative case (an unknown model still falls through to `DEFAULT_CONTEXT_WINDOW_TOKENS`).
+2. **Assert `plan.contextWindowExtracted` alongside `plan.contextWindow`.** A future refactor that inverts the extraction/fallback precedence would produce a numerically correct plan with the wrong provenance flag; asserting both fields pins the contract.
+3. **Never leak a `RecoveryPromptFn` across tests.** The module holds the callback in a process-local `let`, so `afterEach(() => setRecoveryPrompt(null))` is mandatory in any suite that calls `setRecoveryPrompt(fn)`.
+
 ### Testing Network Disconnect Classification (`network.disconnected`)
 
 Introduced 2026-09-25 (ports upstream opencode/kilocode `d6bb0ef05`,

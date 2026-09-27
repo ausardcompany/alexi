@@ -3119,6 +3119,146 @@ try {
 }
 ```
 
+## Max-Tokens Recovery API
+
+Exported from `src/core/maxTokensRecovery.ts`. Complementary to compaction (which reduces the prompt); this module reduces the response budget `maxTokens` so a retry fits inside the model's context window. Full flow: [ARCHITECTURE.md — Max-Tokens Recovery](ARCHITECTURE.md#max-tokens-recovery-maxtokensrecovery).
+
+### Constants
+
+```typescript
+/** Universal fallback context window (tokens) when no per-model default matches. */
+export const DEFAULT_CONTEXT_WINDOW_TOKENS: 32_000;
+
+/** Minimum viable maxTokens for a retry response. */
+export const MIN_SAFE_MAX_TOKENS: 100;
+
+/** Default flat safety margin (tokens); competes with 10% of the window. */
+export const DEFAULT_SAFETY_MARGIN_TOKENS: 1_000;
+```
+
+### `MaxTokensRecoveryPlan`
+
+```typescript
+export interface MaxTokensRecoveryPlan {
+  /** The context window used for computation. Either extracted from the
+   *  error message or looked up via getModelContextWindow. */
+  contextWindow: number;
+  /** true when contextWindow was recovered from the error text,
+   *  false when a model-family / universal fallback was used. */
+  contextWindowExtracted: boolean;
+  /** chars/4 estimate of the current prompt (system + history + user). */
+  estimatedPromptTokens: number;
+  /** Effective safety margin used. */
+  safetyMargin: number;
+  /** Reduced maxTokens to pass to the retry. */
+  safeMaxTokens: number;
+  /** Original maxTokens before reduction. */
+  originalMaxTokens: number;
+  /** true when the reduction produced a strictly smaller maxTokens than
+   *  the original. When false, retrying will not help — the caller MUST
+   *  surface a terminal error. */
+  reducedFromOriginal: boolean;
+}
+```
+
+### `isMaxTokensError(err)`
+
+```typescript
+export function isMaxTokensError(err: unknown): boolean;
+```
+
+Structural HTTP 413 always qualifies. HTTP 400 requires a max-tokens marker (`max_tokens_exceeded`, `context_length_exceeded`, `maximum context length`, `request entity too large`, `completion exceeds the model's context`, `max_tokens ... too large|exceeds`) somewhere in `err.message`, `err.responseBody`, `err.body`, or up to two levels of `err.cause`. Free-form `"prompt too long"` phrases are deliberately excluded so they continue routing through compaction.
+
+### `extractContextWindow(err)` / `getModelContextWindow(modelId)`
+
+```typescript
+export function extractContextWindow(err: unknown): number | undefined;
+export function getModelContextWindow(modelId: string): number;
+```
+
+`extractContextWindow` returns the integer token count captured by the first matching regex pattern, or `undefined` when no explicit count can be recovered. `getModelContextWindow` maps a model id through nine `MODEL_CONTEXT_WINDOWS` entries (Anthropic Claude 200K, GPT-4/4o/o-series 128K, Gemini 1.5+/2 1M, DeepSeek v4 128K, Llama 3.1+ 128K, Mistral Large 2 128K; conservative legacy fallbacks for older Gemini, DeepSeek, Llama, and Mistral/Mixtral variants). Unknown ids return `DEFAULT_CONTEXT_WINDOW_TOKENS`.
+
+### `computeSafetyMargin(contextWindow)` / `computeSafeMaxTokens(input)`
+
+```typescript
+export function computeSafetyMargin(contextWindow: number): number;
+
+export function computeSafeMaxTokens(input: {
+  originalMaxTokens: number;
+  contextWindow: number;
+  estimatedPromptTokens: number;
+  safetyMargin?: number;
+}): number;
+```
+
+`computeSafetyMargin` returns `max(DEFAULT_SAFETY_MARGIN_TOKENS, floor(contextWindow * 0.1))`. `computeSafeMaxTokens` applies the reducer formula `max(MIN_SAFE_MAX_TOKENS, min(originalMaxTokens, contextWindow - estimatedPromptTokens - safetyMargin))`. When the prompt already exceeds the context window, the result is clamped to `MIN_SAFE_MAX_TOKENS` — the caller must surface a terminal error, but returning the floor keeps the return type non-optional.
+
+### `planMaxTokensRecovery(input)`
+
+```typescript
+export function planMaxTokensRecovery(input: {
+  err: unknown;
+  modelId: string;
+  originalMaxTokens: number;
+  messages: readonly Message[];
+  safetyMargin?: number;
+}): MaxTokensRecoveryPlan;
+```
+
+Pure function. Performs no I/O and does not touch the session. Composition:
+
+1. `extractContextWindow(err)` first, then `getModelContextWindow(modelId)` as the fallback.
+2. `estimateMessagesTokens(messages)` from `src/core/compaction.ts` for the chars/4 prompt estimate.
+3. `computeSafetyMargin(contextWindow)` unless the caller supplied one.
+4. `computeSafeMaxTokens(...)` to solve for `safeMaxTokens`.
+
+### `confirmMaxTokensRecovery(plan)` / `setRecoveryPrompt(fn)` / `getRecoveryPrompt()`
+
+```typescript
+export type RecoveryPromptFn = (plan: MaxTokensRecoveryPlan) => Promise<boolean> | boolean;
+
+export function setRecoveryPrompt(fn: RecoveryPromptFn | null): void;
+export function getRecoveryPrompt(): RecoveryPromptFn | null;
+export function confirmMaxTokensRecovery(plan: MaxTokensRecoveryPlan): Promise<boolean>;
+```
+
+`confirmMaxTokensRecovery` returns `false` immediately when `plan.reducedFromOriginal === false` (retrying will not help). Headless / agent mode (no callback registered) auto-accepts. A registered callback receives the plan; the return value gates the retry. A callback that itself throws is treated as a decline (never wedges recovery). The TUI registers a callback at startup and clears it (`setRecoveryPrompt(null)`) at teardown so the module can round-trip between interactive and headless mode within a single process.
+
+### Consumer example (headless retry)
+
+```typescript
+import {
+  confirmMaxTokensRecovery,
+  isMaxTokensError,
+  planMaxTokensRecovery,
+} from './core/maxTokensRecovery.js';
+
+let maxTokensRetried = false;
+let activeMaxTokens = 4096;
+for (;;) {
+  try {
+    return await provider.complete(messages, { maxTokens: activeMaxTokens });
+  } catch (err) {
+    if (!maxTokensRetried && isMaxTokensError(err)) {
+      const plan = planMaxTokensRecovery({
+        err,
+        modelId,
+        originalMaxTokens: activeMaxTokens,
+        messages,
+      });
+      if (plan.reducedFromOriginal && (await confirmMaxTokensRecovery(plan))) {
+        maxTokensRetried = true;
+        activeMaxTokens = plan.safeMaxTokens;
+        continue;
+      }
+    }
+    throw err;
+  }
+}
+```
+
+Recovery is one-shot per `sendChat()` / `streamChat()` invocation — a second max-tokens error on the retry is terminal. See `src/core/orchestrator.ts:225-256` and `src/core/streamingOrchestrator.ts:474-519` for the two production integrations.
+
 ## Stream Watchdog and Connectivity Probe API
 
 Introduced in the 2026-09 sync (issue #1836). Full flow: [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836).

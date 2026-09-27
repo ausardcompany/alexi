@@ -11,6 +11,11 @@ import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './contextOverflow.js';
 import { isRateLimitError } from './error-backoff.js';
+import {
+  confirmMaxTokensRecovery,
+  isMaxTokensError,
+  planMaxTokensRecovery,
+} from './maxTokensRecovery.js';
 import { logger } from '../utils/logger.js';
 import { extractInlineModelOverride } from './inlineModelOverride.js';
 
@@ -215,77 +220,109 @@ export async function sendChat(
   const reasoningParams = effectiveReasoning ? resolveReasoning(modelId, effectiveReasoning) : {};
 
   let result;
-  try {
-    result = await provider.complete(messages, {
-      maxTokens: 4096,
-      signal: options?.signal,
-      reasoning: reasoningParams,
-    });
-  } catch (err) {
-    const classified = classifyRouteError(err);
-    // User-initiated aborts are NOT a route health signal: skip recording
-    // entirely so a healthy route is not falsely penalised or auto-disabled
-    // just because the user pressed Ctrl+C.
-    if (classified.kind === 'permanent') {
-      recordRouteOutcome(modelId, classified);
-    }
-    // Context-window overflow: rewrite the message so the CLI presents an
-    // actionable line instead of the raw provider payload. The original
-    // provider text is preserved after `:` so it remains debuggable and
-    // any operator with logs can still see the vendor-specific string.
-    if (err instanceof Error && isContextOverflowError(err)) {
-      err.message = `${CONTEXT_OVERFLOW_USER_MESSAGE} (${err.message})`;
-      throw err;
-    }
-    // Rate-limit UX: `FreeTierRateLimitError` and `ProviderRateLimitError`
-    // already carry a fully-formatted, user-facing message with model,
-    // wait time, and the docs link. Log the full details at debug level
-    // (including the upstream `cause` and any `Retry-After`) so operators
-    // running with `LOG_LEVEL=debug` see the provider's raw payload, then
-    // rethrow the classified error unchanged so the CLI displays the
-    // curated message instead of a stack trace of the raw HTTP failure.
-    if (isRateLimitError(err)) {
-      const rateLimitErr = err as {
-        name?: string;
-        code?: string;
-        modelName?: string;
-        retryAfterSeconds?: number;
-        resetAt?: Date;
-        limit?: number;
-        suggestedAction?: string;
-        cause?: unknown;
-        message?: string;
-      };
-      // INFO-level breadcrumb so operators can see rate-limit hits in
-      // normal logs (per issue #1435) without needing to raise the log
-      // level to debug. The full raw payload (upstream `cause`,
-      // provider message) stays at debug to avoid flooding the console.
-      const retryAfter = rateLimitErr.retryAfterSeconds;
-      const retrySuffix =
-        typeof retryAfter === 'number' && retryAfter > 0
-          ? ` (retry after ${retryAfter}s)`
-          : rateLimitErr.resetAt instanceof Date && !Number.isNaN(rateLimitErr.resetAt.getTime())
-            ? ` (resets at ${rateLimitErr.resetAt.toISOString()})`
-            : '';
-      logger.info(`Rate limit hit for model '${rateLimitErr.modelName ?? modelId}'${retrySuffix}`);
-      logger.debug('Rate limit error from provider', {
-        name: rateLimitErr.name,
-        code: rateLimitErr.code,
-        model: rateLimitErr.modelName ?? modelId,
-        retryAfterSeconds: rateLimitErr.retryAfterSeconds,
-        resetAt: rateLimitErr.resetAt,
-        limit: rateLimitErr.limit,
-        suggestedAction: rateLimitErr.suggestedAction,
-        message: rateLimitErr.message,
-        cause: rateLimitErr.cause,
+  let activeMaxTokens = 4096;
+  let maxTokensRetried = false;
+  for (;;) {
+    try {
+      result = await provider.complete(messages, {
+        maxTokens: activeMaxTokens,
+        signal: options?.signal,
+        reasoning: reasoningParams,
       });
+      break;
+    } catch (err) {
+      // Max-tokens recovery: reduce the response budget and retry once
+      // per sendChat() call. Complementary to the (compaction-driving)
+      // context-overflow path below.
+      if (!maxTokensRetried && isMaxTokensError(err)) {
+        const messagesForEstimate = messages.map((m) => ({
+          role: m.role as 'user' | 'assistant' | 'system',
+          content: m.content,
+          timestamp: 0,
+        }));
+        const plan = planMaxTokensRecovery({
+          err,
+          modelId,
+          originalMaxTokens: activeMaxTokens,
+          messages: messagesForEstimate,
+        });
+        if (plan.reducedFromOriginal && (await confirmMaxTokensRecovery(plan))) {
+          maxTokensRetried = true;
+          logger.info(
+            `max_tokens exceeded; retrying with maxTokens=${plan.safeMaxTokens} ` +
+              `(context window=${plan.contextWindow}, prompt~${plan.estimatedPromptTokens})`
+          );
+          activeMaxTokens = plan.safeMaxTokens;
+          continue;
+        }
+      }
+      const classified = classifyRouteError(err);
+      // User-initiated aborts are NOT a route health signal: skip recording
+      // entirely so a healthy route is not falsely penalised or auto-disabled
+      // just because the user pressed Ctrl+C.
+      if (classified.kind === 'permanent') {
+        recordRouteOutcome(modelId, classified);
+      }
+      // Context-window overflow: rewrite the message so the CLI presents an
+      // actionable line instead of the raw provider payload. The original
+      // provider text is preserved after `:` so it remains debuggable and
+      // any operator with logs can still see the vendor-specific string.
+      if (err instanceof Error && isContextOverflowError(err)) {
+        err.message = `${CONTEXT_OVERFLOW_USER_MESSAGE} (${err.message})`;
+        throw err;
+      }
+      // Rate-limit UX: `FreeTierRateLimitError` and `ProviderRateLimitError`
+      // already carry a fully-formatted, user-facing message with model,
+      // wait time, and the docs link. Log the full details at debug level
+      // (including the upstream `cause` and any `Retry-After`) so operators
+      // running with `LOG_LEVEL=debug` see the provider's raw payload, then
+      // rethrow the classified error unchanged so the CLI displays the
+      // curated message instead of a stack trace of the raw HTTP failure.
+      if (isRateLimitError(err)) {
+        const rateLimitErr = err as {
+          name?: string;
+          code?: string;
+          modelName?: string;
+          retryAfterSeconds?: number;
+          resetAt?: Date;
+          limit?: number;
+          suggestedAction?: string;
+          cause?: unknown;
+          message?: string;
+        };
+        // INFO-level breadcrumb so operators can see rate-limit hits in
+        // normal logs (per issue #1435) without needing to raise the log
+        // level to debug. The full raw payload (upstream `cause`,
+        // provider message) stays at debug to avoid flooding the console.
+        const retryAfter = rateLimitErr.retryAfterSeconds;
+        const retrySuffix =
+          typeof retryAfter === 'number' && retryAfter > 0
+            ? ` (retry after ${retryAfter}s)`
+            : rateLimitErr.resetAt instanceof Date && !Number.isNaN(rateLimitErr.resetAt.getTime())
+              ? ` (resets at ${rateLimitErr.resetAt.toISOString()})`
+              : '';
+        logger.info(
+          `Rate limit hit for model '${rateLimitErr.modelName ?? modelId}'${retrySuffix}`
+        );
+        logger.debug('Rate limit error from provider', {
+          name: rateLimitErr.name,
+          code: rateLimitErr.code,
+          model: rateLimitErr.modelName ?? modelId,
+          retryAfterSeconds: rateLimitErr.retryAfterSeconds,
+          resetAt: rateLimitErr.resetAt,
+          limit: rateLimitErr.limit,
+          suggestedAction: rateLimitErr.suggestedAction,
+          message: rateLimitErr.message,
+          cause: rateLimitErr.cause,
+        });
+        throw err;
+      }
+      const formatted = formatProviderError(err);
+      if (err instanceof Error && formatted !== err.message) {
+        err.message = formatted;
+      }
       throw err;
     }
-    const formatted = formatProviderError(err);
-    if (err instanceof Error && formatted !== err.message) {
-      err.message = formatted;
-    }
-    throw err;
   }
   recordRouteOutcome(modelId, { kind: 'success' });
 
