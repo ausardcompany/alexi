@@ -7033,3 +7033,81 @@ Run the full probe / watchdog coverage:
 ```bash
 npm test -- tests/core/streamProbe.test.ts tests/core/streamWatchdog.test.ts
 ```
+
+## Testing the Project-Scoped Config Cache (issue #1848)
+
+`src/config/projectCache.ts` wraps every config loader (`discoverRules`, `loadRoutingConfig`, `loadMcpConfig`, custom agents, skills, hooks) with a cache keyed by `` `${configPath}:${normalizedWorkdir}` `` so multi-worktree workflows (Agent Manager, parallel sessions) never leak config across projects. The regression the module exists to prevent — project A's rules or routing surviving a switch to project B — is exactly what this suite pins.
+
+`tests/config/projectCache.test.ts` (440 lines) is the canonical suite. It uses `fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-cache-a-'))` to build two isolated worktrees per test and tears them down with `fs.rmSync(..., { recursive: true, force: true })` in `afterEach`. Every test also calls `invalidateAllProjectCaches()` and `_resetWorkdirTrackerForTests()` in `beforeEach` / `afterEach` so no state leaks across cases.
+
+### Suite layout
+
+```typescript
+import {
+  normalizeWorkdirForCache,
+  makeCacheKey,
+  onWorkdirChange,
+  invalidateProjectCache,
+  invalidateAllProjectCaches,
+  getConfigRules,
+  getConfigRoutingConfig,
+  getConfigMcpServers,
+  getConfigSkills,
+  getConfigHooks,
+  _projectCacheSize,
+  _resetWorkdirTrackerForTests,
+} from '../../src/config/projectCache.js';
+
+describe('projectCache', () => {
+  let workdirA: string;
+  let workdirB: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    workdirA = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-cache-a-'));
+    workdirB = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-cache-b-'));
+    invalidateAllProjectCaches();
+    _resetWorkdirTrackerForTests();
+  });
+
+  afterEach(() => {
+    // Restore CWD in case a getter chdir'd and threw before restoring.
+    try { process.chdir(originalCwd); } catch { /* best-effort */ }
+    invalidateAllProjectCaches();
+    _resetWorkdirTrackerForTests();
+    fs.rmSync(workdirA, { recursive: true, force: true });
+    fs.rmSync(workdirB, { recursive: true, force: true });
+  });
+});
+```
+
+### What the suite pins
+
+1. **Key normalization (`normalizeWorkdirForCache`).** `.` resolves against `process.cwd()`. `path.join(workdirA, 'sub', '..') + path.sep` collapses to `path.resolve(workdirA)`. `undefined` falls back to `process.cwd()`. The Windows case-insensitivity branch is asserted conditionally: on `process.platform === 'win32'`, `/Tmp/Project` and `/tmp/project` map to the same cache slot; on POSIX they stay distinct.
+2. **Cache-key composition (`makeCacheKey`).** `` `routing:${path.resolve(workdirA)}` `` on POSIX, lowercased on Windows. Distinct workdirs produce distinct keys. The same workdir with different tags (`rules` vs `routing`) produces distinct keys.
+3. **Per-workdir cache identity.** Two calls to `getConfigRules(workdirA)` return the same instance (`toBe`), guaranteeing the cache is hit. Two calls with different workdirs (`getConfigRules(workdirA)` vs `getConfigRules(workdirB)`) return distinct instances (`not.toBe`), guaranteeing no leak. This identity check is stronger than deep-equal — it proves the cached array/object is reused rather than reconstructed with matching fields.
+4. **Real per-project overrides across every surface.** For each cache (`rules`, `routing`, `mcp`, `skills`, `hooks`), the suite writes a distinct config file under `workdirA` and a different one under `workdirB`, then asserts that reads through the cache return each project's content and NOT the other's. For example, `routing-config.json` in `workdirA` declares `a-only-model`; `workdirB` declares `b-only-model`; assertions confirm each read contains its own id and excludes the other's.
+5. **`onWorkdirChange` semantics.**
+   - First call establishes the baseline and returns `false`; the cache is untouched.
+   - Same-workdir call is a no-op that returns `false` and leaves `_projectCacheSize()` unchanged.
+   - Transition purges the OLD workdir (assert via `_projectCacheSize` shrinking) and keeps the NEW workdir intact.
+   - Chained transitions (A → B → C) purge every intermediate workdir. Because the API does not expose per-workdir counts, the assertion is that re-reading an intermediate workdir's config after multiple transitions produces a fresh discovery (`toBeDefined`, not a stale cached identity).
+6. **Targeted `invalidateProjectCache(workdir)`.** Purges only the given workdir; other workdirs remain cached (asserted via `toBe` identity on a workdir that was not invalidated). `invalidateProjectCache()` without an argument purges every entry, reducing `_projectCacheSize()` to `0`.
+7. **`invalidateAllProjectCaches`.** Empties every cache surface. `_projectCacheSize()` goes from `> 0` to `0`.
+8. **Undefined-workdir backward compatibility.** Every getter accepts `undefined` and falls back to `process.cwd()`. Two `undefined` calls to the same getter return the same cached instance.
+
+### Testing patterns to reuse
+
+- **Two isolated `mkdtempSync` worktrees per test.** Build both in `beforeEach`, tear both down in `afterEach`. Prefixes (`alexi-cache-a-`, `alexi-cache-b-`) make it obvious in a stack trace which worktree a stray file belonged to.
+- **Restore CWD in `afterEach`.** `getConfigRoutingConfig` and `getConfigMcpServers` invoke `withWorkdir(...)` which temporarily `process.chdir()`s. If the test throws before the loader restores the CWD, subsequent tests would run against the temp directory. The `try / catch` around `process.chdir(originalCwd)` is best-effort — a missing directory silently succeeds and the next test's `mkdtempSync` re-establishes a valid CWD.
+- **Assert on identity (`toBe`), not on equality.** The cache contract is "same instance on hit"; a `toEqual` check would pass even if the cache were completely broken and reconstructed the object on every read.
+- **`_projectCacheSize()` for purge assertions.** Because the API does not expose per-workdir counts, the total-size delta is the primary signal that a purge happened. When testing chained transitions, combine `_projectCacheSize` with a per-workdir identity check on a re-read.
+
+### Running the suite
+
+```bash
+npm test -- tests/config/projectCache.test.ts
+```
+
+See [ARCHITECTURE.md — Project-Scoped Config Cache](ARCHITECTURE.md#project-scoped-config-cache-issue-1848) for the runtime design and the invalidation contract with `invalidateGlobalConfig`.
