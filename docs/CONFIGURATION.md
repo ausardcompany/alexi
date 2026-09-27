@@ -2,6 +2,8 @@
 
 This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, compaction settings, hooks, and instruction files.
 
+> **Version:** applies to Alexi `1.22.31` and later. The 2026-09-27 upstream sync (commit `d3b6b912`, `1.22.30` → `1.22.31`) was a low-touch tracking bump that touched only `.github/last-sync-commits.json` and `package.json` — no configuration surface (environment variable, user-config key, routing schema, compaction schema, hook event, or session-storage layout) was added, removed, or renamed. If you are reading this document to diagnose a `1.22.30` → `1.22.31` behaviour change: there isn't one. Every key documented here reads the same on either version. See [CHANGELOG.md — `[Unreleased]`](../CHANGELOG.md#unreleased) for the paired sync-tracking entry.
+
 ## Table of Contents
 
 - [Environment Variables](#environment-variables)
