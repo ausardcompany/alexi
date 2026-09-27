@@ -2020,6 +2020,46 @@ Testing guidance for a new project-scoped cache:
 - Use `_projectCacheSize()` when testing invalidation to prove the total entry count went down — the API does not expose per-workdir counts.
 - The reference suite is `tests/config/projectCache.test.ts` (440 lines); see [TESTING.md — Testing the Project-Scoped Config Cache](../docs/TESTING.md#testing-the-project-scoped-config-cache-issue-1848) for the full case-by-case breakdown.
 
+### Wiring `onWorkdirChange` at a session-context boundary
+
+`projectCache` supplies the mechanism (`onWorkdirChange`), but the *caller* is responsible for firing it at the moments where the active project could have changed. The reference wiring lives in `src/core/sessionManager.ts` (commit `d4343e26`) and covers the two session boundaries that matter in practice:
+
+1. **On session creation.** Capture `process.cwd()` exactly once into a local, use that same value for both the persisted `metadata.workdir` field and the `onWorkdirChange(workdir)` call. Reading `process.cwd()` twice risks the persisted metadata and the announced workdir drifting if another handler on the event loop calls `process.chdir()` between the two reads.
+
+2. **On session resume.** Announce the *session's* `metadata.workdir` (from the on-disk transcript), not the ambient `process.cwd()`. This is the Agent Manager scenario: a fresh manager in worktree B resumes a session created under worktree A, and the transition must fire against A so any A-keyed cache entries left behind by a previous run are purged. Fall back to `process.cwd()` only when the persisted field is absent (legacy sessions written before the field existed).
+
+3. **Swallow tracker errors.** Wrap the announcement in `try { onWorkdirChange(target); } catch { /* non-fatal */ }`. Cache-scoping is a performance optimisation — a tracker failure on an unrecognised path shape must not surface as "failed to create/resume session" to the caller. The safety net degrades to the pre-#1848 behaviour ("cache stays warm across worktrees") rather than blocking the boundary event.
+
+The reference wiring:
+
+```typescript
+// src/core/sessionManager.ts — createSession
+const workdir = process.cwd();
+const session: Session = {
+  metadata: { /* ... */, workdir, /* ... */ },
+  messages: [...initialMessages],
+};
+this.activeSession = session;
+try {
+  onWorkdirChange(workdir);
+} catch {
+  // Non-fatal — cache-scoping is a performance optimisation.
+}
+```
+
+```typescript
+// src/core/sessionManager.ts — loadSession
+this.activeSession = session;
+try {
+  const targetWorkdir = session.metadata.workdir ?? process.cwd();
+  onWorkdirChange(targetWorkdir);
+} catch {
+  // Non-fatal — cache-scoping is a performance optimisation.
+}
+```
+
+If you are adding a new session-like abstraction (a long-running plan runner, a persistent agent worker), thread `onWorkdirChange` into its lifecycle by mirroring these two hooks. The regression suite is `tests/core/sessionManager-workdir-cache.test.ts` (172 lines); see [TESTING.md — Testing SessionManager Workdir Wiring](../docs/TESTING.md#testing-sessionmanager-workdir-wiring-issue-1848) for the recipe on exercising the real cache (do NOT mock `projectCache` in your regression test — the whole point is that the cache actually reacts to the announcement).
+
 ## Per-Instance State
 
 Effective 1.21.4, module-level singleton state that is unsafe to share between concurrent Alexi sessions (multiple SAP AI Core workspaces in the same process, headless `alexi agent` alongside the interactive TUI, subagents, ...) MUST be refactored into a per-instance class. `src/core/filesystem/watcher.ts` is the reference: an `InstanceWatcher` class owns the `Map<directory, disposer>` and every debounce timer, plus a module-level `defaultInstance` and `startWatcher(...)` shim to keep pre-refactor call sites compiling.

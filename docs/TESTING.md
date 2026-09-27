@@ -7111,3 +7111,84 @@ npm test -- tests/config/projectCache.test.ts
 ```
 
 See [ARCHITECTURE.md — Project-Scoped Config Cache](ARCHITECTURE.md#project-scoped-config-cache-issue-1848) for the runtime design and the invalidation contract with `invalidateGlobalConfig`.
+
+## Testing SessionManager Workdir Wiring (issue #1848)
+
+`src/config/projectCache.ts` supplies the cache and the transition detector, but the load-bearing collaborator is `SessionManager` — it is the module that decides WHEN a workdir transition has occurred. `tests/core/sessionManager-workdir-cache.test.ts` (172 lines, three cases) pins the wiring end-to-end without mocking `projectCache`, so any refactor that quietly drops one of the `onWorkdirChange` calls in `createSession` or `loadSession` breaks the suite.
+
+### Why exercise the real cache
+
+Mocking `../src/config/projectCache.js` would let the test assert "the mock was called" without proving the cache actually took effect. The real-cache pattern used here — write config files under two temp worktrees, prime the cache with `getConfigRules(workdir)`, observe `_projectCacheSize()` movement across a session boundary — proves the transition detector fires AND that the purge reaches the right entries. That is the exact behaviour a naive "just call `onWorkdirChange`" refactor could silently break.
+
+### Suite layout
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+// Mock the internal collaborators SessionManager pulls in — but NOT
+// projectCache. The cache is under test.
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager } from '../../src/core/sessionManager.js';
+import {
+  _projectCacheSize,
+  _resetWorkdirTrackerForTests,
+  getConfigRules,
+  invalidateAllProjectCaches,
+  normalizeWorkdirForCache,
+} from '../../src/config/projectCache.js';
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-workdir-'));
+  workdirA = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-workdir-a-'));
+  workdirB = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-workdir-b-'));
+  invalidateAllProjectCaches();
+  _resetWorkdirTrackerForTests();
+});
+
+afterEach(() => {
+  try { process.chdir(originalCwd); } catch { /* best-effort */ }
+  invalidateAllProjectCaches();
+  _resetWorkdirTrackerForTests();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  fs.rmSync(workdirA, { recursive: true, force: true });
+  fs.rmSync(workdirB, { recursive: true, force: true });
+});
+```
+
+Note that `tempDir` is the `sessionsDir` passed to every `SessionManager` under test — session JSON files land there, isolated from `~/.alexi/sessions/` and from the two config-under-test worktrees `workdirA` / `workdirB`.
+
+### What the suite pins
+
+1. **Create-then-switch purge.** Chdir into `workdirA`, `mgr.createSession(...)`, prime the cache with `getConfigRules(workdirA)`, chdir into `workdirB`, prime again with `getConfigRules(workdirB)`, then create a second session — `_projectCacheSize()` must shrink because the second `createSession` announces `workdirB` to the tracker and A's entries are purged.
+2. **Cross-worktree resume.** `mgrA` in `workdirA` creates a session; `mgrB` (fresh instance) in `workdirB` calls `loadSession(sessionAId)`. Assertions: the returned session's `metadata.workdir === workdirA` (persisted correctly), and a follow-up `mgrB.createSession(...)` under `workdirB` proves the identity `getConfigRules(workdirB)` is preserved through the transition (`toBe` identity), while A's entries are gone.
+3. **Legacy sessions.** Hand-write a session JSON without a `workdir` field, then `mgr.loadSession(legacyId)` — `resumed.metadata.workdir` stays `undefined` and no throw escapes. This confirms the `?? process.cwd()` fallback in `loadSession` matches pre-#1848 behaviour byte-identically for on-disk transcripts written before the field was introduced.
+
+### Testing patterns to reuse
+
+- **Three separate temp directories.** `tempDir` for `sessionsDir`, `workdirA` and `workdirB` for the config-under-test worktrees. Prefixes (`sm-workdir-`, `sm-workdir-a-`, `sm-workdir-b-`) make it obvious in a stack trace which directory a stray file belonged to.
+- **Don't mock `projectCache`.** The whole point of the suite is that the real cache reacts to `SessionManager` announcements. `vi.mock('../../src/config/projectCache.js', ...)` would pass with a stubbed session manager and still ship a broken cache.
+- **Compose `_projectCacheSize()` with identity checks.** Total-size delta proves a purge happened; per-workdir `toBe` proves the SURVIVING workdir was not swept incorrectly. Neither assertion alone is sufficient — a bug that purges the wrong workdir would leave the total unchanged.
+- **Restore `originalCwd` in `afterEach`.** `SessionManager.createSession` calls `process.cwd()`; if a previous test's `chdir` leaked into the next one, session workdirs would be recorded against the wrong path and the transition detector would fire on the wrong boundary. The `try / catch` around `process.chdir(originalCwd)` is best-effort — a missing directory silently succeeds and the next test's `mkdtempSync` re-establishes a valid CWD.
+
+### Running the suite
+
+```bash
+npm test -- tests/core/sessionManager-workdir-cache.test.ts
+```
+
+See [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848) for the runtime sequence diagram and the contract points on `createSession` / `loadSession`.

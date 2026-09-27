@@ -767,6 +767,48 @@ if (tokens) {
 
 The dedicated `totalReasoningTokens` field exists purely for observability (surfacing extended-thinking usage in `sessions list`, telemetry spans, and cost reports). Because reasoning tokens are already inside `totalTokens`, a caller answering `"how many tokens has this session used?"` reads `totalTokens` alone and never needs to add the two fields together.
 
+## Session Workdir and Project-Scoped Config Cache (issue #1848)
+
+Every session records the working directory it was created in (`SessionMetadata.workdir`) and announces that value to the project-scoped config cache at both session-context boundaries. The project cache in `src/config/projectCache.ts` keys every entry by `` `${configPath}:${normalizedWorkdir}` ``, but a cache that is worktree-aware without a transition detector still leaks: nothing purges project A's cached rules / routing / MCP / agents / skills / hooks when a caller opens a session under project B. `SessionManager` is the load-bearing collaborator that closes this loop — session creation and session resume are the two moments where the runtime learns that the active project may have changed.
+
+```mermaid
+sequenceDiagram
+    participant User as User / Agent Manager
+    participant SM as SessionManager
+    participant PC as projectCache
+    participant Loader as Config Loader<br/>(rules / routing / MCP / ...)
+
+    Note over User,Loader: create session under project A
+    User->>SM: createSession(model)
+    SM->>SM: workdir = process.cwd() // A
+    SM->>SM: metadata.workdir = A<br/>persist session file
+    SM->>PC: onWorkdirChange(A)
+    Note over PC: baseline established<br/>lastWorkdir = A
+    User->>SM: (session run under A)
+    SM->>Loader: getConfigRules(A) via cached wrapper
+    Loader-->>PC: cache entry keyed on A
+
+    Note over User,Loader: resume session B (created under B) from ambient cwd A
+    User->>SM: loadSession(bId)
+    SM->>SM: read metadata.workdir = B
+    SM->>PC: onWorkdirChange(B)
+    Note over PC: transition detected<br/>purge every entry ending in `:A`<br/>lastWorkdir = B
+    User->>SM: (session run under B)
+    SM->>Loader: getConfigRules(B) via cached wrapper
+    Loader-->>PC: fresh entry keyed on B
+```
+
+Contract points, all in `src/core/sessionManager.ts`:
+
+- **`createSession(modelId?, parentSessionId?, options?)`** (`src/core/sessionManager.ts:243-271`) captures `process.cwd()` exactly once into a local `workdir` binding, writes it to `metadata.workdir`, persists the session file, and then calls `onWorkdirChange(workdir)` inside a `try/catch`. The single capture is deliberate — reading `process.cwd()` twice would risk the persisted metadata and the announced workdir drifting if another handler on the event loop calls `process.chdir()` between the two reads. A tracker failure never blocks session creation: cache-scoping is a performance optimisation, not a correctness prerequisite for a new session.
+- **`loadSession(sessionId)`** (`src/core/sessionManager.ts:593-622`) reads `session.metadata.workdir` from the on-disk transcript and announces THAT value to `onWorkdirChange`, falling back to `process.cwd()` only when the field is absent. This is the Agent Manager scenario: a fresh `SessionManager` in worktree B that resumes a session created under worktree A must fire the transition against A, not the ambient CWD, so any A-keyed cache entries left behind by a previous run are purged before the resumed session issues its first routing / MCP / rules lookup.
+- **Legacy sessions.** Session files written before `metadata.workdir` was introduced have no recorded workdir. `loadSession` falls through to `process.cwd()` for the announcement, matching pre-#1848 behaviour exactly — the tracker is called, but its argument is the ambient CWD, so the transition detector sees whatever the process is currently pointed at. A legacy session resumed in-place looks like a same-workdir call to the tracker and is a no-op; a legacy session resumed after a `chdir` looks like a normal transition and behaves correctly.
+- **Error swallowing.** Both call sites wrap `onWorkdirChange` in a `try/catch` that logs nothing. The tracker's own contract is `boolean` (it returns whether a purge happened, not whether the announcement succeeded), and any exceptional case there — an unrecognised path shape, a filesystem race — must not surface as a "failed to create session" error to the caller. The safety net degrades to the pre-#1848 behaviour of "cache stays warm across worktrees" rather than blocking a session boundary.
+
+Regression coverage lives in `tests/core/sessionManager-workdir-cache.test.ts` (172 lines, three cases). The suite exercises the real `SessionManager` surface — no `vi.mock('../src/config/projectCache.js')` — so a refactor that quietly drops one of the `onWorkdirChange` calls trips the assertion on `_projectCacheSize` shrinkage or on `getConfigRules` returning a fresh (non-identical) result. The three cases pin (1) the create-then-switch purge path, (2) the cross-worktree resume path, and (3) the legacy-session no-workdir fallback.
+
+Read [Testing SessionManager Workdir Wiring](TESTING.md#testing-sessionmanager-workdir-wiring-issue-1848) for the test recipe and [Testing the Project-Scoped Config Cache](TESTING.md#testing-the-project-scoped-config-cache-issue-1848) for the cache-side counterpart.
+
 ## Session Retention Lifecycle
 
 Session transcripts persisted to `~/.alexi/sessions/*.json` accumulate over time. Without a bounded lifetime an active operator's sessions directory grows without limit, slowing FTS index rebuilds, `alexi sessions` listings, and repo-map inference passes that scan the directory. The retention pipeline (schema in `src/config/userConfig.ts`, runner in `src/core/sessionManager.ts:828`, scheduler in `src/core/retentionScheduler.ts`, CLI surface in `src/cli/commands/sessions.ts`) deletes sessions older than a configured `maxAgeDays` while guaranteeing no in-flight or freshly-written transcript is touched.
