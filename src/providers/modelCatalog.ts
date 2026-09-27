@@ -78,6 +78,12 @@ export interface CatalogState {
   entries: readonly CatalogEntry[];
   lastRefreshedAt: number | null;
   errorMessage?: string;
+  /**
+   * Structural classification of the last fetch failure, when known.
+   * Populated alongside `errorMessage` so the TUI / CLI can render an
+   * actionable hint (issue #1851) without regex-matching the reason.
+   */
+  errorClass?: FetchErrorClass;
   /** Resource group used for the last successful fetch */
   resourceGroup?: string;
 }
@@ -229,6 +235,7 @@ export async function refreshModelCatalog(
       lastRefreshedAt: Date.now(),
       resourceGroup,
       errorMessage: undefined,
+      errorClass: undefined,
     });
   } catch (err) {
     // `ModelFetchError.reason` carries the classified, user-facing
@@ -241,9 +248,19 @@ export async function refreshModelCatalog(
         : err instanceof Error
           ? err.message
           : String(err);
+    const errorClass: FetchErrorClass =
+      err instanceof ModelFetchError
+        ? {
+            transient: err.transient,
+            statusCode: err.statusCode,
+            code: err.code,
+            reason: err.reason,
+          }
+        : classifyFetchError(err);
     setState({
       status: 'error',
       errorMessage: msg,
+      errorClass,
     });
   } finally {
     _refreshInProgress = false;
@@ -371,6 +388,7 @@ export function invalidateCatalog(): void {
     entries: buildStaticEntries(),
     lastRefreshedAt: null,
     errorMessage: undefined,
+    errorClass: undefined,
   });
 }
 
@@ -435,6 +453,7 @@ export async function fetchDeploymentCatalog(
 // module. Keeping the raw error type on the barrel makes the public
 // surface easier to discover from `src/providers/index.ts`.
 export { ModelFetchError, classifyFetchError, fetchWithRetry };
+export { formatCatalogErrorHint, hintForErrorMessage } from './modelFetchErrors.js';
 export type { FetchErrorClass, FetchRetryOptions };
 
 // Export catalog TTL for tests

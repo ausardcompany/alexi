@@ -13,6 +13,8 @@ import {
   ModelFetchError,
   classifyFetchError,
   fetchWithRetry,
+  formatCatalogErrorHint,
+  hintForErrorMessage,
 } from '../../src/providers/modelFetchErrors.js';
 
 describe('classifyFetchError', () => {
@@ -264,5 +266,101 @@ describe('ModelFetchError', () => {
     expect(err.transient).toBe(false);
     expect(err.cause).toBe(cause);
     expect(err.message).toBe('Failed to fetch models: unauthorized');
+  });
+});
+
+describe('formatCatalogErrorHint', () => {
+  it('suggests re-checking AICORE_SERVICE_KEY for 401/403', () => {
+    for (const status of [401, 403]) {
+      const hint = formatCatalogErrorHint({
+        statusCode: status,
+        reason: `unauthorized (${status})`,
+      });
+      expect(hint).toBeDefined();
+      expect(hint).toMatch(/AICORE_SERVICE_KEY/);
+    }
+  });
+
+  it('suggests verifying URL or passing -m for 404', () => {
+    const hint = formatCatalogErrorHint({
+      statusCode: 404,
+      reason: 'endpoint not found (404)',
+    });
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/AI_API_URL|resource group|-m/);
+  });
+
+  it('notes rate-limiting for 429', () => {
+    const hint = formatCatalogErrorHint({ statusCode: 429, reason: 'rate limit (429)' });
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/Rate-limited/i);
+  });
+
+  it('notes upstream degradation for 5xx (retries automatically)', () => {
+    const hint = formatCatalogErrorHint({ statusCode: 503, reason: 'HTTP 503' });
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/degraded|retrying/i);
+  });
+
+  it('suggests checking network for known transient Node.js codes', () => {
+    for (const code of ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED']) {
+      const hint = formatCatalogErrorHint({ code, reason: `network error (${code})` });
+      expect(hint, `code=${code}`).toBeDefined();
+      expect(hint).toMatch(/network|proxy|VPN/i);
+    }
+  });
+
+  it('surfaces a local file / permission hint for ENOENT / EACCES', () => {
+    for (const code of ['ENOENT', 'EACCES']) {
+      const hint = formatCatalogErrorHint({ code, reason: `system error (${code})` });
+      expect(hint).toBeDefined();
+      expect(hint).toMatch(/AICORE_SERVICE_KEY|permission/i);
+    }
+  });
+
+  it('falls back to a network hint for bare "fetch failed" messages', () => {
+    const hint = formatCatalogErrorHint({ reason: 'fetch failed' });
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/network|proxy|VPN/i);
+  });
+
+  it('returns undefined when no meaningful hint applies', () => {
+    // No status, no code, no recognisable keywords.
+    const hint = formatCatalogErrorHint({ reason: 'undocumented mystery failure' });
+    expect(hint).toBeUndefined();
+  });
+
+  it('surfaces a rate-limit hint when the reason mentions rate limit without a status', () => {
+    const hint = formatCatalogErrorHint({ reason: 'quota exceeded — rate limit' });
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/Rate-limited/i);
+  });
+});
+
+describe('hintForErrorMessage', () => {
+  it('lifts status codes out of the stored reason', () => {
+    const hint = hintForErrorMessage('unauthorized (401) — check AICORE_SERVICE_KEY');
+    expect(hint).toMatch(/AICORE_SERVICE_KEY/);
+  });
+
+  it('lifts Node.js error codes out of the stored reason', () => {
+    const hint = hintForErrorMessage('network error (ECONNRESET) — retrying with backoff');
+    expect(hint).toMatch(/network|proxy|VPN/i);
+  });
+
+  it('returns undefined for an empty message', () => {
+    expect(hintForErrorMessage(undefined)).toBeUndefined();
+    expect(hintForErrorMessage('')).toBeUndefined();
+  });
+
+  it('falls back to a generic pointer when nothing recognisable is in the message', () => {
+    const hint = hintForErrorMessage('mystery failure');
+    expect(hint).toBeDefined();
+    expect(hint).toMatch(/AICORE_SERVICE_KEY|network|provider/i);
+  });
+
+  it('recognises 404 in a stored reason and suggests -m fallback', () => {
+    const hint = hintForErrorMessage('endpoint not found (404) — check AI_API_URL');
+    expect(hint).toMatch(/-m|AI_API_URL/);
   });
 });

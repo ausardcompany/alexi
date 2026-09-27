@@ -991,6 +991,153 @@ sequenceDiagram
   `AICORE_SERVICE_KEY` fails fast with an actionable message rather
   than after three retries.
 
+### Actionable hints (issue #1851)
+
+`ModelFetchError.reason` describes WHAT failed
+(`"unauthorized (401) — check AICORE_SERVICE_KEY / credentials"`); the
+hint helpers describe WHAT to fix next. Two small exported functions
+share one deterministic status/code-to-hint table so `alexi models` and
+the TUI `ModelPicker` render the same guidance:
+
+```typescript
+// src/providers/modelFetchErrors.ts
+
+export function formatCatalogErrorHint(
+  classification: Pick<FetchErrorClass, 'statusCode' | 'code' | 'reason'>
+): string | undefined;
+
+export function hintForErrorMessage(
+  errorMessage: string | undefined
+): string | undefined;
+```
+
+Both are re-exported from `src/providers/index.ts` and from the catalog
+barrel `src/providers/modelCatalog.ts` so consumers can import from
+either boundary.
+
+`formatCatalogErrorHint` is the structural entry point — pass the
+classified `{ statusCode, code, reason }` and receive a one-line hint
+(or `undefined` when nothing meaningful can be said, so the caller
+does not render an empty line). The mapping:
+
+| Classification                                              | Hint                                                                                       |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `statusCode: 401` / `403`                                   | `Re-check AICORE_SERVICE_KEY and token expiry, then re-run \`alexi models\`.`              |
+| `statusCode: 404`                                           | `Verify AI_API_URL / resource group, or pass \`-m <model-id>\` to skip discovery.`         |
+| `statusCode: 400` / `422`                                   | `The request payload was rejected — check \`AICORE_RESOURCE_GROUP\` and provider config.`  |
+| `statusCode: 429`                                           | `Rate-limited by SAP AI Core — retry in a few seconds.`                                    |
+| `statusCode: 5xx`                                           | `SAP AI Core is degraded — retrying with backoff. If it persists, check the status page.` |
+| `code: ECONNRESET`/`ECONNREFUSED`/`ETIMEDOUT`/`ENOTFOUND`/… | `Provider endpoint unreachable — check network, proxy, and VPN, then retry.`               |
+| `code: ENOENT`/`EACCES`/`ENOTDIR`/`EPERM`                   | `A local file / permission error blocked the request — check AICORE_SERVICE_KEY path.`     |
+| `reason` matches `/fetch failed\|network\|econn.../i`       | `Provider endpoint unreachable — check network, proxy, and VPN, then retry.`               |
+| `reason` matches `/rate limit/i`                            | `Rate-limited by SAP AI Core — retry in a few seconds.`                                    |
+| anything else                                               | `undefined`                                                                                |
+
+`hintForErrorMessage` is the convenience wrapper for callers that
+persisted only the stringified reason (the catalog state stores
+`errorMessage: string` for on-disk round-tripping, not the original
+`FetchErrorClass`). It lifts a status code (`/\((\d{3})\)/`) and a
+Node.js code (`/\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|EAGAIN|EBUSY|ENOENT|EACCES|ENOTDIR|EPERM)\b/`)
+back out of the message and forwards the result to
+`formatCatalogErrorHint`. When neither pattern matches it falls back to
+a generic `Check \`AICORE_SERVICE_KEY\`, network, and provider config,
+then re-run \`alexi models\`.` so the operator always gets some pointer
+instead of nothing.
+
+### Structural classification on `CatalogState`
+
+To keep the TUI hint consistent with what `classifyFetchError` itself
+would emit, `CatalogState` now carries the classification alongside the
+message:
+
+```typescript
+export interface CatalogState {
+  status: CatalogStatus;
+  entries: readonly CatalogEntry[];
+  lastRefreshedAt: number | null;
+  errorMessage?: string;
+  /**
+   * Structural classification of the last fetch failure, when known.
+   * Populated alongside `errorMessage` so the TUI / CLI can render an
+   * actionable hint (issue #1851) without regex-matching the reason.
+   */
+  errorClass?: FetchErrorClass;
+  resourceGroup?: string;
+}
+```
+
+Populated on failure from the thrown `ModelFetchError` (transient flag,
+status code, error code, and reason preserved) OR by calling
+`classifyFetchError(err)` on the raw error when the error was not a
+`ModelFetchError`. Cleared on a subsequent successful refresh alongside
+`errorMessage`, and reset by `invalidateCatalog()`. Undefined for the
+initial `idle` state and for `ready` states that never observed a
+failure — legacy consumers unaware of the field are unaffected.
+
+### Consumer wiring
+
+`alexi models` (`src/cli/commands/models.ts:272-292`) prints a second
+stderr line `Hint: <actionable text>` in yellow after the classified
+reason. Import is dynamic and best-effort — a missing helper never
+fails the CLI, the error message is already on stderr:
+
+```typescript
+try {
+  const { formatCatalogErrorHint, hintForErrorMessage } = await import(
+    '../../providers/modelFetchErrors.js'
+  );
+  const hint = isModelFetchError
+    ? formatCatalogErrorHint({
+        statusCode: (e as { statusCode?: number }).statusCode,
+        code: (e as { code?: string }).code,
+        reason: (e as { reason?: string }).reason ?? message,
+      })
+    : hintForErrorMessage(message);
+  if (hint) {
+    console.error(c('yellow', `  Hint: ${hint}\n`));
+  }
+} catch {
+  // Import failure is not fatal — the error message is already printed.
+}
+```
+
+The Ink `ModelPicker` (`src/cli/tui/dialogs/ModelPicker.tsx`) renders a
+two-line status badge on `status === 'error'`:
+
+- Line 1 (warning colour):
+  `⚠ Model list unavailable: <reason> (showing static catalog · <N> models)`
+- Line 2 (dim colour): `→ <hint>` when `hintForErrorMessage` returned a
+  non-empty string.
+
+The message is read from `getCatalogState().errorMessage` at mount time
+and refreshed via the existing `subscribeCatalog` callback so no
+additional subscription surface is introduced. When no reason was
+captured (older code paths / test seams) the badge falls back to the
+pre-1851 generic `AI Core unreachable` label so the render never emits
+a bare `Model list unavailable: ` line.
+
+### Sequence: TUI hint on a 401 refresh
+
+```mermaid
+sequenceDiagram
+    participant UI as ModelPicker
+    participant Cat as modelCatalog
+    participant Cls as classifyFetchError
+    participant Hint as hintForErrorMessage
+    participant SDK as DeploymentApi
+
+    UI->>Cat: subscribeCatalog(cb)
+    Cat->>SDK: deploymentQuery(...)
+    SDK-->>Cat: throw Error(status=401)
+    Cat->>Cls: classifyFetchError(err)
+    Cls-->>Cat: { transient:false, statusCode:401,<br/>reason:"unauthorized (401) —<br/>check AICORE_SERVICE_KEY / credentials" }
+    Cat->>Cat: setState({ status:'error',<br/>errorMessage, errorClass })
+    Cat-->>UI: notify('error')
+    UI->>Hint: hintForErrorMessage(errorMessage)
+    Hint-->>UI: "Re-check AICORE_SERVICE_KEY..."
+    UI-->>UI: render two-line badge
+```
+
 ## Configuration
 
 ### Environment Variables

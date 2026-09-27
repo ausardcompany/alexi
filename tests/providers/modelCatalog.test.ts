@@ -66,6 +66,31 @@ describe('refreshModelCatalog error surfacing', () => {
     expect(executeMock).toHaveBeenCalledTimes(1);
   });
 
+  it('records the structural classification on failure (issue #1851)', async () => {
+    executeMock.mockRejectedValue(Object.assign(new Error('boom'), { status: 401 }));
+    await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+    const state = getCatalogState();
+    expect(state.errorClass).toBeDefined();
+    expect(state.errorClass?.statusCode).toBe(401);
+    expect(state.errorClass?.transient).toBe(false);
+    expect(state.errorClass?.reason).toMatch(/unauthorized/i);
+  });
+
+  it('clears both errorMessage and errorClass on a subsequent successful refresh', async () => {
+    executeMock.mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 401 }));
+    await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+    expect(getCatalogState().errorClass).toBeDefined();
+
+    executeMock.mockResolvedValueOnce({
+      resources: [{ id: 'dep-1', configurationName: 'gpt-4o' }],
+    });
+    await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+    const state = getCatalogState();
+    expect(state.status).toBe('ready');
+    expect(state.errorMessage).toBeUndefined();
+    expect(state.errorClass).toBeUndefined();
+  });
+
   it('retries transient 503 failures and eventually reports ready', async () => {
     executeMock
       .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 503 }))

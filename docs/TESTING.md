@@ -432,6 +432,142 @@ Patterns worth internalising:
    `tests/providers/modelCatalog.test.ts` where `@sap-ai-sdk/ai-api` is
    mocked via `vi.mock` at the module level.
 
+#### Testing hint helpers (issue #1851)
+
+`formatCatalogErrorHint` and `hintForErrorMessage` are pure functions
+and live in the same suite as `classifyFetchError`. Pin one case per
+branch so a refactor that reorders the guard ladder (e.g. moves the
+`404` branch below the generic 4xx branch, or drops the message-based
+fallback) trips a specific test rather than an incidental one.
+
+```typescript
+import { formatCatalogErrorHint, hintForErrorMessage } from '../../src/providers/modelFetchErrors.js';
+
+describe('formatCatalogErrorHint', () => {
+  it('returns the AICORE_SERVICE_KEY hint on 401', () => {
+    expect(formatCatalogErrorHint({ statusCode: 401, reason: '' })).toMatch(/AICORE_SERVICE_KEY/);
+  });
+  it('returns the AI_API_URL / -m fallback hint on 404', () => {
+    const hint = formatCatalogErrorHint({ statusCode: 404, reason: '' });
+    expect(hint).toMatch(/AI_API_URL/);
+    expect(hint).toMatch(/-m/);
+  });
+  it('returns the network hint on ECONNRESET', () => {
+    expect(formatCatalogErrorHint({ code: 'ECONNRESET', reason: '' })).toMatch(/network|proxy|VPN/);
+  });
+  it('returns undefined for an unclassified failure', () => {
+    expect(formatCatalogErrorHint({ reason: 'weird upstream thing' })).toBeUndefined();
+  });
+});
+
+describe('hintForErrorMessage', () => {
+  it('recovers the 401 hint from a stringified reason', () => {
+    expect(hintForErrorMessage('unauthorized (401) — check AICORE_SERVICE_KEY / credentials'))
+      .toMatch(/AICORE_SERVICE_KEY/);
+  });
+  it('falls back to a generic pointer when no status or code was captured', () => {
+    expect(hintForErrorMessage('mystery failure')).toMatch(/AICORE_SERVICE_KEY|network|provider config/);
+  });
+  it('returns undefined for an empty message', () => {
+    expect(hintForErrorMessage(undefined)).toBeUndefined();
+  });
+});
+```
+
+Patterns worth internalising:
+
+1. **Pin the hint by regex, not by full-string equality.** Every hint
+   is user-visible copy; a future editorial tweak to the wording should
+   NOT force a test churn as long as the actionable keyword
+   (`AICORE_SERVICE_KEY`, `AI_API_URL`, `network`, `proxy`, `VPN`, `-m`)
+   still lands in the string. `toMatch(/AICORE_SERVICE_KEY/)` catches
+   the regression that matters — "does the operator still see WHICH
+   env var to fix?" — without pinning prose.
+2. **Assert the fallback branch of `hintForErrorMessage`.** The final
+   generic pointer exists so the operator always gets some guidance
+   even when the classifier had no status or code to work with. A
+   regression that returned `undefined` from the fallback would
+   silently degrade the CLI to the pre-#1851 behaviour with no compile
+   error, so pin the branch explicitly.
+3. **Do not fake `errorClass` shape in catalog tests.** The catalog
+   test suite (`tests/providers/modelCatalog.test.ts`) drives
+   `refreshModelCatalog` end-to-end and asserts `getCatalogState().errorClass`
+   against the real classifier output so a divergence between the
+   thrown `ModelFetchError` and the persisted state is caught on the
+   spot.
+
+#### Testing the TUI model picker error path (`tests/cli/tui/ModelPicker.test.tsx`)
+
+The Ink `ModelPicker` renders a two-line error badge (reason + hint)
+when the live catalog is in `status === 'error'`. Drive the catalog
+into an error state by mocking `@sap-ai-sdk/ai-api` and rejecting the
+`DeploymentApi.deploymentQuery` promise, then render the picker under
+the same `DialogProvider` / `ThemeProvider` context wrapper the app
+uses:
+
+```tsx
+const { executeMock, deploymentQueryMock } = vi.hoisted(() => {
+  const executeMock = vi.fn();
+  const deploymentQueryMock = vi.fn(() => ({ execute: executeMock }));
+  return { executeMock, deploymentQueryMock };
+});
+
+vi.mock('@sap-ai-sdk/ai-api', () => ({
+  DeploymentApi: { deploymentQuery: deploymentQueryMock },
+}));
+
+const noSleep = (): Promise<void> => Promise.resolve();
+
+beforeEach(() => {
+  executeMock.mockReset();
+  deploymentQueryMock.mockClear();
+  invalidateCatalog();
+});
+afterEach(() => {
+  invalidateCatalog();
+});
+
+it('renders the classified reason and actionable hint on a 401 failure', async () => {
+  executeMock.mockRejectedValue(Object.assign(new Error('boom'), { status: 401 }));
+  await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+
+  const { lastFrame } = render(
+    <Wrapper>
+      <ModelPicker currentModel="claude-sonnet-id" />
+    </Wrapper>
+  );
+  const frame = lastFrame() ?? '';
+  expect(frame).toContain('Model list unavailable');
+  expect(frame).toMatch(/unauthorized/i);
+  expect(frame).toMatch(/AICORE_SERVICE_KEY/);
+});
+```
+
+Patterns worth internalising:
+
+1. **`invalidateCatalog()` in both `beforeEach` and `afterEach`.** The
+   catalog is module-level singleton state; without the reset the
+   error state from one test leaks into the next `ready` assertion and
+   the tests only fail when the file order changes.
+2. **Inject `retry: { sleep: noSleep }` on `refreshModelCatalog`.** The
+   default retry loop sleeps for `1000ms` / `2000ms` between attempts,
+   which would balloon the picker test file into multi-second runs.
+   `sleep: () => Promise.resolve()` makes the retries effectively
+   instant. For the `ECONNRESET` case set `maxAttempts: 1` too so the
+   test does not exercise the exponential backoff at all.
+3. **Assert both lines of the two-line badge.** Line 1 (`Model list
+   unavailable`) proves the picker read the classified reason from
+   `getCatalogState().errorMessage`; line 2 (the hint regex, e.g.
+   `AICORE_SERVICE_KEY`, `AI_API_URL|-m`, or `network|proxy|VPN`)
+   proves the picker also called `hintForErrorMessage` and rendered
+   the result. A regression that dropped the hint line would still pass
+   a line-1-only assertion.
+4. **Pin the ready-state as a control.** The suite also asserts the
+   success path (`executeMock.mockResolvedValueOnce({ resources: [...] })`)
+   renders the `live` count and does NOT contain `Model list
+   unavailable`. Without the control, a regression that hard-coded the
+   error badge into every render would only fail one direction.
+
 ### Testing reasoning-token accounting (`tests/providers/sapOrchestration-reasoningTokens.test.ts`)
 
 `extractReasoningTokens` and `normalizeTokenUsage` in `src/providers/sapOrchestration.ts` are pure classifiers — no SAP SDK, no network — so their tests are direct unit tests over synthetic payloads. The `SapOrchestrationProvider.complete()` / `.stream()` end-to-end assertions mock the SAP SDK at the module boundary so the reasoning-token plumbing can be exercised without live credentials.
@@ -2884,6 +3020,162 @@ describe('normalizeMovePath', () => {
 The whitespace-only case is deliberate — the upstream fix targeted
 the empty-string case only. Trimming whitespace-only paths is the
 caller's responsibility.
+
+### Testing max-tokens recovery
+
+Introduced with issue #1850 (commit `816bc24a`). The recovery module in `src/core/maxTokensRecovery.ts` splits into two suites:
+
+1. **`tests/core/maxTokensRecovery.test.ts`** (302 lines, ten describe blocks) — pure unit tests. No network, no timers, no filesystem. Verifies the classifier, the extractor, the per-family fallbacks, the safety-margin formula, the reducer floor, the plan composition, and the headless-vs-callback behaviour of `confirmMaxTokensRecovery`.
+2. **`tests/core/streamingOrchestrator.maxTokens.test.ts`** (249 lines) — integration tests. Mocks `getProviderForModelWithFallback` and `getDefaultModel`, drives `streamChat` end-to-end, and pins the one-shot recovery contract.
+
+#### Classifier and extractor patterns (unit suite)
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
+  MIN_SAFE_MAX_TOKENS,
+  computeSafeMaxTokens,
+  extractContextWindow,
+  getModelContextWindow,
+  isMaxTokensError,
+  planMaxTokensRecovery,
+} from '../../src/core/maxTokensRecovery.js';
+
+describe('isMaxTokensError', () => {
+  it('detects HTTP 413 by status code alone', () => {
+    const err = Object.assign(new Error('Request Entity Too Large'), { statusCode: 413 });
+    expect(isMaxTokensError(err)).toBe(true);
+  });
+
+  it('detects HTTP 400 combined with a max-tokens marker in the body', () => {
+    const err = Object.assign(new Error('Bad Request'), {
+      statusCode: 400,
+      responseBody: { error: { code: 'context_length_exceeded' } },
+    });
+    expect(isMaxTokensError(err)).toBe(true);
+  });
+
+  it('rejects a bare HTTP 400 without a max-tokens marker', () => {
+    const err = Object.assign(new Error('missing required field: model'), { statusCode: 400 });
+    expect(isMaxTokensError(err)).toBe(false);
+  });
+});
+
+describe('extractContextWindow', () => {
+  it('extracts from "maximum context length is X tokens"', () => {
+    expect(
+      extractContextWindow(new Error('maximum context length is 128000 tokens'))
+    ).toBe(128000);
+  });
+});
+
+describe('computeSafeMaxTokens', () => {
+  it('clamps to MIN_SAFE_MAX_TOKENS when the prompt already fills the window', () => {
+    expect(
+      computeSafeMaxTokens({
+        originalMaxTokens: 4096,
+        contextWindow: 8000,
+        estimatedPromptTokens: 7900,
+        safetyMargin: 1000,
+      })
+    ).toBe(MIN_SAFE_MAX_TOKENS);
+  });
+});
+```
+
+#### Headless-vs-callback contract for `confirmMaxTokensRecovery`
+
+```typescript
+import { setRecoveryPrompt, confirmMaxTokensRecovery } from '../../src/core/maxTokensRecovery.js';
+
+afterEach(() => {
+  setRecoveryPrompt(null); // Never leak a callback across tests.
+});
+
+it('auto-accepts in headless mode', async () => {
+  const plan = {
+    contextWindow: 128000,
+    contextWindowExtracted: true,
+    estimatedPromptTokens: 100000,
+    safetyMargin: 12800,
+    safeMaxTokens: 15200,
+    originalMaxTokens: 4096,
+    reducedFromOriginal: true,
+  };
+  expect(await confirmMaxTokensRecovery(plan)).toBe(true);
+});
+
+it('routes through a registered TUI callback and honours its decision', async () => {
+  const callback = vi.fn(async () => false);
+  setRecoveryPrompt(callback);
+  const plan = { /* ...same shape, reducedFromOriginal: true... */ };
+  expect(await confirmMaxTokensRecovery(plan)).toBe(false);
+  expect(callback).toHaveBeenCalledWith(plan);
+});
+```
+
+#### Integration-level orchestrator suite
+
+The `streamChat` integration test builds a fake provider that throws on the first call and yields chunks on the second. Two invariants worth pinning per case:
+
+1. **Recovery is one-shot.** Two successive `max_tokens_exceeded` errors surface the second unchanged; the retry counter is not reset between them.
+2. **The `logger.info` breadcrumb is emitted before the retry.** Grep-friendly log output is part of the contract — operators running `LOG_LEVEL=debug` in autonomous mode rely on it to diagnose why an agent turn produced a shorter response than expected.
+
+```typescript
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    setLevel: vi.fn(), debug: vi.fn(), info: vi.fn(),
+    warn: vi.fn(), error: vi.fn(), print: vi.fn(),
+  },
+}));
+
+import { streamChat } from '../../src/core/streamingOrchestrator.js';
+import { getProviderForModelWithFallback } from '../../src/providers/index.js';
+import { logger } from '../../src/utils/logger.js';
+import { setRecoveryPrompt } from '../../src/core/maxTokensRecovery.js';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  setRecoveryPrompt(null);
+});
+
+afterEach(() => {
+  setRecoveryPrompt(null); // Guard against leaked callbacks across suites.
+});
+
+it('retries once with reduced maxTokens and logs a breadcrumb', async () => {
+  const err = Object.assign(new Error('max_tokens_exceeded'), { statusCode: 400 });
+  const { provider, getCalls } = makeMaxTokensProvider(err, 1, [
+    { type: 'text', text: 'ok' },
+  ]);
+  vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+    provider, effectiveModelId: 'gpt-4o', usedFallback: false,
+  });
+
+  const chunks: unknown[] = [];
+  for await (const c of streamChat('hello')) chunks.push(c);
+
+  const calls = getCalls();
+  expect(calls).toHaveLength(2);
+  expect(calls[1].maxTokens).toBeLessThan(calls[0].maxTokens!);
+  expect(logger.info).toHaveBeenCalledWith(
+    expect.stringMatching(/^max_tokens exceeded; retrying with maxTokens=/)
+  );
+});
+```
+
+Coverage priorities for future extensions:
+
+1. **Every new fallback in `MODEL_CONTEXT_WINDOWS` gets a positive case.** Add the case in the `getModelContextWindow` describe block alongside a negative case (an unknown model still falls through to `DEFAULT_CONTEXT_WINDOW_TOKENS`).
+2. **Assert `plan.contextWindowExtracted` alongside `plan.contextWindow`.** A future refactor that inverts the extraction/fallback precedence would produce a numerically correct plan with the wrong provenance flag; asserting both fields pins the contract.
+3. **Never leak a `RecoveryPromptFn` across tests.** The module holds the callback in a process-local `let`, so `afterEach(() => setRecoveryPrompt(null))` is mandatory in any suite that calls `setRecoveryPrompt(fn)`.
 
 ### Testing Network Disconnect Classification (`network.disconnected`)
 
