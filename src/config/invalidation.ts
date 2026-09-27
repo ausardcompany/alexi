@@ -61,6 +61,13 @@ export function _instanceCacheCount(): number {
  * console.warn only — this module intentionally does not depend on
  * `src/utils/logger.ts` to keep it importable from very early boot
  * paths). A misbehaving disposer never blocks the rest of the flush.
+ *
+ * Also flushes the project-scoped caches in `projectCache.ts` (issue
+ * #1848): a global-config rewrite frequently changes rules, routing,
+ * or MCP servers indirectly, and stale worktree entries there would
+ * survive `invalidateGlobalConfig` otherwise. Dynamic import keeps
+ * this file free of a boot-time cycle with `projectCache.ts` (which
+ * imports higher-level loaders from `mcp/`, `agent/`, `skill/`).
  */
 export function invalidateGlobalConfig(): void {
   for (const dispose of instanceCaches) {
@@ -71,4 +78,36 @@ export function invalidateGlobalConfig(): void {
       console.warn(`[config] instance cache disposer threw during invalidation: ${String(err)}`);
     }
   }
+  // Best-effort: project caches are optional (dynamic import so a
+  // consumer that never touches `projectCache` avoids the transitive
+  // load), and a failure here must not block the rest of the flush.
+  void import('./projectCache.js')
+    .then(({ invalidateAllProjectCaches }) => {
+      invalidateAllProjectCaches();
+    })
+    .catch(() => {
+      // Project cache not loaded — nothing to purge.
+    });
+}
+
+/**
+ * Invalidate project-scoped config caches for a specific workdir. Use
+ * this from session-context boundaries (workdir switch during a
+ * long-lived process) rather than the global `invalidateGlobalConfig`
+ * — a global flush is overkill when only one worktree's on-disk
+ * config changed.
+ *
+ * When `workdir` is omitted, invalidates project caches for every
+ * workdir (a stronger flush than a targeted purge, but still narrower
+ * than `invalidateGlobalConfig` which also runs registered instance
+ * disposers).
+ */
+export function invalidateProjectConfig(workdir?: string): void {
+  void import('./projectCache.js')
+    .then(({ invalidateProjectCache }) => {
+      invalidateProjectCache(workdir);
+    })
+    .catch(() => {
+      // Project cache not loaded — nothing to purge.
+    });
 }
