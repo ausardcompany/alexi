@@ -96,6 +96,21 @@ const ConnectTimeoutSchema = z
  * validation are enforced strictly; extra keys are accepted so future
  * additions do not require a schema bump.
  */
+/**
+ * Zod schema for the optional `git` block attached to servers that were
+ * installed via `ax mcp install <repo-url>`. Populated by the git
+ * installer and consumed by future refresh / auto-update flows.
+ */
+const GitOriginSchema = z
+  .object({
+    type: z.literal('git'),
+    url: z.string().min(1),
+    branch: z.string().optional(),
+    autoUpdate: z.boolean().optional(),
+    installedPath: z.string().optional(),
+  })
+  .strict();
+
 const McpServerConfigSchema = z
   .object({
     name: z.string().min(1),
@@ -119,6 +134,7 @@ const McpServerConfigSchema = z
         maxDelayMs: z.number().int().min(0).optional(),
       })
       .optional(),
+    git: GitOriginSchema.optional(),
   })
   .passthrough();
 
@@ -229,6 +245,19 @@ export interface McpServerConfig {
     maxAttempts?: number;
     initialDelayMs?: number;
     maxDelayMs?: number;
+  };
+  /**
+   * Optional git-origin metadata for servers installed via
+   * `ax mcp install <repo-url>`. Populated by the git installer so
+   * later refresh / auto-update flows can rediscover the source
+   * repository without reparsing.
+   */
+  git?: {
+    type: 'git';
+    url: string;
+    branch?: string;
+    autoUpdate?: boolean;
+    installedPath?: string;
   };
 }
 
