@@ -6204,3 +6204,50 @@ Semantics pinned by `src/core/database/migration.legacy-journal.test.ts`:
 
 `importLegacyDrizzleJournal` is exported alongside `applyMigrations` from `src/core/database/migration.ts`. Adapters that do not back onto SQLite (or that never shipped a Drizzle-based schema) can leave `LegacySqliteBridge` unimplemented — `applyMigrations` still works without it.
 
+## Canonical Model Identity for Usage Attribution (`catalog-identity`)
+
+`src/core/stats/catalog-identity.ts` is a pure helper that normalises the same underlying model surfaced under multiple `provider/model` combinations onto a single canonical lab identity. Ported from opencode `packages/stats/core/src/domain/catalog-identity.ts` (commit `acb6859`), adapted so the SAP AI Core provider participates in the resolution.
+
+The problem it solves: when Alexi aggregates usage across SAP AI Core deployments, direct OpenAI-compatible providers, and gateway-routed providers, the same model (Anthropic Claude Opus, for example) may appear as `sap-ai-core/anthropic--claude-4.7-opus`, `anthropic/claude-4-opus`, and `openrouter/anthropic/claude-opus-4`. A naive per-`provider/modelID` group-by triple-counts that model in per-lab spend reports. `catalogIdentity` folds every offering back to a single canonical lab id (`"anthropic"`) so downstream aggregation buckets by lab correctly.
+
+### Public surface
+
+```typescript
+// src/core/stats/catalog-identity.ts
+export interface CatalogIdentity {
+  readonly offerings: ReadonlyMap<string, string>; // "<providerID>/<modelID>" -> lab
+  readonly models: ReadonlyMap<string, string>; // normalised model name -> lab (unambiguous only)
+}
+
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = [
+  'opencode',
+  'opencode-go',
+  'sap-ai-core',
+];
+
+export function catalogIdentity(
+  value: unknown,
+  statsProviders: readonly string[] = DEFAULT_STATS_PROVIDERS
+): CatalogIdentity;
+```
+
+`DEFAULT_STATS_PROVIDERS` extends the upstream opencode list with `sap-ai-core` — this is the load-bearing SAP-adaptation change. Callers that want to include additional providers can pass an explicit `statsProviders` array.
+
+### Resolution rules
+
+1. For each provider in `statsProviders`, iterate `provider.models`.
+2. Determine the canonical id for each model:
+   - use `model.canonical_model_id` when the catalog entry declares it;
+   - else fall back to `modelID` when the top-level `models` map already contains it;
+   - else fall back to `"<providerID>/<modelID>"` if that key is in `models`;
+   - else skip the entry (no canonical data available).
+3. The lab is the segment before the first `/` of the canonical id.
+4. Record `"<providerID>/<modelID>" → lab` in `offerings`.
+5. Track candidate labs per normalised model name (dropping `-free` / `-preview` suffixes so variant offerings collapse); only surface names with a single candidate lab in the `models` output. Ambiguous names — the same normalised name offered by two labs — are dropped so callers cannot accidentally mis-attribute usage.
+
+The helper is intentionally decoupled from Alexi's static catalog: it consumes a JSON-shaped value produced by an upstream tool or a shared model index and returns two read-only maps for the caller to look up.
+
+### Interaction with `CostTracker`
+
+`catalogIdentity` is separate from `src/core/costTracker.ts` — the tracker records per-call `UsageRecord`s keyed by the raw `provider/model` string, and cross-provider lab aggregation is a downstream concern that consumes the offering-to-lab map. This keeps the tracker's write path zero-dependency and defers the (potentially expensive) catalog resolution to the report layer.
+

@@ -5463,6 +5463,114 @@ contributors do not re-introduce them by hand:
    --write` pass. Running `npm run format` before committing avoids the
    `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up.
 
+8. **Wrap `.toBe(...)` chains onto the same line as the `expect(...)` argument
+   when the receiver fits, and split the `vi.fn(async () => ...)` argument
+   onto its own indented line when the assignment overflows 100 columns.**
+   Two related axes from the 2026-09-28 auto-fix pass in commit `3fb337cd`
+   on `src/providers/gateway/models.test.ts:40` and
+   `src/providers/provider.test.ts:80`/`:108`:
+
+   - Prettier prefers to keep an `expect(...).toBe(...)` chain compact:
+     when the argument to `expect(...)` fits alongside the call, the whole
+     `.toBe(false)` sits on the next line indented once, rather than
+     wrapping the `expect` argument across three lines. Canonical form:
+
+     ```typescript
+     // Anti-pattern — three-line wrap of a compact expect chain
+     expect(
+       modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })
+     ).toBe(false);
+
+     // Canonical form after auto-fix
+     expect(modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })).toBe(
+       false
+     );
+     ```
+
+     The assertion semantics are unchanged — `modelSupportsTools` still
+     receives the same `{ id: 'x', supported_parameters: ['temperature', 'top_p'] }`
+     record and the expectation still fires against `false`. This exercises
+     the negative branch of `modelSupportsTools` (explicit metadata,
+     `'tools'` / `'tool_choice'` absent → not tool-capable).
+
+   - When a `globalThis.fetch = vi.fn(...) as unknown as typeof globalThis.fetch;`
+     assignment overflows 100 columns, Prettier splits the `vi.fn`
+     argument onto its own indented line rather than reflowing the
+     surrounding cast. Canonical form:
+
+     ```typescript
+     // Anti-pattern — 130-column single line
+     globalThis.fetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof globalThis.fetch;
+
+     // Canonical form after auto-fix — vi.fn argument on its own indented line
+     globalThis.fetch = vi.fn(
+       async () => new Response('ok', { status: 200 })
+     ) as unknown as typeof globalThis.fetch;
+     ```
+
+     The `beforeEach` / `afterEach` scope that saves and restores the
+     original `globalThis.fetch` and calls `vi.restoreAllMocks()` is
+     untouched, and the resolved response (`status: 200`) is unchanged.
+     This pattern applies to any test that installs a mock `fetch` via a
+     double cast — the `as unknown as typeof globalThis.fetch` idiom is
+     preserved verbatim.
+
+   Diff statistics for that pass: `3 files changed, 14 insertions(+), 6 deletions(-)`
+   across `src/core/stats/catalog-identity.ts`, `src/providers/gateway/models.test.ts`,
+   and `src/providers/provider.test.ts`. Running `npm run format` before committing
+   avoids the `style(ci)` follow-up.
+
+### Testing gateway model capability (`modelSupportsTools`)
+
+`src/providers/gateway/models.test.ts` pins the fail-open contract from kilocode
+`c4506f7ef`. The suite covers every input shape a real SAP AI Core deployment
+query can produce and is the load-bearing regression guard against a future
+refactor that tightens `undefined` / `null` / `[]` into "definitely no tools":
+
+- `modelSupportsTools({ id: 'x' })` — undefined `supported_parameters` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: null })` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: [] })` → `true` (fail-open; empty is not distinguishable from "no metadata" for most upstream gateways).
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tool_choice'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools', 'tool_choice', 'temperature'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })` → `false` (explicit metadata, tools not listed — the ONLY branch that returns `false`).
+- A realistic SAP AI Core deployment record (`{ id: 'anthropic--claude-4.7-opus' }` with no `supported_parameters` field) → `true`.
+
+The 7th case is the critical one for the SAP AI Core adaptation: many
+deployment records omit `supported_parameters` entirely, and the pre-fix
+codebase would silently downgrade them to text-only. The `false`-returning case
+is deliberately kept small so a future refactor cannot claim the fail-open
+default was "accidental".
+
+### Testing the provider fetch wrapper timeout (`buildFetch`)
+
+`src/providers/provider.test.ts` pins the unconditional-timeout contract from
+opencode `35fc7a7`. The suite is the load-bearing regression guard against a
+future refactor that gates the timeout on a URL match again:
+
+- `DEFAULT_PROVIDER_TIMEOUT_MS` is exported and positive.
+- Gateway-routed requests (`https://gateway.ai.cloudflare.com/v1/xxx`) are
+  aborted when the timeout elapses. This is the load-bearing case for the
+  opencode `35fc7a7` port — the pre-fix codebase let gateway-routed requests
+  escape the wrapper entirely.
+- SAP AI Core-routed requests (`https://api.ai.sap.example/v2/`) are aborted
+  when the timeout elapses. Same axis as the Cloudflare case, pinned separately
+  so a future refactor that special-cased Cloudflare cannot silently break the
+  SAP path.
+- Direct provider URLs (`https://api.anthropic.com`) are aborted when the
+  timeout elapses. The baseline case — the wrapper was already correct here
+  before opencode `35fc7a7`.
+- A resolved response (`new Response('ok', { status: 200 })`) comes back when
+  the fetch completes before the timeout.
+- A caller-supplied `AbortSignal` (`controller.abort(new Error('user cancelled'))`)
+  wins over the timeout — the rejection matches `/cancelled|abort/i`.
+- `timeout: 0` disables the timeout entirely and the response resolves.
+
+Each case installs its own mock `fetch` in a `beforeEach`, and the top-level
+`afterEach` restores `globalThis.fetch` from the saved reference and calls
+`vi.restoreAllMocks()`. See pattern **8** above for the `vi.fn(async () => ...)`
+argument-splitting rule that applies to the two successful-response mocks.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has

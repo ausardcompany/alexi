@@ -5684,130 +5684,67 @@ await importLegacyDrizzleJournal(sqliteBridge, ALL_MIGRATIONS);
 await applyMigrations(sqliteBridge, ALL_MIGRATIONS);
 ```
 
-## Gateway Model Capability API (`src/providers/gateway/models.ts`)
+## Catalog Identity API (`src/core/stats/catalog-identity.ts`)
 
-Fail-open helper for deciding whether an *external* gateway model record (SAP AI Core deployment query, OpenRouter, Cloudflare AI Gateway) should be offered tool calling. Kept separate from the maintainer-authored `ORCHESTRATION_MODEL_METADATA` in `sapOrchestration.ts` — an empty capability list there is fail-closed, an empty `supported_parameters` here is fail-open.
+Pure helper for normalising the same underlying model surfaced under multiple `provider/model` combinations onto a single canonical lab identity. Used by usage-attribution reporters to fold cross-provider offerings back to a single lab (`"anthropic"`, `"openai"`, `"deepseek"`, ...) so per-lab spend aggregation is not triple-counted.
 
-```typescript
-export interface GatewayModelInfo {
-  /** Model identifier (e.g. `"anthropic--claude-4.7-opus"`). */
-  id?: string;
-  /**
-   * Parameters advertised as supported by the gateway.
-   * - `undefined` / `null` — no metadata (fail-open).
-   * - `[]` — empty list (fail-open; empty is not distinguishable from "no metadata").
-   * - `[...names]` — explicit list; look up `"tools"` / `"tool_choice"`.
-   */
-  supported_parameters?: readonly string[] | null;
-}
-
-/**
- * Whether a gateway-routed model should be treated as tool-capable.
- *
- * Ported from kilocode c4506f7ef.
- */
-export function modelSupportsTools(model: GatewayModelInfo): boolean;
-```
-
-Usage:
+### `DEFAULT_STATS_PROVIDERS`
 
 ```typescript
-import { modelSupportsTools } from '../providers/gateway/models.js';
-
-for (const record of gatewayDeployments) {
-  if (!modelSupportsTools(record)) {
-    // Skip tool binding — the gateway explicitly advertised no tools/tool_choice.
-    continue;
-  }
-  registerToolBindings(record.id);
-}
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = [
+  'opencode',
+  'opencode-go',
+  'sap-ai-core',
+];
 ```
 
-## Provider Fetch Timeout API (`src/providers/provider.ts`)
+The provider ids whose entries participate in canonical-identity resolution by default. Extended with `sap-ai-core` relative to the upstream opencode list so SAP-routed offerings map to the correct lab.
 
-`fetch`-compatible wrapper enforcing a request timeout for BOTH direct provider URLs and gateway URLs (Cloudflare AI Gateway, SAP AI Core, OpenRouter). Ports opencode `35fc7a7`.
-
-```typescript
-export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
-
-export interface BuildFetchOptions {
-  /** Informational only. Timeout is applied unconditionally regardless of the value. */
-  baseURL?: string;
-  /**
-   * Timeout in milliseconds. Defaults to DEFAULT_PROVIDER_TIMEOUT_MS.
-   * Non-positive / non-finite values disable the wrapper.
-   */
-  timeout?: number;
-}
-
-export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-
-export function buildFetch(opts?: BuildFetchOptions): FetchLike;
-```
-
-Behaviour:
-
-1. `timeout <= 0` or non-finite → forwards directly to `globalThis.fetch`.
-2. `timeout > 0` → creates an `AbortController` with a `setTimeout(timeout).unref()` timer that aborts with `new Error('Provider timeout after ${timeout}ms (${baseURL ?? "provider"})')`.
-3. Composes with `init.signal` via `AbortSignal.any` (Node ≥ 20 / Bun ≥ 1.1) or a manual multi-signal listener chain on older runtimes. Whichever signal fires first wins.
-
-Usage:
-
-```typescript
-import { buildFetch, DEFAULT_PROVIDER_TIMEOUT_MS } from '../providers/provider.js';
-
-const clientFetch = buildFetch({
-  baseURL: 'https://gateway.ai.cloudflare.com/v1/xxx',
-  timeout: DEFAULT_PROVIDER_TIMEOUT_MS,
-});
-
-// Drop into any SDK that accepts a custom `fetch`:
-const sdk = new SomeProviderSDK({ fetch: clientFetch, apiKey });
-```
-
-## Canonical Model Identity API (`src/core/stats/catalog-identity.ts`)
-
-Pure resolver that maps `"<providerID>/<modelID>"` offerings to canonical lab ids for usage attribution. Ported from opencode `packages/stats/core/src/domain/catalog-identity.ts` commit `acb6859`, extended with `"sap-ai-core"` in the default provider list.
+### `CatalogIdentity`
 
 ```typescript
 export interface CatalogIdentity {
-  /** `"<providerID>/<modelID>"` → canonical lab id. */
+  /** `"<providerID>/<modelID>"` -> canonical lab id (e.g. `"anthropic"`). */
   readonly offerings: ReadonlyMap<string, string>;
-  /**
-   * Normalised model name → canonical lab id.
-   * Ambiguous names (offered by multiple labs) are dropped.
-   */
+  /** Normalised model name -> canonical lab id. Only populated for unambiguous names. */
   readonly models: ReadonlyMap<string, string>;
 }
+```
 
-export const DEFAULT_STATS_PROVIDERS: readonly string[];
+- `offerings` — one entry per input offering that could be resolved to a canonical model id. Ambiguous inputs are dropped rather than emitted with an incorrect lab.
+- `models` — normalised model names (with `-free` / `-preview` suffixes stripped) that map unambiguously to a single lab. Names offered by multiple labs are dropped so callers cannot accidentally mis-attribute usage.
 
-/**
- * Build canonical `offering → lab` and `model → lab` maps from a model catalog.
- *
- * @param value          Raw catalog value (validated inline).
- * @param statsProviders Provider ids to include; defaults to DEFAULT_STATS_PROVIDERS.
- * @throws Error("Invalid model catalog") when the input is malformed.
- */
+### `catalogIdentity(value, statsProviders?)`
+
+```typescript
 export function catalogIdentity(
   value: unknown,
-  statsProviders?: readonly string[]
+  statsProviders: readonly string[] = DEFAULT_STATS_PROVIDERS
 ): CatalogIdentity;
 ```
 
-Usage:
+Build canonical `offerings` and `models` maps from a raw catalog value. The expected shape mirrors the upstream models.dev catalog:
 
-```typescript
-import { catalogIdentity } from '../core/stats/catalog-identity.js';
-
-const catalog = await fetch('https://models.dev/api.json').then((r) => r.json());
-const { offerings, models } = catalogIdentity(catalog);
-
-// Per-offering lab lookup for spend reports:
-const lab = offerings.get('sap-ai-core/anthropic--claude-4.7-opus'); // → "anthropic"
-
-// Unambiguous-name lookup for backward-compat cost tables keyed by short id:
-const legacyLab = models.get('claude-opus-4'); // → "anthropic" | undefined
+```jsonc
+{
+  "models":    { "<canonicalID>": { /* ... */ } },
+  "providers": { "<providerID>": { "models": { "<modelID>": { "canonical_model_id"?: "string" } } } }
+}
 ```
 
-See [PROVIDERS.md](PROVIDERS.md#canonical-model-identity-for-usage-attribution) for the full contract and the resolution-rule ordering.
+Resolution rules:
+
+1. For each provider in `statsProviders`, iterate `provider.models`.
+2. Determine the canonical id for each model:
+   - use `model.canonical_model_id` when set;
+   - else fall back to `modelID` if it exists in the top-level `models` map;
+   - else fall back to `"<providerID>/<modelID>"` if that key is in `models`;
+   - else skip the entry (no canonical data available).
+3. The lab is the segment before the first `/` of the canonical id.
+4. Record `"<providerID>/<modelID>" -> lab` in `offerings`.
+5. Track candidate labs per normalised model name; only surface names with a single candidate lab in the `models` output.
+
+Throws `Error('Invalid model catalog')` when `value` does not have the expected top-level shape.
+
+Full flow: [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-catalog-identity).
+
