@@ -116,6 +116,19 @@ export interface SessionMetadata {
    * Ported from upstream kilocode commit f4cba053a.
    */
   agent?: string;
+  /**
+   * Wall-clock timestamp (milliseconds since epoch) of the most recent
+   * session access — either a load via {@link SessionManager.loadSession}
+   * or a save via {@link SessionManager.saveSession}. Used by the
+   * {@link RetentionRunner} to determine when a session was last
+   * "touched" independently of its logical `updated` field (which is
+   * only advanced on message writes).
+   *
+   * Optional and backwards-compatible: legacy sessions written before
+   * this field was introduced will surface `undefined` here, and
+   * retention runners fall back to `updated` in that case.
+   */
+  lastAccessedAt?: number;
 }
 
 export interface Session {
@@ -601,6 +614,20 @@ export class SessionManager {
       const content = fs.readFileSync(sessionPath, 'utf-8');
       const session = JSON.parse(content) as Session;
 
+      // Refresh the last-access timestamp on load so the retention
+      // runner treats a resumed session as recently touched even if no
+      // new message has been appended yet. Best-effort: a failure to
+      // persist the refreshed metadata (read-only FS, disk full) is
+      // swallowed here — surfacing an error on load would be surprising
+      // for a getter, and the next `saveSession` call will retry.
+      session.metadata.lastAccessedAt = Date.now();
+      try {
+        fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
+      } catch {
+        // Non-fatal: retention will fall back to `updated` when the
+        // on-disk `lastAccessedAt` cannot be refreshed.
+      }
+
       this.activeSession = session;
       // Issue #1848: a resumed session may have been created in a
       // different worktree than the current process; treat that as a
@@ -632,6 +659,12 @@ export class SessionManager {
    */
   private saveSession(session: Session): void {
     const sessionPath = path.join(this.sessionsDir, `${session.metadata.id}.json`);
+
+    // Stamp the last-access timestamp before serialisation so the on-disk
+    // representation always reflects the moment of the most recent write.
+    // Retention runners rely on this field to distinguish "touched
+    // yesterday" from "message write yesterday" (which is `updated`).
+    session.metadata.lastAccessedAt = Date.now();
 
     try {
       fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2), 'utf-8');
