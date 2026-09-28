@@ -78,7 +78,9 @@ describe('buildFetch — provider timeout', () => {
   });
 
   it('passes through when the request completes before the timeout', async () => {
-    globalThis.fetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () => new Response('ok', { status: 200 })
+    ) as unknown as typeof globalThis.fetch;
 
     const fetchFn = buildFetch({ timeout: 1_000 });
     const res = await fetchFn('https://example.test/', {});
@@ -105,7 +107,9 @@ describe('buildFetch — provider timeout', () => {
 
   it('disables the timeout when timeout <= 0', async () => {
     // A resolved response comes back even though we set timeout=0.
-    globalThis.fetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () => new Response('ok', { status: 200 })
+    ) as unknown as typeof globalThis.fetch;
 
     const fetchFn = buildFetch({ timeout: 0 });
     const res = await fetchFn('https://example.test/', {});

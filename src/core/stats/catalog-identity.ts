@@ -55,7 +55,11 @@ function record(v: unknown): v is Record<string, unknown> {
  * to the upstream opencode list so SAP-routed offerings map to the
  * correct lab.
  */
-export const DEFAULT_STATS_PROVIDERS: readonly string[] = ['opencode', 'opencode-go', 'sap-ai-core'];
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = [
+  'opencode',
+  'opencode-go',
+  'sap-ai-core',
+];
 
 /**
  * Build canonical `offering → lab` and `model → lab` maps from a model

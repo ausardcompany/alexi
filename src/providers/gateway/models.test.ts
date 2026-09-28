@@ -38,9 +38,9 @@ describe('modelSupportsTools', () => {
   });
 
   it('returns false when parameters are listed but tools/tool_choice are absent', () => {
-    expect(
-      modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })
-    ).toBe(false);
+    expect(modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })).toBe(
+      false
+    );
   });
 
   it('handles a realistic gateway record with no supported_parameters', () => {
