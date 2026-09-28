@@ -1907,6 +1907,18 @@ The directory is recreated by `Wakeup.schedule` on the next invocation via `ensu
 
 Upstream kilocode persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as JSON files and the timer loop is a plain `setInterval`. The public surface matches the upstream contract exactly (`Wakeup.schedule`, `Wakeup.cancel`, `Wakeup.list`, `Wakeup.fireDue`) so the companion tools (`schedule_wakeup` / `cancel_wakeup`) port verbatim. See [ARCHITECTURE.md — Wakeup Subsystem](ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup) and [API.md — Wakeup API](API.md#wakeup-api) for the design notes and public TypeScript surface.
 
+## Provider Timeout Configuration
+
+Alexi wraps its outgoing provider `fetch` calls with `buildFetch` from `src/providers/provider.ts`. The wrapper enforces a request timeout unconditionally, regardless of whether the target is a direct provider URL or an AI gateway (Cloudflare AI Gateway, SAP AI Core, OpenRouter). See [PROVIDERS.md — Provider Fetch Timeout Wrapper](PROVIDERS.md#provider-fetch-timeout-wrapper-buildfetch) and [ARCHITECTURE.md — Provider Fetch Wrapper — Unconditional Timeout](ARCHITECTURE.md#provider-fetch-wrapper--unconditional-timeout-srcprovidersproviderts) for the full contract.
+
+The default timeout is exposed as a runtime constant:
+
+```typescript
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
+```
+
+No environment variable currently overrides this at process start — override it programmatically at the SDK-adapter layer when needed, or pass `timeout: 0` to opt out entirely and fall back to the platform default. On a slow SAP corporate VPN or a degraded gateway, expect Ctrl+C at the TUI to abort the underlying fetch immediately (the caller signal composes with the internal timeout via `AbortSignal.any`).
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

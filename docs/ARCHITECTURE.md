@@ -6038,6 +6038,116 @@ Platform launcher (deliberately Node built-ins, no `open` npm package, to keep t
 
 When `detached: true` (the default) the child is `unref()`'d and `openUrl` resolves immediately, so quitting Alexi before the browser tab opens does not kill the launcher. `detached: false` waits for exit and rejects if the launcher exits non-zero.
 
+## Canonical Model Identity for Usage Attribution (`src/core/stats/catalog-identity.ts`)
+
+The `catalogIdentity` helper resolves each `"<providerID>/<modelID>"` offering to a canonical lab id so downstream aggregation (per-lab spend reports, usage dashboards) can bucket by lab correctly instead of triple-counting the same underlying model exposed under multiple gateway routes.
+
+Motivating example. The same Anthropic Claude Opus can appear as:
+
+- `sap-ai-core/anthropic--claude-4.7-opus` (SAP AI Core deployment)
+- `anthropic/claude-4-opus` (direct)
+- `openrouter/anthropic/claude-opus-4` (OpenRouter)
+
+A naive per-`provider/modelID` grouping would credit those three offerings to three different buckets when a spend report expects a single `"anthropic"` row. `catalogIdentity` normalises all three to the canonical lab `"anthropic"`.
+
+Contract:
+
+- **Pure function.** Consumes a JSON-shaped value (upstream models.dev-style catalog) and returns two read-only maps. No I/O, no async, no dependency on Alexi's static in-code catalog. Safe to call from any code path — cost tracking, telemetry, TUI status widgets.
+- **Two outputs.** `offerings: ReadonlyMap<"<providerID>/<modelID>", labId>` is populated for every offering the input catalog declares (as long as the offering can be resolved to a canonical model id). `models: ReadonlyMap<normalisedModelName, labId>` is populated ONLY for unambiguous names — if the same normalised model name is offered by two labs (e.g. Anthropic Claude Opus vs Meituan Claude Opus), the name is dropped from `models` so callers cannot accidentally mis-attribute usage.
+- **Suffix normalisation.** `-free$` and `-preview$` suffixes are stripped when counting candidates so `claude-opus-4-free` and `claude-opus-4-preview` collapse into one entry keyed by `claude-opus-4`. This mirrors the upstream opencode logic byte-for-byte.
+- **Default provider list.** `DEFAULT_STATS_PROVIDERS = ['opencode', 'opencode-go', 'sap-ai-core']`. The `"sap-ai-core"` entry is Alexi's extension relative to the upstream list — without it, SAP-routed offerings would silently drop out of the resolution.
+- **Input validation.** Non-object input, or a record missing `models` or `providers`, throws `Error('Invalid model catalog')`. Malformed per-provider or per-model entries are skipped silently so a single corrupt row does not tank the whole resolution.
+
+Resolution rules (in order, per entry):
+
+1. `model.canonical_model_id` when set (explicit gateway metadata).
+2. Fall back to `modelID` when the top-level `models` map already contains it (self-canonical offerings like `opencode/gpt-4o`).
+3. Fall back to `"<providerID>/<modelID>"` when the top-level map contains that key (namespaced offerings).
+4. Skip the entry when no canonical id can be recovered.
+
+The lab is then the segment before the first `/` of the canonical id (`anthropic/claude-opus-4` → `"anthropic"`).
+
+Reference: ported from opencode `packages/stats/core/src/domain/catalog-identity.ts` commit `acb6859`, adapted to Alexi's provider registry by extending the default list with `sap-ai-core`.
+
+## Gateway Model Tool-Capability Helper (`src/providers/gateway/models.ts`)
+
+Fail-open capability check for gateway-routed model records so tool-capable models are not silently downgraded to text-only when the gateway omits parameter metadata. This module is intentionally decoupled from the authoritative in-code metadata in `src/providers/sapOrchestration.ts`:
+
+| Data source                                     | `capabilities: []` / empty params means             |
+| ----------------------------------------------- | --------------------------------------------------- |
+| `ORCHESTRATION_MODEL_METADATA` (maintainer-authored) | "definitely no tools" — MUST be honoured (fail-closed). |
+| External gateway (`GatewayModelInfo`)           | "no metadata published" — fail-open, assume tools.  |
+
+`modelSupportsTools(model: GatewayModelInfo): boolean` returns `true` when:
+
+- `supported_parameters` is `undefined` or `null` (gateway does not publish metadata).
+- `supported_parameters` is an empty array (empty is not distinguishable from "no metadata" for most upstream gateways).
+- The list explicitly contains `"tools"` or `"tool_choice"`.
+
+Rationale: some gateways (SAP AI Core deployment queries, certain OpenRouter records) omit the `supported_parameters` field entirely. Treating "unknown" as "unsupported" would incorrectly disable tools for perfectly tool-capable models and silently downgrade the agent to a text-only fallback.
+
+```mermaid
+flowchart TD
+    Start[GatewayModelInfo record] --> Check{supported_parameters}
+    Check -->|undefined / null| FailOpen[Return true fail-open]
+    Check -->|empty array| FailOpen
+    Check -->|non-empty list| Match{Contains tools or tool_choice?}
+    Match -->|yes| Yes[Return true]
+    Match -->|no| No[Return false]
+```
+
+Reference: ported from kilocode `c4506f7ef` (`fix(gateway): assume models with empty supported parameters support tools`).
+
+## Provider Fetch Wrapper — Unconditional Timeout (`src/providers/provider.ts`)
+
+`buildFetch` returns a `fetch`-compatible wrapper that enforces a request timeout for the configured provider or gateway. The critical invariant it locks: the timeout fires for BOTH direct provider URLs (`https://api.anthropic.com`) AND gateway URLs (Cloudflare AI Gateway, SAP AI Core, OpenRouter).
+
+Upstream bug it fixes (opencode `35fc7a7`). The provider timeout config was previously only applied when the base URL matched a direct provider pattern, so requests routed through an AI gateway bypassed the wrapper entirely and would hang on the default platform-level fetch timeout. Users on SAP corporate VPNs saw the TUI spinner spin indefinitely with no way to recover without Ctrl+C.
+
+Contract:
+
+- **Unconditional.** The timeout applies regardless of `baseURL`. That value is retained ONLY to make the timeout error message friendlier (`Provider timeout after 60000ms (https://gateway.ai.cloudflare.com/…)`).
+- **Composes with caller signal.** When the caller passes their own `init.signal` (e.g. user Ctrl+C, session abort), the wrapper joins it with the internal timeout via `AbortSignal.any` (Node ≥ 20 / Bun ≥ 1.1) or a manual multi-signal listener chain on older runtimes. Whichever fires first — timeout or caller — aborts the underlying request.
+- **Opt-out.** `timeout: 0` (or any non-positive value, or non-finite input) disables the wrapper: the request forwards directly to `globalThis.fetch` and inherits the platform default.
+- **Event-loop hygiene.** The internal `setTimeout` handle is `.unref()`ed so a forgotten in-flight request cannot keep the Node process alive past the caller's own cleanup.
+
+Default timeout: `DEFAULT_PROVIDER_TIMEOUT_MS = 60_000` (60 seconds), matching opencode `35fc7a7`.
+
+```mermaid
+sequenceDiagram
+    participant Caller as SDK caller
+    participant Fetch as buildFetch wrapper
+    participant Timer as setTimeout(timeout)
+    participant Signal as AbortController
+    participant Global as globalThis.fetch
+
+    Caller->>Fetch: fetch(url, { signal: userSignal })
+    alt timeout <= 0
+        Fetch->>Global: forward directly
+        Global-->>Caller: Response
+    else timeout > 0
+        Fetch->>Timer: schedule abort(timeout ms)
+        Fetch->>Signal: compose userSignal + internal
+        Fetch->>Global: fetch(url, { signal: composed })
+        alt response arrives first
+            Global-->>Fetch: Response
+            Fetch->>Timer: clearTimeout
+            Fetch-->>Caller: Response
+        else timer fires first
+            Timer->>Signal: abort("Provider timeout after Xms")
+            Global-->>Fetch: rejects with abort reason
+            Fetch-->>Caller: rejects with timeout error
+        else user aborts first
+            Caller->>Signal: abort()
+            Global-->>Fetch: rejects with user reason
+            Fetch->>Timer: clearTimeout
+            Fetch-->>Caller: rejects with user error
+        end
+    end
+```
+
+Reference: ported from opencode `35fc7a7` (`fix(opencode): apply provider timeouts to Cloudflare AI Gateway models`).
+
 ## Legacy Drizzle Journal Import (`importLegacyDrizzleJournal`)
 
 Added in the 2026-09-26 upstream sync (`src/core/database/migration.ts:135`). Defensive port of the upstream kilocode fix that hardens the legacy journal import against older Drizzle schemas whose `__drizzle_migrations` table predates the `name` column. On an older SAP AI Core deployment, a naive `SELECT name FROM __drizzle_migrations` crashed with an obscure SQL error the first time Alexi booted; this helper inspects `PRAGMA table_info` before selecting and falls back to matching by `created_at` prefix when `name` is absent.
@@ -6093,4 +6203,51 @@ Semantics pinned by `src/core/database/migration.legacy-journal.test.ts`:
 - **`recordCompleted` is idempotent.** Adapters implement it with `INSERT OR IGNORE` semantics so re-running the import after a partial failure is safe.
 
 `importLegacyDrizzleJournal` is exported alongside `applyMigrations` from `src/core/database/migration.ts`. Adapters that do not back onto SQLite (or that never shipped a Drizzle-based schema) can leave `LegacySqliteBridge` unimplemented — `applyMigrations` still works without it.
+
+## Canonical Model Identity for Usage Attribution (`catalog-identity`)
+
+`src/core/stats/catalog-identity.ts` is a pure helper that normalises the same underlying model surfaced under multiple `provider/model` combinations onto a single canonical lab identity. Ported from opencode `packages/stats/core/src/domain/catalog-identity.ts` (commit `acb6859`), adapted so the SAP AI Core provider participates in the resolution.
+
+The problem it solves: when Alexi aggregates usage across SAP AI Core deployments, direct OpenAI-compatible providers, and gateway-routed providers, the same model (Anthropic Claude Opus, for example) may appear as `sap-ai-core/anthropic--claude-4.7-opus`, `anthropic/claude-4-opus`, and `openrouter/anthropic/claude-opus-4`. A naive per-`provider/modelID` group-by triple-counts that model in per-lab spend reports. `catalogIdentity` folds every offering back to a single canonical lab id (`"anthropic"`) so downstream aggregation buckets by lab correctly.
+
+### Public surface
+
+```typescript
+// src/core/stats/catalog-identity.ts
+export interface CatalogIdentity {
+  readonly offerings: ReadonlyMap<string, string>; // "<providerID>/<modelID>" -> lab
+  readonly models: ReadonlyMap<string, string>; // normalised model name -> lab (unambiguous only)
+}
+
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = [
+  'opencode',
+  'opencode-go',
+  'sap-ai-core',
+];
+
+export function catalogIdentity(
+  value: unknown,
+  statsProviders: readonly string[] = DEFAULT_STATS_PROVIDERS
+): CatalogIdentity;
+```
+
+`DEFAULT_STATS_PROVIDERS` extends the upstream opencode list with `sap-ai-core` — this is the load-bearing SAP-adaptation change. Callers that want to include additional providers can pass an explicit `statsProviders` array.
+
+### Resolution rules
+
+1. For each provider in `statsProviders`, iterate `provider.models`.
+2. Determine the canonical id for each model:
+   - use `model.canonical_model_id` when the catalog entry declares it;
+   - else fall back to `modelID` when the top-level `models` map already contains it;
+   - else fall back to `"<providerID>/<modelID>"` if that key is in `models`;
+   - else skip the entry (no canonical data available).
+3. The lab is the segment before the first `/` of the canonical id.
+4. Record `"<providerID>/<modelID>" → lab` in `offerings`.
+5. Track candidate labs per normalised model name (dropping `-free` / `-preview` suffixes so variant offerings collapse); only surface names with a single candidate lab in the `models` output. Ambiguous names — the same normalised name offered by two labs — are dropped so callers cannot accidentally mis-attribute usage.
+
+The helper is intentionally decoupled from Alexi's static catalog: it consumes a JSON-shaped value produced by an upstream tool or a shared model index and returns two read-only maps for the caller to look up.
+
+### Interaction with `CostTracker`
+
+`catalogIdentity` is separate from `src/core/costTracker.ts` — the tracker records per-call `UsageRecord`s keyed by the raw `provider/model` string, and cross-provider lab aggregation is a downstream concern that consumes the offering-to-lab map. This keeps the tracker's write path zero-dependency and defers the (potentially expensive) catalog resolution to the report layer.
 
