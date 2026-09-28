@@ -17,6 +17,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Routing](#testing-routing)
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
+- [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -5033,6 +5034,8 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp-config.test.ts` — MCP config loader, environment-variable resolution, per-server timeout parsing, and the example-config schema guard
 - `tests/mcp/playwright.test.ts` — end-to-end contract tests for the optional Playwright MCP server entry: schema validation of the example scaffold, generic startup retry, graceful degradation on a missing `@playwright/mcp-server` binary, and unchanged tool-schema passthrough
 - `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
+- `tests/mcp/cimd.test.ts` — pure-function coverage of Capability Interface Metadata Document validation (`validateCapabilities`, `buildManifestFromTools`, `CapabilityManifestSchema`, `McpCapabilityMismatchError`) covering the backward-compatibility, protocol-version, tool-removal, additive-change, schema-drift, description-drift, and composite-failure axes (issue #1877)
+- `tests/mcp/client-cimd.test.ts` — end-to-end integration of CIMD validation into `McpClientManager.connect`: manifest caching on every successful connect, warn-only behaviour when `cimdEnabled` is absent, permanent-failure behaviour when `cimdEnabled: true`, and the no-op path when `expectedCapabilities` is not pinned (issue #1877)
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
 
@@ -7593,6 +7596,99 @@ npm test -- tests/core/sessionManager-workdir-cache.test.ts
 
 See [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848) for the runtime sequence diagram and the contract points on `createSession` / `loadSession`.
 
+## Testing MCP Capability Validation (CIMD, issue #1877)
+
+The CIMD (Capability Interface Metadata Document) validation module in `src/mcp/cimd.ts` moves MCP breaking-change detection from per-call runtime failures to `connect()` time. Two co-located suites pin the contract:
+
+- `tests/mcp/cimd.test.ts` (325 lines) exercises the pure functions and schemas in isolation — no client, no mocks, no filesystem.
+- `tests/mcp/client-cimd.test.ts` (203 lines) wires the module through `McpClientManager.connect` end-to-end with mocked `@modelcontextprotocol/client`, `child_process.spawn`, and `logger` surfaces.
+
+### What the pure-function suite pins
+
+Six describe blocks cover the mismatch matrix without booting a client:
+
+1. **`CapabilityManifestSchema`** — accepts a tools-only manifest, accepts a manifest with `protocolVersion` and a fully-populated tool including a nested `inputSchema` (`{ type: 'object', properties: { text: { type: 'string' } } }`), and rejects any tool without a `name`. The rejection case guards against a future refactor that relaxes `z.string().min(1)` on `CapabilityTool.name` — a nameless tool has no cache key and cannot be compared across manifests.
+2. **`buildManifestFromTools`** — projects raw MCP `tools/list` responses onto the narrower manifest shape. Two cases: (a) `protocolVersion` is copied verbatim when supplied and every tool retains `description` / `inputSchema` (with explicit `undefined` for missing fields, not omission — the test asserts `toEqual([{ name: 'a', ... }, { name: 'b', description: undefined, inputSchema: undefined }])`); (b) `protocolVersion` is `undefined` on the manifest when the caller omits the argument.
+3. **`validateCapabilities` / backward compatibility** — two no-op cases. When `expectedCapabilities` is absent, validation returns `{ valid: true, mismatches: [], warnings: [] }` regardless of the `cimdEnabled` flag. This is the load-bearing property that lets CIMD ship as strictly additive: an operator who has never touched their `mcp-servers.json` sees zero behavioural change.
+4. **`validateCapabilities` / protocol version** — four cases: an incompatible `protocolVersion` produces a single `protocol_version_incompatible` mismatch whose message names both versions; matching versions produce no mismatches; a missing actual version and a missing expected version each skip the check (the caller pinned only tools).
+5. **`validateCapabilities` / tool removal, additive changes, schema drift, description drift** — one describe block per kind. Tool removal produces one `tool_removed` mismatch per missing tool (verified with a 3-tool expected manifest that lists 1 actual tool). Additive changes (actual has more tools) produce warnings, never mismatches. Schema drift is compared structurally via the module-internal `deepEqualJson`: a case with reordered object keys (`{ q, limit }` vs. `{ limit, q }`) is asserted equal, and a case with a renamed property (`{ q }` vs. `{ query }`) is asserted as a `tool_schema_changed` mismatch. Description drift produces a low-severity `tool_description_changed` mismatch, and is skipped when the expected description is absent (so operators who don't want to pin descriptions get zero noise).
+6. **`validateCapabilities` / composite failures** — one case exercises protocol-version-plus-tool-removal-plus-schema-change together, asserting that all three mismatch kinds appear in a single pass. This locks in the "collect every mismatch, don't fail fast" contract that lets an operator see the full picture with one connect attempt instead of a whack-a-mole retry cycle.
+7. **`McpCapabilityMismatchError`** — smoke test that the error carries the `serverName`, the raw `mismatches` array, and a multi-line `message` that names every mismatch AND references both `cimdEnabled` and `expectedCapabilities` so the operator knows exactly which fields to edit in `mcp-servers.json`.
+
+```typescript
+// Excerpt from tests/mcp/cimd.test.ts (describe 'schema drift')
+it('treats structurally equal schemas with reordered keys as matching', () => {
+  const server = makeServer({
+    expectedCapabilities: {
+      tools: [
+        {
+          name: 'search',
+          inputSchema: {
+            type: 'object',
+            properties: { q: { type: 'string' }, limit: { type: 'number' } },
+          },
+        },
+      ],
+    },
+  });
+  const manifest: CapabilityManifest = {
+    tools: [
+      {
+        name: 'search',
+        inputSchema: {
+          properties: { limit: { type: 'number' }, q: { type: 'string' } },
+          type: 'object',
+        },
+      },
+    ],
+  };
+  expect(validateCapabilities(server, manifest).valid).toBe(true);
+});
+```
+
+### What the integration suite pins
+
+`tests/mcp/client-cimd.test.ts` uses the same mocking pattern as `tests/mcp/client.test.ts` (mocks for `child_process.spawn`, `@modelcontextprotocol/client`, `@modelcontextprotocol/client/stdio`, and `src/mcp/config.js`), plus a hoisted `loggerWarnMock` on `src/utils/logger.js` so the warn-vs-throw branch can be asserted directly:
+
+```typescript
+const { loggerWarnMock } = vi.hoisted(() => ({ loggerWarnMock: vi.fn() }));
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: { info: vi.fn(), warn: loggerWarnMock, error: vi.fn(), debug: vi.fn() },
+}));
+```
+
+Six cases cover the client-side surface:
+
+1. **Manifest caching after connect.** With `mockClientListTools` returning a single `search` tool, the resulting `connection.capabilityManifest` is defined, has one tool, and `.tools[0].name === 'search'`. Manifest capture is unconditional — it happens on every successful connect regardless of `cimdEnabled` so operators can inspect the observed manifest offline (e.g. to author a matching `expectedCapabilities` block).
+2. **Warn-only when a tool is missing and `cimdEnabled` is absent.** The expected manifest lists `[search, summarise]`, the actual manifest lists only `[search]`. The connection status is `'connected'` (backward-compatible default) and `loggerWarnMock` was called with a message containing `'capability mismatch'`. The assertion routes through `mock.calls.some((call) => String(call[0]).includes('capability mismatch'))` rather than exact-string matching so the log format can evolve without touching the test.
+3. **Permanent failure when `cimdEnabled: true` and a tool is missing.** Same manifest shape as case 2, `cimdEnabled: true` added. The connection status is `'failed'` and `connection.error` contains both `'capability validation'` and the missing tool name (`'summarise'`). The manager's error-classification path (`classifyConnectError` in `src/mcp/client.ts`) treats `McpCapabilityMismatchError` as a permanent config error, so the retry budget is preserved and no exponential-backoff loop kicks in.
+4. **`cimdEnabled: true` without `expectedCapabilities` is a no-op.** A server with `cimdEnabled: true` but no pinned expected manifest connects cleanly. This is the "opted-in but not yet configured" state — CIMD must not turn every not-yet-pinned server into a failed connection.
+5. **Clean connect when observed matches expected exactly.** A server with `cimdEnabled: true` and a fully-populated `expectedCapabilities` (name, description, `inputSchema`) matching the observed manifest verbatim connects with `status === 'connected'` and NO warn calls containing `'capability mismatch'`.
+6. **`McpCapabilityMismatchError` is exported and `instanceof Error`.** A one-liner smoke test that guards against a future refactor that accidentally drops the export or changes the prototype chain. `instanceof` checks in downstream code (`error-backoff.ts`, `router.ts`, telemetry) rely on both properties.
+
+### Testing patterns to reuse when extending the CIMD suite
+
+1. **Test the pure functions in `cimd.test.ts` and the wiring in `client-cimd.test.ts`.** The split matters: `cimd.test.ts` runs in a millisecond with zero mocks, so exhaustive coverage of the mismatch matrix (every `CapabilityMismatchKind`, every input shape) lives there. `client-cimd.test.ts` is the more expensive suite that pays for the `@modelcontextprotocol/client` mock plumbing, so keep it narrow to the branches that ONLY the client can exercise (manifest caching, `logger.warn` vs. `throw`, error classification via `connection.error`).
+2. **Route new mismatch cases through `makeServer(overrides)`.** The helper builds a valid stdio config with sensible defaults; individual tests override only `expectedCapabilities` and `cimdEnabled`. Rebuilding the full `McpServerConfig` inline in each case is what obscures the actual property under test.
+3. **Assert on `kind` and `toolName`, not on `message`.** The `CapabilityMismatchKind` union is the stable programmatic contract; the human-readable `message` is free to evolve. Tests that regex-match on message strings become high-maintenance the first time an operator asks for a clearer wording. Message assertions belong ONLY on `McpCapabilityMismatchError` where the exact operator-facing text is the contract.
+4. **Use `vi.hoisted` for logger capture, not top-level `vi.fn()`.** Hoisted `vi.mock` factories run before top-level `const` initializers, so a `const loggerWarnMock = vi.fn()` referenced from inside `vi.mock(...)` triggers a temporal-dead-zone error at module load. The `vi.hoisted(() => ({ ... }))` pattern gives you a closure over a value that is initialized in the correct order.
+5. **Route by `params.name` when the same mock serves multiple tools.** The client suite reuses `mockClientListTools.mockResolvedValueOnce(...)` per case rather than routing by tool name because each case sets up its own manifest shape; if a future case needs to distinguish two `listTools` calls in the same test (e.g. an initial connect followed by a `refreshTools`), fall back to `mockImplementation` and switch on the argument shape, mirroring the pattern in `tests/mcp/client-timeout.test.ts`.
+6. **Do NOT mock `src/mcp/cimd.js` from the client suite.** The whole point of `client-cimd.test.ts` is that the real validator reacts to real config shapes. Stubbing the validator would let a client-side regression that skips the `validateCapabilities` call pass silently.
+
+### Running the suites
+
+```bash
+# Pure-function suite (fast, no I/O)
+npm test -- tests/mcp/cimd.test.ts
+
+# Integration suite (mocks client + spawn + logger)
+npm test -- tests/mcp/client-cimd.test.ts
+
+# Both, plus every other MCP test file
+npm test -- tests/mcp/
+```
+
+See `src/mcp/cimd.ts` for the module's public surface and JSDoc, and `src/mcp/client.ts` (`fetchInitialMetadata` and `readProtocolVersion`) for the integration point that populates `connection.capabilityManifest` and gates the throw-vs-warn branch on `config.cimdEnabled`.
 ## Testing Canonical Model Identity (`src/core/stats/catalog-identity.test.ts`)
 
 `catalogIdentity` is a pure resolver, so the suite is `describe`-flat, `vi.mock`-free, and runs in single-digit milliseconds. Test coverage (`src/core/stats/catalog-identity.test.ts`, seven cases, 131 lines) pins every branch of the resolution rules from [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts).
