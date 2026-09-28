@@ -1000,6 +1000,84 @@ Complements the automatic path in three ways:
 
 Neither path invokes the other — the scheduler continues to run its age-only sweep even when the operator uses `sessions-clean`, and `sessions-clean` does not touch the `last-retention-run` state file.
 
+## Session Retention Lifecycle Runner (`src/session/retention.ts`, issue #1876)
+
+The two paths above (`SessionManager.cleanupExpiredSessions` and `applyRetentionPolicy`) both couple a policy decision to a specific invocation surface — a scheduler and a CLI subcommand respectively. Programmatic callers (embedding hosts, upcoming scheduler refactors, MCP retention servers, test harnesses) need a third surface: a reusable library entry point that keeps the same scan / decide / apply split but exposes a plain class with injectable clock and injectable active-run tracker. That is `RetentionRunner` (`src/session/retention.ts`).
+
+The runner is deliberately thin. It composes `scanSessions` (from `src/core/sessionScanner.ts` — the same scanner used by `applyRetentionPolicy`) for the read phase and a purpose-built pure helper (`selectCandidatesFromPolicy`) for the decision phase, then dispatches to `fs.unlink` for the delete phase. Nothing new was invented at the scanner or unlink level; the value the runner adds is the injection seams (custom `now`, custom `sessionsDir`, custom `sessionManager` for the active-run check) and a simpler policy DSL (global `maxCount`, no per-project bucketing).
+
+```mermaid
+graph TB
+    subgraph Caller["Programmatic caller"]
+        Ctor[new RetentionRunner options]
+        Sweep[runner.sweep policy]
+    end
+
+    subgraph Runner["RetentionRunner src/session/retention.ts"]
+        Parse[RetentionPolicySchema.parse]
+        Scan[scanSessions this.sessionsDir]
+        Select[selectCandidatesFromPolicy<br/>pure decision phase]
+        IsActive["isActive sessionId<br/>= sessionManager.hasActiveRun<br/>fallback: () => false"]
+        Unlink["fs.promises.unlink per candidate<br/>dryRun: skip"]
+        Result[return RetentionResult]
+    end
+
+    subgraph FS["~/.alexi/sessions/"]
+        Files[transcript json files]
+    end
+
+    subgraph SM["SessionManager optional"]
+        Active[sessionRuns Map]
+    end
+
+    Ctor --> Runner
+    Sweep --> Parse
+    Parse --> Scan
+    Scan --> Files
+    Scan --> Select
+    IsActive --> Active
+    Select --> IsActive
+    Select -->|toDelete| Unlink
+    Select -->|toPreserve| Result
+    Unlink --> Result
+```
+
+Contract points, pinned by `tests/session/retention.test.ts`:
+
+- **Effective age signal.** `effectiveLastAccessed(session)` returns `metadata.lastAccessedAt` when finite, otherwise falls back to `updatedAt`, otherwise to the file's `mtime`. The `lastAccessedAt` field is stamped on every `SessionManager.loadSession` and every `saveSession` (see `src/core/sessionManager.ts:606-677`) so a session resumed via `alexi sessions resume <id>` is treated as recently touched even before the next message write — a longer-lived improvement over the previous behaviour where a resumed-but-unmodified session could still age out.
+- **Policy union, not intersection.** Age check and count check produce independent expiry sets; a session is a deletion candidate when it appears in EITHER set. This matches the semantics of `applyRetentionPolicy` — combining `maxAgeDays: 30` with `maxCount: 10` deletes anything older than 30 days AND additionally trims the count down to the 10 most-recent survivors.
+- **Global count, not per-project.** Unlike `applyRetentionPolicy`, `RetentionRunner` sorts all scanned sessions by `effectiveLastAccessed` DESC and keeps the top `maxCount` globally. Callers that need per-project bucketing must use the `alexi sessions-clean` engine.
+- **`preserveActive` defaults to `true`.** The runner checks `parsed.preserveActive !== false`, so both `undefined` and explicit `true` enable the guard. Sessions with an active in-memory run (`sessionManager.hasActiveRun(id) === true`) are moved from `toDelete` into `toPreserve` instead of being unlinked. When no `sessionManager` is supplied (offline callers, fresh processes), `isActive` returns `false` for every id — the guard is disabled by construction, which is the safe default for a headless sweep.
+- **`dryRun` populates `deleted` and `bytesFreed`.** Preview mode still returns the full candidate list and its aggregate size so operators can decide whether to promote a `dryRun: true` run into a real sweep. `errors[]` stays empty in dry-run mode because no `fs.unlink` is attempted.
+- **Best-effort per-file I/O.** Per-file unlink failures are captured in `result.errors` and the sweep continues to the next candidate. The scanner is equally tolerant — malformed JSON, missing metadata, and unreadable files are skipped with a warning (`result.scanned` counts only files that parsed successfully).
+- **Directory-level scan errors DO surface.** A `scanSessions` failure on the sessions directory itself (with any errno other than `ENOENT`) propagates out of `sweep()` so the caller can render a clear "cannot access sessions directory" error. A missing directory returns `{ scanned: 0, deleted: [] }` — a fresh install has nothing to clean.
+- **Runner is reusable.** A single instance is safe to reuse across multiple `sweep()` calls; each call performs a fresh scan of the sessions directory. The runner holds no in-memory session cache — deliberately, so a long-lived scheduler process does not miss sessions created since the last sweep.
+
+### `lastAccessedAt` timestamp contract
+
+`SessionMetadata.lastAccessedAt` (`src/core/sessionManager.ts:100-131`) is optional and backwards-compatible. Two call sites in `SessionManager` are responsible for keeping it fresh:
+
+- **On load** (`loadSession`, `src/core/sessionManager.ts:606-649`): after a successful `JSON.parse`, the manager stamps `session.metadata.lastAccessedAt = Date.now()` and re-writes the transcript. Wrapped in a bare `catch {}` so a read-only filesystem or a full disk does not surface an error from what is semantically a getter. The next `saveSession` call retries the stamp.
+- **On save** (`saveSession`, `src/core/sessionManager.ts:660-677`): the stamp is applied before `JSON.stringify` so the on-disk representation always reflects the moment of the most recent write.
+
+Retention runners fall back to `updated`, then to the file's `mtime`, when `lastAccessedAt` is absent — matches the behaviour of `applyRetentionPolicy` for legacy sessions (`ScannedSession.updatedAt` already applies the same fallback chain).
+
+### Relationship to the other two paths
+
+The runner does NOT replace `SessionManager.cleanupExpiredSessions` or `applyRetentionPolicy` — it sits alongside them as the programmatic surface. All three consume the same underlying `~/.alexi/sessions/` directory but expose different policy shapes and invocation contracts:
+
+| Concern           | `cleanupExpiredSessions`               | `applyRetentionPolicy` (`sessions-clean`)      | `RetentionRunner.sweep` (this section)              |
+| ----------------- | -------------------------------------- | ---------------------------------------------- | --------------------------------------------------- |
+| Invocation        | scheduler + `alexi sessions --cleanup` | operator via `alexi sessions-clean`            | programmatic library caller                         |
+| Policy source     | `~/.alexi/config.json`                 | CLI flags per invocation                       | constructor + policy argument per `sweep()`         |
+| Policy shape      | age only                               | age + per-project count + project + exclude    | age + global count + `preserveActive` toggle        |
+| Age signal        | `metadata.updated`                     | `metadata.updated ?? mtime`                    | `lastAccessedAt ?? updated ?? mtime`                |
+| Dry-run           | not supported                          | `--dry-run` flag                               | `dryRun: true` in policy                            |
+| Active-run guard  | fixed check via `hasActiveRun`         | not applicable (offline path)                  | opt-in via `preserveActive` + injected tracker      |
+| Cascade to children| yes (deletes children of expired root)| no (count already retains most-recent)         | no (global count is a flat sort)                    |
+
+The three pipelines do not invoke each other. The daily scheduler continues to run its age-only sweep even when programmatic callers embed `RetentionRunner`, and `RetentionRunner` does not touch the `last-retention-run` state file (so an embedded sweep does not delay the next scheduler tick).
+
 ## Headless Exit and Session Drain
 
 Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.

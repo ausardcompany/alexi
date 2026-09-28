@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Session retention lifecycle runner (`src/session/retention.ts`)** (`src/session/retention.ts`, `src/core/sessionManager.ts`, `tests/session/retention.test.ts`, commit `bc84e999` `feat(core): add session retention lifecycle runner`, issue #1876). New user-facing entry point for the session retention lifecycle that complements the existing age-only automatic sweep (`SessionManager.cleanupExpiredSessions`) and the operator-driven `alexi sessions-clean` engine (`src/core/sessionRetention.ts`). `RetentionRunner` composes the low-level `scanSessions` (read phase) and `selectCandidatesFromPolicy` (pure decision phase) helpers into a single class that CLI commands and schedulers can consume without repeating the scan/decide/apply plumbing.
+
+  New public surface exported from `src/session/retention.ts`:
+
+  - `RetentionPolicySchema` — Zod schema, `z.object(...).strict()`. Rejects unknown fields at parse time. All four fields are optional; an empty policy is a no-op. Constraints: `maxAgeDays` must be an integer `>= 1`; `maxCount` must be an integer `>= 0` (0 means "delete everything").
+  - `RetentionPolicy` — inferred type. Shape: `{ maxAgeDays?: number; maxCount?: number; preserveActive?: boolean; dryRun?: boolean }`.
+  - `RetentionResult` — outcome of `RetentionRunner.sweep`. Shape: `{ deleted: string[]; preserved: string[]; errors: string[]; scanned: number; bytesFreed: number; dryRun: boolean }`. `deleted` and `preserved` are absolute file paths; `bytesFreed` is populated even in dry-run mode so operators can preview reclaimable space; `errors` collects per-file unlink failure messages (a corrupted file cannot block cleanup of the rest of the sweep).
+  - `RetentionRunnerOptions` — constructor options. Shape: `{ sessionsDir?: string; sessionManager?: Pick<SessionManager, 'hasActiveRun'>; now?: () => number }`. `sessionsDir` overrides the default `~/.alexi/sessions/` location (tests use `fs.mkdtemp`); `sessionManager` supplies the in-memory active-run tracker (`hasActiveRun`) that gates the `preserveActive` guard; `now` overrides the wall clock for deterministic age calculations.
+  - `defaultSessionsDir(): string` — returns `path.join(os.homedir(), '.alexi', 'sessions')`. Extracted so tests / callers can compute the same path without depending on the class.
+  - `effectiveLastAccessed(session: ScannedSession): number` — returns the effective "last touched" timestamp for a session. Prefers `metadata.lastAccessedAt`, falls back to `updatedAt`, then to the file's `mtime`. Always finite so callers can compare directly.
+  - `selectCandidatesFromPolicy(sessions, policy, now, isActive): { toDelete, toPreserve }` — pure decision-phase helper. Age check flags sessions older than `now - maxAgeDays * 86_400_000` as expired; count check keeps the `maxCount` most-recently-touched sessions globally and marks the rest expired; a session is a deletion candidate when EITHER check fails (union, not intersection); when `preserveActive` is `true` (the default), expired candidates that answer `true` from `isActive(session.id)` are moved from `toDelete` into `toPreserve` instead. The returned lists are disjoint.
+  - `RetentionRunner` — the runner class itself. Constructor accepts `RetentionRunnerOptions`; a single instance is safe to reuse across sweeps (each `sweep()` performs a fresh scan). Methods:
+    - `getSessionsDir(): string` — diagnostic accessor for the configured sessions directory.
+    - `sweep(policy?: RetentionPolicy): Promise<RetentionResult>` — one retention pass. Scans the directory, applies the policy, and (unless `dryRun`) unlinks selected files. Never throws for per-file unlink failures (captured in `result.errors`); a directory-level scan failure IS propagated so the caller can surface a clear "cannot access sessions directory" message. Returns `{ scanned: 0, deleted: [], ... }` when the directory does not exist (fresh install).
+
+  Supporting change in `src/core/sessionManager.ts`:
+
+  - New optional field `SessionMetadata.lastAccessedAt?: number` — wall-clock millisecond timestamp of the most recent access (load or save). Distinct from `metadata.updated`, which is advanced only on message writes. `RetentionRunner` uses this field as its primary age signal so a session resumed via `alexi sessions resume <id>` is treated as "recently touched" even before the next message write. Backwards-compatible: legacy sessions written before this field was introduced surface `undefined`, and `effectiveLastAccessed` falls back to `updated`, then to the file's mtime.
+  - `SessionManager.loadSession` (`src/core/sessionManager.ts:606-649`) now stamps `session.metadata.lastAccessedAt = Date.now()` and re-writes the transcript on every successful load. Best-effort: the re-write is wrapped in a bare `catch {}` so a read-only filesystem or a full disk does not surface an error from a getter — the next `saveSession` call retries.
+  - `SessionManager.saveSession` (`src/core/sessionManager.ts:660-677`) stamps `lastAccessedAt = Date.now()` before serialisation so the on-disk representation always reflects the moment of the most recent write.
+
+  Design contract:
+
+  - **Thin composition, not a rewrite.** `RetentionRunner` does not duplicate `applyRetentionPolicy` from `src/core/sessionRetention.ts` — it composes the same scanner (`scanSessions`) with a simpler global-count policy (no per-project bucketing, no exclude patterns) and adds the in-memory `preserveActive` guard driven by `SessionManager.hasActiveRun`. Callers that need per-project caps or glob-based exclusions should keep using `applyRetentionPolicy` via the `alexi sessions-clean` CLI.
+  - **Decision / apply split.** `selectCandidatesFromPolicy` is a pure function that never touches the filesystem. Tests exercise the policy logic with synthetic `ScannedSession` fixtures (no `fs.mkdtemp` required for the decision branch), then a smaller set of integration tests drives `RetentionRunner.sweep` against a real temp directory to pin the `fs.unlink` / `dryRun` / malformed-file behaviour.
+  - **Preserve active is on by default.** `preserveActive` defaults to `true` (the runner checks `parsed.preserveActive !== false`). An operator who explicitly opts out with `preserveActive: false` can delete a session even while it has an active run — deliberately supported for automation that intentionally kills a stuck subagent's transcript.
+  - **`dryRun` reports full deletion set.** Even in dry-run mode, `result.deleted` and `result.bytesFreed` are populated so callers see exactly what a real run would remove. The runner does not gate the operator's UI on real disk mutations.
+
+  Test coverage in `tests/session/retention.test.ts` (322 lines, 20 cases across four `describe` blocks):
+
+  - **`RetentionPolicySchema`.** Strict mode rejects unknown fields; `maxAgeDays` must be `>= 1` (rejects `0` and negative); `maxCount === 0` is accepted (delete-everything semantics); empty policy is accepted (no-op).
+  - **`effectiveLastAccessed`.** Prefers `metadata.lastAccessedAt` over `updatedAt` when present; falls back to `updatedAt` when `lastAccessedAt` is absent (legacy sessions).
+  - **`selectCandidatesFromPolicy` (pure).** Age-expired sessions marked for deletion; count-overflow keeps N most-recent; `preserveActive: true` moves active-run sessions to `toPreserve` instead of `toDelete`; `preserveActive: false` deletes active sessions; empty policy returns no deletions; `lastAccessedAt` (not `updatedAt`) is the effective age signal.
+  - **`RetentionRunner.sweep` (integration).** Deletes age-expired files from a real `fs.mkdtemp` directory; honours `dryRun` (no filesystem writes); preserves sessions with an active run via a `SessionManager` stub; applies count-based cleanup; skips malformed session files without aborting the sweep; returns an empty result for an empty policy; returns `{ scanned: 0, deleted: [] }` when the sessions directory does not exist.
+
+  Positioning versus the existing paths — three pipelines now cover the retention surface:
+
+  | Concern | `SessionManager.cleanupExpiredSessions` | `applyRetentionPolicy` (`sessions-clean`) | `RetentionRunner.sweep` (this change) |
+  | ------- | --------------------------------------- | ----------------------------------------- | ------------------------------------- |
+  | Policy shape | age only, `retention.maxAgeDays` | age + per-project count + exclude patterns | age + global count + `preserveActive` toggle |
+  | Age signal | `metadata.updated` | `metadata.updated ?? mtime` | `lastAccessedAt ?? updated ?? mtime` |
+  | Preview | not supported | `dryRun: true` | `dryRun: true` |
+  | Config source | `~/.alexi/config.json` | CLI flags | constructor + policy argument |
+  | Active-run guard | age-only via `hasActiveRun` | not supported (offline) | `preserveActive` via injected `hasActiveRun` |
+  | Invocation | scheduler / `alexi sessions --cleanup` | operator via `alexi sessions-clean` | programmatic (library) |
+
+  See [docs/ARCHITECTURE.md — Session Retention Lifecycle Runner (`src/session/retention.ts`)](docs/ARCHITECTURE.md#session-retention-lifecycle-runner-srcsessionretentionts-issue-1876) for the pipeline diagram and [docs/TESTING.md — Testing the Session Retention Lifecycle Runner](docs/TESTING.md#testing-the-session-retention-lifecycle-runner-testssessionretentiontestts) for the fixture pattern.
+
 - **Project-scoped configuration cache (`src/config/projectCache.ts`)** (`src/config/projectCache.ts`, `src/config/invalidation.ts`, `tests/config/projectCache.test.ts`, commit `6333b3a1` `feat(config): add project-scoped config caching to prevent worktree leakage`, issue #1848). Fixes the multi-worktree config-leakage bug where `userConfig`-derived getters previously cached results globally (keyed by the config file path only). In Agent Manager and parallel-session workflows, opening project A cached its rules / routing / MCP / agents / skills / hooks, and then switching to project B kept serving A's cached values until a CLI restart. This module wraps every raw config loader in a cache keyed by `` `${configPath}:${normalizedWorkdir}` `` so each worktree has its own snapshot, plus workdir-transition detection that purges the previous project's entries. New public surface exported from `src/config/projectCache.ts`:
 
   - `normalizeWorkdirForCache(workdir?: string): string` — resolves `.`, `..`, and trailing separators via `path.resolve`; lowercases on `process.platform === 'win32'` where filesystem paths are case-insensitive (so `/Tmp/Project` and `/tmp/project` share a cache slot on Windows but stay distinct on Linux / macOS). Falls back to `process.cwd()` when the caller passes `undefined` so headless contexts that have not threaded a session workdir still get a stable key.
