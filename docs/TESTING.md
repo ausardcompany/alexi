@@ -3811,6 +3811,108 @@ Key patterns to reuse when extending the suite:
 3. **Sort ids when the assertion is order-insensitive.** The union case uses `.sort()` because the engine does not commit to an ordering for combined age + count expiry.
 4. **Do not mock `logger`.** The scanner's tolerance path (`logger.warn` on malformed JSON) is exercised for behaviour, not for its log output — a spy would couple the test to the log format.
 
+### Testing the Session Retention Lifecycle Runner (`tests/session/retention.test.ts`)
+
+`tests/session/retention.test.ts` (322 lines, 20 cases across four `describe` blocks) pins the programmatic retention library (`src/session/retention.ts`) added by issue #1876. The runner is a thin composition on top of the same `scanSessions` used by `applyRetentionPolicy` (see [Testing the Session Retention Engine](#testing-the-session-retention-engine) above), but its policy shape (`maxCount` global, `preserveActive` guard, `lastAccessedAt` age signal) and its injection surface (`sessionsDir`, `sessionManager`, `now`) are different — so the runner has its own test file rather than piggybacking on `tests/core/sessionRetention.test.ts`.
+
+**Structure.** Four `describe` blocks organised so a regression in the pure decision layer trips before the disk-touching integration layer runs:
+
+1. `RetentionPolicySchema` — strict-mode acceptance / rejection cases.
+2. `effectiveLastAccessed` — timestamp precedence rules.
+3. `selectCandidatesFromPolicy (pure decision phase)` — synthetic `ScannedSession` fixtures, no disk I/O.
+4. `RetentionRunner.sweep` — real `fs.mkdtemp` directory + `writeSession` helper.
+
+**Fixture pattern.** Two helpers do the heavy lifting: a `writeSession` that persists a real session JSON with a controllable `updated` and (optional) `lastAccessedAt` field and pins the file's `utimes` to the same moment, plus a `makeScanned` that produces an in-memory `ScannedSession` for the pure-decision tests without touching disk.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+import {
+  RetentionRunner,
+  effectiveLastAccessed,
+  selectCandidatesFromPolicy,
+  RetentionPolicySchema,
+  type RetentionPolicy,
+} from '../../src/session/retention.js';
+import type { ScannedSession } from '../../src/core/sessionScanner.js';
+import type { SessionMetadata } from '../../src/core/sessionManager.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = 1_700_000_000_000;
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-runner-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function writeSession(
+  dir: string,
+  opts: { id: string; updated: number; lastAccessedAt?: number; title?: string; workdir?: string }
+): string {
+  const metadata: SessionMetadata = {
+    id: opts.id,
+    created: opts.updated,
+    updated: opts.updated,
+    totalTokens: 0,
+    messageCount: 0,
+    ...(opts.title ? { title: opts.title } : {}),
+    ...(opts.workdir ? { workdir: opts.workdir } : {}),
+    ...(typeof opts.lastAccessedAt === 'number' ? { lastAccessedAt: opts.lastAccessedAt } : {}),
+  };
+  const filePath = path.join(dir, `${opts.id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify({ metadata, messages: [] }, null, 2), 'utf-8');
+  fs.utimesSync(filePath, opts.updated / 1000, opts.updated / 1000);
+  return filePath;
+}
+```
+
+**Contract points asserted by `RetentionPolicySchema`** (4 cases):
+
+- Unknown fields are rejected (`.strict()` mode).
+- `maxAgeDays: 0` and negative values throw at parse time.
+- `maxCount: 0` is accepted — it is the "delete everything" opt-in.
+- The empty policy `{}` is accepted so callers can defer the policy fill.
+
+**Contract points asserted by `effectiveLastAccessed`** (2 cases):
+
+- `metadata.lastAccessedAt` wins when it is a finite number — even when it is more recent than `updatedAt`, which is the whole point of the field.
+- The chain falls back to `updatedAt` when `lastAccessedAt` is absent on a legacy session; the file's `mtime` is the last-resort fallback (indirectly tested via the integration cases where sessions have no `lastAccessedAt`).
+
+**Contract points asserted by `selectCandidatesFromPolicy` (pure)** (6 cases):
+
+- **Age-expired sessions are marked for deletion.** With `maxAgeDays: 30`, a 45-day-old session becomes a candidate and a 1-day-old session survives.
+- **Count-overflow keeps the N most-recent.** Four sessions, `maxCount: 2`, keeps `a` and `b`, deletes `c` and `d`.
+- **`preserveActive: true` (the default) moves active-run sessions to `toPreserve`.** The `isActive` predicate is a caller-supplied closure — tests pass a `Set<string>` membership check to keep the case obvious.
+- **`preserveActive: false` deletes active sessions too.** The test uses `isActive = () => true` to prove the guard is really gated by the flag.
+- **Empty policy returns no deletions.** A 1970-vintage session survives when no policy fields are set.
+- **`lastAccessedAt` is the effective age signal.** A session with `updatedAt: NOW - 90 * DAY_MS` but `lastAccessedAt: NOW - 1 * DAY_MS` is NOT a candidate under `maxAgeDays: 30`. This is the failure mode that the entire `lastAccessedAt` design exists to prevent.
+
+**Contract points asserted by `RetentionRunner.sweep` (integration)** (8 cases):
+
+- **Age-expired files are removed from disk.** `result.deleted` matches the expected path AND `fs.existsSync(oldPath) === false` — the test asserts on both the API return and the filesystem state so a regression that reports success without deleting fails.
+- **`dryRun` never touches the filesystem.** `result.dryRun === true`, `result.deleted` is populated, but `fs.existsSync(oldPath) === true` — the file survived preview mode.
+- **`preserveActive` via a `SessionManager` stub.** The runner accepts `Pick<SessionManager, 'hasActiveRun'>`, so the test passes `{ hasActiveRun: (id) => active.has(id) }` — a minimal shape that avoids constructing a real `SessionManager`.
+- **Count-based cleanup applies after age filtering.** Four sessions, `maxCount: 2`, deletes the two oldest from disk and leaves the two newest in place.
+- **Malformed session files are skipped.** A `garbage.json` alongside a real session does not abort the sweep; `result.scanned` counts only the parseable file.
+- **Empty policy returns an empty deletion set.** A 999-day-old session survives `runner.sweep()` with no policy — the runner does not fall through to a default `maxAgeDays`.
+- **Missing sessions directory returns `{ scanned: 0, deleted: [] }`.** A fresh install has nothing to clean; the runner does not throw.
+- **`getSessionsDir()` returns the configured path.** Sanity check for the diagnostic accessor.
+
+**Patterns to reuse when extending the suite:**
+
+1. **Prefer the pure-decision phase for policy assertions.** `selectCandidatesFromPolicy` is a plain function with injectable `isActive` and `now`. Only reach for the `RetentionRunner.sweep` layer when the assertion depends on real `fs.unlink` behaviour (dry-run, malformed files, missing directory).
+2. **Inject `now` on every runner.** `new RetentionRunner({ sessionsDir: tempDir, now: () => NOW })` pins the wall clock so age math is deterministic. Never use `Date.now()` inside a case.
+3. **Use the `SessionManager` shape, not a `new SessionManager()`.** The runner declares `Pick<SessionManager, 'hasActiveRun'>` deliberately — tests pass an object literal with only that method to keep the fixture surface small and to avoid the sessions-directory side effects of the real class.
+4. **Assert on `.map((s) => s.filePath)` or `.map((s) => s.id)`, not on full records.** `ScannedSession` carries filesystem-dependent fields (`size`, `mtime`) that shift between hosts.
+5. **Do not mock `scanSessions`.** The runner composes the real scanner so the malformed-file tolerance test really exercises `JSON.parse` failure handling end-to-end.
+
 ### Testing subagent approval boundaries
 
 `tests/tool/tools/task-approval-boundary.test.ts` (291 lines, 9 cases) pins the security contract enforced by `src/agent/subagent-permissions.ts:deriveSubagentSessionPermission` and driven from `src/tool/tools/task.ts:TaskTool.buildSubagentConfig`. The suite is the regression guard for the `d37f77ba` port of cline #14225: subagents inherit parent RESTRICTIONS but MUST NOT inherit parent APPROVALS. Every case exercises the derivation through the tool-level API rather than the internal helper so a wiring regression in `buildSubagentConfig` also surfaces here.

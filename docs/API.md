@@ -5375,6 +5375,128 @@ async function previewCleanup(): Promise<void> {
 }
 ```
 
+## Session Retention Lifecycle Runner API (`src/session/retention.ts`)
+
+Added in commit `bc84e999` (issue #1876). Programmatic library surface for the session retention lifecycle. Complements `SessionManager.cleanupExpiredSessions` (age-only automatic sweep) and `applyRetentionPolicy` (operator-driven `alexi sessions-clean` engine) with a reusable class that keeps the same decide / apply split but exposes injectable dependencies (clock, sessions directory, `SessionManager`) suitable for embedding in schedulers, MCP servers, and test harnesses.
+
+See [ARCHITECTURE.md — Session Retention Lifecycle Runner](ARCHITECTURE.md#session-retention-lifecycle-runner-srcsessionretentionts-issue-1876) for the pipeline diagram and the contract points; the section below documents the exported types.
+
+### Types
+
+```typescript
+// src/session/retention.ts
+
+export const RetentionPolicySchema: z.ZodType<RetentionPolicy>;
+
+export interface RetentionPolicy {
+  /** Sessions whose effective last-accessed timestamp is older than `now - maxAgeDays * 86400000` are candidates. `>= 1` when provided. */
+  maxAgeDays?: number;
+  /** After age filtering, keep only the N most-recently-touched sessions globally. `>= 0` when provided (0 deletes everything). */
+  maxCount?: number;
+  /** When `true` (the default), sessions with an active in-memory run are moved to `preserved` instead of `deleted`. */
+  preserveActive?: boolean;
+  /** Preview mode. When `true`, `sweep()` returns the candidate list without calling `fs.unlink`. */
+  dryRun?: boolean;
+}
+
+export interface RetentionResult {
+  deleted: string[];    // absolute file paths that were (or would be) removed
+  preserved: string[];  // absolute file paths held back by `preserveActive`
+  errors: string[];     // human-readable per-file failure messages
+  scanned: number;      // total parseable session files inspected
+  bytesFreed: number;   // total size in bytes across `deleted` (populated even in dry-run mode)
+  dryRun: boolean;      // mirrors the policy flag so callers can format without keeping input
+}
+
+export interface RetentionRunnerOptions {
+  /** Overrides `~/.alexi/sessions/`. Tests pass an `fs.mkdtemp` directory. */
+  sessionsDir?: string;
+  /** When supplied, `preserveActive` consults `hasActiveRun(sessionId)`. Absent in headless offline contexts. */
+  sessionManager?: Pick<SessionManager, 'hasActiveRun'>;
+  /** Overrides `Date.now()` for deterministic age calculations. */
+  now?: () => number;
+}
+
+export function defaultSessionsDir(): string;
+
+export function effectiveLastAccessed(session: ScannedSession): number;
+
+export function selectCandidatesFromPolicy(
+  sessions: ScannedSession[],
+  policy: RetentionPolicy,
+  now: number,
+  isActive: (sessionId: string) => boolean
+): { toDelete: ScannedSession[]; toPreserve: ScannedSession[] };
+
+export class RetentionRunner {
+  constructor(options?: RetentionRunnerOptions);
+  getSessionsDir(): string;
+  sweep(policy?: RetentionPolicy): Promise<RetentionResult>;
+}
+```
+
+Contract points:
+
+- **Zod-validated inputs.** `RetentionPolicySchema` is `.strict()` — unknown fields are rejected at parse time. `sweep()` re-parses on every call so callers do not need to pre-validate. A rejected policy throws synchronously (before any disk I/O).
+- **Decision / apply split.** `selectCandidatesFromPolicy` is a pure function suitable for unit testing with in-memory `ScannedSession` fixtures. `RetentionRunner.sweep` is the disk-touching wrapper (scan + decide + `fs.unlink`).
+- **Empty policy is a no-op.** A policy with neither `maxAgeDays` nor `maxCount` set returns `{ deleted: [], preserved: [], errors: [], scanned, bytesFreed: 0, dryRun }` — the scan runs (to populate `scanned`) but no candidates are selected.
+- **Union semantics.** A session is a deletion candidate when it fails **either** the age check **or** the count check. The `preserveActive` guard is applied after both, moving matching candidates to `preserved` instead of `deleted`.
+- **`preserveActive` defaults to `true`.** The runner checks `parsed.preserveActive !== false`, so both `undefined` and explicit `true` enable the guard. When no `sessionManager` is supplied to the constructor, `isActive` returns `false` for every id — the guard is effectively disabled by construction, which is the safe default for headless callers.
+- **Age signal precedence.** `effectiveLastAccessed(session)` prefers `metadata.lastAccessedAt`, falls back to `session.updatedAt`, then to `session.mtime`. `lastAccessedAt` is stamped on every `SessionManager.loadSession` and every `saveSession`; legacy sessions without the field fall through the chain transparently.
+- **Directory-level scan errors DO surface.** A missing sessions directory returns `{ scanned: 0, deleted: [] }` (fresh install has nothing to clean). Other directory errors (permissions, I/O) propagate out of `sweep()` so the caller can render a clear message.
+- **Per-file I/O is best-effort.** Per-file `fs.unlink` failures are captured in `result.errors` with the shape `Failed to delete <path>: <message>`; the sweep continues past errors. A `logger.warn` entry is emitted for each failure. Malformed session JSON is skipped during the scan phase and does not appear in `scanned`.
+- **`now` injection.** `new RetentionRunner({ now })` pins the clock for the runner instance; both age comparisons and any downstream diagnostics that need "when did this sweep run" use the injected function. Defaults to `Date.now()` when omitted.
+
+### Usage example: programmatic sweep with active-run preservation
+
+```typescript
+import { RetentionRunner, type RetentionPolicy } from './session/retention.js';
+import { SessionManager } from './core/sessionManager.js';
+
+async function nightlySweep(): Promise<void> {
+  const sessionManager = new SessionManager();
+  const runner = new RetentionRunner({ sessionManager });
+
+  const policy: RetentionPolicy = {
+    maxAgeDays: 30,
+    maxCount: 100,
+    preserveActive: true,
+  };
+
+  const result = await runner.sweep(policy);
+
+  console.log(
+    `Retention sweep: scanned=${result.scanned}, deleted=${result.deleted.length}, ` +
+      `preserved=${result.preserved.length}, bytesFreed=${result.bytesFreed}`
+  );
+
+  if (result.errors.length > 0) {
+    for (const err of result.errors) console.error(err);
+    process.exit(1);
+  }
+}
+```
+
+### Related: `SessionMetadata.lastAccessedAt`
+
+The runner relies on the optional `SessionMetadata.lastAccessedAt` field (`src/core/sessionManager.ts:100-131`) to distinguish "touched yesterday" (an interactive resume without a new message) from "message write yesterday" (`metadata.updated`).
+
+```typescript
+interface SessionMetadata {
+  // ... existing fields
+  /**
+   * Wall-clock timestamp (milliseconds since epoch) of the most recent
+   * session access — either a load via SessionManager.loadSession or a
+   * save via SessionManager.saveSession. Optional and backwards-
+   * compatible: legacy sessions surface `undefined` and retention
+   * runners fall back to `updated`, then to the file's `mtime`.
+   */
+  lastAccessedAt?: number;
+}
+```
+
+The stamp is applied at two call sites and both are best-effort — a failed re-write on load is swallowed so a read-only filesystem does not surface an error from a getter, and the next `saveSession` retries the stamp.
+
 ## Worktree Status Registry API
 
 Introduced by commit `8b372ad7` (issue #1826). Public TypeScript surface exposed by `src/agent/worktreeStatus.ts` for publishers (orchestrator, tool layer, tests) that need to push Agent Manager worktree lifecycle events into the TUI, plus the React binding under `src/cli/tui/hooks/useWorktreeStatus.ts` used by the Sidebar. See the [Agent Manager Worktree Status Registry](ARCHITECTURE.md#agent-manager-worktree-status-registry-issue-1826) section of the architecture doc for the runtime contract and status vocabulary.
