@@ -2568,6 +2568,113 @@ const ref = await selectModelForTask('auxiliary', ctx);
 
 The `hasSapDeployment` callback is the capability gate — return `false` from it in a test to assert the "defensive fallback to primary" branch is exercised even when a small id is present. See `docs/TESTING.md#testing-auxiliary-task-model-selection` for the full test pattern.
 
+## Gateway Model Capability Helper (`modelSupportsTools`)
+
+`src/providers/gateway/models.ts` operates over `ModelInfo`-shaped records loaded from EXTERNAL catalogs (SAP AI Core deployment queries, OpenRouter-style gateways, Cloudflare AI Gateway, etc.) rather than the authoritative in-code metadata in `sapOrchestration.ts`. The distinction is load-bearing:
+
+- `ORCHESTRATION_MODEL_METADATA` in `sapOrchestration.ts` is authored by Alexi maintainers. An entry with `capabilities: []` is an intentional, tested "definitely no tools" declaration and MUST NOT be treated as fail-open.
+- `ModelInfo.supported_parameters` here is provided by a remote gateway. Some gateways (including certain SAP AI Core deployment revisions) omit the field entirely, or return an empty array when they simply do not publish parameter metadata for a model. Treating "unknown" as "unsupported" here would incorrectly disable tools for valid tool-capable models routed through a gateway, downgrading the agent to a text-only fallback.
+
+Ports the fix from kilocode `c4506f7ef` ("fix(gateway): assume models with empty supported parameters support tools").
+
+### `GatewayModelInfo`
+
+```typescript
+export interface GatewayModelInfo {
+  /** Model identifier (e.g. `"anthropic--claude-4.7-opus"`). */
+  id?: string;
+  /**
+   * Parameters advertised as supported by the gateway. Three observable
+   * states carry three different meanings:
+   *  - `undefined` / `null` — the gateway does not publish parameter
+   *    metadata for this model (treat as fail-open).
+   *  - `[]` — the gateway returned an empty list (treat as fail-open;
+   *    empty is not distinguishable from "no metadata" for most upstream
+   *    gateways).
+   *  - `[...names]` — an explicit, non-empty list; look up `"tools"` /
+   *    `"tool_choice"` in the list.
+   */
+  supported_parameters?: readonly string[] | null;
+}
+```
+
+### `modelSupportsTools(model)`
+
+```typescript
+export function modelSupportsTools(model: GatewayModelInfo): boolean;
+```
+
+Resolution rules:
+
+1. If `supported_parameters` is `undefined` or `null` — the gateway did not publish parameter metadata — return `true`. Fail-open so tool-capable models are not silently downgraded to text-only.
+2. If `supported_parameters` is an empty array — the gateway returned no parameters — return `true`. Same fail-open rationale: some gateways collapse "no metadata authored" into an empty list.
+3. Otherwise, return `true` iff the list contains `"tools"` or `"tool_choice"`.
+
+Contract pinned by `src/providers/gateway/models.test.ts`:
+
+- `modelSupportsTools({ id: 'x' })` → `true` (undefined `supported_parameters`).
+- `modelSupportsTools({ id: 'x', supported_parameters: null })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: [] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tool_choice'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })` → `false` (explicit metadata, tools not listed).
+- `modelSupportsTools({ id: 'anthropic--claude-4.7-opus' })` → `true` (realistic SAP AI Core deployment record with no metadata).
+
+## Provider Fetch Wrapper (`buildFetch`, `DEFAULT_PROVIDER_TIMEOUT_MS`)
+
+`src/providers/provider.ts` provides a `fetch`-compatible wrapper that enforces a request timeout UNCONDITIONALLY — regardless of whether the request goes through a direct provider URL or a gateway. Ports opencode `35fc7a7` ("fix(opencode): apply provider timeouts to Cloudflare AI Gateway models"). The upstream bug allowed gateway-routed requests (Cloudflare AI Gateway, SAP AI Core, OpenRouter) to bypass the wrapper entirely and hang on the default platform-level fetch timeout.
+
+### `DEFAULT_PROVIDER_TIMEOUT_MS`
+
+```typescript
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
+```
+
+### `BuildFetchOptions` / `FetchLike`
+
+```typescript
+export interface BuildFetchOptions {
+  /** Base URL of the provider or gateway endpoint. Informational only — the
+   * timeout is applied unconditionally regardless of the value. Used to make
+   * timeout error messages friendlier. */
+  baseURL?: string;
+  /** Timeout in milliseconds. Defaults to `DEFAULT_PROVIDER_TIMEOUT_MS`.
+   * Non-positive values disable the timeout (fall through to the platform
+   * fetch default). */
+  timeout?: number;
+}
+
+export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+```
+
+### `buildFetch(opts)`
+
+```typescript
+export function buildFetch(opts?: BuildFetchOptions): FetchLike;
+```
+
+Contract:
+
+- **Unconditional timeout.** Applies the timeout regardless of whether `baseURL` points at a direct provider (`https://api.anthropic.com`) or a gateway (`https://gateway.ai.cloudflare.com/v1/xxx`, `https://api.ai.sap.example/v2/`). This is the load-bearing behaviour: prior to opencode `35fc7a7` the timeout was gated on a URL match, and gateway-routed requests silently escaped it.
+- **AbortSignal composition.** Composes with a caller-supplied `init.signal` (Ctrl+C, user cancellation): whichever fires first — timeout or caller signal — aborts the underlying request. The caller's abort reason is preserved when the caller wins.
+- **Zero-timeout disables the wrapper.** When `timeout <= 0` (or `NaN` / `Infinity`), no timeout is applied and the request is forwarded to `globalThis.fetch` directly.
+- **`AbortSignal.any` fallback.** On Node < 20 or Bun < 1.1 the platform helper is absent; the module provides a manual multi-signal composer so the caller's own abort signal still wins over the timeout when either fires first.
+- **Timer is `unref`'d.** The timeout does not keep the Node event loop alive if the caller has already forgotten about the fetch.
+
+Timeout error message shape: `` `Provider timeout after ${timeout}ms (${label})` `` where `label` is the `baseURL` when provided, or the literal string `'provider'` otherwise.
+
+Contract pinned by `src/providers/provider.test.ts` (six cases):
+
+- `DEFAULT_PROVIDER_TIMEOUT_MS` is exported and positive.
+- Gateway-routed (Cloudflare AI Gateway) requests are aborted when the timeout elapses; the rejection matches `/timeout/i`.
+- SAP AI Core-routed requests (`https://api.ai.sap.example/v2/`) are aborted when the timeout elapses.
+- Direct provider URLs (`https://api.anthropic.com`) are aborted when the timeout elapses.
+- A resolved response comes back when the fetch completes before the timeout.
+- A caller-supplied `AbortSignal` (`controller.abort(new Error('user cancelled'))`) wins over the timeout — the rejection matches `/cancelled|abort/i`.
+- `timeout: 0` disables the timeout entirely; the response resolves.
+
+The wrapper is a plain function, so it can be dropped into any SDK that accepts a custom `fetch` implementation.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

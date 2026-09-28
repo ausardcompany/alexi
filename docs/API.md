@@ -5805,3 +5805,68 @@ import { ALL_MIGRATIONS } from './core/database/migrations/index.js';
 await importLegacyDrizzleJournal(sqliteBridge, ALL_MIGRATIONS);
 await applyMigrations(sqliteBridge, ALL_MIGRATIONS);
 ```
+
+## Catalog Identity API (`src/core/stats/catalog-identity.ts`)
+
+Pure helper for normalising the same underlying model surfaced under multiple `provider/model` combinations onto a single canonical lab identity. Used by usage-attribution reporters to fold cross-provider offerings back to a single lab (`"anthropic"`, `"openai"`, `"deepseek"`, ...) so per-lab spend aggregation is not triple-counted.
+
+### `DEFAULT_STATS_PROVIDERS`
+
+```typescript
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = [
+  'opencode',
+  'opencode-go',
+  'sap-ai-core',
+];
+```
+
+The provider ids whose entries participate in canonical-identity resolution by default. Extended with `sap-ai-core` relative to the upstream opencode list so SAP-routed offerings map to the correct lab.
+
+### `CatalogIdentity`
+
+```typescript
+export interface CatalogIdentity {
+  /** `"<providerID>/<modelID>"` -> canonical lab id (e.g. `"anthropic"`). */
+  readonly offerings: ReadonlyMap<string, string>;
+  /** Normalised model name -> canonical lab id. Only populated for unambiguous names. */
+  readonly models: ReadonlyMap<string, string>;
+}
+```
+
+- `offerings` — one entry per input offering that could be resolved to a canonical model id. Ambiguous inputs are dropped rather than emitted with an incorrect lab.
+- `models` — normalised model names (with `-free` / `-preview` suffixes stripped) that map unambiguously to a single lab. Names offered by multiple labs are dropped so callers cannot accidentally mis-attribute usage.
+
+### `catalogIdentity(value, statsProviders?)`
+
+```typescript
+export function catalogIdentity(
+  value: unknown,
+  statsProviders: readonly string[] = DEFAULT_STATS_PROVIDERS
+): CatalogIdentity;
+```
+
+Build canonical `offerings` and `models` maps from a raw catalog value. The expected shape mirrors the upstream models.dev catalog:
+
+```jsonc
+{
+  "models":    { "<canonicalID>": { /* ... */ } },
+  "providers": { "<providerID>": { "models": { "<modelID>": { "canonical_model_id"?: "string" } } } }
+}
+```
+
+Resolution rules:
+
+1. For each provider in `statsProviders`, iterate `provider.models`.
+2. Determine the canonical id for each model:
+   - use `model.canonical_model_id` when set;
+   - else fall back to `modelID` if it exists in the top-level `models` map;
+   - else fall back to `"<providerID>/<modelID>"` if that key is in `models`;
+   - else skip the entry (no canonical data available).
+3. The lab is the segment before the first `/` of the canonical id.
+4. Record `"<providerID>/<modelID>" -> lab` in `offerings`.
+5. Track candidate labs per normalised model name; only surface names with a single candidate lab in the `models` output.
+
+Throws `Error('Invalid model catalog')` when `value` does not have the expected top-level shape.
+
+Full flow: [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-catalog-identity).
+

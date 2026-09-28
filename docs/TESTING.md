@@ -17,6 +17,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Routing](#testing-routing)
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
+- [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -5135,6 +5136,8 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp-config.test.ts` — MCP config loader, environment-variable resolution, per-server timeout parsing, and the example-config schema guard
 - `tests/mcp/playwright.test.ts` — end-to-end contract tests for the optional Playwright MCP server entry: schema validation of the example scaffold, generic startup retry, graceful degradation on a missing `@playwright/mcp-server` binary, and unchanged tool-schema passthrough
 - `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
+- `tests/mcp/cimd.test.ts` — pure-function coverage of Capability Interface Metadata Document validation (`validateCapabilities`, `buildManifestFromTools`, `CapabilityManifestSchema`, `McpCapabilityMismatchError`) covering the backward-compatibility, protocol-version, tool-removal, additive-change, schema-drift, description-drift, and composite-failure axes (issue #1877)
+- `tests/mcp/client-cimd.test.ts` — end-to-end integration of CIMD validation into `McpClientManager.connect`: manifest caching on every successful connect, warn-only behaviour when `cimdEnabled` is absent, permanent-failure behaviour when `cimdEnabled: true`, and the no-op path when `expectedCapabilities` is not pinned (issue #1877)
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
 
@@ -5564,6 +5567,114 @@ contributors do not re-introduce them by hand:
    already fits on one line will be re-collapsed by the next `prettier
    --write` pass. Running `npm run format` before committing avoids the
    `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up.
+
+8. **Wrap `.toBe(...)` chains onto the same line as the `expect(...)` argument
+   when the receiver fits, and split the `vi.fn(async () => ...)` argument
+   onto its own indented line when the assignment overflows 100 columns.**
+   Two related axes from the 2026-09-28 auto-fix pass in commit `3fb337cd`
+   on `src/providers/gateway/models.test.ts:40` and
+   `src/providers/provider.test.ts:80`/`:108`:
+
+   - Prettier prefers to keep an `expect(...).toBe(...)` chain compact:
+     when the argument to `expect(...)` fits alongside the call, the whole
+     `.toBe(false)` sits on the next line indented once, rather than
+     wrapping the `expect` argument across three lines. Canonical form:
+
+     ```typescript
+     // Anti-pattern — three-line wrap of a compact expect chain
+     expect(
+       modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })
+     ).toBe(false);
+
+     // Canonical form after auto-fix
+     expect(modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })).toBe(
+       false
+     );
+     ```
+
+     The assertion semantics are unchanged — `modelSupportsTools` still
+     receives the same `{ id: 'x', supported_parameters: ['temperature', 'top_p'] }`
+     record and the expectation still fires against `false`. This exercises
+     the negative branch of `modelSupportsTools` (explicit metadata,
+     `'tools'` / `'tool_choice'` absent → not tool-capable).
+
+   - When a `globalThis.fetch = vi.fn(...) as unknown as typeof globalThis.fetch;`
+     assignment overflows 100 columns, Prettier splits the `vi.fn`
+     argument onto its own indented line rather than reflowing the
+     surrounding cast. Canonical form:
+
+     ```typescript
+     // Anti-pattern — 130-column single line
+     globalThis.fetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof globalThis.fetch;
+
+     // Canonical form after auto-fix — vi.fn argument on its own indented line
+     globalThis.fetch = vi.fn(
+       async () => new Response('ok', { status: 200 })
+     ) as unknown as typeof globalThis.fetch;
+     ```
+
+     The `beforeEach` / `afterEach` scope that saves and restores the
+     original `globalThis.fetch` and calls `vi.restoreAllMocks()` is
+     untouched, and the resolved response (`status: 200`) is unchanged.
+     This pattern applies to any test that installs a mock `fetch` via a
+     double cast — the `as unknown as typeof globalThis.fetch` idiom is
+     preserved verbatim.
+
+   Diff statistics for that pass: `3 files changed, 14 insertions(+), 6 deletions(-)`
+   across `src/core/stats/catalog-identity.ts`, `src/providers/gateway/models.test.ts`,
+   and `src/providers/provider.test.ts`. Running `npm run format` before committing
+   avoids the `style(ci)` follow-up.
+
+### Testing gateway model capability (`modelSupportsTools`)
+
+`src/providers/gateway/models.test.ts` pins the fail-open contract from kilocode
+`c4506f7ef`. The suite covers every input shape a real SAP AI Core deployment
+query can produce and is the load-bearing regression guard against a future
+refactor that tightens `undefined` / `null` / `[]` into "definitely no tools":
+
+- `modelSupportsTools({ id: 'x' })` — undefined `supported_parameters` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: null })` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: [] })` → `true` (fail-open; empty is not distinguishable from "no metadata" for most upstream gateways).
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tool_choice'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools', 'tool_choice', 'temperature'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })` → `false` (explicit metadata, tools not listed — the ONLY branch that returns `false`).
+- A realistic SAP AI Core deployment record (`{ id: 'anthropic--claude-4.7-opus' }` with no `supported_parameters` field) → `true`.
+
+The 7th case is the critical one for the SAP AI Core adaptation: many
+deployment records omit `supported_parameters` entirely, and the pre-fix
+codebase would silently downgrade them to text-only. The `false`-returning case
+is deliberately kept small so a future refactor cannot claim the fail-open
+default was "accidental".
+
+### Testing the provider fetch wrapper timeout (`buildFetch`)
+
+`src/providers/provider.test.ts` pins the unconditional-timeout contract from
+opencode `35fc7a7`. The suite is the load-bearing regression guard against a
+future refactor that gates the timeout on a URL match again:
+
+- `DEFAULT_PROVIDER_TIMEOUT_MS` is exported and positive.
+- Gateway-routed requests (`https://gateway.ai.cloudflare.com/v1/xxx`) are
+  aborted when the timeout elapses. This is the load-bearing case for the
+  opencode `35fc7a7` port — the pre-fix codebase let gateway-routed requests
+  escape the wrapper entirely.
+- SAP AI Core-routed requests (`https://api.ai.sap.example/v2/`) are aborted
+  when the timeout elapses. Same axis as the Cloudflare case, pinned separately
+  so a future refactor that special-cased Cloudflare cannot silently break the
+  SAP path.
+- Direct provider URLs (`https://api.anthropic.com`) are aborted when the
+  timeout elapses. The baseline case — the wrapper was already correct here
+  before opencode `35fc7a7`.
+- A resolved response (`new Response('ok', { status: 200 })`) comes back when
+  the fetch completes before the timeout.
+- A caller-supplied `AbortSignal` (`controller.abort(new Error('user cancelled'))`)
+  wins over the timeout — the rejection matches `/cancelled|abort/i`.
+- `timeout: 0` disables the timeout entirely and the response resolves.
+
+Each case installs its own mock `fetch` in a `beforeEach`, and the top-level
+`afterEach` restores `globalThis.fetch` from the saved reference and calls
+`vi.restoreAllMocks()`. See pattern **8** above for the `vi.fn(async () => ...)`
+argument-splitting rule that applies to the two successful-response mocks.
 
 ### Registry-contract pinning tests
 
@@ -7586,3 +7697,203 @@ npm test -- tests/core/sessionManager-workdir-cache.test.ts
 ```
 
 See [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848) for the runtime sequence diagram and the contract points on `createSession` / `loadSession`.
+
+## Testing MCP Capability Validation (CIMD, issue #1877)
+
+The CIMD (Capability Interface Metadata Document) validation module in `src/mcp/cimd.ts` moves MCP breaking-change detection from per-call runtime failures to `connect()` time. Two co-located suites pin the contract:
+
+- `tests/mcp/cimd.test.ts` (325 lines) exercises the pure functions and schemas in isolation — no client, no mocks, no filesystem.
+- `tests/mcp/client-cimd.test.ts` (203 lines) wires the module through `McpClientManager.connect` end-to-end with mocked `@modelcontextprotocol/client`, `child_process.spawn`, and `logger` surfaces.
+
+### What the pure-function suite pins
+
+Six describe blocks cover the mismatch matrix without booting a client:
+
+1. **`CapabilityManifestSchema`** — accepts a tools-only manifest, accepts a manifest with `protocolVersion` and a fully-populated tool including a nested `inputSchema` (`{ type: 'object', properties: { text: { type: 'string' } } }`), and rejects any tool without a `name`. The rejection case guards against a future refactor that relaxes `z.string().min(1)` on `CapabilityTool.name` — a nameless tool has no cache key and cannot be compared across manifests.
+2. **`buildManifestFromTools`** — projects raw MCP `tools/list` responses onto the narrower manifest shape. Two cases: (a) `protocolVersion` is copied verbatim when supplied and every tool retains `description` / `inputSchema` (with explicit `undefined` for missing fields, not omission — the test asserts `toEqual([{ name: 'a', ... }, { name: 'b', description: undefined, inputSchema: undefined }])`); (b) `protocolVersion` is `undefined` on the manifest when the caller omits the argument.
+3. **`validateCapabilities` / backward compatibility** — two no-op cases. When `expectedCapabilities` is absent, validation returns `{ valid: true, mismatches: [], warnings: [] }` regardless of the `cimdEnabled` flag. This is the load-bearing property that lets CIMD ship as strictly additive: an operator who has never touched their `mcp-servers.json` sees zero behavioural change.
+4. **`validateCapabilities` / protocol version** — four cases: an incompatible `protocolVersion` produces a single `protocol_version_incompatible` mismatch whose message names both versions; matching versions produce no mismatches; a missing actual version and a missing expected version each skip the check (the caller pinned only tools).
+5. **`validateCapabilities` / tool removal, additive changes, schema drift, description drift** — one describe block per kind. Tool removal produces one `tool_removed` mismatch per missing tool (verified with a 3-tool expected manifest that lists 1 actual tool). Additive changes (actual has more tools) produce warnings, never mismatches. Schema drift is compared structurally via the module-internal `deepEqualJson`: a case with reordered object keys (`{ q, limit }` vs. `{ limit, q }`) is asserted equal, and a case with a renamed property (`{ q }` vs. `{ query }`) is asserted as a `tool_schema_changed` mismatch. Description drift produces a low-severity `tool_description_changed` mismatch, and is skipped when the expected description is absent (so operators who don't want to pin descriptions get zero noise).
+6. **`validateCapabilities` / composite failures** — one case exercises protocol-version-plus-tool-removal-plus-schema-change together, asserting that all three mismatch kinds appear in a single pass. This locks in the "collect every mismatch, don't fail fast" contract that lets an operator see the full picture with one connect attempt instead of a whack-a-mole retry cycle.
+7. **`McpCapabilityMismatchError`** — smoke test that the error carries the `serverName`, the raw `mismatches` array, and a multi-line `message` that names every mismatch AND references both `cimdEnabled` and `expectedCapabilities` so the operator knows exactly which fields to edit in `mcp-servers.json`.
+
+```typescript
+// Excerpt from tests/mcp/cimd.test.ts (describe 'schema drift')
+it('treats structurally equal schemas with reordered keys as matching', () => {
+  const server = makeServer({
+    expectedCapabilities: {
+      tools: [
+        {
+          name: 'search',
+          inputSchema: {
+            type: 'object',
+            properties: { q: { type: 'string' }, limit: { type: 'number' } },
+          },
+        },
+      ],
+    },
+  });
+  const manifest: CapabilityManifest = {
+    tools: [
+      {
+        name: 'search',
+        inputSchema: {
+          properties: { limit: { type: 'number' }, q: { type: 'string' } },
+          type: 'object',
+        },
+      },
+    ],
+  };
+  expect(validateCapabilities(server, manifest).valid).toBe(true);
+});
+```
+
+### What the integration suite pins
+
+`tests/mcp/client-cimd.test.ts` uses the same mocking pattern as `tests/mcp/client.test.ts` (mocks for `child_process.spawn`, `@modelcontextprotocol/client`, `@modelcontextprotocol/client/stdio`, and `src/mcp/config.js`), plus a hoisted `loggerWarnMock` on `src/utils/logger.js` so the warn-vs-throw branch can be asserted directly:
+
+```typescript
+const { loggerWarnMock } = vi.hoisted(() => ({ loggerWarnMock: vi.fn() }));
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: { info: vi.fn(), warn: loggerWarnMock, error: vi.fn(), debug: vi.fn() },
+}));
+```
+
+Six cases cover the client-side surface:
+
+1. **Manifest caching after connect.** With `mockClientListTools` returning a single `search` tool, the resulting `connection.capabilityManifest` is defined, has one tool, and `.tools[0].name === 'search'`. Manifest capture is unconditional — it happens on every successful connect regardless of `cimdEnabled` so operators can inspect the observed manifest offline (e.g. to author a matching `expectedCapabilities` block).
+2. **Warn-only when a tool is missing and `cimdEnabled` is absent.** The expected manifest lists `[search, summarise]`, the actual manifest lists only `[search]`. The connection status is `'connected'` (backward-compatible default) and `loggerWarnMock` was called with a message containing `'capability mismatch'`. The assertion routes through `mock.calls.some((call) => String(call[0]).includes('capability mismatch'))` rather than exact-string matching so the log format can evolve without touching the test.
+3. **Permanent failure when `cimdEnabled: true` and a tool is missing.** Same manifest shape as case 2, `cimdEnabled: true` added. The connection status is `'failed'` and `connection.error` contains both `'capability validation'` and the missing tool name (`'summarise'`). The manager's error-classification path (`classifyConnectError` in `src/mcp/client.ts`) treats `McpCapabilityMismatchError` as a permanent config error, so the retry budget is preserved and no exponential-backoff loop kicks in.
+4. **`cimdEnabled: true` without `expectedCapabilities` is a no-op.** A server with `cimdEnabled: true` but no pinned expected manifest connects cleanly. This is the "opted-in but not yet configured" state — CIMD must not turn every not-yet-pinned server into a failed connection.
+5. **Clean connect when observed matches expected exactly.** A server with `cimdEnabled: true` and a fully-populated `expectedCapabilities` (name, description, `inputSchema`) matching the observed manifest verbatim connects with `status === 'connected'` and NO warn calls containing `'capability mismatch'`.
+6. **`McpCapabilityMismatchError` is exported and `instanceof Error`.** A one-liner smoke test that guards against a future refactor that accidentally drops the export or changes the prototype chain. `instanceof` checks in downstream code (`error-backoff.ts`, `router.ts`, telemetry) rely on both properties.
+
+### Testing patterns to reuse when extending the CIMD suite
+
+1. **Test the pure functions in `cimd.test.ts` and the wiring in `client-cimd.test.ts`.** The split matters: `cimd.test.ts` runs in a millisecond with zero mocks, so exhaustive coverage of the mismatch matrix (every `CapabilityMismatchKind`, every input shape) lives there. `client-cimd.test.ts` is the more expensive suite that pays for the `@modelcontextprotocol/client` mock plumbing, so keep it narrow to the branches that ONLY the client can exercise (manifest caching, `logger.warn` vs. `throw`, error classification via `connection.error`).
+2. **Route new mismatch cases through `makeServer(overrides)`.** The helper builds a valid stdio config with sensible defaults; individual tests override only `expectedCapabilities` and `cimdEnabled`. Rebuilding the full `McpServerConfig` inline in each case is what obscures the actual property under test.
+3. **Assert on `kind` and `toolName`, not on `message`.** The `CapabilityMismatchKind` union is the stable programmatic contract; the human-readable `message` is free to evolve. Tests that regex-match on message strings become high-maintenance the first time an operator asks for a clearer wording. Message assertions belong ONLY on `McpCapabilityMismatchError` where the exact operator-facing text is the contract.
+4. **Use `vi.hoisted` for logger capture, not top-level `vi.fn()`.** Hoisted `vi.mock` factories run before top-level `const` initializers, so a `const loggerWarnMock = vi.fn()` referenced from inside `vi.mock(...)` triggers a temporal-dead-zone error at module load. The `vi.hoisted(() => ({ ... }))` pattern gives you a closure over a value that is initialized in the correct order.
+5. **Route by `params.name` when the same mock serves multiple tools.** The client suite reuses `mockClientListTools.mockResolvedValueOnce(...)` per case rather than routing by tool name because each case sets up its own manifest shape; if a future case needs to distinguish two `listTools` calls in the same test (e.g. an initial connect followed by a `refreshTools`), fall back to `mockImplementation` and switch on the argument shape, mirroring the pattern in `tests/mcp/client-timeout.test.ts`.
+6. **Do NOT mock `src/mcp/cimd.js` from the client suite.** The whole point of `client-cimd.test.ts` is that the real validator reacts to real config shapes. Stubbing the validator would let a client-side regression that skips the `validateCapabilities` call pass silently.
+
+### Running the suites
+
+```bash
+# Pure-function suite (fast, no I/O)
+npm test -- tests/mcp/cimd.test.ts
+
+# Integration suite (mocks client + spawn + logger)
+npm test -- tests/mcp/client-cimd.test.ts
+
+# Both, plus every other MCP test file
+npm test -- tests/mcp/
+```
+
+See `src/mcp/cimd.ts` for the module's public surface and JSDoc, and `src/mcp/client.ts` (`fetchInitialMetadata` and `readProtocolVersion`) for the integration point that populates `connection.capabilityManifest` and gates the throw-vs-warn branch on `config.cimdEnabled`.
+## Testing Canonical Model Identity (`src/core/stats/catalog-identity.test.ts`)
+
+`catalogIdentity` is a pure resolver, so the suite is `describe`-flat, `vi.mock`-free, and runs in single-digit milliseconds. Test coverage (`src/core/stats/catalog-identity.test.ts`, seven cases, 131 lines) pins every branch of the resolution rules from [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts).
+
+### Cases
+
+1. **Input rejection.** `catalogIdentity(null)`, `catalogIdentity('nope')`, and `catalogIdentity([])` MUST throw `/Invalid model catalog/`.
+2. **Missing shape.** A record with `models: {}` and no `providers`, or `providers: {}` and no `models`, MUST throw.
+3. **SAP AI Core offering resolves to canonical lab.** A catalog containing `sap-ai-core/anthropic--claude-4.7-opus` with `canonical_model_id: 'anthropic/claude-opus-4'` MUST produce `offerings.get('sap-ai-core/anthropic--claude-4.7-opus') === 'anthropic'` AND `models.get('anthropic--claude-4.7-opus') === 'anthropic'`.
+4. **`modelID` fallback.** When `canonical_model_id` is absent but `models[modelID]` exists (`opencode/gpt-4o`), the resolver picks up the modelID directly (`offerings.get('opencode/gpt-4o') === 'gpt-4o'`).
+5. **Ambiguous names dropped from `models`.** When two providers offer the same normalised name mapping to different labs (`opencode/claude-opus-4` → `anthropic`, `opencode-go/claude-opus-4` → `meituan`), `offerings` keeps both entries but `models.has('claude-opus-4') === false`.
+6. **`-free$` / `-preview$` suffix normalisation.** `claude-opus-4-free` and `claude-opus-4-preview` under the same lab collapse into a single `models.get('claude-opus-4')` entry.
+7. **Custom `statsProviders`.** With the default list, an `other-provider` offering does not surface (`offerings.size === 0`). With an explicit `['other-provider']`, it does.
+
+Plus a `DEFAULT_STATS_PROVIDERS.includes('sap-ai-core')` regression guard so a future opencode sync cannot silently drop the SAP-AI-Core extension from the default list.
+
+### Running
+
+```bash
+npm test -- src/core/stats/catalog-identity.test.ts
+```
+
+## Testing Gateway Model Tool-Capability (`src/providers/gateway/models.test.ts`)
+
+`modelSupportsTools` is fail-open when the gateway does not publish parameter metadata. The suite (`src/providers/gateway/models.test.ts`, eight cases, 55 lines) locks the truth table from [PROVIDERS.md — Gateway Model Tool-Capability](PROVIDERS.md#gateway-model-tool-capability-modelsupportstools) so a future refactor that "tightens" the check by treating unknown metadata as unsupported breaks the suite immediately.
+
+### Cases
+
+- `supported_parameters === undefined` → `true`
+- `supported_parameters === null` → `true`
+- `supported_parameters === []` → `true`
+- `supported_parameters === ['tools']` → `true`
+- `supported_parameters === ['tool_choice']` → `true`
+- `supported_parameters === ['tools', 'tool_choice', 'temperature']` → `true`
+- `supported_parameters === ['temperature', 'top_p']` → `false`
+- Realistic SAP-shaped record `{ id: 'anthropic--claude-4.7-opus' }` with no `supported_parameters` at all → `true` (the anchor for the kilocode `c4506f7ef` fix — SAP AI Core deployment queries typically look like this).
+
+### Running
+
+```bash
+npm test -- src/providers/gateway/models.test.ts
+```
+
+## Testing Provider Fetch Timeout (`src/providers/provider.test.ts`)
+
+The critical assertion the suite locks: the timeout MUST fire for BOTH direct provider URLs AND gateway URLs. The upstream bug (opencode `35fc7a7`) allowed gateway-routed requests to bypass the wrapper entirely and hang forever; a regression that re-introduces the "only wrap direct URLs" branch trips this suite in ~50ms per case.
+
+### Setup
+
+Tests replace `globalThis.fetch` with a `vi.fn` that returns a never-resolving `Promise` (unless the abort signal fires), then rely on the wrapper's timeout to reject the outer promise. `beforeEach` captures `originalFetch`; `afterEach` restores it and calls `vi.restoreAllMocks()`.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildFetch, DEFAULT_PROVIDER_TIMEOUT_MS } from './provider.js';
+
+describe('buildFetch — provider timeout', () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('exposes a sane default timeout', () => {
+    expect(DEFAULT_PROVIDER_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('aborts gateway-routed (Cloudflare AI Gateway) requests when timeout elapses', async () => {
+    globalThis.fetch = vi.fn((_input, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal!.reason ?? new Error('aborted'));
+        });
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const fetchFn = buildFetch({
+      baseURL: 'https://gateway.ai.cloudflare.com/v1/xxx',
+      timeout: 50,
+    });
+
+    await expect(fetchFn('https://gateway.ai.cloudflare.com/v1/xxx/slow', {})).rejects.toThrow(
+      /timeout/i
+    );
+  });
+});
+```
+
+### Cases (`src/providers/provider.test.ts`, 114 lines)
+
+1. **Sane default.** `DEFAULT_PROVIDER_TIMEOUT_MS > 0`.
+2. **Gateway URL aborts on timeout.** A Cloudflare AI Gateway base URL with a never-resolving mocked `fetch` and a 50ms timeout MUST reject with a `/timeout/i` message. Regression guard against the "only wrap direct URLs" bug.
+3. **Direct provider URL aborts on timeout.** Same mock, same timeout, direct base URL (`https://api.anthropic.com`). MUST also reject.
+4. **`timeout: 0` disables the wrapper.** The mock's never-resolving promise MUST NOT be raced by the wrapper — the test proves the caller inherits the platform default.
+5. **Negative timeout disables the wrapper.** Same as `timeout: 0`.
+6. **Caller signal wins when it fires first.** A caller-supplied `AbortController` aborted BEFORE the timeout fires MUST propagate the caller's reason, not the timeout error.
+
+### Running
+
+```bash
+npm test -- src/providers/provider.test.ts
+```

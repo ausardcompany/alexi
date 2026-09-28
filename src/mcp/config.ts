@@ -96,6 +96,21 @@ const ConnectTimeoutSchema = z
  * validation are enforced strictly; extra keys are accepted so future
  * additions do not require a schema bump.
  */
+const McpCapabilityToolSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    inputSchema: z.unknown().optional(),
+  })
+  .passthrough();
+
+const McpExpectedCapabilitiesSchema = z
+  .object({
+    protocolVersion: z.string().min(1).optional(),
+    tools: z.array(McpCapabilityToolSchema).optional(),
+  })
+  .passthrough();
+
 const McpServerConfigSchema = z
   .object({
     name: z.string().min(1),
@@ -119,6 +134,8 @@ const McpServerConfigSchema = z
         maxDelayMs: z.number().int().min(0).optional(),
       })
       .optional(),
+    cimdEnabled: z.boolean().optional(),
+    expectedCapabilities: McpExpectedCapabilitiesSchema.optional(),
   })
   .passthrough();
 
@@ -229,6 +246,49 @@ export interface McpServerConfig {
     maxAttempts?: number;
     initialDelayMs?: number;
     maxDelayMs?: number;
+  };
+  /**
+   * Enable MCP Capability Interface Metadata (CIMD) validation at
+   * connect time. When `true` and {@link expectedCapabilities} is set,
+   * a manifest mismatch (removed tool, changed schema, incompatible
+   * protocol version) ABORTS the connect attempt via
+   * `McpCapabilityMismatchError` instead of surfacing later as a
+   * per-call runtime failure.
+   *
+   * When `false` or absent (the default, for backward compatibility),
+   * the same mismatch is logged as a `logger.warn` and the connection
+   * proceeds. Operators must opt in explicitly — pinning a manifest
+   * that has since drifted upstream would otherwise brick every
+   * previously-working session.
+   *
+   * Validation is a no-op when `expectedCapabilities` is absent,
+   * regardless of `cimdEnabled`: without an expected manifest there is
+   * nothing to compare against.
+   */
+  cimdEnabled?: boolean;
+  /**
+   * Pinned capability manifest for this server. Compared against the
+   * manifest observed on the wire during `connect()`; any drift is
+   * flagged by {@link validateCapabilities} from `src/mcp/cimd.ts`.
+   *
+   * Fields:
+   * - `protocolVersion`: expected MCP protocol version string. Any
+   *   difference from the actual value is treated as incompatible.
+   *   Omit this field entirely to skip protocol-version checks.
+   * - `tools`: list of tools expected to exist, with their names,
+   *   optional descriptions, and optional input schemas. Missing tools
+   *   trigger `tool_removed` mismatches; input-schema drift triggers
+   *   `tool_schema_changed`. Additional tools on the server that are
+   *   NOT listed here are recorded as warnings (additive change),
+   *   never mismatches.
+   */
+  expectedCapabilities?: {
+    protocolVersion?: string;
+    tools?: Array<{
+      name: string;
+      description?: string;
+      inputSchema?: unknown;
+    }>;
   };
 }
 

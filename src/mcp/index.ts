@@ -17,6 +17,22 @@ export {
   type ClientMetadataDocument,
 } from './client-metadata.js';
 
+// MCP Capability Interface Metadata (CIMD) validation. Detects
+// breaking-change drift between an expected `expectedCapabilities`
+// manifest and the manifest observed on the wire at connect time.
+export {
+  CapabilityManifestSchema,
+  CapabilityToolSchema,
+  validateCapabilities,
+  buildManifestFromTools,
+  McpCapabilityMismatchError,
+  type CapabilityManifest,
+  type CapabilityTool,
+  type CapabilityMismatch,
+  type CapabilityMismatchKind,
+  type ValidationResult,
+} from './cimd.js';
+
 // Experimental MCP Apps surface (kilocode 36c57c12c). Gated behind
 // `ALEXI_EXPERIMENTAL_MCP_APPS=1` at the call site — the exports here
 // are always available so callers can feature-detect without a
