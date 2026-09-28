@@ -17,6 +17,12 @@ import {
   type McpServerConfig,
 } from './config.js';
 import { classifyProbeContentType } from './sse-probe.js';
+import {
+  buildManifestFromTools,
+  McpCapabilityMismatchError,
+  validateCapabilities,
+  type CapabilityManifest,
+} from './cimd.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -135,6 +141,14 @@ export interface McpConnection {
   process?: ChildProcess;
   /** Available tools from this server */
   tools: McpToolInfo[];
+  /**
+   * Cached CIMD capability manifest observed on the wire during the
+   * most recent successful `connect()`. Populated regardless of the
+   * `cimdEnabled` flag so operators can inspect the actual manifest
+   * offline (e.g. to author a matching `expectedCapabilities` block).
+   * `undefined` until the first successful metadata fetch completes.
+   */
+  capabilityManifest?: CapabilityManifest;
   /** Cached resources from this server (populated on demand via refreshResources) */
   resources?: unknown[];
   /** Cached prompts from this server (populated on demand via refreshPrompts) */
@@ -298,6 +312,13 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
     return 'config';
   }
 
+  // CIMD capability mismatches are permanent config errors. The server
+  // is not going to grow a removed tool back on retry; the operator
+  // must update `expectedCapabilities` or roll the server version.
+  if (error instanceof McpCapabilityMismatchError) {
+    return 'config';
+  }
+
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code === 'string') {
     if (CONFIG_ERROR_CODES.has(code)) {
@@ -356,6 +377,13 @@ function formatConnectError(serverName: string, error: unknown): string {
   // Remote-transport auth failures already carry an actionable message
   // pointing at the `apiKey` field. Pass them through verbatim.
   if (error instanceof McpConnectAuthError || /authentication\/authorization failure/.test(raw)) {
+    return raw;
+  }
+
+  // CIMD capability mismatches carry a multi-line actionable message
+  // that already names the offending server, mismatch kinds, and the
+  // `cimdEnabled` / `expectedCapabilities` fields to change.
+  if (error instanceof McpCapabilityMismatchError) {
     return raw;
   }
 
@@ -909,6 +937,62 @@ export class McpClientManager {
     // so a slow endpoint on one axis does not block the others.
     const rawTools = await this.fetchInitialMetadata(config.name, connection.client);
     connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
+
+    // Build and cache the observed capability manifest. The protocol
+    // version is best-effort — the SDK's `getServerVersion()` shape
+    // varies across builds, so we defensively probe for a version
+    // field and fall through when it is unavailable.
+    const protocolVersion = this.readProtocolVersion(connection.client);
+    connection.capabilityManifest = buildManifestFromTools(rawTools, protocolVersion);
+
+    // CIMD validation. A no-op when `expectedCapabilities` is absent,
+    // regardless of `cimdEnabled`. When mismatches are found:
+    //   - `cimdEnabled === true` → throw and abort the connect attempt.
+    //   - otherwise → log a warning and proceed (backward-compatible).
+    if (config.expectedCapabilities !== undefined) {
+      const result = validateCapabilities(config, connection.capabilityManifest);
+      if (!result.valid) {
+        if (config.cimdEnabled === true) {
+          throw new McpCapabilityMismatchError(config.name, result.mismatches);
+        }
+        for (const mismatch of result.mismatches) {
+          logger.warn(`MCP capability mismatch (${mismatch.kind}): ${mismatch.message}`);
+        }
+      }
+      for (const warning of result.warnings) {
+        logger.debug(`MCP capability additive change: ${warning}`);
+      }
+    }
+  }
+
+  /**
+   * Read the MCP protocol version advertised by the connected server.
+   *
+   * The SDK exposes this via `getServerVersion()` on some builds and
+   * as a direct property on others; older builds omit it entirely.
+   * Probes both shapes and returns `undefined` when neither is
+   * available — a missing version is not a validation error, it just
+   * means protocol-version checks are skipped for this connection.
+   */
+  private readProtocolVersion(client: Client): string | undefined {
+    const c = client as unknown as {
+      getServerVersion?: () => { version?: string } | undefined;
+      serverVersion?: { version?: string };
+    };
+    try {
+      const fromMethod =
+        typeof c.getServerVersion === 'function' ? c.getServerVersion() : undefined;
+      if (fromMethod && typeof fromMethod.version === 'string') {
+        return fromMethod.version;
+      }
+    } catch {
+      // Ignore — some SDK builds throw when the field is unpopulated.
+    }
+    const direct = c.serverVersion;
+    if (direct && typeof direct.version === 'string') {
+      return direct.version;
+    }
+    return undefined;
   }
 
   /**
