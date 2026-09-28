@@ -5463,6 +5463,114 @@ contributors do not re-introduce them by hand:
    --write` pass. Running `npm run format` before committing avoids the
    `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up.
 
+8. **Wrap `.toBe(...)` chains onto the same line as the `expect(...)` argument
+   when the receiver fits, and split the `vi.fn(async () => ...)` argument
+   onto its own indented line when the assignment overflows 100 columns.**
+   Two related axes from the 2026-09-28 auto-fix pass in commit `3fb337cd`
+   on `src/providers/gateway/models.test.ts:40` and
+   `src/providers/provider.test.ts:80`/`:108`:
+
+   - Prettier prefers to keep an `expect(...).toBe(...)` chain compact:
+     when the argument to `expect(...)` fits alongside the call, the whole
+     `.toBe(false)` sits on the next line indented once, rather than
+     wrapping the `expect` argument across three lines. Canonical form:
+
+     ```typescript
+     // Anti-pattern — three-line wrap of a compact expect chain
+     expect(
+       modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })
+     ).toBe(false);
+
+     // Canonical form after auto-fix
+     expect(modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })).toBe(
+       false
+     );
+     ```
+
+     The assertion semantics are unchanged — `modelSupportsTools` still
+     receives the same `{ id: 'x', supported_parameters: ['temperature', 'top_p'] }`
+     record and the expectation still fires against `false`. This exercises
+     the negative branch of `modelSupportsTools` (explicit metadata,
+     `'tools'` / `'tool_choice'` absent → not tool-capable).
+
+   - When a `globalThis.fetch = vi.fn(...) as unknown as typeof globalThis.fetch;`
+     assignment overflows 100 columns, Prettier splits the `vi.fn`
+     argument onto its own indented line rather than reflowing the
+     surrounding cast. Canonical form:
+
+     ```typescript
+     // Anti-pattern — 130-column single line
+     globalThis.fetch = vi.fn(async () => new Response('ok', { status: 200 })) as unknown as typeof globalThis.fetch;
+
+     // Canonical form after auto-fix — vi.fn argument on its own indented line
+     globalThis.fetch = vi.fn(
+       async () => new Response('ok', { status: 200 })
+     ) as unknown as typeof globalThis.fetch;
+     ```
+
+     The `beforeEach` / `afterEach` scope that saves and restores the
+     original `globalThis.fetch` and calls `vi.restoreAllMocks()` is
+     untouched, and the resolved response (`status: 200`) is unchanged.
+     This pattern applies to any test that installs a mock `fetch` via a
+     double cast — the `as unknown as typeof globalThis.fetch` idiom is
+     preserved verbatim.
+
+   Diff statistics for that pass: `3 files changed, 14 insertions(+), 6 deletions(-)`
+   across `src/core/stats/catalog-identity.ts`, `src/providers/gateway/models.test.ts`,
+   and `src/providers/provider.test.ts`. Running `npm run format` before committing
+   avoids the `style(ci)` follow-up.
+
+### Testing gateway model capability (`modelSupportsTools`)
+
+`src/providers/gateway/models.test.ts` pins the fail-open contract from kilocode
+`c4506f7ef`. The suite covers every input shape a real SAP AI Core deployment
+query can produce and is the load-bearing regression guard against a future
+refactor that tightens `undefined` / `null` / `[]` into "definitely no tools":
+
+- `modelSupportsTools({ id: 'x' })` — undefined `supported_parameters` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: null })` → `true` (fail-open).
+- `modelSupportsTools({ id: 'x', supported_parameters: [] })` → `true` (fail-open; empty is not distinguishable from "no metadata" for most upstream gateways).
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tool_choice'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['tools', 'tool_choice', 'temperature'] })` → `true`.
+- `modelSupportsTools({ id: 'x', supported_parameters: ['temperature', 'top_p'] })` → `false` (explicit metadata, tools not listed — the ONLY branch that returns `false`).
+- A realistic SAP AI Core deployment record (`{ id: 'anthropic--claude-4.7-opus' }` with no `supported_parameters` field) → `true`.
+
+The 7th case is the critical one for the SAP AI Core adaptation: many
+deployment records omit `supported_parameters` entirely, and the pre-fix
+codebase would silently downgrade them to text-only. The `false`-returning case
+is deliberately kept small so a future refactor cannot claim the fail-open
+default was "accidental".
+
+### Testing the provider fetch wrapper timeout (`buildFetch`)
+
+`src/providers/provider.test.ts` pins the unconditional-timeout contract from
+opencode `35fc7a7`. The suite is the load-bearing regression guard against a
+future refactor that gates the timeout on a URL match again:
+
+- `DEFAULT_PROVIDER_TIMEOUT_MS` is exported and positive.
+- Gateway-routed requests (`https://gateway.ai.cloudflare.com/v1/xxx`) are
+  aborted when the timeout elapses. This is the load-bearing case for the
+  opencode `35fc7a7` port — the pre-fix codebase let gateway-routed requests
+  escape the wrapper entirely.
+- SAP AI Core-routed requests (`https://api.ai.sap.example/v2/`) are aborted
+  when the timeout elapses. Same axis as the Cloudflare case, pinned separately
+  so a future refactor that special-cased Cloudflare cannot silently break the
+  SAP path.
+- Direct provider URLs (`https://api.anthropic.com`) are aborted when the
+  timeout elapses. The baseline case — the wrapper was already correct here
+  before opencode `35fc7a7`.
+- A resolved response (`new Response('ok', { status: 200 })`) comes back when
+  the fetch completes before the timeout.
+- A caller-supplied `AbortSignal` (`controller.abort(new Error('user cancelled'))`)
+  wins over the timeout — the rejection matches `/cancelled|abort/i`.
+- `timeout: 0` disables the timeout entirely and the response resolves.
+
+Each case installs its own mock `fetch` in a `beforeEach`, and the top-level
+`afterEach` restores `globalThis.fetch` from the saved reference and calls
+`vi.restoreAllMocks()`. See pattern **8** above for the `vi.fn(async () => ...)`
+argument-splitting rule that applies to the two successful-response mocks.
+
 ### Registry-contract pinning tests
 
 Some tests exist solely to pin a public-surface contract that the codebase has
@@ -7484,3 +7592,110 @@ npm test -- tests/core/sessionManager-workdir-cache.test.ts
 ```
 
 See [ARCHITECTURE.md — Session Workdir and Project-Scoped Config Cache](ARCHITECTURE.md#session-workdir-and-project-scoped-config-cache-issue-1848) for the runtime sequence diagram and the contract points on `createSession` / `loadSession`.
+
+## Testing Canonical Model Identity (`src/core/stats/catalog-identity.test.ts`)
+
+`catalogIdentity` is a pure resolver, so the suite is `describe`-flat, `vi.mock`-free, and runs in single-digit milliseconds. Test coverage (`src/core/stats/catalog-identity.test.ts`, seven cases, 131 lines) pins every branch of the resolution rules from [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts).
+
+### Cases
+
+1. **Input rejection.** `catalogIdentity(null)`, `catalogIdentity('nope')`, and `catalogIdentity([])` MUST throw `/Invalid model catalog/`.
+2. **Missing shape.** A record with `models: {}` and no `providers`, or `providers: {}` and no `models`, MUST throw.
+3. **SAP AI Core offering resolves to canonical lab.** A catalog containing `sap-ai-core/anthropic--claude-4.7-opus` with `canonical_model_id: 'anthropic/claude-opus-4'` MUST produce `offerings.get('sap-ai-core/anthropic--claude-4.7-opus') === 'anthropic'` AND `models.get('anthropic--claude-4.7-opus') === 'anthropic'`.
+4. **`modelID` fallback.** When `canonical_model_id` is absent but `models[modelID]` exists (`opencode/gpt-4o`), the resolver picks up the modelID directly (`offerings.get('opencode/gpt-4o') === 'gpt-4o'`).
+5. **Ambiguous names dropped from `models`.** When two providers offer the same normalised name mapping to different labs (`opencode/claude-opus-4` → `anthropic`, `opencode-go/claude-opus-4` → `meituan`), `offerings` keeps both entries but `models.has('claude-opus-4') === false`.
+6. **`-free$` / `-preview$` suffix normalisation.** `claude-opus-4-free` and `claude-opus-4-preview` under the same lab collapse into a single `models.get('claude-opus-4')` entry.
+7. **Custom `statsProviders`.** With the default list, an `other-provider` offering does not surface (`offerings.size === 0`). With an explicit `['other-provider']`, it does.
+
+Plus a `DEFAULT_STATS_PROVIDERS.includes('sap-ai-core')` regression guard so a future opencode sync cannot silently drop the SAP-AI-Core extension from the default list.
+
+### Running
+
+```bash
+npm test -- src/core/stats/catalog-identity.test.ts
+```
+
+## Testing Gateway Model Tool-Capability (`src/providers/gateway/models.test.ts`)
+
+`modelSupportsTools` is fail-open when the gateway does not publish parameter metadata. The suite (`src/providers/gateway/models.test.ts`, eight cases, 55 lines) locks the truth table from [PROVIDERS.md — Gateway Model Tool-Capability](PROVIDERS.md#gateway-model-tool-capability-modelsupportstools) so a future refactor that "tightens" the check by treating unknown metadata as unsupported breaks the suite immediately.
+
+### Cases
+
+- `supported_parameters === undefined` → `true`
+- `supported_parameters === null` → `true`
+- `supported_parameters === []` → `true`
+- `supported_parameters === ['tools']` → `true`
+- `supported_parameters === ['tool_choice']` → `true`
+- `supported_parameters === ['tools', 'tool_choice', 'temperature']` → `true`
+- `supported_parameters === ['temperature', 'top_p']` → `false`
+- Realistic SAP-shaped record `{ id: 'anthropic--claude-4.7-opus' }` with no `supported_parameters` at all → `true` (the anchor for the kilocode `c4506f7ef` fix — SAP AI Core deployment queries typically look like this).
+
+### Running
+
+```bash
+npm test -- src/providers/gateway/models.test.ts
+```
+
+## Testing Provider Fetch Timeout (`src/providers/provider.test.ts`)
+
+The critical assertion the suite locks: the timeout MUST fire for BOTH direct provider URLs AND gateway URLs. The upstream bug (opencode `35fc7a7`) allowed gateway-routed requests to bypass the wrapper entirely and hang forever; a regression that re-introduces the "only wrap direct URLs" branch trips this suite in ~50ms per case.
+
+### Setup
+
+Tests replace `globalThis.fetch` with a `vi.fn` that returns a never-resolving `Promise` (unless the abort signal fires), then rely on the wrapper's timeout to reject the outer promise. `beforeEach` captures `originalFetch`; `afterEach` restores it and calls `vi.restoreAllMocks()`.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildFetch, DEFAULT_PROVIDER_TIMEOUT_MS } from './provider.js';
+
+describe('buildFetch — provider timeout', () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('exposes a sane default timeout', () => {
+    expect(DEFAULT_PROVIDER_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('aborts gateway-routed (Cloudflare AI Gateway) requests when timeout elapses', async () => {
+    globalThis.fetch = vi.fn((_input, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal!.reason ?? new Error('aborted'));
+        });
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const fetchFn = buildFetch({
+      baseURL: 'https://gateway.ai.cloudflare.com/v1/xxx',
+      timeout: 50,
+    });
+
+    await expect(fetchFn('https://gateway.ai.cloudflare.com/v1/xxx/slow', {})).rejects.toThrow(
+      /timeout/i
+    );
+  });
+});
+```
+
+### Cases (`src/providers/provider.test.ts`, 114 lines)
+
+1. **Sane default.** `DEFAULT_PROVIDER_TIMEOUT_MS > 0`.
+2. **Gateway URL aborts on timeout.** A Cloudflare AI Gateway base URL with a never-resolving mocked `fetch` and a 50ms timeout MUST reject with a `/timeout/i` message. Regression guard against the "only wrap direct URLs" bug.
+3. **Direct provider URL aborts on timeout.** Same mock, same timeout, direct base URL (`https://api.anthropic.com`). MUST also reject.
+4. **`timeout: 0` disables the wrapper.** The mock's never-resolving promise MUST NOT be raced by the wrapper — the test proves the caller inherits the platform default.
+5. **Negative timeout disables the wrapper.** Same as `timeout: 0`.
+6. **Caller signal wins when it fires first.** A caller-supplied `AbortController` aborted BEFORE the timeout fires MUST propagate the caller's reason, not the timeout error.
+
+### Running
+
+```bash
+npm test -- src/providers/provider.test.ts
+```
