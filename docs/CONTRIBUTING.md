@@ -2601,6 +2601,36 @@ Introduced by commit `9047bab9` (issue #1836). If you are adding a new streaming
 - **Test with the `probe` DI hook, not a network mock.** The watchdog accepts `probe: async (opts) => { ... }` specifically so the suite can inject a fake without any `nock` / `msw` machinery. See `tests/core/streamWatchdog.test.ts` — the `stream-silence connectivity probe (#1836)` describe block is the canonical pattern.
 - **`STREAM_STALL_TIMEOUT_MS` is read on every stream.** `resolveDefaultStreamIdleTimeoutMs()` is called from `src/core/streamingOrchestrator.ts:318` on each new watchdog so a mid-session env change takes effect on the next request. Do NOT cache the result at import time — the env-var-aware reload is a documented behaviour and users rely on it.
 
+## Gateway Model Capability vs. Static Model Metadata
+
+`src/providers/gateway/models.ts:modelSupportsTools` and `src/providers/sapOrchestration.ts:ORCHESTRATION_MODEL_METADATA` overlap in name but must NEVER be conflated when adding a new capability check. See [ARCHITECTURE.md — Gateway Model Tool-Capability Helper](ARCHITECTURE.md#gateway-model-tool-capability-helper-srcprovidersgatewaymodelsts) and [PROVIDERS.md — Gateway Model Tool-Capability](PROVIDERS.md#gateway-model-tool-capability-modelsupportstools) for the runtime contract, and [TESTING.md — Testing Gateway Model Tool-Capability](TESTING.md#testing-gateway-model-tool-capability-srcprovidersgatewaymodelstestts) for the regression contract.
+
+- **`ORCHESTRATION_MODEL_METADATA` is fail-closed.** Entries there are authored and reviewed by maintainers. `capabilities: []` means "this model definitely has no tools" — a routing decision made deliberately. Do NOT wire a fail-open branch into any consumer of this map, and do NOT copy the check from `modelSupportsTools` into a new consumer of the static metadata.
+- **`modelSupportsTools` is fail-open for gateway records only.** `undefined`, `null`, and `[]` all mean "no metadata authored by the gateway" and MUST resolve to `true` — otherwise SAP AI Core deployment queries silently disable tools for perfectly tool-capable models. If you are tempted to "tighten" the check, first re-read `src/providers/gateway/models.ts` — the three fail-open branches are the whole reason the module exists.
+- **Adding a new gateway integration?** Route the gateway's model records through `modelSupportsTools`, not through the static metadata. A new integration that hard-codes an assumption about `supported_parameters === []` regresses kilocode `c4506f7ef`.
+- **Test contract.** Any change to the truth table in `src/providers/gateway/models.test.ts` requires a corresponding update to the truth table in [PROVIDERS.md — Gateway Model Tool-Capability](PROVIDERS.md#gateway-model-tool-capability-modelsupportstools). Docs and tests must stay in lockstep; the test file is the authoritative pin, docs are the human-readable mirror.
+
+## Provider Fetch Timeout (`buildFetch`)
+
+`src/providers/provider.ts:buildFetch` wraps every SDK `fetch` with an unconditional timeout that composes with the caller's `AbortSignal`. Reference: opencode `35fc7a7`. See [ARCHITECTURE.md — Provider Fetch Wrapper — Unconditional Timeout](ARCHITECTURE.md#provider-fetch-wrapper--unconditional-timeout-srcprovidersproviderts), [PROVIDERS.md — Provider Fetch Timeout Wrapper](PROVIDERS.md#provider-fetch-timeout-wrapper-buildfetch), [API.md — Provider Fetch Timeout API](API.md#provider-fetch-timeout-api-srcprovidersproviderts), and [TESTING.md — Testing Provider Fetch Timeout](TESTING.md#testing-provider-fetch-timeout-srcprovidersprovidertestts).
+
+Invariants for anyone touching this file:
+
+- **Never gate the timeout on `baseURL`.** The upstream bug the fix addresses was "only apply the timeout when the base URL matches a direct provider". Any refactor that re-introduces base-URL sniffing before installing the timer trips the gateway regression test immediately.
+- **Compose signals via `AbortSignal.any` when available.** The fallback `anySignal` helper exists for Node < 20 / Bun < 1.1 only — do not remove it, but prefer the platform primitive when present so abort reasons propagate correctly.
+- **`.unref()` the timer.** A caller that forgets an in-flight request should not keep the Node process alive. The `.unref()` guard on the internal `setTimeout` handle is load-bearing for headless CLI runs.
+- **`timeout <= 0` is documented opt-out.** Do not repurpose the semantics — `0` means "no wrapper", not "fire immediately".
+- **Timeout error message shape is public.** The `/timeout/i`-matching regex in `provider.test.ts` doubles as a contract: keep the word `"timeout"` in the error message so existing consumer error-log matchers (including CI grep patterns in `.github/workflows/*.yml`) continue to classify the failure correctly.
+
+## Canonical Model Identity (`catalogIdentity`)
+
+`src/core/stats/catalog-identity.ts:catalogIdentity` is a pure resolver ported from opencode `packages/stats/core/src/domain/catalog-identity.ts` commit `acb6859`. Reference: [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts), [PROVIDERS.md — Canonical Model Identity for Usage Attribution](PROVIDERS.md#canonical-model-identity-for-usage-attribution), [API.md — Canonical Model Identity API](API.md#canonical-model-identity-api-srccorestatscatalog-identityts), [TESTING.md — Testing Canonical Model Identity](TESTING.md#testing-canonical-model-identity-srccorestatscatalog-identitytestts).
+
+- **Do not extend `DEFAULT_STATS_PROVIDERS` without a passing regression test.** The current list is `['opencode', 'opencode-go', 'sap-ai-core']`. Adding a new provider requires updating both the runtime constant AND the `DEFAULT_STATS_PROVIDERS.includes(...)` guard case in `catalog-identity.test.ts`, otherwise a subsequent opencode sync could silently drop the extension.
+- **Resolution order is contractual.** The four fallback paths — `canonical_model_id`, `modelID in models`, `"<providerID>/<modelID>" in models`, else skip — are ordered from most-specific to least-specific. Reordering them silently reclassifies existing offerings and breaks per-lab spend reports. If you MUST change the order, land the change with a diff of the resulting `offerings` map on the current models.dev snapshot.
+- **`-free$` / `-preview$` suffix stripping is byte-for-byte from upstream.** Do not extend the regex casually — adding a new suffix (`-beta`, `-experimental`) is not "just one more rule", it silently merges what used to be two candidate labs and can now drop an unambiguous name from `models`.
+- **Malformed rows are skipped, not thrown.** A single corrupt per-model entry should not tank the whole resolution. Keep the inline `record(...)` guards.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

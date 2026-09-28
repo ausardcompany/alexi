@@ -2568,6 +2568,86 @@ const ref = await selectModelForTask('auxiliary', ctx);
 
 The `hasSapDeployment` callback is the capability gate — return `false` from it in a test to assert the "defensive fallback to primary" branch is exercised even when a small id is present. See `docs/TESTING.md#testing-auxiliary-task-model-selection` for the full test pattern.
 
+## Gateway Model Tool-Capability (`modelSupportsTools`)
+
+`src/providers/gateway/models.ts` exposes `modelSupportsTools(model)` to decide whether a **gateway-routed** model record should be offered function/tool calling. It is intentionally decoupled from `ORCHESTRATION_MODEL_METADATA` in `sapOrchestration.ts` — the latter is maintainer-authored and MUST be honoured fail-closed, the former operates over untrusted external gateway metadata and fails open when the gateway does not publish parameter info.
+
+```typescript
+export interface GatewayModelInfo {
+  id?: string;
+  supported_parameters?: readonly string[] | null;
+}
+
+export function modelSupportsTools(model: GatewayModelInfo): boolean;
+```
+
+Truth table:
+
+| `supported_parameters`                    | `modelSupportsTools` | Rationale                                     |
+| ----------------------------------------- | -------------------- | --------------------------------------------- |
+| `undefined`                               | `true`               | Gateway did not publish metadata (fail-open). |
+| `null`                                    | `true`               | Same as `undefined`.                          |
+| `[]`                                      | `true`               | Empty is not distinguishable from "no metadata" for most gateways (fail-open). |
+| `['tools']`                               | `true`               | Explicit support.                             |
+| `['tool_choice']`                         | `true`               | Explicit support.                             |
+| `['tools', 'tool_choice', 'temperature']` | `true`               | Explicit support.                             |
+| `['temperature', 'top_p']`                | `false`              | Explicit non-support.                         |
+
+The helper is a byte-for-byte port of kilocode `c4506f7ef`. Test coverage in `src/providers/gateway/models.test.ts` locks each row and adds a realistic SAP-shaped record (`{ id: 'anthropic--claude-4.7-opus' }`) to prevent a regression that quietly starts treating SAP AI Core's often-missing parameter metadata as "unsupported".
+
+## Provider Fetch Timeout Wrapper (`buildFetch`)
+
+`src/providers/provider.ts` exposes `buildFetch({ baseURL?, timeout? })`, a `fetch`-compatible wrapper that enforces a request timeout unconditionally — regardless of whether the base URL is a direct provider or an AI gateway (Cloudflare AI Gateway, SAP AI Core, OpenRouter).
+
+```typescript
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
+
+export interface BuildFetchOptions {
+  baseURL?: string;   // informational only, used in timeout error messages
+  timeout?: number;   // ms; <= 0 or non-finite disables the wrapper
+}
+
+export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export function buildFetch(opts?: BuildFetchOptions): FetchLike;
+```
+
+The upstream bug it fixes (opencode `35fc7a7`) allowed gateway-routed requests to bypass the wrapper entirely and hang on the platform-level fetch default. `buildFetch` locks the following invariants:
+
+- **Timeout always applied.** The wrapper does not sniff `baseURL` before installing the timer.
+- **Cancel composition.** A caller-supplied `init.signal` (Ctrl+C, session abort) is joined with the internal timeout signal via `AbortSignal.any` (Node ≥ 20 / Bun ≥ 1.1) or a manual multi-signal listener chain on older runtimes. Whichever fires first wins.
+- **Opt-out.** `timeout: 0` (or any non-positive / non-finite value) disables the wrapper.
+- **Unref timers.** The internal `setTimeout` handle is `.unref()`ed so a forgotten in-flight request cannot keep the Node process alive past the caller's own cleanup.
+
+Usage example (drop into any SDK that accepts a custom `fetch`):
+
+```typescript
+import { buildFetch, DEFAULT_PROVIDER_TIMEOUT_MS } from './provider.js';
+
+const clientFetch = buildFetch({
+  baseURL: 'https://gateway.ai.cloudflare.com/v1/xxx',
+  timeout: DEFAULT_PROVIDER_TIMEOUT_MS,
+});
+
+const res = await clientFetch('https://gateway.ai.cloudflare.com/v1/xxx/completions', {
+  method: 'POST',
+  body: JSON.stringify({ /* ... */ }),
+  signal: abortController.signal,
+});
+```
+
+## Canonical Model Identity for Usage Attribution
+
+`src/core/stats/catalog-identity.ts` exposes `catalogIdentity(value, statsProviders?)` — a pure resolver that maps each `"<providerID>/<modelID>"` offering to a canonical lab id so per-lab usage / spend reports do not triple-count the same underlying model exposed under multiple gateway routes.
+
+See [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts) for the full contract, resolution rules, and the `-free$` / `-preview$` suffix normalisation logic. The default provider list is:
+
+```typescript
+export const DEFAULT_STATS_PROVIDERS: readonly string[] = ['opencode', 'opencode-go', 'sap-ai-core'];
+```
+
+The `"sap-ai-core"` entry is Alexi's extension over the upstream opencode list so SAP-routed offerings (e.g. `sap-ai-core/anthropic--claude-4.7-opus`) resolve to `"anthropic"` rather than dropping out of usage reports.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
