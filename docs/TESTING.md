@@ -852,6 +852,67 @@ Patterns worth internalising:
 3. **Test `mergeUsage` sums reasoning tokens** when validating the empty-response retry loop (issue #1279) so cumulative attempts stay correct.
 4. **Do NOT set `AICORE_SERVICE_KEY` in these tests.** The provider constructor accepts an explicit `deploymentId`; `env('AICORE_RESOURCE_GROUP')` is mocked via `vi.mock('../../src/config/env.js', ...)` so the suite runs identically on a laptop with no credentials and in CI.
 
+### Testing content-filter short-circuit (issue #1888)
+
+The two-layer content-filter short-circuit (`retryEmptyResponse` in `src/providers/sapOrchestration.ts` and `agenticChat` in `src/core/agenticChat.ts`) is covered by two dependency-light unit suites — no live SAP AI Core call, no real timers.
+
+`tests/providers/sapOrchestration-emptyResponseRetry.test.ts` pins the wrapper contract. Two cases were added for #1888 alongside the existing empty-response cases:
+
+```typescript
+it('skips retries when the empty attempt reports a content-filter finish', async () => {
+  let callCount = 0;
+  const factory = (): AsyncIterable<StreamChunk> => {
+    callCount++;
+    async function* gen(): AsyncGenerator<StreamChunk> {
+      yield {
+        text: '',
+        finishReason: 'content-filter',
+        usage: { prompt_tokens: 12, completion_tokens: 0, total_tokens: 12 },
+      };
+    }
+    return gen();
+  };
+  const onEmpty = vi.fn();
+  const result = await collect(
+    retryEmptyResponse(factory, { maxAttempts: 3, onEmptyAttempt: onEmpty })
+  );
+  expect(callCount).toBe(1);                              // NOT 3 — permanent block
+  expect(onEmpty).toHaveBeenCalledTimes(1);
+  expect(result[0]?.finishReason).toBe('content-filter'); // preserved verbatim
+});
+```
+
+The companion guardrail case (a committed attempt that reports `content-filter` after producing output) MUST pass everything through unchanged — the wrapper commits on the first `output` chunk, and any accidental shortcut would drop partial text.
+
+`tests/core/agenticChat.contentFilter.test.ts` (158 lines, 3 cases) pins the higher-level tool-loop short-circuit. It mocks `getProviderForModel` / `getProviderForModelWithFallback`, `routePrompt`, `getCostTracker`, and the tool registry so the case exercises only the finish-reason branch:
+
+```typescript
+mockProvider.complete.mockResolvedValue({
+  text: '',
+  finishReason: 'content-filter',
+  usage: { prompt_tokens: 20, completion_tokens: 0, total_tokens: 20 },
+  toolCalls: undefined,
+} satisfies CompletionResult);
+
+const progressEvents: Array<{ type: string; message?: string }> = [];
+await agenticChat('please generate disallowed content', {
+  workdir: process.cwd(),
+  onProgress: (evt) => progressEvents.push(evt as { type: string; message?: string }),
+});
+
+expect(mockProvider.complete).toHaveBeenCalledTimes(1);   // no further iteration
+const filterMessages = progressEvents.filter(
+  (e) => typeof e.message === 'string' && /content filter/i.test(e.message)
+);
+expect(filterMessages[0]?.message).toMatch(/retry will not succeed/i);
+```
+
+Three properties the suite pins for future maintainers:
+
+1. **The specific "content filter" progress message MUST be emitted.** A regression that folded the branch into the generic empty-response / unknown-finish warning would strip the actionable text; the assertion `/content filter/i` catches it.
+2. **Exactly one provider call.** The block is permanent, so the loop must not iterate again. `expect(mockProvider.complete).toHaveBeenCalledTimes(1)` locks the contract.
+3. **Partial text survives verbatim.** When the model produced any assistant text before the filter fired (`text: 'partial before block'`), `finalText` MUST be that partial text, not the canned warning — the warning goes out on the progress channel only.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
@@ -4452,6 +4513,48 @@ describe('Chunked Compaction', () => {
   });
 });
 ```
+
+### Testing the Auto-Compact Token Trigger (issue #1879)
+
+`tests/core/sessionManager-token-compaction.test.ts` (263 lines, 8 cases in one `describe` block) pins the wiring documented in [ARCHITECTURE.md — Auto-Compact Trigger Wiring](ARCHITECTURE.md#auto-compact-trigger-wiring-sessionmanageraddmessage-issue-1879). The suite covers the two-branch decision (`totalTokens > 0` picks the token-based path at threshold 90; `totalTokens === 0` picks the heuristic fallback at threshold 95), the transition from fallback to token-based on the first usage-bearing turn, and the `autoCompact: false` opt-out.
+
+The load-bearing pattern is that `src/core/compaction.js` is mocked BEFORE `src/core/sessionManager.js` is imported so the real `shouldCompact` never runs — the test asserts on the arguments the SessionManager forwards, not on `shouldCompact`'s own output. `vi.mock` is hoisted by Vitest so the order in the source file is cosmetic; keep the mock block above the `import` line to keep the intent legible on review:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager, type Session } from '../../src/core/sessionManager.js';
+import { shouldCompact, compactConversation } from '../../src/core/compaction.js';
+```
+
+Per-case setup uses `fs.mkdtempSync(path.join(os.tmpdir(), 'session-compact-trigger-'))` for the sessions directory and `fs.rmSync(tempDir, { recursive: true, force: true })` in `afterEach` so each test is filesystem-isolated. `vi.clearAllMocks()` in `beforeEach` resets the `shouldCompact` / `compactConversation` mock state between cases so call-count assertions are additive within a single case only.
+
+Key assertions to reproduce for future changes to the trigger:
+
+1. **Token-based branch forwards `reportedUsage`.** The first `shouldCompact` call after `addMessage('assistant', 'response', { input: 50_000, output: 20_000, reasoning: 5_000 })` receives `{ threshold: 90, reportedUsage: 75_000 }` — the sum `input + output + reasoning`, not just prompt + completion.
+2. **Fallback branch omits `reportedUsage`.** Adding a message with no `tokens` payload yields a call with `{ threshold: 95 }` and `reportedUsage === undefined`. The fallback path must NOT synthesise a bogus reportedUsage from the message array — the higher threshold is the entire mitigation for the heuristic bias.
+3. **Transition on first usage-bearing turn.** A session that starts with a plain `addMessage('user', ...)` records a threshold-95 call, then a follow-up `addMessage('assistant', 'answer', { input: 100, output: 100 })` records a threshold-90 call with `reportedUsage: 200`. The transition is automatic — no explicit flag flip.
+4. **Real projection math via a stubbed `shouldCompact`.** For cases 3 and 4 the mock is upgraded to mimic real behaviour: `vi.mocked(shouldCompact).mockImplementation((_, maxTokens, opts) => opts.reportedUsage >= (maxTokens * opts.threshold) / 100)`. A 92 %-of-budget payload trips `compactConversation`; a 50 %-of-budget payload does not.
+5. **Legacy session on disk.** Cases construct a `Session` object with `metadata.totalTokens: 0`, write it to `path.join(tempDir, id + '.json')`, then `loadSession(id)` and append a reasoning-bearing turn. The next `shouldCompact` call takes the token-based branch because `totalTokens` has crossed zero.
+6. **Opt-out contract.** `new SessionManager({ ..., autoCompact: false })` followed by a large-payload `addMessage` records ZERO calls to both `shouldCompact` and `compactConversation`.
+
+The suite intentionally does NOT test `shouldCompact`'s own projection algorithm — that is the concern of the compaction module's own tests. Duplicating the projection math here would drift the two suites apart. Focus on the arguments the SessionManager forwards; trust the compaction module's tests for the math.
 
 ## Testing TUI Commands
 

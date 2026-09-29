@@ -1907,6 +1907,28 @@ The directory is recreated by `Wakeup.schedule` on the next invocation via `ensu
 
 Upstream kilocode persists wakeups via drizzle-orm + SQLite. Alexi has no SQL runtime, so entries are stored as JSON files and the timer loop is a plain `setInterval`. The public surface matches the upstream contract exactly (`Wakeup.schedule`, `Wakeup.cancel`, `Wakeup.list`, `Wakeup.fireDue`) so the companion tools (`schedule_wakeup` / `cancel_wakeup`) port verbatim. See [ARCHITECTURE.md — Wakeup Subsystem](ARCHITECTURE.md#wakeup-subsystem-srckilocodewakeup) and [API.md — Wakeup API](API.md#wakeup-api) for the design notes and public TypeScript surface.
 
+## Scheduled Session Status
+
+Added 2026-09-29 (`1.22.33`, ports upstream kilocode branch `kwf/cli-scheduled-session-state-1f5e`). A session that is currently `idle` but has one or more pending wakeups is now surfaced by the orchestrator as `scheduled` with the earliest `wakeAt` timestamp. There is no configuration flag — the derivation is applied unconditionally at the status endpoint and CLI session listing layers. The underlying stored status stays `idle` (the derivation is not persisted), so no on-disk migration is required and rolling back to a version without the derivation loses no data.
+
+Consumers that read session status:
+
+- **CLI session listing** (`alexi sessions`) displays the derived status when a session has pending entries in `~/.alexi/wakeups/`.
+- **HTTP status endpoint** returns `{ status: 'scheduled', wakeAt: <epoch-ms> }` for idle sessions with pending wakeups; running/waiting sessions are unaffected.
+- **Agent Manager sidebar** (future) will render `scheduled` distinctly from `idle` so operators can tell a session waiting on a timer apart from one waiting on user input.
+
+The classifier in `src/core/session-status.ts` treats `scheduled` as **dormant** for overview aggregation — both `idle` and `scheduled` collapse to `idle` in the running-vs-dormant view so a scheduled session is never counted as active work. See [ARCHITECTURE.md — Scheduled-Status Derivation](ARCHITECTURE.md#scheduled-status-derivation-srccorescheduledts) and [API.md — Scheduled Status Derivation API](API.md#scheduled-status-derivation-api-srccorescheduledts) for the design contract and TypeScript surface.
+
+### Session-goal contract for time-based waits
+
+The `background_process`, `schedule_wakeup`, and `cancel_wakeup` tool descriptions surfaced to the model gained a "Goals" section in the same sync. These are description-only changes with no new configuration surface, but they pin how agents inside a session goal are expected to handle time-based waits:
+
+- A blocking shell `sleep` inside a session goal is treated as progress and will spin the goal loop. Agents must use `schedule_wakeup` for goal-scoped time waits so the goal suspends until the wakeup lands.
+- A non-terminal `background_process` start inside a session goal suspends the goal until the child process exits, and the exit resumes the goal.
+- Cancelling a wakeup the goal is waiting on resumes the goal with a goal turn, or settles it with a reason the user can read.
+
+Operators do not need to configure anything to enable this behaviour — it is inherent to the wakeup subsystem plus the goal loop. Existing agents that ignore the "Goals" section continue to work as before.
+
 ## Provider Timeout Configuration
 
 Alexi wraps its outgoing provider `fetch` calls with `buildFetch` from `src/providers/provider.ts`. The wrapper enforces a request timeout unconditionally, regardless of whether the target is a direct provider URL or an AI gateway (Cloudflare AI Gateway, SAP AI Core, OpenRouter). See [PROVIDERS.md — Provider Fetch Timeout Wrapper](PROVIDERS.md#provider-fetch-timeout-wrapper-buildfetch) and [ARCHITECTURE.md — Provider Fetch Wrapper — Unconditional Timeout](ARCHITECTURE.md#provider-fetch-wrapper--unconditional-timeout-srcprovidersproviderts) for the full contract.

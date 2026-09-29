@@ -28,7 +28,12 @@ export const cancelWakeupTool = defineTool<typeof CancelWakeupParamsSchema, Canc
 
 Idempotent: cancelling an unknown, already-fired, or foreign-session
 wakeup returns { cancelled: false } instead of raising an error, so
-you can call this defensively without pre-checking the wakeup state.`,
+you can call this defensively without pre-checking the wakeup state.
+
+Goals:
+- In a session goal, a wakeup the goal waits for suspends the goal until it
+  fires; cancelling it resumes the goal with a goal turn, or settles it with
+  a reason the user can read.`,
 
   parameters: CancelWakeupParamsSchema,
 

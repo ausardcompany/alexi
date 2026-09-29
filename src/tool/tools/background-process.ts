@@ -71,12 +71,24 @@ Sleep / wait semantics:
   child process has spawned (typically within a couple of seconds while ports
   are being detected). If you need to wait for a service to become ready,
   spawn it here and then poll the endpoint from a separate shell/tool call.
+- Do not start \`sleep\`, timers, cooldowns, delays, or polling loops with this
+  tool. Outside a session goal, wait a fixed time with a blocking shell command
+  and raise its \`timeout\`. In a session goal, a time-based wait must use
+  \`schedule_wakeup\` so the goal suspends; a blocking shell sleep is progress
+  and the goal loop will spin.
 - The tool detects listening ports asynchronously after spawn; the initial
   result may return before ports are populated. Query \`listBackgroundProcesses\`
   a moment later to observe the resolved port set.
 - The process is detached and unref'd — it survives the tool call but WILL be
   terminated by \`killAllTracked\` on CLI shutdown. Do not rely on it outliving
-  the parent Alexi session.`,
+  the parent Alexi session.
+
+Goals:
+- In a session goal, a non-terminal \`background_process\` start suspends the
+  goal until the process exits, and the exit resumes the goal.
+- Do not explore the repository, search for a deploy, or poll with bash when
+  the goal is to wait for a deploy, build, or CI job; schedule that wait with
+  \`schedule_wakeup\`. Do not report blocked because no deploy is visible.`,
 
   parameters: BackgroundProcessParamsSchema,
 
