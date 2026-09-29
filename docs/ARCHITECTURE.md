@@ -4941,6 +4941,41 @@ The forwarder does not itself subscribe to the internal event bus: a caller (the
 
 Alexi does not (yet) run a live Agent Manager UI, so this module is infrastructure that the future Ink sidebar and any headless orchestrator will consume. Its self-contained shape makes the future wiring a single-file change.
 
+## Session Status Classification (`src/core/session-status.ts`)
+
+Small, standalone helper module introduced in the 2026-09-29 upstream sync (`feat(sync): apply upstream changes (2026-09-29)`, commit `a5fcc520`). Ports the upstream kilocode `kwf/cli-scheduled-session-state-1f5e` change that introduced the new `scheduled` status to describe an idle session waiting on a pending `schedule_wakeup` or cron task. The purpose of the module is a one-place answer to the question "is this session doing work right now?" so the overview aggregation, the Ink sidebar, the shared board, and any HTTP status endpoint never misclassify a scheduled / offline / completed session as running.
+
+The [`SessionStatus`](#agent-manager-activity-event-forwarding-srccoreagent-managerorchestration-apits) union is re-exported from this module so callers do not need two imports:
+
+```typescript
+// src/core/session-status.ts
+import type { SessionStatus as _SessionStatus } from './agent-manager/orchestration-api.js';
+
+// Re-export the canonical union so callers do not need two imports.
+export type SessionStatus = _SessionStatus;
+
+const RUNNING_STATUSES: ReadonlySet<string> = new Set<string>(['running', 'waiting']);
+
+export function isRunningStatus(status: string): boolean {
+  return RUNNING_STATUSES.has(status);
+}
+
+export function toOverviewStatus(status: string): string {
+  return isRunningStatus(status) ? status : 'idle';
+}
+```
+
+Classification contract:
+
+- **Running** — a session that is actively executing a tool call or blocked awaiting a permission decision. Currently only `'running'` and `'waiting'` qualify. The current `SessionStatus` union only encodes dormant/terminal states plus `'waiting'`; a first-class `'running'` state may be added in a later upstream port, so the `RUNNING_STATUSES` set is deliberately extensible.
+- **Dormant** — every other status: `'idle'`, `'offline'`, `'completed'`, `'failed'`, and the new `'scheduled'`. All of these are coerced to `'idle'` by `toOverviewStatus` so the overview aggregation, the sidebar, and the board never render them as active work.
+
+The `scheduled` case is the one that motivated the split: without this module, a session that scheduled a future `schedule_wakeup` would appear as active work in the overview until the wakeup fired, because the orchestrator's local status field said "waiting". Routing `'scheduled'` through `toOverviewStatus` collapses it to `'idle'` so the sidebar shows the session as dormant until the wakeup resumes it.
+
+Both helpers accept an arbitrary `string` (not the narrower `SessionStatus` union) so callers whose status arrives from an external boundary — an HTTP payload, an event-bus message, a persisted session record from a prior Alexi version — do not need to pre-cast to the literal union. An unknown status simply returns `false` from `isRunningStatus` and is coerced to `'idle'` by `toOverviewStatus`, which is the safe default: an unrecognised status is never treated as active work.
+
+Kept as a small, standalone module (65 lines including docstrings) so the classification is trivial to unit-test and can be imported by any layer without dragging in the whole Agent Manager orchestration surface. The 2026-09-29 sync also introduced the sibling module `src/core/scheduled.ts`, which defines the `scheduled` status metadata (wakeup / cron reason strings) that the classification here collapses to `'idle'`.
+
 ## Auxiliary-Task Model Selection (`src/providers/model-selection.ts`)
 
 Distinct from the tool-scoped [Per-Task Model Selection](#per-task-model-selection-srctoolmodel-selectionts) below, the **auxiliary-task** selector chooses the model used by background pipelines that must run alongside a chat turn without consuming the primary model's budget — title generation, session summarisation, context compaction, and commit-message generation. Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3).
