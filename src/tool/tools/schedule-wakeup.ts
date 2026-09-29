@@ -52,6 +52,17 @@ Provide 'when' as either an ISO 8601 timestamp or a relative duration like
 as a system-reminder when the session resumes. The optional 'payload' is
 round-tripped verbatim so the resumed turn can pick up context.
 
+Goals:
+- In a session goal, scheduling a wakeup suspends the goal until it fires:
+  the goal shows as \`scheduled\` and resumes itself when the wakeup lands.
+  Do not report a time-based wait as blocked when a wakeup can carry the goal
+  forward. When the session goal is to wait for a deploy, build, CI job, or
+  other time-based event, schedule that wait immediately. Do not explore the
+  repository, search for a deploy, or poll with bash first. Do not report
+  blocked because no deploy is visible.
+- A blocking shell \`sleep\` inside a goal is progress and will spin the goal
+  loop — always prefer \`schedule_wakeup\` for goal-scoped time waits.
+
 To cancel a pending wakeup, call 'cancel_wakeup' with the returned wakeupID.`,
 
   parameters: ScheduleWakeupParamsSchema,

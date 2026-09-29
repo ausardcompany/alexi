@@ -23,6 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scheduled-status derivation (`src/core/scheduled.ts`)** (`src/core/scheduled.ts`, new module +84 lines, commit `a5fcc520` `feat(sync): apply upstream changes (2026-09-29)`). Ports upstream kilocode `packages/opencode/src/kilocode/session/scheduled.ts` (branch `kwf/cli-scheduled-session-state-1f5e`). A session that is currently `idle` but has one or more pending `schedule_wakeup` entries is dormant right now yet cooperating with a time-based event — the orchestrator now surfaces this by deriving a synthetic `scheduled` status with the earliest `wakeAt` timestamp. The derivation is intentionally computed at the status-endpoint layer (and at CLI session listing), NOT persisted: the stored session status stays `idle`, and adding or cancelling a wakeup only changes what consumers see, never what is written to disk.
+
+  New public surface exported from `src/core/scheduled.ts`:
+
+  - `ScheduledInfo` — minimal info about a single pending wakeup (`{ sessionId: string; wakeAt: number }`). Kept structural so callers can pass either the raw `WakeupSchema.Entry` shape or a hand-built object.
+  - `ScheduledStatus` — result struct (`{ status: SessionStatus; wakeAt?: number }`) with direct access to the `wakeAt` value for TUI display.
+  - `deriveScheduledStatus(base, pending)` — upgrades `base === 'idle'` with a non-empty `pending` array to `{ status: 'scheduled', wakeAt: min(pending.wakeAt) }`. Every other `base` value passes through untouched. An empty `pending` array returns `base` unchanged. Only `idle` is upgraded — `running`, `waiting`, `offline`, `completed`, and `failed` sessions are NOT converted to `scheduled` even if a pending wakeup exists, because the current activity takes precedence.
+  - `isoToEpochMs(iso)` — helper that converts an ISO-8601 timestamp string (the shape stored on `WakeupSchema.Entry.at`) to an epoch-ms number safe for `deriveScheduledStatus`. Returns `NaN` for invalid input so callers can filter with `Number.isFinite`.
+
+  The module has NO side effects and no I/O — the caller (HTTP handler, CLI listing) is responsible for feeding it the list of pending wakeups obtained from `Wakeup.list(sessionID)`.
+
+- **Session running-vs-dormant classification (`src/core/session-status.ts`)** (`src/core/session-status.ts`, new module +68 lines, commit `a5fcc520`). Ports upstream kilocode `kwf/cli-scheduled-session-state-1f5e`. Both `idle` and `scheduled` mean "no work happening right now" — the overview aggregation and any board / sidebar / status endpoint must NOT treat these as running work. Kept as a small, standalone module so the classification is trivial to unit-test and can be imported by any layer without dragging in the whole agent-manager orchestration surface.
+
+  New public surface:
+
+  - `type SessionStatus` — re-export of the canonical union from `./agent-manager/orchestration-api.js` so callers do not need two imports.
+  - `isRunningStatus(status: string): boolean` — returns `true` only for `'running'` and `'waiting'`. `scheduled` and every other dormant / terminal state (`idle`, `offline`, `completed`, `failed`) returns `false`. Accepts an arbitrary string so callers with statuses coming from external boundaries (HTTP payloads, event bus) do not have to pre-cast to the literal union.
+  - `toOverviewStatus(status: string): string` — one-line helper orchestration loops call while populating a `Map<sessionId, statusForDisplay>` so the sidebar and board never show a scheduled/offline/completed session as "running". Passes through `running`/`waiting` unchanged; collapses everything else to `'idle'`.
+
+  The `RUNNING_STATUSES` set (`new Set(['running', 'waiting'])`) is intentionally extensible — a first-class `running` state may be added in a later upstream port.
+
+### Changed
+
+- **`background_process`, `schedule_wakeup`, and `cancel_wakeup` tool descriptions now document session-goal semantics** (`src/tool/tools/background-process.ts`, `src/tool/tools/schedule-wakeup.ts`, `src/tool/tools/cancel-wakeup.ts`, commit `a5fcc520`). The tool descriptions surfaced to the model gained a new "Goals" section pinning the contract for time-based waits inside a session goal:
+
+  - `background_process`: do NOT start `sleep`, timers, cooldowns, delays, or polling loops with this tool. Outside a session goal, wait a fixed time with a blocking shell command and raise its `timeout`. In a session goal, a time-based wait must use `schedule_wakeup` so the goal suspends; a blocking shell sleep is progress and the goal loop will spin. A non-terminal `background_process` start suspends the goal until the process exits; the exit resumes the goal.
+  - `schedule_wakeup`: scheduling a wakeup inside a session goal suspends the goal until it fires — the goal shows as `scheduled` and resumes itself when the wakeup lands. When the session goal is to wait for a deploy, build, CI job, or other time-based event, schedule that wait immediately. Do NOT explore the repository, search for a deploy, or poll with bash first. Do NOT report blocked because no deploy is visible. A blocking shell `sleep` inside a goal is progress and will spin the goal loop — always prefer `schedule_wakeup` for goal-scoped time waits.
+  - `cancel_wakeup`: cancelling a wakeup that the goal is waiting on resumes the goal with a goal turn, or settles it with a reason the user can read.
+
+  These changes are description-only; the tool schemas and runtime behaviour are unchanged. Existing agents that ignore the `Goals` section continue to work as before.
+
 - **Session retention lifecycle runner (`src/session/retention.ts`)** (`src/session/retention.ts`, `src/core/sessionManager.ts`, `tests/session/retention.test.ts`, commit `bc84e999` `feat(core): add session retention lifecycle runner`, issue #1876). New user-facing entry point for the session retention lifecycle that complements the existing age-only automatic sweep (`SessionManager.cleanupExpiredSessions`) and the operator-driven `alexi sessions-clean` engine (`src/core/sessionRetention.ts`). `RetentionRunner` composes the low-level `scanSessions` (read phase) and `selectCandidatesFromPolicy` (pure decision phase) helpers into a single class that CLI commands and schedulers can consume without repeating the scan/decide/apply plumbing.
 
   New public surface exported from `src/session/retention.ts`:
@@ -398,6 +429,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   See [CONFIGURATION.md — Experimental Context Self-Inspection Tools](docs/CONFIGURATION.md#experimental-context-self-inspection-tools-experimentalcontexttools), [ARCHITECTURE.md — Context Self-Inspection Tools](docs/ARCHITECTURE.md#context-self-inspection-tools-experimentalcontexttools), and [API.md — Context Self-Inspection API](docs/API.md#context-self-inspection-api-experimentalcontexttools) for the runtime contract and public TypeScript surface.
 
 ### Changed
+
+- **Prettier auto-fix reflow of `RUNNING_STATUSES` literal in `session-status.ts`** (`src/core/session-status.ts`, commit `026e3df3` `style(ci): auto-fix lint/format issues [alexi-bot]`). Cosmetic-only follow-up applied by the CI auto-fix workflow on top of the 2026-09-29 upstream sync (`a5fcc520 feat(sync): apply upstream changes (2026-09-29)`), which introduced the `session-status.ts` module. Single hunk, governed by the 100-column `printWidth: 100` Prettier ceiling; no runtime, type, public API, exported constant value, or test assertion changed. Diff statistics: `1 file changed, 1 insertion(+), 4 deletions(-)`.
+
+  - `src/core/session-status.ts:40` — the two-element `RUNNING_STATUSES: ReadonlySet<string>` literal (`new Set<string>(['running', 'waiting'])`) was reflowed from a four-line form (opening `new Set<string>([`, one element per line, closing `])`) onto a single line at 71 columns — comfortably inside the 100-column ceiling. The `ReadonlySet<string>` type annotation, the two string values `'running'` and `'waiting'`, their order, and the module-private `const` binding are all unchanged. Downstream classification helpers `isRunningStatus(status)` and `toOverviewStatus(status)` (also exported from the same file) continue to answer `true` for exactly `'running'` and `'waiting'` and coerce everything else — including `'idle'`, `'offline'`, `'completed'`, `'failed'`, and the recently-added `'scheduled'` — to `'idle'` in the overview aggregation. The module-level docstring above the literal (which documents the running-vs-dormant classification contract and the explicit exclusion of `scheduled`) is untouched.
+
+  `npm run typecheck`, `npm run lint`, and `npm test` produce byte-identical output; the only observable delta is that `npm run format:check` now passes on `src/core/session-status.ts` where it previously reported a diff. See [docs/ARCHITECTURE.md — Session Status Classification (`src/core/session-status.ts`)](docs/ARCHITECTURE.md#session-status-classification-srccoresession-statusts) for the runtime contract and [docs/CONTRIBUTING.md — Style Auto-Fix](docs/CONTRIBUTING.md) for the CI mechanism that opened commit `026e3df3`.
 
 - **Prettier auto-fix reflow of `catalog-identity.ts` and two provider tests** (`src/core/stats/catalog-identity.ts`, `src/providers/gateway/models.test.ts`, `src/providers/provider.test.ts`, commit `3fb337cd` `style(ci): auto-fix lint/format issues [alexi-bot]`). Cosmetic-only follow-up applied by the CI auto-fix workflow. Three independent hunks, all governed by the 100-column `printWidth: 100` Prettier ceiling; no runtime, type, public API, exported constant value, or test assertion changed. Combined diff statistics: `3 files changed, 14 insertions(+), 6 deletions(-)`.
 

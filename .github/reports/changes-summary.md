@@ -1,137 +1,92 @@
-# Changes Summary — Upstream Sync 2026-09-28
+# Update Plan Execution Summary — 2026-09-29
 
-Applied the update plan derived from upstream analysis of kilocode
-(`318a913a2..7d977bce9`) and opencode (`f416138..b471c2b`). All three
-planned items were implemented; no items were skipped.
+Applied the update plan for upstream sync (kilocode 318a913a2..2dfe6fc87).
 
-## Files created
+## Files Modified
 
-| File | Purpose |
-| --- | --- |
-| `src/providers/gateway/models.ts` | Gateway model capability helper (`modelSupportsTools`) — fail-open when `supported_parameters` is unspecified/empty. |
-| `src/providers/gateway/models.test.ts` | Companion vitest suite for `modelSupportsTools`. |
-| `src/providers/provider.ts` | `buildFetch` wrapper that unconditionally enforces provider timeouts on both direct and gateway-routed requests. |
-| `src/providers/provider.test.ts` | Companion vitest suite ported from opencode `test/provider/header-timeout.test.ts` (35fc7a7). |
-| `src/core/stats/catalog-identity.ts` | `catalogIdentity` helper for normalising `provider/model` offerings to canonical lab identities (ported from opencode `packages/stats/core/src/domain/catalog-identity.ts`, commit acb6859). |
-| `src/core/stats/catalog-identity.test.ts` | Companion vitest suite covering canonical-lab resolution, ambiguity handling, and the `sap-ai-core` extension. |
+1. **Created**: `src/core/session-status.ts`
+   - Adds `isRunningStatus(status)` predicate and `toOverviewStatus(status)` helper.
+   - Only `running` and `waiting` are treated as active; every other state
+     (including new `scheduled` plus `idle`, `offline`, `completed`, `failed`)
+     collapses to `idle` in overview aggregation.
+   - Re-exports the canonical `SessionStatus` union from `agent-manager/orchestration-api.ts`.
 
-## Files modified
+2. **Created**: `src/core/scheduled.ts`
+   - `deriveScheduledStatus(base, pending)` upgrades an idle base status to
+     `scheduled` with the earliest `wakeAt` when pending wakeups exist.
+   - Non-idle statuses (`running`, `waiting`, `offline`, `completed`, `failed`)
+     pass through unchanged — current activity takes precedence.
+   - `isoToEpochMs()` helper for converting `WakeupSchema.Entry.at` strings.
+   - Pure, no I/O — HTTP handler / CLI listing feeds it `Wakeup.list(sessionID)`.
 
-None — all changes are additive. No existing SAP AI Core integration
-surface was touched, so the existing provider, orchestrator, router,
-and TUI paths continue to behave exactly as before.
+3. **Modified**: `src/tool/tools/background-process.ts`
+   - Extended tool description with sleep/timer guidance for goal contexts
+     (must use `schedule_wakeup` inside a goal, not `sleep` / bash polling).
+   - Added a `Goals:` section clarifying that non-terminal starts suspend the
+     goal until the process exits, and that repository exploration is the
+     wrong response to a "wait for deploy/build/CI" goal.
 
-## Change details
+4. **Modified**: `src/tool/tools/cancel-wakeup.ts`
+   - Appended `Goals:` block: cancelling a wakeup a goal awaits resumes that
+     goal turn, or settles it with a user-visible reason.
 
-### Change 1 — `modelSupportsTools` (kilocode c4506f7ef port)
+5. **Modified**: `src/tool/tools/schedule-wakeup.ts`
+   - Appended `Goals:` block: scheduling a wakeup inside a goal suspends the
+     goal (which shows as `scheduled`) and resumes when the wakeup lands.
+   - Explicit warning: `sleep` inside a goal is "progress" and spins the loop.
 
-Added a new helper module `src/providers/gateway/models.ts` that
-exports a `modelSupportsTools(model: GatewayModelInfo)` predicate. Its
-resolution rules:
+## Plan Items — Status
 
-1. `supported_parameters` is `undefined` or `null` → return `true`
-   (fail-open — the gateway did not publish parameter metadata).
-2. `supported_parameters` is an empty array → return `true` (same
-   rationale; some gateways collapse "no metadata" into `[]`).
-3. Otherwise → return `true` iff `"tools"` or `"tool_choice"` is
-   listed.
+| # | Item                                                     | Status              |
+| - | -------------------------------------------------------- | ------------------- |
+| 1 | Add `scheduled` to `SessionStatus` union                 | Already present     |
+| 2 | `isRunningStatus` helper + overview coercion             | **Implemented**     |
+| 3 | `board.ts` skip `scheduled` (session-status board)       | N/A (chat board)    |
+| 4 | `background-process` docs: Goals guidance                | **Implemented**     |
+| 5 | `cancel-wakeup` docs: Goals guidance                     | **Implemented**     |
+| 6 | `cron-create` docs (Alexi has no cron tools)             | Mirrored on `schedule-wakeup` |
+| 7 | Scheduled-status derivation + clamp logic                | Derivation **implemented**; clamp N/A (no cron horizon) |
+| 8 | **CRITICAL** context-overflow compact-and-retry recovery | Already present in `src/core/streamingOrchestrator.ts` (`tryOverflowRecovery`) and `src/providers/format.ts` (`classifyProviderError`) |
 
-The helper is intentionally separate from the authoritative
-`modelHasCapability` in `src/providers/sapOrchestration.ts` — the
-in-code metadata there has different semantics (`capabilities: []`
-means "definitely no tools", per Alexi's tested behaviour). The
-documentation on the module explicitly calls out this distinction so
-downstream consumers do not merge the two.
+## Notes on Skipped / Already-Implemented Items
 
-### Change 2 — `buildFetch` timeout (opencode 35fc7a7 port)
+- **Item 1 (SessionStatus)** was already extended with `scheduled` in
+  `src/core/agent-manager/orchestration-api.ts:61` from a prior sync.
+- **Item 3 (`board.ts`)**: Alexi's `src/tool/tools/board.ts` is the
+  shared **agent-coordination chat board**, not the session-status board
+  that upstream referenced. The upstream logic is a session-status
+  aggregation that lives elsewhere; Alexi doesn't yet ship an Agent
+  Manager UI, so the coercion is instead provided as a helper
+  (`toOverviewStatus`) in `session-status.ts` for the future consumer.
+- **Item 6 (cron tools)**: Alexi has `schedule_wakeup` only — no cron
+  scheduler. The Goals sentence from the plan was mirrored into
+  `schedule-wakeup.ts`. The 7-day-horizon clamp logic is
+  cron-specific (recurring-schedule expiry) and does not apply to
+  one-shot wakeups.
+- **Item 7 (clamp logic)**: The `scheduled.ts` derivation is
+  implemented. Clamping is cron-specific (not applicable to Alexi's
+  wakeup-only model).
+- **Item 8 (CRITICAL)**: Context-overflow recovery is already
+  comprehensive in Alexi:
+  - `src/providers/format.ts` classifies errors as `context_overflow`.
+  - `src/core/contextOverflow.ts` provides `isContextOverflowError` /
+    `detectContextOverflow`.
+  - `src/core/streamingOrchestrator.ts::tryOverflowRecovery` triggers
+    session compaction and re-drives the loop on overflow, with
+    one-shot retry semantics and an actionable terminal message.
 
-Added `src/providers/provider.ts` exporting `buildFetch(opts)`. The
-returned fetch wrapper always enforces the configured timeout
-regardless of whether the base URL points at a direct provider or a
-gateway — this is the exact fix from opencode 35fc7a7. Highlights:
+## SAP AI Core Compatibility
 
-- Default timeout: 60 s (`DEFAULT_PROVIDER_TIMEOUT_MS`).
-- Timeout can be disabled by passing `timeout <= 0` (or non-finite).
-- Composes with a caller-supplied `AbortSignal` using `AbortSignal.any`
-  when available (Node ≥ 20, Bun ≥ 1.1); otherwise falls back to a
-  manual multi-signal listener chain so the same behaviour holds on
-  older runtimes.
-- `setTimeout` handle is `unref()`'d so a forgotten fetch does not
-  keep the event loop alive.
-- Error message includes the base URL for diagnosability.
+- No changes to provider dispatch, transport, or auth surfaces.
+- No changes to the `SessionStatus` on-wire contract — `scheduled` was
+  already in the union.
+- Tool description strings changed on `schedule_wakeup`, `cancel_wakeup`,
+  and `background_process`; no schema, permission, or handler changes.
+- `src/core/scheduled.ts` and `src/core/session-status.ts` are new,
+  pure, side-effect-free helpers with no existing importers, so
+  behaviour is unchanged until a consumer opts in.
 
-Test suite covers the four upstream cases (Cloudflare AI Gateway
-timeout, SAP AI Core timeout, direct provider timeout, timely response
-pass-through) plus two extras (caller-supplied signal wins over the
-timeout; `timeout <= 0` disables the wrapper).
+## Issues Encountered
 
-### Change 3 — `catalog-identity` helper (opencode acb6859 port)
-
-Added `src/core/stats/catalog-identity.ts` exporting `catalogIdentity`
-plus `DEFAULT_STATS_PROVIDERS`. The helper builds two read-only maps:
-
-- `offerings: Map<"<providerID>/<modelID>", lab>` — every offering
-  from the configured providers that resolves to a canonical id.
-- `models: Map<normalisedModelID, lab>` — only unambiguous names
-  (single candidate lab) are surfaced; ambiguous names are dropped so
-  callers cannot mis-attribute usage.
-
-The default provider list was extended with `"sap-ai-core"` (relative
-to upstream) so SAP-routed offerings map to the correct lab in Alexi's
-usage aggregation.
-
-## SAP AI Core compatibility
-
-Verified:
-
-- No changes were made to `src/providers/sapOrchestration.ts`,
-  `src/providers/modelCatalog.ts`, `src/providers/auth.ts`, or any
-  existing SAP integration surface.
-- All new modules are additive and opt-in — nothing invokes them from
-  the runtime path yet. Wiring them into e.g. router capability
-  detection or the cost tracker is intentionally deferred so this
-  changeset is a pure refactor / capability introduction and can be
-  reverted cleanly if needed.
-- `AbortSignal.any` compatibility shim ensures the new `buildFetch`
-  wrapper does not require Node > 22.12 (Alexi's floor).
-
-## Testing
-
-Three new vitest files added:
-
-- `src/providers/gateway/models.test.ts` — 8 cases.
-- `src/providers/provider.test.ts` — 7 cases (mocked fetch).
-- `src/core/stats/catalog-identity.test.ts` — 7 cases.
-
-All new suites use vitest primitives (`describe`, `it`, `expect`,
-`vi`) matching existing repository conventions rather than bun:test as
-the upstream plan pseudocode showed. Test files are located next to
-their source files, which `vitest.config.ts` picks up via the
-`src/**/*.test.ts` include glob.
-
-## Issues encountered
-
-- The plan pseudocode targeted repo layouts (`src/providers/gateway/models.ts`,
-  `src/providers/provider.ts`) that did not previously exist in Alexi
-  because SAP AI Core goes through the `@sap-ai-sdk/orchestration` SDK
-  rather than a raw fetch. I created the files as new modules — they
-  are the natural home for a future gateway/proxy integration and are
-  wired to Alexi's ESLint / vitest / tsconfig glob patterns without
-  additional config.
-- The plan's example test code used `bun:test`; Alexi standardises on
-  `vitest`. I ported the assertions to vitest with equivalent
-  semantics.
-- The plan's Change 1 pseudocode overlapped semantically with Alexi's
-  existing authoritative `modelHasCapability` helper. To avoid
-  regressing the tested "empty capabilities means no tools" contract on
-  the SAP static catalog, the new helper is scoped to *gateway-supplied*
-  `supported_parameters` metadata only, and the module-level docstring
-  explicitly forbids merging the two code paths.
-
-## Explicitly NOT ported (per plan)
-
-- opencode Console/Stats UI changes (no equivalent surface in Alexi).
-- opencode version bumps.
-- kilocode CI/workflow changes (Alexi has its own CI).
-- `packages/opencode/src/kilocode/cloud/catalog.ts` (kilocode-cloud-specific).
-- Daily/weekly model ranking features (UI-only).
+None. All changes applied cleanly. Existing tests do not assert on
+description strings so no test updates were required.
