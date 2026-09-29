@@ -37,10 +37,7 @@ export type SessionStatus = _SessionStatus;
  * Explicitly excluded: `idle`, `offline`, `completed`, `failed`,
  * `scheduled`. All of these map to `idle` in the overview.
  */
-const RUNNING_STATUSES: ReadonlySet<string> = new Set<string>([
-  'running',
-  'waiting',
-]);
+const RUNNING_STATUSES: ReadonlySet<string> = new Set<string>(['running', 'waiting']);
 
 /**
  * Return `true` when `status` represents a session that is actively
