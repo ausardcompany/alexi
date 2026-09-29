@@ -586,6 +586,70 @@ A single provider error may trip only one of these gates on a given call. If red
 
 The `logger.info` breadcrumb (`max_tokens exceeded; retrying with maxTokens=<n> (context window=<w>, prompt~<p>)`) fires before every retry so operators running `LOG_LEVEL=debug` can grep the exact plan out of logs, and the streaming orchestrator additionally emits a visible `[status] max_tokens exceeded, retrying...` marker into `fullText` so the CLI/TUI surfaces the recovery inline with the stream.
 
+### Content-Filter Handling (issue #1888)
+
+When a model's content policy blocks a request, the provider surfaces a `finishReason: 'content-filter'` on an empty completion. This is a **permanent** condition — the same prompt will keep triggering the same block on every retry — so Alexi short-circuits it at two layers instead of consuming the empty-response retry budget or the transient `KILO_RETRIES` budget.
+
+```mermaid
+flowchart TB
+    Prompt([User prompt]) --> Provider[SAP AI Core provider call]
+    Provider --> Wrapper[retryEmptyResponse wrapper<br/>src/providers/sapOrchestration.ts:905]
+    Wrapper --> Empty{Attempt<br/>produced output?}
+    Empty -->|Yes: commit| Passthrough[Pass chunks through<br/>preserve finishReason verbatim]
+    Empty -->|No| Reason{lastStructural?.finishReason<br/>=== 'content-filter'?}
+    Reason -->|Yes| Break[Break loop<br/>after this attempt]
+    Reason -->|No| Loop{attempt < maxAttempts?}
+    Loop -->|Yes| Provider
+    Loop -->|No| Final[Yield final metadata chunk]
+    Break --> Final
+    Final --> Agent[agenticChat loop<br/>src/core/agenticChat.ts:817]
+    Passthrough --> Agent
+    Agent --> Filter{finishReason<br/>=== 'content-filter'?}
+    Filter -->|Yes| Warn[Emit specific progress event:<br/>&#34;content filter blocked ...<br/>retry will not succeed&#34;]
+    Warn --> SetText[finalText = result.text OR canned warning]
+    SetText --> End([Return AgenticChatResult])
+    Filter -->|No| Continue[Regular length/unknown/tool_calls path]
+```
+
+Two independent short-circuits, one contract:
+
+- **Provider stream wrapper (`retryEmptyResponse`).** The empty-response retry loop tracks the most recent structural chunk that carries usage OR a finish reason (previously only usage). When an attempt produces no output and `lastStructural?.finishReason === 'content-filter'`, the loop breaks after aggregating usage and yields the final metadata chunk with `finishReason: 'content-filter'` preserved. Every discarded attempt's usage is still summed into `aggregatedUsage`, so a filtered turn is billed correctly even though it never produced text.
+
+  ```typescript
+  // src/providers/sapOrchestration.ts:978
+  // Content-filter turns are permanent: the provider's content policy
+  // blocked this request and every retry will hit the same filter.
+  // Break out early so the caller sees the terminal `content-filter`
+  // reason on the final metadata chunk instead of a masked `stop`.
+  if (lastStructural?.finishReason === 'content-filter') {
+    break;
+  }
+  ```
+
+- **Agentic tool loop (`agenticChat`).** Immediately after the `length` (max-tokens) and `unknown` (proxy-truncated stream) finish-reason handling — both of which continue the loop with a warning — the loop recognises `content-filter` as a terminal outcome:
+
+  ```typescript
+  // src/core/agenticChat.ts:817
+  if (result.finishReason === 'content-filter') {
+    options?.onProgress?.({
+      type: 'iteration',
+      iteration: iterations,
+      message:
+        'Warning: Model content filter blocked this request. ' +
+        'The request violated content policy and retry will not succeed.',
+    });
+    finalText =
+      result.text ||
+      'Model content filter blocked this request. ' +
+        'The request violated content policy and retry will not succeed.';
+    break;
+  }
+  ```
+
+  Any tool calls the model may have emitted alongside the filter are ignored — the request was blocked, so re-driving through a tool cycle would just replay the same prompt.
+
+**Design contract.** `content-filter` is treated the same way as `401`/`403`/`model_not_found` (permanent, actionable, no retry). It is NOT in the transient regex that drives `KILO_RETRIES` (`socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`), and it does NOT flip a route to unhealthy via `classifyRouteError` (the block is prompt-side, not route-side — the same route is still fine for the next unrelated prompt). Partial assistant text produced before the filter fired is preserved verbatim; the canned warning goes out on the progress channel only. Ports Cline PR #13302 (commit `55c4b36`, merged 2026-09-29).
+
 ### Environment Details Fence
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.

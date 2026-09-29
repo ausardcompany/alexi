@@ -1862,6 +1862,34 @@ edge, wrap `provider.streamComplete` in a hand-rolled AsyncIterator
 whose `return()` fires the abort synchronously (the Cline #12249
 pattern).
 
+## Empty-Response Retry
+
+`retryEmptyResponse` (`src/providers/sapOrchestration.ts:905`) wraps a stream factory so a completed-but-empty turn (no `output` chunk yielded) is quietly retried against a fresh stream, up to `maxAttempts` (default 3). It is composed by the streaming orchestrator underneath the stream watchdog, so the empty-response retry loop and the disconnect probe do not duplicate work.
+
+```typescript
+export interface EmptyResponseRetryOptions {
+  maxAttempts?: number;                                      // default 3
+  onEmptyAttempt?: (attempt: number, aggregatedUsage?: TokenUsage) => void;
+}
+
+export async function* retryEmptyResponse(
+  streamFactory: () => AsyncIterable<StreamChunk> | Promise<AsyncIterable<StreamChunk>>,
+  options?: EmptyResponseRetryOptions
+): AsyncGenerator<StreamChunk>;
+```
+
+Semantics (see issue #1279 and Kilo PR #12927):
+
+- **Commit-on-output.** As soon as a chunk classifies as `output`, the attempt is committed. Any buffered structural chunks are flushed first, then every subsequent chunk streams through unchanged. No retry can happen after commit.
+- **Discard-on-empty.** If the stream ends without producing any `output` chunk, the attempt is discarded. Structural chunks are folded into an aggregated running `TokenUsage` via `mergeUsage`, and the factory is invoked again for a fresh stream.
+- **Content-filter short-circuit (issue #1888).** The wrapper tracks the most recent structural chunk that carries usage OR a finish reason. When an empty attempt reports `finishReason: 'content-filter'`, the loop breaks after that attempt — the provider's content policy blocked the request permanently and every retry would hit the same block. The final metadata chunk carries `finishReason: 'content-filter'` verbatim so `agenticChat` can distinguish a permanent block from a transient empty `stop`.
+- **Best-effort final chunk.** After `maxAttempts` empty attempts (or after the content-filter break), the wrapper yields one last `StreamChunk` carrying the aggregated usage and the last-seen `finishReason`, so downstream cost trackers still bill the discarded attempts and the caller can decide whether the empty turn is an error.
+- **Errors are NOT retried here.** A thrown error propagates immediately. Higher-level layers (`ErrorBackoff`, `retryProviderCall`, the workflow-level `KILO_RETRIES` loop, route classification) own error retry with their own budgets.
+
+Interaction with the two-layer content-filter handling and with the transient-vs-permanent classification is diagrammed in [docs/ARCHITECTURE.md — Content-Filter Handling](ARCHITECTURE.md#content-filter-handling-issue-1888). The `mergeUsage(a, b)` aggregator (`src/providers/sapOrchestration.ts:825`) sums `reasoningTokenCount` alongside the existing token fields, so multi-attempt usage aggregates correctly.
+
+Test coverage lives in `tests/providers/sapOrchestration-emptyResponseRetry.test.ts` (commit-on-first-output, per-attempt usage aggregation, `onEmptyAttempt` callback error swallowing, the terminal metadata chunk shape, and — since 2026-09-29 — the content-filter short-circuit plus its guardrail that a committed attempt reporting `content-filter` after producing output still passes everything through).
+
 ## Performance Considerations
 
 ### Token Optimization
