@@ -404,6 +404,60 @@ describe('retryEmptyResponse', () => {
     expect(callCount).toBe(1);
   });
 
+  it('skips retries when the empty attempt reports a content-filter finish', async () => {
+    // Issue #1888: a content-filter block is permanent — every retry hits
+    // the same policy and just wastes budget. The wrapper must break after
+    // the first attempt and surface the terminal `content-filter` reason.
+    let callCount = 0;
+    const factory = (): AsyncIterable<StreamChunk> => {
+      callCount++;
+      async function* gen(): AsyncGenerator<StreamChunk> {
+        yield {
+          text: '',
+          finishReason: 'content-filter',
+          usage: { prompt_tokens: 12, completion_tokens: 0, total_tokens: 12 },
+        };
+      }
+      return gen();
+    };
+    const onEmpty = vi.fn();
+    const result = await collect(
+      retryEmptyResponse(factory, { maxAttempts: 3, onEmptyAttempt: onEmpty })
+    );
+    // Exactly one attempt, not 3.
+    expect(callCount).toBe(1);
+    expect(onEmpty).toHaveBeenCalledTimes(1);
+    // Final metadata chunk carries the terminal content-filter reason so
+    // downstream layers can distinguish this from a transient empty stop.
+    expect(result).toHaveLength(1);
+    expect(result[0]?.finishReason).toBe('content-filter');
+    expect(result[0]?.usage).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 0,
+      total_tokens: 12,
+    });
+  });
+
+  it('does not skip retries when the finish reason is content-filter but the attempt produced output', async () => {
+    // Guardrail: content-filter on a committed attempt (should be
+    // impossible in practice, since a filtered turn cannot produce
+    // output) must NOT accidentally shortcut. The wrapper commits on
+    // the first output chunk and passes everything through.
+    const chunks: StreamChunk[] = [
+      { text: 'partial before filter' },
+      {
+        text: '',
+        finishReason: 'content-filter',
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      },
+    ];
+    const factory = vi.fn(makeStream(chunks));
+    const result = await collect(retryEmptyResponse(factory, { maxAttempts: 3 }));
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(result[0]?.text).toBe('partial before filter');
+    expect(result[1]?.finishReason).toBe('content-filter');
+  });
+
   it('surfaces onEmptyAttempt callback errors without breaking retry', async () => {
     let callCount = 0;
     const factory = (): AsyncIterable<StreamChunk> => {
