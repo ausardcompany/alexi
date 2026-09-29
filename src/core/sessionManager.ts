@@ -143,6 +143,30 @@ export interface SessionManagerOptions {
 }
 
 /**
+ * Default trigger threshold (as a percentage of `maxContextTokens`, after
+ * `reserveOutputTokens`) used by `shouldCompact` when the session carries a
+ * provider-reported total-token count. Kept in sync with the compaction
+ * module's `DEFAULT_TRIGGER_THRESHOLD` (90%).
+ */
+const AUTO_COMPACT_TRIGGER_THRESHOLD = 90;
+
+/**
+ * Fallback trigger threshold used when the active session has no
+ * provider-reported `totalTokens` (legacy sessions written before the field
+ * was populated, or sessions that have not yet completed a provider turn).
+ *
+ * In fallback mode the trigger relies on the chars-per-token heuristic
+ * inside `estimateMessagesTokens`, which routinely OVER-counts extended
+ * reasoning traces and tool JSON blobs. Compacting a still-small session
+ * because of a stale heuristic destroys context we cannot recover — so the
+ * fallback threshold is deliberately higher than the token-based one to
+ * suppress false positives. Once the session's `totalTokens` is populated
+ * on the next successful turn, the trigger reverts to the accurate
+ * token-based path.
+ */
+const FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD = 95;
+
+/**
  * Runtime bookkeeping for a single active session run. Populated by
  * {@link SessionManager.beginSessionRun} and cleared by
  * {@link SessionManager.endSessionRun}.
@@ -751,9 +775,42 @@ export class SessionManager {
 
     this.saveSession(this.activeSession!);
 
-    // Auto-compact if enabled and context usage exceeds threshold
-    if (this.autoCompact && shouldCompact(this.activeSession!.messages, this.maxContextTokens)) {
-      this.compact().catch(() => {});
+    // Auto-compact if enabled and context usage exceeds threshold.
+    //
+    // Issue #1879: prefer the provider-reported `totalTokens` accumulated
+    // on `metadata` (which already sums prompt + completion + reasoning —
+    // see `addMessage` above and `SessionMetadata.totalTokens`) over the
+    // legacy character-based heuristic in `estimateMessagesTokens`. The
+    // heuristic routinely under-counts reasoning traces and structured
+    // tool outputs, and over-counts the very last (as-yet-untokenised)
+    // user turn. Feeding the provider figure directly into
+    // `shouldCompact({ reportedUsage })` lets the compaction module apply
+    // the same 90% trigger math it uses everywhere else, using the exact
+    // token counts the model actually saw.
+    //
+    // Fallback: when the session has no provider-reported total yet
+    // (brand-new session on its first turn, or a legacy session file
+    // written before token accumulation existed), fall back to the
+    // heuristic-based `shouldCompact` but with a higher trigger
+    // threshold (95% instead of 90%) so the well-known chars/4 bias does
+    // not fire premature compactions. Once the next provider response
+    // populates `totalTokens`, subsequent calls take the token-based
+    // branch automatically.
+    if (this.autoCompact) {
+      const messages = this.activeSession!.messages;
+      const reportedUsage = this.activeSession!.metadata.totalTokens;
+      const trigger =
+        reportedUsage > 0
+          ? shouldCompact(messages, this.maxContextTokens, {
+              threshold: AUTO_COMPACT_TRIGGER_THRESHOLD,
+              reportedUsage,
+            })
+          : shouldCompact(messages, this.maxContextTokens, {
+              threshold: FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD,
+            });
+      if (trigger) {
+        this.compact().catch(() => {});
+      }
     }
   }
 
