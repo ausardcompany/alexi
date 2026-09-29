@@ -1847,6 +1847,56 @@ flowchart TD
     Compare -->|No| Skip[return false]
 ```
 
+### Auto-Compact Trigger Wiring (`SessionManager.addMessage`, issue #1879)
+
+The projection logic above is only useful if the `SessionManager` actually hands the provider-reported baseline to `shouldCompact`. Before issue #1879 the wiring inside `addMessage` skipped that step and fell back to the whole-transcript heuristic on every check, so a reasoning-heavy session could compact well before it approached the real 90 % budget. `src/core/sessionManager.ts:778-814` now branches on the accumulated `metadata.totalTokens` figure:
+
+```typescript
+// src/core/sessionManager.ts (excerpt)
+const AUTO_COMPACT_TRIGGER_THRESHOLD = 90;
+const FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD = 95;
+
+if (this.autoCompact) {
+  const messages = this.activeSession!.messages;
+  const reportedUsage = this.activeSession!.metadata.totalTokens;
+  const trigger =
+    reportedUsage > 0
+      ? shouldCompact(messages, this.maxContextTokens, {
+          threshold: AUTO_COMPACT_TRIGGER_THRESHOLD,
+          reportedUsage,
+        })
+      : shouldCompact(messages, this.maxContextTokens, {
+          threshold: FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD,
+        });
+  if (trigger) {
+    this.compact().catch(() => {});
+  }
+}
+```
+
+Design contract:
+
+- **Token-based branch (`AUTO_COMPACT_TRIGGER_THRESHOLD = 90`).** As soon as any provider turn populates `metadata.totalTokens` (recall from the reactive-seeding block above that `addMessage` folds `input + output + reasoning` into the running total before the check), the trigger delegates to `shouldCompact` with `{ threshold: 90, reportedUsage }`. The compaction module then applies the projection algorithm documented in [Trigger Projection from Provider-Reported Usage](#trigger-projection-from-provider-reported-usage) — the SessionManager does not re-implement it. Reasoning tokens participate because they are already inside `totalTokens`.
+- **Fallback branch (`FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD = 95`).** Sessions with `totalTokens === 0` (brand-new session on its first turn, or a legacy session file written before token accumulation existed) take the heuristic path with a HIGHER threshold. The five-percentage-point buffer is deliberate: the chars/4 heuristic under-counts reasoning traces and structured tool outputs, and over-counts the very last user turn, so 95 % on the heuristic is approximately 90 % on real tokens. Compacting a still-small session because of a stale heuristic destroys context we cannot recover — the fallback resists that failure mode.
+- **Auto-migration.** No manual step converts a legacy session. The first `addMessage` call that carries a `tokens` payload advances `metadata.totalTokens` past zero, and every subsequent auto-compact check on that session takes the token-based branch. Sessions that only ever ingest role-tagged content (no provider turn) stay on the fallback threshold indefinitely.
+- **Opt-out preserved.** `autoCompact: false` on `SessionManagerOptions` short-circuits the entire block before either branch fires. Callers that manage compaction externally observe zero calls to `shouldCompact`.
+
+```mermaid
+flowchart TD
+    Add["SessionManager.addMessage(role, content, tokens?)"] --> Save["saveSession(activeSession)"]
+    Save --> AutoOn{autoCompact enabled?}
+    AutoOn -->|No| Return[return]
+    AutoOn -->|Yes| Check{metadata.totalTokens &gt; 0?}
+    Check -->|Yes| Token["shouldCompact(msgs, max,<br/>{ threshold: 90, reportedUsage })"]
+    Check -->|No| Heuristic["shouldCompact(msgs, max,<br/>{ threshold: 95 })"]
+    Token --> Fire{trigger?}
+    Heuristic --> Fire
+    Fire -->|Yes| Compact["compact().catch(noop)"]
+    Fire -->|No| Return
+```
+
+Both thresholds are module-scoped constants — `AUTO_COMPACT_TRIGGER_THRESHOLD` mirrors the compaction module's own `DEFAULT_TRIGGER_THRESHOLD` (any future change to the shared 90 % ceiling must move both in step), and `FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD` is a deliberate offset above it. Regression coverage in `tests/core/sessionManager-token-compaction.test.ts` pins the two-branch decision, the transition from fallback to token-based on the first usage-bearing turn, and the `autoCompact: false` opt-out. See [Testing the Auto-Compact Token Trigger](TESTING.md#testing-the-auto-compact-token-trigger-issue-1879) for the mocking pattern.
+
 ### Empty-Summary Guard
 
 Ports upstream opencode `#14318` (2026-09-23 sync). When the LLM (or the deterministic fallback) returns an empty or whitespace-only summary, `compactConversation()` no longer silently discards the older history:
