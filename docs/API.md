@@ -1824,10 +1824,11 @@ The tool description explicitly enforces four incremental-update rules for calle
 
 `src/tool/tools/background-process.ts` spawns a detached, unref'd child process and returns immediately once port detection completes. Its description explicitly documents four properties models kept getting wrong:
 
-- **Not a sleep primitive.** The tool returns as soon as the child has spawned (typically a couple of seconds while ports are being detected). Do NOT use it to `sleep`, poll, or wait for a service to become ready — spawn the service here and poll the endpoint from a separate `bash` / `shell` call.
+- **Not a sleep primitive.** The tool returns as soon as the child has spawned (typically a couple of seconds while ports are being detected). Do NOT use it to `sleep`, poll, or wait for a service to become ready — spawn the service here and poll the endpoint from a separate `bash` / `shell` call. Do not start `sleep`, timers, cooldowns, delays, or polling loops with this tool.
 - **Port detection is asynchronous.** The initial result may return before ports are populated. Call `listBackgroundProcesses` a moment later to observe the resolved port set.
 - **Detached and unref'd.** The process survives the tool call but WILL be terminated by `killAllTracked` on CLI shutdown. Do not rely on it outliving the parent Alexi session.
 - **Permission gated.** The tool declares `permission: { action: 'execute', getResource: (params) => params.command }`, so it goes through the same permission evaluator as `bash`.
+- **Session-goal contract (added 2026-09-29).** Outside a session goal, wait a fixed time with a blocking shell command and raise its `timeout`. Inside a session goal, a time-based wait must use `schedule_wakeup` so the goal suspends; a blocking shell sleep is treated as progress and the goal loop will spin. A non-terminal `background_process` start inside a session goal suspends the goal until the child process exits, and the exit resumes the goal. Do not explore the repository, search for a deploy, or poll with bash when the goal is to wait for a deploy, build, or CI job; schedule that wait with `schedule_wakeup`. Do not report blocked because no deploy is visible.
 
 Result shape:
 
@@ -4514,6 +4515,12 @@ Example:
 }
 ```
 
+Session-goal contract (added 2026-09-29):
+
+- Inside a session goal, calling `schedule_wakeup` **suspends** the goal until the wakeup fires. The goal shows as `scheduled` (see [Scheduled Status Derivation API](#scheduled-status-derivation-api-srccorescheduledts)) with the wakeup's fire time as `wakeAt`, and resumes itself when the wakeup lands.
+- When the session goal is to wait for a deploy, build, CI job, or other time-based event, agents must schedule that wait immediately rather than exploring the repository, searching for a deploy, or polling with bash. A time-based wait must NOT be reported as blocked when a wakeup can carry the goal forward.
+- A blocking shell `sleep` inside a goal is treated as progress and will spin the goal loop — always prefer `schedule_wakeup` for goal-scoped time waits.
+
 ### `cancel_wakeup` tool
 
 Parameters:
@@ -4531,6 +4538,8 @@ Example (defensive cleanup pattern):
   "wakeupID": "5d7ad3a4-2b96-4d09-8f8c-f8b8a9c1e2f3"
 }
 ```
+
+Session-goal contract (added 2026-09-29): a wakeup the goal is currently waiting for suspends the goal until it fires; cancelling that wakeup resumes the goal with a goal turn, or settles it with a reason the user can read.
 
 ## Recall Tool API
 
@@ -5114,6 +5123,101 @@ export function orchestrateAgentManagerSessions(): ActivityEventForwarder;
 ```
 
 See [ARCHITECTURE.md — Agent Manager Activity Event Forwarding](ARCHITECTURE.md#agent-manager-activity-event-forwarding-srccoreagent-managerorchestration-apits) for the decision matrix and the offline-is-not-terminal contract.
+
+## Scheduled Status Derivation API (`src/core/scheduled.ts`)
+
+Added in the 2026-09-29 sync (ports upstream kilocode `packages/opencode/src/kilocode/session/scheduled.ts`, branch `kwf/cli-scheduled-session-state-1f5e`). Pure, side-effect-free helper that derives a `scheduled` session status for an `idle` session that has one or more pending `schedule_wakeup` entries. Callers (HTTP status handler, CLI session listing, Agent Manager sidebar) obtain the list of pending wakeups from `Wakeup.list(sessionID)` and pass it in — the module never touches disk or the wakeup store itself.
+
+```typescript
+// src/core/scheduled.ts
+
+/** Minimal wakeup info needed to derive a scheduled status. */
+export interface ScheduledInfo {
+  readonly sessionId: string;
+  readonly wakeAt: number; // epoch ms
+}
+
+/** Result struct: status plus (when scheduled) the earliest wakeAt. */
+export interface ScheduledStatus {
+  readonly status: SessionStatus;
+  readonly wakeAt?: number;
+}
+
+/**
+ * When `base === 'idle'` and `pending.length > 0`, upgrade to
+ * `{ status: 'scheduled', wakeAt: min(pending.wakeAt) }`. Otherwise
+ * pass `base` through untouched. Only `idle` is upgraded — a
+ * `running` / `waiting` / `offline` / `completed` / `failed` session
+ * keeps its status even if a pending wakeup exists.
+ */
+export function deriveScheduledStatus(
+  base: SessionStatus,
+  pending: readonly ScheduledInfo[]
+): ScheduledStatus;
+
+/**
+ * Convert an ISO-8601 string (the shape stored on each
+ * `WakeupSchema.Entry.at`) into an epoch-ms number safe for
+ * `deriveScheduledStatus`. Returns `NaN` for invalid input so callers
+ * can filter with `Number.isFinite`.
+ */
+export function isoToEpochMs(iso: string): number;
+```
+
+Typical caller shape:
+
+```typescript
+import { Wakeup } from '../kilocode/wakeup/index.js';
+import { deriveScheduledStatus, isoToEpochMs } from './scheduled.js';
+
+async function statusFor(sessionID: string, baseStatus: SessionStatus) {
+  const pending = (await Wakeup.list(sessionID))
+    .filter((e) => e.status === 'pending')
+    .map((e) => ({ sessionId: e.sessionID, wakeAt: isoToEpochMs(e.at) }))
+    .filter((p) => Number.isFinite(p.wakeAt));
+  return deriveScheduledStatus(baseStatus, pending);
+}
+```
+
+See [ARCHITECTURE.md — Scheduled-Status Derivation](ARCHITECTURE.md#scheduled-status-derivation-srccorescheduledts) for the design rationale.
+
+## Session Status Classifier API (`src/core/session-status.ts`)
+
+Added alongside `scheduled.ts` in the 2026-09-29 sync. Small classifier that distinguishes the two "actively doing work" statuses (`running`, `waiting`) from every dormant / terminal state (`idle`, `offline`, `completed`, `failed`, `scheduled`). Used by the overview aggregation, the board, and the sidebar so a `scheduled` session is never misclassified as active work.
+
+```typescript
+// src/core/session-status.ts
+
+/** Re-export of the canonical union so callers do not need two imports. */
+export type SessionStatus = _SessionStatus;
+
+/**
+ * true iff `status` is one of the two running statuses ('running',
+ * 'waiting'). 'scheduled' and every other dormant / terminal state
+ * returns false. Accepts an arbitrary string so callers with statuses
+ * coming from external boundaries (HTTP payloads, event bus) do not
+ * have to pre-cast to the literal union.
+ */
+export function isRunningStatus(status: string): boolean;
+
+/**
+ * Coerce a raw session status to the overview form: pass through
+ * `'running'` / `'waiting'`, collapse everything else to `'idle'`.
+ */
+export function toOverviewStatus(status: string): string;
+```
+
+Typical caller shape (populating a sidebar status map):
+
+```typescript
+import { toOverviewStatus } from './session-status.js';
+
+for (const [id, raw] of sessionStatuses) {
+  displayMap.set(id, toOverviewStatus(raw));
+}
+```
+
+See [ARCHITECTURE.md — Session Status Classifier](ARCHITECTURE.md#session-status-classifier-srccoresession-statusts) for the running-vs-dormant contract.
 
 ## MCP CIMD Helper API (`src/mcp/client-metadata.ts`)
 

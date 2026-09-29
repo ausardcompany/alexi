@@ -5592,6 +5592,77 @@ Public surface:
 
 Both helpers are additive on top of the existing `recordSnapshot` / `listSnapshots` / `loadSnapshot` / `previewRevert` / `revertTo` / `pruneSnapshots` API (see [API.md — Snapshot Persistence API](API.md#snapshot-persistence-api)).
 
+## Scheduled-Status Derivation (`src/core/scheduled.ts`)
+
+Added in the 2026-09-29 sync (`+84 lines`, ports upstream kilocode `packages/opencode/src/kilocode/session/scheduled.ts`, branch `kwf/cli-scheduled-session-state-1f5e`). Complements the wakeup subsystem: a session that is currently `idle` but has one or more pending `schedule_wakeup` entries is dormant right now yet cooperating with a time-based event. The orchestrator surfaces this by deriving a synthetic `scheduled` status with the earliest `wakeAt` timestamp so the TUI / HTTP status endpoint / agent-manager sidebar shows the session as waiting on a timer rather than plain idle.
+
+The derivation is intentionally computed at the read boundary and **NOT** persisted: the underlying stored session status stays `idle`, and adding or cancelling a wakeup only changes what consumers see, never what is written to disk. The module has no side effects and no I/O — the caller (HTTP handler, CLI listing) is responsible for feeding it the list of pending wakeups obtained from `Wakeup.list(sessionID)` (see [Wakeup Subsystem](#wakeup-subsystem-srckilocodewakeup) below).
+
+```typescript
+// src/core/scheduled.ts
+export interface ScheduledInfo {
+  readonly sessionId: string;
+  readonly wakeAt: number; // epoch ms
+}
+
+export interface ScheduledStatus {
+  readonly status: SessionStatus;
+  readonly wakeAt?: number;
+}
+
+export function deriveScheduledStatus(
+  base: SessionStatus,
+  pending: readonly ScheduledInfo[]
+): ScheduledStatus;
+
+/** ISO-8601 (`WakeupSchema.Entry.at`) to epoch-ms; NaN for invalid input. */
+export function isoToEpochMs(iso: string): number;
+```
+
+### Contract
+
+- **Only `idle` is upgraded.** A `running`, `waiting`, `offline`, `completed`, or `failed` session is NOT converted to `scheduled` even if a pending wakeup exists — the current activity takes precedence.
+- **Empty `pending` is a pass-through.** An empty array returns `base` unchanged with `wakeAt` undefined.
+- **`wakeAt` is the earliest.** When multiple wakeups are pending, `Math.min(...pending.map(p => p.wakeAt))` picks the soonest fire time so the display always shows the next event, not an arbitrary one.
+
+```mermaid
+flowchart TD
+    Read["Status endpoint / CLI listing"] --> BaseStatus{"base status?"}
+    BaseStatus -->|idle| Pending{"Wakeup.list(sessionID)<br/>non-empty?"}
+    BaseStatus -->|running/waiting/offline/completed/failed| PassThrough["return { status: base }"]
+    Pending -->|no| PassThroughIdle["return { status: 'idle' }"]
+    Pending -->|yes| Derive["wakeAt = min(pending.wakeAt)<br/>return { status: 'scheduled', wakeAt }"]
+```
+
+### Session Status Classifier (`src/core/session-status.ts`)
+
+Added alongside `scheduled.ts` (`+68 lines`, same upstream branch). Both `idle` and `scheduled` mean "no work happening right now" — the overview aggregation and any board / sidebar / status endpoint must NOT treat these as running work. `running` and `waiting` are the two states where a session is doing something (executing a tool call, awaiting a permission decision, ...). Everything else — including `offline`, `completed`, `failed`, `idle`, `scheduled` — is dormant from the orchestrator's perspective and is coerced to `idle` in the overview so a scheduled session is never misclassified as active work.
+
+```typescript
+// src/core/session-status.ts
+export type SessionStatus = _SessionStatus; // re-export
+
+const RUNNING_STATUSES: ReadonlySet<string> = new Set<string>(['running', 'waiting']);
+
+/** true iff the session is actively doing work (not scheduled/dormant). */
+export function isRunningStatus(status: string): boolean;
+
+/** running/waiting pass through; everything else collapses to 'idle'. */
+export function toOverviewStatus(status: string): string;
+```
+
+The classifier accepts an arbitrary string so callers with statuses coming from external boundaries (HTTP payloads, event bus) do not have to pre-cast to the literal union. `RUNNING_STATUSES` is intentionally extensible — a first-class `running` state may be added in a later upstream port.
+
+### Interaction with tool descriptions
+
+The `background_process`, `schedule_wakeup`, and `cancel_wakeup` tool descriptions surfaced to the model gained a "Goals" section in the same sync (`src/tool/tools/*.ts`) that pins how time-based waits interact with the goal loop:
+
+- A blocking shell `sleep` inside a session goal is treated as progress and will spin the goal loop. Agents must use `schedule_wakeup` for goal-scoped time waits so the goal suspends until the wakeup lands.
+- A non-terminal `background_process` start inside a session goal suspends the goal until the child process exits, and the exit resumes the goal.
+- Cancelling a wakeup the goal is waiting on resumes the goal with a goal turn, or settles it with a reason the user can read.
+
+These are description-only changes: the tool schemas and runtime behaviour are unchanged. Existing agents that ignore the "Goals" section continue to work as before. See [docs/API.md — Wakeup tools](API.md#wakeup-tools) and [docs/API.md — background_process tool semantics](API.md#background_process-tool-semantics) for the full user-facing surfaces.
+
 ## Wakeup Subsystem (`src/kilocode/wakeup/`)
 
 The wakeup subsystem lets an active agent schedule a future resume of its own session — the model asks "wake me up in 5m to check the batch job" and, when the timestamp elapses, the session is resumed with the original reason and payload as additional context. Ports upstream kilocode `packages/opencode/src/kilocode/wakeup/` (commit `b7070e507`) with two Alexi-native adaptations documented below.
