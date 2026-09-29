@@ -1138,6 +1138,151 @@ sequenceDiagram
     UI-->>UI: render two-line badge
 ```
 
+### Surfacing model-list errors everywhere (issue #1886)
+
+`refreshModelCatalog`, `alexi models`, the Ink `ModelPicker`, and the
+legacy inquirer picker all now share ONE contract for failure
+reporting. Prior to `cdea455a`, four separate code paths could silently
+degrade to a hardcoded catalog of six OpenAI/Anthropic ids when the
+model list could not be retrieved, so an operator staring at `/model`
+in the TUI or `pickModel` in `alexi interactive` had no way to
+distinguish an empty tenant from a broken credential.
+
+Four consumer changes now guarantee the classified reason and
+actionable hint reach the surface the user is looking at:
+
+1. **Ink `ModelPicker` — live catalog is the default.**
+   `ModelPickerProps.modelGroups` is now optional. When omitted (or
+   `undefined`), the picker subscribes to `subscribeCatalog` and
+   renders live state, including the two-line error badge:
+   - Line 1: `⚠ Model list unavailable: <reason> (showing static catalog · <N> models)`
+   - Line 2: `→ <hint>` when `hintForErrorMessage` returned a non-empty string.
+
+   A caller that wants a fixed offline surface (e.g. a test or a help
+   screen) can still pass an explicit non-empty `modelGroups` list; the
+   picker preserves the previous verbatim-render behaviour and skips
+   the catalog subscription entirely:
+
+   ```tsx
+   // src/cli/tui/dialogs/ModelPicker.tsx
+   export interface ModelPickerProps {
+     currentModel: string;
+     /**
+      * Optional static model groups. When provided (and non-empty), the picker
+      * renders these groups verbatim and skips the live SAP AI Core catalog.
+      *
+      * When omitted, the picker subscribes to `subscribeCatalog` and
+      * renders the live catalog state, including any classified fetch error
+      * with an actionable hint (issue #1886).
+      */
+     modelGroups?: ModelGroup[];
+   }
+   ```
+
+2. **`/model` slash command and leader-`m` shortcut — no more hardcoded
+   list.** `src/cli/tui/hooks/useCommands.ts` and
+   `src/cli/tui/hooks/useKeyboard.ts` previously each held their own
+   copy of a six-model `STATIC_MODEL_GROUPS` constant and passed it to
+   `openDialog('model-picker', ...)`. Both copies have been deleted;
+   the picker is now opened without any `modelGroups` override so the
+   live-catalog error branch above always fires:
+
+   ```typescript
+   // src/cli/tui/hooks/useCommands.ts
+   // No args — open ModelPicker dialog. Omit `modelGroups` so the picker
+   // subscribes to the live SAP AI Core catalog and surfaces classified
+   // fetch errors (issue #1886) instead of silently showing a hardcoded
+   // list.
+   const chosen = await deps.openDialog('model-picker', {
+     currentModel: ctx.model,
+   });
+   ```
+
+   ```typescript
+   // src/cli/tui/hooks/useKeyboard.ts
+   case 'm':
+     open('model-picker', {}).catch(() => {
+       /* user cancelled — no-op */
+     });
+   ```
+
+3. **Legacy inquirer picker — reason + hint on stderr.** The picker
+   used by `alexi interactive` when the Ink TUI is not active now
+   surfaces the classified reason and hint through `logger.warn`
+   before rendering the selector, and the proxy fallback classifies
+   the non-OK response instead of using a `catch {}` no-op:
+
+   ```typescript
+   // src/cli/utils/modelPicker.ts — pickModel prelude
+   const catalogState = getCatalogState();
+   if (catalogState.status === 'error' && catalogState.errorMessage) {
+     logger.warn(`Model list unavailable: ${catalogState.errorMessage}`);
+     const hint = catalogState.errorClass
+       ? formatCatalogErrorHint({
+           statusCode: catalogState.errorClass.statusCode,
+           code: catalogState.errorClass.code,
+           reason: catalogState.errorClass.reason,
+         })
+       : hintForErrorMessage(catalogState.errorMessage);
+     if (hint) {
+       logger.warn(`  Hint: ${hint}`);
+     }
+   }
+   ```
+
+   ```typescript
+   // src/cli/utils/modelPicker.ts — fetchRemoteModelsProxy fallback
+   } catch (err) {
+     const classification = classifyFetchError(err);
+     const hint = formatCatalogErrorHint({
+       statusCode: classification.statusCode,
+       code: classification.code,
+       reason: classification.reason,
+     });
+     logger.warn(`SAP proxy model list unavailable: ${classification.reason}`);
+     if (hint) {
+       logger.warn(`  Hint: ${hint}`);
+     }
+   }
+   return [];
+   ```
+
+4. **Background refresh — one log line per failure.**
+   `refreshModelCatalog` now emits a log line so operators watching
+   the CLI/TUI logs see WHY the catalog is empty. The severity is
+   picked from the classification's `transient` flag so the periodic
+   5-minute background refresh does not spam the console when the
+   network blips, but permanent failures (credential, resource group,
+   URL) are loud:
+
+   ```typescript
+   // src/providers/modelCatalog.ts — refresh catch
+   if (errorClass.transient) {
+     logger.debug(`Model catalog refresh failed (transient): ${msg}`);
+   } else {
+     logger.error(`Model catalog refresh failed: ${msg}`);
+   }
+   ```
+
+Contract summary — every surface that can render "no models" now also
+prints WHY:
+
+| Surface                                                    | Reason surface                            | Hint surface                        |
+| ---------------------------------------------------------- | ----------------------------------------- | ----------------------------------- |
+| `alexi models` (`src/cli/commands/models.ts`)              | red `Error: ...` on stderr                | yellow `Hint: ...` on stderr        |
+| Ink `ModelPicker` (`src/cli/tui/dialogs/ModelPicker.tsx`)  | warning-colour badge, line 1              | dim badge, line 2 (`→ <hint>`)      |
+| Legacy inquirer picker (`src/cli/utils/modelPicker.ts`)    | `logger.warn` before selector renders     | `logger.warn` on second line        |
+| Background refresh (`src/providers/modelCatalog.ts`)       | `logger.debug` (transient) / `logger.error` (permanent) | via caller — badge / stderr    |
+
+Test coverage lives in `tests/cli/commands/models.test.ts`,
+`tests/cli/utils/modelPicker.test.ts`,
+`tests/cli/tui/useCommands.test.tsx`, and
+`tests/providers/modelCatalog.test.ts`. See
+[`docs/TESTING.md#testing-the-dynamic-model-catalog`](./TESTING.md#testing-the-dynamic-model-catalog)
+for the shared fixture patterns (mock `@sap-ai-sdk/ai-api`,
+`invalidateCatalog()` in `beforeEach`, `vi.spyOn(logger, 'warn')` for
+the picker paths).
+
 ## Configuration
 
 ### Environment Variables

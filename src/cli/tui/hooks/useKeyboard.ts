@@ -6,45 +6,9 @@ import { useDialog } from '../context/DialogContext.js';
 import { useChat } from '../context/ChatContext.js';
 import { useSidebar } from '../context/SidebarContext.js';
 import { usePage } from '../context/PageContext.js';
-import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { SlashCommand } from './useCommands.js';
 import type { CommandEntry } from '../components/CommandPalette.js';
 import { getHelpEntries } from '../utils/helpEntries.js';
-
-// ---------------------------------------------------------------------------
-// Static model groups (same constant as in useCommands.ts)
-// ---------------------------------------------------------------------------
-
-const STATIC_MODEL_GROUPS: ModelGroup[] = [
-  {
-    provider: 'openai',
-    models: [
-      { id: 'gpt-4o-mini', label: 'gpt-4o-mini', description: 'cheap · 16,000 tokens' },
-      { id: 'gpt-4o', label: 'gpt-4o', description: 'medium · 128,000 tokens' },
-      { id: 'gpt-4.1', label: 'gpt-4.1', description: 'expensive · 128,000 tokens' },
-    ],
-  },
-  {
-    provider: 'claude',
-    models: [
-      {
-        id: 'anthropic--claude-4.5-haiku',
-        label: 'claude-4.5-haiku',
-        description: 'cheap · 200,000 tokens',
-      },
-      {
-        id: 'anthropic--claude-4.5-sonnet',
-        label: 'claude-4.5-sonnet',
-        description: 'medium · 200,000 tokens',
-      },
-      {
-        id: 'anthropic--claude-4.5-opus',
-        label: 'claude-4.5-opus',
-        description: 'expensive · 200,000 tokens',
-      },
-    ],
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -173,7 +137,10 @@ export function useKeyboard(options: UseKeyboardOptions): void {
           return;
 
         case 'm':
-          open('model-picker', { modelGroups: STATIC_MODEL_GROUPS }).catch(() => {
+          // Omit `modelGroups` so the picker subscribes to the live SAP AI
+          // Core catalog and surfaces classified fetch errors (issue #1886)
+          // instead of a hardcoded list.
+          open('model-picker', {}).catch(() => {
             // user cancelled — no-op
           });
           deactivateLeader();

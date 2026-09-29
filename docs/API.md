@@ -286,9 +286,50 @@ so operator-facing errors are classified rather than raw:
 Full contract (classification precedence, retry policy, reason templates)
 in [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824).
 
+#### Interactive picker error surface (issue #1886)
+
+As of commit `cdea455a`, the interactive model pickers no longer fall
+back to a hardcoded six-model list on catalog failure. Every entry
+point renders the classified reason plus the actionable hint from
+`src/providers/modelFetchErrors.ts`:
+
+- **`/model` slash command in the Ink TUI** (`src/cli/tui/hooks/useCommands.ts`)
+  and the leader-`m` shortcut (`src/cli/tui/hooks/useKeyboard.ts`) open
+  the Ink `ModelPicker` without a `modelGroups` prop. The picker
+  subscribes to `subscribeCatalog` and renders a two-line badge on
+  `status === 'error'`:
+
+  ```
+  ⚠ Model list unavailable: unauthorized (401) — check AICORE_SERVICE_KEY / credentials (showing static catalog · N models)
+    → Re-check AICORE_SERVICE_KEY and token expiry, then re-run `alexi models`.
+  ```
+
+- **`alexi interactive` (`pickModel`)** — the legacy inquirer-based
+  picker used when the Ink TUI is not active prints the same
+  classified reason and hint via `logger.warn` on stderr before
+  rendering the selector, and the proxy fallback classifies non-OK
+  responses instead of the previous silent `catch {}`. The picker
+  never blocks selection: the static `ORCHESTRATION_MODELS` list is
+  still available so the operator can type past the error.
+
+- **Background catalog refresh** — `refreshModelCatalog` in
+  `src/providers/modelCatalog.ts` now emits one log line per failure:
+  `logger.debug` for transient failures (so periodic 5-minute retries
+  do not spam the console), `logger.error` for permanent failures
+  (credential, resource group, URL) that require operator action.
+
+Callers that need a fixed offline surface — for example, a help
+screen or a test that seeds a specific list — can still pass an
+explicit non-empty `modelGroups` prop to `ModelPicker`; when provided
+it renders verbatim and skips the catalog subscription entirely.
+
+Full walkthrough with the picker component contract, code excerpts,
+and the surface-by-surface reason/hint table lives in
+[`docs/PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886`](./PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886).
+
 #### Dynamic model catalog
 
-Since v1.22.4, the interactive TUI and the `/model` slash command consult a **live catalog** maintained by `src/providers/modelCatalog.ts`. The catalog is refreshed at startup and every 5 minutes; live models show a `●` prefix in the picker, static-only models show `○`. The status bar shows `● N live`, `⟳` (loading), or `○ offline` depending on the catalog state. Set `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` for the catalog to succeed; without credentials it falls back silently to the static list embedded in `ORCHESTRATION_MODELS`.
+Since v1.22.4, the interactive TUI and the `/model` slash command consult a **live catalog** maintained by `src/providers/modelCatalog.ts`. The catalog is refreshed at startup and every 5 minutes; live models show a `●` prefix in the picker, static-only models show `○`. The status bar shows `● N live`, `⟳` (loading), or `○ offline` depending on the catalog state. Set `AICORE_SERVICE_KEY` and `AICORE_RESOURCE_GROUP` for the catalog to succeed; without credentials it now surfaces the classified reason and an actionable hint on the picker or on stderr (issue #1886) instead of silently degrading — the underlying data still falls back to the static list embedded in `ORCHESTRATION_MODELS` so selection remains possible.
 
 Programmatic access:
 

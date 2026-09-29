@@ -168,6 +168,25 @@ describe('useCommands', () => {
     expect(mockSetModel).toHaveBeenCalledWith('gpt-4o');
   });
 
+  // Issue #1886 — /model without args should open the picker in live-catalog
+  // mode (no hardcoded `modelGroups`) so classified fetch errors surface.
+  it('/model without args opens picker WITHOUT modelGroups (live catalog mode)', async () => {
+    // Mock `open` to just resolve so the dialog does not block the assertion.
+    mockOpen.mockResolvedValueOnce('gpt-4o');
+    render(<InnerComponent />);
+
+    await capturedHandleCommand!('/model');
+
+    // The picker MUST be opened without `modelGroups` — this is what unlocks
+    // the live catalog error branch (issue #1886).
+    expect(mockOpen).toHaveBeenCalledWith(
+      'model-picker',
+      expect.not.objectContaining({ modelGroups: expect.anything() })
+    );
+    // And the returned selection is applied.
+    expect(mockSetModel).toHaveBeenCalledWith('gpt-4o');
+  });
+
   it('/agent with argument calls setAgent', async () => {
     render(<InnerComponent />);
 

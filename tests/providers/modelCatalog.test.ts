@@ -30,6 +30,7 @@ import {
   refreshModelCatalog,
 } from '../../src/providers/modelCatalog.js';
 import { ModelFetchError } from '../../src/providers/modelFetchErrors.js';
+import { logger } from '../../src/utils/logger.js';
 
 const noSleep = () => Promise.resolve();
 
@@ -118,6 +119,35 @@ describe('refreshModelCatalog error surfacing', () => {
     await expect(
       refreshModelCatalog('default', { retry: { sleep: noSleep } })
     ).resolves.toBeUndefined();
+  });
+
+  // Issue #1886 — refresh failures must be logged so operators see WHY
+  // model discovery is empty. Permanent → logger.error (requires action);
+  // transient → logger.debug (auto-retried, low signal).
+  it('logs permanent failures via logger.error (issue #1886)', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    executeMock.mockRejectedValue(Object.assign(new Error('boom'), { status: 401 }));
+
+    await refreshModelCatalog('default', { retry: { sleep: noSleep } });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toMatch(/Model catalog refresh failed/);
+    expect(errorSpy.mock.calls[0]?.[0]).toMatch(/unauthorized/i);
+    errorSpy.mockRestore();
+  });
+
+  it('logs transient failures via logger.debug (issue #1886)', async () => {
+    const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    executeMock.mockRejectedValue(Object.assign(new Error('boom'), { code: 'ECONNRESET' }));
+
+    await refreshModelCatalog('default', { retry: { sleep: noSleep, maxAttempts: 1 } });
+
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+    expect(debugSpy.mock.calls[0]?.[0]).toMatch(/Model catalog refresh failed \(transient\)/);
+    expect(errorSpy).not.toHaveBeenCalled();
+    debugSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });
 

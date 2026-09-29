@@ -569,6 +569,169 @@ Patterns worth internalising:
    unavailable`. Without the control, a regression that hard-coded the
    error badge into every render would only fail one direction.
 
+#### Testing the `alexi models` command error surface (`tests/cli/commands/models.test.ts`, issue #1886)
+
+`tests/cli/commands/models.test.ts` (130 lines) drives the full
+`registerModelsCommand(program)` surface through Commander's async
+parse path, spies on `process.exit`, `console.error`, and
+`console.log`, and pins the classified-reason-plus-hint output for the
+three top failure modes:
+
+- 401 from `DeploymentApi.deploymentQuery` (`AICORE_SERVICE_KEY` reset)
+- 404 from the same call (`AI_API_URL` / `-m` fallback guidance)
+- missing `AICORE_SERVICE_KEY` in the environment
+
+Patterns to internalise from this suite:
+
+1. **Hoist the SAP SDK mock.** `vi.hoisted` guarantees the mock is
+   installed before `registerModelsCommand` transitively imports
+   `@sap-ai-sdk/ai-api`. Missing the hoist means the real SDK is
+   loaded and every test either hits the network or throws on module
+   evaluation:
+
+   ```ts
+   const { executeMock, deploymentQueryMock } = vi.hoisted(() => {
+     const executeMock = vi.fn();
+     const deploymentQueryMock = vi.fn(() => ({ execute: executeMock }));
+     return { executeMock, deploymentQueryMock };
+   });
+
+   vi.mock('@sap-ai-sdk/ai-api', () => ({
+     DeploymentApi: { deploymentQuery: deploymentQueryMock },
+   }));
+   ```
+
+2. **Stub `env` deterministically.** The command reads
+   `AICORE_SERVICE_KEY` via `env('AICORE_SERVICE_KEY')` — stub the
+   whole module so `process.env` is irrelevant:
+
+   ```ts
+   const { envMock } = vi.hoisted(() => ({ envMock: vi.fn() }));
+   vi.mock('../../../src/config/env.js', () => ({ env: envMock }));
+   // In a test that wants the key present:
+   envMock.mockImplementation((key: string) => (key === 'AICORE_SERVICE_KEY' ? '{}' : undefined));
+   ```
+
+3. **Trap `process.exit` with a synthetic throw.** The command calls
+   `process.exit(1)` on failure. Spy it as an implementation that
+   captures the code and throws `Error('__exit__:1')` so control
+   returns to the test:
+
+   ```ts
+   const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+     exitCode = code ?? 0;
+     throw new Error(`__exit__:${exitCode}`);
+   }) as never);
+   ```
+
+4. **Use `program.exitOverride()`.** Commander itself will call
+   `process.exit` on parse errors unless `exitOverride()` is set — turn
+   it on so only the command's own `process.exit` is captured by the
+   spy.
+
+5. **Assert BOTH the reason and the hint.** `Error:` on one line and
+   `Hint:` on the next are two separate `console.error` calls; a
+   regression that dropped the hint would still pass a reason-only
+   assertion. Use two independent `expect(stderr).toMatch(...)` checks.
+
+#### Testing the inquirer picker proxy fallback (`tests/cli/utils/modelPicker.test.ts`, issue #1886)
+
+`tests/cli/utils/modelPicker.test.ts` (145 lines) exercises the legacy
+`getAvailableModels()` used by `alexi interactive` when the Ink TUI is
+not active. When `SAP_PROXY_BASE_URL` / `SAP_PROXY_API_KEY` are set
+but the `/models` call returns 401, the picker MUST log the
+classified reason plus hint via `logger.warn` before falling back to
+`ORCHESTRATION_MODELS`. Test scaffolding:
+
+```ts
+const { executeMock, deploymentQueryMock } = vi.hoisted(() => {
+  const executeMock = vi.fn();
+  const deploymentQueryMock = vi.fn(() => ({ execute: executeMock }));
+  return { executeMock, deploymentQueryMock };
+});
+vi.mock('@sap-ai-sdk/ai-api', () => ({
+  DeploymentApi: { deploymentQuery: deploymentQueryMock },
+}));
+
+const { envMock } = vi.hoisted(() => ({ envMock: vi.fn() }));
+vi.mock('../../../src/config/env.js', () => ({ env: envMock }));
+
+// Force the proxy branch of getAvailableModels:
+envMock.mockImplementation((key: string) => {
+  if (key === 'SAP_PROXY_BASE_URL') return 'https://example.invalid';
+  if (key === 'SAP_PROXY_API_KEY') return 'secret';
+  return undefined;
+});
+const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+  new Response(null, { status: 401, statusText: 'Unauthorized' })
+);
+
+const models = await getAvailableModels();
+expect(models.every((m) => m.source === 'local')).toBe(true); // static fallback
+const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+expect(warnCalls.some((m) => /proxy model list/i.test(m))).toBe(true);
+expect(warnCalls.some((m) => /Hint:/i.test(m))).toBe(true);
+```
+
+`invalidateCatalog()` in both `beforeEach` and `afterEach` is
+mandatory: without it a `ready` state from an earlier suite short-circuits
+`getAvailableModels()` and the proxy branch never runs.
+
+#### Testing the `/model` slash command's picker prop (`tests/cli/tui/useCommands.test.tsx`, issue #1886)
+
+The `useCommands` hook was previously passing a hardcoded six-model
+`STATIC_MODEL_GROUPS` constant to `openDialog('model-picker', ...)`,
+which suppressed the picker's live-catalog error branch. The new
+assertion pins that the `/model` slash command (no args) opens the
+picker WITHOUT `modelGroups` so the live catalog is consulted:
+
+```tsx
+mockOpen.mockResolvedValueOnce('gpt-4o');
+render(<InnerComponent />);
+await capturedHandleCommand!('/model');
+
+expect(mockOpen).toHaveBeenCalledWith(
+  'model-picker',
+  expect.not.objectContaining({ modelGroups: expect.anything() })
+);
+expect(mockSetModel).toHaveBeenCalledWith('gpt-4o');
+```
+
+`expect.not.objectContaining({ modelGroups: expect.anything() })` is
+the precise negation — a regression that reintroduced a
+`modelGroups: []` empty-array override would still trip this
+assertion because the picker's live-catalog branch is gated on
+`propGroupsProvided = modelGroups !== undefined && modelGroups.length > 0`.
+
+#### Testing catalog refresh log severity (`tests/providers/modelCatalog.test.ts`, issue #1886)
+
+`refreshModelCatalog` picks the log severity from the classification's
+`transient` flag — `logger.debug` for retryable failures so the
+periodic 5-minute background refresh does not spam the console at
+`info`, `logger.error` for permanent failures (credential / URL /
+resource group) that require operator action. Pin both branches with
+`vi.spyOn(logger, ...)`:
+
+```ts
+// Permanent — expect logger.error
+const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+executeMock.mockRejectedValue(Object.assign(new Error('boom'), { status: 401 }));
+await refreshModelCatalog('default', { retry: { maxAttempts: 1, sleep: noSleep } });
+expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Model catalog refresh failed'));
+
+// Transient — expect logger.debug, NOT logger.error
+const dbgSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+executeMock.mockRejectedValue(Object.assign(new Error('boom'), { code: 'ECONNRESET' }));
+await refreshModelCatalog('default', { retry: { maxAttempts: 1, sleep: noSleep } });
+expect(dbgSpy).toHaveBeenCalledWith(expect.stringContaining('transient'));
+```
+
+`maxAttempts: 1` on the transient case is intentional — the default
+`3` retries would emit two `onRetry` intermediates BEFORE the final
+throw and pollute the assertion, and the log-severity contract is
+about the final classified reason, not the retry chatter.
+
 ### Testing reasoning-token accounting (`tests/providers/sapOrchestration-reasoningTokens.test.ts`)
 
 `extractReasoningTokens` and `normalizeTokenUsage` in `src/providers/sapOrchestration.ts` are pure classifiers — no SAP SDK, no network — so their tests are direct unit tests over synthetic payloads. The `SapOrchestrationProvider.complete()` / `.stream()` end-to-end assertions mock the SAP SDK at the module boundary so the reasoning-token plumbing can be exercised without live credentials.
