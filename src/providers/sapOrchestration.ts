@@ -878,6 +878,12 @@ export function mergeUsage(
  *  - If the stream ends without producing any `output` chunk, the attempt
  *    is discarded. Its usage is aggregated into a running total, and the
  *    factory is called again to open a fresh stream.
+ *  - Exception: when an empty attempt's final `finishReason` is
+ *    `content-filter`, retries are skipped. The model's content filter
+ *    permanently blocked this request, so re-issuing the same prompt
+ *    will keep hitting the same block. Retrying wastes budget and
+ *    misleads the operator with a generic "empty response" message.
+ *    See issue #1888 and Cline PR #13302.
  *  - After {@link EmptyResponseRetryOptions.maxAttempts} attempts, the
  *    accumulated structural chunks (with aggregated usage) are yielded to
  *    the caller as a best-effort final metadata chunk. The turn ends
@@ -941,7 +947,11 @@ export async function* retryEmptyResponse(
       }
       // structural: buffer for potential replay of usage.
       bufferedStructural.push(chunk);
-      if (chunk.usage) {
+      // Track the most recent structural chunk that carries usage or a
+      // finish reason so downstream layers can distinguish permanent
+      // outcomes (e.g. `content-filter`, issue #1888) from transient
+      // empty `stop` turns.
+      if (chunk.usage || chunk.finishReason) {
         lastStructural = chunk;
       }
     }
@@ -963,6 +973,14 @@ export async function* retryEmptyResponse(
       } catch {
         // Swallow to avoid masking retry progress.
       }
+    }
+
+    // Content-filter turns are permanent: the provider's content policy
+    // blocked this request and every retry will hit the same filter.
+    // Break out early so the caller sees the terminal `content-filter`
+    // reason on the final metadata chunk instead of a masked `stop`.
+    if (lastStructural?.finishReason === 'content-filter') {
+      break;
     }
   }
 

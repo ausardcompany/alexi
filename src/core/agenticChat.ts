@@ -817,6 +817,28 @@ export async function agenticChat(
       });
     }
 
+    // Ports Cline PR #13302 (commit `55c4b36`, merged 2026-09-29): when a
+    // model's content filter blocks a request, the provider surfaces a
+    // `content-filter` finish reason with no assistant text. This is a
+    // permanent condition — retrying the same prompt will hit the same
+    // block — so we surface a specific message and end the turn early
+    // instead of letting the empty-response retry wrapper or the tool
+    // loop paper over it. See issue #1888.
+    if (result.finishReason === 'content-filter') {
+      options?.onProgress?.({
+        type: 'iteration',
+        iteration: iterations,
+        message:
+          'Warning: Model content filter blocked this request. ' +
+          'The request violated content policy and retry will not succeed.',
+      });
+      finalText =
+        result.text ||
+        'Model content filter blocked this request. ' +
+          'The request violated content policy and retry will not succeed.';
+      break;
+    }
+
     // Final turn: ignore any tool calls the model still tried to emit and
     // commit whatever text it produced. Guarantees finalText is non-empty.
     if (isFinalTurn) {
