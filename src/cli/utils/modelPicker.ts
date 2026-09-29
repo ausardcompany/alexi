@@ -6,10 +6,17 @@ import { select, Separator } from '@inquirer/prompts';
 import { ORCHESTRATION_MODELS } from '../../providers/sapOrchestration.js';
 import {
   getCatalogEntries,
+  getCatalogState,
   getCatalogStatus,
   type CatalogEntry,
 } from '../../providers/modelCatalog.js';
+import {
+  classifyFetchError,
+  formatCatalogErrorHint,
+  hintForErrorMessage,
+} from '../../providers/modelFetchErrors.js';
 import { env } from '../../config/env.js';
+import { logger } from '../../utils/logger.js';
 import { c } from './colors.js';
 
 interface ModelChoice {
@@ -104,8 +111,25 @@ async function fetchRemoteModelsProxy(): Promise<string[]> {
       const data = (await res.json()) as { data?: Array<{ id: string }> };
       return (data?.data || []).map((m) => m.id);
     }
-  } catch {
-    // Silently fall back to local models
+    // Non-OK response — build a classified error message so operators know
+    // WHY the proxy /models call failed instead of silently falling back
+    // (issue #1886).
+    const err = new Error(`Failed to fetch proxy models: ${res.status} ${res.statusText}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  } catch (err) {
+    const classification = classifyFetchError(err);
+    const hint = formatCatalogErrorHint({
+      statusCode: classification.statusCode,
+      code: classification.code,
+      reason: classification.reason,
+    });
+    // Fall back to local models but surface the reason on stderr so the
+    // user knows why proxy discovery was skipped.
+    logger.warn(`SAP proxy model list unavailable: ${classification.reason}`);
+    if (hint) {
+      logger.warn(`  Hint: ${hint}`);
+    }
   }
   return [];
 }
@@ -154,8 +178,27 @@ export function buildGroupedChoices(
 
 /**
  * Show interactive model picker. Returns selected model ID or null if cancelled.
+ *
+ * When the live catalog is in the `error` state, prints the classified
+ * reason + actionable hint to stderr so the user sees WHY the live list is
+ * missing (issue #1886) instead of a truncated static-only picker.
  */
 export async function pickModel(currentModel: string): Promise<string | null> {
+  const catalogState = getCatalogState();
+  if (catalogState.status === 'error' && catalogState.errorMessage) {
+    logger.warn(`Model list unavailable: ${catalogState.errorMessage}`);
+    const hint = catalogState.errorClass
+      ? formatCatalogErrorHint({
+          statusCode: catalogState.errorClass.statusCode,
+          code: catalogState.errorClass.code,
+          reason: catalogState.errorClass.reason,
+        })
+      : hintForErrorMessage(catalogState.errorMessage);
+    if (hint) {
+      logger.warn(`  Hint: ${hint}`);
+    }
+  }
+
   const models = await getAvailableModels();
   const choices = buildGroupedChoices(models, currentModel);
 

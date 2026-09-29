@@ -30,6 +30,7 @@ import {
   type FetchErrorClass,
   type FetchRetryOptions,
 } from './modelFetchErrors.js';
+import { logger } from '../utils/logger.js';
 
 // ============================================================================
 // Constants
@@ -257,6 +258,16 @@ export async function refreshModelCatalog(
             reason: err.reason,
           }
         : classifyFetchError(err);
+    // Log the failure so operators watching the CLI/TUI logs see WHY the
+    // model list is empty (issue #1886). Transient failures land in debug
+    // to avoid noise from the periodic background refresh; permanent
+    // failures land in error because they require operator action
+    // (credentials, resource group, URL).
+    if (errorClass.transient) {
+      logger.debug(`Model catalog refresh failed (transient): ${msg}`);
+    } else {
+      logger.error(`Model catalog refresh failed: ${msg}`);
+    }
     setState({
       status: 'error',
       errorMessage: msg,

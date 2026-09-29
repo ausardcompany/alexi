@@ -18,7 +18,6 @@ import { useDialog } from '../context/DialogContext.js';
 import type { DialogType } from '../context/DialogContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { useAttachments } from '../context/AttachmentContext.js';
-import type { ModelGroup } from '../dialogs/ModelPicker.js';
 import type { AgentOption } from '../dialogs/AgentSelector.js';
 import { getDataExporter } from '../../../core/dataExporter.js';
 
@@ -126,41 +125,13 @@ function buildCommands(deps: BuildCommandsDeps): SlashCommand[] {
           ctx.setModel(modelId);
           return true;
         }
-        // No args — open ModelPicker dialog
-        const STATIC_MODEL_GROUPS: ModelGroup[] = [
-          {
-            provider: 'openai',
-            models: [
-              { id: 'gpt-4o-mini', label: 'gpt-4o-mini', description: 'cheap · 16,000 tokens' },
-              { id: 'gpt-4o', label: 'gpt-4o', description: 'medium · 128,000 tokens' },
-              { id: 'gpt-4.1', label: 'gpt-4.1', description: 'expensive · 128,000 tokens' },
-            ],
-          },
-          {
-            provider: 'claude',
-            models: [
-              {
-                id: 'anthropic--claude-4.5-haiku',
-                label: 'claude-4.5-haiku',
-                description: 'cheap · 200,000 tokens',
-              },
-              {
-                id: 'anthropic--claude-4.5-sonnet',
-                label: 'claude-4.5-sonnet',
-                description: 'medium · 200,000 tokens',
-              },
-              {
-                id: 'anthropic--claude-4.5-opus',
-                label: 'claude-4.5-opus',
-                description: 'expensive · 200,000 tokens',
-              },
-            ],
-          },
-        ];
+        // No args — open ModelPicker dialog. Omit `modelGroups` so the picker
+        // subscribes to the live SAP AI Core catalog and surfaces classified
+        // fetch errors (issue #1886) instead of silently showing a hardcoded
+        // list.
         try {
           const chosen = await deps.openDialog('model-picker', {
             currentModel: ctx.model,
-            modelGroups: STATIC_MODEL_GROUPS,
           });
           if (typeof chosen === 'string') {
             ctx.setModel(chosen);

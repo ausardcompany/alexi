@@ -30,7 +30,15 @@ export interface ModelGroup {
 
 export interface ModelPickerProps {
   currentModel: string;
-  modelGroups: ModelGroup[];
+  /**
+   * Optional static model groups. When provided (and non-empty), the picker
+   * renders these groups verbatim and skips the live SAP AI Core catalog.
+   *
+   * When omitted, the picker subscribes to {@link subscribeCatalog} and
+   * renders the live catalog state, including any classified fetch error
+   * with an actionable hint (issue #1886).
+   */
+  modelGroups?: ModelGroup[];
 }
 
 const PROVIDER_PREFIXES: [string, string][] = [
