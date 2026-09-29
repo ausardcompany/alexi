@@ -4290,6 +4290,48 @@ describe('Chunked Compaction', () => {
 });
 ```
 
+### Testing the Auto-Compact Token Trigger (issue #1879)
+
+`tests/core/sessionManager-token-compaction.test.ts` (263 lines, 8 cases in one `describe` block) pins the wiring documented in [ARCHITECTURE.md — Auto-Compact Trigger Wiring](ARCHITECTURE.md#auto-compact-trigger-wiring-sessionmanageraddmessage-issue-1879). The suite covers the two-branch decision (`totalTokens > 0` picks the token-based path at threshold 90; `totalTokens === 0` picks the heuristic fallback at threshold 95), the transition from fallback to token-based on the first usage-bearing turn, and the `autoCompact: false` opt-out.
+
+The load-bearing pattern is that `src/core/compaction.js` is mocked BEFORE `src/core/sessionManager.js` is imported so the real `shouldCompact` never runs — the test asserts on the arguments the SessionManager forwards, not on `shouldCompact`'s own output. `vi.mock` is hoisted by Vitest so the order in the source file is cosmetic; keep the mock block above the `import` line to keep the intent legible on review:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+vi.mock('../../src/core/compaction.js', () => ({
+  shouldCompact: vi.fn().mockReturnValue(false),
+  compactConversation: vi.fn().mockResolvedValue({
+    messages: [],
+    result: { originalMessages: 0, compactedMessages: 0, estimatedTokensSaved: 0, summary: '' },
+  }),
+  estimateMessagesTokens: vi.fn().mockReturnValue(0),
+}));
+
+vi.mock('../../src/core/sessionClose.js', () => ({
+  closeSession: vi.fn().mockReturnValue(0),
+}));
+
+import { SessionManager, type Session } from '../../src/core/sessionManager.js';
+import { shouldCompact, compactConversation } from '../../src/core/compaction.js';
+```
+
+Per-case setup uses `fs.mkdtempSync(path.join(os.tmpdir(), 'session-compact-trigger-'))` for the sessions directory and `fs.rmSync(tempDir, { recursive: true, force: true })` in `afterEach` so each test is filesystem-isolated. `vi.clearAllMocks()` in `beforeEach` resets the `shouldCompact` / `compactConversation` mock state between cases so call-count assertions are additive within a single case only.
+
+Key assertions to reproduce for future changes to the trigger:
+
+1. **Token-based branch forwards `reportedUsage`.** The first `shouldCompact` call after `addMessage('assistant', 'response', { input: 50_000, output: 20_000, reasoning: 5_000 })` receives `{ threshold: 90, reportedUsage: 75_000 }` — the sum `input + output + reasoning`, not just prompt + completion.
+2. **Fallback branch omits `reportedUsage`.** Adding a message with no `tokens` payload yields a call with `{ threshold: 95 }` and `reportedUsage === undefined`. The fallback path must NOT synthesise a bogus reportedUsage from the message array — the higher threshold is the entire mitigation for the heuristic bias.
+3. **Transition on first usage-bearing turn.** A session that starts with a plain `addMessage('user', ...)` records a threshold-95 call, then a follow-up `addMessage('assistant', 'answer', { input: 100, output: 100 })` records a threshold-90 call with `reportedUsage: 200`. The transition is automatic — no explicit flag flip.
+4. **Real projection math via a stubbed `shouldCompact`.** For cases 3 and 4 the mock is upgraded to mimic real behaviour: `vi.mocked(shouldCompact).mockImplementation((_, maxTokens, opts) => opts.reportedUsage >= (maxTokens * opts.threshold) / 100)`. A 92 %-of-budget payload trips `compactConversation`; a 50 %-of-budget payload does not.
+5. **Legacy session on disk.** Cases construct a `Session` object with `metadata.totalTokens: 0`, write it to `path.join(tempDir, id + '.json')`, then `loadSession(id)` and append a reasoning-bearing turn. The next `shouldCompact` call takes the token-based branch because `totalTokens` has crossed zero.
+6. **Opt-out contract.** `new SessionManager({ ..., autoCompact: false })` followed by a large-payload `addMessage` records ZERO calls to both `shouldCompact` and `compactConversation`.
+
+The suite intentionally does NOT test `shouldCompact`'s own projection algorithm — that is the concern of the compaction module's own tests. Duplicating the projection math here would drift the two suites apart. Focus on the arguments the SessionManager forwards; trust the compaction module's tests for the math.
+
 ## Testing TUI Commands
 
 TUI slash commands are tested via the `useCommands` hook with React context mocking.

@@ -1540,6 +1540,37 @@ sessionManager.addMessage('user', hookMessage, undefined, { displayRole: 'system
 
 Auto-title generation skips messages carrying any `displayRole` value so internal instrumentation cannot end up as the session title.
 
+**Auto-compact trigger contract (issue #1879).** When `SessionManagerOptions.autoCompact` is `true` (the default), the final block of `addMessage` decides whether to invoke `SessionManager.compact()` based on the accumulated `metadata.totalTokens`:
+
+```typescript
+// src/core/sessionManager.ts (excerpt)
+const AUTO_COMPACT_TRIGGER_THRESHOLD = 90; // percent, token-based branch
+const FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD = 95; // percent, heuristic branch
+
+if (this.autoCompact) {
+  const messages = this.activeSession!.messages;
+  const reportedUsage = this.activeSession!.metadata.totalTokens;
+  const trigger =
+    reportedUsage > 0
+      ? shouldCompact(messages, this.maxContextTokens, {
+          threshold: AUTO_COMPACT_TRIGGER_THRESHOLD,
+          reportedUsage,
+        })
+      : shouldCompact(messages, this.maxContextTokens, {
+          threshold: FALLBACK_AUTO_COMPACT_TRIGGER_THRESHOLD,
+        });
+  if (trigger) {
+    this.compact().catch(() => {});
+  }
+}
+```
+
+- `reportedUsage > 0` (any provider turn has populated `metadata.totalTokens`): the trigger uses the shared 90 % threshold and forwards the exact token count the model saw. `shouldCompact` then applies the projection algorithm documented under [`ShouldCompactOptions`](#compaction-interfaces).
+- `reportedUsage === 0` (brand-new session or legacy session file written before the token-accumulation contract): the trigger falls back to the pure heuristic path (`estimateMessagesTokens`) with a higher 95 % threshold to compensate for the chars/4 bias. The first `addMessage` call carrying a `tokens` payload advances `totalTokens` past zero, and every subsequent check on that session takes the token-based branch automatically.
+- `autoCompact: false` short-circuits the entire block regardless of `totalTokens`. Callers that manage compaction externally observe zero `shouldCompact` invocations.
+
+See [ARCHITECTURE.md — Auto-Compact Trigger Wiring](ARCHITECTURE.md#auto-compact-trigger-wiring-sessionmanageraddmessage-issue-1879) for the decision diagram and [TESTING.md — Testing the Auto-Compact Token Trigger](TESTING.md#testing-the-auto-compact-token-trigger-issue-1879) for the fixture pattern.
+
 ### Compaction Interfaces
 
 ```typescript
