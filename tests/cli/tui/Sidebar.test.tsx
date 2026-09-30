@@ -181,9 +181,13 @@ describe('Sidebar', () => {
     expect(frame).toContain('stale');
     expect(frame).toContain('waiting');
     // Every non-running icon glyph should be present verbatim.
+    // `blocked` is platform-aware after issue #1896: U+23F8 (⏸) on
+    // non-Linux, U+25A0 (■) on Linux (DejaVu Sans Mono has no glyph
+    // for U+23F8, so it would render as tofu).
+    const expectedBlocked = process.platform === 'linux' ? '\u25A0' : '\u23F8';
     expect(frame).toContain('\u2713'); // idle
     expect(frame).toContain('\u2717'); // error
-    expect(frame).toContain('\u23F8'); // blocked
+    expect(frame).toContain(expectedBlocked); // blocked
     // Running (static fallback since animate=false)
     expect(frame).toContain('\u25D0');
   });

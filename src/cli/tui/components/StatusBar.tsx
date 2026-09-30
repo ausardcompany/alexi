@@ -7,6 +7,7 @@ import {
   ProviderModelFellBack,
 } from '../../../bus/index.js';
 import { useTheme } from '../context/ThemeContext.js';
+import { linuxSafeGlyph } from '../theme/glyphs.js';
 import { formatCwdShort } from '../utils/pathFormat.js';
 import { Spinner } from './Spinner.js';
 import {
@@ -199,7 +200,8 @@ export function StatusBar({
         )}
         {(catalogStatus === 'idle' || catalogStatus === 'loading') && (
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
-            {' · '}⟳
+            {' · '}
+            {linuxSafeGlyph('loading')}
           </Text>
         )}
         {catalogStatus === 'error' && (
