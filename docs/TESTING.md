@@ -5850,6 +5850,28 @@ contributors do not re-introduce them by hand:
    line breaks around the `<>` delimiters change. Assertion semantics, mock
    scope, and the resolved type of `actual` are all identical.
 
+   A second worked example from the 2026-09-30 auto-fix pass (commit
+   `cc24e960`) sits in `src/tool/tools/__tests__/link-pr.test.ts:19` — the
+   `vi.mock('../../../session/pr-link.js', ...)` factory previously placed
+   the generic-parameter list of `vi.importActual<typeof
+   import('../../../session/pr-link.js')>(...)` on its own indented line
+   below the `await` keyword. The auto-fix collapsed it onto the canonical
+   two-line form:
+
+   ```typescript
+   // src/tool/tools/__tests__/link-pr.test.ts:19 (canonical form after the
+   // 2026-09-30 auto-fix pass in commit cc24e960)
+   const actual = await vi.importActual<typeof import('../../../session/pr-link.js')>(
+     '../../../session/pr-link.js'
+   );
+   ```
+
+   The mock factory's return-value spread (`return { ...actual,
+   recordSessionLink: vi.fn(async () => defaultRecord) }`) is unchanged, so
+   the mocked `recordSessionLink` still short-circuits the real
+   session-file write while `parsePrUrl` and `linkMatchesWorktree` continue
+   to exercise their real implementations.
+
 4. **Collapse short fixture-array `.join('\n')` literals onto a single line
    when they fit under 100 columns.** Hand-authored diff-hunk fixtures and
    other line-oriented text fixtures are commonly written as a multi-line
