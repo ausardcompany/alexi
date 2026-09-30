@@ -4,6 +4,7 @@ import InkSpinner from 'ink-spinner';
 
 import { useTheme } from '../context/ThemeContext.js';
 import type { ThemeColors } from '../theme/types.js';
+import { linuxSafeGlyph } from '../theme/glyphs.js';
 import type { WorktreeStatus } from '../../../agent/worktreeStatus.js';
 
 /**
@@ -15,11 +16,15 @@ import type { WorktreeStatus } from '../../../agent/worktreeStatus.js';
  * Kept as a top-level constant so `StatusIcon` and its consumers can
  * assert against the mapping in tests without going through render
  * output.
+ *
+ * `blocked` routes through {@link linuxSafeGlyph} because U+23F8 (⏸ PAUSE)
+ * belongs to the Miscellaneous Technical block which DejaVu Sans Mono
+ * does not cover — see issue #1896. On Linux we substitute U+25A0 (■).
  */
 export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
   idle: '\u2713', // ✓ checkmark
   error: '\u2717', // ✗ cross
-  blocked: '\u23F8', // ⏸ pause
+  blocked: linuxSafeGlyph('pause'), // ⏸ pause (linux: ■)
   unknown: '?',
 };
 

@@ -6155,7 +6155,7 @@ stateDiagram-v2
 - `running` — session is actively producing output. The TUI renders an animated `ink-spinner` (`type: 'dots'`).
 - `idle` — session is alive but not currently working. Rendered with a static `U+2713` (checkmark) in the theme's `success` colour.
 - `error` — session terminated with a failure. Rendered with a static `U+2717` (cross) in `error`. Deliberately does NOT auto-remove the entry so the failure stays visible in the sidebar until the operator explicitly clears it via `removeWorktreeStatus`.
-- `blocked` — session is waiting on a permission prompt or a `question` tool call. Rendered with a static `U+23F8` (pause) in `dimText`.
+- `blocked` — session is waiting on a permission prompt or a `question` tool call. Rendered with a static `U+23F8` (pause) in `dimText` on macOS / Windows; on Linux the glyph is substituted with `U+25A0` (`■` BLACK SQUARE) because the pretty glyph belongs to the `Miscellaneous Technical` block which mainstream Linux monospace fonts (DejaVu Sans Mono, Noto Sans Mono, Ubuntu Mono) do not cover. See [TUI Glyph Safety and Linux Font Compatibility](#tui-glyph-safety-and-linux-font-compatibility-issue-1896).
 - `unknown` — default for a worktree that has never emitted a status event. Rendered with a `?` in `dimText`. The default is deliberately `unknown` rather than `idle` so a dead session cannot masquerade as ready.
 
 ### Registry contract
@@ -6232,13 +6232,15 @@ Three components co-operate to render the sidebar panel:
 
   ```typescript
   export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
-    idle: '\u2713',    // U+2713 checkmark
-    error: '\u2717',   // U+2717 cross
-    blocked: '\u23F8', // U+23F8 pause
+    idle: '\u2713', // U+2713 checkmark
+    error: '\u2717', // U+2717 cross
+    blocked: linuxSafeGlyph('pause'), // U+23F8 pause on macOS/Windows, U+25A0 on Linux
     unknown: '?',
   };
   export function statusColor(status: WorktreeStatus, colors: ThemeColors): string;
   ```
+
+  The `blocked` value is resolved at module import time via `linuxSafeGlyph('pause')` from `src/cli/tui/theme/glyphs.ts` — see [TUI Glyph Safety and Linux Font Compatibility](#tui-glyph-safety-and-linux-font-compatibility-issue-1896). The exported type stays `string`; consumers that need to assert an exact glyph in tests MUST branch on `process.platform === 'linux' ? '\u25A0' : '\u23F8'` (or route the expectation through `linuxSafeGlyph('pause')`) so the assertion tracks the runtime.
 
   The `running` state uses `ink-spinner` when `animate` is `true` (the default) and falls back to a static `U+25D0` half-filled circle when `animate={false}` so snapshot tests stay deterministic. The default branch of the `statusColor` switch uses `const _exhaustive: never = status` so adding a new status to the union without updating the mapping fails compilation.
 
@@ -6266,6 +6268,69 @@ The registry has no built-in publisher. Callers on the orchestrator, tool, or Ag
 5. Call `removeWorktreeStatus(id)` only when the worktree is fully torn down (worktree directory removed, session archived, or the operator dismisses the row).
 
 The `updatedAt` field on every entry is populated by the registry itself (`Date.now()`), so publishers do not need to pass a timestamp. A future headless orchestrator can drive the same pipeline in-process without any changes to the registry or the TUI.
+
+## TUI Glyph Safety and Linux Font Compatibility (issue #1896)
+
+Introduced by commit `5669b9e3` (`feat(cli): audit TUI glyphs for Linux font compatibility`). The Ink-based TUI relies on Unicode glyphs for status indicators, list markers, and separator characters. A handful of Unicode blocks used by prior art (Kilocode, Cline, opencode) render as "tofu" — a blank rectangle or `U+FFFD` — on Linux terminals whose default monospace font does not carry that block. Two blocks are the concrete offenders in practice:
+
+- `Miscellaneous Technical` (U+2300–U+23FF) — includes `⏸` (U+23F8 PAUSE), previously used by `STATIC_STATUS_ICONS.blocked` in the Agent Manager sidebar.
+- `Supplemental Arrows-A` (U+27F0–U+27FF) — includes `⟳` (U+27F3 CLOCKWISE GAPPED CIRCLE ARROW), previously used by the model-catalog "loading" indicator in `StatusBar`.
+
+On macOS, the built-in fallback stack (SF Mono → Menlo → Apple Symbols) fills the missing glyphs transparently. On Linux, terminal emulators do NOT ship an equivalent implicit fallback for their default monospace font (DejaVu Sans Mono, Noto Sans Mono, Ubuntu Mono), and the operator sees a blank box. Alexi's response is to substitute the character at the string level rather than depend on runtime font detection — a substitute glyph from a universally-supported block (`Geometric Shapes`, `Box Drawing`, `Block Elements`, or plain ASCII) always renders correctly regardless of the operator's font choice.
+
+### Module layout
+
+The single source of truth is `src/cli/tui/theme/glyphs.ts`. Three tables and two helpers are exported:
+
+```typescript
+// src/cli/tui/theme/glyphs.ts
+export const SAFE_GLYPH_RANGES: ReadonlyArray<readonly [number, number]>;
+export const SAFE_INDIVIDUAL_GLYPHS: ReadonlySet<number>;
+export function linuxSafeGlyph(key: 'pause' | 'loading'): string;
+export function isSafeCodePoint(codePoint: number): boolean;
+export function _internalGlyphTable(): Record<string, { pretty: string; linux: string }>;
+```
+
+- `SAFE_GLYPH_RANGES` — ranges considered mono-font-safe on every mainstream Linux terminal: ASCII printable (`0x20`–`0x7E`), the Latin-1 punctuation / currency subset the TUI uses (`£`, `¥`, `·`, `€`), General Punctuation dashes and ellipsis (`–`, `—`, `…`), the four cardinal arrows (`←`, `↑`, `→`, `↓`), Box Drawing (U+2500–U+257F), Block Elements (U+2580–U+259F), and Geometric Shapes (U+25A0–U+25FF).
+- `SAFE_INDIVIDUAL_GLYPHS` — an allow-list for glyphs outside those ranges that are still known to render correctly: `U+2713` (`✓`), `U+2717` (`✗`), `U+276F` (`❯`), `U+26A0` (`⚠`).
+- `LINUX_UNSAFE_GLYPHS` (module-scoped, read via `_internalGlyphTable()`) — the mapping of semantic keys to `{ pretty, linux }` pairs. Current entries: `pause = { '\u23F8', '\u25A0' }`, `loading = { '\u27F3', '*' }`.
+- `linuxSafeGlyph(key)` — returns `entry.linux` on Linux, `entry.pretty` on every other platform. Wrapped in a function (not a compile-time constant) so tests can stub `process.platform` via `Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })`.
+- `isSafeCodePoint(codePoint)` — used by the audit test; returns `true` for ASCII, for entries in `SAFE_INDIVIDUAL_GLYPHS`, and for code points in any `SAFE_GLYPH_RANGES` interval.
+
+### Resolution flow
+
+```mermaid
+flowchart TD
+    Author[TUI author writes a glyph literal] --> Check{codePoint safe?}
+    Check -->|"ASCII (< 0x80)"| Safe[Emit verbatim]
+    Check -->|"In SAFE_GLYPH_RANGES"| Safe
+    Check -->|"In SAFE_INDIVIDUAL_GLYPHS"| Safe
+    Check -->|"Otherwise"| Fallback{Route via linuxSafeGlyph?}
+    Fallback -->|"Yes"| Runtime{"process.platform === 'linux'?"}
+    Fallback -->|"No"| AuditFail[glyphs.test.ts fails CI]
+    Runtime -->|"Yes"| Substitute["Emit entry.linux (e.g. ■, *)"]
+    Runtime -->|"No"| Pretty["Emit entry.pretty (e.g. ⏸, ⟳)"]
+    AuditFail -.->|"Fix: pick safer glyph OR<br/>add to SAFE_INDIVIDUAL_GLYPHS OR<br/>add fallback in glyphs.ts"| Author
+```
+
+The two consumers wired in this PR:
+
+- **`src/cli/tui/components/StatusIcon.tsx:24-29`** — the `STATIC_STATUS_ICONS` mapping's `blocked` entry is resolved at module import time via `linuxSafeGlyph('pause')`. Every downstream consumer of the mapping (the render path in `StatusIcon`, the direct-shape assertions in `tests/cli/tui/StatusIcon.test.tsx`, the sidebar frame assertions in `tests/cli/tui/Sidebar.test.tsx`) sees the platform-correct value.
+- **`src/cli/tui/components/StatusBar.tsx:200-206`** — the model-catalog `loading` indicator now emits `linuxSafeGlyph('loading')` inline rather than a raw `⟳` literal. macOS / Windows continue to render the pretty glyph; Linux renders `*`.
+
+### Audit test as an enforcement seam
+
+`tests/cli/tui/glyphs.test.ts` walks every `.ts` / `.tsx` file under `src/cli/tui/**` (excluding `hooks/usePermission.ts`, which is UX emoji out of scope for the mono-font audit), strips block and line comments column-preservingly, and asserts that every non-ASCII code point that appears outside a comment is either safe by range, safe by allow-list, or already been routed through `linuxSafeGlyph`. A failure prints the file, line, column, `U+XXXX`, offending character, and trimmed source snippet so the author knows exactly where the fragile glyph lives.
+
+The comment-stripping pass is intentional: documentation and inline explanations of unsafe code points MUST remain readable. The test cares about glyphs that render at runtime, not glyphs that appear only in the source.
+
+Adding a new fragile glyph to any TUI file trips the suite. The remediation is one of:
+
+1. Pick a safer character in one of the ranges listed in `SAFE_GLYPH_RANGES` (Box Drawing, Block Elements, Geometric Shapes, arrows, currency, General Punctuation subset).
+2. Add the individual code point to `SAFE_INDIVIDUAL_GLYPHS` — a promise from the author that the glyph has been verified in DejaVu Sans Mono, JetBrains Mono, and Noto Sans Mono.
+3. Add a new entry to `LINUX_UNSAFE_GLYPHS` (pretty + Linux substitute) and route the call site through `linuxSafeGlyph`.
+
+See [docs/TESTING.md — Testing the TUI Glyph Audit](TESTING.md#testing-the-tui-glyph-audit-issue-1896) for the full test recipe and the test-only stub pattern for `process.platform`.
 
 ## Network Transport Classification (`classifyNetworkError`)
 

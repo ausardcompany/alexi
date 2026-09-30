@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Centralised Linux-safe TUI glyph module (`src/cli/tui/theme/glyphs.ts`)** (`src/cli/tui/theme/glyphs.ts` +152 lines, `src/cli/tui/components/StatusBar.tsx`, `src/cli/tui/components/StatusIcon.tsx`, `tests/cli/tui/glyphs.test.ts` +284 lines, `tests/cli/tui/StatusIcon.test.tsx`, `tests/cli/tui/Sidebar.test.tsx`, commit `5669b9e3` `feat(cli): audit TUI glyphs for Linux font compatibility`, issue #1896). New theme module that centralises Unicode glyph constants used by the Ink TUI and ships a platform-aware fallback for the two Unicode blocks that render as "tofu" (blank box / U+FFFD) on Linux terminals whose default monospace font (DejaVu Sans Mono, Noto Sans Mono, Ubuntu Mono) does not carry them: `Miscellaneous Technical` (U+2300–U+23FF) and `Supplemental Arrows-A` (U+27F0–U+27FF). On macOS the built-in fallback stack (SF Mono → Menlo → Apple Symbols) hides the problem; on Linux there is no equivalent implicit stack for terminal emulators, so the module ships a pre-baked substitute for each affected glyph and keeps the "pretty" character everywhere else.
+
+  New public surface exported from `src/cli/tui/theme/glyphs.ts`:
+
+  - `SAFE_GLYPH_RANGES: ReadonlyArray<readonly [number, number]>` — Unicode ranges considered safely covered by all mainstream Linux monospace fonts. Includes ASCII printable, the Latin-1 punctuation / currency subset the TUI actually uses (`£ ¥ · €`), General Punctuation dashes and ellipsis (`– — …`), the four cardinal arrows (`← ↑ → ↓`), Box Drawing (U+2500–U+257F), Block Elements (U+2580–U+259F), and Geometric Shapes (U+25A0–U+25FF). Consumed by the glyph audit test.
+  - `SAFE_INDIVIDUAL_GLYPHS: ReadonlySet<number>` — explicit allow-list for individual glyphs outside the safe ranges that are still known to render correctly. Currently: `U+2713` (`✓` check mark), `U+2717` (`✗` ballot X), `U+276F` (`❯` heavy right-pointing angle quotation mark ornament), `U+26A0` (`⚠` warning sign). Emoji code points from Miscellaneous Symbols and Pictographs (U+1F300+) are intentionally NOT included — `usePermission.ts` uses them but is UX-only and out of scope for the Linux mono-font audit.
+  - `linuxSafeGlyph(key): string` — resolves a Linux-safe glyph by semantic name. On macOS / Windows returns the pretty glyph; on Linux returns the pre-baked substitute. Current entries: `pause` (`⏸` U+23F8 → `■` U+25A0), `loading` (`⟳` U+27F3 → `*` ASCII). The `loading` fallback is ASCII `*` rather than U+21BB (which also has patchy Linux coverage) because the semantic is "activity in progress" and the asterisk is unambiguous in context.
+  - `isSafeCodePoint(codePoint: number): boolean` — returns `true` when a code point is `< 0x80`, or matches an entry in `SAFE_INDIVIDUAL_GLYPHS`, or falls inside `SAFE_GLYPH_RANGES`. Consumed by the glyph audit test.
+  - `_internalGlyphTable()` — test helper that exposes the internal `LINUX_UNSAFE_GLYPHS` record so the audit test can assert every declared entry has both a `pretty` and a `linux` glyph.
+
+  Runtime call sites updated to route through the new module:
+
+  - `src/cli/tui/components/StatusIcon.tsx:27` — the `blocked` entry in `STATIC_STATUS_ICONS` now resolves via `linuxSafeGlyph('pause')` instead of the raw `\u23F8` literal. The type (`Record<Exclude<WorktreeStatus, 'running'>, string>`) is unchanged so every existing consumer of the mapping continues to compile.
+  - `src/cli/tui/components/StatusBar.tsx:200-206` — the model-catalog "loading" indicator (previously the raw `⟳` U+27F3 glyph) now emits `linuxSafeGlyph('loading')` so the status bar no longer prints tofu on Linux while the catalog is refreshing.
+
+  Test coverage in `tests/cli/tui/glyphs.test.ts` (284 lines, two describe blocks):
+
+  1. **Audit table sanity** — asserts `SAFE_GLYPH_RANGES` is non-empty and every `[start, end]` pair is monotonic with `start >= 0` and `end <= 0x10FFFF`, and that every entry in `SAFE_INDIVIDUAL_GLYPHS` is non-ASCII.
+  2. **`isSafeCodePoint` agrees with the tables** — spot-checks ASCII `A`, box-drawing `─`, geometric shape `■`, allow-listed `✓`, and rejects the two known-fragile glyphs `⏸` (U+23F8) and `⟳` (U+27F3).
+  3. **Full TUI source scan** — walks every `.ts` / `.tsx` file under `src/cli/tui/**` (excluding `hooks/usePermission.ts`, which is emoji UX out of scope for the audit), strips comments column-preservingly, and fails when any non-ASCII code point outside the safe ranges / allow-list is not routed through `linuxSafeGlyph`. Failure message prints file / line / column / `U+XXXX` / offending character / trimmed snippet so the author can either pick a safer glyph or add a fallback in `theme/glyphs.ts`.
+  4. **`linuxSafeGlyph` fallbacks** — three cases that stub `process.platform` via `Object.defineProperty` and assert `darwin` and `win32` return the pretty glyphs (`⏸`, `⟳`) while `linux` returns the pre-baked substitutes (`■`, `*`).
+  5. **Internal table shape** — asserts every entry in `_internalGlyphTable()` has both a `pretty` and a `linux` glyph, both non-empty, and that their code points differ (so an accidental "linux = pretty" copy-paste fails the suite).
+
+  Existing suites updated:
+
+  - `tests/cli/tui/StatusIcon.test.tsx` — the `STATIC_STATUS_ICONS.blocked` and rendered `blocked` glyph assertions now branch on `process.platform === 'linux' ? '\u25A0' : '\u23F8'` so the test passes on both macOS CI and Linux CI.
+  - `tests/cli/tui/Sidebar.test.tsx` — the sidebar-icons frame check now uses the same platform-aware expected glyph for `blocked` while continuing to assert the platform-independent glyphs (`\u2713` idle, `\u2717` error, `\u25D0` running static fallback) verbatim.
+
+  Design contract:
+
+  - **Additive only.** Every non-Linux platform continues to render the pretty glyphs exactly as before. The change is a Linux-only substitution, so macOS / Windows screenshots, snapshots, and existing user-facing docs remain valid.
+  - **Audit test is the enforcement seam.** Any future TUI change that introduces a raw glyph from `Miscellaneous Technical`, `Supplemental Arrows-A`, or any other block outside `SAFE_GLYPH_RANGES` / `SAFE_INDIVIDUAL_GLYPHS` fails `tests/cli/tui/glyphs.test.ts`. The failure message directs the author to either extend `SAFE_INDIVIDUAL_GLYPHS`, pick a safer character, or add a new entry to `LINUX_UNSAFE_GLYPHS` and route the call through `linuxSafeGlyph`.
+  - **Fallback strings, not fallback fonts.** The substitution happens at the string level (a distinct code point) rather than by shipping / detecting a fallback font. This works reliably in every terminal emulator and does not require the operator to install a specific font.
+
+  See [docs/ARCHITECTURE.md — TUI Glyph Safety and Linux Font Compatibility](docs/ARCHITECTURE.md#tui-glyph-safety-and-linux-font-compatibility-issue-1896) for the resolution flow diagram and [docs/TESTING.md — Testing the TUI Glyph Audit](docs/TESTING.md#testing-the-tui-glyph-audit-issue-1896) for the fixture pattern.
+
+### Changed
+
+- **`STATIC_STATUS_ICONS.blocked` now resolves at import time via `linuxSafeGlyph('pause')`** (`src/cli/tui/components/StatusIcon.tsx`, commit `5669b9e3`). The mapping still exports a `string` value, but on Linux the value is `\u25A0` (`■` BLACK SQUARE) instead of the raw `\u23F8` (`⏸` PAUSE) that DejaVu Sans Mono does not cover. Consumers reading the mapping (tests, alternative renderers) MUST assume the value is platform-dependent — pin `process.platform === 'linux' ? '\u25A0' : '\u23F8'` when asserting exact glyphs, or route through `linuxSafeGlyph('pause')` in the test file so the expected value tracks the runtime automatically.
+- **`StatusBar` catalog "loading" indicator now uses the semantic `linuxSafeGlyph('loading')` helper** (`src/cli/tui/components/StatusBar.tsx:200-206`). Previously an inline `⟳` (U+27F3) glyph. Same visual output on macOS / Windows; on Linux the indicator falls back to `*` because U+27F3 belongs to `Supplemental Arrows-A`, which DejaVu Sans Mono does not carry. No public API change; the status bar still renders the same three catalog states (`● N live`, loading, `○ offline`).
+
+### Fixed
+
+- **TUI status glyphs no longer render as tofu on Linux terminals using DejaVu Sans Mono / Noto Sans Mono / Ubuntu Mono** (`src/cli/tui/theme/glyphs.ts`, `src/cli/tui/components/StatusBar.tsx`, `src/cli/tui/components/StatusIcon.tsx`, commit `5669b9e3`, issue #1896). Both the model-catalog loading indicator (`⟳`) in the status bar and the `blocked` worktree glyph (`⏸`) in the Agent Manager sidebar previously rendered as a blank box (U+FFFD) on the two Unicode blocks that mainstream Linux monospace fonts skip. Operators running the TUI in the default GNOME Terminal / KDE Konsole / xterm profile now see the substitute glyphs (`■` for pause, `*` for loading) instead. macOS / Windows terminals continue to render the pretty glyphs unchanged.
+
 ### Fixed
 
 - **Auto-compact trigger now consumes provider-reported token counts instead of the chars-per-token heuristic** (`src/core/sessionManager.ts`, `tests/core/sessionManager-token-compaction.test.ts`, commit `5e1ba062` `fix(core): use provider token counts for compaction trigger`, issue #1879). The `SessionManager.addMessage` auto-compact path previously fed only the message array into `shouldCompact`, which then estimated tokens via the chars/4 heuristic in `estimateMessagesTokens`. On sessions with heavy reasoning traces or structured tool outputs the heuristic drifts badly in both directions (under-counts reasoning traces, over-counts the still-untokenised final user turn), causing premature compaction that discards recoverable context. The trigger now branches on the accumulated `SessionMetadata.totalTokens` figure instead:

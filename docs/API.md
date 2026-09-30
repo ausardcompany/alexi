@@ -5776,10 +5776,12 @@ export interface SidebarProps {
 
 ```typescript
 // src/cli/tui/components/StatusIcon.tsx
+import { linuxSafeGlyph } from '../theme/glyphs.js';
+
 export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
-  idle: '\u2713',    // U+2713 checkmark
-  error: '\u2717',   // U+2717 cross
-  blocked: '\u23F8', // U+23F8 pause
+  idle: '\u2713', // U+2713 checkmark
+  error: '\u2717', // U+2717 cross
+  blocked: linuxSafeGlyph('pause'), // U+23F8 pause on macOS/Windows, U+25A0 on Linux
   unknown: '?',
 };
 
@@ -5797,6 +5799,78 @@ export function StatusIcon(props: StatusIconProps): React.JSX.Element;
 ```
 
 `StatusIcon` renders inline with no wrapping `<Box>` so callers compose it with a label on the same row: `<StatusIcon status={s} /><Text> {label}</Text>`. A trailing space is intentionally NOT emitted; the caller controls spacing.
+
+The `blocked` entry is resolved at import time through `linuxSafeGlyph('pause')` (see [Linux-safe TUI Glyph Module](#linux-safe-tui-glyph-module-srcclituithemeglyphs) below). Callers that need to assert an exact glyph in tests MUST branch on `process.platform === 'linux' ? '\u25A0' : '\u23F8'` — or route the expectation through `linuxSafeGlyph('pause')` — so the assertion tracks the runtime substitution automatically.
+
+### Linux-safe TUI Glyph Module (`src/cli/tui/theme/glyphs.ts`)
+
+Introduced in commit `5669b9e3` (issue #1896). Centralises the Unicode glyphs used by the TUI and ships platform-aware substitutes for the two Unicode blocks that render as "tofu" on Linux terminals whose default monospace font (DejaVu Sans Mono, Noto Sans Mono, Ubuntu Mono) does not carry them: `Miscellaneous Technical` (U+2300–U+23FF) and `Supplemental Arrows-A` (U+27F0–U+27FF). See [ARCHITECTURE.md — TUI Glyph Safety and Linux Font Compatibility](ARCHITECTURE.md#tui-glyph-safety-and-linux-font-compatibility-issue-1896) for the full contract.
+
+```typescript
+// src/cli/tui/theme/glyphs.ts
+
+/**
+ * Unicode ranges considered mono-font-safe on every mainstream Linux
+ * monospace font. Consumed by the glyph audit test in
+ * tests/cli/tui/glyphs.test.ts.
+ */
+export const SAFE_GLYPH_RANGES: ReadonlyArray<readonly [number, number]>;
+
+/**
+ * Explicit allow-list for individual glyphs OUTSIDE the safe ranges.
+ * Current entries: U+2713 (✓), U+2717 (✗), U+276F (❯), U+26A0 (⚠).
+ */
+export const SAFE_INDIVIDUAL_GLYPHS: ReadonlySet<number>;
+
+/**
+ * Resolve a Linux-safe glyph by semantic name. On macOS / Windows
+ * returns the pretty glyph; on Linux returns the pre-baked substitute.
+ *
+ * Current keys:
+ *  - 'pause'   -> '\u23F8' (⏸) | linux: '\u25A0' (■)
+ *  - 'loading' -> '\u27F3' (⟳) | linux: '*'
+ */
+export function linuxSafeGlyph(key: 'pause' | 'loading'): string;
+
+/**
+ * True when the code point is ASCII, in SAFE_INDIVIDUAL_GLYPHS, or
+ * falls in one of the SAFE_GLYPH_RANGES intervals.
+ */
+export function isSafeCodePoint(codePoint: number): boolean;
+
+/**
+ * Test-only helper. Exposes the internal LINUX_UNSAFE_GLYPHS table so
+ * the audit suite can assert every declared entry has both a `pretty`
+ * and a `linux` glyph.
+ */
+export function _internalGlyphTable(): Record<string, { pretty: string; linux: string }>;
+```
+
+Usage patterns:
+
+- **Inline in a component render.** Emit the resolved glyph directly. Example (from `src/cli/tui/components/StatusBar.tsx:200-206`):
+
+  ```tsx
+  {(catalogStatus === 'idle' || catalogStatus === 'loading') && (
+    <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
+      {' · '}
+      {linuxSafeGlyph('loading')}
+    </Text>
+  )}
+  ```
+
+- **In a module-scoped mapping.** Resolve at import time so downstream consumers see a plain `string`. Example (from `src/cli/tui/components/StatusIcon.tsx:24-29`):
+
+  ```typescript
+  export const STATIC_STATUS_ICONS: Record<Exclude<WorktreeStatus, 'running'>, string> = {
+    idle: '\u2713',
+    error: '\u2717',
+    blocked: linuxSafeGlyph('pause'),
+    unknown: '?',
+  };
+  ```
+
+Adding a new fragile glyph to any file under `src/cli/tui/**` trips `tests/cli/tui/glyphs.test.ts`. The remediation is one of: pick a safer character inside `SAFE_GLYPH_RANGES`, add the code point to `SAFE_INDIVIDUAL_GLYPHS`, or add a new entry to `LINUX_UNSAFE_GLYPHS` and route the call site through `linuxSafeGlyph`.
 
 ### Usage example: publishing status from a background task
 

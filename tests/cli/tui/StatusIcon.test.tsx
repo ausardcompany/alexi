@@ -6,6 +6,11 @@ import { StatusIcon, STATIC_STATUS_ICONS, statusColor } from '../../../src/cli/t
 import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
 import { darkTheme } from '../../../src/cli/tui/theme/dark.js';
 
+// The `blocked` glyph is platform-aware after the #1896 Linux mono-font audit:
+// - Non-Linux: U+23F8 ⏸ (PAUSE) — the "pretty" glyph.
+// - Linux:     U+25A0 ■ (BLACK SQUARE) — the mono-font-safe fallback.
+const EXPECTED_BLOCKED_GLYPH = process.platform === 'linux' ? '\u25A0' : '\u23F8';
+
 function renderIcon(ui: React.JSX.Element) {
   return render(<ThemeProvider>{ui}</ThemeProvider>);
 }
@@ -14,7 +19,7 @@ describe('StatusIcon — static mapping', () => {
   it('exposes the expected glyph for every non-running status', () => {
     expect(STATIC_STATUS_ICONS.idle).toBe('\u2713');
     expect(STATIC_STATUS_ICONS.error).toBe('\u2717');
-    expect(STATIC_STATUS_ICONS.blocked).toBe('\u23F8');
+    expect(STATIC_STATUS_ICONS.blocked).toBe(EXPECTED_BLOCKED_GLYPH);
     expect(STATIC_STATUS_ICONS.unknown).toBe('?');
   });
 
@@ -41,7 +46,7 @@ describe('StatusIcon — rendering', () => {
 
   it('renders the pause glyph for blocked', () => {
     const { lastFrame } = renderIcon(<StatusIcon status="blocked" animate={false} />);
-    expect(lastFrame() ?? '').toContain('\u23F8');
+    expect(lastFrame() ?? '').toContain(EXPECTED_BLOCKED_GLYPH);
   });
 
   it('renders a question mark for unknown', () => {

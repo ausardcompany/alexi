@@ -7725,10 +7725,16 @@ Cases:
 
 Locks the static-glyph mapping and the animation fallback. Every case renders under `ink-testing-library` with `animate={false}` unless the animated path is explicitly under test, so snapshot output stays deterministic.
 
+The `blocked` glyph assertions branch on `process.platform` because commit `5669b9e3` (issue #1896) routes the `STATIC_STATUS_ICONS.blocked` value through `linuxSafeGlyph('pause')`: `U+23F8` (`⏸`) on macOS / Windows and `U+25A0` (`■`) on Linux. The test file pins the expectation with a top-level constant:
+
+```typescript
+const EXPECTED_BLOCKED_GLYPH = process.platform === 'linux' ? '\u25A0' : '\u23F8';
+```
+
 Cases:
 
-1. **`STATIC_STATUS_ICONS` mapping** — direct object-shape assertion (no render).
-2. **Each static status renders its expected glyph** — parametrised over `idle`, `error`, `blocked`, `unknown`.
+1. **`STATIC_STATUS_ICONS` mapping** — direct object-shape assertion (no render). The `blocked` key is asserted against `EXPECTED_BLOCKED_GLYPH` so the case passes on both macOS CI and Linux CI.
+2. **Each static status renders its expected glyph** — parametrised over `idle`, `error`, `blocked`, `unknown`. The `blocked` case uses `EXPECTED_BLOCKED_GLYPH` for the same reason.
 3. **`animate={false}` fallback for `running`** — asserts the rendered output contains `U+25D0` and NOT any spinner frame.
 4. **`animate={true}` for `running`** — asserts the rendered output does NOT contain the fallback glyph (the `ink-spinner` frame is timing-dependent, so the assertion is negative).
 5. **Theme-derived colour resolution** — passes a mock `ThemeColors` and asserts `statusColor(status, colors)` returns the expected key: `running -> warning`, `idle -> success`, `error -> error`, `blocked / unknown -> dimText`.
@@ -7742,7 +7748,7 @@ Cases:
 
 1. **`worktrees` undefined -> no panel.** Renders the Sidebar without the new props and asserts the output does not contain the `Worktrees` header.
 2. **`worktrees` empty array -> no panel.** Same assertion with `worktrees={[]}`.
-3. **`worktrees` non-empty -> `Worktrees (N)` header + row per entry.** Renders three worktrees in three different states, asserts the header count, and asserts each row renders `<icon> <label>` in Map insertion order.
+3. **`worktrees` non-empty -> `Worktrees (N)` header + row per entry.** Renders three worktrees in three different states, asserts the header count, and asserts each row renders `<icon> <label>` in Map insertion order. The `blocked` glyph assertion resolves via `process.platform === 'linux' ? '\u25A0' : '\u23F8'` (see issue #1896) so the frame check passes on Linux CI where DejaVu Sans Mono forces the `U+25A0` substitution.
 4. **Empty file list still renders the panel.** Combines the `files: []` (No changes yet) branch with a non-empty `worktrees` array; asserts both regions co-exist.
 5. **`animateWorktrees={false}` produces a stable frame.** Snapshot-tests the render output for a `running` row with `animate={false}`, asserts the `U+25D0` fallback is present.
 
@@ -7758,6 +7764,92 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/useWorktreeStatus.test.tsx \
   tests/cli/tui/Sidebar.test.tsx
 ```
+
+## Testing the TUI Glyph Audit (issue #1896)
+
+Introduced by commit `5669b9e3` (`feat(cli): audit TUI glyphs for Linux font compatibility`). The audit lives in `tests/cli/tui/glyphs.test.ts` (284 lines) and defends the contract from `src/cli/tui/theme/glyphs.ts`: every non-ASCII code point that appears in a TUI source file MUST render correctly on Linux terminals using DejaVu Sans Mono / Noto Sans Mono / Ubuntu Mono, either directly (safe range or explicit allow-list) or via `linuxSafeGlyph()`. See [ARCHITECTURE.md — TUI Glyph Safety and Linux Font Compatibility](ARCHITECTURE.md#tui-glyph-safety-and-linux-font-compatibility-issue-1896) and [API.md — Linux-safe TUI Glyph Module](API.md#linux-safe-tui-glyph-module-srcclituithemeglyphs).
+
+### Setup
+
+The test walks the TUI source tree with `fs.readdir({ withFileTypes: true })`, strips block and line comments column-preservingly (so documentation of unsafe glyphs remains readable while runtime glyphs are audited), and reports any offender with file / line / column / `U+XXXX` / character / snippet:
+
+```typescript
+import * as path from 'node:path';
+import { promises as fs } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { describe, it, expect } from 'vitest';
+
+import {
+  SAFE_GLYPH_RANGES,
+  SAFE_INDIVIDUAL_GLYPHS,
+  _internalGlyphTable,
+  isSafeCodePoint,
+  linuxSafeGlyph,
+} from '../../../src/cli/tui/theme/glyphs.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const TUI_ROOT = path.resolve(HERE, '../../../src/cli/tui');
+
+// Emoji-heavy UX file — out of scope for the mono-font audit.
+const AUDIT_EXCLUDES = new Set([path.resolve(TUI_ROOT, 'hooks/usePermission.ts')]);
+```
+
+For the platform-substitution cases, the test stubs `process.platform` via a configurable property so a single test run can exercise all three OS branches without spawning subprocesses:
+
+```typescript
+function setPlatform(p: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', { value: p, configurable: true });
+}
+```
+
+An `afterEach` (declared at the top of the `linuxSafeGlyph fallbacks` block) restores the real value before the next test runs, so the audit case above never sees a mutated `process.platform`.
+
+### Cases pinned (`tests/cli/tui/glyphs.test.ts`)
+
+**`describe('TUI Unicode glyph audit (issue #1896)')`:**
+
+1. **Safe-range table is non-empty and monotonic** — asserts `SAFE_GLYPH_RANGES.length > 0` and, for every `[start, end]` pair, `start <= end`, `start >= 0`, and `end <= 0x10FFFF`.
+2. **Individual-glyph allow-list contains only non-ASCII entries** — asserts every code point in `SAFE_INDIVIDUAL_GLYPHS` is `>= 0x80`. ASCII characters do not belong in the allow-list; they are already covered by the ASCII range in `SAFE_GLYPH_RANGES`.
+3. **`isSafeCodePoint` agrees with the safe ranges + allow-list** — spot-checks that `0x41` (`A`, ASCII), `0x2500` (`─`, box drawing), `0x25A0` (`■`, geometric shapes), and `0x2713` (`✓`, allow-list) are safe, and that `0x23F8` (`⏸`) and `0x27F3` (`⟳`) are NOT safe (they MUST route through `linuxSafeGlyph`).
+4. **Every TUI source file uses only mono-font-safe glyphs** — the audit walk. Fails with a readable per-line breakdown when any file emits a fragile glyph outside a comment.
+
+**`describe('linuxSafeGlyph fallbacks')`:**
+
+5. **Exposes both a pretty and a Linux glyph for every entry** — iterates `_internalGlyphTable()` and asserts every entry has non-empty `pretty` and `linux` strings AND that the two code points differ (so an accidental `linux: entry.pretty` copy-paste fails the case).
+6. **Returns the pretty glyph on `darwin`** — `linuxSafeGlyph('pause') === '\u23F8'`, `linuxSafeGlyph('loading') === '\u27F3'`.
+7. **Returns the pretty glyph on `win32`** — same expectations.
+8. **Returns the safe substitute on `linux`** — `linuxSafeGlyph('pause') === '\u25A0'`, `linuxSafeGlyph('loading') === '*'`. The `loading` substitute is ASCII rather than `U+21BB` (which also has patchy Linux coverage) because the semantic is "activity in progress" and the asterisk is unambiguous.
+
+### Interpreting a failure
+
+When the walk reports offenders the failure message includes an actionable snippet:
+
+```
+Found N font-fragile glyph(s) in src/cli/tui/**.
+Route them through linuxSafeGlyph() in src/cli/tui/theme/glyphs.ts,
+pick a safer alternative, or add to SAFE_INDIVIDUAL_GLYPHS:
+  components/MyPanel.tsx:42:17  U+27F3 "⟳"  in: return <Text>⟳ working</Text>
+```
+
+Three remediation paths:
+
+1. Pick a safer glyph inside one of the `SAFE_GLYPH_RANGES` intervals (Box Drawing, Block Elements, Geometric Shapes, arrows, currency, General Punctuation subset).
+2. Add the code point to `SAFE_INDIVIDUAL_GLYPHS` — a promise from the author that the glyph has been verified in DejaVu Sans Mono, JetBrains Mono, and Noto Sans Mono.
+3. Add a new entry to `LINUX_UNSAFE_GLYPHS` (pretty + Linux substitute) and route the call site through `linuxSafeGlyph`.
+
+### Running the audit
+
+```bash
+# Full audit suite
+npm test -- tests/cli/tui/glyphs.test.ts
+
+# Combined with the StatusIcon and Sidebar suites that share the mapping
+npm test -- tests/cli/tui/glyphs.test.ts \
+  tests/cli/tui/StatusIcon.test.tsx \
+  tests/cli/tui/Sidebar.test.tsx
+```
+
+Run the same suites on both Linux (default in GitHub Actions) and macOS (via `runs-on: macos-latest`) when adding a new fallback entry — the platform-branched assertions in `StatusIcon.test.tsx` and `Sidebar.test.tsx` are the seam that catches a fallback that works on one OS but not the other.
 
 ## Testing reasoning-token accounting
 
