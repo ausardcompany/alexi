@@ -9,6 +9,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Test Configuration](#test-configuration)
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
+  - [Testing the `link_pr` Tool](#testing-the-link_pr-tool)
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing Compaction](#testing-compaction)
@@ -1170,6 +1171,165 @@ Key patterns:
 3. **Assert on substrings from `UNSAFE_WORKSPACE_ROOT_MESSAGE`, not the exact string.** The canonical message may gain platform-specific hints over time; asserting on `home directory` / `filesystem root` / `OOM` pins the classification without coupling to the exact copy.
 4. **Skip the POSIX-root case on Windows.** The filesystem-root check is platform-aware — `/` is not a Windows root — so gate the `workdir: '/'` case with `if (process.platform === 'win32') { return; }`.
 5. **Cover the `path:` override, not just `workdir`.** The guard is applied to the *resolved* `searchPath` inside each tool, so a test that only exercises `context.workdir` will miss a regression where the guard is moved earlier in the pipeline and the `path:` override bypass reappears.
+
+### Testing the `link_pr` Tool
+
+Introduced 2026-09-30 (`1.22.34`, ports upstream kilocode `9cc0a9158` /
+`56ab1e502` / `154a8427c` / `9076f0301`). The `link_pr` tool binds a
+pull-request URL to the ACTIVE session and persists to
+`~/.alexi/sessions/<sessionId>/pr-link.json`. Its runtime has four
+distinct refusal reasons (`unsupported_client`, `invalid_url`,
+`missing_session`, `worktree_mismatch`, `storage_error`) and one happy
+path — the regression suite locks in a case per branch so a future
+refactor of the gate order (`enabled()` → parse → session id →
+`recordSessionLink`) cannot silently reorder the failure modes.
+
+Reference regression suite: `src/tool/tools/__tests__/link-pr.test.ts`
+(188 lines, 8 cases across two `describe` blocks). The pattern:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+// Hoisted mock — mirrors AGENTS.md guidance (mock BEFORE importing SUT).
+// `parsePrUrl` stays real so URL-shape tests exercise the real parser;
+// `recordSessionLink` is swapped per test with `mockImplementation`.
+vi.mock('../../../session/pr-link.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../../session/pr-link.js')>(
+      '../../../session/pr-link.js'
+    );
+  return {
+    ...actual,
+    recordSessionLink: vi.fn(actual.recordSessionLink),
+  };
+});
+
+import { linkPrTool } from '../link-pr.js';
+import * as prLink from '../../../session/pr-link.js';
+import type { ToolContext } from '../../index.js';
+
+function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
+  return {
+    workdir: '/tmp/fake-worktree',
+    sessionId: 'session-abc',
+    ...overrides,
+  };
+}
+
+describe('link_pr tool', () => {
+  const originalClient = process.env.ALEXI_CLIENT;
+
+  beforeEach(() => {
+    process.env.ALEXI_CLIENT = 'cli';
+    vi.mocked(prLink.recordSessionLink).mockReset();
+  });
+
+  afterEach(() => {
+    if (originalClient === undefined) {
+      delete process.env.ALEXI_CLIENT;
+    } else {
+      process.env.ALEXI_CLIENT = originalClient;
+    }
+  });
+
+  test('refuses execution when backend is not CLI', async () => {
+    process.env.ALEXI_CLIENT = 'vscode';
+
+    const result = await linkPrTool.executeUnsafe(
+      { url: 'https://github.com/owner/repo/pull/1' },
+      makeContext()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.data).toMatchObject({ ok: false, reason: 'unsupported_client' });
+    expect(prLink.recordSessionLink).not.toHaveBeenCalled();
+  });
+
+  test('records a session link on the happy path via recordSessionLink', async () => {
+    const writes: { sessionId: string; record: unknown; worktree: string }[] = [];
+    vi.mocked(prLink.recordSessionLink).mockImplementation(
+      async (sessionId, record, worktree) => {
+        writes.push({ sessionId, record, worktree });
+        return record;
+      }
+    );
+
+    const result = await linkPrTool.executeUnsafe(
+      { url: 'https://github.com/owner/repo/pull/42' },
+      makeContext({ sessionId: 'session-abc', workdir: '/tmp/fake-worktree' })
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ ok: true });
+    expect(writes[0]).toMatchObject({
+      sessionId: 'session-abc',
+      worktree: '/tmp/fake-worktree',
+      record: {
+        evidence: 'user',
+        link: { host: 'github.com', owner: 'owner', repo: 'repo', number: 42 },
+      },
+    });
+  });
+
+  test('surfaces worktree_mismatch when recordSessionLink refuses', async () => {
+    vi.mocked(prLink.recordSessionLink).mockResolvedValue(undefined);
+
+    const result = await linkPrTool.executeUnsafe(
+      { url: 'https://github.com/other/repo/pull/1' },
+      makeContext()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.data).toMatchObject({ ok: false, reason: 'worktree_mismatch' });
+  });
+});
+```
+
+Key coverage points for anyone extending this suite:
+
+1. **Snapshot and restore `ALEXI_CLIENT` around every case.** The
+   variable defaults to `cli` when unset, so a test that assigns it
+   without restoring will make every subsequent test in the same worker
+   see the stale value. Save `originalClient = process.env.ALEXI_CLIENT`
+   in a `describe`-scoped constant, restore in `afterEach`, and use
+   `delete` when the pre-test value was `undefined` — reassignment
+   coerces `undefined` to the string `'undefined'`, which is a non-CLI
+   value and would silently disable the tool in later tests.
+2. **Mock `recordSessionLink` with `mockImplementation`, not
+   `mockResolvedValue`, when you need to inspect the arguments.**
+   The tool passes `sessionId`, `{ link, evidence: 'user' }`, and
+   `worktree` in a specific order — a regression that swaps positional
+   arguments would still pass `mockResolvedValue` but would misroute
+   the record on disk in production.
+3. **Assert on `result.data.reason`, not `result.error`.** The `error`
+   string is a human-readable message and may gain platform hints over
+   time; `reason` is a typed union (`unsupported_client | invalid_url |
+   missing_session | worktree_mismatch | storage_error`) and is the
+   stable contract for programmatic callers.
+4. **Cover both real `parsePrUrl` shapes AND the invalid path.** Keep
+   `parsePrUrl` un-mocked (via `...actual`) so the URL-shape branch
+   exercises the real regex — GitHub `/pull/N`, GitLab
+   `/merge_requests/N`, Azure DevOps `/pull-requests/N` — and reject
+   issue URLs (`/issues/N`) and non-URL strings with `invalid_url`.
+5. **Never touch the real filesystem.** Because `recordSessionLink` is
+   mocked, no `fs.mkdtemp` scaffolding is needed for the tool suite. If
+   a follow-up test wants to exercise the on-disk shape, use the
+   `pr-link` helpers block (below) and point `HOME` at a temp directory
+   via `fs.mkdtemp` in its own `describe` block — do not leak that
+   scaffolding into the tool suite.
+6. **Skip `context.sessionId` at your peril.** The tool refuses with
+   `missing_session` when the tool context has no session id, and the
+   pre-existing shared tool test harness must be built with an explicit
+   `sessionId` for the happy-path assertions to succeed. The
+   `makeContext` helper in the suite above is the recommended shape;
+   copy it into new test files rather than reconstructing `ToolContext`
+   inline.
+
+Companion `pr-link` helpers suite (`describe('pr-link helpers')`, 2
+cases) exercises `enabled()` across three `ALEXI_CLIENT` states (`cli`,
+`vscode`, unset — where unset defaults to CLI) and `parsePrUrl` across
+GitHub, GitLab, non-URL, and issue-URL inputs. Follow the same
+snapshot/restore discipline for `ALEXI_CLIENT` in that block.
 
 ### Testing Bash Tool Shell-Type Reporting
 

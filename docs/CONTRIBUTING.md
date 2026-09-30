@@ -468,6 +468,54 @@ When testing anything that reads the dynamic model catalog (`src/providers/model
 
 **Do NOT `vi.spyOn` on Node builtin namespace exports.** Under Alexi's ESM configuration (`"type": "module"` + `module: NodeNext` + Node >= 22.12), entries on `fs/promises`, `node:fs`, `node:child_process`, `node:os`, and `node:path` are exposed as non-configurable own accessors on the namespace object. `vi.spyOn(fs, 'readdir')` — and, in most cases, `vi.mock('fs/promises', ...)` with a partial-override factory that spreads `vi.importActual(...)` — throws `TypeError: Cannot redefine property: <name>` at test load time. This is a Vitest ESM limitation documented at `https://vitest.dev/guide/browser/#limitations`, not a bug in Alexi's test setup. The correct alternatives are (in order of preference): (1) accept the I/O boundary as a function parameter (see [Injectable I/O boundaries (preferred over module mocks)](#injectable-io-boundaries-preferred-over-module-mocks) below) so the test can pass a stub directly; (2) route the call through a wrapper module you own (`src/utils/fs-wrapper.ts` or similar) which Vitest CAN mock because its exports are configurable ESM re-exports; (3) quarantine the case into a suite that runs under `vitest --pool=vmThreads`, accepting the CI-time cost that comes with it. Worked example, 2026-09-05, commit `400ccb7f` (`fix(tests): skip ESM-incompatible fs.readdir spy test in glob-timeout [alexi-bot]`): `tests/tool/tools/glob-timeout.test.ts` originally used `vi.spyOn(fs, 'readdir').mockImplementation(() => new Promise(() => {}))` to simulate a hung filesystem so the `GLOB_SEARCH_TIMEOUT_MS = 30_000` deadline was the only way the promise could settle. Under ESM the spy threw at load time and the whole file failed to collect. The negative case is now `it.skip` with the ESM rationale inlined at the call site; the positive case (`does not set timedOut on a successful fast search`) still runs unchanged. See [`docs/TESTING.md#testing-the-bounded-glob-deadline-kilocode-pr-13805-adaptation`](./TESTING.md#testing-the-bounded-glob-deadline-kilocode-pr-13805-adaptation) for the full three-option contributor guidance.
 
+### Mocking CLI-gated tools
+
+When a tool is gated on a runtime signal — the canonical example is
+`link_pr`, which is only registered when `ALEXI_CLIENT === 'cli'` (see
+[`docs/CONFIGURATION.md#alexi_client`](./CONFIGURATION.md#alexi_client))
+— test suites MUST snapshot and restore the gating environment variable
+around every case. The pattern established in
+`src/tool/tools/__tests__/link-pr.test.ts`:
+
+```typescript
+describe('link_pr tool', () => {
+  const originalClient = process.env.ALEXI_CLIENT;
+
+  beforeEach(() => {
+    process.env.ALEXI_CLIENT = 'cli';
+  });
+
+  afterEach(() => {
+    if (originalClient === undefined) {
+      delete process.env.ALEXI_CLIENT;
+    } else {
+      process.env.ALEXI_CLIENT = originalClient;
+    }
+  });
+  // ...
+});
+```
+
+Two subtle rules that trip up new contributors:
+
+1. **Use `delete process.env.X`, not `process.env.X = undefined`, when
+   the pre-test value was unset.** Assigning `undefined` coerces to the
+   string `'undefined'`, which — for `ALEXI_CLIENT` — is a non-CLI value
+   and would silently gate the `link_pr` tool out of the registry for
+   every subsequent test in the same worker. This is why the
+   restore branch uses `delete` explicitly.
+2. **Mock the collaborator module (`session/pr-link.js`), not the tool
+   itself.** The tool's contract is the four-layer defense chain
+   (`enabled()` gate → `parsePrUrl` shape check → `sessionId` presence
+   check → `recordSessionLink` worktree cross-check); mocking the tool
+   collapses the chain and hides regressions. Keep `parsePrUrl` real
+   via `...actual` so the URL-shape branch exercises the actual regex
+   and swap only `recordSessionLink` with `vi.fn` /
+   `mockImplementation` per case.
+
+See [`docs/TESTING.md#testing-the-link_pr-tool`](./TESTING.md#testing-the-link_pr-tool)
+for the fully worked reference suite.
+
 ### Minify-safe class detection
 
 Production bundlers (esbuild, Bun, terser, swc) rename local class identifiers to single letters, silently breaking any control-flow gate that reads `obj.constructor.name === 'SomeClass'`. When contributing telemetry, instrumentation, or any code that needs to detect an object's class at runtime, follow the reference pattern established by `src/utils/telemetry.ts`:
