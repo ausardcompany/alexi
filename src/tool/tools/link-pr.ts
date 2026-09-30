@@ -34,7 +34,9 @@ import { logger } from '../../utils/logger.js';
 const LinkPrParamsSchema = z.object({
   url: z
     .string()
-    .describe('Full URL of the pull request to link (e.g. https://github.com/owner/repo/pull/123).'),
+    .describe(
+      'Full URL of the pull request to link (e.g. https://github.com/owner/repo/pull/123).'
+    ),
 });
 
 export interface LinkPrResult {
@@ -104,8 +106,7 @@ Parameters:
       if (!stored) {
         return {
           success: false,
-          error:
-            "The PR does not match this session's worktree (different host/owner/repo).",
+          error: "The PR does not match this session's worktree (different host/owner/repo).",
           data: { ok: false, reason: 'worktree_mismatch' },
         };
       }

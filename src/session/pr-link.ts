@@ -115,10 +115,7 @@ export function parsePrUrl(url: string): ParsedPrLink | undefined {
  * verify" the same as "does not match", which is the same policy
  * upstream `56ab1e502` chose.
  */
-export async function linkMatchesWorktree(
-  link: ParsedPrLink,
-  worktree: string
-): Promise<boolean> {
+export async function linkMatchesWorktree(link: ParsedPrLink, worktree: string): Promise<boolean> {
   const remoteUrl = await readWorktreeRemote(worktree).catch(() => undefined);
   if (!remoteUrl) {
     return false;
@@ -161,9 +158,7 @@ export async function recordSessionLink(
  * Read the currently persisted session PR link, if any. Returns
  * `undefined` when no link has been recorded yet or when parsing fails.
  */
-export async function readSessionLink(
-  sessionId: string
-): Promise<SessionPrLink | undefined> {
+export async function readSessionLink(sessionId: string): Promise<SessionPrLink | undefined> {
   const p = sessionLinkPath(sessionId);
   try {
     const raw = await fs.readFile(p, 'utf-8');
@@ -178,22 +173,14 @@ export async function readSessionLink(
  * cross-session fan-out. Kept as a thin wrapper for any legacy callers;
  * emits a warning and delegates. Will be removed once no caller remains.
  */
-export async function writePrLinkOverride(
-  _worktree: string,
-  _link: ParsedPrLink
-): Promise<void> {
+export async function writePrLinkOverride(_worktree: string, _link: ParsedPrLink): Promise<void> {
   // eslint-disable-next-line no-console
-  console.warn(
-    'writePrLinkOverride is deprecated: use recordSessionLink(sessionId, ...)'
-  );
+  console.warn('writePrLinkOverride is deprecated: use recordSessionLink(sessionId, ...)');
 }
 
 // ---------- internal helpers ----------
 
-async function writeSessionLink(
-  sessionId: string,
-  record: SessionPrLink
-): Promise<void> {
+async function writeSessionLink(sessionId: string, record: SessionPrLink): Promise<void> {
   const p = sessionLinkPath(sessionId);
   await fs.mkdir(path.dirname(p), { recursive: true });
   await fs.writeFile(p, JSON.stringify(record, null, 2), 'utf-8');
@@ -238,9 +225,7 @@ async function readWorktreeRemote(worktree: string): Promise<string | undefined>
  * Parse a remote URL (either HTTPS or SSH) into host/owner/repo. Returns
  * `undefined` for anything unrecognizable.
  */
-function parseRemoteUrl(
-  remote: string
-): { host: string; owner: string; repo: string } | undefined {
+function parseRemoteUrl(remote: string): { host: string; owner: string; repo: string } | undefined {
   const trimmed = remote.trim();
   // git@host:owner/repo(.git)
   const ssh = /^[\w.-]+@([^:]+):([^/]+)\/(.+?)(?:\.git)?$/i.exec(trimmed);

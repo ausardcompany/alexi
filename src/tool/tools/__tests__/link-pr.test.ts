@@ -16,10 +16,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 // We keep `parsePrUrl` real so URL-shape tests exercise the real parser,
 // but swap `recordSessionLink` for a fixture per test.
 vi.mock('../../../session/pr-link.js', async () => {
-  const actual =
-    await vi.importActual<typeof import('../../../session/pr-link.js')>(
-      '../../../session/pr-link.js'
-    );
+  const actual = await vi.importActual<typeof import('../../../session/pr-link.js')>(
+    '../../../session/pr-link.js'
+  );
   return {
     ...actual,
     // Default fixture — individual tests override via `mockImplementation`.
@@ -93,12 +92,10 @@ describe('link_pr tool', () => {
 
   test('records a session link on the happy path via recordSessionLink', async () => {
     const writes: { sessionId: string; record: unknown; worktree: string }[] = [];
-    vi.mocked(prLink.recordSessionLink).mockImplementation(
-      async (sessionId, record, worktree) => {
-        writes.push({ sessionId, record, worktree });
-        return record;
-      }
-    );
+    vi.mocked(prLink.recordSessionLink).mockImplementation(async (sessionId, record, worktree) => {
+      writes.push({ sessionId, record, worktree });
+      return record;
+    });
 
     const result = await linkPrTool.executeUnsafe(
       { url: 'https://github.com/owner/repo/pull/42' },
@@ -174,9 +171,7 @@ describe('pr-link helpers', () => {
       repo: 'repo',
       number: 12,
     });
-    expect(
-      prLink.parsePrUrl('https://gitlab.com/group/proj/merge_requests/8')
-    ).toMatchObject({
+    expect(prLink.parsePrUrl('https://gitlab.com/group/proj/merge_requests/8')).toMatchObject({
       host: 'gitlab.com',
       owner: 'group',
       repo: 'proj',
