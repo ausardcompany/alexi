@@ -43,6 +43,13 @@ import { applyPatchTool } from './apply-patch.js';
 import { repoCloneTool } from './repo-clone.js';
 import { imageGenTool } from './image-gen.js';
 import { openPlanTool } from './open-plan.js';
+// Ports kilocode `9076f0301` fix(opencode): offer the link_pr tool to CLI
+// sessions only. The tool binds a PR URL to the active session, but the
+// storage is CLI-only — non-CLI backends (SAP BAS extension, VS Code
+// webview) must not see the tool at all. Gated at registration by
+// `prEnabled()` and again at execute-time inside the tool.
+import { linkPrTool } from './link-pr.js';
+import { enabled as prEnabled } from '../../session/pr-link.js';
 // Ports kilocode `packages/opencode/src/kilocode/tool/registry.ts` (+36):
 // shared agent board tools are gated behind `experimental.sharedAgentBoard`.
 import { boardReadTool, boardWriteTool } from './board.js';
@@ -118,6 +125,12 @@ export const builtInTools = [
   openPlanTool,
   scheduleWakeupTool, // kilocode_change
   cancelWakeupTool, // kilocode_change
+  // Ports kilocode `9076f0301`: `link_pr` is only offered to CLI backends.
+  // The check runs once at module load — Alexi does not hot-reload tools,
+  // so callers embedding Alexi as a library must set `ALEXI_CLIENT`
+  // before importing this module. On non-CLI backends the tool is
+  // omitted from the registry entirely so the model never sees it.
+  ...(prEnabled() ? [linkPrTool] : []),
 ];
 
 /**
@@ -195,6 +208,10 @@ export {
   cancelWakeupTool,
   contextInspectTool,
   contextSummarizeTool,
+  // Ports kilocode `9076f0301`. Re-exported unconditionally so tests
+  // and downstream consumers can reference the tool object; whether it
+  // is registered depends on `prEnabled()` — see `builtInTools`.
+  linkPrTool,
 };
 
 // Re-export UI utilities from specific tools

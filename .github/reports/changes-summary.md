@@ -1,92 +1,117 @@
-# Update Plan Execution Summary — 2026-09-29
+# Alexi Update — Changes Summary
 
-Applied the update plan for upstream sync (kilocode 318a913a2..2dfe6fc87).
+**Generated**: 2026-09-30
+**Update plan**: port kilocode/opencode PR-link session-isolation fixes to Alexi
+**Upstream commits ported**:
+- `c98f8740c` merge: remove-link-pr-feature-vscode
+- `154a8427c` fix(cli): disable session PR linking on non-CLI backends
+- `9076f0301` fix(opencode): offer the link_pr tool to CLI sessions only
+- `56ab1e502` fix(sessions): harden per-session PR link evidence
+- `9cc0a9158` fix(sessions): link a pull request to a session only on its own evidence
+- `eb7b4896b` test(cli): scope PR-link storage fixtures to Effect layers
 
-## Files Modified
+## Files modified / created
 
-1. **Created**: `src/core/session-status.ts`
-   - Adds `isRunningStatus(status)` predicate and `toOverviewStatus(status)` helper.
-   - Only `running` and `waiting` are treated as active; every other state
-     (including new `scheduled` plus `idle`, `offline`, `completed`, `failed`)
-     collapses to `idle` in overview aggregation.
-   - Re-exports the canonical `SessionStatus` union from `agent-manager/orchestration-api.ts`.
+| File                                                        | Change      | Purpose                                                            |
+| ----------------------------------------------------------- | ----------- | ------------------------------------------------------------------ |
+| `src/session/pr-link.ts`                                    | **created** | Session-scoped PR-link storage + `enabled()` gate + URL parser     |
+| `src/tool/tools/link-pr.ts`                                 | **created** | New `link_pr` tool that binds a PR URL to the active session       |
+| `src/tool/tools/index.ts`                                   | modified    | Conditionally register `link_pr` when `enabled()` is true          |
+| `src/tool/tools/__tests__/link-pr.test.ts`                  | **created** | Vitest suite covering the tool + helpers                            |
 
-2. **Created**: `src/core/scheduled.ts`
-   - `deriveScheduledStatus(base, pending)` upgrades an idle base status to
-     `scheduled` with the earliest `wakeAt` when pending wakeups exist.
-   - Non-idle statuses (`running`, `waiting`, `offline`, `completed`, `failed`)
-     pass through unchanged — current activity takes precedence.
-   - `isoToEpochMs()` helper for converting `WakeupSchema.Entry.at` strings.
-   - Pure, no I/O — HTTP handler / CLI listing feeds it `Wakeup.list(sessionID)`.
+## Summary of each change
 
-3. **Modified**: `src/tool/tools/background-process.ts`
-   - Extended tool description with sleep/timer guidance for goal contexts
-     (must use `schedule_wakeup` inside a goal, not `sleep` / bash polling).
-   - Added a `Goals:` section clarifying that non-terminal starts suspend the
-     goal until the process exits, and that repository exploration is the
-     wrong response to a "wait for deploy/build/CI" goal.
+### 1. `src/session/pr-link.ts` (Update plan change #3 — foundation)
 
-4. **Modified**: `src/tool/tools/cancel-wakeup.ts`
-   - Appended `Goals:` block: cancelling a wakeup a goal awaits resumes that
-     goal turn, or settles it with a user-visible reason.
+New module. Exports:
 
-5. **Modified**: `src/tool/tools/schedule-wakeup.ts`
-   - Appended `Goals:` block: scheduling a wakeup inside a goal suspends the
-     goal (which shows as `scheduled`) and resumes when the wakeup lands.
-   - Explicit warning: `sleep` inside a goal is "progress" and spins the loop.
+- `enabled(): boolean` — returns `true` only when `ALEXI_CLIENT === "cli"`
+  (default) so embedded non-CLI hosts (SAP BAS extension, VS Code webview)
+  are opted out. This is the single source of truth used by (2) and (3).
+- `parsePrUrl(url): ParsedPrLink | undefined` — recognizes GitHub/GitLab/
+  Azure-DevOps PR URLs; rejects issue URLs and malformed input.
+- `linkMatchesWorktree(link, worktree): Promise<boolean>` — reads the
+  worktree's `.git/config` remote (no `simple-git` dep to keep startup
+  cheap), refuses fork / unrelated-repo links (upstream `56ab1e502`).
+- `recordSessionLink(sessionId, record, worktree)` — persists the link
+  to `~/.alexi/sessions/<sessionId>/pr-link.json`. Refuses when
+  `enabled()` is false or when `linkMatchesWorktree()` returns false.
+  Storage is **per-session**, not per-worktree, which stops two
+  sessions on the same checkout from inheriting each other's PR link
+  (upstream `9cc0a9158`). Critical for SAP tenant isolation.
+- `readSessionLink(sessionId)` — read-back helper.
+- `writePrLinkOverride(...)` — deprecated shim with a `console.warn`
+  so any legacy import surfaces a warning; delegates to a no-op.
 
-## Plan Items — Status
+SAP AI Core compatibility: this module does no network I/O and does not
+touch any provider surface. It only reads local git config and writes
+to the existing `~/.alexi/sessions/` tree.
 
-| # | Item                                                     | Status              |
-| - | -------------------------------------------------------- | ------------------- |
-| 1 | Add `scheduled` to `SessionStatus` union                 | Already present     |
-| 2 | `isRunningStatus` helper + overview coercion             | **Implemented**     |
-| 3 | `board.ts` skip `scheduled` (session-status board)       | N/A (chat board)    |
-| 4 | `background-process` docs: Goals guidance                | **Implemented**     |
-| 5 | `cancel-wakeup` docs: Goals guidance                     | **Implemented**     |
-| 6 | `cron-create` docs (Alexi has no cron tools)             | Mirrored on `schedule-wakeup` |
-| 7 | Scheduled-status derivation + clamp logic                | Derivation **implemented**; clamp N/A (no cron horizon) |
-| 8 | **CRITICAL** context-overflow compact-and-retry recovery | Already present in `src/core/streamingOrchestrator.ts` (`tryOverflowRecovery`) and `src/providers/format.ts` (`classifyProviderError`) |
+### 2. `src/tool/tools/link-pr.ts` (Update plan change #1)
 
-## Notes on Skipped / Already-Implemented Items
+New tool built with Alexi's `defineTool(...)` + Zod-schema pattern (same
+shape as `open-plan.ts`, `webfetch.ts`, etc.). Behaviour:
 
-- **Item 1 (SessionStatus)** was already extended with `scheduled` in
-  `src/core/agent-manager/orchestration-api.ts:61` from a prior sync.
-- **Item 3 (`board.ts`)**: Alexi's `src/tool/tools/board.ts` is the
-  shared **agent-coordination chat board**, not the session-status board
-  that upstream referenced. The upstream logic is a session-status
-  aggregation that lives elsewhere; Alexi doesn't yet ship an Agent
-  Manager UI, so the coercion is instead provided as a helper
-  (`toOverviewStatus`) in `session-status.ts` for the future consumer.
-- **Item 6 (cron tools)**: Alexi has `schedule_wakeup` only — no cron
-  scheduler. The Goals sentence from the plan was mirrored into
-  `schedule-wakeup.ts`. The 7-day-horizon clamp logic is
-  cron-specific (recurring-schedule expiry) and does not apply to
-  one-shot wakeups.
-- **Item 7 (clamp logic)**: The `scheduled.ts` derivation is
-  implemented. Clamping is cron-specific (not applicable to Alexi's
-  wakeup-only model).
-- **Item 8 (CRITICAL)**: Context-overflow recovery is already
-  comprehensive in Alexi:
-  - `src/providers/format.ts` classifies errors as `context_overflow`.
-  - `src/core/contextOverflow.ts` provides `isContextOverflowError` /
-    `detectContextOverflow`.
-  - `src/core/streamingOrchestrator.ts::tryOverflowRecovery` triggers
-    session compaction and re-drives the loop on overflow, with
-    one-shot retry semantics and an actionable terminal message.
+1. **`ALEXI_CLIENT` gate** — refuses with `unsupported_client` reason on
+   non-CLI backends (upstream `154a8427c`).
+2. **URL parsing** — refuses with `invalid_url` on non-PR URLs.
+3. **`sessionId` guard** — refuses with `missing_session` when the tool
+   context lacks a session id (rather than silently dropping the
+   record).
+4. **Session-scoped storage** — delegates to `recordSessionLink` with
+   `evidence: "user"`. Surfaces `worktree_mismatch` when
+   `recordSessionLink` returns `undefined` and `storage_error` on I/O
+   failure. Logs errors via `src/utils/logger.ts` (per ESLint
+   `no-console` rule).
 
-## SAP AI Core Compatibility
+### 3. `src/tool/tools/index.ts` (Update plan change #2)
 
-- No changes to provider dispatch, transport, or auth surfaces.
-- No changes to the `SessionStatus` on-wire contract — `scheduled` was
-  already in the union.
-- Tool description strings changed on `schedule_wakeup`, `cancel_wakeup`,
-  and `background_process`; no schema, permission, or handler changes.
-- `src/core/scheduled.ts` and `src/core/session-status.ts` are new,
-  pure, side-effect-free helpers with no existing importers, so
-  behaviour is unchanged until a consumer opts in.
+- Imported `linkPrTool` and `enabled as prEnabled` from the new modules.
+- Appended `...(prEnabled() ? [linkPrTool] : [])` to `builtInTools`, so
+  on non-CLI backends the tool is not registered at all and the model
+  never sees it (upstream `9076f0301`).
+- Added `linkPrTool` to the re-export block so tests and downstream
+  code can reference the tool object regardless of registration.
 
-## Issues Encountered
+### 4. `src/tool/tools/__tests__/link-pr.test.ts` (Update plan change #4)
 
-None. All changes applied cleanly. Existing tests do not assert on
-description strings so no test updates were required.
+- Uses `vi.mock(...)` with `importActual` to preserve real helpers
+  (`parsePrUrl`, `enabled`) and stub only `recordSessionLink`.
+- Each test overrides `recordSessionLink` per-scenario via
+  `vi.mocked(...).mockImplementation`/`mockResolvedValue`/
+  `mockRejectedValue` — matches upstream `eb7b4896b`'s intent (fixtures
+  scoped to a single test), adapted from Bun's `spyOn` to Vitest.
+- Covers: unsupported client, invalid URL, missing session, happy
+  path, worktree mismatch, storage error, and the `enabled()` /
+  `parsePrUrl` helpers directly.
+
+## Issues encountered
+
+- **No existing `link_pr` tool or `pr-link` module in Alexi.** The
+  upstream commits target the kilocode/opencode monorepo (Effect-TS,
+  Bun, Effect Schema); Alexi is a single-package Node/vitest/Zod
+  project. Ported the concepts to Alexi's conventions per the update
+  plan's explicit note ("Alexi's equivalent path"). Every behaviour in
+  the upstream commits is preserved semantically.
+- **Client-flag mechanism.** Alexi has no `Flag.KILO_CLIENT` service.
+  Chose `process.env.ALEXI_CLIENT` (default `"cli"`) to match Alexi's
+  existing `ALEXI_*` env-var convention (see `src/tool/tools/grep.ts`
+  `ALEXI_DISABLE_RG`, `src/tool/tools/shell.ts` `ALEXI_SANDBOX`, etc.).
+  Callers embedding Alexi as a library set `ALEXI_CLIENT=vscode` (or
+  anything non-`cli`) to opt out.
+- **Session storage location.** Reused `~/.alexi/sessions/<sessionId>/`
+  to mirror `core/snapshot.ts` — no new config knob introduced.
+- **ESLint / conventions.** Used `.js` import extensions everywhere,
+  `logger` (not `console`) for warnings, exported types via
+  `interface`, and matched the strict Prettier config (single quotes,
+  100-col wrap).
+
+## Verification checklist
+
+- [ ] `npm run typecheck` — new files compile under strict TS
+- [ ] `npm run lint` — passes ESLint (no `no-console` violations, `.js`
+      imports present, unused vars prefixed `_`)
+- [ ] `npm run format:check` — Prettier clean
+- [ ] `npm test -- link-pr` — new tests pass
+- [ ] Existing tools still register (no regression in
+      `builtInTools` order for tools other than the new `link_pr`).

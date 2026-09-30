@@ -2,7 +2,7 @@
 
 This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, compaction settings, hooks, and instruction files.
 
-> **Version:** applies to Alexi `1.22.31` and later. The 2026-09-27 upstream sync (commit `d3b6b912`, `1.22.30` → `1.22.31`) was a low-touch tracking bump that touched only `.github/last-sync-commits.json` and `package.json` — no configuration surface (environment variable, user-config key, routing schema, compaction schema, hook event, or session-storage layout) was added, removed, or renamed. If you are reading this document to diagnose a `1.22.30` → `1.22.31` behaviour change: there isn't one. Every key documented here reads the same on either version. See [CHANGELOG.md — `[Unreleased]`](../CHANGELOG.md#unreleased) for the paired sync-tracking entry.
+> **Version:** applies to Alexi `1.22.34` and later. The 2026-09-30 upstream sync (commit `f10eef53`, `1.22.33` → `1.22.34`) ported the per-session `link_pr` tool from kilocode and introduced ONE new configuration surface: the `ALEXI_CLIENT` environment variable, which gates the tool at registration time and again inside its runtime. See [`ALEXI_CLIENT`](#alexi_client) for the contract and [Session PR-Link Storage](#session-pr-link-storage) for the on-disk layout. Every other key documented here is unchanged from `1.22.33`.
 
 ## Table of Contents
 
@@ -14,6 +14,7 @@ This document describes all configuration options available in Alexi, including 
 - [Instruction Files](#instruction-files)
 - [Project Context](#project-context)
 - [Session Storage](#session-storage)
+  - [Session PR-Link Storage](#session-pr-link-storage)
   - [Session Retention Policy](#session-retention-policy)
 - [Configuration Examples](#configuration-examples)
 
@@ -285,6 +286,42 @@ Read-only git subcommands (`log`, `status`, `diff`, `show`, `ls-files`,
 `rev-parse`, …) are NOT escalated — only write-shaped subcommands such as
 `add`, `commit`, `push`, `checkout`, `config`, `stash`, `merge`, `rebase`,
 `reset`, `restore`, `revert`, `rm`, `submodule`, `switch`, `tag`, `worktree`.
+
+#### ALEXI_CLIENT
+
+Introduced in `1.22.34` (2026-09-30, commit `f10eef53`). Identifies the
+host that embeds Alexi so features whose persistence semantics only make
+sense on the CLI (currently the `link_pr` tool and its
+`~/.alexi/sessions/<sessionId>/pr-link.json` storage) can gate themselves
+at registration time.
+
+- **CLI runs (default).** The CLI entrypoint sets `ALEXI_CLIENT=cli`, and
+  `enabled()` in `src/session/pr-link.ts` also treats an unset value as
+  `cli` — a fresh clone / `npm run dev` invocation therefore sees the
+  full tool surface without any environment configuration.
+- **Embedded hosts (SAP BAS extension, VS Code webview, generic
+  library).** Set `ALEXI_CLIENT` to any non-`cli` value before importing
+  `src/tool/tools/index.ts`. `link_pr` is omitted from `builtInTools`
+  entirely, and any direct call to the tool object returns
+  `{ ok: false, reason: 'unsupported_client' }` without touching the
+  filesystem.
+
+```bash
+# Explicit CLI signal (default; usually unnecessary)
+export ALEXI_CLIENT=cli
+
+# Non-CLI embedded host — the link_pr tool is hidden from the model
+export ALEXI_CLIENT=vscode
+```
+
+The comparison is case-insensitive (`vscode`, `VSCODE`, `VSCode` all
+resolve to non-CLI). The check runs ONCE at module load — Alexi does not
+hot-reload tool registrations mid-turn — so callers embedding Alexi as a
+library MUST set the variable BEFORE importing the tool registry.
+
+See [Session PR-Link Storage](#session-pr-link-storage) for the on-disk
+layout and [docs/TESTING.md — Testing the `link_pr` Tool](TESTING.md#testing-the-link_pr-tool)
+for the fixture pattern used to exercise the gate under Vitest.
 
 ## User Configuration
 
@@ -1195,6 +1232,76 @@ Reconciliation rules (`resolveSessionModelPreference`):
 4. Fresh effort update (only `reasoningEffort` set) merges into an explicit choice without swapping the model.
 
 Legacy records (persisted before the `source` field existed) are migrated by treating a missing `source` as `"user-explicit"` — the conservative choice. The alternative (`"default"`) would silently downgrade a user's saved model on the next config reload. See [ARCHITECTURE.md — Session Model Preference Reconciliation](ARCHITECTURE.md#session-model-preference-reconciliation-srccoremodelpreferencets) for the design and [API.md — Session Model Preference API](API.md#session-model-preference-api-srccoremodelpreferencets) for the programmatic surface.
+
+### Session PR-Link Storage
+
+Introduced in `1.22.34` (2026-09-30, ports upstream kilocode `9cc0a9158` /
+`56ab1e502` / `154a8427c` / `9076f0301`). The `link_pr` tool binds a pull-request
+URL to the ACTIVE session and persists it at:
+
+```
+~/.alexi/sessions/<sessionId>/pr-link.json
+```
+
+On-disk shape (`SessionPrLink` in `src/session/pr-link.ts`):
+
+```json
+{
+  "link": {
+    "host": "github.com",
+    "owner": "owner",
+    "repo": "repo",
+    "number": 42,
+    "url": "https://github.com/owner/repo/pull/42"
+  },
+  "evidence": "user"
+}
+```
+
+Semantics and guarantees:
+
+- **Per-session, never per-worktree.** The scoping key is the session id, not
+  the checkout directory. Two Alexi sessions on the same worktree do NOT inherit
+  each other's PR link — an explicit link from one session cannot fan out to a
+  sibling session, satisfying SAP tenant isolation.
+- **CLI-only.** Persistence is gated by [`ALEXI_CLIENT`](#alexi_client). On
+  non-CLI backends the `link_pr` tool is omitted from the registry entirely and
+  never records anything.
+- **Worktree evidence check.** Before recording, `recordSessionLink` reads the
+  worktree's `.git/config` (prefers `[remote "origin"]`, falls back to the first
+  remote block) and refuses links whose host/owner/repo do not match. A link to
+  a fork or an unrelated repository is refused with `worktree_mismatch`; a
+  missing / unreadable git config is treated the same as "does not match" and
+  refused. The check is dependency-free (no `simple-git`) so the module can run
+  in hot paths without adding startup latency.
+- **Evidence provenance.** The `evidence` tag records how the link was captured:
+  `user` (an explicit `link_pr` tool call from the model), `auto` (heuristic
+  detection from the current branch), or `poller` (a background reconciliation
+  loop). Future code may use this to decide whether a lower-confidence source
+  is allowed to overwrite a higher-confidence one; the current implementation
+  always writes with the evidence supplied by the caller.
+- **Deletion.** The file is removed when the session directory itself is
+  deleted (via `alexi session-delete <id>` or the retention runner). There is
+  no separate PR-unlink command yet; ports of upstream `kilo pr unlink` will
+  land in a future sync.
+- **Zero network I/O.** The module never contacts the PR host — all validation
+  is local (URL shape, git config, filesystem write). Safe for tenants that
+  restrict outbound calls.
+
+Read the currently persisted link programmatically:
+
+```typescript
+import { readSessionLink } from './session/pr-link.js';
+
+const record = await readSessionLink(sessionId);
+if (record) {
+  console.log(`Session ${sessionId} → ${record.link.owner}/${record.link.repo}#${record.link.number}`);
+}
+```
+
+See [docs/CONTRIBUTING.md — Testing Guidelines](CONTRIBUTING.md#testing-guidelines)
+for the mocking pattern used to exercise this surface without touching the real
+filesystem.
 
 ### Session Retention Policy
 
