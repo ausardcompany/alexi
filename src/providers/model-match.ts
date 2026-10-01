@@ -81,6 +81,73 @@ export function isClaude(modelId: string): boolean {
 }
 
 /**
+ * Claude family → documented max output token caps.
+ *
+ * Ports kilocode commits `f05a4fdc3` ("fix(cli): request full output
+ * limit for Claude") and `c3f1e509e` ("fix(cli): use Claude family for
+ * output token limits"). The upstream bug: Claude deployments were
+ * under-provisioned on `max_tokens` so long completions got truncated
+ * well before the model's documented ceiling. The fix is to detect the
+ * Claude FAMILY (not just the exact model id) via substring regex and
+ * pick the documented maximum.
+ *
+ * Values are the published Anthropic output caps as of 2026-04:
+ *   - Claude 3.7 Sonnet / Claude 4.x (sonnet, opus): 64 KB
+ *   - Claude 3.5 Sonnet / 3.5 Haiku:                  8 KB
+ *   - Claude 3 Opus:                                  4 KB
+ *   - Claude 3 Sonnet / 3 Haiku:                      4 KB
+ *
+ * Order matters — more specific patterns MUST come first so
+ * `claude-3-5-sonnet` is matched before `claude-3-sonnet`.
+ *
+ * Keep this list aligned with Anthropic's published limits. The SAP
+ * AI Core naming convention uses double-dash form
+ * (`anthropic--claude-4.5-opus`), which is also matched here because
+ * the regex is applied with `i` and no anchors.
+ */
+const CLAUDE_FAMILY_OUTPUT_LIMITS: ReadonlyArray<readonly [RegExp, number]> = [
+  // Claude 4.x family (opus 4.1+, sonnet 4+) and 3.7 — 64K output.
+  // Handles both bare Anthropic (`claude-opus-4-5`) and SAP double-dash
+  // (`anthropic--claude-4.5-opus`, `anthropic--claude-4.5-sonnet`).
+  [/claude-(?:3-?7|opus-4|sonnet-4|4\.\d+-(?:opus|sonnet))/i, 64_000],
+  // Claude 3.5 family — 8K output.
+  [/claude-3[-.]5-(?:sonnet|haiku)/i, 8_192],
+  // Claude 3 Opus — 4K output (same as other Claude 3 variants).
+  [/claude-3-opus/i, 4_096],
+  // Claude 3 Sonnet / Haiku — 4K output.
+  [/claude-3-(?:sonnet|haiku)/i, 4_096],
+];
+
+/**
+ * Default output cap for unrecognised Claude variants. Request a safe
+ * high value (8K) rather than the historical 4K default so new SAP AI
+ * Core Claude deployments do not silently truncate.
+ */
+const CLAUDE_DEFAULT_OUTPUT_LIMIT = 8_192;
+
+/**
+ * Return the documented max output tokens for a Claude family model, or
+ * `undefined` for non-Claude models. Callers combine this with an
+ * explicit caller-supplied `maxTokens` (which still wins when present).
+ *
+ * @example
+ *   claudeFamilyMaxOutputTokens('anthropic--claude-4.5-opus') // => 64000
+ *   claudeFamilyMaxOutputTokens('anthropic--claude-3.5-sonnet') // => 8192
+ *   claudeFamilyMaxOutputTokens('gpt-4o') // => undefined
+ */
+export function claudeFamilyMaxOutputTokens(modelId: string): number | undefined {
+  if (!isClaude(modelId)) {
+    return undefined;
+  }
+  for (const [pattern, limit] of CLAUDE_FAMILY_OUTPUT_LIMITS) {
+    if (pattern.test(modelId)) {
+      return limit;
+    }
+  }
+  return CLAUDE_DEFAULT_OUTPUT_LIMIT;
+}
+
+/**
  * Known Anthropic model ids that Alexi's router recognizes explicitly.
  *
  * This catalog is used by `isAnthropicModel` for fast, unambiguous matching

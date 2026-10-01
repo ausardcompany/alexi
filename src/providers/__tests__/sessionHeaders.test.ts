@@ -54,6 +54,11 @@ describe('provider request headers survive session-header merge', () => {
     expect(merged['x-session-affinity']).toBe('sess-abc');
     expect(merged['X-Interaction-Id']).toBe('sess-abc');
     expect(merged['x-parent-session-id']).toBe('parent-xyz');
+    // Namespaced identity headers (opencode #52370) — emitted alongside
+    // the legacy headers so multi-tenant SAP AI Core gateways can
+    // disambiguate session identity without header-name collisions.
+    expect(merged['x-alexi-session-id']).toBe('sess-abc');
+    expect(merged['x-alexi-parent-session-id']).toBe('parent-xyz');
     expect(merged['x-alexi-agent-id']).toBe('code');
     expect(merged['x-alexi-parent-agent-id']).toBe('orchestrator');
   });
@@ -82,10 +87,14 @@ describe('provider request headers survive session-header merge', () => {
     // empty header value, which SAP AI Core may reject).
     const headers = buildSessionHeaders('sess-1');
     expect(headers['x-session-affinity']).toBe('sess-1');
+    // Namespaced identity header (opencode #52370): emitted whenever a
+    // session id is present, even without a parent / agent.
+    expect(headers['x-alexi-session-id']).toBe('sess-1');
     // X-Interaction-Id (opencode #47215) rides on every request that
     // has a session id, purely additive for tracing.
     expect(headers['X-Interaction-Id']).toBe('sess-1');
     expect(headers['x-parent-session-id']).toBeUndefined();
+    expect(headers['x-alexi-parent-session-id']).toBeUndefined();
     expect(headers['x-alexi-agent-id']).toBeUndefined();
     expect(headers['x-alexi-parent-agent-id']).toBeUndefined();
   });
@@ -97,6 +106,8 @@ describe('provider request headers survive session-header merge', () => {
     const merged = mergeSessionHeaders({ Authorization: 'Bearer x' }, { sessionID: 'sess-42' });
     expect(merged['X-Interaction-Id']).toBe('sess-42');
     expect(merged['x-session-affinity']).toBe('sess-42');
+    // Namespaced identity (opencode #52370) is emitted alongside.
+    expect(merged['x-alexi-session-id']).toBe('sess-42');
     // Non-session headers still survive.
     expect(merged['Authorization']).toBe('Bearer x');
   });
