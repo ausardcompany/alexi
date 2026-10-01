@@ -10,6 +10,21 @@ export interface SessionHeaders {
   'x-alexi-agent-id'?: string;
   'x-alexi-parent-agent-id'?: string;
   /**
+   * Namespaced identity header (preferred by SAP AI Core gateway and
+   * downstream proxies / tenants). Ports upstream opencode PR #52370
+   * which introduced namespaced `x-<product>-session-id` headers so
+   * multi-tenant gateways can disambiguate session identity without
+   * header-name collisions. Emitted ALONGSIDE the legacy
+   * `x-session-affinity` for backward compatibility with existing
+   * observability / routing infra.
+   */
+  'x-alexi-session-id'?: string;
+  /**
+   * Namespaced parent-session header companion to `x-alexi-session-id`
+   * (opencode #52370). Only emitted when a parent session id is known.
+   */
+  'x-alexi-parent-session-id'?: string;
+  /**
    * Session-scoped request correlation header. Ports the opencode
    * `X-Interaction-Id: <sessionID>` pattern (upstream feature #47215):
    * useful for SAP AI Core telemetry / distributed-tracing so a request
@@ -44,6 +59,12 @@ export function buildSessionHeaders(
   parentAgentId?: string
 ): SessionHeaders {
   const headers: SessionHeaders = {
+    // Namespaced identity header (preferred by SAP AI Core gateway;
+    // opencode PR #52370). Multi-tenant proxies disambiguate on this.
+    'x-alexi-session-id': sessionID,
+    // Legacy affinity header retained for backward compatibility with
+    // existing observability / routing infrastructure that keys off
+    // `x-session-affinity`.
     'x-session-affinity': sessionID,
     // Correlation header — always emitted alongside `x-session-affinity`
     // because the two carry the same value but different semantics
@@ -54,6 +75,8 @@ export function buildSessionHeaders(
   };
 
   if (parentSessionID) {
+    // Namespaced parent header (opencode #52370) + legacy variant.
+    headers['x-alexi-parent-session-id'] = parentSessionID;
     headers['x-parent-session-id'] = parentSessionID;
   }
 

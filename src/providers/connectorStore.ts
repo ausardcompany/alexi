@@ -444,6 +444,16 @@ export async function saveConnectorState(state: Record<string, ConnectorState>):
  * failures are swallowed so a single bad entry cannot block
  * hydration of the rest.
  *
+ * Resilience note (ports kilocode fix 1988e54fd — "keep storage
+ * usable after an interrupted first access"): the `hydrated` flag
+ * is only set AFTER the load+merge completes without throwing. If
+ * the first call is cancelled or `loadConnectorState` throws
+ * synchronously (e.g. a signal fires mid-startup), subsequent calls
+ * can retry hydration instead of inheriting a half-initialised state
+ * forever. The old behaviour set the flag before the await, which
+ * meant one bad startup permanently poisoned token recovery for the
+ * remainder of the process.
+ *
  * Callers should invoke this once during startup (e.g. from the
  * provider bootstrap path in `sapOrchestration.ts`) so the first
  * refresh check finds the persisted refresh token.
@@ -452,12 +462,12 @@ export async function initializeConnectorStore(options?: { now?: () => number })
   if (currentStoreHydrated) {
     return;
   }
-  currentStoreHydrated = true;
 
   let snapshot: Record<string, ConnectorState>;
   try {
     snapshot = await loadConnectorState(options);
   } catch {
+    // Do NOT mark hydrated — a failed load should allow a later retry.
     return;
   }
 
@@ -483,4 +493,9 @@ export async function initializeConnectorStore(options?: { now?: () => number })
       // Skip this entry and keep going.
     }
   }
+
+  // Mark hydrated only after the full load+merge completed. See the
+  // kilocode 1988e54fd "retry after interrupted first access" note at
+  // the top of this function.
+  currentStoreHydrated = true;
 }
