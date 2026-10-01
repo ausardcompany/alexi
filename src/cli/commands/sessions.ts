@@ -9,6 +9,7 @@ import {
   formatBytes,
   type RetentionPolicy,
 } from '../../core/sessionRetention.js';
+import { formatWakeTime } from '../../utils/wakeTime.js';
 
 /**
  * JSON output shape for `alexi sessions --json` (public contract):
@@ -19,7 +20,9 @@ import {
  *     updatedAt: number,   // unix epoch milliseconds
  *     messageCount: number,
  *     totalTokens: number,
- *     workdir: string | null
+ *     workdir: string | null,
+ *     scheduledWakeTime: number | null  // ms-since-epoch, when a wakeup
+ *                                       // will resume the session (#1901)
  *   }
  */
 export function registerSessionCommands(program: Command): void {
@@ -28,7 +31,7 @@ export function registerSessionCommands(program: Command): void {
     .command('sessions')
     .description(
       'List all saved sessions. Use --json to emit a stable JSON array ' +
-        '({ id, title, model, updatedAt, messageCount, totalTokens, workdir }) for scripting. ' +
+        '({ id, title, model, updatedAt, messageCount, totalTokens, workdir, scheduledWakeTime }) for scripting. ' +
         'Use --here to filter to sessions created in the current directory, ' +
         '--workdir <dir> to filter to a specific directory, or --all (default) ' +
         'to list every saved session including legacy ones with no recorded workdir. ' +
@@ -121,6 +124,7 @@ export function registerSessionCommands(program: Command): void {
               messageCount: s.messageCount,
               totalTokens: s.totalTokens,
               workdir: s.workdir ?? null,
+              scheduledWakeTime: s.scheduledWakeTime ?? null,
               ...('score' in s && typeof s.score === 'number' ? { score: s.score } : {}),
               ...('snippet' in s && typeof s.snippet === 'string' ? { snippet: s.snippet } : {}),
             }));
@@ -143,6 +147,14 @@ export function registerSessionCommands(program: Command): void {
             console.log(`  Messages: ${session.messageCount}, Tokens: ${session.totalTokens}`);
             console.log(`  Model: ${session.modelId || 'N/A'}`);
             console.log(`  Workdir: ${session.workdir || 'N/A'}`);
+            // Issue #1901: surface the scheduled wake time for paused
+            // sessions so operators can see when a wakeup will land
+            // without inspecting `~/.alexi/wakeups/` by hand. Skipped
+            // when the session has no pending wakeup.
+            const wake = formatWakeTime(session.scheduledWakeTime);
+            if (wake) {
+              console.log(`  Wake: ${wake}`);
+            }
             if ('score' in session && typeof session.score === 'number') {
               console.log(`  Score: ${session.score.toFixed(3)}`);
             }
@@ -207,6 +219,7 @@ export function registerSessionCommands(program: Command): void {
               messageCount: s.messageCount,
               totalTokens: s.totalTokens,
               workdir: s.workdir ?? null,
+              scheduledWakeTime: s.scheduledWakeTime ?? null,
               ...('score' in s && typeof s.score === 'number' ? { score: s.score } : {}),
               ...('snippet' in s && typeof s.snippet === 'string' ? { snippet: s.snippet } : {}),
             }));
@@ -229,6 +242,13 @@ export function registerSessionCommands(program: Command): void {
             console.log(`  Messages: ${session.messageCount}, Tokens: ${session.totalTokens}`);
             console.log(`  Model: ${session.modelId || 'N/A'}`);
             console.log(`  Workdir: ${session.workdir || 'N/A'}`);
+            // Issue #1901: surface the scheduled wake time for paused
+            // sessions so operators can see when a wakeup will land
+            // without inspecting `~/.alexi/wakeups/` by hand.
+            const wake = formatWakeTime(session.scheduledWakeTime);
+            if (wake) {
+              console.log(`  Wake: ${wake}`);
+            }
             if ('score' in session && typeof session.score === 'number') {
               console.log(`  Score: ${session.score.toFixed(3)}`);
             }

@@ -96,6 +96,7 @@ describe('alexi sessions command', () => {
         messageCount: 7,
         totalTokens: 1234,
         workdir: '/repo/alexi',
+        scheduledWakeTime: null,
       });
 
       // Second session exercises the null fallbacks for title, model, and workdir.
@@ -107,6 +108,7 @@ describe('alexi sessions command', () => {
         messageCount: 0,
         totalTokens: 0,
         workdir: null,
+        scheduledWakeTime: null,
       });
 
       // Each entry must have exactly the documented set of keys.
@@ -118,6 +120,7 @@ describe('alexi sessions command', () => {
         'messageCount',
         'totalTokens',
         'workdir',
+        'scheduledWakeTime',
       ];
       for (const entry of arr) {
         expect(Object.keys(entry).sort()).toEqual([...expectedKeys].sort());

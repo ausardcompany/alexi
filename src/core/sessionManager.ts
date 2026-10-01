@@ -129,6 +129,22 @@ export interface SessionMetadata {
    * retention runners fall back to `updated` in that case.
    */
   lastAccessedAt?: number;
+  /**
+   * Wall-clock timestamp (milliseconds since epoch) at which the
+   * session is scheduled to resume after a pending wakeup. Populated by
+   * the `schedule_wakeup` tool when it enqueues a wakeup entry so that
+   * CLI (`alexi sessions`) and TUI (`SessionList`) surfaces can tell the
+   * user when a paused agent will come back on its own.
+   *
+   * Cleared by `schedule_wakeup`'s matching cancel path and by the
+   * wakeup runner once the entry fires, so a surfaced value always
+   * reflects a still-pending resume. Legacy sessions and sessions that
+   * never scheduled a wakeup serialise this field as absent, keeping
+   * the on-disk shape backwards-compatible.
+   *
+   * See issue #1901.
+   */
+  scheduledWakeTime?: number;
 }
 
 export interface Session {
@@ -712,6 +728,70 @@ export class SessionManager {
   persistActiveSession(): void {
     if (this.activeSession) {
       this.saveSession(this.activeSession);
+    }
+  }
+
+  /**
+   * Stamp (or clear) the scheduled wake time for a session.
+   *
+   * When `atMs` is a positive finite number the field is set to that
+   * timestamp; when `null` the field is cleared (used by the wakeup
+   * cancel path and the fire-time runner). Prefers the in-memory
+   * active session when its id matches so a subsequent `saveSession`
+   * from the normal transcript path cannot overwrite the field;
+   * otherwise loads the session from disk, mutates the metadata, and
+   * writes it back.
+   *
+   * Returns `true` when the session was found and updated. Non-fatal
+   * on failure — the wakeup is independently persisted in
+   * `~/.alexi/wakeups/` and the visibility surface simply degrades to
+   * "no scheduled wake time shown".
+   *
+   * See issue #1901.
+   */
+  setScheduledWakeTime(sessionId: string, atMs: number | null): boolean {
+    const sanitized =
+      atMs === null || atMs === undefined || !Number.isFinite(atMs) || atMs <= 0
+        ? undefined
+        : Math.floor(atMs);
+
+    // Prefer the in-memory session so a concurrent `saveSession` from
+    // the regular transcript path (`addMessage`) cannot clobber the
+    // field we just wrote.
+    if (this.activeSession && this.activeSession.metadata.id === sessionId) {
+      if (sanitized === undefined) {
+        delete this.activeSession.metadata.scheduledWakeTime;
+      } else {
+        this.activeSession.metadata.scheduledWakeTime = sanitized;
+      }
+      this.saveSession(this.activeSession);
+      return true;
+    }
+
+    const sessionPath = path.join(this.sessionsDir, `${sessionId}.json`);
+    try {
+      if (!fs.existsSync(sessionPath)) {
+        return false;
+      }
+      const raw = fs.readFileSync(sessionPath, 'utf-8');
+      const parsed = JSON.parse(raw) as Session;
+      if (sanitized === undefined) {
+        delete parsed.metadata.scheduledWakeTime;
+      } else {
+        parsed.metadata.scheduledWakeTime = sanitized;
+      }
+      // Preserve the on-disk shape by writing through `saveSession`'s
+      // sibling path (we intentionally do NOT refresh `lastAccessedAt`
+      // here: scheduling a future wakeup is a metadata annotation, not
+      // a user-facing session access).
+      fs.writeFileSync(sessionPath, JSON.stringify(parsed, null, 2), 'utf-8');
+      return true;
+    } catch (error) {
+      logger.warn('[sessionManager] failed to stamp scheduledWakeTime', {
+        sessionId,
+        err: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     }
   }
 

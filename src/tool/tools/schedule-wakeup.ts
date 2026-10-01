@@ -81,6 +81,23 @@ To cancel a pending wakeup, call 'cancel_wakeup' with the returned wakeupID.`,
         reason: params.reason,
         payload: params.payload,
       });
+      // Alexi_change (issue #1901): stamp the scheduled wake time on the
+      // session metadata so CLI (`alexi sessions`) and TUI
+      // (`SessionList`) surfaces can show the user when a paused agent
+      // will come back. Best-effort — a missing session manager (unit
+      // tests, one-shot invocations) or a write failure degrades to the
+      // previous behaviour (no wake-time banner) rather than failing
+      // the wakeup, which is independently persisted in the wakeup
+      // store.
+      try {
+        const atMs = Date.parse(entry.at);
+        if (Number.isFinite(atMs)) {
+          context.sessionManager?.setScheduledWakeTime(context.sessionId, atMs);
+        }
+      } catch {
+        // Non-fatal — surfacing stamping errors would obscure the
+        // successful wakeup result.
+      }
       return {
         success: true,
         data: { wakeupID: entry.id, at: entry.at },

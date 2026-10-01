@@ -158,4 +158,39 @@ describe('SessionList', () => {
     expect(frame).toContain('Sessions');
     expect(frame).toContain('[New Session]');
   });
+
+  // Issue #1901: paused sessions should show their scheduled wake
+  // time inline so the operator does not need to leave the TUI.
+  it('renders the scheduled wake time for paused sessions', () => {
+    const paused: SessionSummary[] = [
+      {
+        id: 'session-paused',
+        name: 'Paused',
+        createdAt: now - 60_000,
+        messageCount: 3,
+        // Far enough in the future to land in the relative branch
+        // (<24h horizon) so the label is predictable.
+        scheduledWakeTime: Date.now() + 2 * 60 * 60 * 1000,
+      },
+    ];
+    const { lastFrame } = render(
+      <Wrapper>
+        <SessionList sessions={paused} activeSessionId="other" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('resumes in');
+    expect(frame).toContain('Paused');
+  });
+
+  it('omits the wake-time label on sessions without a schedule', () => {
+    const { lastFrame } = render(
+      <Wrapper>
+        <SessionList sessions={sampleSessions} activeSessionId="session-aaa" />
+      </Wrapper>
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('resumes in');
+    expect(frame).not.toContain('wakes at');
+  });
 });
