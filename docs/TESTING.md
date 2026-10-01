@@ -1331,6 +1331,148 @@ cases) exercises `enabled()` across three `ALEXI_CLIENT` states (`cli`,
 GitHub, GitLab, non-URL, and issue-URL inputs. Follow the same
 snapshot/restore discipline for `ALEXI_CLIENT` in that block.
 
+### Testing Connector Store Hydration Resilience
+
+Reference regression suite: `src/providers/__tests__/connectorStore.resilience.test.ts` (127 lines, 2 cases). Ports kilocode fix `1988e54fd` ("keep storage usable after an interrupted first access"). The suite pins the invariant that `initializeConnectorStore` can be retried after a transient first-access failure instead of permanently inheriting a half-initialised state.
+
+The pattern uses the real filesystem to drive two attempts because the production code reads from `getConnectorStatePath()`:
+
+```typescript
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryConnectorStore,
+  getConnectorStore,
+  initializeConnectorStore,
+  resetConnectorStatePath,
+  setConnectorStatePath,
+  setConnectorStore,
+} from '../connectorStore.js';
+
+describe('initializeConnectorStore resilience', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-connector-'));
+    // Reset the store so `currentStoreHydrated` is false.
+    setConnectorStore(createInMemoryConnectorStore());
+  });
+
+  afterEach(() => {
+    resetConnectorStatePath();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('does not mark hydrated when loadConnectorState throws, allowing retry', async () => {
+    // Point the state path at a directory to force `loadConnectorState`
+    // to throw (reading a dir as a file errors on most platforms).
+    const asDir = path.join(tmpDir, 'as-dir');
+    fs.mkdirSync(asDir);
+    setConnectorStatePath(asDir);
+    await initializeConnectorStore();
+    expect(await getConnectorStore().get('sap-ai-core')).toBeUndefined();
+
+    // Now point at a valid snapshot and retry WITHOUT swapping stores.
+    // Pre-fix: the hydrated flag was set early, so this would be a no-op.
+    // Post-fix: hydration actually runs.
+    const populated = path.join(tmpDir, 'populated.json');
+    fs.writeFileSync(
+      populated,
+      JSON.stringify({
+        version: 1,
+        connectors: { 'sap-ai-core': { refreshToken: 'retry-token' } },
+      }),
+      { mode: 0o600 }
+    );
+    setConnectorStatePath(populated);
+    await initializeConnectorStore();
+
+    const entry = await getConnectorStore().get('sap-ai-core');
+    expect(entry?.refreshToken).toBe('retry-token');
+  });
+});
+```
+
+Key coverage points for anyone extending this suite:
+
+1. **Use `fs.mkdtempSync` for test isolation.** The state file lives on real disk and `initializeConnectorStore` reads it via the pointer configured by `setConnectorStatePath`. Each test owns a fresh temp directory and tears it down in `afterEach` via `fs.rmSync(tmpDir, { recursive: true, force: true })`.
+2. **Reset the store in `beforeEach`.** The module-scoped `currentStoreHydrated` flag persists across tests. `setConnectorStore(createInMemoryConnectorStore())` restores a fresh in-memory store so the hydrated flag starts at `false`.
+3. **Always call `resetConnectorStatePath` in `afterEach`.** Otherwise a later test in the same file would inherit the path override and read from a now-deleted temp directory.
+4. **The "point at a directory" trick forces a thrown load.** Reading a directory as a file errors on most platforms with `EISDIR`. The suite leverages this to simulate `loadConnectorState` throwing without needing to mock the `fs` module. After the throw, the second attempt against a valid snapshot MUST succeed — the regression this guards is the pre-fix behaviour where the hydrated flag flipped before the `await` and poisoned the retry.
+5. **Write snapshots with `mode: 0o600`.** This mirrors the production write path (`saveConnectorState`) and keeps the fixture realistic — a snapshot written with permissive permissions would surface a different bug class and should not be used here.
+
+### Testing Claude Family Output Token Limits
+
+Reference regression suite: `src/providers/__tests__/model-match.test.ts` (`describe('claudeFamilyMaxOutputTokens')`, 50 lines added, 7 cases). Ports kilocode fixes `f05a4fdc3` + `c3f1e509e`. The suite locks the family → cap mapping so a future regression that resets `max_tokens` to the historical 4096 default on Claude deployments trips immediately.
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { claudeFamilyMaxOutputTokens } from '../model-match.js';
+
+describe('claudeFamilyMaxOutputTokens', () => {
+  it('returns 64K for Claude 4.x opus and sonnet (SAP double-dash)', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.7-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-sonnet')).toBe(64_000);
+  });
+
+  it('returns 8K for Claude 3.5 variants', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-3.5-sonnet')).toBe(8_192);
+    expect(claudeFamilyMaxOutputTokens('claude-3-5-sonnet')).toBe(8_192);
+  });
+
+  it('returns 4K for Claude 3 opus / sonnet / haiku', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-3-opus')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-sonnet')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-haiku')).toBe(4_096);
+  });
+
+  it('falls back to a safe 8K default for unrecognised Claude variants', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-9999-wild')).toBe(8_192);
+  });
+
+  it('returns undefined for non-Claude models', () => {
+    expect(claudeFamilyMaxOutputTokens('gpt-4o')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('gemini-2.5-pro')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('')).toBeUndefined();
+  });
+
+  it('is case-insensitive and matches SAP provider-prefixed form', () => {
+    expect(claudeFamilyMaxOutputTokens('SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('sap-ai-core/anthropic--claude-3.5-sonnet')).toBe(8_192);
+  });
+});
+```
+
+Key coverage points for anyone extending this suite:
+
+1. **Order of patterns matters — pin BOTH `claude-3-5-sonnet` and `claude-3-sonnet`.** The regex table is scanned top-to-bottom and the 3.5 pattern must match before the Claude 3 Sonnet pattern. A rewrite that reorders the table would silently misroute `claude-3-5-sonnet` to the 4096 ceiling; the pair of assertions here forces an immediate failure.
+2. **Case-insensitive and prefix-tolerant.** The helper is applied with `/i` and no anchors so `SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS` resolves identically to the lowercased bare id. Keep at least one upper-case + prefix combination in the suite so a future `toLowerCase()` or anchoring refactor is caught.
+3. **The fallback branch MUST stay at 8192, not 4096.** The unrecognised-Claude case is deliberately NOT the global default — a brand-new SAP AI Core Claude deployment that lands before Alexi's table is updated still gets a safe 8K ceiling instead of silently truncating to 4K. Any PR that drops the fallback to 4096 breaks the test.
+4. **Non-Claude models return `undefined`, NOT a number.** The precedence chain inside `buildModuleConfig` relies on `undefined` to fall through to the next layer. If a future refactor makes the helper return `4096` for non-Claude ids, the fallback layering collapses.
+
+### Testing Namespaced Session Identity Headers
+
+Reference regression suite: `src/providers/__tests__/sessionHeaders.test.ts`. The additive opencode #52370 fields (`x-alexi-session-id`, `x-alexi-parent-session-id`) are checked alongside the existing `x-session-affinity` / `X-Interaction-Id` assertions to guarantee that:
+
+```typescript
+// Namespaced identity headers (opencode #52370) — emitted alongside the
+// legacy headers so multi-tenant SAP AI Core gateways can disambiguate
+// session identity without header-name collisions.
+expect(merged['x-alexi-session-id']).toBe('sess-abc');
+expect(merged['x-alexi-parent-session-id']).toBe('parent-xyz');
+```
+
+The suite covers three states:
+
+1. **Full context** (session id + parent + agent) — all seven headers are emitted together, including both the legacy and namespaced parent / affinity variants.
+2. **Session-only context** — `x-alexi-session-id`, `x-session-affinity`, and `X-Interaction-Id` are emitted; both parent headers (legacy + namespaced) are `undefined`; no empty-string headers that SAP AI Core might reject.
+3. **Merge path** — `mergeSessionHeaders` returns the namespaced identity alongside the legacy affinity and preserves non-session headers (`Authorization`, etc.) untouched.
+
+The additive contract is the test's most important invariant: adding a new identity surface must never remove the legacy one, because existing observability pipelines keyed on `x-session-affinity` must keep working during the rollout window.
+
 ### Testing Bash Tool Shell-Type Reporting
 
 The `bash` tool records the detected shell type on every result via

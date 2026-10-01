@@ -1658,6 +1658,44 @@ sequenceDiagram
 - **Why not extract from `total_tokens`?** `total_tokens` is the billing surface and MUST match what SAP AI Core actually invoiced. Recomputing it locally would drift from the invoice on the first payload where `total_tokens != prompt_tokens + completion_tokens + reasoning`.
 - **Why is `0` preserved but `undefined` returned when the field is missing?** `0` means "the model checked and did not think"; `undefined` means "no data" — collapsing them would erase the difference between a model that opted out of reasoning this turn and a model that does not support reasoning at all.
 
+### Claude Family Output-Token Limits (`claudeFamilyMaxOutputTokens`)
+
+Historically Alexi defaulted every provider request to `max_tokens = 4096` unless the caller passed an explicit override. That default silently truncates long completions on Claude 3.7 and 4.x deployments, whose documented output ceilings are **16× larger** (64K tokens) than the global default. Ports kilocode fixes `f05a4fdc3` ("fix(cli): request full output limit for Claude") and `c3f1e509e` ("fix(cli): use Claude family for output token limits").
+
+Exported from `src/providers/model-match.ts`:
+
+```typescript
+// Returns the documented max output tokens for a Claude family model,
+// or `undefined` for non-Claude models.
+export function claudeFamilyMaxOutputTokens(modelId: string): number | undefined;
+```
+
+Family → cap table (as of 2026-04, Anthropic published limits):
+
+| Claude family                           | Max output tokens |
+| --------------------------------------- | ----------------- |
+| Claude 4.x (opus / sonnet) and 3.7      | 64,000            |
+| Claude 3.5 (sonnet / haiku)             | 8,192             |
+| Claude 3 (opus / sonnet / haiku)        | 4,096             |
+| Unrecognised Claude variants (fallback) | 8,192             |
+
+The helper is **case-insensitive** and matches both the bare Anthropic id form (`claude-opus-4-5`) and the SAP AI Core double-dash form (`anthropic--claude-4.5-opus`), including provider-prefixed variants like `sap-ai-core/anthropic--claude-4.7-opus`.
+
+**Precedence inside `buildModuleConfig` (`src/providers/sapOrchestration.ts`):**
+
+```typescript
+const claudeFamilyCap = claudeFamilyMaxOutputTokens(this.config.modelName);
+const modelParams: Record<string, unknown> = {
+  max_tokens:
+    options?.maxTokens ??      // 1. explicit caller value always wins
+    this.config.maxTokens ??    // 2. provider-level default
+    claudeFamilyCap ??          // 3. documented Claude family cap
+    4096,                       // 4. global fallback (non-Claude)
+};
+```
+
+Non-Claude models (`gpt-4o`, `gemini-2.5-pro`, `deepseek-r1`) continue to use the historical 4096 default — the helper returns `undefined` so the fallback chain reaches the final literal. Only Claude deployments benefit from the raised ceiling; no other provider's behaviour changes.
+
 ### Provider Completion-Token Hard Caps
 
 Some providers routed through the SAP AI Core orchestration API hard-cap `max_completion_tokens` at a value BELOW the model's advertised context window. Alexi's generic normalization step recomputes `max_completion_tokens = contextWindow - promptTokens`, which silently overwrites that cap and causes the provider to reject the request with a 400 at its edge.
@@ -2186,6 +2224,79 @@ Alexi caches SAP AI Core OAuth access tokens between CLI invocations to cut ~500
 ```
 
 The default (`persistAuthTokens: true`) is the right choice for developer workstations. On disk failure (permissions, ENOSPC), the current request still succeeds — only cross-process reuse is lost, which is a soft-fail Alexi accepts silently.
+
+### Connector-Store Hydration Resilience
+
+`initializeConnectorStore` in `src/providers/connectorStore.ts` hydrates the in-memory connector state (refresh token, token endpoint, client id) from `~/.alexi/connector-state.json` once per process. Ports kilocode fix `1988e54fd` ("keep storage usable after an interrupted first access").
+
+**Pre-fix bug**: the `currentStoreHydrated` flag was set **before** the `await loadConnectorState(...)` call. If that first attempt was cancelled or threw (EINTR, a stale lock, a signal fired mid-startup), the flag stayed `true` and every subsequent `initializeConnectorStore` call short-circuited — the persisted refresh token never made it back into memory for the rest of the process lifetime.
+
+**Fix**: the flag is only set **after** the load + merge completes without throwing. On a thrown load, hydration can be retried without a process restart:
+
+```typescript
+export async function initializeConnectorStore(options?: { now?: () => number }): Promise<void> {
+  if (currentStoreHydrated) {
+    return;
+  }
+
+  let snapshot: Record<string, ConnectorState>;
+  try {
+    snapshot = await loadConnectorState(options);
+  } catch {
+    // Do NOT mark hydrated — a failed load should allow a later retry.
+    return;
+  }
+
+  // ... merge snapshot entries into the active store ...
+
+  // Mark hydrated only after the full load+merge completed.
+  currentStoreHydrated = true;
+}
+```
+
+A later retry (triggered either by a fresh store swap or by the orchestrator's bootstrap path reinvoking `initializeConnectorStore`) now re-reads the snapshot instead of inheriting a half-initialised state.
+
+### Model Catalog Connection Invalidation
+
+`refreshModelCatalog` in `src/providers/modelCatalog.ts` guards against stale fetches landing in shared state after a connection change. Ports kilocode fix `9efa2165a` ("invalidate in-flight model fetch on connection change").
+
+**The hazard**: when the user switches SAP AI Core credentials (`AICORE_SERVICE_KEY`, `AICORE_RESOURCE_GROUP`) or runs `alexi login` on a different tenant while a model-list fetch is already in flight, the stale response can resolve **after** the new connection is active and overwrite the fresh catalog with results from the OLD tenant.
+
+**The two-pronged guard**:
+
+1. `_currentFetchController: AbortController` — tied to the current refresh. `invalidateCatalog()` aborts it so the pending fetch cannot complete into shared state.
+2. `_currentConnectionKey: string | null` — captured at fetch start (currently the resource group) and re-checked at every commit site (success path, error path, finally cleanup). If the key changed while awaiting, the response is dropped silently.
+
+```typescript
+// Guard: another connection superseded us while we awaited.
+if (_currentConnectionKey !== connectionKey) {
+  return;
+}
+// Guard: the controller was aborted (invalidateCatalog called).
+if (_currentFetchController?.signal.aborted) {
+  return;
+}
+```
+
+Both guards appear on the success path AND the error path so a stale `catch` cannot record an error against the NEW connection. The `finally` block clears the controller only if it is still the one it opened — a concurrent `invalidateCatalog()` may have swapped a fresh controller in and that one must survive.
+
+### Namespaced Session Identity Headers (`x-alexi-session-id`)
+
+`buildSessionHeaders` in `src/providers/sessionHeaders.ts` now emits namespaced identity headers **alongside** the legacy `x-session-affinity` so multi-tenant SAP AI Core gateways can disambiguate session identity without header-name collisions. Ports opencode PR #52370.
+
+Headers emitted for every provider request that carries a `sessionID`:
+
+| Header                          | Purpose                                                      | Emitted when |
+| ------------------------------- | ------------------------------------------------------------ | ------------ |
+| `x-alexi-session-id`            | Namespaced identity (preferred by SAP AI Core gateway)        | always       |
+| `x-session-affinity`            | Legacy affinity hint (retained for existing observability)    | always       |
+| `X-Interaction-Id`              | Session-scoped trace correlation (opencode #47215)            | always       |
+| `x-alexi-parent-session-id`     | Namespaced parent-session companion                           | parent known |
+| `x-parent-session-id`           | Legacy parent-session header                                   | parent known |
+| `x-alexi-agent-id`              | Agent identity for multi-agent observability                  | agent known  |
+| `x-alexi-parent-agent-id`       | Parent agent identity                                         | parent known |
+
+Servers that do not consume the namespaced form simply ignore the extra headers; the change is purely additive. See [docs/CONFIGURATION.md — Session Headers](./CONFIGURATION.md#session-headers-for-load-balanced-sap-ai-core-deployments) for the operator-facing contract.
 
 ### Auto-CA Harvesting
 

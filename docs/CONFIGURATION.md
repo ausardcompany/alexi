@@ -2,11 +2,12 @@
 
 This document describes all configuration options available in Alexi, including environment variables, user configuration files, routing rules, compaction settings, hooks, and instruction files.
 
-> **Version:** applies to Alexi `1.22.34` and later. The 2026-09-30 upstream sync (commit `f10eef53`, `1.22.33` → `1.22.34`) ported the per-session `link_pr` tool from kilocode and introduced ONE new configuration surface: the `ALEXI_CLIENT` environment variable, which gates the tool at registration time and again inside its runtime. See [`ALEXI_CLIENT`](#alexi_client) for the contract and [Session PR-Link Storage](#session-pr-link-storage) for the on-disk layout. Every other key documented here is unchanged from `1.22.33`.
+> **Version:** applies to Alexi `1.22.35` and later. The 2026-10-01 upstream sync (commit `7905c70f`, `1.22.33` → `1.22.35`) added two additive surfaces that do NOT require operator action: (1) namespaced `x-alexi-session-id` / `x-alexi-parent-session-id` identity headers emitted alongside the legacy `x-session-affinity` (see [Session Headers](#session-headers-for-load-balanced-sap-ai-core-deployments)); and (2) a resource-group-scoped guard on the in-flight model-catalog fetch so a mid-flight `alexi login` on a different tenant can never clobber the fresh catalog with stale results. No existing config key changed semantics. The earlier 2026-09-30 sync (commit `f10eef53`, `1.22.33` → `1.22.34`) ported the per-session `link_pr` tool from kilocode and introduced the `ALEXI_CLIENT` environment variable, which gates the tool at registration time and again inside its runtime — see [`ALEXI_CLIENT`](#alexi_client) and [Session PR-Link Storage](#session-pr-link-storage).
 
 ## Table of Contents
 
 - [Environment Variables](#environment-variables)
+- [Session Headers for Load-Balanced SAP AI Core Deployments](#session-headers-for-load-balanced-sap-ai-core-deployments)
 - [User Configuration](#user-configuration)
 - [Routing Configuration](#routing-configuration)
 - [Compaction Configuration](#compaction-configuration)
@@ -322,6 +323,24 @@ library MUST set the variable BEFORE importing the tool registry.
 See [Session PR-Link Storage](#session-pr-link-storage) for the on-disk
 layout and [docs/TESTING.md — Testing the `link_pr` Tool](TESTING.md#testing-the-link_pr-tool)
 for the fixture pattern used to exercise the gate under Vitest.
+
+## Session Headers for Load-Balanced SAP AI Core Deployments
+
+Alexi emits a bundle of session-scoped HTTP headers on every provider request so load-balanced SAP AI Core deployments can route a long-running session consistently and so observability pipelines can correlate requests back to the originating Alexi session. These headers are built by `buildSessionHeaders` / `mergeSessionHeaders` in `src/providers/sessionHeaders.ts` and merged into the SDK's base headers at request time — operators do not configure them directly, but they are useful to know about when debugging routing or stitching distributed traces together.
+
+| Header                        | Value               | Semantics                                                                 | Emitted when |
+| ----------------------------- | ------------------- | ------------------------------------------------------------------------- | ------------ |
+| `x-alexi-session-id`          | session id          | Namespaced identity (opencode PR #52370). Preferred by SAP AI Core gateway. | always       |
+| `x-session-affinity`          | session id          | Legacy affinity hint for backward-compatible routing.                     | always       |
+| `X-Interaction-Id`            | session id          | Distributed-tracing correlation key (opencode #47215).                    | always       |
+| `x-alexi-parent-session-id`   | parent session id   | Namespaced parent-session companion.                                      | parent known |
+| `x-parent-session-id`         | parent session id   | Legacy parent-session header.                                             | parent known |
+| `x-alexi-agent-id`            | agent id            | Agent identity for multi-agent observability.                             | agent known  |
+| `x-alexi-parent-agent-id`     | parent agent id     | Parent agent identity.                                                    | parent known |
+
+**Why both namespaced and legacy?** Multi-tenant proxies / gateways prefer `x-alexi-session-id` because the `x-<product>-session-id` naming convention cannot collide with another tenant's own session header. Existing observability pipelines keyed on `x-session-affinity` keep working — the two are emitted together and carry the same value. Servers that do not consume one simply ignore it.
+
+**Opt-out**: there is no runtime toggle — the headers are additive, carry no credential material, and SAP AI Core gateways tolerate unknown headers transparently. Operators who need to strip them before egress should do so at the proxy layer.
 
 ## User Configuration
 
