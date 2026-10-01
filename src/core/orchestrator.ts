@@ -4,6 +4,7 @@ import {
   modelHasCapability,
   type ImageGenerationResult,
 } from '../providers/index.js';
+import { ContentFilterError } from '../providers/sapOrchestration.js';
 import { formatProviderError } from '../providers/format.js';
 import { resolveReasoning, type ReasoningConfig } from '../providers/reasoning.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
@@ -11,6 +12,7 @@ import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
 import { isContextOverflowError, CONTEXT_OVERFLOW_USER_MESSAGE } from './contextOverflow.js';
 import { isRateLimitError } from './error-backoff.js';
+import { Telemetry } from '../utils/telemetry.js';
 import {
   confirmMaxTokensRecovery,
   isMaxTokensError,
@@ -324,6 +326,27 @@ export async function sendChat(
       throw err;
     }
   }
+
+  // Content-filter rejection (issue #1903): when the provider surfaces a
+  // `content-filter` finish reason, the model's content policy blocked
+  // the request. This is a PERMANENT condition — retrying the same
+  // prompt will hit the same filter — so we throw a dedicated
+  // `ContentFilterError` immediately. The error carries the
+  // `content_filter` marker recognised by `ErrorBackoff.isFatal()` so
+  // any outer retry loop (CLI `KILO_RETRIES`, provider-layer
+  // `ErrorBackoff`) stops instead of burning rate-limit budget. A
+  // telemetry event is fired so operators can trace how often the
+  // filter fires.
+  if (result.finishReason === 'content-filter') {
+    Telemetry.track('provider.content_filter', {
+      model: modelId,
+      hasPartialText: typeof result.text === 'string' && result.text.length > 0,
+      promptTokens: result.usage?.prompt_tokens,
+      completionTokens: result.usage?.completion_tokens,
+    });
+    throw new ContentFilterError(modelId, result.text);
+  }
+
   recordRouteOutcome(modelId, { kind: 'success' });
 
   const responseText = result.text;

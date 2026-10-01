@@ -29,6 +29,37 @@ const FREE_TIER_RATE_LIMIT_CODE = 'free_tier_rate_limit';
 const PROVIDER_RATE_LIMIT_CODE = 'provider_rate_limit';
 
 /**
+ * Machine-readable error code for content-filter policy rejections.
+ * Duplicated here (rather than imported from `src/providers/`) for the
+ * same layering reason as the rate-limit codes above.
+ *
+ * Kept in sync with `CONTENT_FILTER_ERROR_CODE` in
+ * `src/providers/sapOrchestration.ts`. See issue #1903.
+ */
+const CONTENT_FILTER_ERROR_CODE = 'content_filter';
+
+/**
+ * Return true when `err` carries the content-filter marker. Matches on
+ * the machine-readable `code` or the class `name` so detection survives
+ * cross-module re-imports (identity `instanceof` checks fail when the
+ * providers module has been loaded twice, e.g. by vitest workers).
+ *
+ * A content-filter rejection is PERMANENT per the AGENTS.md error
+ * contract: the provider's content policy blocked the request, and
+ * retrying the same prompt will hit the same block. See issue #1903.
+ */
+export function isContentFilterError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { code?: unknown; name?: unknown };
+  if (candidate.code === CONTENT_FILTER_ERROR_CODE) {
+    return true;
+  }
+  return candidate.name === 'ContentFilterError';
+}
+
+/**
  * Return true when `err` carries the free-tier rate-limit marker. Matches
  * either the `code` property (set by `FreeTierRateLimitError`) or the
  * class `name` — the latter keeps the check working across module-boundary
@@ -179,7 +210,12 @@ export class ErrorBackoff {
     // it fatal here short-circuits the retry loop and prevents wasted
     // budget on identical follow-up calls. See `FreeTierRateLimitError`
     // in `src/providers/sapOrchestration.ts`.
-    if (isFreeTierRateLimitError(err)) {
+    //
+    // Content-filter rejections (issue #1903) are the second permanent
+    // non-4xx shape: the provider's content policy blocked the request
+    // and no amount of retrying will unblock it. Same fatal flag so the
+    // outer retry loop stops immediately.
+    if (isFreeTierRateLimitError(err) || isContentFilterError(err)) {
       this.fatalNotified = true;
     } else if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
       // Generic 429 is transient per the AGENTS.md error contract: the
@@ -239,15 +275,17 @@ export class ErrorBackoff {
    *
    * Two lookup paths:
    *   1. When `err` is provided, check whether it carries the
-   *      `free_tier_rate_limit` marker (from
-   *      `FreeTierRateLimitError`). This lets callers make a fatal
-   *      decision *without* first calling `recordError` — useful for
-   *      short-circuit checks in tests and CLI error rendering.
+   *      `free_tier_rate_limit` or `content_filter` marker. This lets
+   *      callers make a fatal decision *without* first calling
+   *      `recordError` — useful for short-circuit checks in tests and
+   *      CLI error rendering. Content-filter is treated identically to
+   *      a 4xx validation error (issue #1903): retrying the same prompt
+   *      against the same policy will hit the same block.
    *   2. When `err` is omitted, fall back to the internal
    *      `fatalNotified` flag set by prior `recordError` calls.
    */
   isFatal(err?: unknown): boolean {
-    if (err !== undefined && isFreeTierRateLimitError(err)) {
+    if (err !== undefined && (isFreeTierRateLimitError(err) || isContentFilterError(err))) {
       return true;
     }
     return this.fatalNotified;
