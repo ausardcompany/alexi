@@ -3506,6 +3506,70 @@ Key coverage points for future changes to `worktreeId` handling:
 
 All cases route through `agentManagerTool.executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path and the handler's capability check from permission behaviour. When the managed-worktree registry lands in a future release, the fourth case should be split into a happy-path assertion (successful directory resolution) and a not-found assertion (unknown `worktreeId` still fails loudly).
 
+### Testing `agent_manager` validation error message quality
+
+Introduced 2026-10-02 (`1.22.36`, ports upstream opencode 2026-10 improvement to agent-manager validation messages). The cross-field validator for `worktreeId` now emits a Zod issue whose message carries three pieces of context that an LLM caller needs to self-correct: the received value, the received action, and an explicit remediation sentence. This companion suite locks in the message contract separately from the earlier `worktreeId` schema suite so a future refactor cannot regress the message to a bare one-liner without failing the dedicated regression test.
+
+Reference regression suite: `src/tool/tools/__tests__/agent-manager.error-messages.test.ts` (61 lines, three cases). The pattern asserts message substrings, not the full error prose, so the exact phrasing can evolve without breaking the suite as long as the three invariants hold:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import type { ToolContext } from '../../index.js';
+
+describe('agent-manager tool — validation error messages', () => {
+  it('includes the received worktreeId value in the error message', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'list', worktreeId: 'wt-xyz-123' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    // Received value must appear in the error so the LLM can see what it
+    // sent and self-correct instead of retrying the same payload.
+    expect(result.error ?? '').toContain('wt-xyz-123');
+  });
+
+  it('includes a remediation hint telling the caller how to recover', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'stop', worktreeId: 'wt-abc' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    // Must spell out the fix path so LLM callers can self-correct.
+    expect(result.error ?? '').toMatch(/omit worktreeId or send JSON null/i);
+  });
+
+  it('names the offending action in the error message', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'status', worktreeId: 'wt-abc', sessionId: 'session-1' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? '').toContain('status');
+  });
+});
+```
+
+Key coverage points for future changes to the validator in `src/tool/tools/agent-manager.ts`:
+
+1. **Echo the received value.** The emitted message MUST contain the original `worktreeId` string verbatim (asserted via `toContain('wt-xyz-123')`). Assert against a value that is obviously not a legitimate ID (dashes, a numeric suffix) so a stray fallback like `JSON.stringify(null)` would fail the match. The current implementation uses `JSON.stringify(params.worktreeId)`, which quotes the value and makes it visually distinct in the serialised tool result.
+2. **Remediation sentence is mandatory.** The suite asserts the exact substring `omit worktreeId or send JSON null` (case-insensitive). Any rewrite that drops this phrase — for example a return to `worktreeId is only valid on action=create` — fails the second case immediately. The phrasing matters: the LLM reads tool errors as prompts, and a verb-first sentence (`omit…`) is deterministic to follow.
+3. **Name the offending action.** The message MUST contain the action name (`list`, `stop`, `status`, `answer`) so the model can locate the bad field in a multi-field payload rather than guessing which argument tripped the validator. The current implementation echoes `JSON.stringify(params.action)` for the same quoting reason as the ID.
+4. **Dynamic imports isolate schema reloads.** Every case uses `const { agentManagerTool } = await import('../agent-manager.js');` INSIDE the `it` block rather than a top-level import so a future test that mutates module-level state (feature flags, provider mocks) in a sibling file cannot affect this suite.
+
+All three cases route through `agentManagerTool.executeUnsafe` to bypass permission gating. The message contract is independent of the earlier capability-gating assertions in `agent-manager.worktree-id.test.ts` — if you change the validator path (e.g. move the cross-field rule from Zod into the handler), both suites must still pass without edits to the assertion lists.
+
 ### Testing `apply_patch` `move_path` Normalization
 
 Introduced 2026-09-25 (ports upstream kilocode `f7da00f35`, PR #45329).
