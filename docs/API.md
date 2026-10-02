@@ -3355,6 +3355,86 @@ for (;;) {
 
 Recovery is one-shot per `sendChat()` / `streamChat()` invocation — a second max-tokens error on the retry is terminal. See `src/core/orchestrator.ts:225-256` and `src/core/streamingOrchestrator.ts:474-519` for the two production integrations.
 
+## Content-Filter Rejection API (issue #1903)
+
+Non-streaming callers of `sendChat()` (`alexi chat`, `code-review`, scripted provider dispatch, server mode without a tool loop) raise a dedicated `ContentFilterError` when the provider surfaces `finishReason === 'content-filter'`. Full flow: [ARCHITECTURE.md — Content-Filter Handling at `sendChat()`](ARCHITECTURE.md#content-filter-handling-at-sendchat-issue-1903).
+
+### `ContentFilterError`
+
+Exported from `src/providers/sapOrchestration.ts` and consumed inside the orchestrator at `src/core/orchestrator.ts:330-348`.
+
+```typescript
+export const CONTENT_FILTER_ERROR_CODE = 'content_filter';
+
+export class ContentFilterError extends Error {
+  readonly code: typeof CONTENT_FILTER_ERROR_CODE;      // 'content_filter' — machine-readable marker
+  readonly modelName: string;                           // The model id whose content policy fired
+  readonly suggestedAction: string;                     // Single-line user-facing hint for CLI/TUI
+  // Attached only when the model emitted text before the filter blocked:
+  //   (err as ContentFilterError & { partialText?: string }).partialText
+  constructor(modelName: string, partialText?: string);
+}
+
+export function isContentFilterError(err: unknown): boolean;
+```
+
+The user-facing `message` names the policy block explicitly so renderers never fall back to a generic "unknown error":
+
+```text
+Content policy blocked this request for model '<id>'. The provider's content filter
+rejected the prompt or the generated response. This is a permanent policy decision —
+retrying the same request will hit the same block. Rephrase the request or try a
+different prompt.
+```
+
+### `isContentFilterError` (core copy)
+
+Re-exported from `src/core/error-backoff.ts` to keep `src/core/**` free of a hard dependency on the providers layer. Identical semantics to the provider-side definition — matches on the `code` property OR the class `name` so detection survives cross-module re-imports (`instanceof` fails when vitest workers load the providers module twice).
+
+```typescript
+export function isContentFilterError(err: unknown): boolean;
+```
+
+### `ErrorBackoff.isFatal` integration
+
+`src/core/error-backoff.ts:210-217` and `:285-290` treat a `ContentFilterError` as permanent — same bucket as `FreeTierRateLimitError` and 4xx validation errors. The outer retry budget (`KILO_RETRIES`, provider-layer `ErrorBackoff`) stops on first inspection instead of burning the transient-blip budget on a prompt the provider will keep rejecting.
+
+```typescript
+import { ErrorBackoff, isContentFilterError } from './core/error-backoff.js';
+import { ContentFilterError } from './providers/sapOrchestration.js';
+
+const backoff = new ErrorBackoff();
+
+try {
+  await sendChat(userPrompt);
+} catch (err) {
+  if (isContentFilterError(err)) {
+    // Surface the user-facing message verbatim — do NOT retry.
+    const cfe = err as ContentFilterError;
+    renderError(cfe.message, { hint: cfe.suggestedAction });
+    return;
+  }
+  // `isFatal` short-circuits the retry decision without recording first.
+  if (backoff.isFatal(err)) {
+    throw err;
+  }
+  // ... retry path
+}
+```
+
+### Telemetry event
+
+`sendChat()` fires exactly one `provider.content_filter` telemetry event per filtered response, BEFORE throwing, so the operator trace captures the model id and partial-text flag even when the caller re-throws without logging.
+
+```typescript
+Telemetry.track('provider.content_filter', {
+  model: modelId,                                              // string
+  hasPartialText: typeof result.text === 'string' && result.text.length > 0, // boolean
+  promptTokens: result.usage?.prompt_tokens,                   // number | undefined
+  completionTokens: result.usage?.completion_tokens,           // number | undefined
+});
+```
+
 ## Stream Watchdog and Connectivity Probe API
 
 Introduced in the 2026-09 sync (issue #1836). Full flow: [ARCHITECTURE.md — Stream-Silence Connectivity Probe](ARCHITECTURE.md#stream-silence-connectivity-probe-issue-1836).

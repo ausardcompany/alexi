@@ -650,6 +650,71 @@ Two independent short-circuits, one contract:
 
 **Design contract.** `content-filter` is treated the same way as `401`/`403`/`model_not_found` (permanent, actionable, no retry). It is NOT in the transient regex that drives `KILO_RETRIES` (`socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`), and it does NOT flip a route to unhealthy via `classifyRouteError` (the block is prompt-side, not route-side — the same route is still fine for the next unrelated prompt). Partial assistant text produced before the filter fired is preserved verbatim; the canned warning goes out on the progress channel only. Ports Cline PR #13302 (commit `55c4b36`, merged 2026-09-29).
 
+### Content-Filter Handling at `sendChat()` (issue #1903)
+
+The two layers above cover the streaming / agentic paths. A third layer at the non-streaming `sendChat()` entry point closes the gap for callers that dispatch through the one-shot `provider.complete()` path (`alexi chat`, `code-review`, scripted provider dispatch, server mode `POST /v1/chat` without a tool loop). Before #1903 these callers received a successful empty-string response — indistinguishable from a transient blank completion — when the provider's content policy blocked a request. The fix: after `provider.complete()` returns, `sendChat()` checks `result.finishReason === 'content-filter'` BEFORE `recordRouteOutcome(... success)` and throws a dedicated `ContentFilterError` carrying the `content_filter` machine code recognised by `ErrorBackoff.isFatal()`.
+
+```mermaid
+sequenceDiagram
+    participant Caller as alexi chat / code-review
+    participant Orch as sendChat<br/>(src/core/orchestrator.ts)
+    participant Provider as SAP AI Core provider
+    participant Backoff as ErrorBackoff<br/>(src/core/error-backoff.ts)
+    participant Tel as Telemetry
+
+    Caller->>Orch: sendChat(prompt, options)
+    Orch->>Provider: complete({ messages, model, ... })
+    Provider-->>Orch: { text, finishReason, usage }
+
+    alt finishReason === 'content-filter'
+        Orch->>Tel: track('provider.content_filter',<br/>{ model, hasPartialText,<br/>promptTokens, completionTokens })
+        Orch->>Orch: throw new ContentFilterError(<br/>modelId, result.text)
+        Note over Orch: route-success NOT recorded
+        Orch-->>Caller: ContentFilterError
+        Caller->>Backoff: isFatal(err)
+        Backoff-->>Caller: true (short-circuit)
+    else finishReason === 'stop' (success)
+        Orch->>Orch: recordRouteOutcome(<br/>modelId, { kind: 'success' })
+        Orch-->>Caller: { text, usage, modelUsed, ... }
+    end
+```
+
+Implementation (`src/core/orchestrator.ts:330-348`):
+
+```typescript
+// Content-filter rejection (issue #1903): when the provider surfaces a
+// `content-filter` finish reason, the model's content policy blocked
+// the request. This is a PERMANENT condition — retrying the same
+// prompt will hit the same filter — so we throw a dedicated
+// `ContentFilterError` immediately. The error carries the
+// `content_filter` marker recognised by `ErrorBackoff.isFatal()` so
+// any outer retry loop (CLI `KILO_RETRIES`, provider-layer
+// `ErrorBackoff`) stops instead of burning rate-limit budget.
+if (result.finishReason === 'content-filter') {
+  Telemetry.track('provider.content_filter', {
+    model: modelId,
+    hasPartialText: typeof result.text === 'string' && result.text.length > 0,
+    promptTokens: result.usage?.prompt_tokens,
+    completionTokens: result.usage?.completion_tokens,
+  });
+  throw new ContentFilterError(modelId, result.text);
+}
+
+recordRouteOutcome(modelId, { kind: 'success' });
+```
+
+**Three-layer contract.** The content-filter short-circuit now covers every code path that reaches a provider `complete()` or `streamComplete()`:
+
+| Layer                                                       | File                                           | Behaviour on `content-filter`                                                                                                            |
+| ----------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Provider stream wrapper (`retryEmptyResponse`)           | `src/providers/sapOrchestration.ts:905`        | Breaks the empty-response retry loop after one attempt; yields a final metadata chunk with `finishReason: 'content-filter'` preserved. |
+| 2. Agentic tool loop (`agenticChat`)                        | `src/core/agenticChat.ts:817`                  | Breaks the iteration loop; emits the specific "content filter blocked ... retry will not succeed" progress message; preserves partial text. |
+| 3. Non-streaming orchestrator (`sendChat`, issue #1903)     | `src/core/orchestrator.ts:330-348`             | Throws `ContentFilterError` with `code: 'content_filter'`; fires a `provider.content_filter` telemetry event; does NOT record route success. |
+
+**`ErrorBackoff` fatal flag.** `src/core/error-backoff.ts:210-217` recognises `ContentFilterError` alongside `FreeTierRateLimitError` in the permanent-failure branch of `recordError`, flipping `fatalNotified` so the circuit breaker short-circuits any further attempt on the same instance. The synchronous `isFatal(err?)` short-circuit (`error-backoff.ts:285-290`) returns `true` for a `ContentFilterError` on the first inspection — CLI renderers can decide synchronously whether to retry or surface the user-facing message without first calling `recordError`.
+
+**No route-health penalty, no cost under-count.** The check runs BEFORE `recordRouteOutcome(modelId, { kind: 'success' })`, so a filtered response does not spuriously reset the route failure counter. `provider.complete()` already reported usage BEFORE throwing, so the caller can still bill the prompt tokens the policy block consumed — the telemetry event carries `promptTokens` / `completionTokens` for the operator trace. The error object carries `partialText` when the model produced any output before the filter fired, so a surface that wants to show "model produced N tokens before the block" can read it off `(err as ContentFilterError & { partialText?: string }).partialText`.
+
 ### Environment Details Fence
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.
