@@ -2073,6 +2073,20 @@ Interaction with the two-layer content-filter handling and with the transient-vs
 
 Test coverage lives in `tests/providers/sapOrchestration-emptyResponseRetry.test.ts` (commit-on-first-output, per-attempt usage aggregation, `onEmptyAttempt` callback error swallowing, the terminal metadata chunk shape, and — since 2026-09-29 — the content-filter short-circuit plus its guardrail that a committed attempt reporting `content-filter` after producing output still passes everything through).
 
+### `ContentFilterError` export (issue #1903)
+
+The provider module also exports a dedicated `ContentFilterError` subclass and its `CONTENT_FILTER_ERROR_CODE = 'content_filter'` constant, consumed by the non-streaming `sendChat()` orchestrator (`src/core/orchestrator.ts:330-348`) when the provider returns `finishReason === 'content-filter'`. This is the THIRD layer of the content-filter contract alongside the `retryEmptyResponse` wrapper (layer 1) and the `agenticChat` tool loop (layer 2) — see [ARCHITECTURE.md — Content-Filter Handling at `sendChat()`](ARCHITECTURE.md#content-filter-handling-at-sendchat-issue-1903) and [API.md — Content-Filter Rejection API](API.md#content-filter-rejection-api-issue-1903) for the full three-layer contract.
+
+```typescript
+import {
+  ContentFilterError,
+  CONTENT_FILTER_ERROR_CODE,
+  isContentFilterError,
+} from './providers/sapOrchestration.js';
+```
+
+The error carries the `content_filter` machine code recognised by `ErrorBackoff.isFatal()` (`src/core/error-backoff.ts`), so any outer retry budget (CLI `KILO_RETRIES`, provider-layer `ErrorBackoff`) stops on first inspection — a content-filter block is a permanent policy decision and retrying the same prompt will hit the same block. Partial text produced before the block is preserved on `(err as ContentFilterError & { partialText?: string }).partialText`.
+
 ## Performance Considerations
 
 ### Token Optimization

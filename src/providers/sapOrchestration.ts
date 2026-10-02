@@ -2836,6 +2836,78 @@ export class ProviderRateLimitError extends Error {
   }
 }
 
+// ============================================================================
+// Content filter rejection
+// ============================================================================
+
+/**
+ * Machine-readable error code carried by {@link ContentFilterError} and
+ * recognised by `ErrorBackoff.isFatal()` in `src/core/error-backoff.ts`.
+ *
+ * A `content-filter` finish reason is *permanent* per the AGENTS.md error
+ * contract: the model's content policy blocked this request and retrying
+ * the same prompt will hit the same block. Treat any error with this code
+ * as fatal — do not retry.
+ *
+ * See issue #1903.
+ */
+export const CONTENT_FILTER_ERROR_CODE = 'content_filter';
+
+/**
+ * Error thrown when a provider response carries `finishReason ===
+ * 'content-filter'`. Surfaces as a permanent (non-retryable) failure so
+ * callers do not burn rate-limit budget on identical follow-up calls.
+ *
+ * Message is user-facing — the CLI/TUI renders it verbatim. The `code`
+ * field (`content_filter`) is the machine-readable signal consumed by
+ * `ErrorBackoff.isFatal()` and `isContentFilterError()`.
+ */
+export class ContentFilterError extends Error {
+  readonly code: typeof CONTENT_FILTER_ERROR_CODE = CONTENT_FILTER_ERROR_CODE;
+  readonly modelName: string;
+  /**
+   * Short, single-line, user-facing guidance for the CLI to show alongside
+   * the full error message. Distinct from `message` so renderers can show
+   * it prominently without re-parsing the long form.
+   */
+  readonly suggestedAction: string;
+
+  constructor(modelName: string, partialText?: string) {
+    const message =
+      `Content policy blocked this request for model '${modelName}'. ` +
+      `The provider's content filter rejected the prompt or the generated response. ` +
+      `This is a permanent policy decision — retrying the same request will hit the ` +
+      `same block. Rephrase the request or try a different prompt.`;
+    super(message);
+    this.name = 'ContentFilterError';
+    this.modelName = modelName;
+    this.suggestedAction =
+      'Rephrase the request to avoid content policy triggers, or try a different prompt.';
+    if (partialText !== undefined && partialText.length > 0) {
+      // Preserve any partial text the model emitted before the filter
+      // fired so operators can inspect what triggered the block.
+      (this as Error & { partialText?: string }).partialText = partialText;
+    }
+  }
+}
+
+/**
+ * Structural check for a {@link ContentFilterError}. Matches on the
+ * machine-readable `code` or the class `name` so detection survives
+ * cross-module re-imports (identity `instanceof` checks fail when the
+ * providers module has been loaded twice, e.g. by vitest workers).
+ */
+export function isContentFilterError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { code?: unknown; name?: unknown };
+  if (candidate.code === CONTENT_FILTER_ERROR_CODE) {
+    return true;
+  }
+  return candidate.name === 'ContentFilterError';
+}
+
 /**
  * Heuristic: a model id targets a free-tier SAP AI Core deployment if its
  * last hyphen-delimited segment is `free` (case-insensitive). Examples:

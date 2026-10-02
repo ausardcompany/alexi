@@ -914,6 +914,112 @@ Three properties the suite pins for future maintainers:
 2. **Exactly one provider call.** The block is permanent, so the loop must not iterate again. `expect(mockProvider.complete).toHaveBeenCalledTimes(1)` locks the contract.
 3. **Partial text survives verbatim.** When the model produced any assistant text before the filter fired (`text: 'partial before block'`), `finalText` MUST be that partial text, not the canned warning — the warning goes out on the progress channel only.
 
+### Testing `sendChat` content-filter rejection (issue #1903)
+
+The non-streaming orchestrator path (`src/core/orchestrator.ts:330-348`) throws a dedicated `ContentFilterError` when the provider returns `finishReason === 'content-filter'`. Covered by `tests/core/orchestrator.contentFilter.test.ts` (230 lines, 13 cases across two describe blocks). The suite is dependency-light — no live SAP AI Core call, no real timers, no filesystem — because every surface the orchestrator touches is mocked at the module boundary.
+
+Mock providers, router, and telemetry BEFORE importing the SUT (vitest hoists `vi.mock`, but explicit ordering keeps the dependency direction readable). The key fixture is `getProviderForModelWithFallback` returning `{ provider, effectiveModelId, usedFallback }` so the control-flow path through `sendChat` sees the mock provider:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/index.js', () => {
+  const getProviderForModel = vi.fn();
+  return {
+    getProviderForModel,
+    getProviderForModelWithFallback: vi.fn((modelId: string) => ({
+      provider: getProviderForModel(modelId),
+      effectiveModelId: modelId,
+      usedFallback: false,
+    })),
+    getDefaultModel: vi.fn(),
+    modelHasCapability: vi.fn(() => false),
+  };
+});
+
+vi.mock('../../src/core/router.js', () => ({
+  routePrompt: vi.fn(),
+  recordRouteOutcome: vi.fn(),
+  classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
+}));
+
+import { sendChat } from '../../src/core/orchestrator.js';
+import { getProviderForModel, getDefaultModel } from '../../src/providers/index.js';
+import { recordRouteOutcome } from '../../src/core/router.js';
+import {
+  ContentFilterError,
+  CONTENT_FILTER_ERROR_CODE,
+  isContentFilterError,
+} from '../../src/providers/sapOrchestration.js';
+import {
+  ErrorBackoff,
+  isContentFilterError as isContentFilterErrorBackoff,
+} from '../../src/core/error-backoff.js';
+import { Telemetry } from '../../src/utils/telemetry.js';
+```
+
+The telemetry assertion requires `Telemetry.setEnabled(true)` + `Telemetry.clear()` in `beforeEach`/`afterEach` so each case sees exactly one `provider.content_filter` event:
+
+```typescript
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(getDefaultModel).mockReturnValue('gpt-4o');
+  Telemetry.setEnabled(true);
+  Telemetry.clear();
+});
+
+afterEach(() => {
+  Telemetry.setEnabled(false);
+  Telemetry.clear();
+  vi.resetAllMocks();
+});
+```
+
+The happy-path content-filter case drives the whole orchestrator contract through one `complete()` call:
+
+```typescript
+it('throws ContentFilterError when the provider reports finishReason=content-filter', async () => {
+  const mockProvider = {
+    complete: vi.fn().mockResolvedValue({
+      text: '',
+      finishReason: 'content-filter',
+      usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
+    }),
+  };
+  vi.mocked(getProviderForModel).mockReturnValue(mockProvider as never);
+
+  await expect(sendChat('disallowed prompt')).rejects.toBeInstanceOf(ContentFilterError);
+});
+```
+
+Five properties the suite pins for future maintainers:
+
+1. **The thrown error MUST be a `ContentFilterError`, not a generic `Error`.** Downstream renderers key off `err instanceof ContentFilterError` to decide whether to show the policy-rejection message or a generic failure. `rejects.toBeInstanceOf(ContentFilterError)` catches a regression that folded the branch into a plain `throw new Error(...)`.
+2. **Exactly one provider call.** `expect(mockProvider.complete).toHaveBeenCalledTimes(1)` locks the no-retry contract. A regression that added a retry inside `sendChat` on `content-filter` would burn the transient-blip budget on a prompt the provider will keep rejecting.
+3. **User-facing message names the policy block.** `expect(err.message.toLowerCase()).toContain('content policy')` plus `'permanent'` and `'retry'` catch a regression that stripped the actionable guidance.
+4. **Telemetry event fires once with model id and partial-text flag.** `expect(filterEvents[0].properties?.hasPartialText).toBe(true)` on a case where the model emitted partial text catches a regression that stopped forwarding the partial-text flag — operators need the signal to decide whether to inspect `partialText` on the error.
+5. **No route-success recording.** `expect(recordRouteOutcome).not.toHaveBeenCalledWith('gpt-4o', { kind: 'success' })` catches a regression that moved the content-filter check after `recordRouteOutcome`, which would spuriously reset the route failure counter on a filtered response.
+
+The `ContentFilterError classification helpers` describe block covers the pure-function surface — no provider mock needed. Two kinds of assertions:
+
+```typescript
+// Structural matcher: match on `code` OR class `name`, so detection survives
+// cross-module re-imports (vitest workers can load the providers module twice).
+expect(isContentFilterError({ code: 'content_filter' })).toBe(true);
+expect(isContentFilterError({ name: 'ContentFilterError' })).toBe(true);
+
+// ErrorBackoff integration: isFatal returns true WITHOUT a prior recordError
+// call, so CLI renderers can decide synchronously.
+const b = new ErrorBackoff();
+const err = new ContentFilterError('gpt-4o');
+expect(b.isFatal(err)).toBe(true);
+```
+
+Guardrails for these helper cases:
+
+- Pass `null`, `undefined`, strings, and numbers to `isContentFilterError` to pin the "non-object → false" branch. A regression that forgot the `typeof err !== 'object'` guard would throw on `isContentFilterError(null)`.
+- Instantiate `new ContentFilterError('gpt-4o', 'partial response')` and assert `(err as ContentFilterError & { partialText?: string }).partialText === 'partial response'`. The partial-text attachment is optional and only fires when the constructor receives a non-empty second argument — assert both the "attached" and "omitted" branches.
+
 ### Testing quoted `@file` mentions
 
 `src/utils/file-mention.ts:parseFileMentions` is a pure function — no mocking needed. Test both parser cases and the command-template integration in `src/command/index.ts` (which wraps `@$N` positional args in quotes when the argument contains whitespace):
