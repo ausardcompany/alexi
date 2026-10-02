@@ -857,15 +857,16 @@ Tests should cover the JSON-encoded path, the native object path, and the missin
 
 ### Cross-field Zod validation for action-scoped parameters
 
-When a tool parameter is only meaningful for a subset of actions on a discriminated schema — e.g. `worktreeId` only applies when `action === 'create'` — enforce that constraint at the schema layer with a `.refine()` on the outer object, not inside the handler body. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-07, `1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter).
+When a tool parameter is only meaningful for a subset of actions on a discriminated schema — e.g. `worktreeId` only applies when `action === 'create'` — enforce that constraint at the schema layer with a `.superRefine()` on the outer object, not inside the handler body. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-07, `1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter; message quality upgraded 2026-10-02 in `1.22.36`, ports upstream opencode 2026-10 agent-manager validation message improvement).
 
 Contract:
 
 1. Validate the shape of each field independently first (inner `.refine()` on the field itself for value-level constraints such as "must not be blank").
-2. Add the cross-field rule as a top-level `.refine()` on the object schema after every field is declared. Provide an explicit `path` on the error so the failure surfaces on the offending field, not the whole object.
-3. Provide a runtime capability check inside the handler ONLY when the schema-passing path is not yet fully implemented. Fail loudly with an error that echoes the offending value back to the caller, rather than silently ignoring the field. This gives the model a signal to retry without the field and gives operators a searchable log line.
+2. Add the cross-field rule as a top-level `.superRefine()` on the object schema after every field is declared. Provide an explicit `path` on the issue so the failure surfaces on the offending field, not the whole object.
+3. **Message quality is part of the contract.** LLM callers retry on validation errors, so the message MUST contain three things or the retry burns budget on the same bad payload: (a) the received value of the offending field, (b) the received value of the discriminator (`action`), and (c) an explicit remediation sentence — a verb-first instruction the model can execute without inferring intent. Prefer `JSON.stringify(value)` to quote strings so the field value is visually distinct from the surrounding English prose.
+4. Provide a runtime capability check inside the handler ONLY when the schema-passing path is not yet fully implemented. Fail loudly with an error that echoes the offending value back to the caller, rather than silently ignoring the field. This gives the model a signal to retry without the field and gives operators a searchable log line.
 
-Reference implementation (from `src/tool/tools/agent-manager.ts`):
+Reference implementation (from `src/tool/tools/agent-manager.ts:49-147`):
 
 ```typescript
 const AgentManagerParamsSchema = z
@@ -884,20 +885,30 @@ const AgentManagerParamsSchema = z
       ),
     // ...
   })
-  // Cross-field rule: `worktreeId` only makes sense for a start (create) call.
-  // Reject the combination early so we produce a descriptive Zod error instead
-  // of silently ignoring the field deeper in the handler.
-  .refine(
-    (params) =>
-      params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
-    {
-      message: 'worktreeId is only valid on action=create',
-      path: ['worktreeId'],
+  // Cross-field rule: `worktreeId` only makes sense for a start (create)
+  // call. Reject the combination early so we produce a descriptive Zod
+  // error instead of silently ignoring the field deeper in the handler.
+  //
+  // The message echoes the received value AND an explicit remediation
+  // hint ("omit worktreeId or send JSON null") so LLM callers can
+  // self-correct instead of retrying the same invalid payload.
+  .superRefine((params, ctx) => {
+    if (params.worktreeId === null || params.worktreeId === undefined) {
+      return;
     }
-  );
+    if (params.action !== 'create') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['worktreeId'],
+        message: `worktreeId ${JSON.stringify(params.worktreeId)} is only valid on action=create (received action=${JSON.stringify(params.action)}). To target a managed worktree, use action=create; otherwise omit worktreeId or send JSON null.`,
+      });
+    }
+  });
 ```
 
-Both `.refine()` predicates use the explicit two-arm form `x === null || x === undefined` rather than the shorter loose-equality idiom `x == null`. This is the standing convention for null-and-undefined narrowing under the project's `eqeqeq: error` ESLint rule — see the "Loose-null autohealing" pattern in the ESLint auto-fix section below and the worked example under commit `f33a09e5` (`fix(tools): replace loose null equality with strict checks [autohealing]`, 2026-09-07) which rewrote both `agent-manager.ts` predicates from their historical `== null` form.
+Both predicates use the explicit two-arm form `x === null || x === undefined` rather than the shorter loose-equality idiom `x == null`. This is the standing convention for null-and-undefined narrowing under the project's `eqeqeq: error` ESLint rule — see the "Loose-null autohealing" pattern in the ESLint auto-fix section below and the worked example under commit `f33a09e5` (`fix(tools): replace loose null equality with strict checks [autohealing]`, 2026-09-07) which rewrote both `agent-manager.ts` predicates from their historical `== null` form.
+
+Why `.superRefine()` over `.refine()`: a bare `.refine()` accepts a single static message string, which is enough for a boolean "valid / not valid" verdict but insufficient when the message must interpolate the received field value and the received discriminator value. `.superRefine()` gives the predicate access to the full validated payload and a `ctx.addIssue()` builder, so the issue message can be constructed per-call. Keep the inner `.refine()` on the field itself for stateless value-level checks (`trim().length > 0`), and reserve `.superRefine()` for the outer object where cross-field context is required.
 
 Runtime capability gating pattern (same file):
 

@@ -126,14 +126,25 @@ const AgentManagerParamsSchema = z
   // only makes sense for a start (create) call. Reject the combination
   // early so we produce a descriptive Zod error instead of silently
   // ignoring the field deeper in the handler.
-  .refine(
-    (params) =>
-      params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
-    {
-      message: 'worktreeId is only valid on action=create',
-      path: ['worktreeId'],
+  //
+  // The error message echoes the received value AND an explicit remediation
+  // hint ("omit worktreeId or send JSON null"), ported from upstream
+  // opencode's 2026-10 improvement to agent-manager validation messages.
+  // The upstream rationale: ambiguous validation errors cause LLM callers
+  // to retry the same invalid payload; naming the field value and the fix
+  // path materially improves agent self-correction.
+  .superRefine((params, ctx) => {
+    if (params.worktreeId === null || params.worktreeId === undefined) {
+      return;
     }
-  );
+    if (params.action !== 'create') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['worktreeId'],
+        message: `worktreeId ${JSON.stringify(params.worktreeId)} is only valid on action=create (received action=${JSON.stringify(params.action)}). To target a managed worktree, use action=create; otherwise omit worktreeId or send JSON null.`,
+      });
+    }
+  });
 
 interface AgentManagerResult {
   action: string;

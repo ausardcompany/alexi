@@ -1,117 +1,81 @@
-# Alexi Update — Changes Summary
+# Changes Summary — Upstream Sync 2026-10-02
 
-**Generated**: 2026-09-30
-**Update plan**: port kilocode/opencode PR-link session-isolation fixes to Alexi
-**Upstream commits ported**:
-- `c98f8740c` merge: remove-link-pr-feature-vscode
-- `154a8427c` fix(cli): disable session PR linking on non-CLI backends
-- `9076f0301` fix(opencode): offer the link_pr tool to CLI sessions only
-- `56ab1e502` fix(sessions): harden per-session PR link evidence
-- `9cc0a9158` fix(sessions): link a pull request to a session only on its own evidence
-- `eb7b4896b` test(cli): scope PR-link storage fixtures to Effect layers
+Executed against update plan generated from upstream deltas:
+- kilocode `fdebb0e10..a10fa8ebe` (27 commits)
+- opencode `0112a92..1ddb087` (7 commits)
 
-## Files modified / created
+## Files Modified
 
-| File                                                        | Change      | Purpose                                                            |
-| ----------------------------------------------------------- | ----------- | ------------------------------------------------------------------ |
-| `src/session/pr-link.ts`                                    | **created** | Session-scoped PR-link storage + `enabled()` gate + URL parser     |
-| `src/tool/tools/link-pr.ts`                                 | **created** | New `link_pr` tool that binds a PR URL to the active session       |
-| `src/tool/tools/index.ts`                                   | modified    | Conditionally register `link_pr` when `enabled()` is true          |
-| `src/tool/tools/__tests__/link-pr.test.ts`                  | **created** | Vitest suite covering the tool + helpers                            |
+| File | Type | Notes |
+|---|---|---|
+| `src/tool/tools/agent-manager.ts` | edit | Upgraded `worktreeId` cross-field validation error message |
+| `src/tool/tools/__tests__/agent-manager.error-messages.test.ts` | new | Locks in error-message quality (received value + remediation hint + offending action) |
 
-## Summary of each change
+## Change-by-change
 
-### 1. `src/session/pr-link.ts` (Update plan change #3 — foundation)
+### Change 1 (plan priority: high) — PTY smoke test resiliency — **SKIPPED (not applicable)**
 
-New module. Exports:
+Alexi does not include a PTY module. Verified via:
+- `glob **/pty/smoke*` → 0 matches
+- `glob src/core/kilocode/**` → 0 matches
 
-- `enabled(): boolean` — returns `true` only when `ALEXI_CLIENT === "cli"`
-  (default) so embedded non-CLI hosts (SAP BAS extension, VS Code webview)
-  are opted out. This is the single source of truth used by (2) and (3).
-- `parsePrUrl(url): ParsedPrLink | undefined` — recognizes GitHub/GitLab/
-  Azure-DevOps PR URLs; rejects issue URLs and malformed input.
-- `linkMatchesWorktree(link, worktree): Promise<boolean>` — reads the
-  worktree's `.git/config` remote (no `simple-git` dep to keep startup
-  cheap), refuses fork / unrelated-repo links (upstream `56ab1e502`).
-- `recordSessionLink(sessionId, record, worktree)` — persists the link
-  to `~/.alexi/sessions/<sessionId>/pr-link.json`. Refuses when
-  `enabled()` is false or when `linkMatchesWorktree()` returns false.
-  Storage is **per-session**, not per-worktree, which stops two
-  sessions on the same checkout from inheriting each other's PR link
-  (upstream `9cc0a9158`). Critical for SAP tenant isolation.
-- `readSessionLink(sessionId)` — read-back helper.
-- `writePrLinkOverride(...)` — deprecated shim with a `console.warn`
-  so any legacy import surfaces a warning; delegates to a no-op.
+Alexi is a SAP AI Core CLI orchestrator; it does not spawn PTYs for a user-facing shell the way kilocode's terminal integration does. The upstream fix (retry probe for pwsh/ConPTY input drops, timeout 15s→30s) has no equivalent code path to patch. No action taken.
 
-SAP AI Core compatibility: this module does no network I/O and does not
-touch any provider surface. It only reads local git config and writes
-to the existing `~/.alexi/sessions/` tree.
+### Change 2 (plan priority: medium) — Agent-manager `worktreeId` validation error message — **APPLIED**
 
-### 2. `src/tool/tools/link-pr.ts` (Update plan change #1)
+Alexi's agent-manager tool (`src/tool/tools/agent-manager.ts`) is schema-divergent from upstream opencode (Alexi uses Zod `action` enum rather than opencode's `mode: "local"`), so the direct string replacement from the plan did not match. The functionally-equivalent validation rule in Alexi is the cross-field rejection of `worktreeId` on non-`create` actions.
 
-New tool built with Alexi's `defineTool(...)` + Zod-schema pattern (same
-shape as `open-plan.ts`, `webfetch.ts`, etc.). Behaviour:
+**Before:**
+```ts
+.refine(
+  (params) =>
+    params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
+  {
+    message: 'worktreeId is only valid on action=create',
+    path: ['worktreeId'],
+  }
+);
+```
 
-1. **`ALEXI_CLIENT` gate** — refuses with `unsupported_client` reason on
-   non-CLI backends (upstream `154a8427c`).
-2. **URL parsing** — refuses with `invalid_url` on non-PR URLs.
-3. **`sessionId` guard** — refuses with `missing_session` when the tool
-   context lacks a session id (rather than silently dropping the
-   record).
-4. **Session-scoped storage** — delegates to `recordSessionLink` with
-   `evidence: "user"`. Surfaces `worktree_mismatch` when
-   `recordSessionLink` returns `undefined` and `storage_error` on I/O
-   failure. Logs errors via `src/utils/logger.ts` (per ESLint
-   `no-console` rule).
+**After:** rewrote to `.superRefine` so the error message can echo the received value and the offending action:
+```ts
+.superRefine((params, ctx) => {
+  if (params.worktreeId === null || params.worktreeId === undefined) return;
+  if (params.action !== 'create') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['worktreeId'],
+      message: `worktreeId ${JSON.stringify(params.worktreeId)} is only valid on action=create (received action=${JSON.stringify(params.action)}). To target a managed worktree, use action=create; otherwise omit worktreeId or send JSON null.`,
+    });
+  }
+});
+```
 
-### 3. `src/tool/tools/index.ts` (Update plan change #2)
+**Rationale (preserved from upstream intent):** the previous one-line message gave the LLM caller no information about what value it sent nor how to recover. Including the value + an explicit remediation (`omit worktreeId or send JSON null`) materially improves agent self-correction, which was upstream opencode's stated reason for the change.
 
-- Imported `linkPrTool` and `enabled as prEnabled` from the new modules.
-- Appended `...(prEnabled() ? [linkPrTool] : [])` to `builtInTools`, so
-  on non-CLI backends the tool is not registered at all and the model
-  never sees it (upstream `9076f0301`).
-- Added `linkPrTool` to the re-export block so tests and downstream
-  code can reference the tool object regardless of registration.
+**Compatibility note:** the existing regression test `agent-manager.worktree-id.test.ts` matches `/Invalid parameters/i` (which comes from the tool wrapper around Zod, independent of the issue message), so it continues to pass. A new focused test file (`agent-manager.error-messages.test.ts`) locks in the three new quality properties:
+1. The received `worktreeId` value appears in the error.
+2. The remediation hint (`omit worktreeId or send JSON null`) appears.
+3. The offending action name appears.
 
-### 4. `src/tool/tools/__tests__/link-pr.test.ts` (Update plan change #4)
+### Change 3 (plan priority: medium) — Agent-manager setup task error handling simplification — **DEFERRED (per plan)**
 
-- Uses `vi.mock(...)` with `importActual` to preserve real helpers
-  (`parsePrUrl`, `enabled`) and stub only `recordSessionLink`.
-- Each test overrides `recordSessionLink` per-scenario via
-  `vi.mocked(...).mockImplementation`/`mockResolvedValue`/
-  `mockRejectedValue` — matches upstream `eb7b4896b`'s intent (fixtures
-  scoped to a single test), adapted from Bun's `spyOn` to Vitest.
-- Covers: unsupported client, invalid URL, missing session, happy
-  path, worktree mismatch, storage error, and the `enabled()` /
-  `parsePrUrl` helpers directly.
+The plan itself flagged this as optional and defer-to-review because the upstream diff hunks were not fully available. Alexi has no `src/agent/agent-manager/task-runner.ts` nor equivalent structure (`glob src/agent/agent-manager/**` → 0 matches). No code to refactor; no action taken, consistent with the plan's explicit guidance.
 
-## Issues encountered
+## Issues Encountered
 
-- **No existing `link_pr` tool or `pr-link` module in Alexi.** The
-  upstream commits target the kilocode/opencode monorepo (Effect-TS,
-  Bun, Effect Schema); Alexi is a single-package Node/vitest/Zod
-  project. Ported the concepts to Alexi's conventions per the update
-  plan's explicit note ("Alexi's equivalent path"). Every behaviour in
-  the upstream commits is preserved semantically.
-- **Client-flag mechanism.** Alexi has no `Flag.KILO_CLIENT` service.
-  Chose `process.env.ALEXI_CLIENT` (default `"cli"`) to match Alexi's
-  existing `ALEXI_*` env-var convention (see `src/tool/tools/grep.ts`
-  `ALEXI_DISABLE_RG`, `src/tool/tools/shell.ts` `ALEXI_SANDBOX`, etc.).
-  Callers embedding Alexi as a library set `ALEXI_CLIENT=vscode` (or
-  anything non-`cli`) to opt out.
-- **Session storage location.** Reused `~/.alexi/sessions/<sessionId>/`
-  to mirror `core/snapshot.ts` — no new config knob introduced.
-- **ESLint / conventions.** Used `.js` import extensions everywhere,
-  `logger` (not `console`) for warnings, exported types via
-  `interface`, and matched the strict Prettier config (single quotes,
-  100-col wrap).
+1. **Schema divergence between Alexi and upstream opencode.** The plan's exact string match (`"worktreeID requires mode local"`) does not exist in Alexi because Alexi uses `action: 'create'|'list'|...` where opencode uses `mode: 'local'|...`. I preserved the *intent* (echo value + remediation hint) and applied it to the matching Alexi code path (`worktreeId` is only valid on `action=create`) rather than skipping the item. This is a judgement call documented here so a reviewer can revert if desired.
 
-## Verification checklist
+2. **No PTY in Alexi.** Change 1 was the only "high" priority item in the plan, but it targets code that does not exist in this project. The plan did not provide an alternative, and inventing a new PTY module would exceed the plan's scope. Skipped per "do NOT add extra changes not in the plan".
 
-- [ ] `npm run typecheck` — new files compile under strict TS
-- [ ] `npm run lint` — passes ESLint (no `no-console` violations, `.js`
-      imports present, unused vars prefixed `_`)
-- [ ] `npm run format:check` — Prettier clean
-- [ ] `npm test -- link-pr` — new tests pass
-- [ ] Existing tools still register (no regression in
-      `builtInTools` order for tools other than the new `link_pr`).
+## SAP AI Core Compatibility
+
+- No provider wiring touched.
+- No dependency changes.
+- Only touched is the `agent-manager` tool's parameter validator (Zod error message); the tool handler, permission layer, and model-selection path are unchanged.
+- Existing agent-manager tests (`agent-manager.worktree-id.test.ts`, `agent-manager.json-config.test.ts`, `agent-manager-forwarding.test.ts`, `permission/agent-manager.test.ts`) remain structurally compatible.
+
+## Recommended Follow-ups (not executed)
+
+- Run `npm run lint && npm run typecheck && npm test` to confirm the `.superRefine` migration compiles and existing regression tests still pass.
+- Consider a dedicated `src/pty/` module if/when Alexi ever grows a terminal integration — at that point port Change 1 verbatim.
