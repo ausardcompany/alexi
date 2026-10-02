@@ -456,7 +456,13 @@ vi.mock('../src/providers/index.js', () => ({
 import { sendChat } from '../src/core/orchestrator.js';
 ```
 
-When testing anything that reads the dynamic model catalog (`src/providers/modelCatalog.ts`), mock `@sap-ai-sdk/ai-api` and call `invalidateCatalog()` in `beforeEach` — the module holds a process-wide cache that leaks across tests. See [`docs/TESTING.md#testing-the-dynamic-model-catalog`](./TESTING.md#testing-the-dynamic-model-catalog).
+When testing anything that reads the dynamic model catalog (`src/providers/modelCatalog.ts`), mock `@sap-ai-sdk/ai-api` and call `invalidateCatalog()` in `beforeEach` — the module holds a process-wide cache that leaks across tests. `invalidateCatalog()` is also the hook that aborts an in-flight `AbortController` and resets the `_currentConnectionKey` tracker (ports kilocode `9efa2165a`), so any test that races a connection change against a pending fetch should assert that a late response does NOT clobber the state installed after the invalidation point. See [`docs/TESTING.md#testing-the-dynamic-model-catalog`](./TESTING.md#testing-the-dynamic-model-catalog) and [`docs/PROVIDERS.md#model-catalog-connection-invalidation`](./PROVIDERS.md#model-catalog-connection-invalidation).
+
+**When testing one-shot hydration paths (`initializeConnectorStore` and friends)**, treat the module-scoped "hydrated" flag as test-shared state and reset the store in `beforeEach` with `setConnectorStore(createInMemoryConnectorStore())`. Use `setConnectorStatePath` to point the loader at a `fs.mkdtempSync` directory per case and `resetConnectorStatePath` in `afterEach` to restore the production path — a leaked override will have the next test file reading from a deleted temp directory. To simulate a thrown load without mocking `fs` (ESM mocking of `fs/promises` is unreliable per the `vi.spyOn` section below), point the state path at a directory: `fs.readFile(dir)` errors with `EISDIR` on every platform. The regression test must then re-point at a VALID snapshot and reinvoke `initializeConnectorStore` WITHOUT swapping stores — pre-fix the hydrated flag would have been set, post-fix the retry actually runs. See [`docs/TESTING.md#testing-connector-store-hydration-resilience`](./TESTING.md#testing-connector-store-hydration-resilience).
+
+**Changes to `claudeFamilyMaxOutputTokens` must preserve the pattern order.** The regex table in `src/providers/model-match.ts` is scanned top-to-bottom. The Claude 3.5 pattern (`/claude-3[-.]5-(?:sonnet|haiku)/i`) MUST appear BEFORE the Claude 3 patterns (`/claude-3-opus/i`, `/claude-3-(?:sonnet|haiku)/i`) because `claude-3-5-sonnet` would otherwise match the broader `claude-3-sonnet` rule and route to 4096 instead of 8192. The regression suite (`src/providers/__tests__/model-match.test.ts`) pins both forms. Keep the fallback at `CLAUDE_DEFAULT_OUTPUT_LIMIT = 8_192`, not 4096: a brand-new SAP AI Core Claude deployment that lands before the table is updated should still get a safe high ceiling. See [`docs/PROVIDERS.md#claude-family-output-token-limits-claudefamilymaxoutputtokens`](./PROVIDERS.md#claude-family-output-token-limits-claudefamilymaxoutputtokens).
+
+**Session headers additive contract.** `buildSessionHeaders` emits both namespaced (`x-alexi-session-id`, `x-alexi-parent-session-id`) and legacy (`x-session-affinity`, `x-parent-session-id`) forms on every request. Any PR that removes the legacy headers breaks downstream observability pipelines that already key on them; any PR that adds a new identity surface MUST emit it alongside the existing pair until a deprecation cycle is explicitly agreed. The regression suite (`src/providers/__tests__/sessionHeaders.test.ts`) asserts BOTH forms on every case. See [`docs/CONFIGURATION.md#session-headers-for-load-balanced-sap-ai-core-deployments`](./CONFIGURATION.md#session-headers-for-load-balanced-sap-ai-core-deployments).
 
 **Do NOT reintroduce hardcoded model-group constants in TUI hooks or CLI helpers (issue #1886).** Commit `cdea455a` removed two copies of `STATIC_MODEL_GROUPS` from `src/cli/tui/hooks/useCommands.ts` and `src/cli/tui/hooks/useKeyboard.ts` because they suppressed the Ink `ModelPicker`'s live-catalog error branch and left operators staring at a six-model list on every catalog failure. New pickers, palettes, or completion surfaces MUST read from the live catalog via `getCatalogEntries()` / `subscribeCatalog()` / `getCatalogState()` and rely on the classification+hint pipeline in `src/providers/modelFetchErrors.ts` to surface failures. A pinned static list is only acceptable inside a test fixture or a help screen that is explicitly documented as offline; in every user-facing path the fallback is the static `ORCHESTRATION_MODELS` list already inside `modelCatalog.ts`, not a locally-embedded copy. See [`docs/PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886`](./PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886) for the surface contract and [`docs/TESTING.md#testing-the-model-slash-commands-picker-prop-testsclitui-usecommandstesttsx-issue-1886`](./TESTING.md#testing-the-model-slash-commands-picker-prop-testsclitui-usecommandstesttsx-issue-1886) for the assertion pattern that pins the regression.
 
@@ -851,15 +857,16 @@ Tests should cover the JSON-encoded path, the native object path, and the missin
 
 ### Cross-field Zod validation for action-scoped parameters
 
-When a tool parameter is only meaningful for a subset of actions on a discriminated schema — e.g. `worktreeId` only applies when `action === 'create'` — enforce that constraint at the schema layer with a `.refine()` on the outer object, not inside the handler body. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-07, `1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter).
+When a tool parameter is only meaningful for a subset of actions on a discriminated schema — e.g. `worktreeId` only applies when `action === 'create'` — enforce that constraint at the schema layer with a `.superRefine()` on the outer object, not inside the handler body. Canonical implementation: `src/tool/tools/agent-manager.ts` (2026-09-07, `1.22.15`, ports upstream opencode 2026-09 `worktreeID` start parameter; message quality upgraded 2026-10-02 in `1.22.36`, ports upstream opencode 2026-10 agent-manager validation message improvement).
 
 Contract:
 
 1. Validate the shape of each field independently first (inner `.refine()` on the field itself for value-level constraints such as "must not be blank").
-2. Add the cross-field rule as a top-level `.refine()` on the object schema after every field is declared. Provide an explicit `path` on the error so the failure surfaces on the offending field, not the whole object.
-3. Provide a runtime capability check inside the handler ONLY when the schema-passing path is not yet fully implemented. Fail loudly with an error that echoes the offending value back to the caller, rather than silently ignoring the field. This gives the model a signal to retry without the field and gives operators a searchable log line.
+2. Add the cross-field rule as a top-level `.superRefine()` on the object schema after every field is declared. Provide an explicit `path` on the issue so the failure surfaces on the offending field, not the whole object.
+3. **Message quality is part of the contract.** LLM callers retry on validation errors, so the message MUST contain three things or the retry burns budget on the same bad payload: (a) the received value of the offending field, (b) the received value of the discriminator (`action`), and (c) an explicit remediation sentence — a verb-first instruction the model can execute without inferring intent. Prefer `JSON.stringify(value)` to quote strings so the field value is visually distinct from the surrounding English prose.
+4. Provide a runtime capability check inside the handler ONLY when the schema-passing path is not yet fully implemented. Fail loudly with an error that echoes the offending value back to the caller, rather than silently ignoring the field. This gives the model a signal to retry without the field and gives operators a searchable log line.
 
-Reference implementation (from `src/tool/tools/agent-manager.ts`):
+Reference implementation (from `src/tool/tools/agent-manager.ts:49-147`):
 
 ```typescript
 const AgentManagerParamsSchema = z
@@ -878,20 +885,30 @@ const AgentManagerParamsSchema = z
       ),
     // ...
   })
-  // Cross-field rule: `worktreeId` only makes sense for a start (create) call.
-  // Reject the combination early so we produce a descriptive Zod error instead
-  // of silently ignoring the field deeper in the handler.
-  .refine(
-    (params) =>
-      params.worktreeId === null || params.worktreeId === undefined || params.action === 'create',
-    {
-      message: 'worktreeId is only valid on action=create',
-      path: ['worktreeId'],
+  // Cross-field rule: `worktreeId` only makes sense for a start (create)
+  // call. Reject the combination early so we produce a descriptive Zod
+  // error instead of silently ignoring the field deeper in the handler.
+  //
+  // The message echoes the received value AND an explicit remediation
+  // hint ("omit worktreeId or send JSON null") so LLM callers can
+  // self-correct instead of retrying the same invalid payload.
+  .superRefine((params, ctx) => {
+    if (params.worktreeId === null || params.worktreeId === undefined) {
+      return;
     }
-  );
+    if (params.action !== 'create') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['worktreeId'],
+        message: `worktreeId ${JSON.stringify(params.worktreeId)} is only valid on action=create (received action=${JSON.stringify(params.action)}). To target a managed worktree, use action=create; otherwise omit worktreeId or send JSON null.`,
+      });
+    }
+  });
 ```
 
-Both `.refine()` predicates use the explicit two-arm form `x === null || x === undefined` rather than the shorter loose-equality idiom `x == null`. This is the standing convention for null-and-undefined narrowing under the project's `eqeqeq: error` ESLint rule — see the "Loose-null autohealing" pattern in the ESLint auto-fix section below and the worked example under commit `f33a09e5` (`fix(tools): replace loose null equality with strict checks [autohealing]`, 2026-09-07) which rewrote both `agent-manager.ts` predicates from their historical `== null` form.
+Both predicates use the explicit two-arm form `x === null || x === undefined` rather than the shorter loose-equality idiom `x == null`. This is the standing convention for null-and-undefined narrowing under the project's `eqeqeq: error` ESLint rule — see the "Loose-null autohealing" pattern in the ESLint auto-fix section below and the worked example under commit `f33a09e5` (`fix(tools): replace loose null equality with strict checks [autohealing]`, 2026-09-07) which rewrote both `agent-manager.ts` predicates from their historical `== null` form.
+
+Why `.superRefine()` over `.refine()`: a bare `.refine()` accepts a single static message string, which is enough for a boolean "valid / not valid" verdict but insufficient when the message must interpolate the received field value and the received discriminator value. `.superRefine()` gives the predicate access to the full validated payload and a `ctx.addIssue()` builder, so the issue message can be constructed per-call. Keep the inner `.refine()` on the field itself for stateless value-level checks (`trim().length > 0`), and reserve `.superRefine()` for the outer object where cross-field context is required.
 
 Runtime capability gating pattern (same file):
 

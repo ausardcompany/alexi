@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ANTHROPIC_MODELS,
+  claudeFamilyMaxOutputTokens,
   isAnthropicModel,
   isClaudeOpus4,
   modelSupportsReasoningEffort,
@@ -221,6 +222,55 @@ describe('isClaudeOpus4', () => {
     expect(isClaudeOpus4('gpt-4o')).toBe(false);
     expect(isClaudeOpus4('deepseek-r1')).toBe(false);
     expect(isClaudeOpus4('')).toBe(false);
+  });
+});
+
+describe('claudeFamilyMaxOutputTokens', () => {
+  // Ports kilocode fixes f05a4fdc3 + c3f1e509e: the max_tokens request
+  // for a Claude deployment should match the model's documented output
+  // cap, not the historical global default of 4096.
+  it('returns 64K for Claude 4.x opus and sonnet (SAP double-dash)', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.6-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.7-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-sonnet')).toBe(64_000);
+  });
+
+  it('returns 64K for Claude 4.x and 3.7 (bare Anthropic ids)', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-opus-4-1')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('claude-opus-4-5')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('claude-sonnet-4')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('claude-3-7-sonnet-20250219')).toBe(64_000);
+  });
+
+  it('returns 8K for Claude 3.5 variants', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-3.5-sonnet')).toBe(8_192);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-3.5-haiku')).toBe(8_192);
+    expect(claudeFamilyMaxOutputTokens('claude-3-5-sonnet')).toBe(8_192);
+  });
+
+  it('returns 4K for Claude 3 opus / sonnet / haiku', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-3-opus')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-sonnet')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-haiku')).toBe(4_096);
+  });
+
+  it('falls back to a safe 8K default for unrecognised Claude variants', () => {
+    // Unknown-future Claude ids should NOT truncate to the historical
+    // 4K default; prefer a safe high value.
+    expect(claudeFamilyMaxOutputTokens('claude-9999-wild')).toBe(8_192);
+  });
+
+  it('returns undefined for non-Claude models', () => {
+    expect(claudeFamilyMaxOutputTokens('gpt-4o')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('gemini-2.5-pro')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('deepseek-r1')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('')).toBeUndefined();
+  });
+
+  it('is case-insensitive and matches SAP provider-prefixed form', () => {
+    expect(claudeFamilyMaxOutputTokens('SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('sap-ai-core/anthropic--claude-3.5-sonnet')).toBe(8_192);
   });
 });
 

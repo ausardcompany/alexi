@@ -102,6 +102,31 @@ let _state: CatalogState = {
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let _refreshInProgress = false;
 
+/**
+ * In-flight fetch tracking (ports kilocode fix 9efa2165a —
+ * "invalidate in-flight model fetch on connection change").
+ *
+ * When the user switches SAP AI Core credentials / endpoints
+ * (`AICORE_SERVICE_KEY`, `AICORE_RESOURCE_GROUP`, or an entirely
+ * different connector) while a model-list fetch is already in flight,
+ * the stale response could land AFTER the new connection is active
+ * and overwrite the fresh catalog with results from the OLD tenant.
+ *
+ * The fix is a two-pronged guard:
+ *   1. `_currentFetchController` — AbortController tied to the current
+ *      refresh. `invalidateCatalog()` aborts it so the pending fetch
+ *      cannot complete into shared state.
+ *   2. `_currentConnectionKey` — identity string (currently the
+ *      resourceGroup, but can be extended to include endpoint / tenant)
+ *      captured at fetch start and re-checked at commit time. If the
+ *      key changed while awaiting, the response is dropped silently.
+ *
+ * Together these mean a connection change is "poison" for any in-flight
+ * request without needing to rewrite the SDK-level fetch stack.
+ */
+let _currentFetchController: AbortController | null = null;
+let _currentConnectionKey: string | null = null;
+
 /** Listeners notified on every state change. */
 const _listeners = new Set<() => void>();
 
@@ -176,6 +201,15 @@ export async function refreshModelCatalog(
   if (_refreshInProgress) return;
   _refreshInProgress = true;
 
+  // Mark this fetch's connection identity and open a fresh abort
+  // controller. If `invalidateCatalog()` fires mid-flight (e.g. the
+  // user runs `alexi login` on a different tenant), the controller is
+  // aborted and the stale response is dropped at the commit guard
+  // below.
+  const connectionKey = resourceGroup;
+  _currentConnectionKey = connectionKey;
+  _currentFetchController = new AbortController();
+
   setState({ status: 'loading' });
 
   try {
@@ -187,6 +221,17 @@ export async function refreshModelCatalog(
         ).execute(),
       options.retry
     );
+
+    // Guard: another connection superseded us while we awaited. Drop
+    // the stale response rather than clobbering the current state
+    // with results from the old tenant / resource group.
+    if (_currentConnectionKey !== connectionKey) {
+      return;
+    }
+    // Guard: the controller was aborted (invalidateCatalog called).
+    if (_currentFetchController?.signal.aborted) {
+      return;
+    }
 
     const liveDeployments = response.resources ?? [];
 
@@ -239,6 +284,15 @@ export async function refreshModelCatalog(
       errorClass: undefined,
     });
   } catch (err) {
+    // Guard: a connection change invalidated this fetch while we
+    // awaited. Treat as a dropped request — do not clobber state or
+    // record an error against the NEW connection.
+    if (_currentConnectionKey !== connectionKey) {
+      return;
+    }
+    if (_currentFetchController?.signal.aborted) {
+      return;
+    }
     // `ModelFetchError.reason` carries the classified, user-facing
     // message; for non-classified errors fall back to the raw message.
     // Keep existing entries (static or previous live), just mark as error
@@ -275,6 +329,11 @@ export async function refreshModelCatalog(
     });
   } finally {
     _refreshInProgress = false;
+    // Clear the controller only if it is still OURS — a concurrent
+    // `invalidateCatalog()` call may have swapped a fresh one in.
+    if (_currentConnectionKey === connectionKey) {
+      _currentFetchController = null;
+    }
   }
 
   // Schedule next background refresh

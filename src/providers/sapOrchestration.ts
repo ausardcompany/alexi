@@ -47,7 +47,7 @@ import {
   initializeConnectorStore,
   type ConnectorState,
 } from './connectorStore.js';
-import { isClaudeOpus4 } from './model-match.js';
+import { isClaudeOpus4, claudeFamilyMaxOutputTokens } from './model-match.js';
 import { extractImageChunks } from './transform.js';
 import { env } from '../config/env.js';
 import {
@@ -1553,9 +1553,20 @@ export class SapOrchestrationProvider {
    * Build the orchestration module configuration
    */
   private buildModuleConfig(options?: CompletionOptions): OrchestrationModuleConfig {
-    // Build model params
+    // Build model params.
+    //
+    // `max_tokens` precedence (ports kilocode fixes f05a4fdc3 + c3f1e509e,
+    // "request full output limit for Claude family"):
+    //   1. Explicit caller value (`options.maxTokens`) — always wins.
+    //   2. Instance config (`this.config.maxTokens`) — provider-level default.
+    //   3. For Claude-family models: the DOCUMENTED Anthropic output cap
+    //      (64K for Claude 3.7 / 4.x, 8K for 3.5, 4K for 3.x). Previously
+    //      Claude deployments inherited the global 4K default and silently
+    //      truncated long completions well before the model's real ceiling.
+    //   4. Global fallback of 4096 — safe default for non-Claude models.
+    const claudeFamilyCap = claudeFamilyMaxOutputTokens(this.config.modelName);
     const modelParams: Record<string, unknown> = {
-      max_tokens: options?.maxTokens ?? this.config.maxTokens ?? 4096,
+      max_tokens: options?.maxTokens ?? this.config.maxTokens ?? claudeFamilyCap ?? 4096,
     };
 
     // Anthropic deprecated the `temperature` parameter for the Claude Opus 4

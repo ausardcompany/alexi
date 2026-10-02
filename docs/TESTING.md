@@ -1437,6 +1437,148 @@ cases) exercises `enabled()` across three `ALEXI_CLIENT` states (`cli`,
 GitHub, GitLab, non-URL, and issue-URL inputs. Follow the same
 snapshot/restore discipline for `ALEXI_CLIENT` in that block.
 
+### Testing Connector Store Hydration Resilience
+
+Reference regression suite: `src/providers/__tests__/connectorStore.resilience.test.ts` (127 lines, 2 cases). Ports kilocode fix `1988e54fd` ("keep storage usable after an interrupted first access"). The suite pins the invariant that `initializeConnectorStore` can be retried after a transient first-access failure instead of permanently inheriting a half-initialised state.
+
+The pattern uses the real filesystem to drive two attempts because the production code reads from `getConnectorStatePath()`:
+
+```typescript
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  createInMemoryConnectorStore,
+  getConnectorStore,
+  initializeConnectorStore,
+  resetConnectorStatePath,
+  setConnectorStatePath,
+  setConnectorStore,
+} from '../connectorStore.js';
+
+describe('initializeConnectorStore resilience', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-connector-'));
+    // Reset the store so `currentStoreHydrated` is false.
+    setConnectorStore(createInMemoryConnectorStore());
+  });
+
+  afterEach(() => {
+    resetConnectorStatePath();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('does not mark hydrated when loadConnectorState throws, allowing retry', async () => {
+    // Point the state path at a directory to force `loadConnectorState`
+    // to throw (reading a dir as a file errors on most platforms).
+    const asDir = path.join(tmpDir, 'as-dir');
+    fs.mkdirSync(asDir);
+    setConnectorStatePath(asDir);
+    await initializeConnectorStore();
+    expect(await getConnectorStore().get('sap-ai-core')).toBeUndefined();
+
+    // Now point at a valid snapshot and retry WITHOUT swapping stores.
+    // Pre-fix: the hydrated flag was set early, so this would be a no-op.
+    // Post-fix: hydration actually runs.
+    const populated = path.join(tmpDir, 'populated.json');
+    fs.writeFileSync(
+      populated,
+      JSON.stringify({
+        version: 1,
+        connectors: { 'sap-ai-core': { refreshToken: 'retry-token' } },
+      }),
+      { mode: 0o600 }
+    );
+    setConnectorStatePath(populated);
+    await initializeConnectorStore();
+
+    const entry = await getConnectorStore().get('sap-ai-core');
+    expect(entry?.refreshToken).toBe('retry-token');
+  });
+});
+```
+
+Key coverage points for anyone extending this suite:
+
+1. **Use `fs.mkdtempSync` for test isolation.** The state file lives on real disk and `initializeConnectorStore` reads it via the pointer configured by `setConnectorStatePath`. Each test owns a fresh temp directory and tears it down in `afterEach` via `fs.rmSync(tmpDir, { recursive: true, force: true })`.
+2. **Reset the store in `beforeEach`.** The module-scoped `currentStoreHydrated` flag persists across tests. `setConnectorStore(createInMemoryConnectorStore())` restores a fresh in-memory store so the hydrated flag starts at `false`.
+3. **Always call `resetConnectorStatePath` in `afterEach`.** Otherwise a later test in the same file would inherit the path override and read from a now-deleted temp directory.
+4. **The "point at a directory" trick forces a thrown load.** Reading a directory as a file errors on most platforms with `EISDIR`. The suite leverages this to simulate `loadConnectorState` throwing without needing to mock the `fs` module. After the throw, the second attempt against a valid snapshot MUST succeed — the regression this guards is the pre-fix behaviour where the hydrated flag flipped before the `await` and poisoned the retry.
+5. **Write snapshots with `mode: 0o600`.** This mirrors the production write path (`saveConnectorState`) and keeps the fixture realistic — a snapshot written with permissive permissions would surface a different bug class and should not be used here.
+
+### Testing Claude Family Output Token Limits
+
+Reference regression suite: `src/providers/__tests__/model-match.test.ts` (`describe('claudeFamilyMaxOutputTokens')`, 50 lines added, 7 cases). Ports kilocode fixes `f05a4fdc3` + `c3f1e509e`. The suite locks the family → cap mapping so a future regression that resets `max_tokens` to the historical 4096 default on Claude deployments trips immediately.
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { claudeFamilyMaxOutputTokens } from '../model-match.js';
+
+describe('claudeFamilyMaxOutputTokens', () => {
+  it('returns 64K for Claude 4.x opus and sonnet (SAP double-dash)', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.7-opus')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-4.5-sonnet')).toBe(64_000);
+  });
+
+  it('returns 8K for Claude 3.5 variants', () => {
+    expect(claudeFamilyMaxOutputTokens('anthropic--claude-3.5-sonnet')).toBe(8_192);
+    expect(claudeFamilyMaxOutputTokens('claude-3-5-sonnet')).toBe(8_192);
+  });
+
+  it('returns 4K for Claude 3 opus / sonnet / haiku', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-3-opus')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-sonnet')).toBe(4_096);
+    expect(claudeFamilyMaxOutputTokens('claude-3-haiku')).toBe(4_096);
+  });
+
+  it('falls back to a safe 8K default for unrecognised Claude variants', () => {
+    expect(claudeFamilyMaxOutputTokens('claude-9999-wild')).toBe(8_192);
+  });
+
+  it('returns undefined for non-Claude models', () => {
+    expect(claudeFamilyMaxOutputTokens('gpt-4o')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('gemini-2.5-pro')).toBeUndefined();
+    expect(claudeFamilyMaxOutputTokens('')).toBeUndefined();
+  });
+
+  it('is case-insensitive and matches SAP provider-prefixed form', () => {
+    expect(claudeFamilyMaxOutputTokens('SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS')).toBe(64_000);
+    expect(claudeFamilyMaxOutputTokens('sap-ai-core/anthropic--claude-3.5-sonnet')).toBe(8_192);
+  });
+});
+```
+
+Key coverage points for anyone extending this suite:
+
+1. **Order of patterns matters — pin BOTH `claude-3-5-sonnet` and `claude-3-sonnet`.** The regex table is scanned top-to-bottom and the 3.5 pattern must match before the Claude 3 Sonnet pattern. A rewrite that reorders the table would silently misroute `claude-3-5-sonnet` to the 4096 ceiling; the pair of assertions here forces an immediate failure.
+2. **Case-insensitive and prefix-tolerant.** The helper is applied with `/i` and no anchors so `SAP-AI-CORE/ANTHROPIC--CLAUDE-4.7-OPUS` resolves identically to the lowercased bare id. Keep at least one upper-case + prefix combination in the suite so a future `toLowerCase()` or anchoring refactor is caught.
+3. **The fallback branch MUST stay at 8192, not 4096.** The unrecognised-Claude case is deliberately NOT the global default — a brand-new SAP AI Core Claude deployment that lands before Alexi's table is updated still gets a safe 8K ceiling instead of silently truncating to 4K. Any PR that drops the fallback to 4096 breaks the test.
+4. **Non-Claude models return `undefined`, NOT a number.** The precedence chain inside `buildModuleConfig` relies on `undefined` to fall through to the next layer. If a future refactor makes the helper return `4096` for non-Claude ids, the fallback layering collapses.
+
+### Testing Namespaced Session Identity Headers
+
+Reference regression suite: `src/providers/__tests__/sessionHeaders.test.ts`. The additive opencode #52370 fields (`x-alexi-session-id`, `x-alexi-parent-session-id`) are checked alongside the existing `x-session-affinity` / `X-Interaction-Id` assertions to guarantee that:
+
+```typescript
+// Namespaced identity headers (opencode #52370) — emitted alongside the
+// legacy headers so multi-tenant SAP AI Core gateways can disambiguate
+// session identity without header-name collisions.
+expect(merged['x-alexi-session-id']).toBe('sess-abc');
+expect(merged['x-alexi-parent-session-id']).toBe('parent-xyz');
+```
+
+The suite covers three states:
+
+1. **Full context** (session id + parent + agent) — all seven headers are emitted together, including both the legacy and namespaced parent / affinity variants.
+2. **Session-only context** — `x-alexi-session-id`, `x-session-affinity`, and `X-Interaction-Id` are emitted; both parent headers (legacy + namespaced) are `undefined`; no empty-string headers that SAP AI Core might reject.
+3. **Merge path** — `mergeSessionHeaders` returns the namespaced identity alongside the legacy affinity and preserves non-session headers (`Authorization`, etc.) untouched.
+
+The additive contract is the test's most important invariant: adding a new identity surface must never remove the legacy one, because existing observability pipelines keyed on `x-session-affinity` must keep working during the rollout window.
+
 ### Testing Bash Tool Shell-Type Reporting
 
 The `bash` tool records the detected shell type on every result via
@@ -3469,6 +3611,70 @@ Key coverage points for future changes to `worktreeId` handling:
 4. **Runtime capability gating.** When the field passes both schema layers, the handler MUST fail with the exact `Managed worktrees are not available in this build (worktreeId=<id>)` message AND echo the supplied ID back so operators can correlate the error to the failing call. Assert BOTH the message pattern (`toMatch(/Managed worktrees are not available/i)`) AND the ID substring (`toContain('wt-abc')`).
 
 All cases route through `agentManagerTool.executeUnsafe` — which bypasses permission gating — to isolate the schema-decode path and the handler's capability check from permission behaviour. When the managed-worktree registry lands in a future release, the fourth case should be split into a happy-path assertion (successful directory resolution) and a not-found assertion (unknown `worktreeId` still fails loudly).
+
+### Testing `agent_manager` validation error message quality
+
+Introduced 2026-10-02 (`1.22.36`, ports upstream opencode 2026-10 improvement to agent-manager validation messages). The cross-field validator for `worktreeId` now emits a Zod issue whose message carries three pieces of context that an LLM caller needs to self-correct: the received value, the received action, and an explicit remediation sentence. This companion suite locks in the message contract separately from the earlier `worktreeId` schema suite so a future refactor cannot regress the message to a bare one-liner without failing the dedicated regression test.
+
+Reference regression suite: `src/tool/tools/__tests__/agent-manager.error-messages.test.ts` (61 lines, three cases). The pattern asserts message substrings, not the full error prose, so the exact phrasing can evolve without breaking the suite as long as the three invariants hold:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import type { ToolContext } from '../../index.js';
+
+describe('agent-manager tool — validation error messages', () => {
+  it('includes the received worktreeId value in the error message', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'list', worktreeId: 'wt-xyz-123' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    // Received value must appear in the error so the LLM can see what it
+    // sent and self-correct instead of retrying the same payload.
+    expect(result.error ?? '').toContain('wt-xyz-123');
+  });
+
+  it('includes a remediation hint telling the caller how to recover', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'stop', worktreeId: 'wt-abc' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    // Must spell out the fix path so LLM callers can self-correct.
+    expect(result.error ?? '').toMatch(/omit worktreeId or send JSON null/i);
+  });
+
+  it('names the offending action in the error message', async () => {
+    const { agentManagerTool } = await import('../agent-manager.js');
+    const context: ToolContext = { workdir: process.cwd() };
+
+    const result = await agentManagerTool.executeUnsafe(
+      { action: 'status', worktreeId: 'wt-abc', sessionId: 'session-1' },
+      context
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? '').toContain('status');
+  });
+});
+```
+
+Key coverage points for future changes to the validator in `src/tool/tools/agent-manager.ts`:
+
+1. **Echo the received value.** The emitted message MUST contain the original `worktreeId` string verbatim (asserted via `toContain('wt-xyz-123')`). Assert against a value that is obviously not a legitimate ID (dashes, a numeric suffix) so a stray fallback like `JSON.stringify(null)` would fail the match. The current implementation uses `JSON.stringify(params.worktreeId)`, which quotes the value and makes it visually distinct in the serialised tool result.
+2. **Remediation sentence is mandatory.** The suite asserts the exact substring `omit worktreeId or send JSON null` (case-insensitive). Any rewrite that drops this phrase — for example a return to `worktreeId is only valid on action=create` — fails the second case immediately. The phrasing matters: the LLM reads tool errors as prompts, and a verb-first sentence (`omit…`) is deterministic to follow.
+3. **Name the offending action.** The message MUST contain the action name (`list`, `stop`, `status`, `answer`) so the model can locate the bad field in a multi-field payload rather than guessing which argument tripped the validator. The current implementation echoes `JSON.stringify(params.action)` for the same quoting reason as the ID.
+4. **Dynamic imports isolate schema reloads.** Every case uses `const { agentManagerTool } = await import('../agent-manager.js');` INSIDE the `it` block rather than a top-level import so a future test that mutates module-level state (feature flags, provider mocks) in a sibling file cannot affect this suite.
+
+All three cases route through `agentManagerTool.executeUnsafe` to bypass permission gating. The message contract is independent of the earlier capability-gating assertions in `agent-manager.worktree-id.test.ts` — if you change the validator path (e.g. move the cross-field rule from Zod into the handler), both suites must still pass without edits to the assertion lists.
 
 ### Testing `apply_patch` `move_path` Normalization
 
