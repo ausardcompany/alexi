@@ -2411,6 +2411,80 @@ Contributor rules:
 - **Update the four task-tool test files together.** `task-approval-boundary.test.ts`, `task-abort-propagation.test.ts`, `task-depth-limit.test.ts`, and `task-failure-paths.test.ts` all mock `src/agent/index.js`. Any change to that module's shape (a new export, a renamed helper) must be reflected in the `vi.importActual + spread` factories in each of the four files or the suites fail to load. See [TESTING.md — Testing subagent approval boundaries](TESTING.md#testing-subagent-approval-boundaries) for the current mock pattern.
 - **The pure-function contract belongs in `src/agent/subagent-permissions.test.ts`.** The co-located suite added in commit `82dbef06` pins the three-decision contract (ALLOW dropped, ASK dropped, DENY + `external_directory` retained) directly against `deriveSubagentSessionPermission` without going through the tool wiring. Any change that touches the internal filter (e.g. adding a fourth decision shape, tightening the `external_directory` retention rule, or altering the fail-closed default when `allowedTools` omits a tool the parent had allowed) MUST land with a matching case here — the mock-free suite is the fast-path regression guard that fails before the integration suite even loads its mocks. Do NOT delete or fold this suite into the tool-level file; keeping the derivation function testable in isolation is what lets `subagent-permissions.ts` be refactored without breaking the tool contract.
 
+## Subagent Cancellation Error Messages (`task` tool)
+
+Added in the 2026-10-03 upstream sync (commit `e41af453`, ports upstream kilocode `17a6a7cd6`). The `task` tool at `src/tool/tools/task.ts:744-767` returns a specific terminal error when either the parent `context.signal` or the child's own `childSignal` is aborted:
+
+```typescript
+if (context.signal?.aborted || childSignal?.aborted) {
+  taskData.status = 'cancelled';
+  const cancelledUsage = costTracker.endTask(taskId!);
+  return {
+    success: false,
+    error: 'Task cancelled by the user',
+    data: {
+      taskId: taskId!,
+      agentId: agent.id,
+      response: '',
+      completed: false,
+      status: 'cancelled' as const,
+      usage: cancelledUsage,
+    },
+  };
+}
+```
+
+Contributor rules when adding a new abort path to the `task` tool or to a sibling subagent tool:
+
+- **Never phrase a user-initiated cancellation as `'Operation aborted'`, `'Aborted'`, `'Cancelled'`, or any other generic verb.** Parent LLMs reading the tool result interpret those phrasings as transient failures and immediately spawn a replacement subagent, producing a restart loop that burns `KILO_RETRIES` budget without recovering. The literal string `'Task cancelled by the user'` (or an equally explicit "stopped by user" variant for a sibling tool) is the terminal signal that makes the parent halt the chain. This is consistent with the AGENTS.md error-classification contract — user cancellation is permanent, not transient.
+- **Keep the data payload populated even on cancellation.** `taskData.status = 'cancelled'`, `data.status: 'cancelled' as const`, `data.completed: false`, and the `costTracker.endTask(taskId)` usage summary must still be returned so the orchestrator can finalise usage accounting. A caller that drops the payload leaks the `taskId` from `costTracker`.
+- **Check BOTH `context.signal?.aborted` and `childSignal?.aborted`.** The parent signal fires when the user cancels the whole session; the child signal fires when the subagent itself times out or is cancelled by its own policy. A check that only inspects one of them loses the other cancellation path.
+- **The provider-layer `AbortError` → `ContentFilterError` → generic `Error` fallthrough stays in `src/providers/sapOrchestration.ts`.** Do not add a competing "cancelled" branch at the provider layer. The provider surfaces whatever abort reason the fetch stack reports; the tool wrapper is the one place that re-labels it as a user stop.
+- **No new retry wrapper around the cancellation path.** `ErrorBackoff.isFatal(err)` treats a 4xx validation error and a cancelled subagent identically — permanent, no retry — and the outer `KILO_RETRIES` loop stops on the first match of the transient-only regex (`socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`). A new retry wrapper would re-introduce the restart loop this contract is designed to prevent.
+
+## Conditional / Optional Tool Registration Pattern (`src/tool/registry.ts`)
+
+Added in the 2026-10-03 upstream sync (commit `e41af453`, documents the shape of upstream kilocode `bf40cc7cb` — VS Code `semantic_search` consent) as a long-form comment above `PromptToolResolver` in `src/tool/registry.ts:102-151`. No live code path uses the pattern yet — Alexi does not currently register any conditional tool — but any future addition (SAP AI Core entitlement check, feature flag, runtime consent store, flaky dependency import) MUST follow it. One place to audit, one place to extend.
+
+The three-rule contract:
+
+1. **Lazy-import the dependency inside an async check — never at module top-level.** A failing import at the top of `src/tool/registry.ts` would break the entire registry build and take down every unrelated tool with it. The check must live inside `checkOptionalCondition(() => import('./optionalDep.js'), false, 'optional_tool')` (or an equivalent `try { ... } catch` wrapper) so that a failing import collapses to the safe fallback for THIS tool only.
+2. **Swallow / log the error and return a safe fallback (typically `false` for "tool disabled") instead of propagating.** The registry MUST still produce a usable tool list even if one optional check explodes. `logger.warn(context, { err })` is the preferred reporting surface — do not `throw` out of the check and do not emit to `console.*` directly (ESLint `no-console: warn` applies, only `src/utils/logger.ts` is allowed to call `console`).
+3. **Filter with `flatMap`, not `filter`.** The idiom is `tools.flatMap((t) => t.name === 'optional_tool' ? (canUseOptional ? [t] : []) : [t])`. Every branch MUST return an ARRAY (`[t]` or `[]`) — a bare `t` would be iterated by `flatMap` as its own keys, which is a subtle bug the test suite would not catch until the first time an operator enabled the flag. The `flatMap` shape also lets a future change swap `[]` for `[stubTool]` without reshaping the pipeline — a conditional tool with a stub fallback should look exactly like a conditional tool with no fallback at the pipeline level.
+
+Reference skeleton (copy verbatim, do not reinvent):
+
+```typescript
+async function checkOptionalCondition<T>(
+  check: () => Promise<T>,
+  fallback: T,
+  context: string,
+): Promise<T> {
+  try {
+    return await check();
+  } catch (err) {
+    logger.warn(`${context} unavailable`, { err });
+    return fallback;
+  }
+}
+
+const canUseOptional = await checkOptionalCondition(
+  async () => (await import('./someOptionalDep.js')).isEnabled(),
+  false,
+  'optional_tool',
+);
+const resolved = tools.flatMap((t) =>
+  t.name === 'optional_tool' ? (canUseOptional ? [t] : []) : [t],
+);
+```
+
+Contributor rules:
+
+- **Document any future gating in the same comment block in `src/tool/registry.ts`.** Operators need a single place to audit "which tools are gated, and on what signal". Do NOT scatter conditional checks across the individual tool modules in `src/tool/tools/*.ts` — gate at the registry layer so the audit path is one file.
+- **Add a dedicated test case under `tests/tool/registry.*.test.ts`** that stubs the runtime signal in BOTH states (enabled → tool present, disabled → tool absent) and asserts the `resolveForPrompt` result length changes accordingly. A case that only exercises the enabled path hides the regression where the `flatMap` filter accidentally returns a bare `t` (silently iterated as keys).
+- **Do NOT register a conditional tool through the direct `register(tool)` API that unconditional tools use.** Route it through the resolver layer so the gating happens at prompt-tool-resolution time, not at registry-build time — SAP AI Core entitlements can flip between prompts within the same session (`AICORE_RESOURCE_GROUP` changes via `alexi login`), and a build-time check would stale.
+- **Keep the fallback type the same as the primary type.** `checkOptionalCondition<boolean>` returns `boolean`; do not mix `boolean` and `undefined`. The caller writes `canUseOptional ? [t] : []`, which depends on the fallback being falsy — a `null` or `undefined` fallback is still correct here, but mixing types in the same registry obscures the contract when a reviewer scans the file.
+
 ## Draft Cache (`DraftCache`)
 
 Added in the 2026-09-17 sync. The in-memory cache in `src/session/draft.ts` is the canonical place for TUI in-progress prompt state. When adding a new place that reads or writes the buffer:

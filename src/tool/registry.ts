@@ -98,6 +98,58 @@ export interface ToolResolutionContext {
  */
 export type ToolCategory = 'read' | 'write' | 'execute' | 'network' | 'agent' | 'meta' | 'other';
 
+/**
+ * Pattern note (upstream kilocode `bf40cc7cb` — VS Code semantic_search consent):
+ *
+ * When introducing OPTIONAL tools whose availability depends on a runtime
+ * signal (feature flag, external consent store, SAP AI Core entitlement,
+ * missing env var, flaky dependency import, etc.), follow this contract so
+ * that tool enumeration remains robust:
+ *
+ *   1. Lazy-import the dependency inside an async check — never at
+ *      module top-level — so that a failing import does not break the
+ *      entire registry build.
+ *   2. Swallow / log the error and return a safe fallback (typically
+ *      `false` for "tool disabled") instead of propagating. The registry
+ *      must still produce a usable tool list even if one optional check
+ *      explodes.
+ *   3. When filtering the resulting tool list, prefer `flatMap` over
+ *      `filter` so excluded tools can be swapped for a stub/alternative
+ *      in a future change (`cond ? [tool] : []` → `cond ? [tool] : [stub]`)
+ *      without reshaping the pipeline. Every branch MUST return an array
+ *      (`[tool]` or `[]`) — a bare `tool` would be iterated as its own
+ *      keys by `flatMap`.
+ *
+ * Example skeleton (not currently used — add only when a conditional
+ * tool actually lands):
+ *
+ *   async function checkOptionalCondition<T>(
+ *     check: () => Promise<T>,
+ *     fallback: T,
+ *     context: string,
+ *   ): Promise<T> {
+ *     try {
+ *       return await check();
+ *     } catch (err) {
+ *       logger.warn(`${context} unavailable`, { err });
+ *       return fallback;
+ *     }
+ *   }
+ *
+ *   const canUseOptional = await checkOptionalCondition(
+ *     async () => (await import('./someOptionalDep.js')).isEnabled(),
+ *     false,
+ *     'optional_tool',
+ *   );
+ *   const resolved = tools.flatMap((t) =>
+ *     t.name === 'optional_tool' ? (canUseOptional ? [t] : []) : [t],
+ *   );
+ *
+ * Alexi does not currently register any such conditional tool, so no
+ * live code path uses this helper yet. Document any future gating here
+ * so operators have one place to audit the pattern.
+ */
+
 export interface PromptToolResolver {
   resolve(context: ToolResolutionContext): Promise<Tool<any, any>[]>;
 }
