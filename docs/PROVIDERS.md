@@ -2754,7 +2754,180 @@ All three helpers are `undefined`-safe so a provider integration can call them u
 
 ### Shutdown
 
-`initTracing()` is invoked eagerly from `src/cli/program.ts` and is idempotent. On shutdown the CLI's SIGINT/SIGTERM/beforeExit handlers all call `shutdownTracing()`, which flushes pending spans through the batch span processor before `process.exit(0)`. `shutdownTracing()` never throws — a broken exporter must not block process exit.
+`initTracing()` is invoked eagerly from `src/cli/program.ts` and is idempotent. On shutdown the CLI's SIGINT/SIGTERM/beforeExit handlers all call `shutdownTracing()`, which flushes pending spans through the batch span processor before `process.exit(0)`. `shutdownTracing()` never throws -- a broken exporter must not block process exit.
+
+## Langfuse BYOK Tracing (Opt-in)
+
+Alexi additionally ships an opt-in Langfuse integration that lives alongside the OTLP relay above. It is designed for operators who already run (or point at) their own Langfuse instance -- typically for CI, benchmark, or agent-fleet runs that want per-run tags, metadata, and environment labelling. Ported from Cline PR #14787 (`feat(llms): opt-in Langfuse tracing for BYOK providers plus env tags, metadata and environment`). Implementation: `src/providers/langfuse-telemetry.ts`.
+
+### Design goals
+
+1. **Disabled by default.** Nothing is loaded or sent unless the operator sets `ALEXI_LANGFUSE_ALL_PROVIDERS=1` AND provides direct Langfuse credentials. The `langfuse` SDK is dynamic-imported so cold-start is unaffected.
+2. **Direct exporter only.** BYOK tracing NEVER goes through the host OTLP relay -- it talks directly to the operator-configured Langfuse `baseUrl`. This is a security property: an operator who BYOKs their own model deployment and their own observability stack cannot have prompts routed to a collector they did not configure themselves.
+3. **Independent of the OTLP relay.** Both integrations can be enabled at once (they emit via different code paths); either can be enabled on its own.
+4. **Trace-level labelling from env.** A benchmark harness or CI workflow can label every trace it produces (`suite:regression`, `commit:abc123`, `workflow:ci-auto-fix`) without touching call sites.
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ALEXI_LANGFUSE_ALL_PROVIDERS` | yes | Truthy opt-in. Treated as `true` for `1`, `true`, `yes`, `on`, or any non-empty value other than `0`/`false`/`no`/`off`. |
+| `LANGFUSE_BASE_URL` | yes | Base URL of the Langfuse instance, e.g. `https://cloud.langfuse.com`. |
+| `LANGFUSE_PUBLIC_KEY` | yes | Langfuse public key. |
+| `LANGFUSE_SECRET_KEY` | yes | Langfuse secret key. |
+| `LANGFUSE_TRACING_ENVIRONMENT` | no | Langfuse `environment` tag on every trace (e.g. `ci`, `prod`, `benchmark`). |
+| `ALEXI_LANGFUSE_TAGS` | no | Comma-separated trace tags, e.g. `suite:regression,commit:abc123`. Trimmed and deduped. |
+| `ALEXI_LANGFUSE_METADATA` | no | Either a JSON object (`{"run":"42"}`) or `key=value,...` pairs. Non-string values are stringified; `null` / `undefined` entries are dropped. Malformed JSON is ignored (logged when `ALEXI_DEBUG_LANGFUSE=1`). |
+| `ALEXI_DEBUG_LANGFUSE` | no | When truthy, emits internal debug messages to stderr (useful during a benchmark bring-up). |
+
+Credentials MUST all three be set to enable tracing. If any one of `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` is missing, the relay stays disabled rather than silently losing traces.
+
+### Attribute merge rules
+
+Call-site attributes (passed from the provider at the point of the call) are merged with env attributes:
+
+- **Tags**: `env tags ++ call tags`, deduped. Env tags come first; call-site tags that are not already present are appended.
+- **Metadata**: `{...envMetadata, ...callMetadata}` -- the call-site wins on key conflicts. This matches the Cline reference contract so benchmark harnesses can override an env default per call.
+- **Short-circuit**: when both sides are empty, propagation is skipped entirely so no empty trace is emitted.
+- **sessionId / userId**: pass through from the call-site; env vars do not populate these fields (sessions are per-call concepts).
+
+### Example
+
+```bash
+export ALEXI_LANGFUSE_ALL_PROVIDERS=1
+export LANGFUSE_BASE_URL=https://cloud.langfuse.com
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+
+# Benchmark workflow run with environment + per-run labels
+export LANGFUSE_TRACING_ENVIRONMENT=benchmark
+export ALEXI_LANGFUSE_TAGS=suite:regression,commit:abc123,workflow:ci-auto-fix
+export ALEXI_LANGFUSE_METADATA='{"runId":"42","model":"anthropic--claude-4-opus"}'
+
+alexi chat -m "Explain the architecture"
+```
+
+Every trace emitted during that CLI invocation lands in the operator's Langfuse under the `benchmark` environment, tagged `suite:regression commit:abc123 workflow:ci-auto-fix`, with `runId=42` and `model=anthropic--claude-4-opus` as metadata.
+
+### SDK integration stamp
+
+Every batch posted to the Langfuse `/api/public/ingestion` endpoint carries `metadata.sdk_integration = "alexi-langfuse-direct"` so dashboards and queries can distinguish Alexi-generated traces from vanilla Langfuse SDK traces coming from the same project. The constant is exported as `LANGFUSE_SDK_INTEGRATION` from both `src/providers/langfuse-telemetry.ts` and the top-level `src/providers/index.ts` barrel so downstream dashboards and tests can match on the exact string without duplicating the literal.
+
+### Scope
+
+Only chat and streaming chat completion calls through `SapOrchestrationProvider` are instrumented. Image generation (`generateImage`) is not, matching the Cline contract.
+
+### Public TypeScript surface
+
+The module in `src/providers/langfuse-telemetry.ts` (482 lines) is re-exported through `src/providers/index.ts` so callers import from the barrel instead of reaching into the file directly:
+
+```typescript
+// Env var name constants (operators grep for these):
+export const LANGFUSE_ALL_PROVIDERS_ENV: 'ALEXI_LANGFUSE_ALL_PROVIDERS';
+export const LANGFUSE_TAGS_ENV: 'ALEXI_LANGFUSE_TAGS';
+export const LANGFUSE_METADATA_ENV: 'ALEXI_LANGFUSE_METADATA';
+export const LANGFUSE_ENVIRONMENT_ENV: 'LANGFUSE_TRACING_ENVIRONMENT';
+export const LANGFUSE_BASE_URL_ENV: 'LANGFUSE_BASE_URL';
+export const LANGFUSE_PUBLIC_KEY_ENV: 'LANGFUSE_PUBLIC_KEY';
+export const LANGFUSE_SECRET_KEY_ENV: 'LANGFUSE_SECRET_KEY';
+export const LANGFUSE_SDK_INTEGRATION: 'alexi-langfuse-direct';
+
+// Types:
+export interface DirectLangfuseTelemetryConfig {
+  baseUrl: string;
+  publicKey: string;
+  secretKey: string;
+  environment?: string;
+}
+
+export interface LangfuseTraceAttributes {
+  sessionId?: string;
+  userId?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export type AiSdkTelemetryDecision =
+  | { isEnabled: false }
+  | { isEnabled: true; client: Langfuse; config: DirectLangfuseTelemetryConfig };
+
+// Runtime surface:
+export function isEnvTruthy(raw: string | undefined): boolean;
+export function readDirectLangfuseTelemetryConfig(): DirectLangfuseTelemetryConfig | undefined;
+export function readEnvTraceAttributes(): Pick<LangfuseTraceAttributes, 'tags' | 'metadata'>;
+export function withLangfuseTraceAttributes(
+  callAttrs: LangfuseTraceAttributes,
+  envAttrs?: Pick<LangfuseTraceAttributes, 'tags' | 'metadata'>
+): LangfuseTraceAttributes | undefined;
+export function resolveAiSdkTelemetry(modelId: string): Promise<AiSdkTelemetryDecision>;
+export function startLangfuseTrace(
+  decision: AiSdkTelemetryDecision,
+  callAttrs: LangfuseTraceAttributes & { name?: string }
+): LangfuseTraceClient | undefined;
+export function startLangfuseGeneration(
+  trace: LangfuseTraceClient | undefined,
+  attrs: { name: string; model: string; input?: unknown }
+): LangfuseGenerationClient | undefined;
+export function finishLangfuseGeneration(
+  generation: LangfuseGenerationClient | undefined,
+  data: { output?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }; finishReason?: string }
+): void;
+export function failLangfuseGeneration(
+  generation: LangfuseGenerationClient | undefined,
+  error: unknown
+): void;
+```
+
+Every helper is `undefined`-safe: pass `undefined` for the trace or generation handle and the call is a no-op. This keeps the integration path in `SapOrchestrationProvider` free of `if (langfuseTrace)` guards.
+
+### Trace lifecycle (sequence)
+
+```mermaid
+sequenceDiagram
+    participant Caller as SapOrchestrationProvider.sendChat
+    participant Module as langfuse-telemetry.ts
+    participant Env as process.env
+    participant SDK as langfuse SDK (lazy)
+    participant Server as Langfuse /api/public/ingestion
+
+    Caller->>Module: resolveAiSdkTelemetry(modelId)
+    Module->>Env: isEnvTruthy(ALEXI_LANGFUSE_ALL_PROVIDERS)?
+    alt opt-in off OR creds missing
+        Module-->>Caller: { isEnabled: false }
+        Note over Caller: start/finish helpers<br/>become no-ops
+    else enabled + credentials present
+        Module->>SDK: dynamic import('langfuse') (cached)
+        Module->>SDK: new Langfuse({ baseUrl, keys, sdkIntegration: 'alexi-langfuse-direct', flushAt: 1 })
+        Module-->>Caller: { isEnabled: true, client, config }
+        Caller->>Module: startLangfuseTrace(decision, { name, sessionId, tags, metadata })
+        Module->>Module: withLangfuseTraceAttributes(call, env)
+        Module->>SDK: client.trace(mergedAttrs)
+        Caller->>Module: startLangfuseGeneration(trace, { name, model, input })
+        Module->>SDK: trace.generation({ name, model, input, startTime })
+        Caller->>Caller: provider.chatCompletion(...)
+        alt provider error
+            Caller->>Module: failLangfuseGeneration(generation, err)
+            Module->>SDK: generation.end({ level: 'ERROR', statusMessage })
+        else success
+            Caller->>Module: finishLangfuseGeneration(generation, { output, usage, finishReason })
+            Module->>SDK: generation.end({ output, usage, metadata.finishReason })
+        end
+        SDK->>Server: POST /api/public/ingestion<br/>(batch with sdk_integration='alexi-langfuse-direct')
+    end
+```
+
+The dynamic `import('langfuse')` keeps the SDK out of the hot boot path when BYOK tracing is disabled (the default). The Langfuse client is cached per `baseUrl|publicKey|environment` tuple so a long-running process reuses a single HTTP keep-alive pool across every provider call. Test-only `_resetLangfuseTelemetryForTests()` drains the cache between vitest describe blocks.
+
+### Integration points inside the provider
+
+Both the non-streaming and streaming chat paths call `resolveAiSdkTelemetry()` once per request and emit a parallel Langfuse trace alongside the OTLP span. The two integrations are independent — enabling one does not require the other:
+
+- `src/providers/sapOrchestration.ts:1734-1774` (non-streaming `chatCompletion`): starts a `sap-ai-core.chat` trace, nests one `generation`, calls `failLangfuseGeneration` on `classifyRateLimitError`, calls `finishLangfuseGeneration` on success with `{ output, usage, finishReason }`.
+- `src/providers/sapOrchestration.ts:1850-1946` (streaming `chatCompletionStream`): same lifecycle; `failLangfuseGeneration` is called on both the initial dispatch error AND on stream-mid errors so a partially-emitted stream still records an error observation.
+
+### Testing
+
+See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract (350 lines of unit coverage in `src/providers/__tests__/langfuse-telemetry.test.ts`, 191-line HTTP-server integration test in `tests/providers/langfuse-telemetry-integration.test.ts`).
 
 ## Auxiliary-Task Model Selection
 

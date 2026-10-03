@@ -73,6 +73,32 @@ export {
 // Re-export auth errors
 export { StartupTimeoutError } from './auth.js';
 
+// Re-export BYOK Langfuse telemetry (direct exporter, opt-in via
+// ALEXI_LANGFUSE_ALL_PROVIDERS=1). See src/providers/langfuse-telemetry.ts
+// for the full contract (merge rules, env parsing, security boundary).
+export {
+  resolveAiSdkTelemetry,
+  readEnvTraceAttributes,
+  readDirectLangfuseTelemetryConfig,
+  withLangfuseTraceAttributes,
+  startLangfuseTrace,
+  startLangfuseGeneration,
+  finishLangfuseGeneration,
+  failLangfuseGeneration,
+  isEnvTruthy,
+  LANGFUSE_SDK_INTEGRATION,
+  LANGFUSE_ALL_PROVIDERS_ENV,
+  LANGFUSE_TAGS_ENV,
+  LANGFUSE_METADATA_ENV,
+  LANGFUSE_ENVIRONMENT_ENV,
+  LANGFUSE_BASE_URL_ENV,
+  LANGFUSE_PUBLIC_KEY_ENV,
+  LANGFUSE_SECRET_KEY_ENV,
+  type AiSdkTelemetryDecision,
+  type DirectLangfuseTelemetryConfig,
+  type LangfuseTraceAttributes,
+} from './langfuse-telemetry.js';
+
 // Re-export image response transforms (issue #1389)
 export { extractImageChunk, extractImageChunks, type NormalizedImageChunk } from './transform.js';
 

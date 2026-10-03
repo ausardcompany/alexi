@@ -65,6 +65,13 @@ import {
   shouldSampleSession,
 } from '../utils/tracing.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  resolveAiSdkTelemetry,
+  startLangfuseTrace,
+  startLangfuseGeneration,
+  finishLangfuseGeneration,
+  failLangfuseGeneration,
+} from './langfuse-telemetry.js';
 
 /**
  * Provider id used as the cache key for SAP AI Core access tokens.
@@ -1724,12 +1731,27 @@ export class SapOrchestrationProvider {
       messageCount: orchestrationMessages.length,
     });
 
+    // BYOK Langfuse tracing is opt-in and ONLY uses the direct exporter
+    // (`src/providers/langfuse-telemetry.ts`). It runs in parallel with the
+    // OTEL relay above -- the two are independent integrations.
+    const langfuseDecision = await resolveAiSdkTelemetry(this.config.modelName);
+    const langfuseTrace = startLangfuseTrace(langfuseDecision, {
+      name: 'sap-ai-core.chat',
+      sessionId: options?.sessionId,
+      metadata: { model: this.config.modelName, operation: 'chat' },
+    });
+    const langfuseGeneration = startLangfuseGeneration(langfuseTrace, {
+      name: 'sap-ai-core.chat',
+      model: this.config.modelName,
+    });
+
     let response;
     try {
       response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
     } catch (err) {
       const classified = classifyRateLimitError(err, this.config.modelName);
       failProviderSpan(span, classified);
+      failLangfuseGeneration(langfuseGeneration, classified);
       throw classified;
     }
 
@@ -1744,6 +1766,11 @@ export class SapOrchestrationProvider {
       usage,
       finishReason,
       contentPreview: content,
+    });
+    finishLangfuseGeneration(langfuseGeneration, {
+      output: content,
+      usage,
+      finishReason,
     });
 
     return {
@@ -1820,6 +1847,18 @@ export class SapOrchestrationProvider {
       sessionId: options?.sessionId,
       messageCount: orchestrationMessages.length,
     });
+    // BYOK Langfuse tracing (opt-in, direct exporter only). Independent of
+    // the OTEL relay above; see `src/providers/langfuse-telemetry.ts`.
+    const langfuseDecision = await resolveAiSdkTelemetry(this.config.modelName);
+    const langfuseTrace = startLangfuseTrace(langfuseDecision, {
+      name: 'sap-ai-core.stream',
+      sessionId: options?.sessionId,
+      metadata: { model: this.config.modelName, operation: 'stream' },
+    });
+    const langfuseGeneration = startLangfuseGeneration(langfuseTrace, {
+      name: 'sap-ai-core.stream',
+      model: this.config.modelName,
+    });
     let response;
     try {
       response = await client.stream(
@@ -1831,6 +1870,7 @@ export class SapOrchestrationProvider {
     } catch (err) {
       const classified = classifyRateLimitError(err, this.config.modelName);
       failProviderSpan(span, classified);
+      failLangfuseGeneration(langfuseGeneration, classified);
       throw classified;
     }
 
@@ -1889,6 +1929,7 @@ export class SapOrchestrationProvider {
     } catch (err) {
       const classified = classifyRateLimitError(err, this.config.modelName);
       failProviderSpan(span, classified);
+      failLangfuseGeneration(langfuseGeneration, classified);
       throw classified;
     }
 
@@ -1901,6 +1942,11 @@ export class SapOrchestrationProvider {
       usage,
       finishReason: finishReason ?? undefined,
       contentPreview: aggregatedText.length > 0 ? aggregatedText : undefined,
+    });
+    finishLangfuseGeneration(langfuseGeneration, {
+      output: aggregatedText.length > 0 ? aggregatedText : undefined,
+      usage,
+      finishReason: finishReason ?? undefined,
     });
 
     // Yield final chunk with metadata

@@ -210,6 +210,81 @@ export ALEXI_TRACE_RECORD_CONTENT=true
 
 Users can also disable the entire tracing relay via `telemetryOptOut: true` in `~/.alexi/config.json`, or the macOS managed preference `disableTelemetry: true`. Both keys are honoured by `isTelemetryOptOut()` in `src/utils/tracing.ts`, and any exception while reading the config is caught and treated as opt-out (fail-closed).
 
+#### ALEXI_LANGFUSE_ALL_PROVIDERS
+
+Opt-in flag that enables BYOK Langfuse tracing for every SAP AI Core provider call. Introduced in `1.22.36` (commit `898a37b9`, ports Cline PR #14787). Disabled by default. Treated as truthy for any non-empty value other than `0`, `false`, `no`, or `off` (case-insensitive); matches the operator-friendly contract used by `isEnvTruthy()` in `src/providers/langfuse-telemetry.ts`.
+
+```bash
+export ALEXI_LANGFUSE_ALL_PROVIDERS=1
+```
+
+Enabling the flag does nothing on its own — the three credential variables `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_SECRET_KEY` MUST all three be set. If any one is missing, `resolveAiSdkTelemetry()` returns `{ isEnabled: false }` rather than silently losing traces.
+
+The Langfuse integration is independent of the OTLP relay (`ALEXI_OTEL_TRACES_EXPORTER`): both can be enabled at once; either can run on its own. BYOK traces NEVER traverse the host OTLP endpoint — they are shipped directly to the operator-configured `LANGFUSE_BASE_URL` through the `langfuse` SDK. See [`docs/PROVIDERS.md#langfuse-byok-tracing-opt-in`](PROVIDERS.md#langfuse-byok-tracing-opt-in) for the full contract (merge rules, security boundary, SDK integration stamp).
+
+#### LANGFUSE_BASE_URL
+
+Base URL of the Langfuse instance that BYOK traces are shipped to, for example `https://cloud.langfuse.com` or a self-hosted deployment. Required alongside `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` for BYOK Langfuse tracing. Alexi only reads this variable when `ALEXI_LANGFUSE_ALL_PROVIDERS` is also set to a truthy value.
+
+```bash
+export LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+#### LANGFUSE_PUBLIC_KEY
+
+Langfuse project public key paired with `LANGFUSE_SECRET_KEY` for the direct exporter. Both halves of the credential pair are required; the module refuses to construct a client if either is missing.
+
+```bash
+export LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
+```
+
+#### LANGFUSE_SECRET_KEY
+
+Langfuse project secret key. Treat as a secret — do NOT commit to source control. Loaded via `env()` in `src/providers/langfuse-telemetry.ts` so a `.env` file at the repo root works for local development.
+
+```bash
+export LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+```
+
+#### LANGFUSE_TRACING_ENVIRONMENT
+
+Optional. Sets the Langfuse `environment` field on every trace emitted by this process. Typical values: `ci`, `benchmark`, `prod`, `staging`. When unset, traces land in the Langfuse project's default environment.
+
+```bash
+export LANGFUSE_TRACING_ENVIRONMENT=benchmark
+```
+
+#### ALEXI_LANGFUSE_TAGS
+
+Optional. Comma-separated list of trace tags appended to every trace produced by this process. Tags are trimmed, empty entries dropped, and the final list is deduped. Combined with the call-site `tags` field via `withLangfuseTraceAttributes()` (env first, then call-site new values appended, deduped).
+
+```bash
+export ALEXI_LANGFUSE_TAGS='suite:regression,commit:abc123,workflow:ci-auto-fix'
+```
+
+#### ALEXI_LANGFUSE_METADATA
+
+Optional. Trace-level metadata merged under call-site metadata (`{...env, ...callSite}`, call-site wins on key conflict). Accepts two formats:
+
+- JSON object (string starts with `{`): `{"run":"42","model":"anthropic--claude-4-opus"}`. Non-string values are stringified via `JSON.stringify`; `null` and `undefined` entries are dropped.
+- `key=value,key=value` pairs: `suite=swe-bench,commit=abc123`. Keys with an empty name or no `=` separator are dropped.
+
+Malformed JSON is ignored (logged to stderr only when `ALEXI_DEBUG_LANGFUSE=1`) — a corrupt env var MUST NOT crash the provider.
+
+```bash
+export ALEXI_LANGFUSE_METADATA='{"runId":"42","model":"anthropic--claude-4-opus"}'
+# or
+export ALEXI_LANGFUSE_METADATA='suite=swe-bench,commit=abc123'
+```
+
+#### ALEXI_DEBUG_LANGFUSE
+
+Optional. When set to a truthy value (`1`, `true`, `yes`, `on`), the Langfuse telemetry module writes internal debug messages (client construction, trace/generation errors, malformed metadata) to stderr. Useful during benchmark bring-up. Keep off in production — the messages are not rate-limited.
+
+```bash
+export ALEXI_DEBUG_LANGFUSE=1
+```
+
 #### ALEXI_PROJECT_DIR
 
 Override the project directory for configuration resolution.
