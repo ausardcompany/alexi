@@ -532,6 +532,23 @@ Production bundlers (esbuild, Bun, terser, swc) rename local class identifiers t
 4. **Export the singleton reference (`fooInstance`)** so consumers can perform identity checks (`obj === fooInstance`) — the cheapest and most robust minify-immune check.
 5. **Add a sibling `<module>-minify.test.ts`** that pipes the module through `esbuild.transform` with `minify: true` and asserts the structural helpers still work against the minified output. See [`docs/TESTING.md#testing-minify-safe-telemetry-detection`](./TESTING.md#testing-minify-safe-telemetry-detection) for the reference suite and [`docs/ARCHITECTURE.md#minify-safe-patterns`](./ARCHITECTURE.md#minify-safe-patterns) for the design rationale.
 
+### Opt-in provider telemetry (BYOK Langfuse pattern)
+
+When contributing a new opt-in telemetry integration for provider-layer calls — the canonical example is the BYOK Langfuse module added in `1.22.36` (`src/providers/langfuse-telemetry.ts`) — follow the same five-rule contract so operators can trust the opt-in gate and the security boundary:
+
+1. **Default off, truthy opt-in via a single ALEXI_-prefixed env var.** The module does nothing (no SDK import, no HTTP) until the operator sets the opt-in to a truthy value. Parse the flag with `isEnvTruthy()` from `src/providers/langfuse-telemetry.ts` so `=1`, `=true`, `=yes`, `=on` all enable identically, and `=0`, `=false`, `=no`, `=off`, empty, or unset all disable identically.
+2. **Fail-closed on partial credentials.** When the integration needs multiple credential vars (e.g. `_BASE_URL` + `_PUBLIC_KEY` + `_SECRET_KEY`), the reader returns `undefined` as soon as ANY one is missing. Never silently emit traces with a half-set credential — the operator thinks it is working and nothing is recorded.
+3. **Direct exporter only; never the host OTLP relay.** A BYOK integration MUST talk directly to the operator-configured endpoint, not via `src/utils/tracing.ts`. Enabling one integration must not route data to a collector the operator did not configure. Stamp every emitted batch with a stable `sdkIntegration` constant (`alexi-<integration>-direct`) so downstream dashboards and the integration test's assertion loop can verify the identity marker.
+4. **Dynamic-import the SDK.** `import('<sdk>')` inside the opt-in branch so cold-start is unaffected when the integration is disabled (the default). Cache the client per credential tuple (`baseUrl|publicKey|environment`) to avoid leaking an HTTP keep-alive pool per call.
+5. **Every public helper is `undefined`-safe.** Follow the `startX / finishX / failX` shape where every helper accepts the handle as the first positional argument and short-circuits to a no-op when the handle is `undefined`. This keeps the integration path in the provider free of `if (handle)` guards.
+
+Testing contract (two suites, co-located with the module and the integration tests directory):
+
+- A unit suite under `src/providers/__tests__/<module>.test.ts` that mocks the SDK at the module level (`vi.mock('<sdk>', ...)` with constructor + lifecycle spies) and pins every observable behaviour: opt-in gating, fail-closed on missing creds, env-attribute parsing and merge rules, client caching, lifecycle no-ops when disabled.
+- An integration suite under `tests/providers/<module>-integration.test.ts` that boots a `node:http` receiver on a random loopback port, points `<SDK>_BASE_URL` at it, drives one lifecycle, and asserts on the actual payload the SDK sends — including the direct-exporter `sdkIntegration` stamp. The receiver returns HTTP 207 with `{ successes: [], errors: [] }` so the SDK thinks the batch was accepted and does not retry.
+
+Both suites MUST scrub every related env var in `beforeEach` and call a `_resetXTelemetryForTests()` helper exported ONLY for tests to drain the module-level cache between cases. See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](./TESTING.md#testing-byok-langfuse-telemetry) for the reference suite.
+
 ### Test import-path depth
 
 Test files under `tests/` walk up to the repository root before descending into `src/`. The number of `../` segments needed depends on where the test file lives, and it must always land in `src/` — never in a sibling under `tests/` itself. Concrete rules:

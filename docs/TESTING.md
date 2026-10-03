@@ -4841,6 +4841,142 @@ beforeEach(() => {
 - **Mock `getConfigValue` and `loadFullConfig` on `../../src/config/userConfig.js` per test.** This avoids depending on the runner's `~/.alexi/config.json` or on file-system race conditions.
 - **Fail-closed cases are as important as fail-open ones.** Explicitly write a case where the config layer throws and assert the relay disables itself — otherwise a future refactor could silently start assuming opt-in on parse errors.
 
+## Testing BYOK Langfuse Telemetry
+
+The BYOK Langfuse telemetry module (`src/providers/langfuse-telemetry.ts`, introduced in `1.22.36`) is covered by two complementary suites: a 350-line unit suite that pins the observable contract (opt-in gating, env parsing, merge rules, span-lifecycle no-ops) and a 191-line integration suite that boots a real HTTP receiver and verifies the SDK-emitted payload.
+
+### Test files
+
+- `src/providers/__tests__/langfuse-telemetry.test.ts` (350 lines) — unit coverage. Mocks the `langfuse` SDK at the module level so no network traffic is attempted; exercises `isEnvTruthy`, `readDirectLangfuseTelemetryConfig`, `resolveAiSdkTelemetry`, `readEnvTraceAttributes`, `withLangfuseTraceAttributes`, and the span lifecycle helpers.
+- `tests/providers/langfuse-telemetry-integration.test.ts` (191 lines) — integration coverage. Starts a `node:http` server on a random port, points `LANGFUSE_BASE_URL` at it, drives one trace + generation lifecycle, and asserts on the batched ingestion payload the real SDK sends.
+
+### Mocking the langfuse SDK (unit suite)
+
+The SDK is imported dynamically from inside the module under test. `vi.mock` is applied at the module level so no real HTTP client is constructed, and three spies observe the behaviour the suite needs to pin:
+
+```typescript
+const langfuseConstructorSpy = vi.fn();
+const traceSpy = vi.fn();
+const shutdownAsyncSpy = vi.fn().mockResolvedValue(undefined);
+
+vi.mock('langfuse', () => {
+  class MockLangfuse {
+    public sdkIntegration: string;
+    public baseUrl: string;
+    constructor(config: { sdkIntegration?: string; baseUrl: string }) {
+      this.sdkIntegration = config.sdkIntegration ?? 'default';
+      this.baseUrl = config.baseUrl;
+      langfuseConstructorSpy(config);
+    }
+    trace(args: unknown): unknown {
+      traceSpy(args);
+      return {
+        id: 'trace-id',
+        generation: (): unknown => ({ end: (): void => undefined }),
+      };
+    }
+    shutdownAsync(): Promise<void> {
+      return shutdownAsyncSpy();
+    }
+  }
+  return { Langfuse: MockLangfuse };
+});
+```
+
+The constructor spy lets the suite assert the `sdkIntegration` stamp is always `alexi-langfuse-direct` (the direct-exporter marker) and that the module caches one client per credential tuple instead of leaking a new client per call.
+
+### Environment isolation per test
+
+The suite scrubs every variable it cares about in `beforeEach` and restores the full `process.env` snapshot in `afterEach`. This matters because stray values on the runner (CI bots occasionally set `LANGFUSE_*` for other scripts) would otherwise poison individual cases:
+
+```typescript
+beforeEach(() => {
+  for (const name of [
+    'ALEXI_LANGFUSE_ALL_PROVIDERS',
+    'ALEXI_LANGFUSE_TAGS',
+    'ALEXI_LANGFUSE_METADATA',
+    'LANGFUSE_TRACING_ENVIRONMENT',
+    'LANGFUSE_BASE_URL',
+    'LANGFUSE_PUBLIC_KEY',
+    'LANGFUSE_SECRET_KEY',
+    'ALEXI_DEBUG_LANGFUSE',
+  ]) {
+    delete process.env[name];
+  }
+  langfuseConstructorSpy.mockClear();
+  traceSpy.mockClear();
+  shutdownAsyncSpy.mockClear();
+  _resetLangfuseTelemetryForTests();
+});
+```
+
+`_resetLangfuseTelemetryForTests()` is exported ONLY for the test suite — it drains the module-level `clientCache` so consecutive cases do not observe each other's cached Langfuse clients.
+
+### Contract pinned by the unit suite
+
+Grouped by describe block in `src/providers/__tests__/langfuse-telemetry.test.ts`:
+
+1. **`isEnvTruthy`** — empty, `0`, `false`, `no`, `off`, whitespace, and `undefined` are falsy; everything else is truthy. Operators enabling the integration can set `=1`, `=true`, `=yes`, or any non-empty value with the same effect.
+2. **`readDirectLangfuseTelemetryConfig`** — returns `undefined` when ANY of the three credentials is missing (fail-closed). Returns the credential set when all three are present. Attaches `environment` when `LANGFUSE_TRACING_ENVIRONMENT` is set.
+3. **`resolveAiSdkTelemetry` (opt-in + exporter identity)** — stays disabled without the opt-in; stays disabled with the opt-in but missing creds; enables tracing with opt-in + creds and uses the direct exporter (verified via `sdkIntegration: 'alexi-langfuse-direct'`); ignores falsy opt-in values (`0`, `false`); passes `LANGFUSE_TRACING_ENVIRONMENT` to the client; reuses a cached client across calls for the same credentials (constructor fires exactly once).
+4. **`readEnvTraceAttributes`** — tags are deduped and trimmed; metadata as `key=value,...` drops malformed pairs and empty keys; metadata as JSON stringifies non-string values and drops `null`/`undefined`; malformed JSON returns an empty attribute set rather than crashing.
+5. **`withLangfuseTraceAttributes` (merge logic)** — env tags come first, call-site tags appended, deduped; metadata is `{...env, ...callSite}` so call-site keys win on conflict; empty-both-sides returns `undefined` so the caller can short-circuit propagation; an empty metadata object alone does NOT trigger propagation.
+6. **Span lifecycle helpers** — `startLangfuseTrace({ isEnabled: false }, ...)` returns `undefined`; `startLangfuseGeneration(undefined, ...)`, `finishLangfuseGeneration(undefined, ...)`, and `failLangfuseGeneration(undefined, ...)` are all no-ops that never throw. The enabled path merges env+call attributes on the emitted trace.
+
+### Integration suite (real HTTP server)
+
+The integration suite boots a lightweight `node:http` receiver in `beforeAll` on a random port and lets the real `langfuse` SDK serialise and POST its batches to it. `recorded[]` captures every incoming request so the assertion phase can walk the batched events:
+
+```typescript
+server = http.createServer((req, res) => {
+  const chunks: Buffer[] = [];
+  req.on('data', (chunk) => chunks.push(chunk as Buffer));
+  req.on('end', () => {
+    const body = Buffer.concat(chunks).toString('utf8');
+    let parsed: unknown = body;
+    try { parsed = JSON.parse(body) as unknown; } catch { /* leave as string */ }
+    recorded.push({
+      method: req.method ?? 'GET',
+      url: req.url ?? '',
+      authorization: req.headers['authorization']?.toString(),
+      body: parsed,
+    });
+    res.statusCode = 207;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ successes: [], errors: [] }));
+  });
+});
+await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+```
+
+The single integration case `ships traces to the operator-configured Langfuse with the direct scope + env + tags + metadata` verifies four cross-cutting invariants in one round trip:
+
+1. **Authorization header present.** `recorded[0].authorization` matches `/^Basic /` so the Langfuse SDK did authenticate with the provided keys.
+2. **Trace-create event carries merged attributes.** Tags are `['env-tag', 'shared', 'call-tag']` (env first, call-site appended, `'shared'` deduped to one entry). Metadata is `{ suite: 'swe-bench', runId: 'call-run' }` (call-site `runId` wins the key-conflict).
+3. **`sdkIntegration` stamp on every batch.** The suite inspects `body.metadata.sdk_integration` on every recorded POST and asserts it equals `LANGFUSE_SDK_INTEGRATION` (`'alexi-langfuse-direct'`). This is the direct-exporter identity marker that distinguishes Alexi-emitted traces from vanilla Langfuse SDK traces.
+4. **`LANGFUSE_TRACING_ENVIRONMENT` propagates to the trace body.** `traceCreate.body.environment === 'benchmark'` so the env-driven environment label actually reaches the observable payload.
+
+### Draining the SDK batch queue
+
+The SDK buffers events and flushes asynchronously, so the integration test calls `decision.client.flushAsync()` after the lifecycle and then polls `recorded.length` with a bounded deadline before asserting:
+
+```typescript
+await decision.client.flushAsync();
+const deadline = Date.now() + 2_000;
+while (recorded.length < 3 && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+```
+
+The 2-second deadline keeps the test from hanging the suite when the SDK fails to flush, and the 25 ms poll interval is short enough to resolve on the next event-loop tick without burning CPU. The outer `it` has a 20-second timeout for cases where CI is especially slow.
+
+### Key patterns to reuse
+
+- **Scrub ALL related env vars in `beforeEach`.** A single stray `LANGFUSE_PUBLIC_KEY` from the runner would flip half the opt-in cases to enabled.
+- **Prefer `_resetLangfuseTelemetryForTests()` over `vi.resetModules()`.** The reset helper drains the module-level `clientCache` without re-running top-level imports, so the mock applied with `vi.mock('langfuse', ...)` stays in effect.
+- **Assert on the direct-exporter stamp.** Every integration suite that touches this module MUST verify `sdkIntegration === 'alexi-langfuse-direct'` on at least one emitted batch. If the stamp ever regresses to the default (`'default'`), the entire security boundary between BYOK and the OTLP relay is broken silently.
+- **Always point `LANGFUSE_BASE_URL` at a loopback port in integration tests.** Never let the test accidentally emit to `https://cloud.langfuse.com` — a stray hostname in a fixture would ship synthetic traces to a real project.
+
 ## Testing Hooks
 
 ### Hook Test Files
