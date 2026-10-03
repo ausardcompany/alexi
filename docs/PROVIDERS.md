@@ -2754,7 +2754,68 @@ All three helpers are `undefined`-safe so a provider integration can call them u
 
 ### Shutdown
 
-`initTracing()` is invoked eagerly from `src/cli/program.ts` and is idempotent. On shutdown the CLI's SIGINT/SIGTERM/beforeExit handlers all call `shutdownTracing()`, which flushes pending spans through the batch span processor before `process.exit(0)`. `shutdownTracing()` never throws — a broken exporter must not block process exit.
+`initTracing()` is invoked eagerly from `src/cli/program.ts` and is idempotent. On shutdown the CLI's SIGINT/SIGTERM/beforeExit handlers all call `shutdownTracing()`, which flushes pending spans through the batch span processor before `process.exit(0)`. `shutdownTracing()` never throws -- a broken exporter must not block process exit.
+
+## Langfuse BYOK Tracing (Opt-in)
+
+Alexi additionally ships an opt-in Langfuse integration that lives alongside the OTLP relay above. It is designed for operators who already run (or point at) their own Langfuse instance -- typically for CI, benchmark, or agent-fleet runs that want per-run tags, metadata, and environment labelling. Ported from Cline PR #14787 (`feat(llms): opt-in Langfuse tracing for BYOK providers plus env tags, metadata and environment`). Implementation: `src/providers/langfuse-telemetry.ts`.
+
+### Design goals
+
+1. **Disabled by default.** Nothing is loaded or sent unless the operator sets `ALEXI_LANGFUSE_ALL_PROVIDERS=1` AND provides direct Langfuse credentials. The `langfuse` SDK is dynamic-imported so cold-start is unaffected.
+2. **Direct exporter only.** BYOK tracing NEVER goes through the host OTLP relay -- it talks directly to the operator-configured Langfuse `baseUrl`. This is a security property: an operator who BYOKs their own model deployment and their own observability stack cannot have prompts routed to a collector they did not configure themselves.
+3. **Independent of the OTLP relay.** Both integrations can be enabled at once (they emit via different code paths); either can be enabled on its own.
+4. **Trace-level labelling from env.** A benchmark harness or CI workflow can label every trace it produces (`suite:regression`, `commit:abc123`, `workflow:ci-auto-fix`) without touching call sites.
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ALEXI_LANGFUSE_ALL_PROVIDERS` | yes | Truthy opt-in. Treated as `true` for `1`, `true`, `yes`, `on`, or any non-empty value other than `0`/`false`/`no`/`off`. |
+| `LANGFUSE_BASE_URL` | yes | Base URL of the Langfuse instance, e.g. `https://cloud.langfuse.com`. |
+| `LANGFUSE_PUBLIC_KEY` | yes | Langfuse public key. |
+| `LANGFUSE_SECRET_KEY` | yes | Langfuse secret key. |
+| `LANGFUSE_TRACING_ENVIRONMENT` | no | Langfuse `environment` tag on every trace (e.g. `ci`, `prod`, `benchmark`). |
+| `ALEXI_LANGFUSE_TAGS` | no | Comma-separated trace tags, e.g. `suite:regression,commit:abc123`. Trimmed and deduped. |
+| `ALEXI_LANGFUSE_METADATA` | no | Either a JSON object (`{"run":"42"}`) or `key=value,...` pairs. Non-string values are stringified; `null` / `undefined` entries are dropped. Malformed JSON is ignored (logged when `ALEXI_DEBUG_LANGFUSE=1`). |
+| `ALEXI_DEBUG_LANGFUSE` | no | When truthy, emits internal debug messages to stderr (useful during a benchmark bring-up). |
+
+Credentials MUST all three be set to enable tracing. If any one of `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` is missing, the relay stays disabled rather than silently losing traces.
+
+### Attribute merge rules
+
+Call-site attributes (passed from the provider at the point of the call) are merged with env attributes:
+
+- **Tags**: `env tags ++ call tags`, deduped. Env tags come first; call-site tags that are not already present are appended.
+- **Metadata**: `{...envMetadata, ...callMetadata}` -- the call-site wins on key conflicts. This matches the Cline reference contract so benchmark harnesses can override an env default per call.
+- **Short-circuit**: when both sides are empty, propagation is skipped entirely so no empty trace is emitted.
+- **sessionId / userId**: pass through from the call-site; env vars do not populate these fields (sessions are per-call concepts).
+
+### Example
+
+```bash
+export ALEXI_LANGFUSE_ALL_PROVIDERS=1
+export LANGFUSE_BASE_URL=https://cloud.langfuse.com
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+
+# Benchmark workflow run with environment + per-run labels
+export LANGFUSE_TRACING_ENVIRONMENT=benchmark
+export ALEXI_LANGFUSE_TAGS=suite:regression,commit:abc123,workflow:ci-auto-fix
+export ALEXI_LANGFUSE_METADATA='{"runId":"42","model":"anthropic--claude-4-opus"}'
+
+alexi chat -m "Explain the architecture"
+```
+
+Every trace emitted during that CLI invocation lands in the operator's Langfuse under the `benchmark` environment, tagged `suite:regression commit:abc123 workflow:ci-auto-fix`, with `runId=42` and `model=anthropic--claude-4-opus` as metadata.
+
+### SDK integration stamp
+
+Every batch posted to the Langfuse `/api/public/ingestion` endpoint carries `metadata.sdk_integration = "alexi-langfuse-direct"` so dashboards and queries can distinguish Alexi-generated traces from vanilla Langfuse SDK traces coming from the same project.
+
+### Scope
+
+Only chat and streaming chat completion calls through `SapOrchestrationProvider` are instrumented. Image generation (`generateImage`) is not, matching the Cline contract.
 
 ## Auxiliary-Task Model Selection
 
