@@ -744,9 +744,17 @@ Usage:
       if (context.signal?.aborted || childSignal?.aborted) {
         taskData.status = 'cancelled';
         const cancelledUsage = costTracker.endTask(taskId!);
+        // kilocode_change start (upstream 17a6a7cd6) - clarify that this
+        // was a user-initiated cancellation rather than a transient
+        // failure. Without this reason, parent models tend to interpret a
+        // generic "Operation aborted" from a subagent as a retryable error
+        // and immediately spawn a replacement subagent, producing a
+        // restart loop. Phrasing the error as an explicit user stop makes
+        // the parent LLM treat it as a terminal signal and halt the chain.
+        // kilocode_change end
         return {
           success: false,
-          error: 'Operation aborted',
+          error: 'Task cancelled by the user',
           data: {
             taskId: taskId!,
             agentId: agent.id,
