@@ -1497,15 +1497,161 @@ interface SessionRetentionPolicy {
    * less than 1.
    */
   maxAgeDays: number;
+  /**
+   * Days after which an active session is archived (moved to
+   * `<sessionsDir>/.archive/<id>.json.gz`) by the automated lifecycle
+   * runner. Minimum 1. Default 30. Distinct from `maxAgeDays`: archive
+   * is non-destructive, deletion is permanent. See
+   * `src/core/retentionRunner.ts`.
+   */
+  archiveAfterDays: number;
+  /**
+   * Days after which an archived session is permanently removed by the
+   * lifecycle runner. Measured against the archive file's mtime (not
+   * the metadata timestamp, since the gzipped JSON is not re-parsed on
+   * every cycle). Minimum 1. Default 90. Must be strictly greater than
+   * `archiveAfterDays`; a corrupt config widens the delete window
+   * rather than disabling the runner.
+   */
+  deleteAfterDays: number;
+  /**
+   * How often `startRetentionScheduler` triggers a cycle, in hours.
+   * Minimum 1. Default 24. Read once at scheduler-start time — mid-
+   * session config changes require a CLI restart to take effect.
+   */
+  intervalHours: number;
 }
 
 function getConfigSessionRetention(): SessionRetentionPolicy;
 function setConfigSessionRetention(policy: Partial<SessionRetentionPolicy>): void;
 ```
 
-`setConfigSessionRetention` validates that `maxAgeDays` is a positive integer >= 1 and throws `Error('retention.maxAgeDays must be a positive integer >= 1 (got <value>)')` on non-finite or below-one inputs. `enabled` and `maxAgeDays` may be updated independently — a partial write leaves the other field untouched.
+`setConfigSessionRetention` validates every numeric field: `maxAgeDays`, `archiveAfterDays`, `deleteAfterDays`, and `intervalHours` must each be a positive integer `>= 1` and throw `Error('retention.<field> must be a positive integer >= 1 (got <value>)')` on non-finite or below-one inputs. All four numeric fields plus `enabled` may be updated independently — a partial write leaves the other fields untouched.
 
-Consumed by `SessionManager.cleanupExpiredSessions` (below) and by the daily scheduler `triggerRetentionSweep` (`src/core/retentionScheduler.ts`). When `enabled` is `false` (the default), both paths short-circuit immediately without scanning the sessions directory.
+`getConfigSessionRetention` applies a safety guard for `deleteAfterDays <= archiveAfterDays`: the delete window is widened to `archiveAfterDays + 1` rather than disabling the runner. A corrupt config degrades gracefully instead of silently losing retention.
+
+Consumed by `SessionManager.cleanupExpiredSessions` (below), by the daily scheduler `triggerRetentionSweep` (`src/core/retentionScheduler.ts`), and by `startRetentionScheduler` (`src/core/scheduledRetention.ts`, below). When `enabled` is `false` (the default), every path short-circuits immediately without scanning the sessions directory.
+
+#### Session Retention Lifecycle Runner (`runRetentionCycle` / `startRetentionScheduler`)
+
+Two-phase (archive -> delete) session lifecycle runner introduced in issue #1927. Complements the age-only `cleanupExpiredSessions` by adding a reversible intermediate state: aged sessions are first moved to `<sessionsDir>/.archive/<id>.json.gz` (gzip-compressed, non-destructive) and only later permanently unlinked once the archive mtime crosses `retention.deleteAfterDays`. Wired into CLI startup via `src/cli/program.ts`.
+
+```typescript
+// src/core/retentionRunner.ts
+export const ARCHIVE_DIRNAME = '.archive';
+export const DISABLE_ENV = 'ALEXI_DISABLE_RETENTION';
+
+export interface RetentionLifecyclePolicy {
+  archiveAfterDays: number;
+  deleteAfterDays: number;
+}
+
+export interface RetentionReport {
+  archivedCount: number;
+  deletedCount: number;
+  freedBytes: number;
+  errors: string[];
+  scanned: number;
+  dryRun: boolean;
+  skipped: boolean;
+}
+
+export interface RunRetentionOptions {
+  sessionsDir?: string;
+  now?: number;
+  dryRun?: boolean;
+}
+
+export function defaultSessionsDir(): string;
+export function isDisabledByEnv(): boolean;
+
+export function runRetentionCycle(
+  policy: RetentionLifecyclePolicy,
+  options?: RunRetentionOptions
+): Promise<RetentionReport>;
+```
+
+```typescript
+// src/core/scheduledRetention.ts
+export const DEFAULT_INITIAL_DELAY_MS = 5 * 60 * 1000;
+
+export interface StartRetentionSchedulerOptions {
+  initialDelayMs?: number;
+  intervalMs?: number;
+  policy?: SessionRetentionPolicy;
+  sessionsDir?: string;
+  onCycle?: (report: RetentionReport) => void;
+}
+
+export interface RetentionSchedulerHandle {
+  started: boolean;
+  stop: () => void;
+}
+
+export function startRetentionScheduler(
+  options?: StartRetentionSchedulerOptions
+): RetentionSchedulerHandle;
+
+/** @internal */
+export function _resetSchedulerForTests(): void;
+```
+
+Semantics (pinned by `src/core/__tests__/retentionRunner.test.ts` and `src/core/__tests__/scheduledRetention.test.ts`):
+
+- **`runRetentionCycle` never throws for per-file I/O failures.** Archive-move, unlink, and stat errors are captured in `report.errors[]` so one broken session cannot block cleanup of the rest. Only a `scanSessions` failure with an errno other than `ENOENT` returns an early report with populated `errors[]`; `ENOENT` on the sessions directory returns a well-formed empty report.
+- **`skipped: true` signals a short-circuit with no I/O.** Set when `ALEXI_DISABLE_RETENTION=1`, `archiveAfterDays < 1`, or `deleteAfterDays < 1`. Callers can distinguish "ran but found nothing" (`skipped: false, archivedCount: 0`) from "did not run" (`skipped: true, archivedCount: 0`).
+- **`dryRun: true` is a safe preview.** Populates `archivedCount`, `deletedCount`, and `freedBytes` without touching the filesystem. `report.errors[]` is empty in dry-run mode because no `fs.unlink` is attempted.
+- **Age signal.** Prefers `metadata.lastAccessedAt`, falls back to `metadata.updated`, then to the file's mtime — identical to the heuristic in `src/session/retention.ts`.
+- **Delete phase keys off archive mtime.** Once a session is archived, the gzipped JSON is not re-parsed on every cycle. The delete cutoff uses `fs.statSync(archiveEntry).mtimeMs`, set when the archive write completes.
+- **Stray entries ignored.** Only files whose basename ends in `.json.gz` are considered for deletion. Hand-authored `notes.txt` under `.archive/` survives every cycle.
+- **`startRetentionScheduler` is idempotent per process.** A module-level singleton (`activeHandle`) prevents a second call in the same Node process from registering duplicate timers. Returns `{ started: false, stop: () => {} }` on the second call. Important for the interactive REPL, which spawns subagent child processes that must not register their own timers.
+- **Delayed first cycle.** First cycle fires `DEFAULT_INITIAL_DELAY_MS` (5 minutes) after `startRetentionScheduler()` so provider init and TUI warm-up do not compete for the event loop. Override with `initialDelayMs: 0` in tests.
+- **Timers are `unref()`ed.** Both the initial `setTimeout` and the periodic `setInterval` call `.unref()` so a pending retention tick never blocks process exit.
+- **Startup-latched cadence.** The scheduler reads `getConfigSessionRetention()` once at `startRetentionScheduler()` time; mid-session config changes do not re-cadence the scheduler. Operators must restart the CLI.
+- **`onCycle` errors are logged and swallowed.** A thrown callback does not break the scheduler loop; the next cycle still fires on schedule.
+
+Programmatic usage:
+
+```typescript
+import { runRetentionCycle } from './core/retentionRunner.js';
+
+// One-shot dry-run preview — safe to call from a test harness.
+const report = await runRetentionCycle(
+  { archiveAfterDays: 30, deleteAfterDays: 90 },
+  { sessionsDir: '/tmp/sessions', dryRun: true }
+);
+console.log(
+  `would archive ${report.archivedCount}, would delete ${report.deletedCount}, ` +
+    `freeing ${report.freedBytes} bytes`
+);
+```
+
+```typescript
+import { startRetentionScheduler } from './core/scheduledRetention.js';
+
+// Called from src/cli/program.ts — fire-and-forget, returns immediately.
+const handle = startRetentionScheduler({
+  onCycle: (report) => {
+    if (report.errors.length > 0) {
+      // Emit a diagnostic without crashing the CLI.
+      console.error(`retention cycle had ${report.errors.length} per-file errors`);
+    }
+  },
+});
+if (!handle.started) {
+  // Scheduler short-circuited: already running, opt-out env var set,
+  // or `retention.enabled` is `false` in `~/.alexi/config.json`.
+}
+```
+
+Opt-out mechanisms (any one disables the lifecycle):
+
+- `retention.enabled: false` (or absent) in `~/.alexi/config.json` — the config-level opt-out.
+- `ALEXI_DISABLE_RETENTION=1` in the process environment — a per-process override that bypasses the config.
+- `--disable-retention` CLI flag — honoured by `src/cli/program.ts` for one-shot invocations.
+- `handle.stop()` on the returned `RetentionSchedulerHandle` — graceful shutdown from a signal handler or test teardown.
+
+See [docs/ARCHITECTURE.md — Automated Session Retention Lifecycle Runner](ARCHITECTURE.md#automated-session-retention-lifecycle-runner-srccoreretentionrunnerts-issue-1927) for the pipeline diagram and lifecycle sequence, and [docs/TESTING.md — Testing the Automated Retention Lifecycle Runner](TESTING.md#testing-the-automated-retention-lifecycle-runner) for the fixture pattern.
 
 #### SessionManager.cleanupExpiredSessions
 

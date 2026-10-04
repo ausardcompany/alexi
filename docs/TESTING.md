@@ -19,6 +19,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
+- [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -4608,6 +4609,123 @@ function writeSession(
 3. **Use the `SessionManager` shape, not a `new SessionManager()`.** The runner declares `Pick<SessionManager, 'hasActiveRun'>` deliberately — tests pass an object literal with only that method to keep the fixture surface small and to avoid the sessions-directory side effects of the real class.
 4. **Assert on `.map((s) => s.filePath)` or `.map((s) => s.id)`, not on full records.** `ScannedSession` carries filesystem-dependent fields (`size`, `mtime`) that shift between hosts.
 5. **Do not mock `scanSessions`.** The runner composes the real scanner so the malformed-file tolerance test really exercises `JSON.parse` failure handling end-to-end.
+
+### Testing the Automated Retention Lifecycle Runner
+
+`src/core/__tests__/retentionRunner.test.ts` (318 lines, five `describe` blocks) and `src/core/__tests__/scheduledRetention.test.ts` (265 lines) pin the archive-then-delete lifecycle introduced by issue #1927. Unlike the three earlier retention test suites, these cases exercise a two-phase pipeline — the archive phase moves aged sessions into `<sessionsDir>/.archive/<id>.json.gz` (gzip-compressed), and the delete phase prunes archive entries whose compressed-file mtime has crossed `deleteAfterDays`. Both phases must be exercised with real `fs.mkdtemp` directories because the archive phase composes a streamed `pipeline(createReadStream, createGzip, createWriteStream)` that cannot be meaningfully stubbed.
+
+**Fixture pattern.** Two helpers persist synthetic sessions and archive entries at a controllable `mtime`. The `writeSession` helper writes a real session JSON and pins its `utimes` to the age cutoff being tested; `writeArchiveEntry` writes a gzip blob under `.archive/` with a controllable mtime so the delete phase can be driven without first running the archive phase.
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import zlib from 'zlib';
+
+import {
+  ARCHIVE_DIRNAME,
+  DISABLE_ENV,
+  defaultSessionsDir,
+  isDisabledByEnv,
+  runRetentionCycle,
+} from '../retentionRunner.js';
+import type { SessionMetadata } from '../sessionManager.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = 1_700_000_000_000;
+let tempDir: string;
+
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-runner-cycle-'));
+  delete process.env[DISABLE_ENV];
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  delete process.env[DISABLE_ENV];
+});
+
+function writeSession(dir: string, opts: {
+  id: string;
+  updated: number;
+  lastAccessedAt?: number;
+}): string {
+  const metadata: SessionMetadata = {
+    id: opts.id,
+    created: opts.updated,
+    updated: opts.updated,
+    totalTokens: 0,
+    messageCount: 0,
+    ...(typeof opts.lastAccessedAt === 'number'
+      ? { lastAccessedAt: opts.lastAccessedAt }
+      : {}),
+  };
+  const filePath = path.join(dir, `${opts.id}.json`);
+  fs.writeFileSync(filePath, JSON.stringify({ metadata, messages: [] }, null, 2), 'utf-8');
+  fs.utimesSync(filePath, opts.updated / 1000, opts.updated / 1000);
+  return filePath;
+}
+
+function writeArchiveEntry(
+  archiveDir: string,
+  id: string,
+  mtimeMs: number,
+  payload = 'x'
+): string {
+  fs.mkdirSync(archiveDir, { recursive: true });
+  const filePath = path.join(archiveDir, `${id}.json.gz`);
+  fs.writeFileSync(filePath, zlib.gzipSync(Buffer.from(payload)));
+  fs.utimesSync(filePath, mtimeMs / 1000, mtimeMs / 1000);
+  return filePath;
+}
+```
+
+**Archive-phase contract points** (five cases):
+
+- **Sessions older than `archiveAfterDays` move to `.archive/`.** With `{ archiveAfterDays: 30, deleteAfterDays: 90 }` and `now: NOW`, a 40-day-old session is unlinked from `<tempDir>` and a `<id>.json.gz` entry appears under `<tempDir>/.archive/`. The suite round-trips the gzipped content back through `zlib.gunzipSync` to confirm the archived JSON parses to the original `{ metadata: { id } }` shape — a regression that swaps the stream order (gzip -> write vs. write -> gzip) corrupts the payload and this assertion fails.
+- **Sessions newer than the cutoff survive.** A 5-day-old session is left in place with `archivedCount: 0`.
+- **`lastAccessedAt` beats `updatedAt`.** A session whose `metadata.updated` is 90 days old but `metadata.lastAccessedAt` is 1 day old is NOT archived — the age signal mirrors the user-facing `RetentionRunner`.
+- **`dryRun: true` previews without touching the filesystem.** `archivedCount` is incremented but the source file is still present and `<tempDir>/.archive/` is NOT created.
+- **Stream-compression invariant.** The archive file must be valid gzip AND the decompressed JSON must round-trip. Catches regressions that bypass the `zlib.createGzip()` pipeline (e.g. writing the plain JSON with a `.json.gz` suffix).
+
+**Delete-phase contract points** (three cases):
+
+- **Entries older than `deleteAfterDays` are unlinked.** `writeArchiveEntry(archiveDir, 'ancient', NOW - 120 * DAY_MS)` is removed; `writeArchiveEntry(archiveDir, 'recent', NOW - 10 * DAY_MS)` survives. `freedBytes > 0`.
+- **`dryRun: true` reports `deletedCount` and `freedBytes` but leaves the file on disk.** Preview-mode symmetry with the archive phase.
+- **Non-`.json.gz` entries are ignored.** A hand-authored `notes.txt` under `.archive/` with an ancient mtime survives every cycle — the delete loop filters on the `.json.gz` suffix.
+
+**Skip-behaviour contract points** (four cases):
+
+- **`ALEXI_DISABLE_RETENTION=1` short-circuits.** `report.skipped === true`, `archivedCount === 0`, `deletedCount === 0`, source session untouched.
+- **Invalid `archiveAfterDays: 0` short-circuits.** `report.skipped === true`.
+- **Non-finite `deleteAfterDays: Number.NaN` short-circuits.** Same.
+- **Missing sessions dir returns an empty report.** `scanSessions` treats ENOENT as 0 entries, `listArchive` likewise.
+
+**Error-handling contract points** (two cases):
+
+- **Per-file delete failures accumulate in `report.errors`.** The suite sets the archive directory to `chmod 0o500` so `fs.unlink` fails with `EACCES`, then asserts that `report.errors.length + report.deletedCount >= 1`. The test gracefully skips the EACCES branch when running as root (where `chmod 0o500` does not block the owner) by checking `process.getuid() === 0`.
+- **Both phases run even when one errors.** A pre-populated old archive entry is deleted even when the archive phase would otherwise fail — the runner degrades gracefully rather than aborting the whole cycle.
+
+**Scheduler contract points** (`scheduledRetention.test.ts`). The scheduler tests use `_resetSchedulerForTests()` in `beforeEach` to drain the module-level singleton — production code must NEVER call this helper, but tests rely on it so each case starts from a clean slate. The suite pins:
+
+- **First cycle fires after `initialDelayMs`.** With `initialDelayMs: 0`, the first cycle runs synchronously (via `setTimeout(fn, 0)`); with the default 5-minute delay, the first cycle does NOT fire during a short test window.
+- **Periodic cycles fire on `intervalMs`.** A short `intervalMs: 10` is injected and the `onCycle` callback is counted across multiple ticks.
+- **`stop()` clears both timers.** After `handle.stop()`, no further `onCycle` invocations occur.
+- **Second `startRetentionScheduler()` returns `{ started: false }`.** The singleton guard is observable from the handle.
+- **`ALEXI_DISABLE_RETENTION=1` returns `{ started: false }` without registering timers.** Verified by asserting `onCycle` is never called.
+- **`retention.enabled: false` returns `{ started: false }` without registering timers.** Verified by injecting `policy: { enabled: false, ... }`.
+- **Config load failures swallow and return `{ started: false }`.** Verified by injecting a `policy` getter that throws.
+- **Thrown `onCycle` callbacks do not break the scheduler loop.** Subsequent ticks still fire.
+
+**Patterns to reuse when extending these suites:**
+
+1. **Inject `now`, never use `Date.now()` inside a case.** `runRetentionCycle(policy, { now: NOW })` pins the wall clock so age math is deterministic across hosts.
+2. **Set the archive entry's mtime explicitly with `fs.utimesSync`.** The delete phase keys off `mtimeMs`, not the current wall clock. A regression that forgets `fs.utimesSync` makes the test wall-clock-sensitive and flaky on slow CI.
+3. **Delete `process.env[DISABLE_ENV]` in both `beforeEach` and `afterEach`.** The env var persists across cases in the same worker; forgetting to clean up gives spurious `skipped: true` reports in unrelated suites.
+4. **Call `_resetSchedulerForTests()` in `beforeEach` for every scheduler test.** The module-level singleton guard means a scheduler left running by a previous case returns `{ started: false }` for every subsequent case.
+5. **Verify timers are `unref()`ed.** The scheduler tests assert that `typeof initialHandle.unref === 'function'` was called; a regression that forgets `.unref()` would keep the Node process alive after a one-shot command.
+6. **Round-trip the gzipped payload when asserting on archive content.** `zlib.gunzipSync(fs.readFileSync(archivedFile)).toString('utf-8')` and `JSON.parse` give the original `{ metadata, messages }` object. Comparing byte-for-byte against the source would depend on gzip determinism and is not portable across Node versions.
 
 ### Testing subagent approval boundaries
 
