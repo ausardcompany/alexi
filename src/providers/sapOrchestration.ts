@@ -56,6 +56,8 @@ import {
   isChatGPTSubscription,
   type LanguageModelV2Prompt,
 } from './openai/prompt-cache.js';
+import { isCacheError, stripAnthropicCacheControl, type AnthropicMessage } from './cache-error.js';
+import { logger } from '../utils/logger.js';
 import { loadToken, clearToken } from '../utils/tokenStorage.js';
 import { getConfigPersistAuthTokens } from '../config/userConfig.js';
 import {
@@ -1747,7 +1749,27 @@ export class SapOrchestrationProvider {
 
     let response;
     try {
-      response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
+      try {
+        response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
+      } catch (err) {
+        if (!isCacheError(err)) {
+          throw err;
+        }
+        // Prompt-cache failure (cache eviction, invalid breakpoint, or a
+        // 422 on the cache endpoint). Retry ONCE with cache markers
+        // stripped from the request. See `./cache-error.ts` for the
+        // detector and the full rationale.
+        logger.warn(
+          `Prompt cache error, retrying without cache (chat ${this.config.modelName}): ` +
+            `${err instanceof Error ? err.message : String(err)}. ` +
+            `Hint: usually a transient cache eviction; if it repeats, ` +
+            `check prompt stability or provider cache status.`
+        );
+        const stripped = stripAnthropicCacheControl(
+          orchestrationMessages as unknown as AnthropicMessage[]
+        ) as unknown as ChatMessage[];
+        response = await client.chatCompletion({ messages: stripped }, requestConfig);
+      }
     } catch (err) {
       const classified = classifyRateLimitError(err, this.config.modelName);
       failProviderSpan(span, classified);
@@ -1861,12 +1883,35 @@ export class SapOrchestrationProvider {
     });
     let response;
     try {
-      response = await client.stream(
-        { messages: orchestrationMessages },
-        options?.signal,
-        undefined,
-        requestConfig
-      );
+      try {
+        response = await client.stream(
+          { messages: orchestrationMessages },
+          options?.signal,
+          undefined,
+          requestConfig
+        );
+      } catch (err) {
+        if (!isCacheError(err)) {
+          throw err;
+        }
+        // Prompt-cache failure on the streaming endpoint. Retry ONCE
+        // with cache markers stripped. See `./cache-error.ts`.
+        logger.warn(
+          `Prompt cache error, retrying without cache (stream ${this.config.modelName}): ` +
+            `${err instanceof Error ? err.message : String(err)}. ` +
+            `Hint: usually a transient cache eviction; if it repeats, ` +
+            `check prompt stability or provider cache status.`
+        );
+        const stripped = stripAnthropicCacheControl(
+          orchestrationMessages as unknown as AnthropicMessage[]
+        ) as unknown as ChatMessage[];
+        response = await client.stream(
+          { messages: stripped },
+          options?.signal,
+          undefined,
+          requestConfig
+        );
+      }
     } catch (err) {
       const classified = classifyRateLimitError(err, this.config.modelName);
       failProviderSpan(span, classified);

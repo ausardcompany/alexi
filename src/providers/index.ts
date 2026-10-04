@@ -73,6 +73,17 @@ export {
 // Re-export auth errors
 export { StartupTimeoutError } from './auth.js';
 
+// Re-export prompt-cache error detection + fallback helpers (issue #1930).
+export {
+  isCacheError,
+  stripOpenAICacheBreakpoints,
+  stripAnthropicCacheControl,
+  withCacheFallback,
+  type AnthropicMessage,
+  type AnthropicContentBlock,
+  type CacheFallbackOptions,
+} from './cache-error.js';
+
 // Re-export BYOK Langfuse telemetry (direct exporter, opt-in via
 // ALEXI_LANGFUSE_ALL_PROVIDERS=1). See src/providers/langfuse-telemetry.ts
 // for the full contract (merge rules, env parsing, security boundary).
