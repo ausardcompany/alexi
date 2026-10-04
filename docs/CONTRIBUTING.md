@@ -983,6 +983,49 @@ Follow the same shape when adding new transforms: keep the module pure,
 export both the callable and its input types, and avoid globals so parallel
 tests do not need setup/teardown.
 
+A third canonical example lives in `src/providers/cache-error.ts` (issue
+#1930, 2026-10-04) and demonstrates how the pure-function pattern composes
+with a thin stateful call-site:
+
+- `isCacheError(err)` — pure detector returning `boolean`. No I/O, no
+  module state. The detector is deliberately conservative — the keyword
+  list and HTTP-status set are declared as `const readonly` collections at
+  module scope so the shape is reviewable in one place.
+- `stripOpenAICacheBreakpoints(prompt)` /
+  `stripAnthropicCacheControl(messages)` — pure transforms. Both return
+  the input reference-equal when no marker was present (optimisation) and
+  never mutate the input. Unit tests pin both properties with
+  `expect(result).toBe(input)` on the no-op path and
+  `JSON.stringify(input)` snapshots on the strip path.
+- `withCacheFallback({ cached, uncached, label?, onFallback? })` — thin
+  stateful composer. It owns ONE concern (one-shot retry on cache-shaped
+  errors) and delegates everything else to its collaborators. The retry
+  budget is hard-coded at one additional attempt — the function is NOT a
+  general retry loop and callers must not conflate it with `ErrorBackoff`.
+
+The split keeps `cache-error.ts` trivially unit-testable (no `vi.mock`,
+no module reset) and lets the orchestration provider wire it in with a
+narrow `try` / `catch` without pulling the detector or strip logic into
+the provider itself. When adding a similar "detector + pure strip +
+one-shot fallback" surface, keep the four invariants:
+
+1. **The detector returns `boolean` and never throws.** Shape guards on
+   `null` / `undefined` / non-object errors live inside the detector so
+   callers don't duplicate them.
+2. **Each strip helper handles one marker position** rather than a mega-
+   helper that handles both providers. The Anthropic helper covers both
+   top-level and content-block markers because the SDK accepts them in
+   both positions — but one SDK, one helper.
+3. **The fallback composer logs exactly once per invocation** and
+   rethrows the ORIGINAL error if the fallback itself fails. Attach the
+   fallback error as `cause` for diagnosability; never swap the
+   user-visible error for the secondary symptom.
+4. **The retry budget is explicit and non-configurable.** A caller who
+   wants deeper retry builds it with `ErrorBackoff` or the workflow
+   `KILO_RETRIES` loop — this hook is a tactical graceful-degradation
+   path for a specific permanent-but-recoverable class, not a general
+   retry primitive.
+
 A more recent example (issue #1716, 2026-09-13) is
 `src/core/inlineModelOverride.ts`. It exports two symbols:
 

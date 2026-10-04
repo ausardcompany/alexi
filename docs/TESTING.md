@@ -8885,3 +8885,111 @@ describe('buildFetch — provider timeout', () => {
 ```bash
 npm test -- src/providers/provider.test.ts
 ```
+
+## Testing Prompt-Cache Error Recovery
+
+Prompt-cache error recovery (issue #1930, `src/providers/cache-error.ts`) ships as a conservative detector plus two pure strip helpers plus a one-shot fallback composer. All four are exercised at two layers:
+
+1. **Unit coverage** against the helpers themselves — pins the detector matrix, the pure-function invariants of the strip helpers, and the `withCacheFallback` success / cache-fallback / rethrow matrix.
+2. **Integration coverage** through `SapOrchestrationProvider.complete()` / `streamComplete()` — mocks the `@sap-ai-sdk/orchestration` client to inject cache-shaped failures and asserts the retry request carries no `cache_control` markers.
+
+Both suites run under the standard `npm test` entry point; no live SAP AI Core credentials are required because every provider dependency is mocked at the module boundary.
+
+### Unit suite (`src/providers/__tests__/cache-error.test.ts`)
+
+Four describe blocks totalling 397 lines. The suite imports the module under test with the `.js` extension (ESM NodeNext requires it even from `.ts`) and relies on vitest's `vi.spyOn(console, 'warn')` to assert the WARN emission without polluting test output. Each `withCacheFallback` test restores the spy in `afterEach` so a failing assertion does not leak the mocked `console.warn` into neighbouring suites.
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+import {
+  isCacheError,
+  stripOpenAICacheBreakpoints,
+  stripAnthropicCacheControl,
+  withCacheFallback,
+  type AnthropicMessage,
+} from '../cache-error.js';
+```
+
+Detector matrix (`describe('isCacheError')`):
+
+- **Shape guards.** `null`, `undefined`, number, empty string, object without a `message` property — all return `false`.
+- **Keyword path.** 13 positive cases cover every keyword in `CACHE_KEYWORDS` (both `prompt_cache` and `prompt cache` spellings, `cache_control`, `cache breakpoint`, `cache miss`, `cache evicted`, `cache eviction`, `invalid breakpoint`, `invalid cache`, `evicted`). Case-insensitivity is asserted independently (`PROMPT_CACHE eviction` matches).
+- **Message shapes.** Bare strings, `Error` instances, and `{ message: string }` plain objects all route through `errorMessage()` identically.
+- **Negative cases.** 11 cases cover auth (401/403), rate limit (429 without cache keyword), model-not-found (404), network (`ECONNRESET`, `socket hang up`, `request timed out`), generic 500, and generic 422 validation.
+- **HTTP status + keyword.** 422 with `invalid breakpoint` returns `true`; 422 without a cache signal returns `false`. `response.status` is read as a fallback for fetch-wrapper style errors. 429 is explicitly NOT treated as cache-shaped unless the message carries a cache keyword — pinning the invariant that a true rate-limit should not degrade to a cache-free retry.
+
+Strip helpers (`describe('stripOpenAICacheBreakpoints')`, `describe('stripAnthropicCacheControl')`):
+
+- **Reference-equal pass-through.** An input with no markers is returned reference-equal (optimisation). Asserted via `toBe(prompt)` rather than `toEqual`.
+- **Purity.** `JSON.stringify(input)` is captured before the call and compared after — the input must be byte-identical. This catches an accidental shallow mutation introduced by a future refactor.
+- **Namespace preservation.** `providerOptions.anthropic.thinking` survives an `openai.cacheBreakpoint` strip; `parallelToolCalls` survives alongside `cacheBreakpoint`. For the Anthropic helper, string-shaped `content` is passed through unchanged (strings cannot carry cache markers).
+- **Dual-position coverage.** `stripAnthropicCacheControl` is asserted to remove BOTH top-level `cache_control` on a message AND per-content-block `cache_control` in a single pass.
+
+Fallback composer (`describe('withCacheFallback')`):
+
+- **Success.** `cached()` resolves — `uncached()` is never called, no WARN emitted.
+- **Cache fallback.** `cached()` rejects with a cache-shaped error — `uncached()` runs exactly once, WARN emitted exactly once, label echoed in the WARN message.
+- **Non-cache rethrow.** `cached()` rejects with `HTTP 401 Unauthorized` — `uncached()` is never called, the original error propagates.
+- **Fallback failure.** Both `cached()` and `uncached()` reject — the ORIGINAL `cacheErr` is rethrown (asserted with `rejects.toBe(cacheErr)`, not `toThrow`), and the fallback error is attached as `cause` so a diagnostic path can walk it.
+- **`onFallback` callback.** Invoked on successful fallback, NOT invoked when the fallback itself fails, and a throw from the callback is swallowed so it cannot mask a success.
+
+### Integration suite (`tests/providers/sapOrchestration-cache-fallback.test.ts`)
+
+Five cases totalling 249 lines. The suite mocks `@sap-ai-sdk/orchestration` and `src/config/env.js` at the module level, then drives the real `SapOrchestrationProvider` through a scripted mock client whose behaviour is toggled per test via a shared module-scope flag:
+
+```typescript
+vi.mock('@sap-ai-sdk/orchestration', () => {
+  class MockOrchestrationClient {
+    async chatCompletion(params: { messages: Array<Record<string, unknown>> }) {
+      chatCalls.push({ messages: params.messages });
+      if (chatCompletionBehaviour === 'cache-then-ok') {
+        if (chatCalls.length === 1) {
+          const err = new Error('prompt_cache: invalid breakpoint');
+          Object.assign(err, { status: 422 });
+          throw err;
+        }
+        return successResponse('fallback-ok');
+      }
+      // ... other behaviours
+    }
+  }
+  return { OrchestrationClient: MockOrchestrationClient, /* ...other exports */ };
+});
+```
+
+Behaviour flags (`chatCompletionBehaviour`, `streamBehaviour`) are reset in `beforeEach` so tests stay order-independent. `chatCalls` / `streamCalls` arrays capture every request so the second (retry) request can be inspected for stripped markers:
+
+```typescript
+const retryBlocks = chatCalls[1].messages[0].content as Array<Record<string, unknown>>;
+expect(retryBlocks[0].cache_control).toBeUndefined();
+expect(retryBlocks[0].text).toBe('static prefix');
+```
+
+Cases pinned by the suite:
+
+1. **`complete()` cache-then-ok.** A cache-shaped first error with `status: 422` + `prompt_cache: invalid breakpoint` triggers exactly one retry. The retry request carries no `cache_control` on any content block. `console.warn` is called once with a message containing `Prompt cache error`. Final `result.text === 'fallback-ok'`.
+2. **`complete()` auth-err.** A `status: 401` first error does NOT trigger a retry. Only one chat call is captured, no WARN emitted.
+3. **`complete()` cache-then-fail.** Both calls reject (cache-shaped first, generic network second). Both attempts are captured; the final error propagates. One WARN is emitted (the fallback trigger).
+4. **`streamComplete()` cache-then-ok.** A cache-shaped first error on `client.stream()` triggers a one-shot retry; the retry request carries no `cache_control`; the eventual stream yields the model output.
+5. **`streamComplete()` auth-err.** A `status: 401` error on `client.stream()` is not retried.
+
+### Running
+
+```bash
+# Unit coverage
+npm test -- src/providers/__tests__/cache-error.test.ts
+
+# Integration coverage
+npm test -- tests/providers/sapOrchestration-cache-fallback.test.ts
+
+# Both at once
+npm test -- cache-error cache-fallback
+```
+
+### Patterns reused from this suite
+
+Two patterns in this suite are deliberately generalisable:
+
+- **Reference-equal optimisation assertions.** When a pure helper returns the input reference-equal on no-op (as `stripOpenAICacheBreakpoints` does), prefer `expect(result).toBe(input)` over `expect(result).toEqual(input)`. The identity check catches a future refactor that accidentally allocates a fresh array on every call — a correctness-neutral but performance-regressing change.
+- **Module-scope behaviour flags for mocked SDK clients.** The `chatCompletionBehaviour` / `streamBehaviour` flags let a single `vi.mock('@sap-ai-sdk/orchestration', ...)` factory serve every case in the describe block without re-mocking per test. The flag is reset in `beforeEach` so tests stay order-independent, and the shared `chatCalls` / `streamCalls` arrays make it trivial to inspect "what was actually sent" after the fact.
