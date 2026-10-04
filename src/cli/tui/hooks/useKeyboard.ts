@@ -6,6 +6,7 @@ import { useDialog } from '../context/DialogContext.js';
 import { useChat } from '../context/ChatContext.js';
 import { useSidebar } from '../context/SidebarContext.js';
 import { usePage } from '../context/PageContext.js';
+import { useSubagent } from '../context/SubagentContext.js';
 import type { SlashCommand } from './useCommands.js';
 import type { CommandEntry } from '../components/CommandPalette.js';
 import { getHelpEntries } from '../utils/helpEntries.js';
@@ -40,6 +41,7 @@ export function useKeyboard(options: UseKeyboardOptions): void {
   const { isStreaming, abortController } = useChat();
   const sidebar = useSidebar();
   const { togglePage } = usePage();
+  const subagent = useSubagent();
 
   useInput((input, key) => {
     // Tab — cycle agents forward
@@ -88,6 +90,38 @@ export function useKeyboard(options: UseKeyboardOptions): void {
     // Ctrl+B — toggle sidebar
     if (key.ctrl && input === 'b') {
       sidebar.toggle();
+      return;
+    }
+
+    // Ctrl+S — open steering prompt dialog for the active subagent.
+    // When no subagent is running we intentionally no-op so Ctrl+S does
+    // not accidentally trigger unrelated behaviour (ports upstream
+    // kilocode #14702: steering is a strict superset — guard with
+    // activeSubagentId so idle sessions ignore the key).
+    if (key.ctrl && input === 's') {
+      if (subagent.activeSubagentId === null) {
+        return;
+      }
+      open<Record<string, string>>('arg-input', {
+        title: 'Steer subagent:',
+        fields: [
+          {
+            name: 'prompt',
+            label: 'Prompt',
+            placeholder: 'e.g. focus on edge cases',
+            required: true,
+          },
+        ],
+      })
+        .then((values) => {
+          const text = values?.prompt?.trim();
+          if (text) {
+            void subagent.steer(text);
+          }
+        })
+        .catch(() => {
+          // user cancelled — no-op
+        });
       return;
     }
 
