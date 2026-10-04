@@ -923,9 +923,33 @@ export interface SessionRetentionPolicy {
    * Days a session is kept before retention deletes it. Minimum 1.
    */
   maxAgeDays: number;
+  /**
+   * Days after which a session is archived (moved to the on-disk
+   * `.archive/` directory and gzip-compressed) by the automated
+   * retention runner. Minimum 1. Defaults to {@link DEFAULT_RETENTION_ARCHIVE_AFTER_DAYS}.
+   *
+   * This is distinct from the user-opt-in `maxAgeDays` deletion window:
+   * archiving is a non-destructive intermediate state used by the
+   * lifecycle runner in `src/core/retentionRunner.ts`.
+   */
+  archiveAfterDays: number;
+  /**
+   * Days after which an archived session is permanently removed by the
+   * automated retention runner. Must be greater than
+   * {@link archiveAfterDays}. Defaults to {@link DEFAULT_RETENTION_DELETE_AFTER_DAYS}.
+   */
+  deleteAfterDays: number;
+  /**
+   * How often the scheduled runner (see `src/core/scheduledRetention.ts`)
+   * triggers a retention cycle, in hours. Minimum 1. Defaults to 24.
+   */
+  intervalHours: number;
 }
 
 const DEFAULT_RETENTION_MAX_AGE_DAYS = 30;
+const DEFAULT_RETENTION_ARCHIVE_AFTER_DAYS = 30;
+const DEFAULT_RETENTION_DELETE_AFTER_DAYS = 90;
+const DEFAULT_RETENTION_INTERVAL_HOURS = 24;
 
 /**
  * Return the effective session-retention policy. When `retention` is
@@ -936,8 +960,15 @@ const DEFAULT_RETENTION_MAX_AGE_DAYS = 30;
 export function getConfigSessionRetention(): SessionRetentionPolicy {
   const config = loadFullConfig();
   const raw = config.retention;
+  const defaults: SessionRetentionPolicy = {
+    enabled: false,
+    maxAgeDays: DEFAULT_RETENTION_MAX_AGE_DAYS,
+    archiveAfterDays: DEFAULT_RETENTION_ARCHIVE_AFTER_DAYS,
+    deleteAfterDays: DEFAULT_RETENTION_DELETE_AFTER_DAYS,
+    intervalHours: DEFAULT_RETENTION_INTERVAL_HOURS,
+  };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { enabled: false, maxAgeDays: DEFAULT_RETENTION_MAX_AGE_DAYS };
+    return defaults;
   }
   const rec = raw as Record<string, unknown>;
   const enabled = rec.enabled === true;
@@ -946,7 +977,28 @@ export function getConfigSessionRetention(): SessionRetentionPolicy {
   if (typeof rawMax === 'number' && isFinite(rawMax) && rawMax >= 1) {
     maxAgeDays = Math.floor(rawMax);
   }
-  return { enabled, maxAgeDays };
+  let archiveAfterDays = DEFAULT_RETENTION_ARCHIVE_AFTER_DAYS;
+  const rawArchive = rec.archiveAfterDays;
+  if (typeof rawArchive === 'number' && isFinite(rawArchive) && rawArchive >= 1) {
+    archiveAfterDays = Math.floor(rawArchive);
+  }
+  let deleteAfterDays = DEFAULT_RETENTION_DELETE_AFTER_DAYS;
+  const rawDelete = rec.deleteAfterDays;
+  if (typeof rawDelete === 'number' && isFinite(rawDelete) && rawDelete >= 1) {
+    deleteAfterDays = Math.floor(rawDelete);
+  }
+  // Guard: deleteAfterDays must be strictly greater than archiveAfterDays
+  // so the lifecycle has a meaningful "archived" phase. A corrupt config
+  // widens the delete window rather than disabling the runner.
+  if (deleteAfterDays <= archiveAfterDays) {
+    deleteAfterDays = archiveAfterDays + 1;
+  }
+  let intervalHours = DEFAULT_RETENTION_INTERVAL_HOURS;
+  const rawInterval = rec.intervalHours;
+  if (typeof rawInterval === 'number' && isFinite(rawInterval) && rawInterval >= 1) {
+    intervalHours = Math.floor(rawInterval);
+  }
+  return { enabled, maxAgeDays, archiveAfterDays, deleteAfterDays, intervalHours };
 }
 
 /**
@@ -963,6 +1015,30 @@ export function setConfigSessionRetention(policy: Partial<SessionRetentionPolicy
       `retention.maxAgeDays must be a positive integer >= 1 (got ${String(policy.maxAgeDays)})`
     );
   }
+  if (
+    policy.archiveAfterDays !== undefined &&
+    (!Number.isFinite(policy.archiveAfterDays) || policy.archiveAfterDays < 1)
+  ) {
+    throw new Error(
+      `retention.archiveAfterDays must be a positive integer >= 1 (got ${String(policy.archiveAfterDays)})`
+    );
+  }
+  if (
+    policy.deleteAfterDays !== undefined &&
+    (!Number.isFinite(policy.deleteAfterDays) || policy.deleteAfterDays < 1)
+  ) {
+    throw new Error(
+      `retention.deleteAfterDays must be a positive integer >= 1 (got ${String(policy.deleteAfterDays)})`
+    );
+  }
+  if (
+    policy.intervalHours !== undefined &&
+    (!Number.isFinite(policy.intervalHours) || policy.intervalHours < 1)
+  ) {
+    throw new Error(
+      `retention.intervalHours must be a positive integer >= 1 (got ${String(policy.intervalHours)})`
+    );
+  }
   const config = loadFullConfig();
   const existing =
     config.retention && typeof config.retention === 'object' && !Array.isArray(config.retention)
@@ -974,6 +1050,15 @@ export function setConfigSessionRetention(policy: Partial<SessionRetentionPolicy
   }
   if (policy.maxAgeDays !== undefined) {
     merged.maxAgeDays = Math.floor(policy.maxAgeDays);
+  }
+  if (policy.archiveAfterDays !== undefined) {
+    merged.archiveAfterDays = Math.floor(policy.archiveAfterDays);
+  }
+  if (policy.deleteAfterDays !== undefined) {
+    merged.deleteAfterDays = Math.floor(policy.deleteAfterDays);
+  }
+  if (policy.intervalHours !== undefined) {
+    merged.intervalHours = Math.floor(policy.intervalHours);
   }
   config.retention = merged;
   saveFullConfig(config);
