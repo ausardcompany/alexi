@@ -235,16 +235,42 @@ export async function refreshModelCatalog(
 
     const liveDeployments = response.resources ?? [];
 
-    // Build a map: modelId → deploymentId for live entries
+    // Build a map: modelId → deploymentId for live entries.
+    //
+    // Ports upstream kilocode fix 2792c704e ("keep valid models when
+    // provider config contains malformed entry"): previously ANY
+    // throw inside `extractModelId` (bad shape, non-string
+    // configurationName, etc.) would propagate up and abort the entire
+    // refresh, leaving the user with an empty catalog. We now isolate
+    // every per-deployment parse so a single bad entry is logged and
+    // skipped while the rest of the catalog is still assembled.
     const liveMap = new Map<string, string>();
+    let malformedCount = 0;
     for (const d of liveDeployments) {
-      const modelId = extractModelId(d.configurationName);
+      let modelId: string | null;
+      try {
+        modelId = extractModelId(d.configurationName);
+      } catch (parseErr) {
+        malformedCount += 1;
+        logger.debug(
+          `Model catalog: skipping malformed deployment entry (${
+            parseErr instanceof Error ? parseErr.message : String(parseErr)
+          })`
+        );
+        continue;
+      }
       if (modelId) {
         // If multiple deployments map to the same model id, keep the first one.
         if (!liveMap.has(modelId)) {
           liveMap.set(modelId, d.id);
         }
       }
+    }
+    if (malformedCount > 0) {
+      logger.warn(
+        `Model catalog: skipped ${malformedCount} malformed deployment ` +
+          `entr${malformedCount === 1 ? 'y' : 'ies'}; kept ${liveMap.size} valid model(s).`
+      );
     }
 
     // Merge: static entries updated with live info + purely live entries added
@@ -525,6 +551,19 @@ export async function fetchDeploymentCatalog(
 export { ModelFetchError, classifyFetchError, fetchWithRetry };
 export { formatCatalogErrorHint, hintForErrorMessage } from './modelFetchErrors.js';
 export type { FetchErrorClass, FetchRetryOptions };
+
+// Re-export the generic Retry-After-aware retry helper. Alexi's SDK
+// path uses `fetchWithRetry` (SDK-thrown-error shape); new HTTP-based
+// catalog fetches that need to honor the server's `Retry-After` header
+// should use `withCatalogRetry` instead. Ports upstream kilocode
+// catalog-recovery hardening (07b18a1a2, b1642e87c, 88f8ea950,
+// 59313c749, 5539dd3ae).
+export {
+  withCatalogRetry,
+  parseRetryAfter,
+  DEFAULT_CATALOG_RETRY,
+} from './catalog-retry.js';
+export type { CatalogRetryOptions, CatalogFetchResult } from './catalog-retry.js';
 
 // Export catalog TTL for tests
 export { CATALOG_TTL_MS };

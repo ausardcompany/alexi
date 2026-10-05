@@ -118,12 +118,70 @@ export function defineSkill(definition: SkillDefinition): Skill {
  * upstream convention where prompt authors write leading-slash paths
  * to mean "project-relative" without needing to know where the skill
  * store lives on disk.
+ *
+ * ---
+ *
+ * Frontmatter cache (upstream kilocode fix `b0aeda50b`):
+ *
+ * Parsed Skills are memoised by resolved absolute path and keyed on
+ * `(size, mtimeMs)`. A repeated load of an unchanged skill file (very
+ * common because `reloadSkills` and `skillDirectories` walk the same
+ * directories on every invocation) short-circuits past the gray-matter
+ * parse. The cache is invalidated the moment either dimension changes,
+ * so a user editing a skill still sees the new content on the next
+ * load. If `fs.statSync` fails, we fall through to a fresh parse — no
+ * guesses, no stale reads.
  */
+/**
+ * In-memory cache of parsed skills keyed by resolved absolute path.
+ *
+ * Each entry is tagged with the file's `(size, mtimeMs)` at the time
+ * of parse. On the next load the loader re-stats the file and reuses
+ * the cached Skill iff both dimensions still match. This matches the
+ * upstream kilocode behavior (`b0aeda50b`) where repeated frontmatter
+ * reads are the dominant cost of `reloadSkills()`.
+ *
+ * Exposed through {@link _resetSkillFrontmatterCacheForTests} so unit
+ * tests can observe a clean cache between cases.
+ */
+interface SkillCacheEntry {
+  readonly skill: Skill;
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+const _skillFrontmatterCache = new Map<string, SkillCacheEntry>();
+
+/**
+ * Reset the frontmatter cache. Internal — exposed for tests only.
+ * @internal
+ */
+export function _resetSkillFrontmatterCacheForTests(): void {
+  _skillFrontmatterCache.clear();
+}
+
 export function loadSkillFromFile(filePath: string, projectRoot?: string): Skill | null {
   const resolved = resolveSkillPath(filePath, projectRoot);
   if (!resolved) {
     console.warn(`Skill file not found: ${filePath}`);
     return null;
+  }
+  // Fast path: unchanged file → reuse the cached Skill without re-parsing.
+  // `fs.statSync` on a non-existent file throws, which we treat as a cache
+  // miss and let the loader surface the real error below.
+  let fileSize: number | undefined;
+  let fileMtimeMs: number | undefined;
+  try {
+    const stat = fs.statSync(resolved);
+    fileSize = stat.size;
+    fileMtimeMs = stat.mtimeMs;
+    const cached = _skillFrontmatterCache.get(resolved);
+    if (cached && cached.size === fileSize && cached.mtimeMs === fileMtimeMs) {
+      return cached.skill;
+    }
+  } catch {
+    // Stat failed — fall through to the parse path. If the file truly
+    // doesn't exist the gray-matter read below will produce the real
+    // error with the resolved path in the warning.
   }
   try {
     // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
@@ -149,6 +207,12 @@ export function loadSkillFromFile(filePath: string, projectRoot?: string): Skill
       source: 'file',
       sourcePath: resolved,
     };
+
+    // Populate the frontmatter cache. We only cache when the earlier
+    // stat succeeded — otherwise we have no reliable invalidation key.
+    if (fileSize !== undefined && fileMtimeMs !== undefined) {
+      _skillFrontmatterCache.set(resolved, { skill, size: fileSize, mtimeMs: fileMtimeMs });
+    }
 
     return skill;
   } catch (error) {
