@@ -64,7 +64,7 @@
     "node-notifier": "^10.0.1",
     "pptxgenjs": "^4.0.1",
     "react": "^19.3.0",
-    "simple-git": "^3.36.0",
+    "simple-git": "^4.0.2",
     "terminal-image": "^5.0.1",
     "terminal-link": "^5.0.0",
     "xlsx": "^0.18.5",
