@@ -124,7 +124,7 @@
     "husky": "^9.1.7",
     "ink-testing-library": "^4.0.0",
     "jszip": "^3.10.2",
-    "lint-staged": "^17.5.1",
+    "lint-staged": "^17.6.0",
     "prettier": "^3.9.9",
     "tsc-files": "^1.1.4",
     "tsx": "^4.23.13",
