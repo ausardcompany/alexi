@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Skill, custom agent, and slash command loaders now bypass `gray-matter`'s content-keyed internal cache (issue #1945)** (`src/skill/index.ts:138`, `src/agent/customAgentLoader.ts:107`, `src/command/index.ts:338`, `tests/skill/cache-poisoning.test.ts` +177 lines, commit `e359e23c` `fix(tools): bypass gray-matter cache in skill/agent/command loaders`). `gray-matter`'s default call signature maintains a process-wide, content-keyed cache keyed on the raw string. The cache entry is written BEFORE `parseMatter` runs, so a malformed YAML frontmatter that throws during parse still leaves a cached `{ data: {}, content: <raw>, isEmpty: false }` entry behind. The next identical `matter(content)` call then returns the poisoned entry WITHOUT re-attempting the parse — the thrown error is permanently swallowed, and the second load silently reports empty frontmatter.
+
+  Visible symptom pre-fix: in multi-worktree checkouts and long-running TUI processes a byte-identical `SKILL.md`, custom-agent `.md`, or slash-command `.md` whose first parse failed (unquoted inner colon, bad indentation) would, on reload, silently resolve with filename-derived defaults instead of either returning `null` or re-raising. A rename-driven cache poisoning also hit the valid case: a valid file whose content string had previously been cached with empty data (because of a crashed first parse) would reload as a skill named after the file, with no description, no `preferredModel`, no `tags` — all the frontmatter dropped.
+
+  Fix: all three loaders now call `matter(content, {})`. Passing any options object (even empty) short-circuits the cache lookup path in `gray-matter`'s index entry, forcing a fresh parse per call. The three touched call sites are:
+
+  - `src/skill/index.ts:138` — `loadSkillFromFile`, consumed by the skill registry at TUI boot and whenever the skill tool is invoked.
+  - `src/agent/customAgentLoader.ts:107` — `loadAgentFromFile`, consumed by the custom-agent loader (`src/agent/*`) and by the `task` tool's subagent dispatch when a project-local agent is referenced by id.
+  - `src/command/index.ts:338` — `loadCommandFromFile`, consumed by the slash-command registry (`src/command/*`) during TUI boot.
+
+  BOM-stripping (`readUtf8FileSyncStripBom`) is unchanged — the Windows Notepad "UTF-8 with BOM" workaround from `src/utils/frontmatter.ts` continues to run before `gray-matter` sees the content, as it did before. The cache-bypass is additive on top of the BOM strip, not a replacement.
+
+  No change to the shape of the returned `Skill` / `Agent` / `Command` structs; the only observable difference is that a previously-malformed file that is re-written on disk with valid YAML now reloads correctly without a process restart, and a load error is surfaced on every attempt instead of being silently absorbed after the first.
+
+  Test coverage in `tests/skill/cache-poisoning.test.ts` (177 lines, three describe blocks — one per loader):
+
+  - `skill loader: gray-matter cache poisoning` (2 cases): (1) two files with byte-identical malformed frontmatter both resolve to `null` — the second does NOT return a bogus cached skill; (2) a valid file loads its real frontmatter even after the cache was manually seeded with an empty-data entry keyed on the same content string.
+  - `agent loader: gray-matter cache poisoning` (1 case, async): the valid agent file parses its real `id`, `name`, `description`, and `model` even when the cache was pre-poisoned with `{ data: {} }` for the same content.
+  - `command loader: gray-matter cache poisoning` (1 case): the valid command file parses its real `name` and `description` even when the cache was pre-poisoned.
+
+  Each describe block clears `matter.cache` in both `beforeEach` and `afterEach` (via the `(matter as unknown as { cache: Record<string, unknown> }).cache = {}` escape hatch) so cross-suite test ordering cannot interfere. Temp fixtures use `fs.mkdtempSync(os.tmpdir(), 'alexi-<kind>-cache-')` and `fs.rmSync(..., { recursive: true, force: true })` for parallel-safe cleanup, matching the AGENTS.md "temp workdir + `afterEach` teardown" guidance for tool-adjacent tests.
+
+  See [docs/TESTING.md — Testing gray-matter Cache Poisoning Regression (issue #1945)](docs/TESTING.md#testing-gray-matter-cache-poisoning-regression-issue-1945) for the fixture pattern and the exact malformed-YAML string.
+
 ### Added
 
 - **Opt-in BYOK Langfuse tracing with env tags, metadata, and environment labelling** (`src/providers/langfuse-telemetry.ts` +482 lines, `src/providers/index.ts` +26 lines barrel re-exports, `src/providers/sapOrchestration.ts` +46 lines integration, `src/providers/__tests__/langfuse-telemetry.test.ts` +350 lines unit coverage, `tests/providers/langfuse-telemetry-integration.test.ts` +191 lines HTTP integration, `package.json` + `package-lock.json` adds `langfuse@^3.39.2`, `1.22.32` → `1.22.36`, commit `898a37b9` `feat(providers): opt-in Langfuse BYOK tracing with env tags/metadata/environment`, issue #1914). Ports Cline PR #14787 (`feat(llms): opt-in Langfuse tracing for BYOK providers plus env tags, metadata and environment`). Operators who already run (or point at) their own Langfuse instance — typically for CI, benchmark, or agent-fleet runs that want per-run tags, metadata, and environment labelling — can now attach Langfuse traces to every SAP AI Core provider call without the host OTLP relay being involved.

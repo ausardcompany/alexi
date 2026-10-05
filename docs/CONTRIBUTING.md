@@ -1087,6 +1087,54 @@ Ports the pair of upstream fixes opencode `517ee736b` (redacted /
 empty replay guards) and kilocode `3f39a329c` (thinking↔tool-call
 rebind).
 
+### Third-party library caches with hidden invariants (`gray-matter` pattern)
+
+Some commonly used libraries carry a process-wide cache that is NOT clearly
+documented at the call site. The one that bit Alexi hardest is `gray-matter`:
+calling `matter(content)` without an options argument stores the entry in
+`matter.cache` **before** attempting the YAML parse, so a thrown parse leaves
+a stale `{ data: {}, content, isEmpty: false }` entry under the same content
+key. The next identical call returns the poisoned entry WITHOUT re-attempting
+the parse — the throw is silently swallowed and callers see empty frontmatter
+instead of either the real data or a thrown error (issue #1945).
+
+The three places that call `matter()` in Alexi are now written as:
+
+```ts
+// src/skill/index.ts, src/agent/customAgentLoader.ts, src/command/index.ts
+import matter from 'gray-matter';
+
+// Pass an options object (even empty) to bypass gray-matter's internal
+// content-keyed cache. Without this, a malformed YAML parse poisons the
+// cache so that subsequent parses of identical content silently return
+// stale/empty data (gray-matter writes to the cache BEFORE parsing).
+// See issue #1945.
+const { data, content: promptContent } = matter(content, {});
+```
+
+Rules that generalise beyond `gray-matter`:
+
+1. **Audit every third-party helper for a process-wide cache.** Grep the
+   package's `index.js` for `cache[`, `WeakMap`, or `Map`. If a cache is
+   written BEFORE the operation it is caching, a throw during that
+   operation leaves a poisoned entry.
+2. **Pick the smallest cache-bypass that works.** For `gray-matter` an
+   empty options object is enough; the library's cache lookup is
+   `arguments.length === 1`-gated. Do NOT reach into `matter.cache` from
+   production code — the cast required is `(matter as unknown as { cache:
+   Record<string, unknown> }).cache` and should be confined to tests.
+3. **Pin the fix with a regression test that pre-seeds the poisoned
+   state.** See `tests/skill/cache-poisoning.test.ts` for the pattern:
+   write to `matter.cache[content]` directly in `beforeEach`, then load
+   the file and assert the loader read the real frontmatter. Clear
+   `matter.cache` in both `beforeEach` AND `afterEach` so cross-suite
+   ordering cannot interfere.
+4. **Do not swallow the real error.** The three loaders catch a thrown
+   parse and return `null` with a `console.warn`; that is intentional
+   (one bad file in a skills directory should not take down the TUI
+   boot) but relies on the cache-bypass fix above so the second call
+   observes the SAME throw rather than a silent empty.
+
 ### Per-call detectors (preferred over module-scoped counters)
 
 When a feature needs to observe a rolling condition across an agent's tool
