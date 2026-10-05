@@ -63,6 +63,8 @@ export interface ChatPageProps {
   onSubmit: (text: string) => void;
   commands: SlashCommand[];
   sidebar: SidebarContextValue;
+  /** True when a subagent is running — surfaces the Ctrl+S hint in the status bar. */
+  subagentActive?: boolean;
 }
 
 /**
@@ -89,6 +91,7 @@ export function ChatPage({
   onSubmit,
   commands,
   sidebar,
+  subagentActive = false,
 }: ChatPageProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -157,6 +160,7 @@ export function ChatPage({
           sessionId={sessionId}
           topModelLabel={topModelLabel}
           cwd={process.cwd()}
+          subagentActive={subagentActive}
         />
       </Box>
     </>
