@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Retry-After-aware catalog retry primitives (`src/providers/catalog-retry.ts`)** (`1.22.37` → `1.22.38`, commit `84b52c95` `feat(sync): apply upstream changes (2026-10-05)`). Ports upstream kilocode catalog-recovery hardening commits `07b18a1a2`, `b1642e87c`, `88f8ea950`, `59313c749`, `5539dd3ae`. New module adds a generic, stateless retry wrapper for SAP AI Core catalog refresh paths that need to honor the HTTP `Retry-After` response header (RFC 7231 §7.1.3) in addition to exponential backoff.
+
+  New public surface re-exported from `src/providers/modelCatalog.ts`:
+
+  - `withCatalogRetry<T>(fn, opts?, signal?): Promise<T>` — runs `fn(attempt)` with bounded exponential-backoff retries. On failure the schedule is `max(retryAfterMs, baseDelay * 2^attempt)` capped at `maxDelayMs`. The retry budget is spent on every failure; classification of transient vs permanent is the caller's responsibility (return `{ ok: false, error }` for transient, throw for permanent). Honors `signal.aborted` BEFORE every attempt AND during the backoff sleep, so cancellation is prompt. Each top-level call starts fresh (`attempt = 0`) — the "rearm after success" contract from the upstream fixes.
+  - `parseRetryAfter(header): number | undefined` — RFC 7231 §7.1.3 header parser. Accepts both delta-seconds (`"30"` → `30_000` ms) and HTTP-date (`"Wed, 21 Oct 2015 ..."` → milliseconds-until-that-date). Past HTTP-date clamps to `0` (retry immediately). Returns `undefined` for missing, empty, or unparseable headers so callers fall back to exponential backoff.
+  - `DEFAULT_CATALOG_RETRY: CatalogRetryOptions` — defaults aligned with `ErrorBackoff` in `src/core`: `maxAttempts: 5`, `baseDelayMs: 1_000`, `maxDelayMs: 30_000`.
+  - Types: `CatalogRetryOptions` (`{ maxAttempts, baseDelayMs, maxDelayMs }`, all required so callsites make an explicit budget decision), `CatalogFetchResult<T>` (discriminated union `{ ok: true; value } | { ok: false; retryAfterMs?; error }`). The explicit-result shape lets callers surface a response-level `Retry-After` without having to encode it into a thrown error class.
+
+  Design note: `withCatalogRetry` does NOT delegate to `fetchWithRetry` in `modelFetchErrors.ts`. The two helpers coexist — `fetchWithRetry` for the SDK-thrown-error path, `withCatalogRetry` for `fetch()`-style HTTP where response headers are accessible. Exponential backoff matches the AGENTS.md contract: `delay = min(initialDelay * 2^attempt, maxDelay)`.
+
+  Test coverage: `src/providers/__tests__/catalog-retry.test.ts` (142 lines, two describe blocks). Pins `parseRetryAfter` edge cases (delta-seconds, HTTP-date, past date, invalid, missing, negative), `withCatalogRetry` behaviour on first-success / retry-until-success / exhaust-then-throw / `Retry-After` honored over exponential / prompt abort / `maxAttempts < 1` validation, and the "rearm on fresh call — budget is per-call, not per-process" contract (two successive calls that each use their full budget both succeed because the counter resets).
+
+  See [docs/PROVIDERS.md — Catalog Retry (Retry-After-aware)](docs/PROVIDERS.md#catalog-retry-retry-after-aware) for the full contract and sequence diagram, and [docs/TESTING.md — Testing `withCatalogRetry` and `parseRetryAfter`](docs/TESTING.md#testing-withcatalogretry-and-parseretryafter) for the unit test patterns.
+
+- **Skill frontmatter cache (`src/skill/index.ts`)** (commit `84b52c95`). Ports upstream kilocode fix `b0aeda50b`. Parsed `Skill` objects loaded by `loadSkillFromFile()` are now memoised in a module-level `Map<string, SkillCacheEntry>` keyed by resolved absolute path. Each entry is tagged with the file's `(size, mtimeMs)` at parse time. On a repeat load the loader re-stats the file; when both dimensions still match, the cached `Skill` is returned verbatim without re-reading or re-parsing the file.
+
+  Rationale (ported from upstream): `reloadSkills()` and `skillDirectories()` walk the same project / global skill roots on every invocation. In a long interactive session this makes the gray-matter frontmatter parse the dominant cost of skill discovery, even though the files on disk almost never change. The cache is a straightforward `stat`-gated LRU-less memo: a cache hit replaces one file read + one gray-matter parse with one `statSync`.
+
+  Invalidation: the cache entry is dropped automatically the moment either `size` or `mtimeMs` changes. Hot-editing a skill from inside the TUI picks up the new content on the next load. If `fs.statSync` fails (e.g. the file was deleted mid-session) the loader falls through to a fresh parse and surfaces the real error via the resolved path in the warning.
+
+  New internal export: `_resetSkillFrontmatterCacheForTests()` — clears the cache. Exposed only for unit tests so they can observe a clean cache between cases. Not part of the public API.
+
+  Test coverage: `src/skill/frontmatter-cache.test.ts` (71 lines, two cases). Verifies that (1) a second `loadSkillFromFile()` on an unchanged file returns the SAME object reference as the first call (reference equality — if the parser had run again we would get a new object), and (2) rewriting the file AND bumping its mtime explicitly via `fs.utimesSync` invalidates the cache so the new content is parsed. The explicit mtime bump makes the test robust against filesystems that collapse rapid successive writes.
+
+- **`grep` tool exposes `isInvalidRgPattern` classifier + `RgExecuteOptions` object (`src/tool/tools/grep.ts`)** (commit `84b52c95`). Ports upstream kilocode fixes `501286ba9` (gate per-pattern retry on invalid globs), `93519a31c` (honor ignore files outside git via `--no-require-git`), and `21164ba0b` (scan workspace honoring additional caller-supplied exclusion globs).
+
+  New public surface:
+
+  - `isInvalidRgPattern(stderr: string): boolean` — classifier for `rg` stderr output. Returns `true` when the error indicates a malformed pattern (regex OR glob) that will fail identically on retry. Matches on `regex parse error`, `error parsing regex`, and `error parsing glob` substrings. Previously the retry loop treated every `rg` exit code 2 as transient, so a bad glob (`[` without a closing `]`, `**{` without `}`) got retried N times before surfacing. The classifier is now consumed to surface such errors on the first attempt.
+  - `GrepResult.invalidPattern?: boolean` — optional field set when the search was abandoned due to an unparseable pattern. Callers MUST NOT retry such patterns — they will fail identically on every attempt. This gates the marketplace / suggestion scan retry budget so a configuration bug does not consume the full `KILO_RETRIES` allowance.
+  - `RgExecuteOptions` interface — options bag replacing the positional four-arg signature of `executeWithRg`. Fields: `pattern`, `searchDir`, `include`, `signal`, `exclude?: readonly string[]` (additional globs excluded via `--glob=!<pattern>`), `noRequireGit?: boolean` (when true, passes `--no-require-git` so rg honors `.gitignore` / `.ignore` files even outside a git working tree). A back-compat positional overload keeps existing callers compiling unchanged.
+
+  See [docs/TOOLS.md](docs/TOOLS.md) for the public `grep` tool contract (unchanged — these are internal classifier / options surfaces consumed by the retry loop, not new CLI flags).
+
+### Changed
+
+- **Model catalog refresh survives malformed deployment entries (`src/providers/modelCatalog.ts`)** (commit `84b52c95`). Ports upstream kilocode fix `2792c704e` ("keep valid models when provider config contains malformed entry"). Previously ANY throw inside `extractModelId()` (bad shape, non-string `configurationName`, etc.) propagated up and aborted the entire refresh, leaving the user with an empty catalog. Now every per-deployment parse is isolated in a `try` / `catch`: a single bad entry is logged at `debug` level and skipped while the rest of the catalog is still assembled. When one or more entries were skipped, a single `warn`-level summary line reports `Model catalog: skipped N malformed deployment entr{y|ies}; kept M valid model(s).` The user keeps a usable catalog populated from the still-valid entries.
+
+- **Alexi version bumped to `1.22.38`** (`package.json`). Covers this release's upstream-port surface (catalog retry primitives, skill frontmatter cache, grep classifier / options, malformed-entry resilience).
+
+- **Upstream sync pointer advanced to kilocode `a93088bfe237992afaf64dcc14db9a1535b1cf30`, opencode unchanged, claude-code `2bfb629dfaff0c8318047a4beb93cf1dc5b58b18`** (`.github/last-sync-commits.json`). Metadata-only; records the baseline commit used by the 2026-10-05 sync run that produced the above ports. Does not alter runtime behaviour.
+
 - **Opt-in BYOK Langfuse tracing with env tags, metadata, and environment labelling** (`src/providers/langfuse-telemetry.ts` +482 lines, `src/providers/index.ts` +26 lines barrel re-exports, `src/providers/sapOrchestration.ts` +46 lines integration, `src/providers/__tests__/langfuse-telemetry.test.ts` +350 lines unit coverage, `tests/providers/langfuse-telemetry-integration.test.ts` +191 lines HTTP integration, `package.json` + `package-lock.json` adds `langfuse@^3.39.2`, `1.22.32` → `1.22.36`, commit `898a37b9` `feat(providers): opt-in Langfuse BYOK tracing with env tags/metadata/environment`, issue #1914). Ports Cline PR #14787 (`feat(llms): opt-in Langfuse tracing for BYOK providers plus env tags, metadata and environment`). Operators who already run (or point at) their own Langfuse instance — typically for CI, benchmark, or agent-fleet runs that want per-run tags, metadata, and environment labelling — can now attach Langfuse traces to every SAP AI Core provider call without the host OTLP relay being involved.
 
   New public surface re-exported from `src/providers/index.ts`:

@@ -732,6 +732,58 @@ Precedence contract (mirror-only; this module is not currently wired into tool r
 
 Keep both predicates sync and side-effect-free so they are safe to call from tool registration (which runs before any async subsystem is initialised).
 
+### Retry primitives: classify, don't paper over
+
+When adding a new retry wrapper for a provider or catalog refresh
+path, follow the two-tier primitive pattern established by
+`src/providers/catalog-retry.ts` (added in `1.22.38`, ports kilocode
+`07b18a1a2`, `b1642e87c`, `88f8ea950`, `59313c749`, `5539dd3ae`) and
+`src/providers/modelFetchErrors.ts` (`fetchWithRetry`). The retry
+budget is a limited operator resource — matching the AGENTS.md
+"error classification" contract — and must NEVER be spent on failures
+that will repeat identically on retry.
+
+**Classification first, retry second.** The caller is responsible for
+deciding what counts as transient vs permanent, NOT the retry helper.
+In `withCatalogRetry`, that split is encoded in the result shape: the
+caller returns `{ ok: false, error }` for transient failures (burn one
+retry) and `throw`s for permanent failures (propagate immediately
+without consuming budget). In `fetchWithRetry`, the split is encoded
+in `classifyFetchError(err).transient`. Either shape is acceptable;
+duplicating the classification logic inside the retry helper itself
+is not.
+
+**Honor server-supplied hints.** When the upstream path returns an
+HTTP `Retry-After` header (rate limiting, maintenance window), the
+helper MUST schedule the next attempt at `max(retryAfterMs,
+exponential)` capped at `maxDelayMs`. Parse the header through
+`parseRetryAfter` (not a bespoke parser) so RFC 7231 §7.1.3 edge
+cases — fractional delta-seconds, past HTTP-date, negative values —
+behave consistently across the codebase.
+
+**Rearm per-call, not per-process.** Each top-level call starts with
+a fresh attempt counter. A hidden module-level budget means a
+transient blip hours after a successful call fails outright because
+the counter was exhausted by an earlier recoverable blip. The current
+helpers satisfy this by being stateless — the retry test suite in
+`src/providers/__tests__/catalog-retry.test.ts` pins the invariant
+("rearm after success" case). Callers that need longer-lived rearming
+must wrap the primitive themselves.
+
+**Signal propagation.** `AbortSignal` MUST be checked BEFORE every
+attempt AND during the backoff sleep. A caller that cancels mid-retry
+should observe the cancellation promptly, not after the current
+attempt completes. Use `signal.reason` when available so the user's
+cancellation message propagates to the top-level `throw`.
+
+**Classify malformed inputs as permanent.** Patterns that can never
+succeed — bad regex / glob (see `isInvalidRgPattern` in
+`src/tool/tools/grep.ts`), 400 / 401 / 403 / 404 HTTP responses, auth
+failures, missing env vars — are permanent decisions and MUST NOT
+consume retry budget. Surface them on the first attempt. The AGENTS.md
+"Permanent (NOT retried)" bucket lists the full taxonomy; new retry
+helpers extend that bucket, never shrink it.
+
 ### One-way config key migration with a one-shot deprecation warning
 
 When a persisted-config key moves to a new canonical location (e.g. `context.compactionModel` → `models.compaction` in `1.22.18`, ports kilocode `f64c6646d`), the read/write helpers on `src/config/userConfig.ts` follow a fixed contract so the migration is safe against partial rollouts and stale operator configs.

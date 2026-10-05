@@ -836,6 +836,188 @@ targeted message instead of a raw upstream stack trace:
 | 5xx    | `HTTP <NNN> — retrying with backoff`                                          |
 | ECONNRESET/... | `network error (<code>) — retrying with backoff`                      |
 
+## Catalog Retry (Retry-After-aware)
+
+Added in `1.22.38` (upstream kilocode ports `07b18a1a2`, `b1642e87c`,
+`88f8ea950`, `59313c749`, `5539dd3ae`), `src/providers/catalog-retry.ts`
+is a generic retry primitive for SAP AI Core catalog refresh paths
+that need to honor the HTTP `Retry-After` response header
+(RFC 7231 §7.1.3) in addition to exponential backoff. It coexists with
+`fetchWithRetry` (above) — the two helpers target different error
+shapes:
+
+- `fetchWithRetry` wraps SDK calls that throw typed errors. It uses the
+  `classifyFetchError` precedence table and surfaces permanent failures
+  on the first attempt.
+- `withCatalogRetry` wraps `fetch()`-style HTTP where response headers
+  are accessible. The caller returns a discriminated `CatalogFetchResult`
+  with an optional `retryAfterMs` hint parsed from the response, and
+  the helper schedules the next attempt at `max(retryAfterMs, baseDelay
+  * 2^attempt)` capped at `maxDelayMs`.
+
+### Public surface
+
+```typescript
+// src/providers/catalog-retry.ts
+
+export interface CatalogRetryOptions {
+  readonly maxAttempts: number;
+  readonly baseDelayMs: number;
+  readonly maxDelayMs: number;
+}
+
+export const DEFAULT_CATALOG_RETRY: CatalogRetryOptions = {
+  maxAttempts: 5,
+  baseDelayMs: 1_000,
+  maxDelayMs: 30_000,
+};
+
+export type CatalogFetchResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly retryAfterMs?: number; readonly error: unknown };
+
+export function parseRetryAfter(
+  header: string | null | undefined
+): number | undefined;
+
+export async function withCatalogRetry<T>(
+  fn: (attempt: number) => Promise<CatalogFetchResult<T>>,
+  opts?: CatalogRetryOptions,
+  signal?: AbortSignal
+): Promise<T>;
+```
+
+All three names are re-exported from `src/providers/modelCatalog.ts` so
+downstream consumers import from the catalog module rather than reaching
+into the implementation file.
+
+### `parseRetryAfter` contract
+
+| Input                                        | Return         | Rationale                                   |
+| -------------------------------------------- | -------------- | ------------------------------------------- |
+| `null` / `undefined` / `''` / `'   '`        | `undefined`    | No hint — caller falls back to exponential  |
+| `'30'` (delta-seconds)                       | `30_000`       | RFC 7231 §7.1.3, seconds → ms               |
+| `'1.5'`                                      | `1500`         | Fractional seconds honored                  |
+| `'0'`                                        | `0`            | Retry immediately                           |
+| `'-5'`                                       | `undefined`    | Negative delta-seconds rejected             |
+| `'Wed, 21 Oct 2015 07:28:00 GMT'` (future)   | ms-until-date  | HTTP-date form, delta from `Date.now()`     |
+| HTTP-date in the past                        | `0`            | Server lock already released — retry now    |
+| `'tomorrow'` / unparseable string            | `undefined`    | Fall back to exponential                    |
+
+### `withCatalogRetry` contract
+
+- Each top-level call starts with `attempt = 0` — the "rearm after
+  success" clause is satisfied by the shape alone. A previous call that
+  exhausted its budget does NOT carry the exhausted counter forward.
+- The retry budget is spent on EVERY failure. Classification of
+  transient vs permanent is the CALLER'S responsibility: return
+  `{ ok: false, error }` only for transient failures and `throw` for
+  permanent ones (so the helper can propagate the throw immediately).
+- `signal.aborted` is checked BEFORE every attempt AND during the
+  backoff sleep. A user-initiated cancellation is observed promptly
+  without waiting for the current attempt to finish.
+- Delay formula: `backoff = min(maxDelayMs, retryAfterMs ?? baseDelayMs * 2^attempt)`.
+- `maxAttempts < 1` is rejected at the call site with a thrown
+  `Error('withCatalogRetry: maxAttempts must be >= 1, got <N>')`.
+- After every retry fails, the LAST `error` returned by `fn` is thrown
+  verbatim so callers can display it without re-wrapping.
+
+### Sequence: `withCatalogRetry` with a 429 + Retry-After
+
+```mermaid
+sequenceDiagram
+    participant Caller as modelCatalog refresh
+    participant Retry as withCatalogRetry
+    participant Fn as fn(attempt)
+    participant SAP as SAP AI Core
+
+    Caller->>Retry: withCatalogRetry(fn, opts, signal)
+    Retry->>Retry: attempt = 0
+    Retry->>Fn: fn(0)
+    Fn->>SAP: GET /deployments
+    SAP-->>Fn: 429 Retry-After: 2
+    Fn->>Fn: parseRetryAfter("2") -> 2000
+    Fn-->>Retry: { ok: false, retryAfterMs: 2000, error }
+    Retry->>Retry: backoff = min(30000, max(2000, 1000 * 2^0)) = 2000
+    Retry->>Retry: sleep 2000 (signal-aware)
+    Retry->>Fn: fn(1)
+    Fn->>SAP: GET /deployments
+    SAP-->>Fn: 200 { resources: [...] }
+    Fn-->>Retry: { ok: true, value }
+    Retry-->>Caller: value
+```
+
+### Design notes
+
+- The helper is intentionally stateless. "Rearm" is a property of the
+  function shape, not of a hidden counter. Callers that need
+  longer-lived rearming (e.g. a scheduler that only wants to retry N
+  times across the whole process lifetime) should wrap
+  `withCatalogRetry` themselves.
+- The retry budget defaults (`maxAttempts: 5`, `baseDelayMs: 1_000`,
+  `maxDelayMs: 30_000`) match `ErrorBackoff` in `src/core`. One second
+  initial backoff is short enough that a flapping TLS handshake
+  recovers before the user notices; thirty-second cap is long enough
+  that a sustained 429 does not hammer the SAP endpoint, short enough
+  that recovery still feels "almost immediate" from the TUI.
+- Abort propagation uses `signal.reason` when available (otherwise a
+  generic `new Error('aborted')`). The internal `sleepWithSignal`
+  helper installs the abort listener with `{ once: true }` and clears
+  the pending `setTimeout` on both the normal resolve and the abort
+  reject paths — no leaked timers, no accumulating listeners across
+  retries.
+
+## Model Catalog Resilience: Malformed Entries
+
+Added in `1.22.38` (upstream kilocode port `2792c704e`),
+`refreshModelCatalog()` now isolates every per-deployment parse in a
+try / catch so a single bad entry does not abort the entire refresh.
+Previously, any throw inside `extractModelId(d.configurationName)` —
+non-string `configurationName`, missing fields, malformed JSON blob —
+propagated up and emptied the catalog. The user was left with
+`No deployments found` even when every other deployment in the tenant
+was valid.
+
+```typescript
+// src/providers/modelCatalog.ts (excerpt)
+
+const liveMap = new Map<string, string>();
+let malformedCount = 0;
+for (const d of liveDeployments) {
+  let modelId: string | null;
+  try {
+    modelId = extractModelId(d.configurationName);
+  } catch (parseErr) {
+    malformedCount += 1;
+    logger.debug(
+      `Model catalog: skipping malformed deployment entry (${
+        parseErr instanceof Error ? parseErr.message : String(parseErr)
+      })`
+    );
+    continue;
+  }
+  if (modelId && !liveMap.has(modelId)) {
+    liveMap.set(modelId, d.id);
+  }
+}
+if (malformedCount > 0) {
+  logger.warn(
+    `Model catalog: skipped ${malformedCount} malformed deployment ` +
+      `entr${malformedCount === 1 ? 'y' : 'ies'}; kept ${liveMap.size} valid model(s).`
+  );
+}
+```
+
+Observable contract:
+
+- A single `warn`-level summary line is emitted when at least one entry
+  was skipped; the `debug`-level per-entry line names the specific
+  parse error.
+- The returned catalog contains every valid entry. Only the malformed
+  ones are dropped.
+- No change to the `CatalogState` shape or the retry schedule —
+  malformed entries are a data-shape issue, not a transient failure.
+
 ### Retry policy
 
 `fetchWithRetry` runs the operation with capped exponential backoff on
