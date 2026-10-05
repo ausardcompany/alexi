@@ -6326,8 +6326,42 @@ contributors do not re-introduce them by hand:
    array literal followed by `.join('\n')` so the fixture reads like the
    underlying wire format. Prettier will collapse such array literals onto a
    single line whenever the resulting expression fits under `printWidth: 100`.
-   The canonical worked example from the 2026-09-01 auto-fix pass (commit
-   `755ce518`) is `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
+   Most recent worked example from the 2026-10-05 auto-fix pass (commit
+   `72b81ea6`) is `src/skill/frontmatter-cache.test.ts:30-33`, where the
+   six-element YAML-frontmatter fixture feeding `fs.writeFileSync(file, ...)`
+   was collapsed from one-element-per-line onto a single 96-column array
+   literal:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (8 lines)
+   fs.writeFileSync(
+     file,
+     [
+       '---',
+       'id: demo',
+       'name: Demo',
+       'description: cache test',
+       '---',
+       'hello world',
+     ].join('\n')
+   );
+
+   // Canonical form after auto-fix (3 lines, 96-column array literal)
+   fs.writeFileSync(
+     file,
+     ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
+   );
+   ```
+
+   The paired `loadSkillFromFile(file)` round-trip and the reference-equality
+   assertion `expect(second).toBe(first)` (verifying the skill frontmatter
+   cache serves identical object references on an unchanged file) are
+   unaffected — the fixture bytes written to `tmpDir/demo.md` are
+   character-identical before and after the reflow because `['...'].join('\n')`
+   produces the same string regardless of source layout.
+
+   The prior worked example from the 2026-09-01 auto-fix pass (commit
+   `755ce518`) sits in `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
    which feeds a six-element unified-diff hunk into `applyPatchTool.executeUnsafe`:
 
    ```typescript
