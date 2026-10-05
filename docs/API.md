@@ -4422,6 +4422,122 @@ The legacy shape below is still accepted but emits a one-time deprecation warnin
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator guide and [ARCHITECTURE.md — Shared Agent Board](ARCHITECTURE.md#shared-agent-board-srccoredatabaseboardstorets) for the design notes and Mermaid diagram.
 
+## Subagent Steering API
+
+Introduced in commit `3fb3ef7c` (`feat(agent): add subagent steering with Ctrl+S prompt injection`, ports upstream kilocode #14702). Posts a mid-execution prompt to a running subagent via the shared agent board without stopping and restarting the subagent. See [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts) for the data-flow diagram and the TUI integration contract.
+
+### Data layer (`src/agent/session.ts`)
+
+```typescript
+export interface SteeringResult {
+  /** Row id of the posted board message (`kilo_board_message.id`). */
+  messageId: string;
+  /** Resolved board id for the target subagent. */
+  boardId: string;
+  /** The trimmed prompt text as posted. */
+  prompt: string;
+  /** ISO timestamp copied from `BoardMessage.createdAt`. */
+  deliveredAt: string;
+}
+
+/**
+ * Post a steering prompt to a subagent via the shared agent board.
+ * Returns `null` when the prompt is empty/whitespace-only, or when the
+ * subagent has no attached board (swarm feature disabled, missing
+ * better-sqlite3, or id does not resolve). The posted message carries
+ * `author: 'steering'` so the subagent can distinguish operator
+ * steering from peer chatter.
+ */
+export function steerSubagent(
+  subagentSessionId: string,
+  prompt: string
+): Promise<SteeringResult | null>;
+
+/**
+ * Return the most recent steering prompt recorded for a subagent, or
+ * `undefined` when none has been posted. Reads from an in-memory cache
+ * populated by `steerSubagent`; survives for the lifetime of the parent
+ * process only. Callers needing an audit trail should read the board
+ * directly via `BoardStore.read(boardId)`.
+ */
+export function getSteeringPrompt(subagentSessionId: string): string | undefined;
+
+/**
+ * Drop the cached steering prompt for a subagent. Called by the TUI
+ * when the subagent view unmounts and by tests to isolate state.
+ */
+export function clearSteeringPrompt(subagentSessionId: string): void;
+
+/** Test-only — drops the entire in-memory cache. Not part of the public runtime API. */
+export function __resetSteeringStateForTests(): void;
+```
+
+### TUI integration (`src/cli/tui/context/SubagentContext.tsx`)
+
+```typescript
+export interface SubagentState {
+  /**
+   * Session id of the currently-running subagent, or `null` when no
+   * subagent is active. The orchestrator sets this when it spawns a
+   * subagent and clears it on completion.
+   */
+  activeSubagentId: string | null;
+  /** The latest steering prompt the user injected via Ctrl+S. */
+  steeringPrompt: string | null;
+  /** ISO timestamp of the last successful steering post. */
+  steeringDeliveredAt: string | null;
+}
+
+export interface SubagentContextValue extends SubagentState {
+  /** Mark a subagent as active (or `null` to clear and auto-reset steering). */
+  setActiveSubagent: (sessionId: string | null) => void;
+  /**
+   * Post a steering prompt via the board and cache it locally. Returns
+   * `true` on success, `false` when there is no active subagent or the
+   * board layer rejected the write (empty prompt, missing board).
+   */
+  steer: (prompt: string) => Promise<boolean>;
+  /** Drop the cached prompt locally (visual only — board message is unaffected). */
+  clearSteering: () => void;
+}
+
+export function SubagentProvider(props: { children: React.ReactNode }): React.JSX.Element;
+export function useSubagent(): SubagentContextValue; // throws outside a SubagentProvider
+```
+
+### Component surface (`src/cli/tui/components/SubagentView.tsx`)
+
+```typescript
+export interface SubagentViewProps {
+  /** Session id or display name — rendered in the header. */
+  subagentId: string;
+  /** Latest text produced by the subagent (rendered verbatim with wrap="wrap"). */
+  output: string;
+  /** Current steering prompt, or `null` when the user has not injected one. */
+  steeringPrompt: string | null;
+  /** ISO timestamp of the last steering post; rendered as a dim HH:MM:SS meta line. */
+  steeringDeliveredAt?: string | null;
+}
+
+export function SubagentView(props: SubagentViewProps): React.JSX.Element;
+```
+
+### Keybinding
+
+| Key | Context | Behaviour |
+| --- | --- | --- |
+| `Ctrl+S` | `activeSubagentId !== null` | Opens the `arg-input` dialog with title `Steer subagent:` and field `prompt` (placeholder `e.g. focus on edge cases`). On submit, calls `SubagentContext.steer(text)`. |
+| `Ctrl+S` | `activeSubagentId === null` | No-op. `useKeyboard` returns early without opening any dialog so idle sessions do not accidentally trigger unrelated behaviour. |
+
+The `StatusBar.subagentActive` prop (new) flips the help segment from `ctrl+? help` to `Ctrl+S: steer subagent` while a subagent is running so the shortcut is discoverable without opening the help overlay. The help overlay also registers the entry via `getHelpEntries()` in `src/cli/tui/utils/helpEntries.ts` with `category: 'chat'` and `condition: 'subagent active'`.
+
+### Contract summary
+
+- Posted messages carry `author: 'steering'` (constant).
+- The in-memory cache keyed by subagent session id uses latest-wins semantics.
+- `steerSubagent` never throws — a missing board degrades to a `null` return matching the broader "board writes never throw" contract documented in [Shared Agent Board API](#shared-agent-board-api).
+- Setting `setActiveSubagent(null)` auto-clears `steeringPrompt` and `steeringDeliveredAt`.
+
 ## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
 
 Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone Bedrock model-id classifier for future direct Bedrock integrations and SAP AI Core deployment mapping. Alexi does not ship a native Bedrock provider yet, but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments.

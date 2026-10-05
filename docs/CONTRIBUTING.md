@@ -2868,6 +2868,19 @@ Invariants for anyone touching this file:
 - **`-free$` / `-preview$` suffix stripping is byte-for-byte from upstream.** Do not extend the regex casually — adding a new suffix (`-beta`, `-experimental`) is not "just one more rule", it silently merges what used to be two candidate labs and can now drop an unambiguous name from `models`.
 - **Malformed rows are skipped, not thrown.** A single corrupt per-model entry should not tank the whole resolution. Keep the inline `record(...)` guards.
 
+## Subagent Steering (`src/agent/session.ts`)
+
+Steering is the data layer behind the TUI's Ctrl+S shortcut that injects a mid-execution prompt into a running subagent (commit `3fb3ef7c`, ports upstream kilocode #14702). References: [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts), [API.md — Subagent Steering API](API.md#subagent-steering-api), [TESTING.md — Testing Subagent Steering](TESTING.md#testing-subagent-steering).
+
+- **Keep the data layer free of React.** `src/agent/session.ts` must not import from `src/cli/tui/**`. The provider (`SubagentContext.tsx`) is the only module that bridges the two — if a future enhancement needs richer state in `steerSubagent`, surface it as a plain-object return, not a hook-shaped callback.
+- **`steerSubagent` must never throw.** It mirrors the "board writes never throw" contract documented against `BoardStore.write`. Degrade to a `null` return for all four failure modes: empty / whitespace prompt, no attached board, missing subagent id, missing better-sqlite3 binding. The caller surfaces the uniform `false` to the TUI.
+- **Author tag is a constant.** The posted `BoardMessage.author` MUST be the literal string `'steering'`. The subagent's polling loop filters on this value; renaming it silently drops every injected prompt. A regression test in `tests/agent/steering.test.ts:73-90` pins this invariant.
+- **Latest-wins cache is intentional.** `steeringState` is a `Map<string, string>` of session id → latest prompt. Callers that want an audit trail must read the board directly via `BoardStore.read(boardId)`. Do not grow the cache into a list — the TUI only needs the current steering context and the audit trail already lives in SQLite.
+- **Lifetime: parent process only.** `__resetSteeringStateForTests()` is the only sanctioned way to drain the map outside normal operation. `clearSteeringPrompt(id)` is the per-subagent cleanup the TUI calls when the view unmounts and when `setActiveSubagent(null)` fires.
+- **Keybinding guard.** `useKeyboard` must return early for Ctrl+S when `subagent.activeSubagentId === null` so idle sessions do not open the `arg-input` dialog. The guard also prevents the `arg-input` dialog from racing with other handlers in leader mode. A smoke test (`tests/tui/subagent-view.test.tsx:121-134`) pins the no-op invariant via `SubagentContext.steer(...)` returning `false`.
+- **`StatusBar.subagentActive` prop drives discoverability.** When adding a new mid-session shortcut, follow the same pattern: a boolean prop threaded through `ChatPage` that flips the help segment while the context applies, plus a `getHelpEntries()` entry gated on a matching `condition` string. Avoid introducing fresh ad-hoc global state.
+- **Mock the context, not the data layer, in `useKeyboard` tests.** `tests/cli/tui/useKeyboard.test.tsx` mocks `SubagentContext` at the module boundary so changes to `steerSubagent`'s shape do not force a cascade of keyboard-test rewrites. When adding new context consumers to `useKeyboard`, extend the mock with the new fields instead of pulling in the real provider.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
