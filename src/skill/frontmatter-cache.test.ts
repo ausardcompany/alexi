@@ -29,14 +29,7 @@ describe('skill frontmatter cache', () => {
     const file = path.join(tmpDir, 'demo.md');
     fs.writeFileSync(
       file,
-      [
-        '---',
-        'id: demo',
-        'name: Demo',
-        'description: cache test',
-        '---',
-        'hello world',
-      ].join('\n')
+      ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
     );
     const first = loadSkillFromFile(file);
     const second = loadSkillFromFile(file);

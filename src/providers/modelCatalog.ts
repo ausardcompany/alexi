@@ -558,11 +558,7 @@ export type { FetchErrorClass, FetchRetryOptions };
 // should use `withCatalogRetry` instead. Ports upstream kilocode
 // catalog-recovery hardening (07b18a1a2, b1642e87c, 88f8ea950,
 // 59313c749, 5539dd3ae).
-export {
-  withCatalogRetry,
-  parseRetryAfter,
-  DEFAULT_CATALOG_RETRY,
-} from './catalog-retry.js';
+export { withCatalogRetry, parseRetryAfter, DEFAULT_CATALOG_RETRY } from './catalog-retry.js';
 export type { CatalogRetryOptions, CatalogFetchResult } from './catalog-retry.js';
 
 // Export catalog TTL for tests

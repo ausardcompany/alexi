@@ -111,9 +111,9 @@ describe('withCatalogRetry', () => {
     const controller = new AbortController();
     controller.abort(new Error('cancelled'));
     const fn = vi.fn(async (): Promise<CatalogFetchResult<string>> => ({ ok: true, value: 'x' }));
-    await expect(
-      withCatalogRetry(fn, DEFAULT_CATALOG_RETRY, controller.signal)
-    ).rejects.toThrow('cancelled');
+    await expect(withCatalogRetry(fn, DEFAULT_CATALOG_RETRY, controller.signal)).rejects.toThrow(
+      'cancelled'
+    );
     expect(fn).not.toHaveBeenCalled();
   });
 

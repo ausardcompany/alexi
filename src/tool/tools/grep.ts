@@ -372,13 +372,7 @@ async function executeWithRg(
         }
       : patternOrOpts;
   const { pattern, searchDir: dir, include: inc, signal: sig, exclude, noRequireGit } = opts;
-  const args: string[] = [
-    '--json',
-    '--no-heading',
-    '--line-number',
-    '--no-messages',
-    '--stats',
-  ];
+  const args: string[] = ['--json', '--no-heading', '--line-number', '--no-messages', '--stats'];
   if (noRequireGit) {
     // Upstream kilocode 93519a31c: honor `.gitignore` / `.ignore` files
     // even when the search root is not inside a git working tree. Only
