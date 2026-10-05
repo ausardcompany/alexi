@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Skill, custom agent, and slash command loaders now bypass `gray-matter`'s content-keyed internal cache (issue #1945)** (`src/skill/index.ts:138`, `src/agent/customAgentLoader.ts:107`, `src/command/index.ts:338`, `tests/skill/cache-poisoning.test.ts` +177 lines, commit `e359e23c` `fix(tools): bypass gray-matter cache in skill/agent/command loaders`). `gray-matter`'s default call signature maintains a process-wide, content-keyed cache keyed on the raw string. The cache entry is written BEFORE `parseMatter` runs, so a malformed YAML frontmatter that throws during parse still leaves a cached `{ data: {}, content: <raw>, isEmpty: false }` entry behind. The next identical `matter(content)` call then returns the poisoned entry WITHOUT re-attempting the parse — the thrown error is permanently swallowed, and the second load silently reports empty frontmatter.
+
+  Visible symptom pre-fix: in multi-worktree checkouts and long-running TUI processes a byte-identical `SKILL.md`, custom-agent `.md`, or slash-command `.md` whose first parse failed (unquoted inner colon, bad indentation) would, on reload, silently resolve with filename-derived defaults instead of either returning `null` or re-raising. A rename-driven cache poisoning also hit the valid case: a valid file whose content string had previously been cached with empty data (because of a crashed first parse) would reload as a skill named after the file, with no description, no `preferredModel`, no `tags` — all the frontmatter dropped.
+
+  Fix: all three loaders now call `matter(content, {})`. Passing any options object (even empty) short-circuits the cache lookup path in `gray-matter`'s index entry, forcing a fresh parse per call. The three touched call sites are:
+
+  - `src/skill/index.ts:138` — `loadSkillFromFile`, consumed by the skill registry at TUI boot and whenever the skill tool is invoked.
+  - `src/agent/customAgentLoader.ts:107` — `loadAgentFromFile`, consumed by the custom-agent loader (`src/agent/*`) and by the `task` tool's subagent dispatch when a project-local agent is referenced by id.
+  - `src/command/index.ts:338` — `loadCommandFromFile`, consumed by the slash-command registry (`src/command/*`) during TUI boot.
+
+  BOM-stripping (`readUtf8FileSyncStripBom`) is unchanged — the Windows Notepad "UTF-8 with BOM" workaround from `src/utils/frontmatter.ts` continues to run before `gray-matter` sees the content, as it did before. The cache-bypass is additive on top of the BOM strip, not a replacement.
+
+  No change to the shape of the returned `Skill` / `Agent` / `Command` structs; the only observable difference is that a previously-malformed file that is re-written on disk with valid YAML now reloads correctly without a process restart, and a load error is surfaced on every attempt instead of being silently absorbed after the first.
+
+  Test coverage in `tests/skill/cache-poisoning.test.ts` (177 lines, three describe blocks — one per loader):
+
+  - `skill loader: gray-matter cache poisoning` (2 cases): (1) two files with byte-identical malformed frontmatter both resolve to `null` — the second does NOT return a bogus cached skill; (2) a valid file loads its real frontmatter even after the cache was manually seeded with an empty-data entry keyed on the same content string.
+  - `agent loader: gray-matter cache poisoning` (1 case, async): the valid agent file parses its real `id`, `name`, `description`, and `model` even when the cache was pre-poisoned with `{ data: {} }` for the same content.
+  - `command loader: gray-matter cache poisoning` (1 case): the valid command file parses its real `name` and `description` even when the cache was pre-poisoned.
+
+  Each describe block clears `matter.cache` in both `beforeEach` and `afterEach` (via the `(matter as unknown as { cache: Record<string, unknown> }).cache = {}` escape hatch) so cross-suite test ordering cannot interfere. Temp fixtures use `fs.mkdtempSync(os.tmpdir(), 'alexi-<kind>-cache-')` and `fs.rmSync(..., { recursive: true, force: true })` for parallel-safe cleanup, matching the AGENTS.md "temp workdir + `afterEach` teardown" guidance for tool-adjacent tests.
+
+  See [docs/TESTING.md — Testing gray-matter Cache Poisoning Regression (issue #1945)](docs/TESTING.md#testing-gray-matter-cache-poisoning-regression-issue-1945) for the fixture pattern and the exact malformed-YAML string.
+
 ### Changed
 
 - **Low-touch upstream sync-watermark refresh (2026-10-04)** (`.github/last-sync-commits.json`, `package.json`, `1.22.37` → `1.22.38`, commit `81e85574` `feat(sync): apply upstream changes (2026-10-04)`). Canonical "quiet-day" sync shape per `docs/CONTRIBUTING.md` §Automation System (worked example at line 1850): the two-stage planner/executor ran with zero net source changes because both `kilocode` (`76bcfd40b..76bcfd40b`) and `opencode` (`907b3bc..907b3bc`) held steady over the 24h window since the previous sync; only `claude-code` advanced (`1c229fcd1e1e4e452e29a8f116b45fe4cfe2c528` → `2bfb629dfaff0c8318047a4beb93cf1dc5b58b18`) and that upstream contributed no portable changes to Alexi's tracked surface areas (`src/tool/`, `src/agent/`, `src/permission/`, `src/bus/`, `src/core/`, `src/providers/`, `src/router/`, `src/cli/`). Diff statistics for the sync commit: `2 files changed, 6 insertions(+), 6 deletions(-)` — `.github/last-sync-commits.json` (three `last_synced_at` timestamps refreshed to `2026-10-04T11:54:21Z`, one `last_synced_commit` SHA advanced for `claude-code`, and `metadata.workflow_run` updated from `37118929883` to `37200189248`) plus `package.json` (version field only, `1.22.37` → `1.22.38`). Zero `.ts` files, zero dependency additions, zero new configuration surfaces, no new tools, no new CLI subcommands, no new environment variables, no new permissions, no new MCP servers, no new routing-config fields. The paired planning brief (commit `75f66464` `docs(ci): add created issues table to planning brief [alexi-bot]`) extended the planner artefacts under `.github/prompts/` and `.github/reports/` for audit but touches no runtime surface. No operator action required; no CHANGELOG surface addition is expected for `1.22.38` beyond this version-bump entry. All configuration guidance in `docs/CONFIGURATION.md` continues to apply unchanged.

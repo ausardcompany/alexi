@@ -100,7 +100,12 @@ export async function loadAgentFromFile(
     // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
     // sees `---` at byte offset 0. See src/utils/frontmatter.ts.
     const content = readUtf8FileSyncStripBom(filePath);
-    const { data, content: promptContent } = matter(content);
+    // Pass an options object (even empty) to bypass gray-matter's internal
+    // content-keyed cache. Without this, a malformed YAML parse poisons the
+    // cache so that subsequent parses of identical content silently return
+    // stale/empty data (gray-matter writes to the cache BEFORE parsing).
+    // See issue #1945.
+    const { data, content: promptContent } = matter(content, {});
 
     const id = data.slug || data.id || path.basename(filePath, path.extname(filePath));
     const resolvedContent = await resolveFileInclusions(promptContent, path.dirname(filePath));

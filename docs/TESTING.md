@@ -10,6 +10,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
   - [Testing the `link_pr` Tool](#testing-the-link_pr-tool)
+  - [Testing gray-matter Cache Poisoning Regression (issue #1945)](#testing-gray-matter-cache-poisoning-regression-issue-1945)
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing Compaction](#testing-compaction)
@@ -4048,6 +4049,113 @@ to verify the placeholder strings are not reintroduced.
 > assertions adjusted accordingly) or `registry.ts` is updated to re-export a
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
+
+### Testing gray-matter Cache Poisoning Regression (issue #1945)
+
+The skill, custom-agent, and slash-command loaders all parse YAML frontmatter
+via the `gray-matter` package. `gray-matter`'s default call signature keeps a
+process-wide, content-keyed cache in `matter.cache` (see
+`node_modules/gray-matter/index.js`). The cache entry is written BEFORE
+`parseMatter` runs, so a malformed-YAML parse that throws still leaves a
+`{ data: {}, content: <raw>, isEmpty: false }` entry behind under that content
+string. The next identical `matter(content)` call returns the poisoned entry
+WITHOUT re-attempting the parse, so the thrown error is permanently swallowed.
+
+Alexi mitigates this by always passing an options object (even `{}`) when
+calling `matter(...)` — any options argument short-circuits the cache lookup
+path. The three touched call sites are:
+
+- `src/skill/index.ts:138` — `loadSkillFromFile`
+- `src/agent/customAgentLoader.ts:107` — `loadAgentFromFile`
+- `src/command/index.ts:338` — `loadCommandFromFile`
+
+The regression suite in `tests/skill/cache-poisoning.test.ts` (177 lines, three
+describe blocks — one per loader) pins the contract that a poisoned cache
+cannot leak into a subsequent load.
+
+#### Test fixtures
+
+The suite declares two string fixtures at module scope so every case parses
+exactly the same byte sequence through `gray-matter`:
+
+```ts
+// tests/skill/cache-poisoning.test.ts
+const MALFORMED_FRONTMATTER = `---
+name: broken-skill
+description: foo: bar
+---
+
+Hello body.
+`;
+
+const VALID_FRONTMATTER = `---
+name: valid-skill
+description: A perfectly fine skill
+---
+
+Hello body.
+`;
+```
+
+The `description: foo: bar` line is the deliberate trigger — the unquoted
+inner colon makes the YAML parse throw. `description: "foo: bar"` would be
+valid; the trailing newline matters because `gray-matter` keys the cache on
+the exact content string.
+
+#### Cache escape hatch pattern
+
+Every describe block clears `gray-matter`'s global cache in both `beforeEach`
+and `afterEach`, so cross-suite test ordering cannot poison or starve the
+cases:
+
+```ts
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-skill-cache-'));
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+```
+
+The `(matter as unknown as { cache: Record<string, unknown> }).cache` cast is
+the only sanctioned way to reach into `gray-matter`'s internal state from
+TypeScript — the public API intentionally does not expose the cache. Confine
+this cast to tests; do NOT use it in `src/`.
+
+#### Cases pinned by the suite
+
+1. **Malformed-then-malformed, byte-identical content** (skill loader): write
+   `MALFORMED_FRONTMATTER` to `first.md`, load it (expect `null` from the
+   loader's try/catch), write the same bytes to `second.md`, load it. Without
+   the `matter(content, {})` fix, `gray-matter` would return the cached
+   empty-data entry and `loadSkillFromFile` would happily emit a skill named
+   after the filename with an empty description. With the fix, the second
+   load re-parses, re-throws, and the loader returns `null` again.
+2. **Pre-poisoned cache, valid content** (skill, agent, command loaders —
+   one case each): manually seed `matter.cache[VALID_FRONTMATTER]` with
+   `{ data: {}, content: VALID_FRONTMATTER, isEmpty: false, excerpt: '' }`
+   BEFORE calling the loader. Then write the valid content to disk and load
+   it. Without the fix, the loader would read the empty-data cache entry
+   and produce a skill/agent/command with filename-derived defaults. With
+   the fix, the loader bypasses the cache and resolves the real
+   `name`/`id`/`description`.
+
+#### Running
+
+```bash
+npm test -- tests/skill/cache-poisoning.test.ts
+```
+
+When writing a NEW loader that calls `gray-matter`, always pass an options
+object as the second argument (`matter(content, {})`), add a regression case
+to the matching describe block above, and leave the `matter.cache = {}` reset
+in `beforeEach`/`afterEach`. See `AGENTS.md` for the ESM `.js` suffix
+requirement on the fresh `import` of the loader under test — note how the
+suite imports via `../../src/skill/index.js`, `../../src/agent/customAgentLoader.js`,
+and `../../src/command/index.js`.
 
 ## Testing `sanitizeApiKey` and auth-error rewriting
 

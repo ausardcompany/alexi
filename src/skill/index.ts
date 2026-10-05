@@ -130,7 +130,12 @@ export function loadSkillFromFile(filePath: string, projectRoot?: string): Skill
     // sees `---` at byte offset 0. Otherwise the frontmatter is silently
     // ignored — see src/utils/frontmatter.ts.
     const content = readUtf8FileSyncStripBom(resolved);
-    const { data, content: promptContent } = matter(content);
+    // Pass an options object (even empty) to bypass gray-matter's internal
+    // content-keyed cache. Without this, a malformed YAML parse poisons the
+    // cache so that subsequent parses of identical content silently return
+    // stale/empty data (gray-matter writes to the cache BEFORE parsing).
+    // See issue #1945.
+    const { data, content: promptContent } = matter(content, {});
 
     const skill: Skill = {
       id: data.id || path.basename(resolved, path.extname(resolved)),
