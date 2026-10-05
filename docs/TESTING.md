@@ -8993,3 +8993,109 @@ describe('buildFetch — provider timeout', () => {
 ```bash
 npm test -- src/providers/provider.test.ts
 ```
+
+## Testing Subagent Steering
+
+The subagent-steering feature (commit `3fb3ef7c`, ports upstream kilocode #14702, see [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts)) is tested at two layers: a data-layer suite that exercises `steerSubagent` against the shared board, and a TUI smoke-test suite that pins the visual contract of `SubagentView` and the initial state of `SubagentProvider`.
+
+### Data-layer tests (`tests/agent/steering.test.ts`, 124 lines)
+
+The suite isolates state between cases by resetting three singletons in `beforeEach`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  __resetSteeringStateForTests,
+  clearSteeringPrompt,
+  getSteeringPrompt,
+  steerSubagent,
+} from '../../src/agent/session.js';
+import { BoardStore } from '../../src/core/database/boardStore.js';
+import { BoardContext } from '../../src/core/database/boardContext.js';
+
+beforeEach(() => {
+  __resetSteeringStateForTests();
+  BoardContext.__resetForTests();
+  BoardStore.__resetForTests();
+});
+```
+
+A small id-generator keeps subagent and board ids unique across cases so a stale `BoardContext` attachment cannot leak between them:
+
+```typescript
+let counter = 0;
+function nextIds(): { subagentId: string; boardId: string } {
+  counter += 1;
+  return {
+    subagentId: `session-sub-steering-${Date.now()}-${counter}`,
+    boardId: `board-sub-steering-${Date.now()}-${counter}`,
+  };
+}
+```
+
+Cases locked by the suite:
+
+1. **No board → null.** `steerSubagent('session-with-no-board', 'focus on auth')` MUST return `null` and MUST NOT touch the in-memory cache. Pins the no-board fallback.
+2. **Empty / whitespace prompt → null.** Both `''` and `'    '` MUST return `null` with no cache mutation.
+3. **Successful post caches the latest prompt.** After `BoardContext.attach(subagentId, boardId)` and `BoardStore.ensure(boardId, 'task-steering')`, `steerSubagent(subagentId, 'focus on edge cases')` MUST return a `SteeringResult` whose `prompt` equals the trimmed input and whose `messageId` / `deliveredAt` are typed strings; `getSteeringPrompt(subagentId)` MUST mirror the posted prompt.
+4. **Author tag.** The posted row MUST carry `author: 'steering'`. The assertion is guarded by `if (messages.length === 0) return;` so the suite stays green when `better-sqlite3` is absent and `BoardStore.read()` returns an empty array — the no-sqlite path is covered by the earlier cases.
+5. **Latest-wins cache.** Two successive `steerSubagent` calls on the same session id — `first guidance` then `second guidance` — MUST leave `getSteeringPrompt` returning `second guidance`.
+6. **Whitespace trim.** `   actually use the staging db   ` MUST post and cache as `actually use the staging db`.
+7. **`clearSteeringPrompt` drops the cache.** After a successful post, `clearSteeringPrompt(subagentId)` MUST make `getSteeringPrompt` return `undefined`.
+
+### TUI smoke tests (`tests/tui/subagent-view.test.tsx`, 135 lines)
+
+The visual contract is pinned with `ink-testing-library` and the project's `ThemeProvider`. A tiny `Capture` helper reads the live `SubagentContextValue` without needing a DOM:
+
+```tsx
+function Capture({ into }: { into: { current: SubagentContextValue | null } }): React.JSX.Element {
+  const ctx = useSubagent();
+  into.current = ctx;
+  return <Text>captured</Text>;
+}
+```
+
+`SubagentView` cases:
+
+- **Default render.** Given `steeringPrompt={null}`, the frame MUST contain the `subagent` header, the id substring, and the output text, but MUST NOT contain `Steering active`.
+- **Steering overlay.** Given a non-whitespace `steeringPrompt` plus a `steeringDeliveredAt`, the frame MUST contain both `Steering active` and the prompt text.
+- **Whitespace suppression.** `steeringPrompt="   "` MUST render identically to the default case (no overlay).
+- **Delivery timestamp.** When `steeringDeliveredAt` is a valid ISO timestamp, the frame still contains the badge and prompt. (The exact `HH:MM:SS` string is locale-dependent and intentionally not asserted on.)
+
+`SubagentProvider` cases:
+
+- **Initial state.** `activeSubagentId`, `steeringPrompt`, and `steeringDeliveredAt` MUST all start as `null`.
+- **Ctrl+S no-op guard.** With `activeSubagentId === null`, `await ctx.steer('focus on tests')` MUST resolve to `false` and MUST NOT mutate `steeringPrompt`.
+
+### Keyboard-hook mock (`tests/cli/tui/useKeyboard.test.tsx`)
+
+`useKeyboard` now consumes `useSubagent`; the suite mocks the new context so the hook can be exercised in isolation without pulling in the real provider:
+
+```tsx
+vi.mock('../../../src/cli/tui/context/SubagentContext.js', () => ({
+  useSubagent: () => ({
+    activeSubagentId: null,
+    steeringPrompt: null,
+    steeringDeliveredAt: null,
+    setActiveSubagent: vi.fn(),
+    steer: vi.fn(() => Promise.resolve(false)),
+    clearSteering: vi.fn(),
+  }),
+  SubagentProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+```
+
+When adding keybindings or hooks that depend on the subagent context, follow the same shape — the mock stays in step with `SubagentContextValue` so a signature drift breaks the compile instead of silently reaching into a stale shape.
+
+### Running
+
+```bash
+# Data-layer suite
+npm test -- tests/agent/steering.test.ts
+
+# TUI smoke suite
+npm test -- tests/tui/subagent-view.test.tsx
+
+# Keyboard hook (includes the SubagentContext mock)
+npm test -- tests/cli/tui/useKeyboard.test.tsx
+```

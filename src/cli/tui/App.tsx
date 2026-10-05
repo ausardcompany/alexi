@@ -10,6 +10,7 @@ import { AttachmentProvider, useAttachments } from './context/AttachmentContext.
 import type { ImageAttachmentPreview } from './context/AttachmentContext.js';
 import { SidebarProvider, useSidebar } from './context/SidebarContext.js';
 import { PageProvider, usePage } from './context/PageContext.js';
+import { SubagentProvider, useSubagent } from './context/SubagentContext.js';
 import { ChatPage } from './pages/ChatPage.js';
 import { LogsPage } from './pages/LogsPage.js';
 import { useLogCollector } from './hooks/useLogCollector.js';
@@ -237,19 +238,16 @@ function AppLayout(): React.JSX.Element {
     setRewindHandler(rewindTo);
   }, [setRewindHandler, rewindTo]);
 
-  const addSystemMessage = useCallback(
-    (text: string) => {
-      const msg: MessageDisplay = {
-        id: `sys-${Date.now()}`,
-        role: 'system',
-        content: text,
-        toolCalls: [],
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, msg]);
-    },
-    []
-  );
+  const addSystemMessage = useCallback((text: string) => {
+    const msg: MessageDisplay = {
+      id: `sys-${Date.now()}`,
+      role: 'system',
+      content: text,
+      toolCalls: [],
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, msg]);
+  }, []);
 
   const handleRewindResult = useCallback(
     (result: unknown) => {
@@ -275,6 +273,7 @@ function AppLayout(): React.JSX.Element {
   });
   const sidebar = useSidebar();
   const { page } = usePage();
+  const { activeSubagentId } = useSubagent();
   const logCollector = useLogCollector();
   useFileChanges();
   useToolEvents();
@@ -380,6 +379,7 @@ function AppLayout(): React.JSX.Element {
           onSubmit={handleSubmit}
           commands={commands}
           sidebar={sidebar}
+          subagentActive={activeSubagentId !== null}
         />
       ) : (
         <LogsPage
@@ -418,7 +418,9 @@ export function App({ model, autoRoute, sessionId }: AppProps): React.JSX.Elemen
               <SidebarProvider>
                 <KeybindProvider>
                   <DialogProvider>
-                    <AppLayout />
+                    <SubagentProvider>
+                      <AppLayout />
+                    </SubagentProvider>
                   </DialogProvider>
                 </KeybindProvider>
               </SidebarProvider>
