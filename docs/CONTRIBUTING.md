@@ -2743,11 +2743,14 @@ adding a new call site that reads the probe header or extending the classifier:
 
 ## Session Retention Policy (`getConfigSessionRetention` / `setConfigSessionRetention`)
 
-Added in the 2026-09-21 sync. `src/config/userConfig.ts` gained a
-`SessionRetentionPolicy` type plus paired reader / writer for the top-level
-`retention` key on `~/.alexi/config.json`. Alexi ships the schema only; the
-background retention runner is intentionally deferred. When touching this
-surface:
+Added in the 2026-09-21 sync and extended in issue #1927 (archive / delete
+lifecycle). `src/config/userConfig.ts` owns the `SessionRetentionPolicy` type
+and the paired reader / writer for the top-level `retention` key on
+`~/.alexi/config.json`. The policy carries five fields: `enabled`,
+`maxAgeDays` (age-only sweep in `SessionManager.cleanupExpiredSessions`),
+`archiveAfterDays` + `deleteAfterDays` + `intervalHours` (two-phase lifecycle
+runner in `src/core/retentionRunner.ts` + `src/core/scheduledRetention.ts`).
+When touching this surface:
 
 - **Do NOT persist an empty object when nothing changed.**
   `setConfigSessionRetention({})` is a valid no-op — the spread merge
@@ -2785,6 +2788,22 @@ surface:
   returns defaults) and the corrupt-key branch (`retention: 42`,
   `retention: []`, `retention: { maxAgeDays: 'foo' }`) so the fall-back
   contract does not silently drift.
+- **The lifecycle runner has three opt-outs; honour all three.** The
+  automated archive-then-delete runner introduced by issue #1927
+  (`src/core/retentionRunner.ts`, `src/core/scheduledRetention.ts`) must
+  short-circuit when ANY of (a) `retention.enabled === false`,
+  (b) `ALEXI_DISABLE_RETENTION=1` in the environment, or
+  (c) `--disable-retention` is present in `process.argv`. Adding a new
+  retention-driving code path means adding the same three gates — do
+  not route around `isDisabledByEnv()` or the `retention.enabled`
+  check, and never read the policy at a cadence that could ignore a
+  mid-process flip of the env var (the scheduler is deliberately
+  startup-latched, but the env check runs on every cycle).
+- **`deleteAfterDays` MUST be strictly greater than `archiveAfterDays`.**
+  The config reader coerces a violation by widening the delete window
+  to `archiveAfterDays + 1` rather than disabling the runner. Preserve
+  that invariant when adding new numeric fields to the policy —
+  degrading gracefully to a minimally-correct state is the contract.
 
 ## MCP Git Plugin Resolver (`src/mcp/git-resolver.ts`)
 

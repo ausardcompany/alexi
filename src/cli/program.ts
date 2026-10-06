@@ -14,6 +14,7 @@ import { killAllTracked } from '../tool/tools/background-process.js';
 import { installAbortGuard } from './utils/abortGuard.js';
 import { initTracing, shutdownTracing } from '../utils/tracing.js';
 import { triggerRetentionSweep } from '../core/retentionScheduler.js';
+import { startRetentionScheduler } from '../core/scheduledRetention.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../../package.json');
@@ -57,6 +58,22 @@ try {
 } catch {
   // Retention is a housekeeping best-effort. A scheduler failure must
   // never block CLI startup.
+}
+
+// Scheduled retention lifecycle runner (issue #1927). Delayed start +
+// periodic archive/delete cycles. Idempotent, opt-outable via
+// `ALEXI_DISABLE_RETENTION=1`, and a no-op when `retention.enabled`
+// is false. Any failure here is best-effort housekeeping and must not
+// block CLI startup.
+try {
+  if (
+    process.env.ALEXI_DISABLE_RETENTION !== '1' &&
+    !process.argv.includes('--disable-retention')
+  ) {
+    startRetentionScheduler();
+  }
+} catch {
+  // Swallow — scheduler failures must never crash the CLI.
 }
 
 // Default fallback subscriber for non-TUI runs (CLI one-shots, scripts, tests).
