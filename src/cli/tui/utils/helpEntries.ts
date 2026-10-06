@@ -29,6 +29,12 @@ export function getHelpEntries(): HelpEntry[] {
     { key: 'Shift+Enter', description: 'New line', category: 'chat', condition: null },
     { key: 'Ctrl+C', description: 'Abort stream / quit', category: 'chat', condition: null },
     { key: 'Ctrl+L', description: 'Clear messages', category: 'chat', condition: null },
+    {
+      key: 'Ctrl+S',
+      description: 'Steer subagent',
+      category: 'chat',
+      condition: 'subagent active',
+    },
     { key: 'Escape', description: 'Abort stream / cancel', category: 'chat', condition: null },
 
     // Leader mode

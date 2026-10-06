@@ -23,6 +23,8 @@ import {
   validateCapabilities,
   type CapabilityManifest,
 } from './cimd.js';
+import { validateMcpResponse } from './validator.js';
+import { McpBreakageTracker, McpBreakageExceededError } from './breakage-tracker.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -319,6 +321,14 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
     return 'config';
   }
 
+  // Protocol-breakage disables are permanent too: a server that
+  // crossed the breakage threshold will keep returning malformed
+  // responses, retrying only burns the budget. Operators must fix
+  // the server (or reset the tracker) before reconnecting.
+  if (error instanceof McpBreakageExceededError) {
+    return 'config';
+  }
+
   const code = (error as { code?: unknown } | null)?.code;
   if (typeof code === 'string') {
     if (CONFIG_ERROR_CODES.has(code)) {
@@ -384,6 +394,13 @@ function formatConnectError(serverName: string, error: unknown): string {
   // that already names the offending server, mismatch kinds, and the
   // `cimdEnabled` / `expectedCapabilities` fields to change.
   if (error instanceof McpCapabilityMismatchError) {
+    return raw;
+  }
+
+  // Protocol-breakage disables already carry a fully-formed actionable
+  // reason (server name, threshold crossed, remediation hint). Pass
+  // them through verbatim.
+  if (error instanceof McpBreakageExceededError) {
     return raw;
   }
 
@@ -623,6 +640,14 @@ export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
   /**
+   * MCP protocol-breakage tracker. Counts validation violations per
+   * server and surfaces a disable decision once the configured threshold
+   * is crossed. Shared across the lifetime of this manager so a server
+   * that reconnects mid-session cannot "forget" its previous bad
+   * behaviour without an explicit operator-facing reset.
+   */
+  private breakageTracker: McpBreakageTracker = new McpBreakageTracker();
+  /**
    * Per-(server, listKind) debounce state for `list_changed` notifications.
    * The key format is `${serverName}::${listKind}` and mirrors the shape
    * used elsewhere for qualified-tool naming, but only serves as an
@@ -819,6 +844,12 @@ export class McpClientManager {
       const result = await this.withRequestTimeout(serverName, 'tools/list', (opts) =>
         client.listTools({ cursor }, opts)
       );
+      // Validate the per-page response against the MCP spec. Violations
+      // are logged + counted against the breakage tracker, but we still
+      // accept whatever tools came through so a single malformed entry
+      // in a long list does not blank the whole server. The breakage
+      // tracker will disable the server after the threshold is crossed.
+      await this.validateAndRecord(serverName, 'tools/list', result);
       allTools.push(...(result.tools || []));
       previousCursor = cursor;
       cursor = result.nextCursor;
@@ -1523,6 +1554,10 @@ export class McpClientManager {
         timestamp: Date.now(),
       });
     } catch (error) {
+      if (error instanceof McpBreakageExceededError) {
+        this.markBreakageDisabled(serverName, error.message);
+        return;
+      }
       logger.error(`Failed to refresh tools from ${serverName}:`, error);
     }
   }
@@ -1551,9 +1586,14 @@ export class McpClientManager {
       const result = (await this.withRequestTimeout(serverName, 'resources/list', (opts) =>
         c.listResources!({}, opts)
       )) as { resources?: unknown[] };
+      await this.validateAndRecord(serverName, 'resources/list', result);
       connection.resources = Array.isArray(result?.resources) ? result.resources : [];
       connection.resourcesCachedAt = Date.now();
     } catch (error) {
+      if (error instanceof McpBreakageExceededError) {
+        this.markBreakageDisabled(serverName, error.message);
+        return;
+      }
       logger.error(`Failed to refresh resources from ${serverName}:`, error);
     }
   }
@@ -1579,9 +1619,14 @@ export class McpClientManager {
       const result = (await this.withRequestTimeout(serverName, 'prompts/list', (opts) =>
         c.listPrompts!({}, opts)
       )) as { prompts?: unknown[] };
+      await this.validateAndRecord(serverName, 'prompts/list', result);
       connection.prompts = Array.isArray(result?.prompts) ? result.prompts : [];
       connection.promptsCachedAt = Date.now();
     } catch (error) {
+      if (error instanceof McpBreakageExceededError) {
+        this.markBreakageDisabled(serverName, error.message);
+        return;
+      }
       logger.error(`Failed to refresh prompts from ${serverName}:`, error);
     }
   }
@@ -1959,6 +2004,83 @@ export class McpClientManager {
   getConnection(name: string): McpConnection | undefined {
     return this.connections.get(name);
   }
+
+  /**
+   * Expose the shared breakage tracker so tests, diagnostic commands,
+   * and operator tooling can inspect per-server violation counts and
+   * reset the tally after an operator-side fix.
+   */
+  getBreakageTracker(): McpBreakageTracker {
+    return this.breakageTracker;
+  }
+
+  /**
+   * Validate a raw MCP response against the protocol spec, record any
+   * violations against the breakage tracker, log them at WARN, and
+   * disable the server when the threshold is crossed.
+   *
+   * Returns the `ValidationResult` so callers that need to branch on
+   * `valid` (e.g. drop a broken `tools/list` page but keep the
+   * connection open) can do so without re-validating.
+   *
+   * This method is deliberately side-effectful (log + disable) so the
+   * common wiring stays a single call. Call sites that need pure
+   * validation should import {@link validateMcpResponse} directly.
+   */
+  private async validateAndRecord(
+    serverName: string,
+    method: string,
+    response: unknown
+  ): Promise<{ valid: boolean; violations: string[] }> {
+    const result = validateMcpResponse(response, method, serverName);
+    if (result.valid) {
+      return result;
+    }
+
+    for (const violation of result.violations) {
+      logger.warn(`MCP protocol violation: ${violation}`);
+    }
+    this.breakageTracker.recordViolation(serverName, method, result.violations);
+
+    if (this.breakageTracker.shouldDisableServer(serverName)) {
+      const reason = this.breakageTracker.disableReason(serverName);
+      logger.warn(reason);
+      // Throw a dedicated error so the connect retry loop AND any
+      // post-connect refresh paths treat the disable as a permanent
+      // config failure. `classifyConnectError` recognises this type
+      // and bypasses the transient-retry budget.
+      throw new McpBreakageExceededError(serverName, reason);
+    }
+    return result;
+  }
+
+  /**
+   * Flip a connected server to the `failed` state after it crosses the
+   * breakage threshold during a post-connect refresh (`refreshTools`,
+   * `refreshResources`, `refreshPrompts`). The connection entry stays
+   * in the map so `getStatus()` still reports the disable; the
+   * underlying client and child process are torn down so the broken
+   * server cannot keep sending malformed responses.
+   */
+  private markBreakageDisabled(serverName: string, reason: string): void {
+    const connection = this.connections.get(serverName);
+    if (!connection || connection.status === 'failed') {
+      return;
+    }
+    connection.status = 'failed';
+    connection.error = reason;
+    connection.lastErrorAt = Date.now();
+    void connection.client
+      .close()
+      .catch((error) => logger.warn(`Error closing MCP client ${serverName}:`, error));
+    if (connection.process) {
+      try {
+        connection.process.kill();
+      } catch (error) {
+        logger.warn(`Error killing MCP process ${serverName}:`, error);
+      }
+    }
+  }
 }
 
 // Singleton instance
@@ -1973,6 +2095,7 @@ export function getMcpClientManager(): McpClientManager {
 
 export function resetMcpClientManager(): void {
   if (globalManager) {
+    globalManager.getBreakageTracker().resetAll();
     globalManager.disconnectAll();
   }
   globalManager = null;

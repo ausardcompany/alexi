@@ -1207,6 +1207,119 @@ The runner does NOT replace `SessionManager.cleanupExpiredSessions` or `applyRet
 
 The three pipelines do not invoke each other. The daily scheduler continues to run its age-only sweep even when programmatic callers embed `RetentionRunner`, and `RetentionRunner` does not touch the `last-retention-run` state file (so an embedded sweep does not delay the next scheduler tick).
 
+## Automated Session Retention Lifecycle Runner (`src/core/retentionRunner.ts`, issue #1927)
+
+The three retention paths above all share one limitation: they are strictly destructive. A session that ages out is unlinked immediately, with no intermediate state in which an operator can audit "which sessions did the runner just reclaim?" or recover a transcript that was expired by mistake. Issue #1927 closes that gap by introducing a two-phase lifecycle — **archive first, delete later** — driven by a dedicated runner (`src/core/retentionRunner.ts`) and a long-running scheduler (`src/core/scheduledRetention.ts`) wired into CLI startup.
+
+The archive phase moves aged sessions out of the live sessions directory into `<sessionsDir>/.archive/<id>.json.gz`, gzip-compressing the JSON in place via a streamed `zlib.createGzip()` pipeline (so a 50 MB transcript does not materialise in memory). The delete phase then prunes archive entries whose compressed-file mtime has crossed a second, longer cutoff. The two cutoffs are independent — an operator who sets `archiveAfterDays: 7, deleteAfterDays: 365` gets a fast-cleaning active sessions directory with a one-year audit trail.
+
+```mermaid
+graph TB
+    subgraph Startup["CLI Startup (src/cli/program.ts)"]
+        Program[program.ts]
+        OptOut{"ALEXI_DISABLE_RETENTION<br/>or --disable-retention?"}
+        Start[startRetentionScheduler]
+    end
+
+    subgraph Scheduler["Scheduler (src/core/scheduledRetention.ts)"]
+        Guard["singleton guard<br/>activeHandle !== null?"]
+        Initial["setTimeout<br/>DEFAULT_INITIAL_DELAY_MS = 5 min"]
+        Interval["setInterval<br/>intervalHours * 3_600_000"]
+        Unref["timer.unref<br/>never blocks process exit"]
+    end
+
+    subgraph Runner["Lifecycle Runner (src/core/retentionRunner.ts)"]
+        Cycle[runRetentionCycle]
+        Archive["Archive phase:<br/>scanSessions -&gt; filter by effectiveLastAccessed<br/>-&gt; archiveSession via gzip pipeline"]
+        Delete["Delete phase:<br/>listArchive -&gt; filter by mtimeMs<br/>-&gt; fs.unlink"]
+        Report[RetentionReport]
+    end
+
+    subgraph Config["Config (src/config/userConfig.ts)"]
+        Policy["retention.enabled<br/>retention.archiveAfterDays<br/>retention.deleteAfterDays<br/>retention.intervalHours"]
+    end
+
+    subgraph FS["~/.alexi/sessions/"]
+        Live[live *.json]
+        ArchiveDir[.archive/*.json.gz]
+    end
+
+    Program --> OptOut
+    OptOut -->|no| Start
+    OptOut -->|yes| Program
+    Start --> Guard
+    Guard -->|not running| Policy
+    Policy -->|enabled| Initial
+    Initial --> Cycle
+    Cycle --> Archive
+    Archive --> Live
+    Archive --> ArchiveDir
+    Cycle --> Delete
+    Delete --> ArchiveDir
+    Delete --> Report
+    Initial --> Interval
+    Interval --> Unref
+    Interval --> Cycle
+```
+
+Lifecycle sequence for one cycle:
+
+```mermaid
+sequenceDiagram
+    participant Timer as setInterval
+    participant Sched as scheduledRetention.ts
+    participant Runner as retentionRunner.ts
+    participant Scanner as sessionScanner.ts
+    participant FS as ~/.alexi/sessions/
+
+    Timer->>Sched: tick
+    Sched->>Runner: runRetentionCycle(policy, { sessionsDir })
+    Runner->>Runner: check ALEXI_DISABLE_RETENTION
+    Runner->>Runner: validate archiveAfterDays >= 1<br/>validate deleteAfterDays >= 1
+    Runner->>Scanner: scanSessions(sessionsDir)
+    Scanner->>FS: readdir + readFile + JSON.parse (tolerant)
+    Scanner-->>Runner: ScannedSession[]
+    loop each session with effectiveLastAccessed < archiveCutoff
+        Runner->>FS: mkdir -p .archive/
+        Runner->>FS: pipeline(createReadStream, gzip, createWriteStream)
+        Runner->>FS: unlink original *.json
+    end
+    Runner->>FS: readdir .archive/ (ENOENT -> empty)
+    loop each entry with mtimeMs < deleteCutoff
+        Runner->>FS: unlink .archive/<id>.json.gz
+    end
+    Runner-->>Sched: RetentionReport
+    Sched->>Sched: options.onCycle(report)
+```
+
+Contract points, pinned by `src/core/__tests__/retentionRunner.test.ts` and `src/core/__tests__/scheduledRetention.test.ts`:
+
+- **Opt-in by construction.** `startRetentionScheduler` short-circuits with `{ started: false, stop: () => {} }` when `retention.enabled` is `false` (default), `ALEXI_DISABLE_RETENTION=1`, or the config reader throws. The CLI startup block additionally honours a `--disable-retention` flag at `process.argv.includes` level so an operator can suppress the runner for one invocation without touching the config file.
+- **Idempotent per process.** `scheduledRetention.ts` holds a module-level `activeHandle` singleton. A second `startRetentionScheduler()` call in the same Node process returns `{ started: false }` without registering a second pair of timers. This is important because `program.ts` runs once per one-shot command but the interactive REPL spawns subagent child processes that must NOT register their own retention timers.
+- **Delayed first cycle, long interval.** The first cycle runs `DEFAULT_INITIAL_DELAY_MS` (5 minutes) after `startRetentionScheduler()` to avoid competing with provider init and the TUI warm-up. Subsequent cycles fire every `retention.intervalHours` hours (default 24). Both timers are `unref()`ed so a pending tick never blocks process exit — retention is housekeeping, not a hard liveness requirement.
+- **Startup-latched policy.** The scheduler reads `getConfigSessionRetention()` once at `startRetentionScheduler()` time and derives `intervalMs` and the `RetentionLifecyclePolicy` snapshot from that single read. Mid-session config changes do NOT re-cadence the scheduler — operators who change the config must restart the CLI, matching the behaviour of the compaction model and routing config.
+- **Two-phase lifecycle.** Archive is NON-destructive: the session content is preserved as gzip-compressed JSON (`gunzip -c <sessionsDir>/.archive/<id>.json.gz` round-trips to the original `{ metadata, messages }` shape). Only the delete phase is permanent. The archive phase uses a streamed `pipeline(createReadStream, createGzip, createWriteStream)` so very large transcripts never materialise in memory. The original JSON file is unlinked only after the gzip stream resolves successfully.
+- **Age signal matches the other runners.** `effectiveLastAccessed(session)` prefers `metadata.lastAccessedAt`, falls back to `metadata.updated`, then to the file's `mtime` — identical to the heuristic in `src/session/retention.ts` so operators see consistent age reporting across every retention pipeline.
+- **Delete phase keys off archive mtime, not metadata.** Once a session has been archived we no longer parse its JSON — reopening a gzipped transcript on every scheduler tick would defeat the point of compressing it. The delete cutoff is applied against `fs.statSync(archiveEntry).mtimeMs`, which is set when the archive write completes and advances only if the operator touches the file manually.
+- **Config guard: `deleteAfterDays > archiveAfterDays`.** `getConfigSessionRetention()` widens `deleteAfterDays` to `archiveAfterDays + 1` when the on-disk config violates the invariant. The runner degrades gracefully instead of silently losing the archive phase — a corrupt config that would otherwise disable the whole lifecycle is coerced into a minimally-correct state.
+- **Archive-dir creation failure does not block the delete phase.** When `ensureArchiveDir` fails (EACCES, EROFS), the error is appended to `report.errors[]` and the archive phase is skipped, but the delete phase still iterates `<sessionsDir>/.archive/` to prune existing entries. A read-only sessions directory loses the ability to add new archives but not the ability to clean up old ones.
+- **Stray archive-dir entries are ignored.** Only entries whose basename ends in `.json.gz` are considered for deletion; a hand-authored `notes.txt` under `.archive/` survives every cycle. Non-file entries (symlinks to directories, device nodes) are skipped with a `logger.debug` entry.
+- **Best-effort per-file I/O.** Per-file failures (archive move, unlink, stat) accumulate in `report.errors[]`; the runner never throws for I/O that targets a single session file. Only a `scanSessions` failure on the sessions directory with an errno OTHER than `ENOENT` returns early with a populated `errors[]` — `ENOENT` on the sessions dir returns a well-formed empty report (fresh install).
+- **`dryRun` populates counts and bytes.** Preview mode still returns `archivedCount`, `deletedCount`, and `freedBytes` so operators can decide whether to promote a `dryRun: true` run into a real sweep. `report.errors[]` stays empty in dry-run mode because no `fs.unlink` is attempted.
+- **`skipped: true` signals a short-circuit.** `RetentionReport.skipped` is `true` when the runner performed no I/O at all (opt-out env var or invalid policy). Callers can distinguish "ran successfully with nothing to do" (`skipped: false, archivedCount: 0`) from "did not run" (`skipped: true, archivedCount: 0`).
+
+The pipeline does NOT replace the three existing paths. It sits alongside them with a different lifecycle contract — the age-only `SessionManager.cleanupExpiredSessions` still runs via `triggerRetentionSweep` at CLI startup, `applyRetentionPolicy` still backs `alexi sessions-clean`, and `RetentionRunner` remains the programmatic library surface. Operators who enable `retention.enabled: true` get both the age-only sweep (deleting sessions older than `maxAgeDays`) AND the new archive-first lifecycle (archiving at `archiveAfterDays`, deleting the archive at `deleteAfterDays`) in the same process.
+
+| Concern            | `cleanupExpiredSessions` | `applyRetentionPolicy` | `RetentionRunner.sweep` | `runRetentionCycle` (this section)        |
+| ------------------ | ------------------------ | ---------------------- | ----------------------- | ----------------------------------------- |
+| Invocation         | `triggerRetentionSweep` + `--cleanup` | `alexi sessions-clean` | library caller | `startRetentionScheduler` + startup wiring |
+| Policy source      | `~/.alexi/config.json`   | CLI flags              | constructor options     | `~/.alexi/config.json` (startup-latched)  |
+| Phases             | delete only              | delete only            | delete only             | archive -> delete                         |
+| Cadence            | 24 h cooldown            | on demand              | on demand               | `intervalHours` (default 24 h)            |
+| Preview            | not supported            | `--dry-run`            | `dryRun: true`          | `dryRun: true`                            |
+| Reversible?        | no                       | no                     | no                      | yes, between archive and delete           |
+| Opt-out            | `retention.enabled: false` | not applicable       | not applicable          | `retention.enabled: false`, `ALEXI_DISABLE_RETENTION=1`, `--disable-retention` |
+
 ## Headless Exit and Session Drain
 
 Headless CLI commands (`alexi chat`, `alexi agent`) can race their own `process.exit(...)` against unfinished background work: tool events still being fanned out on the event bus, streaming chunks still being written to disk, telemetry flushes. Without a drain, the process can exit(0) while sessions are still emitting events, corrupting persisted state and losing user-visible output.
@@ -5445,6 +5558,108 @@ A second resolver lives in `src/config/userConfig.ts:628` under the `KILO_*` nam
 Env comparisons are strict-string `=== '1'`; any other value (`'0'`, `'true'`, empty, unset) is treated as unset so `KILO_EXPERIMENTAL=0` is never misread as an opt-in. This resolver is the primary gate consulted by `registerBuiltInTools()` (`src/tool/tools/index.ts:129`) — the `kilo_board_read` / `kilo_board_write` tools are only exported to the model when it returns `true` — and by the swarm-identity metadata attached to `task` payloads (`src/tool/tools/task.ts:476`). The kilocode-namespaced `isBoardEnabled` in `src/kilocode/board/enabled.ts` is preserved for downstream tooling that expects upstream env-flag names; the two live in separate modules and target different env-var namespaces because they serve different audiences.
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
+
+## Subagent Steering (`src/agent/session.ts`)
+
+Ports upstream kilocode #14702 (`feat(agent): add subagent steering with Ctrl+S prompt injection`, commit `3fb3ef7c`). The parent TUI can now inject a mid-execution prompt into a running subagent without stopping and restarting it. Previously, mid-course corrections required aborting the subagent (which cancelled accumulated tool-call context) and respawning it with a new prompt — burning the parent's `KILO_RETRIES` budget and losing partial progress. Steering writes a tagged message to the shared agent board (the same `kilo_board_message` table used by the swarm coordination tools) that the subagent's next turn reads on its normal polling cycle.
+
+### Data flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant TUI as "TUI (useKeyboard + Dialog)"
+    participant Ctx as "SubagentContext"
+    participant Session as "steerSubagent (src/agent/session.ts)"
+    participant BoardCtx as "BoardContext"
+    participant Store as "BoardStore (SQLite)"
+    participant Sub as "Subagent (next turn)"
+
+    User->>TUI: Ctrl+S
+    TUI->>Ctx: activeSubagentId !== null?
+    alt No active subagent
+        TUI-->>User: no-op (Ctrl+S ignored)
+    else Active subagent
+        TUI->>User: open arg-input dialog ("Steer subagent")
+        User->>TUI: submit prompt text
+        TUI->>Ctx: steer(prompt)
+        Ctx->>Session: steerSubagent(subagentId, prompt)
+        Session->>Session: trim(prompt); return null if empty
+        Session->>BoardCtx: resolve(subagentId)
+        BoardCtx-->>Session: boardId | undefined
+        alt No board attached
+            Session-->>Ctx: null
+            Ctx-->>TUI: false (no visible change)
+        else Board resolved
+            Session->>Store: write({ sessionID, author: "steering", content })
+            Store-->>Session: BoardMessage
+            Session->>Session: steeringState.set(subagentId, trimmed)
+            Session-->>Ctx: SteeringResult
+            Ctx->>Ctx: setSteeringPrompt / setSteeringDeliveredAt
+            Ctx-->>TUI: true (SubagentView renders overlay)
+        end
+    end
+
+    Note over Sub: On the subagent's next turn
+    Sub->>Store: BoardStore.read(boardId, { since })
+    Store-->>Sub: messages (incl. author="steering")
+    Sub->>Sub: incorporate steering prompt into context
+```
+
+### Public surface (`src/agent/session.ts`)
+
+```typescript
+export interface SteeringResult {
+  messageId: string; // Row id in kilo_board_message
+  boardId: string; // Board the message was posted to
+  prompt: string; // Trimmed prompt text
+  deliveredAt: string; // ISO timestamp from BoardMessage.createdAt
+}
+
+export function steerSubagent(
+  subagentSessionId: string,
+  prompt: string
+): Promise<SteeringResult | null>;
+
+export function getSteeringPrompt(subagentSessionId: string): string | undefined;
+export function clearSteeringPrompt(subagentSessionId: string): void;
+
+/** Test-only — not part of the public runtime API. */
+export function __resetSteeringStateForTests(): void;
+```
+
+### Contract
+
+- **Empty-prompt guard.** `steerSubagent(id, '')` and `steerSubagent(id, '   ')` return `null` and touch neither the board nor the in-memory cache. The caller (`SubagentContext.steer`) surfaces this as a `false` return so the TUI can keep the dialog open or render a friendly hint.
+- **No-board fallback.** When `BoardContext.resolve(subagentSessionId)` returns `undefined` — i.e. the swarm feature is disabled, `better-sqlite3` is missing, or the id does not resolve — the helper returns `null` instead of throwing. The parent TUI treats this identically to the empty-prompt case so an idle session cannot accidentally fire a Ctrl+S shortcut into dead state.
+- **Author tag.** The posted `BoardMessage.author` is the fixed string `'steering'`. The subagent's board polling loop filters on this value to distinguish operator steering from peer chatter.
+- **Latest-wins cache.** `steeringState: Map<string, string>` is replaced on every successful post. Callers that need an audit trail must read the board directly via `BoardStore.read(boardId)`; the in-memory cache is a visual-layer convenience only.
+- **Lifetime.** The cache lives for the lifetime of the parent process. `clearSteeringPrompt(id)` is called by the TUI when the `SubagentView` unmounts; `setActiveSubagent(null)` on `SubagentContext` also auto-clears the cached prompt and timestamp (`src/cli/tui/context/SubagentContext.tsx:59-64`).
+
+### TUI integration
+
+The data layer in `src/agent/session.ts` deliberately has no React/Ink dependency. The TUI integration is split across four files:
+
+| File | Role |
+| --- | --- |
+| `src/cli/tui/context/SubagentContext.tsx` | Provider + hook (`useSubagent`) owning `activeSubagentId`, `steeringPrompt`, `steeringDeliveredAt`; exposes `setActiveSubagent`, `steer`, `clearSteering` |
+| `src/cli/tui/hooks/useKeyboard.ts` | Binds `Ctrl+S` → `arg-input` dialog → `subagent.steer(text)`; no-ops when `activeSubagentId === null` |
+| `src/cli/tui/components/SubagentView.tsx` | Renders the subagent with a `colors.info` border; when `steeringPrompt` is set, stacks a `colors.warning`-bordered panel above with a "Steering active" badge and the prompt text |
+| `src/cli/tui/components/StatusBar.tsx` + `src/cli/tui/pages/ChatPage.tsx` | Threads `subagentActive` so the status bar help segment flips to `Ctrl+S: steer subagent` while a subagent is running |
+
+The provider is mounted inside the existing provider stack in `src/cli/tui/App.tsx:421-423`:
+
+```tsx
+<SubagentProvider>
+  <AppLayout />
+</SubagentProvider>
+```
+
+### Interaction with the shared board
+
+Steering is a thin writer on top of the existing [Shared Agent Board](#shared-agent-board-srccoredatabaseboardstorets) primitive — it does not introduce a new storage path or a new polling mechanism. The subagent's existing `kilo_board_read` tool (or the implicit read described in `src/tool/tools/board.ts`) returns the steering message on its next turn alongside any peer chatter. When `getConfigSharedAgentBoard()` returns `false`, `BoardContext.resolve()` resolves to `undefined` and `steerSubagent` degrades to the no-board fallback; the Ctrl+S shortcut remains inert but does not throw.
+
+See [API.md — Subagent Steering API](API.md#subagent-steering-api) for the public surface reference and [TESTING.md — Testing Subagent Steering](TESTING.md#testing-subagent-steering) for the data-layer and TUI smoke-test patterns.
 
 ## PTY Latch (`src/core/kilocode/pty/latch.ts`)
 
