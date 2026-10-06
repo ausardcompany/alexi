@@ -417,6 +417,77 @@ Alexi emits a bundle of session-scoped HTTP headers on every provider request so
 
 **Opt-out**: there is no runtime toggle — the headers are additive, carry no credential material, and SAP AI Core gateways tolerate unknown headers transparently. Operators who need to strip them before egress should do so at the proxy layer.
 
+## Catalog Refresh Retry Budget
+
+The SAP AI Core model-list / deployment-list endpoints are rate-limited
+(429 + `Retry-After`), and the background catalog refresh loop in
+`src/providers/modelCatalog.ts` relies on two retry primitives to
+survive transient failures without burning operator budget on
+permanent ones:
+
+- `fetchWithRetry` — the SDK-thrown-error path, documented under
+  [Model-Fetch Error Surfacing](PROVIDERS.md#model-fetch-error-surfacing-issue-1824).
+  Defaults: `maxAttempts: 3`, `initialDelayMs: 1_000`, `maxDelayMs: 8_000`.
+- `withCatalogRetry` — the `fetch()`-style HTTP path, honors the HTTP
+  `Retry-After` response header (RFC 7231 §7.1.3) in addition to
+  exponential backoff. Defaults from `DEFAULT_CATALOG_RETRY`:
+  `maxAttempts: 5`, `baseDelayMs: 1_000`, `maxDelayMs: 30_000`. See
+  [Catalog Retry (Retry-After-aware)](PROVIDERS.md#catalog-retry-retry-after-aware)
+  for the full contract.
+
+The two helpers coexist and share no state — the "rearm after success"
+clause is a property of each top-level call starting with a fresh
+`attempt = 0` counter, not of a hidden module-level budget. Operators
+tuning retry behaviour for a flaky SAP AI Core tenant should raise
+`KILO_RETRIES` in the agent workflow env block FIRST (that budget is
+scoped to the whole run), and only fall back to overriding the retry
+options when a specific caller needs a different schedule.
+
+| Option         | `fetchWithRetry` default | `withCatalogRetry` default |
+| -------------- | ------------------------ | -------------------------- |
+| `maxAttempts`  | `3`                      | `5`                        |
+| `baseDelayMs`  | `1_000`                  | `1_000`                    |
+| `maxDelayMs`   | `8_000`                  | `30_000`                   |
+
+A sustained 429 with `Retry-After: 30` plus `withCatalogRetry` defaults
+yields a maximum backoff of 30 seconds per retry regardless of the
+exponential component — the server-supplied hint takes precedence over
+the capped exponential schedule.
+
+## Grep Tool Backend Selection
+
+The `grep` tool (`src/tool/tools/grep.ts`) dispatches to `rg` (ripgrep)
+when it is on PATH for speed, and falls back to a pure-JavaScript file
+walker otherwise. Behaviour is observable through one environment
+variable:
+
+### ALEXI_DISABLE_RG
+
+Hard override that forces the in-process JavaScript file walker even
+when `rg` is available on PATH. Any non-empty value is treated as
+truthy, but `1` is the convention.
+
+```bash
+# Force the JS fallback (debugging, deterministic output comparison)
+export ALEXI_DISABLE_RG=1
+```
+
+The output shape (`{ matches, filesSearched, totalMatches }`) is
+identical between the two paths so callers and tests cannot tell them
+apart. Set the variable when:
+
+- Debugging a case where `rg` and the JS walker disagree.
+- Running the test suite under a sandbox that has `rg` on PATH but
+  blocks `spawn('rg')`.
+- Pinning the test matrix to a single backend for reproducibility.
+
+Detection is cached per-process, so flipping the variable mid-process
+has no effect — the CLI must be restarted. The classifier
+`isInvalidRgPattern(stderr)` (exported from the same module) is used by
+the retry loop to short-circuit on malformed patterns (bad regex or
+glob) that would fail identically on retry, matching the ported
+upstream kilocode fix `501286ba9`.
+
 ## User Configuration
 
 User configuration is stored in `~/.alexi/config.json` and persists settings across sessions.

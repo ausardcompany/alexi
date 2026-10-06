@@ -36,6 +36,32 @@ interface GrepResult {
   matches: GrepMatch[];
   filesSearched: number;
   totalMatches: number;
+  /**
+   * Set when the search was abandoned because the caller supplied a pattern
+   * that `rg` could not parse (bad regex or glob). Callers should NOT retry
+   * such patterns — they will fail identically on every attempt. Ports the
+   * upstream kilocode fix 501286ba9 ("gate per-pattern retry on invalid
+   * globs") so the marketplace/suggestion scan does not burn retry budget
+   * on a configuration bug.
+   */
+  invalidPattern?: boolean;
+}
+
+/**
+ * Classifier for `rg` stderr output. Returns `true` when the error indicates
+ * a malformed pattern (regex OR glob) that will fail identically on retry.
+ *
+ * Ported from upstream kilocode fix 501286ba9: previously the retry loop
+ * treated every rg exit code 2 as transient, which meant a bad glob
+ * (`[` without a closing `]`, `**{` without `}`) got retried N times before
+ * surfacing. We now surface it on the first attempt.
+ */
+export function isInvalidRgPattern(stderr: string): boolean {
+  return (
+    stderr.includes('regex parse error') ||
+    stderr.includes('error parsing regex') ||
+    stderr.includes('error parsing glob')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,35 +322,83 @@ class RgSpawnError extends Error {
  * rg uses to indicate "no matches"). Callers should fall back to the JS
  * path on throw.
  */
+/**
+ * Options accepted by {@link executeWithRg}. Exposed as an interface so the
+ * fast-path can grow new flags (ignore-file honoring outside git, additional
+ * exclude globs) without rippling the positional signature through every
+ * call site.
+ *
+ * Ports upstream kilocode fixes 93519a31c (honor ignore files outside git
+ * repos via `--no-require-git`) and 21164ba0b (scan workspace honoring
+ * additional exclusion globs so the marketplace/suggestion scan does not
+ * descend into vendored directories the caller already declared ignored).
+ */
+export interface RgExecuteOptions {
+  pattern: string;
+  searchDir: string;
+  include: string | undefined;
+  signal: AbortSignal | undefined;
+  /**
+   * Additional glob patterns to EXCLUDE. Each entry is passed to rg as
+   * `--glob=!<pattern>`. The hardcoded `node_modules`, `dist`, `build`
+   * excludes still apply on top of these.
+   */
+  exclude?: readonly string[];
+  /**
+   * When true, pass `--no-require-git` so rg honors `.gitignore` /
+   * `.ignore` files even when the search root is not inside a git
+   * working tree. Mirrors the suggestion-scan behavior upstream now
+   * assumes.
+   */
+  noRequireGit?: boolean;
+}
+
 async function executeWithRg(
-  pattern: string,
-  searchDir: string,
-  include: string | undefined,
-  signal: AbortSignal | undefined
+  patternOrOpts: string | RgExecuteOptions,
+  searchDir?: string,
+  include?: string | undefined,
+  signal?: AbortSignal | undefined
 ): Promise<GrepResult> {
-  const args: string[] = [
-    '--json',
-    '--no-heading',
-    '--line-number',
-    '--no-messages',
-    '--stats',
-    // Don't read .gitignore / parent ignore files so behavior is deterministic
-    // and matches the JS path. rg still skips hidden dirs by default, which
-    // matches the JS path's hidden-dir skip.
-    '--no-ignore-vcs',
-    '--no-ignore-parent',
-    // Mirror the JS path's hard-coded directory excludes.
-    '--glob',
-    '!node_modules',
-    '--glob',
-    '!dist',
-    '--glob',
-    '!build',
-  ];
-  if (include) {
-    args.push('--glob', include);
+  // Back-compat overload: callers pre-dating the options object pass four
+  // positional args. Normalise to the options shape so the body only has
+  // to handle one case.
+  const opts: RgExecuteOptions =
+    typeof patternOrOpts === 'string'
+      ? {
+          pattern: patternOrOpts,
+          searchDir: searchDir ?? '.',
+          include,
+          signal,
+        }
+      : patternOrOpts;
+  const { pattern, searchDir: dir, include: inc, signal: sig, exclude, noRequireGit } = opts;
+  const args: string[] = ['--json', '--no-heading', '--line-number', '--no-messages', '--stats'];
+  if (noRequireGit) {
+    // Upstream kilocode 93519a31c: honor `.gitignore` / `.ignore` files
+    // even when the search root is not inside a git working tree. Only
+    // takes effect alongside rg's default ignore-file reading, so we do
+    // NOT emit `--no-ignore-vcs` / `--no-ignore-parent` on this path.
+    args.push('--no-require-git');
+  } else {
+    // Default: deterministic behavior matching the JS fallback — don't
+    // read .gitignore / parent ignore files. rg still skips hidden dirs
+    // by default, which matches the JS path's hidden-dir skip.
+    args.push('--no-ignore-vcs', '--no-ignore-parent');
   }
-  args.push('--', pattern, searchDir);
+  // Mirror the JS path's hard-coded directory excludes.
+  args.push('--glob', '!node_modules', '--glob', '!dist', '--glob', '!build');
+  // Upstream kilocode 21164ba0b: honor caller-supplied exclusion globs
+  // (one `--glob=!<pattern>` per entry) so a suggestion/marketplace scan
+  // can avoid vendored directories it already declared ignored.
+  if (exclude && exclude.length > 0) {
+    for (const glob of exclude) {
+      args.push(`--glob=!${glob}`);
+    }
+  }
+  if (inc) {
+    args.push('--glob', inc);
+  }
+  args.push('--', pattern, dir);
 
   return new Promise<GrepResult>((resolve, reject) => {
     let proc: ReturnType<typeof spawn>;
@@ -351,8 +425,8 @@ async function executeWithRg(
       reject(new Error('Operation aborted'));
     };
 
-    if (signal) {
-      if (signal.aborted) {
+    if (sig) {
+      if (sig.aborted) {
         try {
           proc.kill();
         } catch {
@@ -361,7 +435,7 @@ async function executeWithRg(
         reject(new Error('Operation aborted'));
         return;
       }
-      signal.addEventListener('abort', onAbort, { once: true });
+      sig.addEventListener('abort', onAbort, { once: true });
     }
 
     const handleLine = (line: string): void => {
@@ -400,7 +474,7 @@ async function executeWithRg(
         // Strip the trailing newline that rg includes in `lines.text`.
         const stripped = text.endsWith('\n') ? text.slice(0, -1) : text;
         matches.push({
-          file: path.relative(searchDir, filePath),
+          file: path.relative(dir, filePath),
           line: e.data.line_number,
           // Trim the preview but never split a UTF-16 surrogate pair — otherwise
           // the tool output contains a lone high surrogate and SAP AI Core
@@ -434,15 +508,15 @@ async function executeWithRg(
     });
 
     proc.on('error', (err) => {
-      if (signal) {
-        signal.removeEventListener('abort', onAbort);
+      if (sig) {
+        sig.removeEventListener('abort', onAbort);
       }
       reject(err);
     });
 
     proc.on('close', (code) => {
-      if (signal) {
-        signal.removeEventListener('abort', onAbort);
+      if (sig) {
+        sig.removeEventListener('abort', onAbort);
       }
       // Drain any final partial line
       if (stdoutBuf.length > 0) {
@@ -456,7 +530,15 @@ async function executeWithRg(
       //   2 — actual error
       //   >=2 — also error
       if (code !== 0 && code !== 1) {
-        reject(new RgSpawnError(`rg exited with code ${code}: ${stderr.trim()}`, code, stderr));
+        // Classify the failure: a malformed regex or glob pattern should
+        // not be retried (upstream kilocode 501286ba9). We throw a typed
+        // error with `invalidPattern: true` so the caller surfaces the
+        // failure immediately instead of burning retry budget.
+        const err = new RgSpawnError(`rg exited with code ${code}: ${stderr.trim()}`, code, stderr);
+        if (isInvalidRgPattern(stderr)) {
+          (err as RgSpawnError & { invalidPattern: boolean }).invalidPattern = true;
+        }
+        reject(err);
         return;
       }
 
@@ -464,7 +546,7 @@ async function executeWithRg(
       const filesWithMatches = [...new Set(matches.map((m) => m.file))];
       Promise.all(
         filesWithMatches.map(async (rel) => {
-          const abs = path.join(searchDir, rel);
+          const abs = path.join(dir, rel);
           const promise = fileMtimes.get(abs);
           const mtime = promise
             ? await promise
@@ -500,7 +582,7 @@ async function executeWithRg(
         };
 
         if (matches.length === 0 && filesSearched === 0) {
-          countFilesWithRg(searchDir, include).then(finishWith, () => finishWith(0));
+          countFilesWithRg(dir, inc).then(finishWith, () => finishWith(0));
         } else {
           finishWith(filesSearched > 0 ? filesSearched : filesSeen.size);
         }
@@ -619,6 +701,19 @@ When independent reads, searches, or edits are also needed, emit those tool call
           // through to the JS path.
           if (context.signal?.aborted) {
             return { success: false, error: 'Operation aborted' };
+          }
+          // Upstream kilocode 501286ba9: a malformed glob / regex is NOT
+          // transient — retrying it (or falling back to the JS walker,
+          // which does its own regex compile) will just fail identically
+          // and waste the caller's retry budget. Surface it directly.
+          if (
+            err instanceof RgSpawnError &&
+            (err as RgSpawnError & { invalidPattern?: boolean }).invalidPattern
+          ) {
+            return {
+              success: false,
+              error: `Invalid search pattern: ${err.stderr.trim() || err.message}`,
+            };
           }
           if (!rgFailureLogged) {
             rgFailureLogged = true;

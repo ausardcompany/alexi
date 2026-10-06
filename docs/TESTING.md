@@ -6434,8 +6434,42 @@ contributors do not re-introduce them by hand:
    array literal followed by `.join('\n')` so the fixture reads like the
    underlying wire format. Prettier will collapse such array literals onto a
    single line whenever the resulting expression fits under `printWidth: 100`.
-   The canonical worked example from the 2026-09-01 auto-fix pass (commit
-   `755ce518`) is `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
+   Most recent worked example from the 2026-10-05 auto-fix pass (commit
+   `72b81ea6`) is `src/skill/frontmatter-cache.test.ts:30-33`, where the
+   six-element YAML-frontmatter fixture feeding `fs.writeFileSync(file, ...)`
+   was collapsed from one-element-per-line onto a single 96-column array
+   literal:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (8 lines)
+   fs.writeFileSync(
+     file,
+     [
+       '---',
+       'id: demo',
+       'name: Demo',
+       'description: cache test',
+       '---',
+       'hello world',
+     ].join('\n')
+   );
+
+   // Canonical form after auto-fix (3 lines, 96-column array literal)
+   fs.writeFileSync(
+     file,
+     ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
+   );
+   ```
+
+   The paired `loadSkillFromFile(file)` round-trip and the reference-equality
+   assertion `expect(second).toBe(first)` (verifying the skill frontmatter
+   cache serves identical object references on an unchanged file) are
+   unaffected — the fixture bytes written to `tmpDir/demo.md` are
+   character-identical before and after the reflow because `['...'].join('\n')`
+   produces the same string regardless of source layout.
+
+   The prior worked example from the 2026-09-01 auto-fix pass (commit
+   `755ce518`) sits in `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
    which feeds a six-element unified-diff hunk into `applyPatchTool.executeUnsafe`:
 
    ```typescript
@@ -8994,6 +9028,120 @@ describe('buildFetch — provider timeout', () => {
 npm test -- src/providers/provider.test.ts
 ```
 
+## Testing `withCatalogRetry` and `parseRetryAfter`
+
+The catalog retry primitives in `src/providers/catalog-retry.ts` (added
+in `1.22.38`, upstream kilocode ports `07b18a1a2`, `b1642e87c`,
+`88f8ea950`, `59313c749`, `5539dd3ae`) have two public functions that
+each anchor a dedicated unit suite in
+`src/providers/__tests__/catalog-retry.test.ts` (142 lines).
+
+### Pattern — mocking the retry function with `vi.fn`
+
+Both `withCatalogRetry` and `parseRetryAfter` are pure, stateless, and
+transport-free. The suite therefore does NOT boot an HTTP server;
+every scenario is driven by a `vi.fn<(attempt: number) => Promise<CatalogFetchResult<T>>>`
+whose `.mockResolvedValueOnce()` queue plays back the exact sequence
+the test needs:
+
+```ts
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  parseRetryAfter,
+  withCatalogRetry,
+  DEFAULT_CATALOG_RETRY,
+  type CatalogFetchResult,
+} from '../catalog-retry.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+it('retries on failure until success', async () => {
+  const fn = vi
+    .fn<(attempt: number) => Promise<CatalogFetchResult<number>>>()
+    .mockResolvedValueOnce({ ok: false, error: new Error('boom-1') })
+    .mockResolvedValueOnce({ ok: false, error: new Error('boom-2') })
+    .mockResolvedValueOnce({ ok: true, value: 42 });
+
+  const result = await withCatalogRetry(fn, {
+    maxAttempts: 5,
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+  });
+  expect(result).toBe(42);
+  expect(fn).toHaveBeenCalledTimes(3);
+});
+```
+
+### `parseRetryAfter` cases
+
+The RFC 7231 §7.1.3 parser is tested against seven inputs:
+
+| Input                                         | Expected        | Rationale                             |
+| --------------------------------------------- | --------------- | ------------------------------------- |
+| `null`, `undefined`, `''`, `'   '`            | `undefined`     | Missing / whitespace header           |
+| `'30'`                                        | `30_000`        | delta-seconds                         |
+| `'0'`                                         | `0`             | Retry immediately                     |
+| `'1.5'`                                       | `1500`          | Fractional delta-seconds              |
+| `'-5'`                                        | `undefined`     | Negative delta-seconds rejected       |
+| Future HTTP-date                              | 55_000..60_500  | ms-until-date (bounded jitter window) |
+| Past HTTP-date                                | `0`             | Server lock released                  |
+| `'tomorrow'`, `'not-a-number-or-date'`        | `undefined`     | Unparseable garbage                   |
+
+The future-date assertion uses an explicit `+60_000` ms offset and
+tolerates up to 500ms of jitter from the `Date.now()` call interleaving
+with the assertion — tightening the bounds further would make the
+suite flaky under CI slot preemption.
+
+### `withCatalogRetry` cases
+
+The six scenarios pin the full contract:
+
+1. **First-attempt success.** `fn` is called exactly once; no sleep.
+2. **Retry-until-success.** `.mockResolvedValueOnce` queue plays
+   failure → failure → success; `fn` is called three times.
+3. **Exhaust-then-throw.** All attempts fail with the same error;
+   the LAST error is thrown and `fn` is called exactly `maxAttempts`
+   times.
+4. **`Retry-After` honored over exponential.** The first result
+   returns `{ ok: false, retryAfterMs: 50 }` and the suite measures
+   `Date.now()` to confirm the sleep is at least 40ms (slack for timer
+   skew). The next attempt resolves `{ ok: true }`.
+5. **Prompt abort.** An `AbortController.abort(reason)` fired BEFORE
+   any attempt causes the retry to throw the reason and never invoke
+   `fn`.
+6. **`maxAttempts < 1` rejection.** Call-site validation surfaces the
+   invariant `maxAttempts must be >= 1, got <N>` immediately.
+
+### "Rearm on fresh call" contract
+
+The seventh case in the suite pins the invariant that upstream kilocode
+fix `b1642e87c` introduces — the retry budget is per-call, not
+per-process:
+
+```ts
+it('\"rearms\" on a fresh call — budget is per-call, not per-process', async () => {
+  const fn = vi
+    .fn<(attempt: number) => Promise<CatalogFetchResult<string>>>()
+    .mockResolvedValueOnce({ ok: false, error: new Error('first') })
+    .mockResolvedValueOnce({ ok: true, value: 'first-ok' })
+    .mockResolvedValueOnce({ ok: false, error: new Error('second') })
+    .mockResolvedValueOnce({ ok: true, value: 'second-ok' });
+  const opts = { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 };
+  expect(await withCatalogRetry(fn, opts)).toBe('first-ok');
+  // A second top-level call must start a FRESH attempt counter, even
+  // though the previous call used its full budget.
+  expect(await withCatalogRetry(fn, opts)).toBe('second-ok');
+  expect(fn).toHaveBeenCalledTimes(4);
+});
+```
+
+Two successive calls each use their full budget AND both succeed —
+the counter resets between them. If a regression introduces a hidden
+module-level counter, this test fails immediately because the second
+call starts with `attempt = 1` instead of `attempt = 0`.
+
 ## Testing Subagent Steering
 
 The subagent-steering feature (commit `3fb3ef7c`, ports upstream kilocode #14702, see [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts)) is tested at two layers: a data-layer suite that exercises `steerSubagent` against the shared board, and a TUI smoke-test suite that pins the visual contract of `SubagentView` and the initial state of `SubagentProvider`.
@@ -9088,6 +9236,102 @@ vi.mock('../../../src/cli/tui/context/SubagentContext.js', () => ({
 When adding keybindings or hooks that depend on the subagent context, follow the same shape — the mock stays in step with `SubagentContextValue` so a signature drift breaks the compile instead of silently reaching into a stale shape.
 
 ### Running
+
+```bash
+npm test -- src/providers/__tests__/catalog-retry.test.ts
+```
+
+## Testing the Skill Frontmatter Cache
+
+The skill frontmatter cache in `src/skill/index.ts` (added in
+`1.22.38`, upstream kilocode port `b0aeda50b`) is covered by
+`src/skill/frontmatter-cache.test.ts` (71 lines, two cases). The
+pattern follows the Vitest tempdir contract used elsewhere in the
+suite:
+
+```ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { loadSkillFromFile, _resetSkillFrontmatterCacheForTests } from './index.js';
+
+describe('skill frontmatter cache', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-skill-cache-'));
+    _resetSkillFrontmatterCacheForTests();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+  // ... cases below
+});
+```
+
+### Case 1 — unchanged file returns the SAME object
+
+Reference equality (`toBe`, not `toEqual`) is the whole point of the
+cache: a second `loadSkillFromFile` on the same path with the same
+`(size, mtimeMs)` MUST return the exact same `Skill` object reference,
+proving the parser was not re-run.
+
+```ts
+it('returns the same Skill instance when the file is unchanged', () => {
+  const file = path.join(tmpDir, 'demo.md');
+  fs.writeFileSync(
+    file,
+    ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
+  );
+  const first = loadSkillFromFile(file);
+  const second = loadSkillFromFile(file);
+  expect(first).not.toBeNull();
+  // If the parser had run again, we would get a new object.
+  expect(second).toBe(first);
+});
+```
+
+### Case 2 — mtime bump invalidates the cache
+
+Some filesystems collapse rapid successive writes to the same mtime,
+which would make the test flaky if we relied on the implicit mtime
+from `fs.writeFileSync` alone. The test explicitly bumps mtime
+forward 2 seconds with `fs.utimesSync` so the cache invalidation path
+is deterministically exercised:
+
+```ts
+it('re-parses when the file mtime changes', () => {
+  const file = path.join(tmpDir, 'demo.md');
+  fs.writeFileSync(file, ['---', 'id: demo', 'description: v1', '---', 'first version'].join('\n'));
+  const first = loadSkillFromFile(file);
+  expect(first?.description).toBe('v1');
+
+  fs.writeFileSync(file, ['---', 'id: demo', 'description: v2', '---', 'second version'].join('\n'));
+  const future = new Date(Date.now() + 2_000);
+  fs.utimesSync(file, future, future);
+
+  const second = loadSkillFromFile(file);
+  expect(second?.description).toBe('v2');
+  expect(second).not.toBe(first);
+});
+```
+
+### Internal reset seam
+
+`_resetSkillFrontmatterCacheForTests()` is the only observability hook
+on the module-level cache map. It is marked `@internal` and MUST NOT
+be imported from runtime code — tests use it to guarantee a clean
+cache between cases so Case 1 and Case 2 cannot cross-contaminate.
+
+### Running
+
+```bash
+npm test -- src/skill/frontmatter-cache.test.ts
+```
+
+### Running (Subagent Steering)
 
 ```bash
 # Data-layer suite
