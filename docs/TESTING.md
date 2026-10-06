@@ -21,6 +21,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
+- [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -9697,4 +9698,151 @@ npm test -- tests/tui/subagent-view.test.tsx
 
 # Keyboard hook (includes the SubagentContext mock)
 npm test -- tests/cli/tui/useKeyboard.test.tsx
+```
+
+## Testing the commit-message rules wiring (issue #1953)
+
+The auto-commit generator in `src/git/commitMessage.ts` now appends
+user-defined rules from `.alexi/rules/` (or the override set via
+`GitConfig.commitMessage.rulesPath`) to the system prompt handed to the
+cheap-model provider. The regression suite in
+`src/git/commitMessage.test.ts` (227 lines, two describe blocks) locks
+in three contracts:
+
+1. The pure helper `buildRulesSection(workdir, rulesPathOverride?)` reads
+   enabled rules only, in deterministic filename order, and wraps each
+   one in a `<rule file="...">` tag with `COMMIT_RULES_PREAMBLE` on top.
+2. `disabled: true` (or the string coercions `"true"` / `"yes"`) in a
+   rule's gray-matter frontmatter excludes that rule from the prompt.
+3. The system message passed to `provider.complete(...)` from
+   `generateCommitMessage(files, config, workdir)` contains the enabled
+   rules, and the `commitMessage.rulesPath` override is honored.
+
+### Fixture pattern — temp workdir with `.alexi/rules/`
+
+Every case runs under an isolated tempdir to stay parallel-safe. The
+helper creates `<workdir>/.alexi/rules/<file>.md` entries and returns a
+cleanup closure for `afterEach`:
+
+```ts
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+function makeWorkdirWithRules(files: Record<string, string>): {
+  workdir: string;
+  cleanup: () => void;
+} {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-rules-'));
+  const rulesDir = path.join(workdir, '.alexi', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  for (const [name, content] of Object.entries(files)) {
+    fs.writeFileSync(path.join(rulesDir, name), content, 'utf-8');
+  }
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+### Mocking the provider and router
+
+Both providers and the router are mocked BEFORE importing the module
+under test. Keeping the `vi.mock` block above the `import` line matches
+the AGENTS.md "mock before import" convention even though `vi.mock` is
+hoisted — the explicit ordering is a readability contract:
+
+```ts
+vi.mock('../providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+}));
+
+vi.mock('../core/router.js', () => ({
+  routePrompt: vi.fn(() => ({ modelId: 'gpt-4o-mini', reason: 'cheap', confidence: 0.9 })),
+}));
+
+import {
+  buildRulesSection,
+  COMMIT_RULES_PREAMBLE,
+  generateCommitMessage,
+} from './commitMessage.js';
+import { getProviderForModelWithFallback } from '../providers/index.js';
+```
+
+In each case the mocked provider returns a canned completion whose text
+is asserted to be the eventual return of `generateCommitMessage`:
+
+```ts
+const completeFn = vi.fn().mockResolvedValue({
+  text: 'feat: wire rules into commit generator',
+  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+});
+vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+  provider: { complete: completeFn } as never,
+  effectiveModelId: 'gpt-4o-mini',
+  usedFallback: false,
+});
+```
+
+### Case 1 — enabled rules appear in the system message
+
+The core assertion inspects the first argument of the recorded
+`complete(...)` call, finds the `role: 'system'` message, and checks
+that the preamble + `<rule file="...">` tag are both present:
+
+```ts
+it('passes enabled rules in the system message to provider.complete', async () => {
+  const msg = await generateCommitMessage(
+    [{ filePath: 'src/foo.ts', toolName: 'write' }],
+    baseConfig,
+    fixture.workdir
+  );
+
+  expect(msg).toBe('feat: wire rules into commit generator');
+  expect(completeFn).toHaveBeenCalledTimes(1);
+  const [messages] = completeFn.mock.calls[0];
+  const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+  expect(systemMsg).toBeDefined();
+  expect(systemMsg.content).toContain('git commit message generator');
+  expect(systemMsg.content).toContain(COMMIT_RULES_PREAMBLE);
+  expect(systemMsg.content).toContain('<rule file="ticket.md">');
+  expect(systemMsg.content).toContain('Always reference an issue number.');
+});
+```
+
+### Case 2 — `disabled: true` rules are excluded
+
+A rule with the frontmatter `---\ndisabled: true\n---\nShould not
+appear.` must NOT reach the model. The test verifies the negative
+assertion against the same system message:
+
+```ts
+const [messages] = completeFn.mock.calls[0];
+const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+expect(systemMsg.content).not.toContain('ignored.md');
+expect(systemMsg.content).not.toContain('Should not appear');
+```
+
+### Case 3 — `rulesPath` config override
+
+The override case points to a sibling directory outside `.alexi/rules/`
+and verifies that the discovery chain honors `customPaths`:
+
+```ts
+await generateCommitMessage(
+  [{ filePath: 'src/foo.ts', toolName: 'write' }],
+  {
+    ...baseConfig,
+    commitMessage: { ...baseConfig.commitMessage, rulesPath: 'custom-rules' },
+  },
+  fixture.workdir
+);
+// systemMsg.content now contains '<rule file="override.md">' and 'Custom override rule.'
+```
+
+### Running
+
+```bash
+npm test -- src/git/commitMessage.test.ts
 ```
