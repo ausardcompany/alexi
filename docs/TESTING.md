@@ -10,6 +10,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
   - [Testing the `link_pr` Tool](#testing-the-link_pr-tool)
+  - [Testing gray-matter Cache Poisoning Regression (issue #1945)](#testing-gray-matter-cache-poisoning-regression-issue-1945)
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing Compaction](#testing-compaction)
@@ -4050,6 +4051,113 @@ to verify the placeholder strings are not reintroduced.
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
 
+### Testing gray-matter Cache Poisoning Regression (issue #1945)
+
+The skill, custom-agent, and slash-command loaders all parse YAML frontmatter
+via the `gray-matter` package. `gray-matter`'s default call signature keeps a
+process-wide, content-keyed cache in `matter.cache` (see
+`node_modules/gray-matter/index.js`). The cache entry is written BEFORE
+`parseMatter` runs, so a malformed-YAML parse that throws still leaves a
+`{ data: {}, content: <raw>, isEmpty: false }` entry behind under that content
+string. The next identical `matter(content)` call returns the poisoned entry
+WITHOUT re-attempting the parse, so the thrown error is permanently swallowed.
+
+Alexi mitigates this by always passing an options object (even `{}`) when
+calling `matter(...)` — any options argument short-circuits the cache lookup
+path. The three touched call sites are:
+
+- `src/skill/index.ts:138` — `loadSkillFromFile`
+- `src/agent/customAgentLoader.ts:107` — `loadAgentFromFile`
+- `src/command/index.ts:338` — `loadCommandFromFile`
+
+The regression suite in `tests/skill/cache-poisoning.test.ts` (177 lines, three
+describe blocks — one per loader) pins the contract that a poisoned cache
+cannot leak into a subsequent load.
+
+#### Test fixtures
+
+The suite declares two string fixtures at module scope so every case parses
+exactly the same byte sequence through `gray-matter`:
+
+```ts
+// tests/skill/cache-poisoning.test.ts
+const MALFORMED_FRONTMATTER = `---
+name: broken-skill
+description: foo: bar
+---
+
+Hello body.
+`;
+
+const VALID_FRONTMATTER = `---
+name: valid-skill
+description: A perfectly fine skill
+---
+
+Hello body.
+`;
+```
+
+The `description: foo: bar` line is the deliberate trigger — the unquoted
+inner colon makes the YAML parse throw. `description: "foo: bar"` would be
+valid; the trailing newline matters because `gray-matter` keys the cache on
+the exact content string.
+
+#### Cache escape hatch pattern
+
+Every describe block clears `gray-matter`'s global cache in both `beforeEach`
+and `afterEach`, so cross-suite test ordering cannot poison or starve the
+cases:
+
+```ts
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-skill-cache-'));
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+```
+
+The `(matter as unknown as { cache: Record<string, unknown> }).cache` cast is
+the only sanctioned way to reach into `gray-matter`'s internal state from
+TypeScript — the public API intentionally does not expose the cache. Confine
+this cast to tests; do NOT use it in `src/`.
+
+#### Cases pinned by the suite
+
+1. **Malformed-then-malformed, byte-identical content** (skill loader): write
+   `MALFORMED_FRONTMATTER` to `first.md`, load it (expect `null` from the
+   loader's try/catch), write the same bytes to `second.md`, load it. Without
+   the `matter(content, {})` fix, `gray-matter` would return the cached
+   empty-data entry and `loadSkillFromFile` would happily emit a skill named
+   after the filename with an empty description. With the fix, the second
+   load re-parses, re-throws, and the loader returns `null` again.
+2. **Pre-poisoned cache, valid content** (skill, agent, command loaders —
+   one case each): manually seed `matter.cache[VALID_FRONTMATTER]` with
+   `{ data: {}, content: VALID_FRONTMATTER, isEmpty: false, excerpt: '' }`
+   BEFORE calling the loader. Then write the valid content to disk and load
+   it. Without the fix, the loader would read the empty-data cache entry
+   and produce a skill/agent/command with filename-derived defaults. With
+   the fix, the loader bypasses the cache and resolves the real
+   `name`/`id`/`description`.
+
+#### Running
+
+```bash
+npm test -- tests/skill/cache-poisoning.test.ts
+```
+
+When writing a NEW loader that calls `gray-matter`, always pass an options
+object as the second argument (`matter(content, {})`), add a regression case
+to the matching describe block above, and leave the `matter.cache = {}` reset
+in `beforeEach`/`afterEach`. See `AGENTS.md` for the ESM `.js` suffix
+requirement on the fresh `import` of the loader under test — note how the
+suite imports via `../../src/skill/index.js`, `../../src/agent/customAgentLoader.js`,
+and `../../src/command/index.js`.
+
 ## Testing `sanitizeApiKey` and auth-error rewriting
 
 Two paired suites cover the config write-boundary hygiene helper
@@ -6444,8 +6552,42 @@ contributors do not re-introduce them by hand:
    array literal followed by `.join('\n')` so the fixture reads like the
    underlying wire format. Prettier will collapse such array literals onto a
    single line whenever the resulting expression fits under `printWidth: 100`.
-   The canonical worked example from the 2026-09-01 auto-fix pass (commit
-   `755ce518`) is `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
+   Most recent worked example from the 2026-10-05 auto-fix pass (commit
+   `72b81ea6`) is `src/skill/frontmatter-cache.test.ts:30-33`, where the
+   six-element YAML-frontmatter fixture feeding `fs.writeFileSync(file, ...)`
+   was collapsed from one-element-per-line onto a single 96-column array
+   literal:
+
+   ```typescript
+   // Anti-pattern — will be reformatted by auto-fix (8 lines)
+   fs.writeFileSync(
+     file,
+     [
+       '---',
+       'id: demo',
+       'name: Demo',
+       'description: cache test',
+       '---',
+       'hello world',
+     ].join('\n')
+   );
+
+   // Canonical form after auto-fix (3 lines, 96-column array literal)
+   fs.writeFileSync(
+     file,
+     ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
+   );
+   ```
+
+   The paired `loadSkillFromFile(file)` round-trip and the reference-equality
+   assertion `expect(second).toBe(first)` (verifying the skill frontmatter
+   cache serves identical object references on an unchanged file) are
+   unaffected — the fixture bytes written to `tmpDir/demo.md` are
+   character-identical before and after the reflow because `['...'].join('\n')`
+   produces the same string regardless of source layout.
+
+   The prior worked example from the 2026-09-01 auto-fix pass (commit
+   `755ce518`) sits in `src/tool/tools/__tests__/apply-patch.json-encoding.test.ts:38`,
    which feeds a six-element unified-diff hunk into `applyPatchTool.executeUnsafe`:
 
    ```typescript
@@ -8897,6 +9039,135 @@ npm test -- tests/mcp/
 ```
 
 See `src/mcp/cimd.ts` for the module's public surface and JSDoc, and `src/mcp/client.ts` (`fetchInitialMetadata` and `readProtocolVersion`) for the integration point that populates `connection.capabilityManifest` and gates the throw-vs-warn branch on `config.cimdEnabled`.
+
+## Testing MCP Protocol-Violation Detection and Breakage Tracker
+
+Introduced in commit `c8eb36d1` (`feat(agent): add MCP protocol violation detection and breakage tracker`). The surface is split across two modules:
+
+- `src/mcp/validator.ts` — pure wire-shape validator (`validateMcpResponse`). Zero side effects, zero mocks required to test.
+- `src/mcp/breakage-tracker.ts` — pure in-memory per-server tally (`McpBreakageTracker`). Zero I/O, zero timers.
+- `src/mcp/client.ts` — wiring (`McpClientManager.validateAndRecord`, `markBreakageDisabled`, `classifyConnectError`). Requires mocking `@modelcontextprotocol/client`, `child_process.spawn`, and the stdio transport.
+
+Three co-located suites pin the contract. The split follows the same discipline as the CIMD suite above: exhaustive shape coverage lives in the cheap pure-function suite, and only the branches that ONLY the client can exercise live in the more expensive integration suite.
+
+### Pure validator suite (`tests/mcp/validator.test.ts`)
+
+289 lines, 29 cases across six `describe` blocks, no mocks, runs in a millisecond. The six axes:
+
+1. **JSON-RPC envelope.** Accepts a valid envelope; flags missing / wrong `jsonrpc`; flags an envelope with BOTH `result` and `error`; flags an envelope with NEITHER; accepts an error envelope without validating payload shape (there is no `result` to validate — treating it as "no payload" avoids double-counting); accepts `id === null` (spec-sanctioned for parse errors); treats a plain unwrapped payload (no envelope) as the already-unwrapped result.
+2. **`tools/list` shape.** Flags missing `tools` array, missing / empty `name`, missing `inputSchema`, `inputSchema` without a `type` field; accepts multiple valid entries; flags a non-object result.
+3. **`resources/list` shape.** Accepts valid URIs (`file:///…`, `https://…`); flags URIs without a scheme (`notes.md`); flags empty `uri`; flags missing `name`; flags missing `resources` array.
+4. **`prompts/list` shape.** Accepts valid entries; flags empty `name`; flags missing `prompts` array.
+5. **`completion/complete` shape.** Accepts `{ completion: { values: ['a', 'b'], total: 2, hasMore: false } }`; flags missing `completion` object; flags non-array `values`; flags non-string element inside `values`.
+6. **Unknown methods.** A method the validator does not know about (`logging/setLevel`) passes through — the validator must stay useful as new MCP methods ship without a schema bump. The envelope is still validated for unknown methods, so a malformed envelope on an unknown method still fails.
+
+Plus a "violation messages" describe block that pins the operator-facing contract: every violation string MUST include the server name and the method name so an operator can locate the source without re-running the test.
+
+Reference setup:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { validateMcpResponse } from '../../src/mcp/validator.js';
+
+it('flags an envelope with both result and error set', () => {
+  const response = {
+    jsonrpc: '2.0',
+    id: 1,
+    result: { tools: [] },
+    error: { code: -32000, message: 'something' },
+  };
+  const result = validateMcpResponse(response, 'tools/list', 'srv');
+  expect(result.valid).toBe(false);
+  expect(result.violations.some((v) => v.includes('BOTH'))).toBe(true);
+});
+```
+
+Patterns worth internalising when extending this suite:
+
+1. **Pin violation substrings, not full strings.** Every violation message is operator-facing copy; a future editorial tweak must not force a test churn as long as the actionable keyword (`missing the 'tools' array`, `malformed URI`, `BOTH`, `neither`, `inputschema`, `my-server`) still lands in the string. The suite uses `toContain('non-object')`, `toLowerCase().includes('inputschema')`, and `every((v) => v.includes('my-server'))` throughout.
+2. **Validate every method under both shapes.** Every method branch should carry at least one envelope-wrapped case AND one unwrapped-result case so the dual-mode design in `extractPayload` is exercised. The current suite relies on the "treats a plain result payload (no envelope) as unwrapped" smoke test to cover the branch for all methods — add a per-method unwrapped case if you add a new method validator.
+3. **Pin the `.passthrough()` contract implicitly.** The validator uses `.passthrough()` on every entry schema so forward-compatible servers do not trip violations. Any new case that asserts a FUTURE field (`outputSchema`, `annotations`, extra metadata) is accepted catches a regression that tightened the schema into `.strict()`.
+4. **Do NOT mock the Zod schemas.** The whole point of the suite is to prove that the real schemas emit the right violation strings for the right inputs. Stubbing a schema would make the suite pass even after a regression that reverted `name: z.string().min(1)` to `name: z.string().optional()`.
+
+### Pure tracker suite (`tests/mcp/breakage-tracker.test.ts`)
+
+107 lines, 10 cases, no mocks, runs in a millisecond. Pins the arithmetic and the API contract so a refactor that changes the counting discipline is caught immediately:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { McpBreakageTracker, DEFAULT_BREAKAGE_THRESHOLD } from '../../src/mcp/breakage-tracker.js';
+
+it('increments the count by ONE per recorded call, not per violation string', () => {
+  const tracker = new McpBreakageTracker();
+  tracker.recordViolation('srv', 'tools/list', ['v1', 'v2', 'v3']);
+  expect(tracker.getViolationCount('srv')).toBe(1);
+});
+
+it('disables the server after the default threshold of 3 violations', () => {
+  const tracker = new McpBreakageTracker();
+  tracker.recordViolation('srv', 'tools/list', ['v']);
+  tracker.recordViolation('srv', 'tools/list', ['v']);
+  tracker.recordViolation('srv', 'resources/list', ['v']);
+  expect(tracker.shouldDisableServer('srv')).toBe(true);
+});
+```
+
+Properties the suite locks:
+
+1. **Unknown server reads as zero.** `getViolationCount('srv')` returns `0` and `shouldDisableServer('srv')` returns `false` before any `recordViolation` call — callers can query the tracker unconditionally without a guard.
+2. **One call, one increment.** The count tracks the number of malformed RESPONSES, not the number of distinct violation strings per response. A regression that counted per string would blow past the threshold on a single response that contained three Zod issues and would disable servers that were otherwise fine.
+3. **Empty violation list is a no-op.** Callers can pipe `validateMcpResponse(...).violations` unconditionally without a `if (result.violations.length === 0) { return; }` guard. The tracker short-circuits internally.
+4. **Default threshold is pinned.** `DEFAULT_BREAKAGE_THRESHOLD === 3`. One transient hiccup is forgiven; a server that keeps returning malformed payloads cannot keep burning tool-call budgets.
+5. **Custom threshold respected; invalid thresholds rejected.** `new McpBreakageTracker(1)` disables after one violation. `new McpBreakageTracker(0)`, `-1`, `1.5`, and `NaN` all throw at construction — a positive-integer precondition caught at the earliest possible point.
+6. **Per-server independence.** Counts and history are per-server; a bad server does not pollute the tally for its siblings.
+7. **History is retained for diagnostics.** `getHistory(serverName)` returns a shallow copy of every recorded `RecordedViolation` (`method`, `violations`, `recordedAt`) so operators and tests can reconstruct exactly which calls tripped the budget.
+8. **`reset` / `resetAll` clear counts AND history.** The symmetric `resetAll` is intended for `resetMcpClientManager()`-style global teardown; per-server `reset` is for operator-initiated reconnect after an upstream fix.
+
+### Client-wiring integration (`tests/mcp/breakage-detection-integration.test.ts`)
+
+172 lines, 5 cases. Mocks `child_process.spawn`, `@modelcontextprotocol/client` (`Client` with `connect` / `listTools` / `close`), `@modelcontextprotocol/client/stdio` (`StdioClientTransport`), and the side-effectful loaders in `src/mcp/config.js`. The warning capture pattern follows the CIMD suite: `vi.hoisted` is mandatory so the logger mock is installed before `McpClientManager` transitively imports `../../src/utils/logger.js`.
+
+```typescript
+const { loggerWarnMock } = vi.hoisted(() => ({ loggerWarnMock: vi.fn() }));
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: loggerWarnMock,
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+```
+
+Cases pin four load-bearing properties the pure suites cannot reach:
+
+1. **A single malformed `tools/list` logs a WARN and increments the tracker.** Setup returns `{ tools: [{ name: 'search' }] }` from `mockClientListTools` — tool entry missing `inputSchema`, a classic MCP spec violation. After `manager.connect(baseConfig)` the connection is `'connected'`, `tracker.getViolationCount('broken-server') === 1`, and `loggerWarnMock` was called with a message containing `'MCP protocol violation'`. The assertion uses `mock.calls.some((call) => String(call[0]).includes(...))` so the log format can evolve without touching the test.
+2. **Crossing the threshold during `connect()` flips the connection to failed.** Seed `tracker.recordViolation(...)` twice to one violation shy of the default-3 threshold, then return a single malformed `tools/list`. After `manager.connect(baseConfig)` the connection is `'failed'`, `connection.error` contains `'disabled after 3 protocol violations'`, and the disable reason was emitted as a WARN. The manager's `classifyConnectError` recognises `McpBreakageExceededError` as a config error, so the retry budget is NOT burned.
+3. **Spec-compliant responses record zero violations.** `{ tools: [{ name: 'search', inputSchema: { type: 'object', properties: {} } }] }` → connection connected, tracker count zero, zero WARN calls containing `'MCP protocol violation'`. Without this control, a regression that always recorded a violation would only fail one direction.
+4. **Partially-malformed `tools/list` keeps the connection open with ALL entries exposed.** `{ tools: [good, bad] }` — one entry valid, one missing `inputSchema`. The connection stays `'connected'`, `connection.tools.length === 2` (both entries forwarded verbatim — the validator never filters the tool list, it only emits violations), and the tracker records exactly one violation. The property matters: a single malformed entry in a long list must not blank the whole server; the breakage threshold is the dedicated mechanism for that.
+5. **`resetMcpClientManager()`-style tracker reset clears per-server counts.** A smoke test that guards against a future refactor that forgot to call `tracker.resetAll()` from the global teardown.
+
+### Testing patterns to reuse when extending the breakage suite
+
+1. **Keep the shape coverage in `validator.test.ts` and the wiring coverage in `breakage-detection-integration.test.ts`.** The split matters: adding a 30th case for a new MCP method schema belongs in the pure suite (no mocks, millisecond), while adding a 6th case for a new connection failure state (reconnect after reset, concurrent connect-and-fail, etc.) belongs in the integration suite.
+2. **Do NOT mock `src/mcp/validator.js` or `src/mcp/breakage-tracker.js` from the integration suite.** The whole point of the integration test is that the real validator and tracker react to real responses. Stubbing either would let a client-side regression that skips the `validateAndRecord` call pass silently.
+3. **Return a fresh mock process from `createMockProcess()` inside `mockSpawn.mockReturnValue(...)` on every case.** The stdio child process carries `EventEmitter`s for `stdin` / `stdout` / `stderr` plus a `kill` spy and a `pid`; sharing one across cases means a kill in case N shows up as a kill in case N+1 and the per-case `markBreakageDisabled` assertion drifts.
+4. **Assert on `connection.error` substrings, not exact strings.** The disable reason format (`disabled after N protocol violations. Check the server's logs...`) is operator-facing copy that may be refined; pin the actionable substrings (`disabled after 3 protocol violations`) and leave the surrounding prose free to evolve.
+5. **Mock `src/mcp/config.js` with `vi.importActual(...)` passthrough.** The suite needs the real `validateMcpConfig` / schema types but stubbed side-effectful loaders (`loadMcpConfig`, `resolveEnvVars`). Mocking the whole module without passthrough breaks the type contract on `McpServerConfig` and the test file fails to collect.
+
+### Running the suites
+
+```bash
+npm test -- tests/mcp/validator.test.ts
+npm test -- tests/mcp/breakage-tracker.test.ts
+npm test -- tests/mcp/breakage-detection-integration.test.ts
+
+# Or the whole MCP folder:
+npm test -- tests/mcp/
+```
+
+See `src/mcp/validator.ts` (pure validation surface + `ValidationResult` type), `src/mcp/breakage-tracker.ts` (`McpBreakageTracker`, `DEFAULT_BREAKAGE_THRESHOLD`, `McpBreakageExceededError`, `RecordedViolation`), and `src/mcp/client.ts` (`McpClientManager.validateAndRecord`, `markBreakageDisabled`, `classifyConnectError`, `getBreakageTracker()`) for the integration points.
+
 ## Testing Canonical Model Identity (`src/core/stats/catalog-identity.test.ts`)
 
 `catalogIdentity` is a pure resolver, so the suite is `describe`-flat, `vi.mock`-free, and runs in single-digit milliseconds. Test coverage (`src/core/stats/catalog-identity.test.ts`, seven cases, 131 lines) pins every branch of the resolution rules from [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-srccorestatscatalog-identityts).
@@ -9002,4 +9273,320 @@ describe('buildFetch — provider timeout', () => {
 
 ```bash
 npm test -- src/providers/provider.test.ts
+```
+
+## Testing `withCatalogRetry` and `parseRetryAfter`
+
+The catalog retry primitives in `src/providers/catalog-retry.ts` (added
+in `1.22.38`, upstream kilocode ports `07b18a1a2`, `b1642e87c`,
+`88f8ea950`, `59313c749`, `5539dd3ae`) have two public functions that
+each anchor a dedicated unit suite in
+`src/providers/__tests__/catalog-retry.test.ts` (142 lines).
+
+### Pattern — mocking the retry function with `vi.fn`
+
+Both `withCatalogRetry` and `parseRetryAfter` are pure, stateless, and
+transport-free. The suite therefore does NOT boot an HTTP server;
+every scenario is driven by a `vi.fn<(attempt: number) => Promise<CatalogFetchResult<T>>>`
+whose `.mockResolvedValueOnce()` queue plays back the exact sequence
+the test needs:
+
+```ts
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  parseRetryAfter,
+  withCatalogRetry,
+  DEFAULT_CATALOG_RETRY,
+  type CatalogFetchResult,
+} from '../catalog-retry.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+it('retries on failure until success', async () => {
+  const fn = vi
+    .fn<(attempt: number) => Promise<CatalogFetchResult<number>>>()
+    .mockResolvedValueOnce({ ok: false, error: new Error('boom-1') })
+    .mockResolvedValueOnce({ ok: false, error: new Error('boom-2') })
+    .mockResolvedValueOnce({ ok: true, value: 42 });
+
+  const result = await withCatalogRetry(fn, {
+    maxAttempts: 5,
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+  });
+  expect(result).toBe(42);
+  expect(fn).toHaveBeenCalledTimes(3);
+});
+```
+
+### `parseRetryAfter` cases
+
+The RFC 7231 §7.1.3 parser is tested against seven inputs:
+
+| Input                                         | Expected        | Rationale                             |
+| --------------------------------------------- | --------------- | ------------------------------------- |
+| `null`, `undefined`, `''`, `'   '`            | `undefined`     | Missing / whitespace header           |
+| `'30'`                                        | `30_000`        | delta-seconds                         |
+| `'0'`                                         | `0`             | Retry immediately                     |
+| `'1.5'`                                       | `1500`          | Fractional delta-seconds              |
+| `'-5'`                                        | `undefined`     | Negative delta-seconds rejected       |
+| Future HTTP-date                              | 55_000..60_500  | ms-until-date (bounded jitter window) |
+| Past HTTP-date                                | `0`             | Server lock released                  |
+| `'tomorrow'`, `'not-a-number-or-date'`        | `undefined`     | Unparseable garbage                   |
+
+The future-date assertion uses an explicit `+60_000` ms offset and
+tolerates up to 500ms of jitter from the `Date.now()` call interleaving
+with the assertion — tightening the bounds further would make the
+suite flaky under CI slot preemption.
+
+### `withCatalogRetry` cases
+
+The six scenarios pin the full contract:
+
+1. **First-attempt success.** `fn` is called exactly once; no sleep.
+2. **Retry-until-success.** `.mockResolvedValueOnce` queue plays
+   failure → failure → success; `fn` is called three times.
+3. **Exhaust-then-throw.** All attempts fail with the same error;
+   the LAST error is thrown and `fn` is called exactly `maxAttempts`
+   times.
+4. **`Retry-After` honored over exponential.** The first result
+   returns `{ ok: false, retryAfterMs: 50 }` and the suite measures
+   `Date.now()` to confirm the sleep is at least 40ms (slack for timer
+   skew). The next attempt resolves `{ ok: true }`.
+5. **Prompt abort.** An `AbortController.abort(reason)` fired BEFORE
+   any attempt causes the retry to throw the reason and never invoke
+   `fn`.
+6. **`maxAttempts < 1` rejection.** Call-site validation surfaces the
+   invariant `maxAttempts must be >= 1, got <N>` immediately.
+
+### "Rearm on fresh call" contract
+
+The seventh case in the suite pins the invariant that upstream kilocode
+fix `b1642e87c` introduces — the retry budget is per-call, not
+per-process:
+
+```ts
+it('\"rearms\" on a fresh call — budget is per-call, not per-process', async () => {
+  const fn = vi
+    .fn<(attempt: number) => Promise<CatalogFetchResult<string>>>()
+    .mockResolvedValueOnce({ ok: false, error: new Error('first') })
+    .mockResolvedValueOnce({ ok: true, value: 'first-ok' })
+    .mockResolvedValueOnce({ ok: false, error: new Error('second') })
+    .mockResolvedValueOnce({ ok: true, value: 'second-ok' });
+  const opts = { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 };
+  expect(await withCatalogRetry(fn, opts)).toBe('first-ok');
+  // A second top-level call must start a FRESH attempt counter, even
+  // though the previous call used its full budget.
+  expect(await withCatalogRetry(fn, opts)).toBe('second-ok');
+  expect(fn).toHaveBeenCalledTimes(4);
+});
+```
+
+Two successive calls each use their full budget AND both succeed —
+the counter resets between them. If a regression introduces a hidden
+module-level counter, this test fails immediately because the second
+call starts with `attempt = 1` instead of `attempt = 0`.
+
+## Testing Subagent Steering
+
+The subagent-steering feature (commit `3fb3ef7c`, ports upstream kilocode #14702, see [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts)) is tested at two layers: a data-layer suite that exercises `steerSubagent` against the shared board, and a TUI smoke-test suite that pins the visual contract of `SubagentView` and the initial state of `SubagentProvider`.
+
+### Data-layer tests (`tests/agent/steering.test.ts`, 124 lines)
+
+The suite isolates state between cases by resetting three singletons in `beforeEach`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  __resetSteeringStateForTests,
+  clearSteeringPrompt,
+  getSteeringPrompt,
+  steerSubagent,
+} from '../../src/agent/session.js';
+import { BoardStore } from '../../src/core/database/boardStore.js';
+import { BoardContext } from '../../src/core/database/boardContext.js';
+
+beforeEach(() => {
+  __resetSteeringStateForTests();
+  BoardContext.__resetForTests();
+  BoardStore.__resetForTests();
+});
+```
+
+A small id-generator keeps subagent and board ids unique across cases so a stale `BoardContext` attachment cannot leak between them:
+
+```typescript
+let counter = 0;
+function nextIds(): { subagentId: string; boardId: string } {
+  counter += 1;
+  return {
+    subagentId: `session-sub-steering-${Date.now()}-${counter}`,
+    boardId: `board-sub-steering-${Date.now()}-${counter}`,
+  };
+}
+```
+
+Cases locked by the suite:
+
+1. **No board → null.** `steerSubagent('session-with-no-board', 'focus on auth')` MUST return `null` and MUST NOT touch the in-memory cache. Pins the no-board fallback.
+2. **Empty / whitespace prompt → null.** Both `''` and `'    '` MUST return `null` with no cache mutation.
+3. **Successful post caches the latest prompt.** After `BoardContext.attach(subagentId, boardId)` and `BoardStore.ensure(boardId, 'task-steering')`, `steerSubagent(subagentId, 'focus on edge cases')` MUST return a `SteeringResult` whose `prompt` equals the trimmed input and whose `messageId` / `deliveredAt` are typed strings; `getSteeringPrompt(subagentId)` MUST mirror the posted prompt.
+4. **Author tag.** The posted row MUST carry `author: 'steering'`. The assertion is guarded by `if (messages.length === 0) return;` so the suite stays green when `better-sqlite3` is absent and `BoardStore.read()` returns an empty array — the no-sqlite path is covered by the earlier cases.
+5. **Latest-wins cache.** Two successive `steerSubagent` calls on the same session id — `first guidance` then `second guidance` — MUST leave `getSteeringPrompt` returning `second guidance`.
+6. **Whitespace trim.** `   actually use the staging db   ` MUST post and cache as `actually use the staging db`.
+7. **`clearSteeringPrompt` drops the cache.** After a successful post, `clearSteeringPrompt(subagentId)` MUST make `getSteeringPrompt` return `undefined`.
+
+### TUI smoke tests (`tests/tui/subagent-view.test.tsx`, 135 lines)
+
+The visual contract is pinned with `ink-testing-library` and the project's `ThemeProvider`. A tiny `Capture` helper reads the live `SubagentContextValue` without needing a DOM:
+
+```tsx
+function Capture({ into }: { into: { current: SubagentContextValue | null } }): React.JSX.Element {
+  const ctx = useSubagent();
+  into.current = ctx;
+  return <Text>captured</Text>;
+}
+```
+
+`SubagentView` cases:
+
+- **Default render.** Given `steeringPrompt={null}`, the frame MUST contain the `subagent` header, the id substring, and the output text, but MUST NOT contain `Steering active`.
+- **Steering overlay.** Given a non-whitespace `steeringPrompt` plus a `steeringDeliveredAt`, the frame MUST contain both `Steering active` and the prompt text.
+- **Whitespace suppression.** `steeringPrompt="   "` MUST render identically to the default case (no overlay).
+- **Delivery timestamp.** When `steeringDeliveredAt` is a valid ISO timestamp, the frame still contains the badge and prompt. (The exact `HH:MM:SS` string is locale-dependent and intentionally not asserted on.)
+
+`SubagentProvider` cases:
+
+- **Initial state.** `activeSubagentId`, `steeringPrompt`, and `steeringDeliveredAt` MUST all start as `null`.
+- **Ctrl+S no-op guard.** With `activeSubagentId === null`, `await ctx.steer('focus on tests')` MUST resolve to `false` and MUST NOT mutate `steeringPrompt`.
+
+### Keyboard-hook mock (`tests/cli/tui/useKeyboard.test.tsx`)
+
+`useKeyboard` now consumes `useSubagent`; the suite mocks the new context so the hook can be exercised in isolation without pulling in the real provider:
+
+```tsx
+vi.mock('../../../src/cli/tui/context/SubagentContext.js', () => ({
+  useSubagent: () => ({
+    activeSubagentId: null,
+    steeringPrompt: null,
+    steeringDeliveredAt: null,
+    setActiveSubagent: vi.fn(),
+    steer: vi.fn(() => Promise.resolve(false)),
+    clearSteering: vi.fn(),
+  }),
+  SubagentProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+```
+
+When adding keybindings or hooks that depend on the subagent context, follow the same shape — the mock stays in step with `SubagentContextValue` so a signature drift breaks the compile instead of silently reaching into a stale shape.
+
+### Running
+
+```bash
+npm test -- src/providers/__tests__/catalog-retry.test.ts
+```
+
+## Testing the Skill Frontmatter Cache
+
+The skill frontmatter cache in `src/skill/index.ts` (added in
+`1.22.38`, upstream kilocode port `b0aeda50b`) is covered by
+`src/skill/frontmatter-cache.test.ts` (71 lines, two cases). The
+pattern follows the Vitest tempdir contract used elsewhere in the
+suite:
+
+```ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { loadSkillFromFile, _resetSkillFrontmatterCacheForTests } from './index.js';
+
+describe('skill frontmatter cache', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-skill-cache-'));
+    _resetSkillFrontmatterCacheForTests();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+  // ... cases below
+});
+```
+
+### Case 1 — unchanged file returns the SAME object
+
+Reference equality (`toBe`, not `toEqual`) is the whole point of the
+cache: a second `loadSkillFromFile` on the same path with the same
+`(size, mtimeMs)` MUST return the exact same `Skill` object reference,
+proving the parser was not re-run.
+
+```ts
+it('returns the same Skill instance when the file is unchanged', () => {
+  const file = path.join(tmpDir, 'demo.md');
+  fs.writeFileSync(
+    file,
+    ['---', 'id: demo', 'name: Demo', 'description: cache test', '---', 'hello world'].join('\n')
+  );
+  const first = loadSkillFromFile(file);
+  const second = loadSkillFromFile(file);
+  expect(first).not.toBeNull();
+  // If the parser had run again, we would get a new object.
+  expect(second).toBe(first);
+});
+```
+
+### Case 2 — mtime bump invalidates the cache
+
+Some filesystems collapse rapid successive writes to the same mtime,
+which would make the test flaky if we relied on the implicit mtime
+from `fs.writeFileSync` alone. The test explicitly bumps mtime
+forward 2 seconds with `fs.utimesSync` so the cache invalidation path
+is deterministically exercised:
+
+```ts
+it('re-parses when the file mtime changes', () => {
+  const file = path.join(tmpDir, 'demo.md');
+  fs.writeFileSync(file, ['---', 'id: demo', 'description: v1', '---', 'first version'].join('\n'));
+  const first = loadSkillFromFile(file);
+  expect(first?.description).toBe('v1');
+
+  fs.writeFileSync(file, ['---', 'id: demo', 'description: v2', '---', 'second version'].join('\n'));
+  const future = new Date(Date.now() + 2_000);
+  fs.utimesSync(file, future, future);
+
+  const second = loadSkillFromFile(file);
+  expect(second?.description).toBe('v2');
+  expect(second).not.toBe(first);
+});
+```
+
+### Internal reset seam
+
+`_resetSkillFrontmatterCacheForTests()` is the only observability hook
+on the module-level cache map. It is marked `@internal` and MUST NOT
+be imported from runtime code — tests use it to guarantee a clean
+cache between cases so Case 1 and Case 2 cannot cross-contaminate.
+
+### Running
+
+```bash
+npm test -- src/skill/frontmatter-cache.test.ts
+```
+
+### Running (Subagent Steering)
+
+```bash
+# Data-layer suite
+npm test -- tests/agent/steering.test.ts
+
+# TUI smoke suite
+npm test -- tests/tui/subagent-view.test.tsx
+
+# Keyboard hook (includes the SubagentContext mock)
+npm test -- tests/cli/tui/useKeyboard.test.tsx
 ```

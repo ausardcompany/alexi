@@ -74,6 +74,18 @@ vi.mock('../../../src/cli/tui/context/PageContext.js', () => ({
   }),
 }));
 
+vi.mock('../../../src/cli/tui/context/SubagentContext.js', () => ({
+  useSubagent: () => ({
+    activeSubagentId: null,
+    steeringPrompt: null,
+    steeringDeliveredAt: null,
+    setActiveSubagent: vi.fn(),
+    steer: vi.fn(() => Promise.resolve(false)),
+    clearSteering: vi.fn(),
+  }),
+  SubagentProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+
 vi.mock('../../../src/cli/tui/context/ChatContext.js', () => ({
   useChat: () => ({
     isStreaming: false,

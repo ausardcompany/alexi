@@ -5559,6 +5559,108 @@ Env comparisons are strict-string `=== '1'`; any other value (`'0'`, `'true'`, e
 
 See [CONFIGURATION.md — Experimental Shared Agent Board](CONFIGURATION.md#experimental-shared-agent-board) for the operator-facing enablement guide and [API.md — Shared Agent Board API](API.md#shared-agent-board-api) for the full TypeScript surface.
 
+## Subagent Steering (`src/agent/session.ts`)
+
+Ports upstream kilocode #14702 (`feat(agent): add subagent steering with Ctrl+S prompt injection`, commit `3fb3ef7c`). The parent TUI can now inject a mid-execution prompt into a running subagent without stopping and restarting it. Previously, mid-course corrections required aborting the subagent (which cancelled accumulated tool-call context) and respawning it with a new prompt — burning the parent's `KILO_RETRIES` budget and losing partial progress. Steering writes a tagged message to the shared agent board (the same `kilo_board_message` table used by the swarm coordination tools) that the subagent's next turn reads on its normal polling cycle.
+
+### Data flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant TUI as "TUI (useKeyboard + Dialog)"
+    participant Ctx as "SubagentContext"
+    participant Session as "steerSubagent (src/agent/session.ts)"
+    participant BoardCtx as "BoardContext"
+    participant Store as "BoardStore (SQLite)"
+    participant Sub as "Subagent (next turn)"
+
+    User->>TUI: Ctrl+S
+    TUI->>Ctx: activeSubagentId !== null?
+    alt No active subagent
+        TUI-->>User: no-op (Ctrl+S ignored)
+    else Active subagent
+        TUI->>User: open arg-input dialog ("Steer subagent")
+        User->>TUI: submit prompt text
+        TUI->>Ctx: steer(prompt)
+        Ctx->>Session: steerSubagent(subagentId, prompt)
+        Session->>Session: trim(prompt); return null if empty
+        Session->>BoardCtx: resolve(subagentId)
+        BoardCtx-->>Session: boardId | undefined
+        alt No board attached
+            Session-->>Ctx: null
+            Ctx-->>TUI: false (no visible change)
+        else Board resolved
+            Session->>Store: write({ sessionID, author: "steering", content })
+            Store-->>Session: BoardMessage
+            Session->>Session: steeringState.set(subagentId, trimmed)
+            Session-->>Ctx: SteeringResult
+            Ctx->>Ctx: setSteeringPrompt / setSteeringDeliveredAt
+            Ctx-->>TUI: true (SubagentView renders overlay)
+        end
+    end
+
+    Note over Sub: On the subagent's next turn
+    Sub->>Store: BoardStore.read(boardId, { since })
+    Store-->>Sub: messages (incl. author="steering")
+    Sub->>Sub: incorporate steering prompt into context
+```
+
+### Public surface (`src/agent/session.ts`)
+
+```typescript
+export interface SteeringResult {
+  messageId: string; // Row id in kilo_board_message
+  boardId: string; // Board the message was posted to
+  prompt: string; // Trimmed prompt text
+  deliveredAt: string; // ISO timestamp from BoardMessage.createdAt
+}
+
+export function steerSubagent(
+  subagentSessionId: string,
+  prompt: string
+): Promise<SteeringResult | null>;
+
+export function getSteeringPrompt(subagentSessionId: string): string | undefined;
+export function clearSteeringPrompt(subagentSessionId: string): void;
+
+/** Test-only — not part of the public runtime API. */
+export function __resetSteeringStateForTests(): void;
+```
+
+### Contract
+
+- **Empty-prompt guard.** `steerSubagent(id, '')` and `steerSubagent(id, '   ')` return `null` and touch neither the board nor the in-memory cache. The caller (`SubagentContext.steer`) surfaces this as a `false` return so the TUI can keep the dialog open or render a friendly hint.
+- **No-board fallback.** When `BoardContext.resolve(subagentSessionId)` returns `undefined` — i.e. the swarm feature is disabled, `better-sqlite3` is missing, or the id does not resolve — the helper returns `null` instead of throwing. The parent TUI treats this identically to the empty-prompt case so an idle session cannot accidentally fire a Ctrl+S shortcut into dead state.
+- **Author tag.** The posted `BoardMessage.author` is the fixed string `'steering'`. The subagent's board polling loop filters on this value to distinguish operator steering from peer chatter.
+- **Latest-wins cache.** `steeringState: Map<string, string>` is replaced on every successful post. Callers that need an audit trail must read the board directly via `BoardStore.read(boardId)`; the in-memory cache is a visual-layer convenience only.
+- **Lifetime.** The cache lives for the lifetime of the parent process. `clearSteeringPrompt(id)` is called by the TUI when the `SubagentView` unmounts; `setActiveSubagent(null)` on `SubagentContext` also auto-clears the cached prompt and timestamp (`src/cli/tui/context/SubagentContext.tsx:59-64`).
+
+### TUI integration
+
+The data layer in `src/agent/session.ts` deliberately has no React/Ink dependency. The TUI integration is split across four files:
+
+| File | Role |
+| --- | --- |
+| `src/cli/tui/context/SubagentContext.tsx` | Provider + hook (`useSubagent`) owning `activeSubagentId`, `steeringPrompt`, `steeringDeliveredAt`; exposes `setActiveSubagent`, `steer`, `clearSteering` |
+| `src/cli/tui/hooks/useKeyboard.ts` | Binds `Ctrl+S` → `arg-input` dialog → `subagent.steer(text)`; no-ops when `activeSubagentId === null` |
+| `src/cli/tui/components/SubagentView.tsx` | Renders the subagent with a `colors.info` border; when `steeringPrompt` is set, stacks a `colors.warning`-bordered panel above with a "Steering active" badge and the prompt text |
+| `src/cli/tui/components/StatusBar.tsx` + `src/cli/tui/pages/ChatPage.tsx` | Threads `subagentActive` so the status bar help segment flips to `Ctrl+S: steer subagent` while a subagent is running |
+
+The provider is mounted inside the existing provider stack in `src/cli/tui/App.tsx:421-423`:
+
+```tsx
+<SubagentProvider>
+  <AppLayout />
+</SubagentProvider>
+```
+
+### Interaction with the shared board
+
+Steering is a thin writer on top of the existing [Shared Agent Board](#shared-agent-board-srccoredatabaseboardstorets) primitive — it does not introduce a new storage path or a new polling mechanism. The subagent's existing `kilo_board_read` tool (or the implicit read described in `src/tool/tools/board.ts`) returns the steering message on its next turn alongside any peer chatter. When `getConfigSharedAgentBoard()` returns `false`, `BoardContext.resolve()` resolves to `undefined` and `steerSubagent` degrades to the no-board fallback; the Ctrl+S shortcut remains inert but does not throw.
+
+See [API.md — Subagent Steering API](API.md#subagent-steering-api) for the public surface reference and [TESTING.md — Testing Subagent Steering](TESTING.md#testing-subagent-steering) for the data-layer and TUI smoke-test patterns.
+
 ## PTY Latch (`src/core/kilocode/pty/latch.ts`)
 
 New 1.22.17 module (2026-09-11 upstream sync, ports kilocode `203f19f5d fix(cli): keep PTY output and exit emitted before listeners attach`). A dependency-free primitive that buffers emissions from a short-lived event source until a listener attaches, then flushes the buffer in FIFO order.
