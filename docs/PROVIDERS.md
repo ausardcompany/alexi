@@ -2373,6 +2373,171 @@ const minor = match[2] !== undefined ? Number(match[2]) : 0;
 
 Aligns with upstream kilocode `c554409080..a5aaef74a` (opencode v1.17.13 parity) plus opencode PRs #47384 / #47385 (GPT version comparator) and kilocode #13190 (env-block detection hardening).
 
+### Prompt-Cache Error Recovery (issue #1930)
+
+Prompt caching reduces latency and cost but is a cooperative optimisation layered on top of the normal provider call. When the provider-side cache misbehaves (LRU eviction, invalid breakpoint shape mismatch between the cached prompt and the current one, 422 on the cache endpoint), the user-visible symptom is a generic `prompt cache error` that does NOT reflect a real provider outage — the exact same request without cache markers would succeed.
+
+`src/providers/cache-error.ts` centralises three primitives so the orchestration provider (and any future caller) can distinguish a cache-shaped failure from a true permanent error and degrade gracefully to a cache-free retry:
+
+```typescript
+// src/providers/index.ts (re-exports)
+export {
+  isCacheError,
+  stripOpenAICacheBreakpoints,
+  stripAnthropicCacheControl,
+  withCacheFallback,
+  type AnthropicMessage,
+  type AnthropicContentBlock,
+  type CacheFallbackOptions,
+} from './cache-error.js';
+```
+
+#### Detector contract (`isCacheError`)
+
+```typescript
+export function isCacheError(err: unknown): boolean;
+```
+
+Returns `true` only when the error message or HTTP status strongly suggests a cache-specific failure. Matching rules (any one is sufficient):
+
+1. **Keyword match (case-insensitive substring).** `prompt_cache`, `prompt cache`, `cache_control`, `cache control`, `cache breakpoint`, `cache_breakpoint`, `cache miss`, `cache evicted`, `cache eviction`, `invalid breakpoint`, `invalid_breakpoint`, `invalid cache`, `evicted`.
+2. **HTTP status 422 + cache hint.** Status 422 (walked via `err.status` or `err.response.status`) AND the message mentions `cache` or `breakpoint`. A bare 422 without a cache signal is NOT treated as a cache error — generic validation failures also surface as 422.
+
+Explicitly non-matching, by design (retrying these without cache markers would just burn budget):
+
+- `null` / `undefined` / non-string, non-Error, non-`{message}` shapes
+- Auth: HTTP 401, 403, `Invalid API Key`
+- Rate limit: HTTP 429 without a cache keyword (`rate limit on cache endpoint` on a 429 still returns `false` — the 429 signals a true rate limit, not a cache failure)
+- Model not found: HTTP 404, `Model not found: ...`
+- Network: `ECONNRESET`, `socket hang up`, `request timed out`
+- Generic validation: HTTP 422 without `cache` or `breakpoint` in the message
+
+The keyword path is independent of status: an error carrying `prompt_cache rate limit` with `status: 429` IS treated as cache-shaped, because the explicit `prompt_cache` signal takes precedence over the status.
+
+#### Pure strip helpers
+
+Both helpers are pure (do not mutate the input) and return reference-equal output when no marker was present (optimisation path):
+
+```typescript
+export function stripOpenAICacheBreakpoints(prompt: LanguageModelV2Prompt): LanguageModelV2Prompt;
+
+export function stripAnthropicCacheControl<T extends AnthropicMessage>(messages: T[]): T[];
+```
+
+- `stripOpenAICacheBreakpoints` removes `providerOptions.openai.cacheBreakpoint` while preserving every other OpenAI field (e.g. `parallelToolCalls`) and every other provider namespace (e.g. `providerOptions.anthropic.thinking`). An empty `providerOptions.openai` is retained (not deleted) because consumers may rely on the key presence.
+- `stripAnthropicCacheControl` walks each message and removes BOTH top-level `message.cache_control` and per-content-block `block.cache_control` in a single pass. Anthropic's SDK accepts the marker in both positions. String-shaped `content` is passed through as-is (strings cannot carry cache markers).
+
+#### One-shot fallback composer (`withCacheFallback`)
+
+```typescript
+export interface CacheFallbackOptions<T> {
+  cached: () => Promise<T>;
+  uncached: () => Promise<T>;
+  label?: string;
+  onFallback?: () => void;
+}
+
+export async function withCacheFallback<T>(options: CacheFallbackOptions<T>): Promise<T>;
+```
+
+Semantics:
+
+1. Run `cached()`. On success, return the result verbatim (no fallback, no warning).
+2. On failure, consult `isCacheError(err)`. For non-cache errors, rethrow immediately — this is NOT a general retry loop.
+3. On a cache-shaped error, emit a one-line WARN prefixed with `label` and a remediation hint, run `uncached()` exactly once, invoke the optional `onFallback` observability callback (errors from the callback are swallowed), and return the result.
+4. If `uncached()` also fails, rethrow the ORIGINAL cache error with the fallback error attached as `cause`. This keeps the user-visible error aligned with the true root cause (the cache failure) and the fallback failure available for diagnosability.
+
+The retry budget is capped at ONE additional attempt. `withCacheFallback` is a tactical graceful-degradation hook for a specific permanent-but-recoverable class; `ErrorBackoff` and the workflow-level `KILO_RETRIES` loop handle every other retry decision with their own budgets.
+
+#### Provider integration
+
+`SapOrchestrationProvider.complete()` (`src/providers/sapOrchestration.ts:1749-1772`) and `SapOrchestrationProvider.streamComplete()` (`src/providers/sapOrchestration.ts:1883-1914`) both wrap their initial SDK call in a cache-aware try block:
+
+```typescript
+try {
+  response = await client.chatCompletion({ messages: orchestrationMessages }, requestConfig);
+} catch (err) {
+  if (!isCacheError(err)) {
+    throw err;
+  }
+  // Prompt-cache failure (cache eviction, invalid breakpoint, or a
+  // 422 on the cache endpoint). Retry ONCE with cache markers
+  // stripped from the request. See `./cache-error.ts` for the
+  // detector and the full rationale.
+  logger.warn(
+    `Prompt cache error, retrying without cache (chat ${this.config.modelName}): ` +
+      `${err instanceof Error ? err.message : String(err)}. ` +
+      `Hint: usually a transient cache eviction; if it repeats, ` +
+      `check prompt stability or provider cache status.`
+  );
+  const stripped = stripAnthropicCacheControl(
+    orchestrationMessages as unknown as AnthropicMessage[]
+  ) as unknown as ChatMessage[];
+  response = await client.chatCompletion({ messages: stripped }, requestConfig);
+}
+```
+
+The streaming path mirrors the shape, calling `client.stream(...)` instead. Non-cache errors fall through to the pre-existing `classifyRateLimitError` + `failProviderSpan` path untouched.
+
+#### Call flow
+
+```mermaid
+sequenceDiagram
+    participant App as Caller
+    participant Prov as SapOrchestrationProvider
+    participant Det as isCacheError
+    participant Strip as stripAnthropicCacheControl
+    participant SDK as @sap-ai-sdk/orchestration
+    participant AICore as SAP AI Core
+
+    App->>Prov: complete([{role, content, cache_control}])
+    Prov->>SDK: chatCompletion({messages: withCache})
+    SDK->>AICore: POST /orchestration (cache_control preserved)
+    AICore-->>SDK: HTTP 422 "invalid breakpoint"
+    SDK-->>Prov: throw Error(status=422, message="invalid breakpoint")
+    Prov->>Det: isCacheError(err)
+    Det-->>Prov: true (status 422 + "breakpoint" keyword)
+    Note over Prov: logger.warn("Prompt cache error, retrying without cache...")
+    Prov->>Strip: stripAnthropicCacheControl(messages)
+    Strip-->>Prov: messages without cache_control
+    Prov->>SDK: chatCompletion({messages: stripped})
+    SDK->>AICore: POST /orchestration (no cache markers)
+    AICore-->>SDK: HTTP 200 (normal response)
+    SDK-->>Prov: response
+    Prov-->>App: CompletionResult
+```
+
+Contrast with a non-cache error (e.g. HTTP 401 auth failure):
+
+```mermaid
+sequenceDiagram
+    participant Prov as SapOrchestrationProvider
+    participant Det as isCacheError
+    participant SDK as @sap-ai-sdk/orchestration
+
+    Prov->>SDK: chatCompletion({messages})
+    SDK-->>Prov: throw Error(status=401)
+    Prov->>Det: isCacheError(err)
+    Det-->>Prov: false (no cache keyword, status != 422)
+    Note over Prov: no retry, no warn
+    Prov-->>Prov: rethrow to classifyRateLimitError
+```
+
+#### Interaction with error classification
+
+The one-shot fallback here sits BELOW the transient / permanent split documented in [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix) and in [docs/ARCHITECTURE.md — Error Handling](ARCHITECTURE.md#error-handling):
+
+- A cache-shaped error that recovers via the fallback never surfaces to `ErrorBackoff`, so no transient-retry budget is spent.
+- A cache-shaped error whose fallback ALSO fails rethrows the ORIGINAL error; `classifyRateLimitError` then runs against that original error, and the resulting classification (likely a 422 permanent failure) ends the chain. The outer `KILO_RETRIES` loop will NOT retry it because the regex only matches `socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|502|503|429|rate limit`.
+- A non-cache error (401, 403, 404, 500, network blip) is rethrown unchanged. Whether it is auto-retried depends entirely on the standard transient / permanent regex at the outer layer.
+
+#### Testing
+
+- Unit coverage in `src/providers/__tests__/cache-error.test.ts` pins the detector matrix (positive keyword and HTTP-status cases, negative auth / rate-limit / network cases), the two strip helpers (purity, idempotency, namespace preservation), and the `withCacheFallback` success / cache-fallback / rethrow matrix.
+- Integration coverage in `tests/providers/sapOrchestration-cache-fallback.test.ts` drives both `complete()` and `streamComplete()` through a mocked `@sap-ai-sdk/orchestration` client with injected cache / auth error behaviours and asserts the retry request carries no `cache_control` markers.
+
+See [docs/TESTING.md — Testing Prompt-Cache Error Recovery](TESTING.md#testing-prompt-cache-error-recovery) for the full test pattern.
+
 ## Security
 
 ### Credential Management
