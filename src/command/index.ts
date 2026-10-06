@@ -331,7 +331,12 @@ export function loadCommandFromFile(filePath: string): Command | null {
     // Strip UTF-8 BOM (Windows Notepad "UTF-8 with BOM") so gray-matter
     // sees `---` at byte offset 0. See src/utils/frontmatter.ts.
     const content = readUtf8FileSyncStripBom(filePath);
-    const { data, content: templateContent } = matter(content);
+    // Pass an options object (even empty) to bypass gray-matter's internal
+    // content-keyed cache. Without this, a malformed YAML parse poisons the
+    // cache so that subsequent parses of identical content silently return
+    // stale/empty data (gray-matter writes to the cache BEFORE parsing).
+    // See issue #1945.
+    const { data, content: templateContent } = matter(content, {});
 
     // Parse and validate arguments if present
     let parsedArguments: CommandArgument[] | undefined;

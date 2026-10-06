@@ -10,6 +10,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Test Coverage](#test-coverage)
 - [Testing Tool System](#testing-tool-system)
   - [Testing the `link_pr` Tool](#testing-the-link_pr-tool)
+  - [Testing gray-matter Cache Poisoning Regression (issue #1945)](#testing-gray-matter-cache-poisoning-regression-issue-1945)
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing Compaction](#testing-compaction)
@@ -4048,6 +4049,113 @@ to verify the placeholder strings are not reintroduced.
 > assertions adjusted accordingly) or `registry.ts` is updated to re-export a
 > `tool` symbol pointing at the registered skill tool. See the `Known issues`
 > section in `CHANGELOG.md` for the autohealing follow-up.
+
+### Testing gray-matter Cache Poisoning Regression (issue #1945)
+
+The skill, custom-agent, and slash-command loaders all parse YAML frontmatter
+via the `gray-matter` package. `gray-matter`'s default call signature keeps a
+process-wide, content-keyed cache in `matter.cache` (see
+`node_modules/gray-matter/index.js`). The cache entry is written BEFORE
+`parseMatter` runs, so a malformed-YAML parse that throws still leaves a
+`{ data: {}, content: <raw>, isEmpty: false }` entry behind under that content
+string. The next identical `matter(content)` call returns the poisoned entry
+WITHOUT re-attempting the parse, so the thrown error is permanently swallowed.
+
+Alexi mitigates this by always passing an options object (even `{}`) when
+calling `matter(...)` — any options argument short-circuits the cache lookup
+path. The three touched call sites are:
+
+- `src/skill/index.ts:138` — `loadSkillFromFile`
+- `src/agent/customAgentLoader.ts:107` — `loadAgentFromFile`
+- `src/command/index.ts:338` — `loadCommandFromFile`
+
+The regression suite in `tests/skill/cache-poisoning.test.ts` (177 lines, three
+describe blocks — one per loader) pins the contract that a poisoned cache
+cannot leak into a subsequent load.
+
+#### Test fixtures
+
+The suite declares two string fixtures at module scope so every case parses
+exactly the same byte sequence through `gray-matter`:
+
+```ts
+// tests/skill/cache-poisoning.test.ts
+const MALFORMED_FRONTMATTER = `---
+name: broken-skill
+description: foo: bar
+---
+
+Hello body.
+`;
+
+const VALID_FRONTMATTER = `---
+name: valid-skill
+description: A perfectly fine skill
+---
+
+Hello body.
+`;
+```
+
+The `description: foo: bar` line is the deliberate trigger — the unquoted
+inner colon makes the YAML parse throw. `description: "foo: bar"` would be
+valid; the trailing newline matters because `gray-matter` keys the cache on
+the exact content string.
+
+#### Cache escape hatch pattern
+
+Every describe block clears `gray-matter`'s global cache in both `beforeEach`
+and `afterEach`, so cross-suite test ordering cannot poison or starve the
+cases:
+
+```ts
+beforeEach(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-skill-cache-'));
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+
+afterEach(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+  (matter as unknown as { cache: Record<string, unknown> }).cache = {};
+});
+```
+
+The `(matter as unknown as { cache: Record<string, unknown> }).cache` cast is
+the only sanctioned way to reach into `gray-matter`'s internal state from
+TypeScript — the public API intentionally does not expose the cache. Confine
+this cast to tests; do NOT use it in `src/`.
+
+#### Cases pinned by the suite
+
+1. **Malformed-then-malformed, byte-identical content** (skill loader): write
+   `MALFORMED_FRONTMATTER` to `first.md`, load it (expect `null` from the
+   loader's try/catch), write the same bytes to `second.md`, load it. Without
+   the `matter(content, {})` fix, `gray-matter` would return the cached
+   empty-data entry and `loadSkillFromFile` would happily emit a skill named
+   after the filename with an empty description. With the fix, the second
+   load re-parses, re-throws, and the loader returns `null` again.
+2. **Pre-poisoned cache, valid content** (skill, agent, command loaders —
+   one case each): manually seed `matter.cache[VALID_FRONTMATTER]` with
+   `{ data: {}, content: VALID_FRONTMATTER, isEmpty: false, excerpt: '' }`
+   BEFORE calling the loader. Then write the valid content to disk and load
+   it. Without the fix, the loader would read the empty-data cache entry
+   and produce a skill/agent/command with filename-derived defaults. With
+   the fix, the loader bypasses the cache and resolves the real
+   `name`/`id`/`description`.
+
+#### Running
+
+```bash
+npm test -- tests/skill/cache-poisoning.test.ts
+```
+
+When writing a NEW loader that calls `gray-matter`, always pass an options
+object as the second argument (`matter(content, {})`), add a regression case
+to the matching describe block above, and leave the `matter.cache = {}` reset
+in `beforeEach`/`afterEach`. See `AGENTS.md` for the ESM `.js` suffix
+requirement on the fresh `import` of the loader under test — note how the
+suite imports via `../../src/skill/index.js`, `../../src/agent/customAgentLoader.js`,
+and `../../src/command/index.js`.
 
 ## Testing `sanitizeApiKey` and auth-error rewriting
 
@@ -9034,6 +9142,99 @@ the counter resets between them. If a regression introduces a hidden
 module-level counter, this test fails immediately because the second
 call starts with `attempt = 1` instead of `attempt = 0`.
 
+## Testing Subagent Steering
+
+The subagent-steering feature (commit `3fb3ef7c`, ports upstream kilocode #14702, see [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts)) is tested at two layers: a data-layer suite that exercises `steerSubagent` against the shared board, and a TUI smoke-test suite that pins the visual contract of `SubagentView` and the initial state of `SubagentProvider`.
+
+### Data-layer tests (`tests/agent/steering.test.ts`, 124 lines)
+
+The suite isolates state between cases by resetting three singletons in `beforeEach`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  __resetSteeringStateForTests,
+  clearSteeringPrompt,
+  getSteeringPrompt,
+  steerSubagent,
+} from '../../src/agent/session.js';
+import { BoardStore } from '../../src/core/database/boardStore.js';
+import { BoardContext } from '../../src/core/database/boardContext.js';
+
+beforeEach(() => {
+  __resetSteeringStateForTests();
+  BoardContext.__resetForTests();
+  BoardStore.__resetForTests();
+});
+```
+
+A small id-generator keeps subagent and board ids unique across cases so a stale `BoardContext` attachment cannot leak between them:
+
+```typescript
+let counter = 0;
+function nextIds(): { subagentId: string; boardId: string } {
+  counter += 1;
+  return {
+    subagentId: `session-sub-steering-${Date.now()}-${counter}`,
+    boardId: `board-sub-steering-${Date.now()}-${counter}`,
+  };
+}
+```
+
+Cases locked by the suite:
+
+1. **No board → null.** `steerSubagent('session-with-no-board', 'focus on auth')` MUST return `null` and MUST NOT touch the in-memory cache. Pins the no-board fallback.
+2. **Empty / whitespace prompt → null.** Both `''` and `'    '` MUST return `null` with no cache mutation.
+3. **Successful post caches the latest prompt.** After `BoardContext.attach(subagentId, boardId)` and `BoardStore.ensure(boardId, 'task-steering')`, `steerSubagent(subagentId, 'focus on edge cases')` MUST return a `SteeringResult` whose `prompt` equals the trimmed input and whose `messageId` / `deliveredAt` are typed strings; `getSteeringPrompt(subagentId)` MUST mirror the posted prompt.
+4. **Author tag.** The posted row MUST carry `author: 'steering'`. The assertion is guarded by `if (messages.length === 0) return;` so the suite stays green when `better-sqlite3` is absent and `BoardStore.read()` returns an empty array — the no-sqlite path is covered by the earlier cases.
+5. **Latest-wins cache.** Two successive `steerSubagent` calls on the same session id — `first guidance` then `second guidance` — MUST leave `getSteeringPrompt` returning `second guidance`.
+6. **Whitespace trim.** `   actually use the staging db   ` MUST post and cache as `actually use the staging db`.
+7. **`clearSteeringPrompt` drops the cache.** After a successful post, `clearSteeringPrompt(subagentId)` MUST make `getSteeringPrompt` return `undefined`.
+
+### TUI smoke tests (`tests/tui/subagent-view.test.tsx`, 135 lines)
+
+The visual contract is pinned with `ink-testing-library` and the project's `ThemeProvider`. A tiny `Capture` helper reads the live `SubagentContextValue` without needing a DOM:
+
+```tsx
+function Capture({ into }: { into: { current: SubagentContextValue | null } }): React.JSX.Element {
+  const ctx = useSubagent();
+  into.current = ctx;
+  return <Text>captured</Text>;
+}
+```
+
+`SubagentView` cases:
+
+- **Default render.** Given `steeringPrompt={null}`, the frame MUST contain the `subagent` header, the id substring, and the output text, but MUST NOT contain `Steering active`.
+- **Steering overlay.** Given a non-whitespace `steeringPrompt` plus a `steeringDeliveredAt`, the frame MUST contain both `Steering active` and the prompt text.
+- **Whitespace suppression.** `steeringPrompt="   "` MUST render identically to the default case (no overlay).
+- **Delivery timestamp.** When `steeringDeliveredAt` is a valid ISO timestamp, the frame still contains the badge and prompt. (The exact `HH:MM:SS` string is locale-dependent and intentionally not asserted on.)
+
+`SubagentProvider` cases:
+
+- **Initial state.** `activeSubagentId`, `steeringPrompt`, and `steeringDeliveredAt` MUST all start as `null`.
+- **Ctrl+S no-op guard.** With `activeSubagentId === null`, `await ctx.steer('focus on tests')` MUST resolve to `false` and MUST NOT mutate `steeringPrompt`.
+
+### Keyboard-hook mock (`tests/cli/tui/useKeyboard.test.tsx`)
+
+`useKeyboard` now consumes `useSubagent`; the suite mocks the new context so the hook can be exercised in isolation without pulling in the real provider:
+
+```tsx
+vi.mock('../../../src/cli/tui/context/SubagentContext.js', () => ({
+  useSubagent: () => ({
+    activeSubagentId: null,
+    steeringPrompt: null,
+    steeringDeliveredAt: null,
+    setActiveSubagent: vi.fn(),
+    steer: vi.fn(() => Promise.resolve(false)),
+    clearSteering: vi.fn(),
+  }),
+  SubagentProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
+```
+
+When adding keybindings or hooks that depend on the subagent context, follow the same shape — the mock stays in step with `SubagentContextValue` so a signature drift breaks the compile instead of silently reaching into a stale shape.
+
 ### Running
 
 ```bash
@@ -9128,4 +9329,17 @@ cache between cases so Case 1 and Case 2 cannot cross-contaminate.
 
 ```bash
 npm test -- src/skill/frontmatter-cache.test.ts
+```
+
+### Running (Subagent Steering)
+
+```bash
+# Data-layer suite
+npm test -- tests/agent/steering.test.ts
+
+# TUI smoke suite
+npm test -- tests/tui/subagent-view.test.tsx
+
+# Keyboard hook (includes the SubagentContext mock)
+npm test -- tests/cli/tui/useKeyboard.test.tsx
 ```

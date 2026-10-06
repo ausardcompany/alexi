@@ -1139,6 +1139,54 @@ Ports the pair of upstream fixes opencode `517ee736b` (redacted /
 empty replay guards) and kilocode `3f39a329c` (thinking↔tool-call
 rebind).
 
+### Third-party library caches with hidden invariants (`gray-matter` pattern)
+
+Some commonly used libraries carry a process-wide cache that is NOT clearly
+documented at the call site. The one that bit Alexi hardest is `gray-matter`:
+calling `matter(content)` without an options argument stores the entry in
+`matter.cache` **before** attempting the YAML parse, so a thrown parse leaves
+a stale `{ data: {}, content, isEmpty: false }` entry under the same content
+key. The next identical call returns the poisoned entry WITHOUT re-attempting
+the parse — the throw is silently swallowed and callers see empty frontmatter
+instead of either the real data or a thrown error (issue #1945).
+
+The three places that call `matter()` in Alexi are now written as:
+
+```ts
+// src/skill/index.ts, src/agent/customAgentLoader.ts, src/command/index.ts
+import matter from 'gray-matter';
+
+// Pass an options object (even empty) to bypass gray-matter's internal
+// content-keyed cache. Without this, a malformed YAML parse poisons the
+// cache so that subsequent parses of identical content silently return
+// stale/empty data (gray-matter writes to the cache BEFORE parsing).
+// See issue #1945.
+const { data, content: promptContent } = matter(content, {});
+```
+
+Rules that generalise beyond `gray-matter`:
+
+1. **Audit every third-party helper for a process-wide cache.** Grep the
+   package's `index.js` for `cache[`, `WeakMap`, or `Map`. If a cache is
+   written BEFORE the operation it is caching, a throw during that
+   operation leaves a poisoned entry.
+2. **Pick the smallest cache-bypass that works.** For `gray-matter` an
+   empty options object is enough; the library's cache lookup is
+   `arguments.length === 1`-gated. Do NOT reach into `matter.cache` from
+   production code — the cast required is `(matter as unknown as { cache:
+   Record<string, unknown> }).cache` and should be confined to tests.
+3. **Pin the fix with a regression test that pre-seeds the poisoned
+   state.** See `tests/skill/cache-poisoning.test.ts` for the pattern:
+   write to `matter.cache[content]` directly in `beforeEach`, then load
+   the file and assert the loader read the real frontmatter. Clear
+   `matter.cache` in both `beforeEach` AND `afterEach` so cross-suite
+   ordering cannot interfere.
+4. **Do not swallow the real error.** The three loaders catch a thrown
+   parse and return `null` with a `console.warn`; that is intentional
+   (one bad file in a skills directory should not take down the TUI
+   boot) but relies on the cache-bypass fix above so the second call
+   observes the SAME throw rather than a silent empty.
+
 ### Per-call detectors (preferred over module-scoped counters)
 
 When a feature needs to observe a rolling condition across an agent's tool
@@ -1898,6 +1946,8 @@ graph LR
 Sync commits follow the pattern `feat(sync): apply upstream changes (YYYY-MM-DD)` followed by a `style(ci): auto-fix lint/format issues [alexi-bot]` commit if formatting adjustments are needed. On quiet upstream days (no new commits on any tracked upstream in the 24h window since the previous sync), the sync commit may be a version-only bump paired with a timestamp-refresh in `.github/last-sync-commits.json` — no runtime, config, tool, provider, or TUI surface is modified. The 2026-08-24 sync (commit `c9e6fa10`, `1.21.6` → `1.21.7`) is the canonical example: `opencode` advanced (`3a31c4ea` → `41616958`) while `kilocode` (`ff74e2ea`) and `claude-code` (`45bdfa96`) held steady, and no `.ts` files were modified. When reviewing a sync PR, verify against `git diff --stat` — if only `package.json` (version field) and `.github/last-sync-commits.json` (timestamps + optional commit hashes) are touched, no CHANGELOG surface additions are expected beyond the paired `### Changed` sync-tracking entry.
 
 Most recent worked example of the low-touch sync shape, 2026-09-13, commit `e367030a` (`feat(sync): apply upstream changes (2026-09-13)`, `1.22.18` → `1.22.19`): a single-file `.github/last-sync-commits.json` refresh where `claude-code` advanced (`df52d04a` → `b5932767`) while `kilocode` (`c36e2263`) and `opencode` (`95daf906`) held steady. The sync commit itself modified only `.github/last-sync-commits.json`, `package.json` (version field), and the `.github/prompts/` + `.github/reports/` planner/executor artefacts — zero `.ts` files under `src/` or `tests/`. Runtime feature work landed independently earlier in the cycle (OTLP tracing relay in commit `486cbe03`, `KILO_*` env-flag enable path for the shared agent board in commit `4c20df6b`); the `1.22.19` version bump captures both under a single `### Changed` sync-tracking entry in `CHANGELOG.md`. When reviewing similar low-touch sync PRs, the invariant is: no source or test file changed, no dependency added or removed in `package.json`, and the paired CHANGELOG entry describes only the upstream tracking refresh — never invent surface additions that the diff does not support.
+
+Third worked example — the `claude-code`-only quiet variant — 2026-10-04, commit `81e85574` (`feat(sync): apply upstream changes (2026-10-04)`, `1.22.37` → `1.22.38`): `kilocode` (`76bcfd40b`) and `opencode` (`907b3bc`) held steady while only `claude-code` advanced (`1c229fcd1e1e4e452e29a8f116b45fe4cfe2c528` → `2bfb629dfaff0c8318047a4beb93cf1dc5b58b18`) and the planner determined the incoming claude-code commits were not portable to Alexi's tracked surface areas (`src/tool/`, `src/agent/`, `src/permission/`, `src/bus/`, `src/core/`, `src/providers/`, `src/router/`, `src/cli/`). The sync commit modified exactly two files — `.github/last-sync-commits.json` (three `last_synced_at` timestamps refreshed to `2026-10-04T11:54:21Z`, one `last_synced_commit` SHA advanced for `claude-code`, `metadata.workflow_run` updated from `37118929883` to `37200189248`) and `package.json` (version field only) — for aggregate `2 files changed, 6 insertions(+), 6 deletions(-)`. Zero `.ts` files, zero dependency additions, zero new configuration surfaces, no new tools, no new CLI subcommands, no new environment variables, no new permissions, no new MCP servers, no new routing-config fields. The paired `.github/reports/changes-summary.md` from the executor explicitly documents the no-op outcome, enumerates each tracked category (`Tool System`, `Agent System`, `Permission System`, `Event Bus`, `Core`, `Other`) as "no changes", and flags two upstream-tooling observability concerns (identical before/after SHAs on kilocode/opencode as a stale-sync-risk signal; claude-code reporting-gap diagnostic) that are NOT actionable from the executor's side. The correct CHANGELOG disposition for this shape is identical to the 2026-09-27 example: a single `### Changed` sync-watermark entry inside `[Unreleased]`, no new `## [1.22.38]` dated section, and no fabricated `### Added` / `### Fixed` entries. When the executor's own `changes-summary.md` reports "Zero changes applied" with `Priority Breakdown` showing `0` across Critical/High/Medium/Low, the paired CHANGELOG entry MUST reflect that no-op outcome — do not infer surface additions from the planner's "potential ports" list that the executor explicitly skipped. Verify by inspecting `git show --stat <sync-commit>` and `.github/reports/changes-summary.md` together: the former gives the mechanical file list, the latter gives the planner/executor rationale for why nothing from the upstream delta was ported.
 
 Second worked example — with two-of-three upstreams advancing — 2026-09-27, commit `d3b6b912` (`feat(sync): apply upstream changes (2026-09-27)`, `1.22.30` → `1.22.31`): `kilocode` advanced (`c2677947` → `7d977bce`) and `opencode` advanced (`696f41bc` → `b471c2b4`) while `claude-code` (`7779afb1`) held steady. The sync commit modified exactly two files — `.github/last-sync-commits.json` (three `last_synced_at` timestamps refreshed to `2026-09-27T11:34:27Z`, two `last_synced_commit` SHAs advanced, `metadata.workflow_run` updated from `36237263991` to `36316046256`) and `package.json` (version field only) — for aggregate `2 files changed, 7 insertions(+), 7 deletions(-)`. Zero `.ts` files, zero dependency additions, zero new configuration surfaces, no new tools, no new CLI subcommands. The paired planning brief (commit `c96c7a5c` `docs(ci): planning brief 2026-09-27 [alexi-bot]`) captures the two-stage planner/executor artefacts under `.github/prompts/` and `.github/reports/` for audit but touches no runtime surface either. When reviewing a `2 files changed` sync PR of this exact shape, the correct CHANGELOG disposition is a single `### Changed` version-bump entry plus a paired sync-watermark entry inside `[Unreleased]` — never a new `## [1.22.31]` dated section (Alexi accumulates version bumps inside `[Unreleased]` until a genuine feature release cuts a dated section) and never a new `### Added` or `### Fixed` entry for a port that the diff does not contain. If the incoming sync PR touches ANY file beyond `.github/last-sync-commits.json` and `package.json`, it is no longer a low-touch sync and must be reviewed against the per-file `### Added` / `### Changed` / `### Fixed` requirements documented elsewhere in this file.
 
@@ -2919,6 +2969,19 @@ Invariants for anyone touching this file:
 - **Resolution order is contractual.** The four fallback paths — `canonical_model_id`, `modelID in models`, `"<providerID>/<modelID>" in models`, else skip — are ordered from most-specific to least-specific. Reordering them silently reclassifies existing offerings and breaks per-lab spend reports. If you MUST change the order, land the change with a diff of the resulting `offerings` map on the current models.dev snapshot.
 - **`-free$` / `-preview$` suffix stripping is byte-for-byte from upstream.** Do not extend the regex casually — adding a new suffix (`-beta`, `-experimental`) is not "just one more rule", it silently merges what used to be two candidate labs and can now drop an unambiguous name from `models`.
 - **Malformed rows are skipped, not thrown.** A single corrupt per-model entry should not tank the whole resolution. Keep the inline `record(...)` guards.
+
+## Subagent Steering (`src/agent/session.ts`)
+
+Steering is the data layer behind the TUI's Ctrl+S shortcut that injects a mid-execution prompt into a running subagent (commit `3fb3ef7c`, ports upstream kilocode #14702). References: [ARCHITECTURE.md — Subagent Steering](ARCHITECTURE.md#subagent-steering-srcagentsessionts), [API.md — Subagent Steering API](API.md#subagent-steering-api), [TESTING.md — Testing Subagent Steering](TESTING.md#testing-subagent-steering).
+
+- **Keep the data layer free of React.** `src/agent/session.ts` must not import from `src/cli/tui/**`. The provider (`SubagentContext.tsx`) is the only module that bridges the two — if a future enhancement needs richer state in `steerSubagent`, surface it as a plain-object return, not a hook-shaped callback.
+- **`steerSubagent` must never throw.** It mirrors the "board writes never throw" contract documented against `BoardStore.write`. Degrade to a `null` return for all four failure modes: empty / whitespace prompt, no attached board, missing subagent id, missing better-sqlite3 binding. The caller surfaces the uniform `false` to the TUI.
+- **Author tag is a constant.** The posted `BoardMessage.author` MUST be the literal string `'steering'`. The subagent's polling loop filters on this value; renaming it silently drops every injected prompt. A regression test in `tests/agent/steering.test.ts:73-90` pins this invariant.
+- **Latest-wins cache is intentional.** `steeringState` is a `Map<string, string>` of session id → latest prompt. Callers that want an audit trail must read the board directly via `BoardStore.read(boardId)`. Do not grow the cache into a list — the TUI only needs the current steering context and the audit trail already lives in SQLite.
+- **Lifetime: parent process only.** `__resetSteeringStateForTests()` is the only sanctioned way to drain the map outside normal operation. `clearSteeringPrompt(id)` is the per-subagent cleanup the TUI calls when the view unmounts and when `setActiveSubagent(null)` fires.
+- **Keybinding guard.** `useKeyboard` must return early for Ctrl+S when `subagent.activeSubagentId === null` so idle sessions do not open the `arg-input` dialog. The guard also prevents the `arg-input` dialog from racing with other handlers in leader mode. A smoke test (`tests/tui/subagent-view.test.tsx:121-134`) pins the no-op invariant via `SubagentContext.steer(...)` returning `false`.
+- **`StatusBar.subagentActive` prop drives discoverability.** When adding a new mid-session shortcut, follow the same pattern: a boolean prop threaded through `ChatPage` that flips the help segment while the context applies, plus a `getHelpEntries()` entry gated on a matching `condition` string. Avoid introducing fresh ad-hoc global state.
+- **Mock the context, not the data layer, in `useKeyboard` tests.** `tests/cli/tui/useKeyboard.test.tsx` mocks `SubagentContext` at the module boundary so changes to `steerSubagent`'s shape do not force a cascade of keyboard-test rewrites. When adding new context consumers to `useKeyboard`, extend the mock with the new fields instead of pulling in the real provider.
 
 ## License
 
