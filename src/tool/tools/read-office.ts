@@ -117,7 +117,7 @@ export function formatXlsxCell(value: XlsxCell | undefined): string {
     const format = code.replace(/"[^"]*"|\\.|\[[^\]]*\]/g, '');
     const timeOnly =
       /\[(h+|m+|s+)\]/i.test(code) || (!/[dy]/i.test(format) && /[hs]/i.test(format));
-    if (value.z != null && timeOnly) {
+    if (value.z !== null && value.z !== undefined && timeOnly) {
       return value.w ?? iso.slice(11, 19);
     }
     if (iso.endsWith('T00:00:00.000Z')) {
