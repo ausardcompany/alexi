@@ -145,6 +145,7 @@ export function ChatPage({
           onSubmit={onSubmit}
           isFocused={!leaderActive && !dialogIsOpen}
           commands={commands}
+          sessionId={sessionId}
         />
       </Box>
 

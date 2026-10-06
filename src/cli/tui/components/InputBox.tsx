@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 
 import type { InputBoxProps } from '../types/props.js';
@@ -7,6 +7,7 @@ import { useClipboardImage } from '../hooks/useClipboardImage.js';
 import { useAttachments } from '../context/AttachmentContext.js';
 import { useTheme } from '../context/ThemeContext.js';
 import { AttachmentBar } from './AttachmentBar.js';
+import { getDraftCache } from '../../../session/draft.js';
 // Local fork of `ink-text-input` with Home/End cursor navigation support.
 // See ControlledTextInput.tsx for the rationale (upstream v6.0.0 does not
 // expose a cursor setter, so we cannot patch Home/End from the outside).
@@ -61,11 +62,26 @@ export function InputBox({
   onSubmit,
   isFocused,
   commands = [],
+  sessionId,
 }: InputBoxProps): React.JSX.Element {
   const {
     theme: { colors },
   } = useTheme();
-  const [value, setValue] = useState('');
+  // Seed the initial value from the draft cache so a draft that was saved
+  // before the InputBox mounted (e.g. during an ongoing session switch) is
+  // restored on first paint without an extra render.
+  const [value, setValue] = useState<string>(() => {
+    if (!sessionId) {
+      return '';
+    }
+    return getDraftCache().get(sessionId) ?? '';
+  });
+
+  // Track the last session id we were showing a draft for so a session
+  // switch can save the current draft under the OLD id and restore the
+  // draft (if any) saved under the NEW id. We initialize to the current
+  // sessionId to avoid a spurious save-under-undefined on first render.
+  const lastSessionIdRef = useRef<string | undefined>(sessionId);
   // history[0] = oldest, history[history.length-1] = newest
   const [history, setHistory] = useState<string[]>([]);
   // historyIndex: -1 = current (not in history), >= 0 = navigating history
@@ -79,6 +95,52 @@ export function InputBox({
   // submissions that fire within MOUNT_DEBOUNCE_MS of mount (e.g. stray keys
   // delivered to a freshly remounted TextInput after a dialog transition).
   const mountTimeRef = useRef<number>(Date.now());
+
+  // Mirror the current `value` into a ref so the session-switch effect
+  // (which fires only when `sessionId` changes) can read the latest draft
+  // without re-subscribing on every keystroke.
+  const valueRef = useRef<string>(value);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+
+  // Session switch wiring: when the sessionId prop changes, save the
+  // in-progress draft under the previous session id (empty / whitespace
+  // drafts are evicted automatically by DraftCache.set) and restore any
+  // draft previously stashed under the new session id. On unmount we
+  // persist the current draft so a later remount for the same session
+  // picks it up again — this matches the upstream kilocode draft contract.
+  useEffect(() => {
+    const previousSessionId = lastSessionIdRef.current;
+    const cache = getDraftCache();
+
+    if (previousSessionId !== sessionId) {
+      // Save the draft that belonged to the previous session before
+      // we overwrite the InputBox state with the new session's draft.
+      if (previousSessionId) {
+        cache.set(previousSessionId, valueRef.current);
+      }
+      // Restore the draft stored for the new session (if any). When no
+      // draft is cached, clear the input so stale text from the previous
+      // session does not leak across the switch.
+      const restored = sessionId ? (cache.get(sessionId) ?? '') : '';
+      setValue(restored);
+      setHistoryIndex(-1);
+      savedInputRef.current = '';
+      setSelectedSuggestion(-1);
+      lastSessionIdRef.current = sessionId;
+    }
+
+    return () => {
+      // Persist the current draft on unmount so a remount for the same
+      // session (e.g. after a dialog overlay closes) restores it. The
+      // DraftCache evicts empty / whitespace values automatically.
+      const current = lastSessionIdRef.current;
+      if (current) {
+        cache.set(current, valueRef.current);
+      }
+    };
+  }, [sessionId]);
 
   // Clipboard image paste (Ctrl+V interception)
   useClipboardImage({ enabled: isFocused && !disabled });
@@ -234,9 +296,16 @@ export function InputBox({
           setHistoryIndex(-1);
           savedInputRef.current = '';
         }
+        // Mirror every keystroke into the per-session draft cache. Empty
+        // / whitespace-only values are evicted by DraftCache.set, so an
+        // in-progress draft survives a session switch but a cleared box
+        // does not resurrect itself after a round trip.
+        if (sessionId) {
+          getDraftCache().set(sessionId, val);
+        }
       }
     },
-    [disabled, historyIndex]
+    [disabled, historyIndex, sessionId]
   );
 
   const handleSubmit = useCallback(
@@ -276,9 +345,15 @@ export function InputBox({
       savedInputRef.current = '';
       setValue('');
       setSelectedSuggestion(-1);
+      // Promote the draft to a real submission: evict the cached draft
+      // for this session (DraftCache.promote drops the entry even when
+      // the promotion is a no-op, matching the upstream kilocode fix).
+      if (sessionId) {
+        getDraftCache().promote(sessionId, trimmed);
+      }
       onSubmit(trimmed);
     },
-    [disabled, onSubmit, selectedSuggestion, suggestions]
+    [disabled, onSubmit, selectedSuggestion, suggestions, sessionId]
   );
 
   if (disabled) {
