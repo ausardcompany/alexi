@@ -34,6 +34,19 @@ export interface RetryOptions {
    * need deterministic timing.
    */
   jitter?: boolean;
+  /**
+   * Called BEFORE the backoff sleep whenever an attempt fails with a
+   * retryable error. The hook is awaited so callers can finalize
+   * in-flight state (notably reasoning blocks — see
+   * `./reasoning-finalize.ts`) before the next attempt opens a fresh
+   * stream.
+   *
+   * Receives the 0-indexed attempt number that just failed and the
+   * error that triggered the retry. Errors thrown from `onRetry` are
+   * swallowed with a warning so cleanup failures never mask the
+   * underlying transient error.
+   */
+  onRetry?: (attempt: number, error: unknown) => void | Promise<void>;
 }
 
 /**
@@ -72,6 +85,22 @@ export async function withRetry<T>(
       lastErr = err;
       if (!shouldRetry(err) || attempt === max - 1) {
         throw err;
+      }
+      // Finalize any in-flight reasoning / stream state before the
+      // next attempt opens a fresh stream. Ports kilocode `54eacd5ff`:
+      // without this hook, retried streams concatenate the retried
+      // turn's reasoning onto a stale half-finished block.
+      if (opts.onRetry) {
+        try {
+          await opts.onRetry(attempt, err);
+        } catch (hookErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[alexi] retry onRetry hook failed (${
+              hookErr instanceof Error ? hookErr.message : String(hookErr)
+            }); continuing with retry`
+          );
+        }
       }
       await new Promise((r) => setTimeout(r, computeDelay(attempt, opts)));
     }
