@@ -3493,6 +3493,40 @@ Contract pinned by `src/providers/provider.test.ts` (six cases):
 
 The wrapper is a plain function, so it can be dropped into any SDK that accepts a custom `fetch` implementation.
 
+## Reasoning Finalize on Stream Retry
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `54eacd5ff`). SAP AI Core streams through the orchestration provider routinely surface transient failures on reasoning-heavy models (socket hang up, premature close, ETIMEDOUT). The shared `withRetry` wrapper in `src/core/session/retry.ts` now carries an optional `onRetry(attempt, error)` hook that is awaited BEFORE the backoff sleep, so a caller can finalize any in-flight reasoning / thinking block before the next attempt opens a fresh stream.
+
+```mermaid
+sequenceDiagram
+    participant Provider as SapOrchestrationProvider.streamComplete
+    participant Retry as withRetry
+    participant State as ReasoningStreamState
+    participant SAP as SAP AI Core
+
+    Provider->>Retry: fn, isNetworkRetryable, { onRetry }
+    Retry->>SAP: attempt 0 (open stream)
+    SAP-->>Retry: reasoning chunks (append to state.buffer)
+    SAP-->>Retry: ECONNRESET (truncated)
+    Retry->>Retry: isNetworkRetryable(err) === true
+    Retry->>State: onRetry(0, err) -> finalizeReasoningBeforeRetry
+    State->>State: emit terminal reasoning part<br/>clear buffer, set finalized=true
+    Retry->>Retry: sleep(computeDelay(0))
+    Retry->>SAP: attempt 1 (fresh stream, clean state)
+    SAP-->>Retry: completes
+    Retry-->>Provider: result
+```
+
+### Why it matters for SAP AI Core
+
+Without the hook, retried streams concatenate the retried turn's reasoning onto the stale half-finished block, producing corrupted output. The classifier that decides whether to retry stays in `src/core/session/retry.ts::isNetworkRetryable`; the finalizer stays in `src/core/session/reasoning-finalize.ts`; the two are composed only at the call site. SAP AI Core's orchestration transport runs through the same shared retry wrapper so every reasoning-aware call site gets the fix with a one-line `onRetry` opt-in — see [API.md — Reasoning Finalize API](API.md#reasoning-finalize-api) for the example.
+
+### Error-shape contract
+
+- Non-network errors (auth, validation, HTTP 4xx) are still permanent and skip the retry — the `onRetry` hook never fires for them. [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix) remains authoritative.
+- A thrown `finalize()` is swallowed with a warning. The retry proceeds because a failed cleanup emit must never turn a recoverable transient into a permanent failure.
+- Hook errors thrown out of `onRetry` itself are also swallowed with a warning for the same reason.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

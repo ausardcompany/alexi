@@ -6894,3 +6894,130 @@ The helper is intentionally decoupled from Alexi's static catalog: it consumes a
 
 `catalogIdentity` is separate from `src/core/costTracker.ts` — the tracker records per-call `UsageRecord`s keyed by the raw `provider/model` string, and cross-provider lab aggregation is a downstream concern that consumes the offering-to-lab map. This keeps the tracker's write path zero-dependency and defers the (potentially expensive) catalog resolution to the report layer.
 
+## MCP Auth-Failure Classification (`src/mcp/auth-failure.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `21ed2b9e` + `c9632e495` "consolidate MCP OAuth in core"). Pure classifier that narrows an unknown MCP error — produced by a third-party OAuth-protected MCP server such as GitHub, Linear, or any registered tool server — into a structured `McpAuthFailure` record. Alexi's SAP AI Core transport does not use OAuth; this surface is only exercised when an operator wires an OAuth-protected MCP server into Alexi's MCP client.
+
+### Design
+
+- **Classification-only.** The module is zero-side-effect: it inspects an error, extracts status + headers via best-effort reflection, and returns either an `McpAuthFailure` record or `null`. It never retries, never calls out, never mutates state.
+- **Transport-agnostic.** Supports every error shape we see in practice — axios, undici, native fetch `Response` — via a layered status probe (`error.status`, `error.statusCode`, `error.response.status`, `error.cause.status`, plus a conservative `/\b(4\d{2})\b/` message fallback). No dependency on any specific HTTP client.
+- **Permanent-only.** 401 and 403 are both permanent per [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix). The retry contract (`src/core/error-backoff.ts`, `src/core/session/retry.ts`, workflow `KILO_RETRIES`) stays authoritative; the classifier flips the error class so the retry predicate skips without a status re-check.
+
+### Classification matrix
+
+```mermaid
+flowchart TD
+    Err[Unknown error from MCP connect / tool call] --> Status{extractHttpStatus}
+    Status -->|undefined| Null[return null]
+    Status -->|401| WWWAuth{WWW-Authenticate matches /oauth|bearer/i?}
+    WWWAuth -->|yes| OAuthReq[kind: 'oauth-required'<br/>message: 'requires OAuth sign-in']
+    WWWAuth -->|no| Expired[kind: 'token-expired'<br/>message: 'token expired or invalid']
+    Status -->|403| Forbid[kind: 'forbidden'<br/>message: 'denied access check scopes']
+    Status -->|other| Null
+```
+
+### Public surface
+
+| Export                                                                            | Purpose                                                                        |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `classifyAuthFailure(serverId, error): McpAuthFailure \| null`                    | Returns a structured failure or `null`. Null means "not an auth error".        |
+| `extractHttpStatus(error): number \| undefined`                                   | Narrow a cross-shape HTTP status; `undefined` when no status can be extracted. |
+| `extractHeader(error, name): string \| undefined`                                 | Case-insensitive header lookup; supports `Headers`-like `.get(name)` objects.  |
+| `McpAuthError extends Error`                                                      | Throwable subclass pinning the structured failure on `.failure`.               |
+| Types `McpAuthFailure`, `McpAuthFailureKind` (`'oauth-required' \| 'token-expired' \| 'forbidden' \| 'unknown-auth'`) | TypeScript surface. |
+
+See [API.md — MCP Auth-Failure API](API.md#mcp-auth-failure-api) for the TypeScript signatures.
+
+## MCP Runtime-Status Registry (`src/mcp/registry.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `c58468b1c` + `d395d0314`). In-memory registry of `connected` / `signed-in` / `failed` status entries keyed by `${scope}::${serverId}`. Prevents misleading status entries from lingering after a server is removed from `mcp-servers.json`, with scope-aware purge so cross-scope same-name entries are preserved on uninstall.
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant CLI as alexi mcp install
+    participant Client as McpClientManager
+    participant Registry as src/mcp/registry.ts
+    participant Remove as alexi mcp remove
+
+    CLI->>Client: connect(serverId, user-scope)
+    Client->>Registry: setMcpStatus({serverId, ownerScope: 'user', state: 'connecting'})
+    Client->>Registry: setMcpStatus({..., state: 'connected'})
+    Note over Registry: entry cached at<br/>key = 'user::serverId'
+
+    Remove->>Registry: uninstallMcpServer(serverId, 'user')
+    Registry-->>Remove: 1 (removed)
+    Note over Registry: entry at 'user::serverId' deleted;<br/>'project::serverId' preserved
+```
+
+### Scope semantics
+
+Alexi is single-scope today (user-only, `~/.alexi/mcp-servers.json`). The `McpScope` enum (`'user' | 'project'`) is still exposed so a future project-scope rollout (`.alexi/mcp-servers.json` next to the current working directory) can distinguish entries without a schema migration. `uninstallMcpServer(serverId, scope)` purges ONLY entries whose `ownerScope === scope` — this is the regression the upstream fix pins: a `user`-scope uninstall must NOT delete a same-named project-scope entry.
+
+See [API.md — MCP Runtime-Status Registry API](API.md#mcp-runtime-status-registry-api) for the exported surface.
+
+## Reasoning-Finalize on Stream Retry (`src/core/session/reasoning-finalize.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `54eacd5ff` "finalize reasoning before stream retries"). Fixes a corruption bug on reasoning-heavy SAP AI Core models: when a stream retried after a transient failure, in-flight `thinking` / reasoning tokens on the dropped stream were previously carried into the retried turn, producing concatenated-reasoning output. The fix emits the terminal reasoning part BEFORE the next stream opens.
+
+### Retry flow
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant withRetry as withRetry (session/retry.ts)
+    participant Finalize as finalizeReasoningBeforeRetry
+    participant Stream as SAP AI Core stream
+
+    Caller->>withRetry: fn, isNetworkRetryable, { onRetry }
+    withRetry->>Stream: attempt 0 (opens stream)
+    Stream-->>withRetry: emits reasoning tokens (buffered on state)
+    Stream-->>withRetry: ECONNRESET
+    withRetry->>withRetry: isNetworkRetryable(err) === true
+    withRetry->>Finalize: onRetry(attempt=0, err)
+    Finalize->>Finalize: state.finalize() -> emit terminal reasoning part
+    Finalize->>Finalize: state.buffer = ''; state.finalized = true
+    withRetry->>withRetry: sleep(computeDelay(0))
+    withRetry->>Stream: attempt 1 (fresh stream, clean state)
+    Stream-->>withRetry: completes
+    withRetry-->>Caller: result
+```
+
+### Contract points
+
+- **`finalizeReasoningBeforeRetry(state)` is safe to call unconditionally.** A `null` / `undefined` state, an already-finalized state, or an empty-buffer state is a no-op. The buffer-empty case still sets `finalized: true` so a stray late reasoning token cannot reopen the block after a retry starts.
+- **Finalization failures do not block retry.** A thrown `finalize()` is caught and logged at warn level; the retry proceeds. The alternative — bailing out on a cleanup failure — would turn a recoverable transient into a permanent one.
+- **The retry hook is awaited.** `withRetry.onRetry` is `await`ed before the backoff sleep so the next attempt opens a fresh stream against a clean state. Hook errors are swallowed with a warning so cleanup failures never mask the underlying transient error.
+- **Callers wire the hook explicitly.** `withRetry` does not depend on the reasoning module; call sites that stream reasoning pass `onRetry: (attempt, err) => finalizeReasoningBeforeRetry(reasoningState)`. The hook is optional so non-streaming retries (e.g. `withCatalogRetry`) stay unaffected.
+
+See [API.md — Reasoning Finalize API](API.md#reasoning-finalize-api) for the exported types and [TESTING.md — Testing Reasoning Finalize on Retry](TESTING.md#testing-reasoning-finalize-on-retry) for the regression suite.
+
+## XLSX Time + Datetime Cell Fidelity (`src/tool/tools/read-office.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports upstream kilocode xlsx-reader fixes). Fixes two precision bugs in the `read` tool's XLSX extractor so SAP operators can import spreadsheets with timestamps without losing precision.
+
+### Bugs fixed
+
+1. **Floating-point error in time parsing.** SheetJS parsed `14:05` as a `Date` whose epoch was `14:04:59.999`. The extractor now rounds to the nearest second via `new Date(Math.round(value.v.getTime() / 1000) * 1000)` before producing the ISO string.
+2. **Over-aggressive date-only flattening.** The previous extractor sliced every date cell to `iso.slice(0, 10)` (`YYYY-MM-DD`), losing the time component for datetime and time-only cells.
+
+### Classification
+
+`xlsx.readFile(path, { cellDates: true, cellNF: true })` now also captures the per-cell number format code `z`. The format code is stripped of quoted text, escaped characters, and bracketed modifiers, then classified against two regexes:
+
+- Elapsed-time format (`[h]:mm:ss`, `[m]:ss`, `[s]`): `/\[(h+|m+|s+)\]/i.test(code)`
+- Wall-clock time-only (no date components, has time components): `!/[dy]/i.test(format) && /[hs]/i.test(format)`
+
+Classification table:
+
+| Cell shape                   | Example format `z`    | Return                                                     |
+| ---------------------------- | --------------------- | ---------------------------------------------------------- |
+| Time-only                    | `h:mm`, `[h]:mm:ss`   | `value.w` (sheet-formatted) or `HH:MM:SS` from the ISO     |
+| Date-only (ISO midnight)     | `yyyy-mm-dd`          | `YYYY-MM-DD` (unchanged behaviour for backwards compat)    |
+| Datetime                     | `yyyy-mm-dd hh:mm`    | `YYYY-MM-DD HH:MM:SS` (space-separated per upstream)       |
+| Hyperlink                    | n/a                   | `${value.w ?? String(value.v)} (${value.l.Target})`        |
+
+The 25 MB file cap (`MAX_FILE_BYTES`) and 5,000-row per-sheet cap (`MAX_ROWS_PER_SHEET`) are unchanged. See [TESTING.md — Testing XLSX Cell Fidelity](TESTING.md#testing-xlsx-cell-fidelity) for the four regression cases that pin the shapes.
+

@@ -3055,6 +3055,46 @@ Steering is the data layer behind the TUI's Ctrl+S shortcut that injects a mid-e
 - **`StatusBar.subagentActive` prop drives discoverability.** When adding a new mid-session shortcut, follow the same pattern: a boolean prop threaded through `ChatPage` that flips the help segment while the context applies, plus a `getHelpEntries()` entry gated on a matching `condition` string. Avoid introducing fresh ad-hoc global state.
 - **Mock the context, not the data layer, in `useKeyboard` tests.** `tests/cli/tui/useKeyboard.test.tsx` mocks `SubagentContext` at the module boundary so changes to `steerSubagent`'s shape do not force a cascade of keyboard-test rewrites. When adding new context consumers to `useKeyboard`, extend the mock with the new fields instead of pulling in the real provider.
 
+## MCP Auth-Failure Classification (`src/mcp/auth-failure.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `21ed2b9e` + `c9632e495`). The classifier is a pure function with no side effects; keep it that way. References: [ARCHITECTURE.md — MCP Auth-Failure Classification](ARCHITECTURE.md#mcp-auth-failure-classification-srcmcpauth-failurets), [API.md — MCP Auth-Failure API](API.md#mcp-auth-failure-api), [TESTING.md — Testing MCP Auth-Failure Classification](TESTING.md#testing-mcp-auth-failure-classification).
+
+- **Do not add retry logic here.** 401 and 403 are both permanent per [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix). The classifier flips the error class so the retry predicate skips without a status re-check. If a new auth variant needs a retry (e.g. a refresh-token flow), add the retry at the caller, not in this file.
+- **Narrow matcher only.** The `/\b(4\d{2})\b/` message fallback deliberately only matches 4xx so a 500-series transport error does not get misclassified. Do not broaden it. If a provider emits a non-standard envelope, extend `extractHttpStatus` with a new named path (`error.response.data.statusCode`, ...), not the message regex.
+- **Transport-agnostic.** No dependency on axios / undici / native fetch. Accept any shape via duck typing. If a future shape needs a parser, add it inline — this module is the single catch-all.
+
+## MCP Runtime-Status Registry (`src/mcp/registry.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `c58468b1c` + `d395d0314`). In-memory status registry keyed by `${scope}::${serverId}`. References: [ARCHITECTURE.md — MCP Runtime-Status Registry](ARCHITECTURE.md#mcp-runtime-status-registry-srcmcpregistryts), [API.md — MCP Runtime-Status Registry API](API.md#mcp-runtime-status-registry-api), [TESTING.md — Testing MCP Runtime-Status Registry](TESTING.md#testing-mcp-runtime-status-registry).
+
+- **Scope-aware purge is contractual.** `uninstallMcpServer(serverId, scope)` MUST preserve entries whose `ownerScope !== scope`. The upstream regression this fixes was a cross-scope wipe; a regression suite in `src/mcp/__tests__/registry.test.ts` pins the invariant.
+- **No persistence.** The cache is per-process. Status for a long-lived operator session is intentionally not written to disk — the registry is a hot view, not a source of truth. The source of truth is `mcp-servers.json` plus the connect probe.
+- **Return the purge count.** Callers (e.g. `alexi mcp remove`) log "removed N stale status entries"; silently returning `void` would lose that signal.
+
+## Reasoning Finalize on Stream Retry (`src/core/session/reasoning-finalize.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `54eacd5ff`). References: [ARCHITECTURE.md — Reasoning-Finalize on Stream Retry](ARCHITECTURE.md#reasoning-finalize-on-stream-retry-srccoresessionreasoning-finalizets), [API.md — Reasoning Finalize API](API.md#reasoning-finalize-api), [TESTING.md — Testing Reasoning Finalize on Retry](TESTING.md#testing-reasoning-finalize-on-retry).
+
+- **The finalizer must never block the retry.** A thrown `state.finalize()` is swallowed with a warning. A failed cleanup emit must not turn a recoverable transient into a permanent failure.
+- **`withRetry.onRetry` is awaited BEFORE the backoff sleep.** This ordering is contractual — the next attempt opens a fresh stream against a clean state. Do not reorder the hook to run during the sleep; a late finalization would race the next attempt's first chunk.
+- **The module stays framework-agnostic.** `ReasoningStreamState` is a plain record. Do not import from any specific stream pipeline here — the TUI, the server bus, and the session store each pass their own `finalize` emitter.
+
+## Memory Model Config (`models.memory`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `86fe6ef9f` + `fffcf0e2a`). References: [CONFIGURATION.md — `models.memory`](CONFIGURATION.md#modelsmemory-auxiliary-task-model), [API.md — Memory Model Config API](API.md#memory-model-config-api), [TESTING.md — Testing Memory Model Config](TESTING.md#testing-memory-model-config).
+
+- **Resolution order is contractual.** `models.memory` wins over `memory_model`; neither set means `undefined` (caller reuses the session model). The order matches `models.compaction` / `models.default` so a future `models.<role>` option composes without re-plumbing.
+- **Fallback must never fail the turn.** `resolveMemoryModel` catches thrown availability checks, logs a warn, and returns the session model. On SAP AI Core, model availability varies by subaccount and reasoning-heavy session models are expensive to spin up for a background job; the fallback is the whole point of the feature.
+- **Setter migrates away from the legacy key.** `setConfigMemoryModel` writes to `models.memory` and deletes the top-level `memory_model` when present so subsequent reads do not fall back to a stale value. Do not add a "write-both-locations" compatibility shim — the resolution order already handles imported configs.
+
+## XLSX Cell Fidelity (`src/tool/tools/read-office.ts`)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync). References: [ARCHITECTURE.md — XLSX Time + Datetime Cell Fidelity](ARCHITECTURE.md#xlsx-time--datetime-cell-fidelity-srctooltoolsread-officets), [TESTING.md — Testing XLSX Cell Fidelity](TESTING.md#testing-xlsx-cell-fidelity).
+
+- **Round away SheetJS floating-point error before any ISO slicing.** `new Date(Math.round(value.v.getTime() / 1000) * 1000)` is the required pattern. Do not short-circuit it even for "obviously whole-second" cells — spreadsheet times are stored as fractional-day floats and the error is not predictable without the number-format code.
+- **Classify by format code, not by heuristic.** The `/\[(h+|m+|s+)\]/i` + `!/[dy]/i.test(format) && /[hs]/i.test(format)` matchers are the only correct way to tell a time-only cell from a datetime cell. Dropping either regex regresses the time-only case to the old date-only slice.
+- **Date-only cells (`T00:00:00.000Z`) stay on `YYYY-MM-DD`.** This is the only backwards-compat invariant: cells that were already date-only must emit the same string as before.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
