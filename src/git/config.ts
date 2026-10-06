@@ -19,6 +19,14 @@ export interface GitConfig {
     useAI: boolean;
     model?: string;
     conventional: boolean;
+    /**
+     * Optional override for the rules directories scanned when building the
+     * commit-message system prompt. Accepts a single path or an array of
+     * paths. Entries are passed to {@link discoverRules} as `customPaths` so
+     * they take precedence over the default `.alexi/rules/`, `.kilo/rules/`,
+     * etc. When unset, the default discovery chain is used.
+     */
+    rulesPath?: string | string[];
   };
 }
 
