@@ -1877,6 +1877,77 @@ chore(deps): bump marked to ^15.0.12 for marked-terminal compatibility
 ci(agent): add daily PR merge workflow with Kilo CLI automation
 ```
 
+### Commit Message Rules (`.alexi/rules/`)
+
+The auto-commit path in `src/git/autoCommit.ts` generates its commit
+message via a cheap-model LLM call routed through
+`generateCommitMessage` in `src/git/commitMessage.ts`. As of commit
+`df4e3924` the generator loads operator-defined rules from
+`.alexi/rules/` (and the rest of the default discovery chain, see
+`src/config/rulesDiscovery.ts`) and appends them to the system prompt
+handed to the provider — matching the behaviour that chat and agent
+sessions already apply. This closes the inconsistency reported in
+issue #1953 where a project-wide tone, language, or ticket-reference
+convention held in chat but was silently ignored when alexi committed
+its own edits.
+
+**Authoring a rule.** Drop a markdown file under `.alexi/rules/`. The
+file name becomes the `file=` attribute of the rendered `<rule>` tag,
+so pick a stable name. Any gray-matter frontmatter is parsed but only
+the `disabled` field is interpreted today:
+
+```markdown
+---
+# Optional. Set to true (or the string "yes" / "1") to park a rule
+# without deleting the file.
+disabled: false
+---
+
+Always reference the issue number in the commit body on a trailing
+line, e.g. `Refs: #1953`.
+```
+
+**Disabling a rule without deleting it.** The `isRuleEnabled` helper
+in `src/git/commitMessage.ts:112-135` interprets a boolean `true`, or
+the strings `"true"` / `"yes"` / `"1"` (case-insensitive, trimmed), as
+a disable signal. Any other value — including a malformed frontmatter
+that fails to parse — keeps the rule enabled. The parse failure is
+logged at `debug` level so operators can diagnose unexpected drops
+without noise on the hot path.
+
+**Overriding the discovery path.** Set `commitMessage.rulesPath` in
+`.alexi-git.json` (or the equivalent config surface) to a single path
+or an array of paths. The value is passed to `discoverRules()` as
+`customPaths` so the override takes precedence over the default
+`.alexi/rules/`, `.kilo/rules/`, etc:
+
+```json
+{
+  "commitMessage": {
+    "useAI": true,
+    "conventional": true,
+    "rulesPath": ["custom-rules", ".company/commit-rules"]
+  }
+}
+```
+
+**Determinism.** Enabled rules are sorted by
+`fileName.localeCompare(a, b)` before rendering, so two invocations
+with the same rule set produce the byte-identical prompt. This matters
+for CI jobs that compare the rendered system prompt across runs.
+
+**No-rules fallback.** When `.alexi/rules/` is empty or missing,
+`buildRulesSection()` returns `''` and the generator falls back to the
+pre-fix base prompt (`'You are a git commit message generator. Respond
+with ONLY the commit message, nothing else. No markdown, no quotes, no
+explanation.'`). Operators who never adopted `.alexi/rules/` see no
+regression surface.
+
+See [docs/TESTING.md — Testing the commit-message rules wiring (issue #1953)](TESTING.md#testing-the-commit-message-rules-wiring-issue-1953)
+for the regression suite and
+[CHANGELOG.md — Wire `.alexi/rules/` into the auto-commit message generator (issue #1953)](../CHANGELOG.md#added)
+for the full behavioural contract.
+
 ### PR Description Template
 
 ```markdown
