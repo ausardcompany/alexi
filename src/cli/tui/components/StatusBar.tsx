@@ -42,6 +42,13 @@ export interface StatusBarProps {
    * streaming to avoid segment jitter next to the spinner.
    */
   cwd?: string;
+  /**
+   * When `true`, the StatusBar surfaces a `Ctrl+S: steer subagent` hint
+   * in the help segment. Set by the parent while a subagent is running
+   * so the user discovers the mid-execution steering shortcut without
+   * having to open the help overlay (ports upstream kilocode #14702).
+   */
+  subagentActive?: boolean;
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -79,6 +86,7 @@ export function StatusBar({
   sessionId,
   topModelLabel,
   cwd,
+  subagentActive = false,
 }: StatusBarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
@@ -157,7 +165,7 @@ export function StatusBar({
       {/* Segment 1: Help hint */}
       <Box backgroundColor={colors.backgroundSecondary} paddingX={1}>
         <Text color={colors.dimText} backgroundColor={colors.backgroundSecondary}>
-          ctrl+? help
+          {subagentActive ? 'Ctrl+S: steer subagent' : 'ctrl+? help'}
         </Text>
       </Box>
 
