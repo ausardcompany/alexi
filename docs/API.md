@@ -5267,6 +5267,60 @@ if (prompt !== undefined) {
 
 The pluggable `DraftCacheStore` interface allows a future durable implementation without changing callers or tests. The default in-memory store is a plain `Map<string, string>`.
 
+### `InputBoxProps` (`src/cli/tui/types/props.ts`)
+
+The TUI `InputBox` component wires per-session draft persistence via the Draft Cache. The relevant portion of the prop contract:
+
+```typescript
+export interface InputBoxProps {
+  /** Current agent name (determines prompt color). */
+  agent: string;
+  /** Agent color from theme. */
+  agentColor: string;
+  /** Disable input (e.g. during streaming). */
+  disabled: boolean;
+  /** Callback when the user submits input (Enter). */
+  onSubmit: (text: string) => void;
+  /** Whether this component currently has focus. */
+  isFocused: boolean;
+  /** Available slash commands for inline autocomplete. */
+  commands?: SlashCommand[];
+  /**
+   * Current session id (issue #1949). When this prop changes, the
+   * InputBox saves the current in-progress draft under the previous
+   * session id and restores any draft previously saved for the new
+   * session. Omit when the InputBox is not tied to a session (e.g.
+   * isolated unit tests, non-session dialogs). When omitted, the
+   * InputBox does not interact with the Draft Cache at all.
+   */
+  sessionId?: string;
+}
+```
+
+Behaviour semantics (pinned by `tests/cli/tui/InputBox.draft.test.tsx`):
+
+- **Mount with cached draft** — the InputBox is seeded with `getDraftCache().get(sessionId)` on first paint via a `useState` initialiser; no extra re-render is required to display the restored text.
+- **Session switch** — a `useEffect` keyed on `sessionId` writes the current value to the OLD session id (empty / whitespace drafts are evicted by `DraftCache.set`), reads the draft for the NEW session id (defaults to empty), and resets the per-session history / suggestion state.
+- **Keystroke persistence** — `handleChange` writes to the cache on every keystroke; empty / whitespace values are evicted automatically.
+- **Submit evicts** — `handleSubmit` calls `cache.promote(sessionId, trimmed)` after `onSubmit`, which trims the input and unconditionally evicts the cache entry regardless of promotion outcome.
+- **Unmount preserves** — the effect cleanup writes the current value under the session id in effect at unmount time, so a later remount for the same session restores the draft (used when a dialog overlay closes and the chat view remounts).
+
+Call-site wiring (`src/cli/tui/pages/ChatPage.tsx:148`):
+
+```tsx
+<InputBox
+  agent={agent}
+  agentColor={agentColor}
+  disabled={isStreaming || dialogIsOpen}
+  onSubmit={onSubmit}
+  isFocused={!leaderActive && !dialogIsOpen}
+  commands={commands}
+  sessionId={sessionId}
+/>
+```
+
+Callers that mount an `InputBox` outside the chat flow (standalone dialogs, test harnesses) MUST either pass the active `sessionId` prop or omit it entirely. Passing an incorrect / fabricated session id would silently poison the cache with unrelated drafts; the `sessionId?` optional contract makes the no-interaction path a deliberate choice.
+
 ## Context Self-Inspection API (`experimental.contextTools`)
 
 Introduced in 1.22.28 (2026-09-23 upstream sync, ports upstream opencode `feat(cli): add experimental self-context tools (#14268)`). See [ARCHITECTURE.md — Context Self-Inspection Tools](./ARCHITECTURE.md#context-self-inspection-tools-experimentalcontexttools) for the runtime contract and [CONFIGURATION.md — Experimental Context Self-Inspection Tools](./CONFIGURATION.md#experimental-context-self-inspection-tools-experimentalcontexttools) for the config surface.

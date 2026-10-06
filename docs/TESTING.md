@@ -8125,6 +8125,96 @@ Assertion patterns:
 
 Prefer constructing a local `new DraftCache()` in test bodies over `getDraftCache()`. The singleton is convenient for production callers that have no natural lifetime to hang an instance off, but tests should keep instances local for isolation.
 
+### Testing TUI InputBox draft persistence (issue #1949)
+
+`tests/cli/tui/InputBox.draft.test.tsx` (265 lines, 7 cases) pins the InputBox + Draft Cache integration added by issue #1949. Unlike the pure `DraftCache` suite above, this is an Ink-component test that renders the real `InputBox` via `ink-testing-library` and asserts cache side effects while driving the component through the lifecycle events a real session switch would produce.
+
+Setup fixtures:
+
+```typescript
+import React from 'react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render } from 'ink-testing-library';
+
+vi.mock('../../../src/cli/tui/hooks/useClipboardImage.js', () => ({
+  useClipboardImage: vi.fn(),
+}));
+
+vi.mock('../../../src/cli/tui/context/AttachmentContext.js', () => ({
+  useAttachments: () => ({
+    pending: [],
+    reading: false,
+    error: null,
+    pasteFromClipboard: vi.fn(),
+    addFromFile: vi.fn(),
+    remove: vi.fn(),
+    clearAll: vi.fn(),
+    consumeAll: vi.fn(),
+  }),
+}));
+
+import { InputBox, MOUNT_DEBOUNCE_MS } from '../../../src/cli/tui/components/InputBox.js';
+import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+import { getDraftCache, resetDraftCache } from '../../../src/session/draft.js';
+
+function Wrapper({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <ThemeProvider>{children}</ThemeProvider>;
+}
+
+describe('InputBox — draft persistence (issue #1949)', () => {
+  const baseProps = {
+    agent: 'code',
+    agentColor: 'green',
+    disabled: false,
+    isFocused: true,
+    onSubmit: vi.fn(),
+  } as const;
+
+  let nowSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let currentTime = 0;
+
+  beforeEach(() => {
+    resetDraftCache();
+    currentTime = 1_000_000;
+    nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+  });
+
+  afterEach(() => {
+    nowSpy?.mockRestore();
+    resetDraftCache();
+  });
+});
+```
+
+Rules of thumb that trip up new contributors:
+
+1. **Mock the clipboard and attachment contexts.** The real `useClipboardImage` hook synchronously forks a child process to read the system clipboard; the real `AttachmentContext` throws if it is not wrapped in its provider. Both are irrelevant to the draft persistence contract so a flat `vi.mock` returning deterministic no-ops is the simplest path.
+2. **Advance `Date.now()` past `MOUNT_DEBOUNCE_MS` before writing to stdin.** The InputBox tracks a `mountTimeRef` and ignores keystrokes delivered during the first `MOUNT_DEBOUNCE_MS` window to avoid a buffered-up-arrow-after-dialog-close replay. Tests that type immediately after mount see the keystroke silently dropped. The suite spies on `Date.now` and bumps `currentTime` by `MOUNT_DEBOUNCE_MS + 1` after every mount.
+3. **`stdin.write('\r')` triggers Enter.** The InputBox treats `\r` as the submit boundary; sending `\n` ends up as a newline in the controlled TextInput instead.
+4. **Flush React commits with `await new Promise((r) => setImmediate(r))`.** Both after every stdin write AND after every rerender call. The InputBox updates state in `useEffect`, which runs on the next microtask boundary; without the flush, the test's `expect(cache.get(...))` reads a stale cache.
+5. **Strip ANSI escape codes before text assertions.** `lastFrame()` returns a terminal-formatted string with colour escapes. Use `const plain = (lastFrame() ?? '').replace(/\u001B\[[0-9;]*m/g, '')` before an `expect(plain).toContain(...)` assertion. The suite's `switching to a session with no cached draft` case is the reference for this pattern.
+6. **Call `resetDraftCache()` in both `beforeEach` AND `afterEach`.** Vitest's module caching means the singleton survives across tests in the same file; a leaked draft from an earlier case will shadow the current case's seeded state and produce false positives. The `beforeEach` call drains the previous test, the `afterEach` call drains the current test so a cross-file ordering regression does not leak state out of this suite.
+7. **Pre-seed the cache for "mount with cached draft" cases.** The InputBox reads the cache in a `useState` initialiser, so `cache.set('s1', 'draft from a previous mount')` MUST happen BEFORE the `render(...)` call. Setting it after the render is a no-op — the state was already seeded with `undefined`.
+8. **Rerender with the new `sessionId` to simulate a session switch.** The `rerender()` helper from `ink-testing-library` triggers the session-switch effect; the test must then flush React commits before asserting on the restored draft.
+
+The seven cases cover the full contract:
+
+| Case | Pinned invariant |
+| ---- | ---------------- |
+| `restores a pre-existing draft when the component mounts with a sessionId` | `useState` initialiser reads the cache before first paint. |
+| `persists the current draft on unmount so a remount restores it` | Cleanup effect writes current value under `lastSessionIdRef.current`. |
+| `saves the current draft under the OLD session id and restores NEW session draft on switch` | Session-switch effect reads from `lastSessionIdRef.current` for the save, then from the new `sessionId` for the load. |
+| `switching to a session with no cached draft clears the input (no leak across switch)` | Default to `''` when the new session has no cached draft — stale text does not leak. The previous session's draft is still preserved. |
+| `clears the draft after a successful submit (promote-on-submit)` | `handleSubmit` calls `cache.promote(sessionId, trimmed)` AFTER `onSubmit`. |
+| `multiple sessions keep independent drafts` | Independent sessions mounted sequentially keep independent cached drafts. |
+| `does not interact with the cache when sessionId is omitted` | Every `cache.get` / `cache.set` call is gated on `if (sessionId)`. |
+
+Mandatory assertion-ordering rule: after a session-switch rerender, the suite asserts first on the OLD session's cache entry (`cache.get('s1')` still returns the saved draft) and THEN on the current frame (`lastFrame()` shows the NEW session's draft). Reversing the order produces a race where the frame assertion fires before the save side effect lands.
+
+Non-rule reminders: do NOT snapshot `DraftCache` instances between tests — the singleton reset is cheap and bulletproof. Do NOT use `vi.useFakeTimers()` to short-circuit the debounce — the TextInput's internal cursor state is driven by real microtask ordering and fake timers break the controlled-input assertion. Do NOT assert on InputBox internal refs — the test should see only the public prop surface, the cache state, and the rendered frame.
+
+See [docs/API.md — `InputBoxProps`](API.md#inputboxprops-srcclituitypespropsts) for the public prop contract and [docs/ARCHITECTURE.md — TUI integration — session-switch draft persistence](ARCHITECTURE.md#tui-integration--session-switch-draft-persistence-issue-1949) for the lifecycle sequence diagram.
+
 ## Testing VCS remote detection and MR/PR URL formatting
 
 `tests/git/remoteDetection.test.ts` (117 lines, 14 cases) and `tests/git/urlFormatter.test.ts` (57 lines) pin the helpers introduced to make `alexi code-review` provider-aware. Both suites are pure — no filesystem, no `execFile`, no network — and run in single-digit milliseconds.

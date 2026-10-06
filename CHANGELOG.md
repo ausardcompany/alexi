@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI `InputBox` draft persistence across session switch (issue #1949)** (`src/cli/tui/components/InputBox.tsx` +79 lines, `src/cli/tui/pages/ChatPage.tsx` +1 line, `src/cli/tui/types/props.ts` +7 lines, `tests/cli/tui/InputBox.draft.test.tsx` +265 lines). Wires the existing `DraftCache` (shipped in the 2026-09-17 upstream sync — see [docs/API.md — Draft Cache API](docs/API.md#draft-cache-api-srcsessiondraftts)) through the Ink `InputBox` component so an in-progress prompt buffer is preserved across session switch, dialog overlay re-mount, and clean unmount within the same process. Pre-fix, switching sessions from the leader-mode session list — or any session-id-changing path — discarded the text the user was composing; post-fix, every per-session draft is restored on remount, and the user's workflow is non-destructive.
+
+  `InputBoxProps` gains a single new optional field `sessionId?: string` (`src/cli/tui/types/props.ts:53-59`). The `ChatPage` component (`src/cli/tui/pages/ChatPage.tsx:148`) now threads the active `sessionId` down to `InputBox` on every render, so the InputBox is always aware of the session it is composing against. Omitting `sessionId` is intentionally supported — isolated unit tests, non-session command dialogs, and future detached-mode editor surfaces can mount the component without any cache interaction and get the previous (session-agnostic) behaviour unchanged.
+
+  Wiring inside `InputBox.tsx`:
+
+  - **Seed on first paint.** `useState` initial value is `getDraftCache().get(sessionId) ?? ''`, so a pre-existing draft stored under the current session id renders without an extra re-render.
+  - **Session-switch effect.** A `useEffect` keyed on `sessionId` tracks the previous session id via `lastSessionIdRef`. On change, it (1) writes the current input value into `DraftCache` under the OLD session id (empty / whitespace drafts are auto-evicted by `DraftCache.set`), (2) reads any draft stored under the NEW session id and installs it as the controlled value, (3) resets history / suggestion state so arrow-up on the new session does not surface the old session's history. The `valueRef` ref mirrors the current value so this effect does not need to re-subscribe on every keystroke.
+  - **Per-keystroke persistence.** `handleChange` writes every intermediate value into the cache under the current session id. The `DraftCache.set` contract evicts empty / whitespace values automatically, so backspacing the input to empty removes the stored draft without a manual cleanup pass.
+  - **Submit evicts the draft.** `handleSubmit` calls `getDraftCache().promote(sessionId, trimmed)` after `onSubmit`, which trims and ALWAYS evicts the cache entry regardless of promotion outcome — matching the upstream kilocode promote-on-submit contract.
+  - **Unmount preserves the draft.** The effect's cleanup function writes the current value into the cache under the session id in effect at unmount time. A later remount for the same session restores the draft — this is what keeps a draft alive across the brief InputBox unmount/remount that happens when a modal dialog opens and closes on top of the chat view.
+
+  Load-bearing invariants pinned by `tests/cli/tui/InputBox.draft.test.tsx` (265 lines, 7 cases):
+
+  - A pre-existing draft stored under `sessionId` is restored on mount (`restores a pre-existing draft when the component mounts with a sessionId`).
+  - Unmount preserves the draft and a fresh mount for the same session restores it (`persists the current draft on unmount so a remount restores it`).
+  - Switching from `s1` to `s2` writes the current `s1` draft to the cache and displays the previously-cached `s2` draft; switching back to `s1` surfaces the earlier draft verbatim (`saves the current draft under the OLD session id and restores NEW session draft on switch`).
+  - Switching to a session with no cached draft clears the input (strips ANSI escape codes before the assertion) so stale text does not leak across the switch, and the previous session's draft is still preserved for later (`switching to a session with no cached draft clears the input (no leak across switch)`).
+  - A successful submit evicts the draft entry (`clears the draft after a successful submit (promote-on-submit)`).
+  - Independent sessions keep independent drafts (`multiple sessions keep independent drafts`).
+  - Omitting `sessionId` on the InputBox does not touch the cache for any id (`does not interact with the cache when sessionId is omitted`).
+  - Clearing the input back to empty via backspace evicts the cached draft (`clearing the input back to empty evicts the cached draft`).
+
+  No new runtime dependencies, no new environment variables, no new CLI subcommands, no new permissions. The `DraftCache` singleton is already instantiated inside `src/session/draft.ts`; the InputBox wiring reuses that singleton via `getDraftCache()`. See [docs/API.md — `InputBoxProps`](docs/API.md#inputboxprops-srcclituitypespropsts) for the public prop reference, [docs/ARCHITECTURE.md — Draft Cache](docs/ARCHITECTURE.md#draft-cache-srcsessiondraftts) for the cache design, and [docs/TESTING.md — Testing TUI InputBox Draft Persistence (issue #1949)](docs/TESTING.md#testing-tui-inputbox-draft-persistence-issue-1949) for the fixture pattern.
+
 - **Wire `.alexi/rules/` into the auto-commit message generator (issue #1953)** (`src/git/commitMessage.ts` +106 lines, `src/git/config.ts` +8 lines, `src/git/autoCommit.ts` +1 line, `src/git/commitMessage.test.ts` +227 lines, commit `df4e3924` `feat(config): wire .alexi/rules/ into commit message generator`). Mirrors cline PR #14103 which solved the same inconsistency by appending `.clinerules` to the commit-message system prompt. Previously, operator-defined rules under `.alexi/rules/` (project-wide tone, language, ticket conventions) were honored by every chat and agent session but silently ignored by the auto-commit path, so an AI-authored commit on the exact same change set would freely violate the project's commit conventions. The generator now discovers rules through the shared `discoverRules()` surface and appends every enabled rule verbatim to the system prompt handed to the cheap-model provider.
 
   New public surface in `src/git/commitMessage.ts`:

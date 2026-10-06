@@ -50,6 +50,13 @@ export interface InputBoxProps {
   isFocused: boolean;
   /** Available slash commands for inline autocomplete */
   commands?: SlashCommand[];
+  /**
+   * Current session id. When this changes, the InputBox saves the current
+   * in-progress draft under the previous session id and restores any draft
+   * previously saved for the new session. Omit when the InputBox is not
+   * tied to a session (e.g. isolated tests).
+   */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------

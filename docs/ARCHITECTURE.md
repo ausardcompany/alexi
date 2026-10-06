@@ -6409,6 +6409,57 @@ Persistence is deliberately in-memory (`InMemoryDraftStore`, a plain `Map<string
 
 The process-global `getDraftCache()` singleton is provided for CLI subcommand and TUI hook callers that have no natural lifetime to hang an instance off. Tests should construct their own `DraftCache` (or `new DraftCache(customStore)`) for isolation.
 
+### TUI integration — session-switch draft persistence (issue #1949)
+
+The Ink `InputBox` component (`src/cli/tui/components/InputBox.tsx`) consumes the Draft Cache via the per-session `sessionId` prop threaded down from `ChatPage` (`src/cli/tui/pages/ChatPage.tsx:148`). The wiring is the production call site for the cache; the four lifecycle moments (mount, keystroke, session switch, submit, unmount) all push through the same `DraftCache` singleton so a draft composed on one session cannot leak into another.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant InputBox as InputBox (sessionId prop)
+    participant Cache as DraftCache singleton
+    participant ChatPage as ChatPage
+
+    User->>InputBox: Mount with sessionId="s1"
+    InputBox->>Cache: get("s1")
+    Cache-->>InputBox: cached draft (if any)
+    InputBox->>User: Seed initial value
+
+    User->>InputBox: Types a character
+    InputBox->>Cache: set("s1", buffer)
+    Note over Cache: empty / whitespace → auto-evict
+
+    User->>ChatPage: Leader+s picks session s2
+    ChatPage->>InputBox: Re-render with sessionId="s2"
+    InputBox->>Cache: set("s1", currentValue) (save old)
+    InputBox->>Cache: get("s2") (load new)
+    Cache-->>InputBox: s2's cached draft (or '')
+    InputBox->>User: Install s2's draft, reset history
+
+    User->>InputBox: Press Enter
+    InputBox->>Cache: promote("s2", trimmed) (evicts)
+    InputBox->>ChatPage: onSubmit(trimmed)
+
+    User->>InputBox: Dialog overlay opens → InputBox unmounts
+    InputBox->>Cache: set("s2", currentValue) (cleanup effect)
+    Note over Cache: Persists for remount
+    ChatPage->>InputBox: Remount after dialog closes
+    InputBox->>Cache: get("s2")
+    Cache-->>InputBox: Restored draft
+```
+
+Load-bearing invariants (pinned by `tests/cli/tui/InputBox.draft.test.tsx`):
+
+1. **Seed is a `useState` initialiser, not a `useEffect`.** The initial value call `getDraftCache().get(sessionId) ?? ''` runs once at construction, so the restored draft appears on first paint — there is no flash of empty content followed by a re-render.
+2. **`lastSessionIdRef` tracks the previous session.** The session-switch effect must save the OLD session's draft before overwriting state with the NEW session's draft. A ref (not a state value) keeps the previous id without triggering extra renders.
+3. **`valueRef` mirrors `value` without re-subscribing.** The session-switch effect reads the current input value through the ref so it does not have to depend on `value` in its deps array, which would re-fire on every keystroke.
+4. **Clearing the input to empty evicts the entry.** The `DraftCache.set(sessionId, '')` branch funnels straight to `store.delete`, so backspacing to empty removes the cached draft without a manual cleanup.
+5. **Omitting `sessionId` makes the InputBox cache-agnostic.** Every cache interaction is gated behind `if (sessionId)` so an isolated test or a non-session dialog mounts the component without ever touching the global cache. This is the production-safe default for callers outside `ChatPage`.
+6. **Submit uses `promote`, not `delete`.** Promotion trims the input AND evicts in one call. Using `set(id, '')` would also work but hides the trim; using `delete` would skip the trim contract that upstream kilocode pinned. `promote` is the single-call primitive.
+7. **Unmount persistence is a cleanup effect return.** React cleanup functions run with the ref-captured value, so the draft that was in the box at unmount time is persisted — not the empty state that a plain `useEffect` on `[]` would see.
+
+The wiring in `src/cli/tui/pages/ChatPage.tsx:66-68, 148` is intentionally a one-line prop pass. `ChatPage` already owns the active `sessionId`; forwarding it to `InputBox` is the only integration needed, and keeps the InputBox component responsible for its own cache lifecycle.
+
 ## Agent Manager Worktree Status Registry (issue #1826)
 
 Introduced by commit `8b372ad7` `feat(agent): add visual status icons to Agent Manager TUI`. Ports the UI-state half of upstream kilocode PR #14487 (`fix(agent-manager): forward all owned session activity events`) into an Alexi-native, TUI-friendly shape. The registry (`src/agent/worktreeStatus.ts`) is a synchronous, in-process key/value store that maps a worktree id (or directory path — the registry treats it as an opaque string key) to its current lifecycle status, exposed to React consumers via a pub/sub API. It is deliberately decoupled from `src/core/agent-manager/orchestration-api.ts`, which is transport-layer forwarding: this module is UI state only.
