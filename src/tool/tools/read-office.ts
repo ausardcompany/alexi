@@ -75,10 +75,7 @@ interface XlsxWorkbook {
 }
 
 interface XlsxLike {
-  readFile: (
-    filePath: string,
-    options?: { cellDates?: boolean; cellNF?: boolean }
-  ) => XlsxWorkbook;
+  readFile: (filePath: string, options?: { cellDates?: boolean; cellNF?: boolean }) => XlsxWorkbook;
   utils: {
     sheet_to_csv: (worksheet: unknown, options?: { blankrows?: boolean }) => string;
     decode_range: (ref: string) => { s: { c: number; r: number }; e: { c: number; r: number } };
@@ -118,7 +115,8 @@ export function formatXlsxCell(value: XlsxCell | undefined): string {
     // characters and [...] sections, so read it as the cell shows it. An m alone is a month (mmm).
     const code = String(value.z ?? '');
     const format = code.replace(/"[^"]*"|\\.|\[[^\]]*\]/g, '');
-    const timeOnly = /\[(h+|m+|s+)\]/i.test(code) || (!/[dy]/i.test(format) && /[hs]/i.test(format));
+    const timeOnly =
+      /\[(h+|m+|s+)\]/i.test(code) || (!/[dy]/i.test(format) && /[hs]/i.test(format));
     if (value.z != null && timeOnly) {
       return value.w ?? iso.slice(11, 19);
     }
