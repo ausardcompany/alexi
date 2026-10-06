@@ -1540,6 +1540,16 @@ Persistence is deliberately in-memory only:
 
 There is currently no user-facing configuration key for the draft cache — it is a runtime behaviour of the interactive TUI. See [API.md — Draft Cache API](API.md#draft-cache-api-srcsessiondraftts) for the programmatic surface.
 
+TUI integration (issue #1949): the `InputBox` component threads a per-session key through the cache so a draft composed on one session is restored verbatim when the user switches back to it. The wiring is automatic — operators do not need to enable anything. A draft is retained across the following transitions in the current interactive process:
+
+- Session switch via the leader-mode session list (`leader → s`) or any other path that changes `ChatPage`'s active `sessionId`.
+- Brief InputBox unmount / remount triggered by a dialog overlay opening and closing on top of the chat view.
+- Clean unmount followed by a fresh mount for the same session id in the same process (e.g. after a page toggle).
+
+A draft is NOT retained across process restarts (the cache is in-memory only), across unrelated sessions (every session id has its own entry), or across a successful submit (the entry is evicted via `DraftCache.promote` as soon as the message is sent). Backspacing the input to empty also evicts the entry — empty / whitespace drafts are never persisted.
+
+See [API.md — `InputBoxProps`](API.md#inputboxprops-srcclituitypespropsts) for the component-level prop surface and [ARCHITECTURE.md — TUI integration — session-switch draft persistence](ARCHITECTURE.md#tui-integration--session-switch-draft-persistence-issue-1949) for the lifecycle sequence diagram.
+
 ## Diagnostic Commands: Sharing Configuration Safely
 
 When troubleshooting SAP AI Core routing, MCP server wiring, or session behaviour, operators often need to paste the effective configuration into a GitHub issue. Directly dumping `~/.alexi/config.json` risks leaking `AICORE_SERVICE_KEY`, OAuth tokens, and MCP client secrets. Since the 2026-09-24 sync, Alexi ships an always-redacted dump command for this purpose:

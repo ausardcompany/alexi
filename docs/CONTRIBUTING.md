@@ -2670,6 +2670,22 @@ Added in the 2026-09-17 sync. The in-memory cache in `src/session/draft.ts` is t
 
 If a durable variant is added (crash-recovery across process restart), it MUST implement the `DraftCacheStore` interface (`get` / `set` / `delete` / `clear`) and preserve the empty-value eviction semantics — the reconciler and the callers depend on it.
 
+### TUI session-switch draft wiring (issue #1949)
+
+The `InputBox` component (`src/cli/tui/components/InputBox.tsx`) is the reference consumer of the Draft Cache. When adding a new TUI surface that owns in-progress text and belongs to a session, follow its wiring exactly instead of inventing a new pattern:
+
+1. **Add an optional `sessionId?: string` prop.** Mandatory props cannot express the "isolated test / non-session dialog" case, and omitting the prop MUST switch the component to a cache-agnostic path. Keeping the prop optional at the type level forces every call site to think about which session the component is composing against.
+2. **Seed the initial value via a `useState` initialiser.** `useState(() => getDraftCache().get(sessionId) ?? '')` runs once at construction so the restored draft appears on first paint — no flash of empty content.
+3. **Mirror `value` into a ref.** The session-switch effect must read the current value without re-firing on every keystroke. A plain `useRef(value)` plus a `useEffect(() => { ref.current = value; }, [value])` is the cheapest shape.
+4. **Track the previous `sessionId` with a ref initialised to the current `sessionId`.** This avoids a spurious save under `undefined` on first render. The ref is updated inside the session-switch effect after the save-and-restore pair completes.
+5. **Save old before restoring new.** Inside the session-switch effect: `cache.set(previousSessionId, valueRef.current)` first, then `cache.get(sessionId) ?? ''` for the new value. Reversing the order would overwrite the new session's cached draft with the old session's text.
+6. **Reset per-session UI state at the same time.** The InputBox also resets history index, saved input ref, and suggestion index on switch. Any new consumer with per-session scrollback / autocomplete must drop that state in step with the draft switch.
+7. **Persist on unmount via the cleanup return.** `return () => { if (lastSessionIdRef.current) { cache.set(lastSessionIdRef.current, valueRef.current); } };`. React cleanup functions run with the ref-captured value, which is what preserves the draft across a brief unmount/remount cycle (e.g. a dialog overlay opening and closing).
+8. **Promote on submit.** `handleSubmit` calls `cache.promote(sessionId, trimmed)` after `onSubmit` — this trims the input AND unconditionally evicts the cache entry, matching the upstream kilocode `0d2fee251` fix. Do not substitute `cache.set(sessionId, '')` + manual trim: the promote primitive owns both actions.
+9. **Gate every cache interaction on `if (sessionId)`.** This is what makes the omitted-`sessionId` path cache-agnostic. The `ChatPage` call site always passes `sessionId`, so production users always get persistence; standalone tests and non-session dialogs mount the component without touching the global cache.
+
+Call-site wiring in `src/cli/tui/pages/ChatPage.tsx` is a single additional prop (`sessionId={sessionId}`). Do not centralise the cache lifecycle inside `ChatPage` — it belongs inside `InputBox` because the component is the one that observes mount, unmount, and value transitions. See [docs/ARCHITECTURE.md — TUI integration — session-switch draft persistence](ARCHITECTURE.md#tui-integration--session-switch-draft-persistence-issue-1949) for the sequence diagram and [docs/TESTING.md — Testing TUI InputBox Draft Persistence (issue #1949)](TESTING.md#testing-tui-inputbox-draft-persistence-issue-1949) for the ink-testing-library regression suite.
+
 ## Programmatic Tool Calling (`experimental.code_mode`)
 
 Added in the 2026-09-18 sync. `src/tool/code-mode.ts` is the ONLY entry point that should observe `experimental.code_mode`. When wiring a caller that wants to route MCP tool calls through the confined runtime:
