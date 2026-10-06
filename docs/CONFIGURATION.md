@@ -2211,6 +2211,67 @@ The `background_process`, `schedule_wakeup`, and `cancel_wakeup` tool descriptio
 
 Operators do not need to configure anything to enable this behaviour — it is inherent to the wakeup subsystem plus the goal loop. Existing agents that ignore the "Goals" section continue to work as before.
 
+## `models.memory` (auxiliary-task model)
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `86fe6ef9f` + `fffcf0e2a`). Lets operators pin a cheaper / faster SAP AI Core model for automatic project-memory saves — the background turn that summarises a working memory for the current project — independent of the primary session model. This matters on SAP AI Core where reasoning-heavy session models are expensive to spin up for a background job and where model availability varies by subaccount.
+
+### Shape
+
+```json
+{
+  "models": {
+    "memory": "sap-ai-core/anthropic--claude-3-haiku",
+    "compaction": "sap-ai-core/anthropic--claude-3-haiku"
+  }
+}
+```
+
+Resolution order (first non-empty wins):
+
+1. `models.memory` — new canonical location, groups with `models.compaction` and `defaultModel`.
+2. `memory_model` — upstream snake_case top-level key. Accepted for backwards compatibility with imported upstream configs; `setConfigMemoryModel` migrates away from it on the next write.
+3. Unset — the caller reuses the session model.
+
+### Runtime behaviour
+
+`resolveMemoryModel(sessionModel, isModelAvailable?)` (`src/config/userConfig.ts`) is the entry point used by the memory save path. It falls back to the session model on three conditions:
+
+- `memory_model` is unset or empty.
+- `isModelAvailable(configured)` returns `false`.
+- `isModelAvailable(configured)` throws (treated as "unavailable" and logged at warn level).
+
+The warn log line is `[alexi] memory_model "<id>" unavailable; falling back to session model "<session>"` or `[alexi] memory_model "<id>" availability check failed (<reason>); falling back to session model "<session>"` so operators can grep for recurring availability instability without failing the turn.
+
+### Example configurations
+
+Cost optimisation (background memory on the cheapest tier):
+
+```json
+{
+  "defaultModel": "sap-ai-core/anthropic--claude-opus-4",
+  "models": {
+    "memory": "sap-ai-core/anthropic--claude-3-haiku"
+  }
+}
+```
+
+Pin the memory model to the same session model (no override, equivalent to leaving `models.memory` unset):
+
+```json
+{ "defaultModel": "sap-ai-core/anthropic--claude-opus-4" }
+```
+
+Legacy imported config (`memory_model` top-level key is still honoured, but the next `setConfigMemoryModel` call migrates it to `models.memory`):
+
+```json
+{
+  "defaultModel": "sap-ai-core/anthropic--claude-opus-4",
+  "memory_model": "sap-ai-core/anthropic--claude-3-haiku"
+}
+```
+
+See [API.md — Memory Model Config API](API.md#memory-model-config-api) for the exported TypeScript surface.
+
 ## Provider Timeout Configuration
 
 Alexi wraps its outgoing provider `fetch` calls with `buildFetch` from `src/providers/provider.ts`. The wrapper enforces a request timeout unconditionally, regardless of whether the target is a direct provider URL or an AI gateway (Cloudflare AI Gateway, SAP AI Core, OpenRouter). See [PROVIDERS.md — Provider Fetch Timeout Wrapper](PROVIDERS.md#provider-fetch-timeout-wrapper-buildfetch) and [ARCHITECTURE.md — Provider Fetch Wrapper — Unconditional Timeout](ARCHITECTURE.md#provider-fetch-wrapper--unconditional-timeout-srcprovidersproviderts) for the full contract.

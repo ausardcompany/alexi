@@ -183,6 +183,113 @@ export function setConfigDefaultModel(modelId: string): void {
   setConfigValue('defaultModel', modelId);
 }
 
+// ============ Memory model (auxiliary-task model) ============
+
+/**
+ * Get the user's persisted "memory" model id — the model used for
+ * automatic project memory saves ("summarise and persist a working
+ * memory on this turn").
+ *
+ * Ports upstream kilocode commits `86fe6ef9f` / `fffcf0e2a`, which add
+ * a dedicated `memory_model` config option so memory operations can
+ * run on a cheaper / faster model than the primary session model.
+ * This is especially useful on SAP AI Core where model availability
+ * varies by subaccount and reasoning-heavy session models are
+ * expensive to spin up for background jobs.
+ *
+ * Resolution order (first non-empty wins):
+ *   1. `models.memory` (new canonical location — groups with
+ *      `models.compaction`, `defaultModel`, ...)
+ *   2. `memory_model` (upstream snake_case key — accepted for
+ *      backwards compatibility with imported configs)
+ *
+ * Returns `undefined` when neither is set — the caller is expected to
+ * reuse the session model in that case (see {@link resolveMemoryModel}).
+ */
+export function getConfigMemoryModel(): string | undefined {
+  const config = loadFullConfig();
+
+  const models = config.models;
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const value = (models as Record<string, unknown>).memory;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  const legacy = config.memory_model;
+  if (typeof legacy === 'string' && legacy.trim().length > 0) {
+    return legacy.trim();
+  }
+
+  return undefined;
+}
+
+/**
+ * Persist the user's chosen memory model id.
+ *
+ * Writes to the new `models.memory` location. If the legacy
+ * `memory_model` top-level key is present, it is cleared so subsequent
+ * reads do not fall back to a stale value.
+ */
+export function setConfigMemoryModel(modelId: string): void {
+  const trimmed = modelId.trim();
+  if (trimmed.length === 0) {
+    throw new Error('memory model id must be a non-empty string');
+  }
+  const config = loadFullConfig();
+  const existingModels =
+    config.models && typeof config.models === 'object' && !Array.isArray(config.models)
+      ? (config.models as Record<string, unknown>)
+      : {};
+  config.models = { ...existingModels, memory: trimmed };
+  if ('memory_model' in config) {
+    delete config.memory_model;
+  }
+  saveFullConfig(config);
+}
+
+/**
+ * Resolve the effective memory model for the current turn, falling
+ * back to the session model when `memory_model` is unset, malformed,
+ * or unavailable.
+ *
+ * `isModelAvailable` is called lazily so a transient SAP AI Core
+ * availability check failure degrades to the session model rather
+ * than crashing the memory save. Any thrown classification is logged
+ * at warn level and treated as "unavailable".
+ */
+export async function resolveMemoryModel(
+  sessionModel: string,
+  isModelAvailable?: (modelId: string) => boolean | Promise<boolean>
+): Promise<string> {
+  const configured = getConfigMemoryModel();
+  if (!configured) {
+    return sessionModel;
+  }
+  try {
+    if (isModelAvailable) {
+      const ok = await isModelAvailable(configured);
+      if (!ok) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[alexi] memory_model "${configured}" unavailable; falling back to session model "${sessionModel}"`
+        );
+        return sessionModel;
+      }
+    }
+    return configured;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[alexi] memory_model "${configured}" availability check failed (${
+        err instanceof Error ? err.message : String(err)
+      }); falling back to session model "${sessionModel}"`
+    );
+    return sessionModel;
+  }
+}
+
 // ============ Compaction model (auxiliary-task model) ============
 
 /**

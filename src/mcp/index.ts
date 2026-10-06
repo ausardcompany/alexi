@@ -45,3 +45,28 @@ export {
   MCP_APPS_ENV_FLAG,
   type MCPResource,
 } from './apps.js';
+
+// Auth-failure classification (kilocode 21ed2b9e + c9632e495). Lets
+// callers surface structured OAuth / token-expired / forbidden errors
+// to the CLI instead of a generic transport error.
+export {
+  classifyAuthFailure,
+  extractHttpStatus,
+  extractHeader,
+  McpAuthError,
+  type McpAuthFailure,
+  type McpAuthFailureKind,
+} from './auth-failure.js';
+
+// Scoped MCP runtime-status registry (kilocode c58468b1c + d395d0314).
+// Clears cached status when a server is uninstalled; purge is scoped
+// to the installing scope (user vs project) so a cross-scope same-name
+// entry is NOT accidentally wiped.
+export {
+  setStatus as setMcpStatus,
+  getStatus as getMcpStatus,
+  listStatuses as listMcpStatuses,
+  uninstallServer as uninstallMcpServer,
+  type McpScope,
+  type McpStatusEntry,
+} from './registry.js';

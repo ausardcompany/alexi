@@ -51,16 +51,84 @@ interface MammothLike {
   convertToMarkdown: (input: { buffer: Buffer }) => Promise<{ value: string }>;
 }
 
+interface XlsxCell {
+  /** Cell type: 'd' = date, 'e' = error, 'n' = number, 's' = string, 'b' = bool. */
+  t?: string;
+  /** Raw value — Date for `t === 'd'` when `cellDates: true`. */
+  v?: unknown;
+  /** Formatted text (`w`) matching the cell's number format `z`. */
+  w?: string;
+  /** Number format code (e.g. `h:mm:ss`, `yyyy-mm-dd`). Populated when `cellNF: true`. */
+  z?: string;
+  /** Hyperlink info. */
+  l?: { Target?: string };
+}
+
+interface XlsxWorksheet {
+  '!ref'?: string;
+  [cellRef: string]: XlsxCell | unknown;
+}
+
 interface XlsxWorkbook {
   SheetNames: string[];
-  Sheets: Record<string, unknown>;
+  Sheets: Record<string, XlsxWorksheet>;
 }
 
 interface XlsxLike {
-  readFile: (filePath: string, options?: { cellDates?: boolean }) => XlsxWorkbook;
+  readFile: (filePath: string, options?: { cellDates?: boolean; cellNF?: boolean }) => XlsxWorkbook;
   utils: {
     sheet_to_csv: (worksheet: unknown, options?: { blankrows?: boolean }) => string;
+    decode_range: (ref: string) => { s: { c: number; r: number }; e: { c: number; r: number } };
+    encode_cell: (addr: { c: number; r: number }) => string;
   };
+}
+
+/**
+ * Format a single XLSX cell to a text representation suitable for CSV output.
+ *
+ * Ports the upstream kilocode xlsx-cell fix (opencode 2026-10):
+ *   - Spreadsheet times (e.g. `14:05`) parse as `14:04:59.999` due to
+ *     SheetJS float error — round the Date to whole seconds.
+ *   - Month-only / time-only / datetime cells were incorrectly flattened
+ *     to date-only ISO strings. We now use the number-format code (`z`)
+ *     to decide whether the cell represents a time, a datetime, or a
+ *     plain date, and format it accordingly.
+ */
+export function formatXlsxCell(value: XlsxCell | undefined): string {
+  if (!value) {
+    return '';
+  }
+  if (value.v === undefined || value.v === null) {
+    return '';
+  }
+  if (value.t === 'e') {
+    return `[Error: ${value.w ?? String(value.v)}]`;
+  }
+  if (value.t === 'd') {
+    if (!(value.v instanceof Date)) {
+      return String(value.v);
+    }
+    // Round away SheetJS's floating-point error: 14:05 parses as 14:04:59.999.
+    const iso = new Date(Math.round(value.v.getTime() / 1000) * 1000).toISOString();
+    // A time of day or a duration is stored as a day in 1899 or 1900. Its format is an elapsed [h], [m]
+    // or [s] one, or shows an hour or a second and no day or year outside quoted text, escaped
+    // characters and [...] sections, so read it as the cell shows it. An m alone is a month (mmm).
+    const code = String(value.z ?? '');
+    const format = code.replace(/"[^"]*"|\\.|\[[^\]]*\]/g, '');
+    const timeOnly =
+      /\[(h+|m+|s+)\]/i.test(code) || (!/[dy]/i.test(format) && /[hs]/i.test(format));
+    if (value.z !== null && value.z !== undefined && timeOnly) {
+      return value.w ?? iso.slice(11, 19);
+    }
+    if (iso.endsWith('T00:00:00.000Z')) {
+      return iso.slice(0, 10);
+    }
+    return iso.slice(0, 19).replace('T', ' ');
+  }
+  if (value.l?.Target) {
+    return `${value.w ?? String(value.v)} (${value.l.Target})`;
+  }
+  return value.w ?? String(value.v);
 }
 
 /**
@@ -118,7 +186,7 @@ export async function extractXlsxText(filePath: string): Promise<OfficeExtractio
       ? (xlsxModule as XlsxLike)
       : (xlsxModule.default as XlsxLike);
 
-  const wb = xlsx.readFile(filePath, { cellDates: true });
+  const wb = xlsx.readFile(filePath, { cellDates: true, cellNF: true });
   const lines: string[] = [];
   let truncated = false;
 
@@ -128,12 +196,7 @@ export async function extractXlsxText(filePath: string): Promise<OfficeExtractio
 
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
-    const csv = xlsx.utils.sheet_to_csv(ws, { blankrows: false });
-    // Split on either CRLF or LF; trim a single trailing empty line that
-    // sheet_to_csv tends to emit so it does not inflate the row count.
-    const rawRows = csv.split(/\r?\n/);
-    const allRows =
-      rawRows.length > 0 && rawRows[rawRows.length - 1] === '' ? rawRows.slice(0, -1) : rawRows;
+    const allRows = worksheetToCsvRows(ws, xlsx);
 
     const sheetTruncated = allRows.length > MAX_ROWS_PER_SHEET;
     const showRows = sheetTruncated ? allRows.slice(0, MAX_ROWS_PER_SHEET) : allRows;
@@ -153,4 +216,59 @@ export async function extractXlsxText(filePath: string): Promise<OfficeExtractio
     truncated,
     hint: truncated ? `Some sheets exceeded ${MAX_ROWS_PER_SHEET} rows; preview only.` : undefined,
   };
+}
+
+/**
+ * Build CSV rows for a worksheet while routing every cell through
+ * {@link formatXlsxCell}. Falls back to `sheet_to_csv` when the worksheet
+ * carries no `!ref` range (empty / malformed sheet) so behaviour matches
+ * the legacy path for the no-data case.
+ *
+ * Blank rows are suppressed to mirror the previous `blankrows: false`
+ * behaviour and avoid inflating the per-sheet row count against the
+ * 5,000-row cap.
+ */
+function worksheetToCsvRows(ws: XlsxWorksheet, xlsx: XlsxLike): string[] {
+  const ref = typeof ws['!ref'] === 'string' ? (ws['!ref'] as string) : undefined;
+  if (!ref) {
+    const csv = xlsx.utils.sheet_to_csv(ws, { blankrows: false });
+    const rawRows = csv.split(/\r?\n/);
+    return rawRows.length > 0 && rawRows[rawRows.length - 1] === ''
+      ? rawRows.slice(0, -1)
+      : rawRows;
+  }
+  const range = xlsx.utils.decode_range(ref);
+  const rows: string[] = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const cells: string[] = [];
+    let hasContent = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = xlsx.utils.encode_cell({ c, r });
+      const cell = ws[addr] as XlsxCell | undefined;
+      const text = formatXlsxCell(cell);
+      if (text.length > 0) {
+        hasContent = true;
+      }
+      cells.push(csvEscape(text));
+    }
+    if (hasContent) {
+      rows.push(cells.join(','));
+    }
+  }
+  return rows;
+}
+
+/**
+ * Minimal CSV field escaper: quote fields that contain a comma, quote,
+ * CR, or LF; double any embedded quotes. Matches the subset of RFC 4180
+ * that SheetJS's `sheet_to_csv` emits for the same inputs.
+ */
+function csvEscape(value: string): string {
+  if (value.length === 0) {
+    return '';
+  }
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replaceAll('"', '""')}"`;
+  }
+  return value;
 }

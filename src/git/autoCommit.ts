@@ -92,7 +92,8 @@ export class AutoCommitManager {
       if (status.staged.length === 0) return null;
 
       // Generate message
-      const rawMessage = messageOverride ?? (await generateCommitMessage(files, this.config));
+      const rawMessage =
+        messageOverride ?? (await generateCommitMessage(files, this.config, this.workdir));
       const message = formatCommitMessage(rawMessage, this.config);
 
       // Apply author env if needed

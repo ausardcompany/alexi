@@ -21,6 +21,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
+- [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -9787,4 +9788,238 @@ npm test -- tests/tui/subagent-view.test.tsx
 
 # Keyboard hook (includes the SubagentContext mock)
 npm test -- tests/cli/tui/useKeyboard.test.tsx
+```
+
+## Testing the commit-message rules wiring (issue #1953)
+
+The auto-commit generator in `src/git/commitMessage.ts` now appends
+user-defined rules from `.alexi/rules/` (or the override set via
+`GitConfig.commitMessage.rulesPath`) to the system prompt handed to the
+cheap-model provider. The regression suite in
+`src/git/commitMessage.test.ts` (227 lines, two describe blocks) locks
+in three contracts:
+
+1. The pure helper `buildRulesSection(workdir, rulesPathOverride?)` reads
+   enabled rules only, in deterministic filename order, and wraps each
+   one in a `<rule file="...">` tag with `COMMIT_RULES_PREAMBLE` on top.
+2. `disabled: true` (or the string coercions `"true"` / `"yes"`) in a
+   rule's gray-matter frontmatter excludes that rule from the prompt.
+3. The system message passed to `provider.complete(...)` from
+   `generateCommitMessage(files, config, workdir)` contains the enabled
+   rules, and the `commitMessage.rulesPath` override is honored.
+
+### Fixture pattern — temp workdir with `.alexi/rules/`
+
+Every case runs under an isolated tempdir to stay parallel-safe. The
+helper creates `<workdir>/.alexi/rules/<file>.md` entries and returns a
+cleanup closure for `afterEach`:
+
+```ts
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+function makeWorkdirWithRules(files: Record<string, string>): {
+  workdir: string;
+  cleanup: () => void;
+} {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-rules-'));
+  const rulesDir = path.join(workdir, '.alexi', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  for (const [name, content] of Object.entries(files)) {
+    fs.writeFileSync(path.join(rulesDir, name), content, 'utf-8');
+  }
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+### Mocking the provider and router
+
+Both providers and the router are mocked BEFORE importing the module
+under test. Keeping the `vi.mock` block above the `import` line matches
+the AGENTS.md "mock before import" convention even though `vi.mock` is
+hoisted — the explicit ordering is a readability contract:
+
+```ts
+vi.mock('../providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+}));
+
+vi.mock('../core/router.js', () => ({
+  routePrompt: vi.fn(() => ({ modelId: 'gpt-4o-mini', reason: 'cheap', confidence: 0.9 })),
+}));
+
+import {
+  buildRulesSection,
+  COMMIT_RULES_PREAMBLE,
+  generateCommitMessage,
+} from './commitMessage.js';
+import { getProviderForModelWithFallback } from '../providers/index.js';
+```
+
+In each case the mocked provider returns a canned completion whose text
+is asserted to be the eventual return of `generateCommitMessage`:
+
+```ts
+const completeFn = vi.fn().mockResolvedValue({
+  text: 'feat: wire rules into commit generator',
+  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+});
+vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+  provider: { complete: completeFn } as never,
+  effectiveModelId: 'gpt-4o-mini',
+  usedFallback: false,
+});
+```
+
+### Case 1 — enabled rules appear in the system message
+
+The core assertion inspects the first argument of the recorded
+`complete(...)` call, finds the `role: 'system'` message, and checks
+that the preamble + `<rule file="...">` tag are both present:
+
+```ts
+it('passes enabled rules in the system message to provider.complete', async () => {
+  const msg = await generateCommitMessage(
+    [{ filePath: 'src/foo.ts', toolName: 'write' }],
+    baseConfig,
+    fixture.workdir
+  );
+
+  expect(msg).toBe('feat: wire rules into commit generator');
+  expect(completeFn).toHaveBeenCalledTimes(1);
+  const [messages] = completeFn.mock.calls[0];
+  const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+  expect(systemMsg).toBeDefined();
+  expect(systemMsg.content).toContain('git commit message generator');
+  expect(systemMsg.content).toContain(COMMIT_RULES_PREAMBLE);
+  expect(systemMsg.content).toContain('<rule file="ticket.md">');
+  expect(systemMsg.content).toContain('Always reference an issue number.');
+});
+```
+
+### Case 2 — `disabled: true` rules are excluded
+
+A rule with the frontmatter `---\ndisabled: true\n---\nShould not
+appear.` must NOT reach the model. The test verifies the negative
+assertion against the same system message:
+
+```ts
+const [messages] = completeFn.mock.calls[0];
+const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+expect(systemMsg.content).not.toContain('ignored.md');
+expect(systemMsg.content).not.toContain('Should not appear');
+```
+
+### Case 3 — `rulesPath` config override
+
+The override case points to a sibling directory outside `.alexi/rules/`
+and verifies that the discovery chain honors `customPaths`:
+
+```ts
+await generateCommitMessage(
+  [{ filePath: 'src/foo.ts', toolName: 'write' }],
+  {
+    ...baseConfig,
+    commitMessage: { ...baseConfig.commitMessage, rulesPath: 'custom-rules' },
+  },
+  fixture.workdir
+);
+// systemMsg.content now contains '<rule file="override.md">' and 'Custom override rule.'
+```
+
+## Testing MCP Auth-Failure Classification
+
+The MCP auth-failure classifier (`src/mcp/auth-failure.ts`, commit `b591e606`, ports kilocode `21ed2b9e` + `c9632e495`) is a pure function with no side effects, so the regression suite is a plain input / output table. See [ARCHITECTURE.md — MCP Auth-Failure Classification](ARCHITECTURE.md#mcp-auth-failure-classification-srcmcpauth-failurets).
+
+Regression contract (`src/mcp/__tests__/auth-failure.test.ts`, 135 lines):
+
+- **HTTP 401 + `WWW-Authenticate` with `oauth` or `bearer`** → `kind: 'oauth-required'`.
+- **HTTP 401 without a matching `WWW-Authenticate`** → `kind: 'token-expired'`.
+- **HTTP 403 (any `WWW-Authenticate`)** → `kind: 'forbidden'`.
+- **No status / 2xx / 5xx** → `null` (not an auth error).
+- **Error shape coverage.** The `extractHttpStatus` probe is exercised against `error.status` (fetch Response shape), `error.response.status` (axios), `error.cause.status` (undici), and the `/\b(4\d{2})\b/` message fallback. The `extractHeader` probe is exercised against plain-object header bags AND `Headers`-like `.get(name)` objects.
+- **No retries.** The classifier never calls out; tests never need mocked timers or fake HTTP clients.
+
+### Running
+
+```bash
+npm test -- src/git/commitMessage.test.ts
+npm test -- src/mcp/__tests__/auth-failure.test.ts
+```
+
+## Testing MCP Runtime-Status Registry
+
+The scoped MCP status registry (`src/mcp/registry.ts`, commit `b591e606`, ports kilocode `c58468b1c` + `d395d0314`) is pure in-memory state keyed by `${scope}::${serverId}`. See [ARCHITECTURE.md — MCP Runtime-Status Registry](ARCHITECTURE.md#mcp-runtime-status-registry-srcmcpregistryts).
+
+Regression contract (`src/mcp/__tests__/registry.test.ts`, 73 lines):
+
+- **Set / get round trip.** `setMcpStatus(entry)` followed by `getMcpStatus(serverId, scope)` returns the entry with `updatedAt` stamped from `Date.now()`.
+- **Scope isolation.** Entries at `user::<id>` and `project::<id>` are independent; `getMcpStatus(id, 'user')` returns only the user-scope entry.
+- **Scoped uninstall.** `uninstallMcpServer(id, 'user')` deletes only `user::<id>`; same-id `project::<id>` entries are preserved. Returns the number of entries actually purged.
+- **Idempotency.** `uninstallMcpServer` on a non-existent `(id, scope)` returns `0` and does not throw.
+- **Test isolation.** Each case calls `_clearStatusCacheForTests()` from `beforeEach` so cross-case state does not leak. The helper is intentionally not re-exported from `src/mcp/index.ts` — tests import `src/mcp/registry.js` directly.
+
+### Running
+
+```bash
+npm test -- src/mcp/__tests__/registry.test.ts
+```
+
+## Testing Reasoning Finalize on Retry
+
+The reasoning-finalize integration (`src/core/session/reasoning-finalize.ts` + `src/core/session/retry.ts` `onRetry` hook, commit `b591e606`, ports kilocode `54eacd5ff`) is covered at two layers. See [ARCHITECTURE.md — Reasoning-Finalize on Stream Retry](ARCHITECTURE.md#reasoning-finalize-on-stream-retry-srccoresessionreasoning-finalizets).
+
+Regression contract (`src/core/session/__tests__/reasoning-finalize.test.ts`, 122 lines):
+
+- **Open block ⇒ terminal part emitted, buffer cleared.** After `appendReasoningToken(state, 'Thinking about SAP AI Core.')`, `finalizeReasoningBeforeRetry(state)` calls `state.finalize()` exactly once, sets `state.buffer === ''`, and sets `state.finalized === true`.
+- **Empty buffer ⇒ no emit but still finalized.** When no tokens were appended, `finalize()` is not called; `state.finalized` is still flipped to `true` so a stray late token after retry cannot reopen the block.
+- **Already-finalized state ⇒ no-op.** A second call to `finalizeReasoningBeforeRetry` on the same state does not re-emit.
+- **Throwing `finalize()` does not block the retry.** A `vi.fn()` that throws is observed, a `console.warn` is emitted, and the function resolves. The retry must always proceed.
+- **`withRetry` integration.** A `withRetry(fn, isNetworkRetryable, { onRetry: () => finalizeReasoningBeforeRetry(state) })` scenario with a transient first attempt + a successful second attempt confirms the hook runs between attempts and the final result is returned.
+
+### Running
+
+```bash
+npm test -- src/core/session/__tests__/reasoning-finalize.test.ts
+```
+
+## Testing Memory Model Config
+
+The `memory_model` config option (`src/config/userConfig.ts`, commit `b591e606`, ports kilocode `86fe6ef9f` + `fffcf0e2a`) is covered by `tests/config/memory-model.test.ts` (124 lines). See [CONFIGURATION.md — `models.memory`](CONFIGURATION.md#modelsmemory-auxiliary-task-model).
+
+Regression contract:
+
+- **Resolution order.** With `models.memory` AND `memory_model` both set, `getConfigMemoryModel()` returns the `models.memory` value. With only `memory_model`, it returns the legacy value. With neither, it returns `undefined`.
+- **Setter migration.** `setConfigMemoryModel(id)` writes to `models.memory` and deletes the legacy `memory_model` top-level key when present.
+- **Empty / whitespace rejection.** `setConfigMemoryModel('')` and `setConfigMemoryModel('   ')` throw with "memory model id must be a non-empty string".
+- **Fallback behaviour.** `resolveMemoryModel(sessionModel)` returns `sessionModel` when `memory_model` is unset. `resolveMemoryModel(sessionModel, async () => false)` returns `sessionModel` and logs a warn. `resolveMemoryModel(sessionModel, async () => { throw new Error('...'); })` catches, logs a warn, and returns `sessionModel` — a thrown availability check must never fail the turn.
+- **Config isolation.** Each case uses a temp `HOME` directory via `process.env.HOME = fs.mkdtempSync(...)` so cases do not clobber the real `~/.alexi/config.json`.
+
+### Running
+
+```bash
+npm test -- tests/config/memory-model.test.ts
+```
+
+## Testing XLSX Cell Fidelity
+
+The XLSX time + datetime precision fixes (`src/tool/tools/read-office.ts`, commit `b591e606`) are covered by `src/tool/tools/__tests__/read-office.xlsx-cell.test.ts` (79 lines). See [ARCHITECTURE.md — XLSX Time + Datetime Cell Fidelity](ARCHITECTURE.md#xlsx-time--datetime-cell-fidelity-srctooltoolsread-officets).
+
+Regression contract — four fixture cells all produced in-memory via `xlsx.utils.aoa_to_sheet` so no spreadsheet files land in-repo:
+
+| Cell input                | Expected output        | Pins                                     |
+| ------------------------- | ---------------------- | ---------------------------------------- |
+| Time-only `14:05` (`h:mm`) | `14:05:00`             | Floating-point rounding + time-only detection |
+| Datetime                  | `YYYY-MM-DD HH:MM:SS`  | Space-separated upstream contract        |
+| Date-only (ISO midnight)  | `YYYY-MM-DD`           | Unchanged behaviour for backwards compat  |
+| Elapsed `[h]:mm`          | sheet-formatted `value.w` | Elapsed-time regex `/\[(h+|m+|s+)\]/i`   |
+
+### Running
+
+```bash
+npm test -- src/tool/tools/__tests__/read-office.xlsx-cell.test.ts
 ```

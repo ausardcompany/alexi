@@ -6516,3 +6516,127 @@ Throws `Error('Invalid model catalog')` when `value` does not have the expected 
 
 Full flow: [ARCHITECTURE.md — Canonical Model Identity for Usage Attribution](ARCHITECTURE.md#canonical-model-identity-for-usage-attribution-catalog-identity).
 
+## MCP Auth-Failure API
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync). Pure classifier re-exported from `src/mcp/index.ts`. See [ARCHITECTURE.md — MCP Auth-Failure Classification](ARCHITECTURE.md#mcp-auth-failure-classification-srcmcpauth-failurets) for the design and classification matrix.
+
+### `classifyAuthFailure(serverId, error)`
+
+```typescript
+export type McpAuthFailureKind = 'oauth-required' | 'token-expired' | 'forbidden' | 'unknown-auth';
+
+export interface McpAuthFailure {
+  kind: McpAuthFailureKind;
+  serverId: string;
+  message: string;
+  cause?: unknown;
+}
+
+export function classifyAuthFailure(serverId: string, error: unknown): McpAuthFailure | null;
+```
+
+Returns a structured failure or `null`. `null` means "not an auth error" — callers keep the generic transport-error pipeline unchanged.
+
+### `extractHttpStatus(error)` / `extractHeader(error, name)`
+
+```typescript
+export function extractHttpStatus(error: unknown): number | undefined;
+export function extractHeader(error: unknown, name: string): string | undefined;
+```
+
+Best-effort narrowing across `error.status` / `error.statusCode` / `error.response.status` / `error.cause.status` for the status probe, and across `error.headers` / `error.response.headers` / `error.cause.headers` (plain-object or `Headers`-like) for the header probe. Supports axios, undici, and native fetch `Response` shapes without a dependency on any of them.
+
+### `McpAuthError`
+
+```typescript
+export class McpAuthError extends Error {
+  readonly failure: McpAuthFailure;
+  constructor(failure: McpAuthFailure);
+}
+```
+
+Throwable subclass. `instanceof McpAuthError` + reading `.failure` lets callers pattern-match on the structured failure without re-classifying.
+
+## MCP Runtime-Status Registry API
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync). Scoped in-memory status registry re-exported from `src/mcp/index.ts` with `Mcp` prefixes. See [ARCHITECTURE.md — MCP Runtime-Status Registry](ARCHITECTURE.md#mcp-runtime-status-registry-srcmcpregistryts) for the lifecycle diagram.
+
+```typescript
+export type McpScope = 'user' | 'project';
+
+export interface McpStatusEntry {
+  serverId: string;
+  ownerScope: McpScope;
+  state: 'connected' | 'disconnected' | 'connecting' | 'failed' | 'signed-in';
+  detail?: string;
+  updatedAt: number;
+}
+
+export function setMcpStatus(entry: Omit<McpStatusEntry, 'updatedAt'>): void;
+export function getMcpStatus(serverId: string, scope: McpScope): McpStatusEntry | undefined;
+export function listMcpStatuses(): McpStatusEntry[];
+export function uninstallMcpServer(serverId: string, scope: McpScope): number;
+```
+
+`uninstallMcpServer` returns the number of entries purged so callers can log an accurate "removed N stale status entries" line. Entries owned by other scopes are preserved.
+
+## Reasoning Finalize API
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync). Framework-agnostic helpers in `src/core/session/reasoning-finalize.ts` paired with the `onRetry` hook on `withRetry` from `src/core/session/retry.ts`. See [ARCHITECTURE.md — Reasoning-Finalize on Stream Retry](ARCHITECTURE.md#reasoning-finalize-on-stream-retry-srccoresessionreasoning-finalizets) for the retry sequence.
+
+```typescript
+export interface ReasoningStreamState {
+  buffer: string;
+  finalized: boolean;
+  finalize: () => void | Promise<void>;
+}
+
+export function createReasoningStreamState(
+  finalize: ReasoningStreamState['finalize']
+): ReasoningStreamState;
+
+export function appendReasoningToken(state: ReasoningStreamState, token: string): void;
+
+export function finalizeReasoningBeforeRetry(
+  state: ReasoningStreamState | undefined
+): Promise<void>;
+```
+
+The `onRetry` option on `withRetry` (`src/core/session/retry.ts`) is awaited BEFORE the backoff sleep, so wiring the finalizer runs the terminal emit against the still-open stream state before the next attempt opens a fresh stream:
+
+```typescript
+await withRetry(
+  async (attempt) => streamSapAiCore(attempt),
+  isNetworkRetryable,
+  {
+    maxAttempts: 5,
+    baseMs: 500,
+    maxMs: 30_000,
+    onRetry: (attempt, err) => finalizeReasoningBeforeRetry(reasoningState),
+  }
+);
+```
+
+A `finalize()` throw is swallowed with a warning; the retry MUST proceed even if the finalization emit itself failed.
+
+## Memory Model Config API
+
+Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `86fe6ef9f` + `fffcf0e2a`). Lets operators pin a cheaper / faster SAP AI Core model for automatic project-memory saves independent of the primary session model. Public surface in `src/config/userConfig.ts`:
+
+```typescript
+export function getConfigMemoryModel(): string | undefined;
+export function setConfigMemoryModel(modelId: string): void;
+export function resolveMemoryModel(
+  sessionModel: string,
+  isModelAvailable?: (modelId: string) => boolean | Promise<boolean>
+): Promise<string>;
+```
+
+Resolution order inside `getConfigMemoryModel`:
+
+1. `models.memory` in `~/.alexi/config.json` (new canonical location, groups with `models.compaction`).
+2. Legacy top-level `memory_model` (accepted for backwards compatibility with imported upstream configs).
+3. `undefined` when neither is set — caller reuses the session model.
+
+`resolveMemoryModel(sessionModel, isModelAvailable?)` falls back to the session model when `memory_model` is unset, malformed, or `isModelAvailable` reports it as unavailable. A thrown availability check is treated as "unavailable" and logged at warn level — on SAP AI Core, model availability varies by subaccount, so a cheap fallback must never fail the turn. See [CONFIGURATION.md — `models.memory`](CONFIGURATION.md#modelsmemory-auxiliary-task-model) for the config shape.
+
