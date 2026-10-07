@@ -165,6 +165,30 @@ function buildSystemPrompt(workdir: string, rulesPathOverride?: string | string[
 }
 
 /**
+ * The most recent provider failure observed by {@link generateWithLLM},
+ * or `null` if the last call succeeded. Preserved as a module-local
+ * for callers (e.g. {@link AutoCommitManager}, CLI diagnostics) that
+ * want to surface provider errors instead of silently seeing heuristic
+ * commit messages — ports upstream kilocode `f54e713dd`
+ * ("fix(cli): preserve commit-message provider errors").
+ *
+ * Reset to `null` at the start of every {@link generateWithLLM} call.
+ */
+let lastLlmError: CommitMessageError | null = null;
+
+/**
+ * Return (and consume) the most recent commit-message provider error.
+ * Returns `null` when the previous LLM call succeeded or when there has
+ * been no call yet. Consuming the error clears it so the next read
+ * reflects the most recent attempt only.
+ */
+export function consumeLastCommitMessageError(): CommitMessageError | null {
+  const err = lastLlmError;
+  lastLlmError = null;
+  return err;
+}
+
+/**
  * Generate commit message via LLM (cheap model)
  * Uses non-streaming completion to ensure full message is received
  */
@@ -173,6 +197,7 @@ async function generateWithLLM(
   config: GitConfig,
   workdir: string
 ): Promise<string | null> {
+  lastLlmError = null;
   try {
     let modelId = config.commitMessage.model
       ? config.commitMessage.model
@@ -227,11 +252,15 @@ async function generateWithLLM(
   } catch (cause) {
     // Distinguish transient/expected failures from real errors so
     // operators can diagnose SAP AI Core provider issues instead of
-    // silently getting heuristic commit messages. Kilocode 738163bb1.
+    // silently getting heuristic commit messages. Kilocode 738163bb1
+    // + f54e713dd: preserve the originating provider error on the
+    // module-local accessor so callers can surface it to the UI
+    // without having to install a logger spy.
     const err = new CommitMessageError(
       `Failed to generate commit message via LLM: ${cause instanceof Error ? cause.message : String(cause)}`,
       cause
     );
+    lastLlmError = err;
     logger.warn(err.message);
     return null;
   }

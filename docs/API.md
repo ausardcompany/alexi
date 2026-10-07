@@ -6791,3 +6791,191 @@ Resolution order inside `getConfigMemoryModel`:
 
 `resolveMemoryModel(sessionModel, isModelAvailable?)` falls back to the session model when `memory_model` is unset, malformed, or `isModelAvailable` reports it as unavailable. A thrown availability check is treated as "unavailable" and logged at warn level — on SAP AI Core, model availability varies by subaccount, so a cheap fallback must never fail the turn. See [CONFIGURATION.md — `models.memory`](CONFIGURATION.md#modelsmemory-auxiliary-task-model) for the config shape.
 
+## MCP OAuth Issuer-Rotation API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `84b26c697`). Pure helpers re-exported from `src/mcp/index.ts:20-30`. See [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts) for the decision flow.
+
+```typescript
+export interface StoredOAuthClient {
+  issuer?: string;
+  authorization_endpoint?: string;
+  token_endpoint?: string;
+  client_id?: string;
+}
+
+export interface DiscoveredOAuthMetadata {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint?: string;
+}
+
+export type ReregistrationAction = 'none' | 'issuer_rotated';
+
+export function hasIssuerChanged(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): boolean;
+
+export function requireReregistration(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): ReregistrationAction;
+```
+
+Behaviour contract:
+
+- `hasIssuerChanged(undefined, …)` and `hasIssuerChanged({}, …)` both return `false` — a fresh install or legacy record is not drift, it is simply "no stored copy to compare against yet". The caller should treat this as "proceed with registration".
+- `hasIssuerChanged({ issuer: X }, { issuer: X, authorization_endpoint: Y })` returns `true` when the stored side is missing `authorization_endpoint` — we cannot prove it matches, so re-register.
+- `requireReregistration` returns `'none'` for the empty / current cases and `'issuer_rotated'` when `hasIssuerChanged` fires. Using the string (instead of a boolean) keeps the signature stable for future `ReregistrationAction` kinds.
+
+Alexi's SAP AI Core transport does not use OAuth. This surface is only exercised when an operator wires a third-party OAuth-protected MCP server (GitHub, Linear, …) into Alexi; everything in the module is pure, so there is no runtime cost on an OAuth-free deployment.
+
+## Schema Failure Diagnostics API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `a8fbcc356` et al.). Three pure helpers in `src/core/message-diagnostics.ts` that produce structural summaries of a `ModelMessage[]` schema failure without ever including raw prompt text, tool arguments, or user content. See [ARCHITECTURE.md — Prompt-Safe Schema-Failure Diagnostics](ARCHITECTURE.md#prompt-safe-schema-failure-diagnostics-srccoremessage-diagnosticsts) for the no-leak invariants.
+
+```typescript
+export interface SchemaFailureIssue {
+  path: string;
+  code: string;
+  messageKind: string; // typeof issue.message, NEVER its content
+}
+
+export interface SchemaFailureSummary {
+  issues: ReadonlyArray<SchemaFailureIssue>;
+  truncated: boolean;
+}
+
+export function summarizeSchemaFailure(error: unknown): SchemaFailureSummary;
+
+export function summarizeMessageEnvelope(message: unknown): Record<string, unknown>;
+
+export function summarizeMessageArrayFailure(
+  messages: unknown,
+  error: unknown
+): {
+  schemaFailure: SchemaFailureSummary;
+  messageShapes: ReadonlyArray<Record<string, unknown>>;
+  truncatedMessages: boolean;
+};
+```
+
+Behaviour contract:
+
+- Accepts either `error.issues` (zod >= 4) or `error.errors` (legacy zod / Effect-like) and treats both aliases identically.
+- `issue.message` is NEVER copied — only `typeof issue.message` becomes `messageKind` (`'string' | 'number' | 'undefined' | ...`).
+- `summarizeMessageEnvelope` returns `{ role, partCount, partKinds, hasId }`; `partKinds` is the first 20 `parts[i].type` strings. No `parts[i].text` or `.url` is ever read.
+- Caps: `MAX_ISSUES = 50`, `MAX_PATH_SEGMENTS = 32`, `MAX_CODE_LENGTH = 128`, `MAX_MESSAGES = 20`. Over-cap inputs set the matching `truncated` / `truncatedMessages` flag.
+- Pathological inputs degrade: non-array `path` → `'<root>'`; non-string / 500-char `code` → `'unknown_code'`; non-object `message` → `{ shape: typeof message }`.
+
+Suggested call site: a provider adapter catches a zod error at the point where it serialises `ModelMessage[]` for the SAP AI Core wire format and routes `summarizeMessageArrayFailure(messages, error)` through `logger.warn` for diagnostic observability without PII at risk.
+
+## Config Overlay API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `b9e4b1e98` et al.). Pure shadowed-write detection in `src/config/overlay.ts`. See [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts) for the algorithm.
+
+```typescript
+export type OverlayId = string;
+
+export interface OverlayLayer {
+  id: OverlayId;
+  precedence: number;
+  keys: ReadonlySet<string>;
+}
+
+export interface ShadowedWrite {
+  shadowedBy: OverlayId;
+}
+
+export function detectShadowedWrite(
+  key: string,
+  targetOverlay: OverlayId,
+  layers: ReadonlyArray<OverlayLayer>
+): ShadowedWrite | null;
+
+export function formatShadowedWriteWarning(
+  key: string,
+  targetOverlay: OverlayId,
+  shadow: ShadowedWrite
+): string;
+```
+
+Behaviour contract:
+
+- Returns `null` when the target overlay is the highest-precedence layer defining the key, when no higher-precedence layer defines the key, and when `targetOverlay` is unknown.
+- When multiple higher-precedence layers define the key, returns `{ shadowedBy }` for the HIGHEST-precedence one — the layer that will actually win at read time.
+- Same-precedence ties do NOT shadow (`layer.precedence > target.precedence` is a strict inequality) — the runtime read ordering is undefined for ties, so a warning would be misleading.
+- `formatShadowedWriteWarning` emits a stable sentence: `Config key "<key>" written to the "<target>" overlay will be shadowed by the "<shadower>" overlay, which defines the same key at a higher precedence. The write will persist, but reads will continue to see the "<shadower>" value.`
+
+Example wiring (not yet in the code path — see the forward-wiring plan in [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts)):
+
+```typescript
+import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../config/overlay.js';
+import { readManagedPreferences, loadFullConfig } from '../config/userConfig.js';
+
+function warnIfShadowed(key: string): void {
+  const managedKeys = new Set(Object.keys(readManagedPreferences() ?? {}));
+  const userKeys = new Set(Object.keys(loadFullConfig()));
+  const layers: OverlayLayer[] = [
+    { id: 'managed', precedence: 100, keys: managedKeys },
+    { id: 'user', precedence: 50, keys: userKeys },
+  ];
+  const shadow = detectShadowedWrite(key, 'user', layers);
+  if (shadow) {
+    // eslint-disable-next-line no-console
+    console.warn(formatShadowedWriteWarning(key, 'user', shadow));
+  }
+}
+```
+
+## Shared Agent Board API
+
+Updated in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `759a6ef99`). The pre-existing `kilo_board_read` / `kilo_board_write` tools (gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json`) gained roster output + self-post refusal. See [ARCHITECTURE.md — Shared Agent Board: Roster + Self-Post Refusal](ARCHITECTURE.md#shared-agent-board-roster--self-post-refusal) for the design.
+
+### `kilo_board_read` result (updated)
+
+```typescript
+interface BoardParticipant {
+  sessionID: string;
+  /** True when this row describes the current calling session. */
+  self: boolean;
+}
+
+interface BoardReadResult {
+  messages: BoardMessage[];
+  boardId?: string;
+  /**
+   * Roster of session ids observed on the board (derived from recent
+   * message authors). The current caller's row carries `self: true`.
+   * Always includes the caller even if they have not posted yet.
+   */
+  roster?: BoardParticipant[];
+}
+```
+
+### `kilo_board_write` recipient contract (updated)
+
+- `recipient === context.sessionId` → `{ success: false, error: 'Refusing board post to self (<sessionId>). Use kilo_board_read to review your own row (self: true) instead.' }`. The write is NEVER attempted, and the `recipientLooksStopped` probe is skipped because the refusal is checked first.
+- `recipient` set to a session id that does not appear in the recent 100 messages → `{ success: true, data: { ..., deliveryStatus: 'no-recipient' }, hint: 'Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.' }` (unchanged behaviour from kilocode `7febec58f`).
+- `recipient` omitted (broadcast) → `deliveryStatus: 'delivered'` without the recipient probe.
+
+## Commit-Message Error Accessor
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `f54e713dd` "fix(cli): preserve commit-message provider errors"). New export from `src/git/commitMessage.ts` so callers can surface SAP AI Core provider failures to the UI instead of silently falling back to the heuristic path.
+
+```typescript
+export class CommitMessageError extends Error {
+  constructor(message: string, public readonly cause?: unknown);
+}
+
+export function consumeLastCommitMessageError(): CommitMessageError | null;
+```
+
+Semantics:
+
+- `generateWithLLM` (the private LLM path invoked by `generateCommitMessage`) resets a module-local `lastLlmError` to `null` at the start of every call. On failure, it stores a `CommitMessageError` wrapping the originating `cause`.
+- `consumeLastCommitMessageError()` returns (and clears) that error. Returns `null` when the previous LLM call succeeded or when there has been no call yet. The "consume" semantics prevent a stale error from being surfaced twice.
+- The fall-back-to-heuristic behaviour is byte-identical to pre-fix: `generateWithLLM` still returns `null` on failure, and `generateCommitMessage` still falls through to `buildHeuristicMessage(files, conventional)`. The only observable change is that `lastLlmError` is now populated for callers who care to read it.
+
+Suggested call site: `AutoCommitManager` or the CLI diagnostic surface calls `consumeLastCommitMessageError()` immediately after `generateCommitMessage` and, if the result is non-null, logs the originating provider error at `warn` or surfaces it in a TUI toast. Without this, a 401 / 403 / 500 from SAP AI Core produces a heuristic commit message with no obvious diagnostic trail.
+

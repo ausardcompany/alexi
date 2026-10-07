@@ -146,4 +146,23 @@ describe('boardWriteTool recipient state warnings', () => {
     expect(call[0]).toBe(BOARD_ID);
     expect(call[1]).toMatchObject({ limit: 100 });
   });
+
+  it('refuses a post to self with an actionable error (kilocode 759a6ef99)', async () => {
+    // Posting to your own session id is a no-op in practice and makes
+    // multi-agent board interactions non-deterministic. The upstream
+    // fix refuses the post with a clear error.
+    const result = await boardWriteTool.execute(
+      { content: 'ping self', recipient: SELF_SESSION },
+      ctx()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(SELF_SESSION);
+    expect(result.error).toMatch(/self/i);
+    expect(result.error).toContain('kilo_board_read');
+    // The write MUST NOT be attempted — self-post is refused up-front.
+    expect(writeMock).not.toHaveBeenCalled();
+    // The recipient probe is also skipped because the refusal is checked first.
+    expect(readMock).not.toHaveBeenCalled();
+  });
 });

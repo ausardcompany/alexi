@@ -7178,3 +7178,230 @@ Classification table:
 
 The 25 MB file cap (`MAX_FILE_BYTES`) and 5,000-row per-sheet cap (`MAX_ROWS_PER_SHEET`) are unchanged. See [TESTING.md — Testing XLSX Cell Fidelity](TESTING.md#testing-xlsx-cell-fidelity) for the four regression cases that pin the shapes.
 
+## MCP OAuth Issuer-Rotation Detection (`src/mcp/oauth-issuer.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `84b26c697` "fix(cli): let configured MCP OAuth clients re-authorize at a new authorization server"). Pure helpers that compare a cached MCP OAuth client record against the metadata discovered live via `.well-known/oauth-authorization-server` and signal when the authorization server has moved. Only exercised when an operator wires a third-party OAuth-protected MCP server (e.g. GitHub, Linear) into Alexi — SAP AI Core's own transport authenticates via `AICORE_SERVICE_KEY` client-credentials and never touches this surface.
+
+### Problem
+
+When an MCP server rotates its authorization-server (AS) endpoint — e.g. an operator moves from one SSO tenant to another — a client that caches the OLD issuer / token endpoint silently refreshes against the stale AS forever. The refresh fails, Alexi reports an opaque transport error, and the operator has no obvious path to recovery short of wiping `~/.alexi/mcp-oauth/<server>.json` by hand.
+
+### Fix flow
+
+```mermaid
+flowchart TD
+    Start[Token refresh needed] --> Load[Load stored OAuth client record]
+    Load --> Discover[GET /.well-known/oauth-authorization-server]
+    Discover --> Check{requireReregistration&#40;stored, discovered&#41;}
+    Check -->|&#39;none&#39;| Refresh[Refresh against cached token_endpoint]
+    Check -->|&#39;issuer_rotated&#39;| Wipe[Clear cached client + tokens]
+    Wipe --> Register[Dynamic client registration against new AS]
+    Register --> Resume[Resume original API call]
+    Refresh --> Resume
+```
+
+### Decision table
+
+`hasIssuerChanged(stored, discovered)`:
+
+| Stored state                                     | Discovered state                   | Returns |
+| ------------------------------------------------ | ---------------------------------- | ------- |
+| `undefined` or `{ issuer: undefined }`           | any                                | `false` |
+| `{ issuer: X, authorization_endpoint: Y }`       | `{ issuer: X, authorization_endpoint: Y }` | `false` |
+| `{ issuer: OLD, ... }`                           | `{ issuer: NEW, ... }`             | `true`  |
+| `{ issuer: X, authorization_endpoint: OLD }`     | `{ issuer: X, authorization_endpoint: NEW }` | `true` |
+| `{ issuer: X }` (missing `authorization_endpoint`) | any                              | `true` (legacy record, treat as drift) |
+
+`requireReregistration(stored, discovered)` is a thin predicate on top: returns `'none'` for an empty stored record or when the record is current, `'issuer_rotated'` when `hasIssuerChanged` fires. Returning the string (not a boolean) keeps the signature stable for a future `'scope_change'` kind.
+
+### Public surface
+
+```typescript
+export interface StoredOAuthClient {
+  issuer?: string;
+  authorization_endpoint?: string;
+  token_endpoint?: string;
+  client_id?: string;
+}
+
+export interface DiscoveredOAuthMetadata {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint?: string;
+}
+
+export type ReregistrationAction = 'none' | 'issuer_rotated';
+
+export function hasIssuerChanged(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): boolean;
+
+export function requireReregistration(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): ReregistrationAction;
+```
+
+Re-exported from `src/mcp/index.ts:20-30` alongside the existing `classifyAuthFailure` / `McpAuthError` surface so a caller that already has a `McpAuthError` with `kind: 'token-expired'` can run the issuer check without a second import. See [API.md — MCP OAuth Issuer-Rotation API](API.md#mcp-oauth-issuer-rotation-api) for the exported TypeScript signatures and [TESTING.md — Testing MCP OAuth Issuer-Rotation Detection](TESTING.md#testing-mcp-oauth-issuer-rotation-detection) for the regression suite.
+
+## Prompt-Safe Schema-Failure Diagnostics (`src/core/message-diagnostics.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `a8fbcc356`, `d99cdbbe2`, `3b5a4de22`, `6c894a552`, `1f093ffed`). Three pure helpers that produce structural summaries of a `ModelMessage[]` schema failure WITHOUT ever including raw prompt text, tool arguments, or user content. The upstream kilocode surface lives in `packages/opencode/src/kilocode/session/message-diagnostics.ts` and is Effect `Schema`-shaped; Alexi's providers already use `zod`, so this module accepts a zod-ish shape (`.issues` or `.errors`) and defensively guards against anything that pretends to be a zod error but isn't.
+
+### No-leak invariants
+
+```mermaid
+flowchart LR
+    Err[ZodError or Effect-like ParseError] --> Extract[extractIssues&#40;error&#41;]
+    Extract --> ForEach[per issue: path, code, typeof message]
+    ForEach --> Issue[&#123; path, code, messageKind &#125;]
+    Issue --> Guard{No raw message text}
+    Guard -->|OK| Out[SchemaFailureSummary]
+
+    Msg[Unknown message envelope] --> Shape[summarizeMessageEnvelope]
+    Shape --> Role[role string or missing]
+    Shape --> Parts[partCount, partKinds up to 20 slots]
+    Shape --> HasId[hasId boolean]
+    Role --> Env[Record no text, no url]
+    Parts --> Env
+    HasId --> Env
+```
+
+- **`issue.message` is NEVER copied.** Only `typeof issue.message` is recorded (`messageKind: 'string' | 'number' | 'undefined' | ...`) — zod sometimes embeds the offending value into its string, and the test suite pins this: `expect(JSON.stringify(summary)).not.toContain('secret prompt text')`.
+- **`parts[i].text` / `.url` are NEVER read.** `summarizeMessageEnvelope` records only `parts[i].type` (and only for the first 20 parts).
+- **Pathological shapes degrade gracefully.** Non-array `path` renders as `'<root>'`, non-string `code` renders as `'unknown_code'`, a 500-char code string also renders as `'unknown_code'` (bound `MAX_CODE_LENGTH = 128`), a 60-issue list truncates at `MAX_ISSUES = 50` with `truncated: true`, a 25-message array truncates at `MAX_MESSAGES = 20` with `truncatedMessages: true`.
+- **Pure — no logging.** The module has zero side effects; callers decide at which level to surface the summary (`debug` for routine schema debugging, `warn` for the point where a `ModelMessage[]` fails validation before being sent to a provider).
+
+### Public surface
+
+```typescript
+export interface SchemaFailureIssue {
+  path: string;
+  code: string;
+  messageKind: string; // typeof, NOT message content
+}
+
+export interface SchemaFailureSummary {
+  issues: ReadonlyArray<SchemaFailureIssue>;
+  truncated: boolean;
+}
+
+export function summarizeSchemaFailure(error: unknown): SchemaFailureSummary;
+
+export function summarizeMessageEnvelope(message: unknown): Record<string, unknown>;
+
+export function summarizeMessageArrayFailure(
+  messages: unknown,
+  error: unknown
+): {
+  schemaFailure: SchemaFailureSummary;
+  messageShapes: ReadonlyArray<Record<string, unknown>>;
+  truncatedMessages: boolean;
+};
+```
+
+Call site shape (expected): a provider adapter catches a zod error at the point where it serialises `ModelMessage[]` for the SAP AI Core wire format, calls `summarizeMessageArrayFailure(messages, error)`, and routes the result through `logger.warn` with no PII at risk. See [API.md — Schema Failure Diagnostics API](API.md#schema-failure-diagnostics-api) for the TypeScript surface and [TESTING.md — Testing Prompt-Safe Schema-Failure Diagnostics](TESTING.md#testing-prompt-safe-schema-failure-diagnostics) for the regression contract.
+
+## Config Overlay Shadowed-Write Detection (`src/config/overlay.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `b9e4b1e98`, `b1395f98d`, `506fa0876`, `5ee9257b8` "surface shadowed config overlay writes before saving"). Pure helper that detects when a write to a lower-precedence config overlay would be silently shadowed by a higher-precedence layer that already defines the same key. Pre-fix, an operator who edited `~/.alexi/config.json` for a key also set in macOS Managed Preferences would save, re-read, and see the managed value — no warning. Post-fix, callers surface a structured warning so the operator understands why their edit will have no effect.
+
+### Overlay layers in Alexi today
+
+| Overlay    | Source                                                                                    | Precedence (higher wins) |
+| ---------- | ----------------------------------------------------------------------------------------- | ------------------------ |
+| `managed`  | macOS Managed Preferences, read via `defaults read ai.alexi.cli` (`src/config/userConfig.ts:31-74`) | 100                      |
+| `user`     | `~/.alexi/config.json`, read / written via `loadFullConfig` / `saveFullConfig`            | 50                       |
+
+The module is a generic helper; it is written against an abstract `OverlayLayer[]` so additional sources (project `.alexi/config.json`, environment-level overrides, …) can be added later without churning the public surface. Alexi has not yet introduced an abstracted "write to layer X" code path, so the module is currently a forward-looking helper — see **Forward wiring** below.
+
+### Shadow-detection algorithm
+
+```mermaid
+flowchart TD
+    In[detectShadowedWrite&#40;key, targetOverlay, layers&#41;] --> Find{Find layer with id === targetOverlay}
+    Find -->|not found| NullOut1[return null]
+    Find -->|found| Scan[Iterate every OTHER layer]
+    Scan --> Check{layer.precedence &gt; target.precedence AND layer.keys.has&#40;key&#41;?}
+    Check -->|no| NextLayer[next layer]
+    Check -->|yes| Track[Track highest-precedence shadower]
+    Track --> NextLayer
+    NextLayer --> Done{Scanned all?}
+    Done -->|no| Scan
+    Done -->|yes| Return{Shadower found?}
+    Return -->|no| NullOut2[return null - safe write]
+    Return -->|yes| Shadow[return &#123; shadowedBy: id &#125;]
+```
+
+Key properties of the algorithm:
+
+- **Highest-precedence shadower wins.** Multiple higher-precedence layers can define the same key — the function returns the one that will actually win at read time, not an arbitrary intermediate one.
+- **Same-precedence ties do NOT shadow.** When two layers have the same `precedence`, a write to either is reported as safe. The runtime read path is undefined for ties, so a warning would be misleading.
+- **Unknown target returns `null`.** When `targetOverlay` is not found in `layers`, the function returns `null` — the caller is writing to a layer the overlay system does not know about, so there is nothing to compare against.
+
+### Public surface
+
+```typescript
+export type OverlayId = string;
+
+export interface OverlayLayer {
+  id: OverlayId;
+  precedence: number;
+  keys: ReadonlySet<string>;
+}
+
+export interface ShadowedWrite {
+  shadowedBy: OverlayId;
+}
+
+export function detectShadowedWrite(
+  key: string,
+  targetOverlay: OverlayId,
+  layers: ReadonlyArray<OverlayLayer>
+): ShadowedWrite | null;
+
+export function formatShadowedWriteWarning(
+  key: string,
+  targetOverlay: OverlayId,
+  shadow: ShadowedWrite
+): string;
+```
+
+### Forward wiring
+
+The intended call site is any CLI subcommand that writes to `~/.alexi/config.json` (`alexi config set`, the TUI config editor, model-picker persistence, …): before the save, build an `OverlayLayer[]` from the live state (snapshot `managed` keys from `readManagedPreferences`, snapshot `user` keys from `loadFullConfig`), call `detectShadowedWrite(key, 'user', layers)`, and if the result is non-null format a warning via `formatShadowedWriteWarning` and surface it on `process.stderr` or in a TUI toast. The write is NOT blocked — the shadow warning is advisory, matching upstream behaviour.
+
+See [API.md — Config Overlay API](API.md#config-overlay-api) for the TypeScript surface and [CONFIGURATION.md — Managed Preferences and the Overlay Precedence Model](CONFIGURATION.md#managed-preferences-and-the-overlay-precedence-model) for the operator-facing precedence contract.
+
+## Shared Agent Board: Roster + Self-Post Refusal
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `759a6ef99` "expose self identity on the roster"). Two coordinated changes to the pre-existing `src/tool/tools/board.ts` surface:
+
+1. **`kilo_board_read` now returns a `roster`.** The returned `BoardReadResult.roster?: BoardParticipant[]` field (`src/tool/tools/board.ts:46-63`) lists every session id observed on the board, derived from recent message authors. The current caller's row carries `self: true` so an agent can distinguish itself from its peers deterministically. The caller is always on the roster even if they have not posted yet, so `self: true` is always observable.
+
+   ```typescript
+   interface BoardParticipant {
+     sessionID: string;
+     self: boolean; // true iff this row describes the current session
+   }
+
+   interface BoardReadResult {
+     messages: BoardMessage[];
+     boardId?: string;
+     roster?: BoardParticipant[]; // NEW
+   }
+   ```
+
+2. **`kilo_board_write` refuses posts to self.** A `kilo_board_write` call with `recipient === context.sessionId` returns `{ success: false, error: 'Refusing board post to self (<sessionId>). Use kilo_board_read to review your own row (self: true) instead.' }`. The write is NEVER attempted, and the `recipientLooksStopped` probe is skipped because the refusal is checked first. A self-post is a no-op in practice and makes multi-agent board interactions non-deterministic — this refusal is upstream's chosen remediation.
+
+Both changes are documented in the tool descriptions surfaced to the model, so an LLM reasoning about board usage sees the new contract directly:
+
+- `kilo_board_read`: `'The roster field lists session ids seen on the board; your own row is flagged self: true.'`
+- `kilo_board_write` `recipient` param: `'Your own row from board_read is flagged self: true (the current session is the board root), and a post to yourself is refused. When set, the tool warns if that subagent is stopped or does not exist.'`
+- `kilo_board_write` tool description: `'Post a message to the shared agent board for coordination with peer subagents (parents, children, and background siblings).'`
+
+The pre-existing `kilo_board_write` recipient-looks-stopped probe (ports kilocode `7febec58f`) is unchanged: when `recipient` is set AND is not refused as self AND does not appear in the recent 100 messages, the message is still written but surfaces `deliveryStatus: 'no-recipient'` + a hint instead of failing. The parent orchestrator decides how to react.
+
+Regression coverage lives in `tests/tool/tools/board-write-recipient.test.ts:149-168` (new case `'refuses a post to self with an actionable error (kilocode 759a6ef99)'`); see [TESTING.md — Testing Shared Agent Board Self-Post Refusal](TESTING.md#testing-shared-agent-board-self-post-refusal).
+
