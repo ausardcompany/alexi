@@ -23,6 +23,12 @@ export function getHelpEntries(): HelpEntry[] {
       category: 'navigation',
       condition: null,
     },
+    {
+      key: 'p',
+      description: 'Pin/unpin selected worktree',
+      category: 'navigation',
+      condition: 'sidebar focused',
+    },
 
     // Chat
     { key: 'Enter', description: 'Send message', category: 'chat', condition: null },
