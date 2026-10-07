@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   __resetWorktreeStatusRegistry,
+  getPinnedWorktreeIds,
   getWorktreeStatus,
   getWorktreeStatuses,
   removeWorktreeStatus,
+  setWorktreePinned,
   setWorktreeStatus,
   subscribe,
+  toggleWorktreePin,
   type WorktreeStatusEntry,
 } from '../../src/agent/worktreeStatus.js';
 
@@ -131,5 +134,100 @@ describe('worktreeStatus registry', () => {
     setWorktreeStatus('wt-1', { label: 'feature-x', status: 'idle' });
     const snap = getWorktreeStatuses();
     expect(Object.isFrozen(snap[0])).toBe(true);
+  });
+
+  describe('pinning (PR #14891)', () => {
+    it('defaults new entries to unpinned', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      expect(getWorktreeStatus('wt-1')?.pinned).toBeUndefined();
+      expect(getPinnedWorktreeIds()).toEqual([]);
+    });
+
+    it('setWorktreePinned flips the flag and emits', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      const listener = vi.fn();
+      subscribe(listener);
+      listener.mockClear();
+      expect(setWorktreePinned('wt-1', true)).toBe(true);
+      expect(getWorktreeStatus('wt-1')?.pinned).toBe(true);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('setWorktreePinned on an unknown id returns false and does not emit', () => {
+      const listener = vi.fn();
+      subscribe(listener);
+      listener.mockClear();
+      expect(setWorktreePinned('nope', true)).toBe(false);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('setWorktreePinned is a no-op when the flag is already in the requested state', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      setWorktreePinned('wt-1', true);
+      const listener = vi.fn();
+      subscribe(listener);
+      listener.mockClear();
+      expect(setWorktreePinned('wt-1', true)).toBe(false);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('toggleWorktreePin flips between pinned and unpinned', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      expect(toggleWorktreePin('wt-1')).toBe(true);
+      expect(getWorktreeStatus('wt-1')?.pinned).toBe(true);
+      expect(toggleWorktreePin('wt-1')).toBe(false);
+      expect(getWorktreeStatus('wt-1')?.pinned).toBe(false);
+    });
+
+    it('toggleWorktreePin returns undefined for an unknown id', () => {
+      expect(toggleWorktreePin('nope')).toBeUndefined();
+    });
+
+    it('setWorktreeStatus preserves pin flag when it is not supplied', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      setWorktreePinned('wt-1', true);
+      // Simulate a lifecycle status update from the orchestrator —
+      // must NOT clobber the user-set pin.
+      setWorktreeStatus('wt-1', { label: 'x', status: 'running' });
+      expect(getWorktreeStatus('wt-1')?.pinned).toBe(true);
+      expect(getWorktreeStatus('wt-1')?.status).toBe('running');
+    });
+
+    it('setWorktreeStatus accepts an explicit pinned override', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle', pinned: true });
+      expect(getWorktreeStatus('wt-1')?.pinned).toBe(true);
+    });
+
+    it('getPinnedWorktreeIds returns ids in insertion order', () => {
+      setWorktreeStatus('a', { label: 'a', status: 'idle' });
+      setWorktreeStatus('b', { label: 'b', status: 'idle' });
+      setWorktreeStatus('c', { label: 'c', status: 'idle' });
+      setWorktreePinned('b', true);
+      setWorktreePinned('a', true);
+      expect(getPinnedWorktreeIds()).toEqual(['a', 'b']);
+    });
+
+    it('removeWorktreeStatus drops a pinned entry', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      setWorktreePinned('wt-1', true);
+      removeWorktreeStatus('wt-1');
+      expect(getPinnedWorktreeIds()).toEqual([]);
+    });
+
+    it('no-op update including pinned does not emit', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle', pinned: true });
+      const listener = vi.fn();
+      subscribe(listener);
+      listener.mockClear();
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle', pinned: true });
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('entries projected into getWorktreeStatuses carry the pinned flag', () => {
+      setWorktreeStatus('wt-1', { label: 'x', status: 'idle' });
+      setWorktreePinned('wt-1', true);
+      const snap: readonly WorktreeStatusEntry[] = getWorktreeStatuses();
+      expect(snap[0].pinned).toBe(true);
+    });
   });
 });
