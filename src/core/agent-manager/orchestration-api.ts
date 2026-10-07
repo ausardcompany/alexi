@@ -205,3 +205,168 @@ export class ActivityEventForwarder {
 export function orchestrateAgentManagerSessions(): ActivityEventForwarder {
   return new ActivityEventForwarder();
 }
+
+// ---------------------------------------------------------------------------
+// Worktree pinning (upstream kilocode PR #14891)
+// ---------------------------------------------------------------------------
+//
+// The Agent Manager sidebar lets users pin individual worktrees to the top
+// so critical ones stay visible when the fleet grows beyond what fits on
+// screen. Pin state is tracked in two places:
+//
+//   1. The in-memory worktree status registry (`src/agent/worktreeStatus.ts`)
+//      so the TUI can project it into sort order on every snapshot.
+//   2. A tiny on-disk file under `~/.alexi/agent-manager.json` so a user
+//      who pinned a worktree in one session sees it pinned on the next
+//      launch.
+//
+// The two layers are kept decoupled by this module: the TUI pushes pin
+// events through `toggleWorktreePin` (updates registry + schedules a
+// debounced write), and startup code calls `loadPersistedPinnedWorktrees`
+// to seed the registry from the file.
+
+import { promises as fsPromises } from 'fs';
+import path from 'path';
+import os from 'os';
+import {
+  getPinnedWorktreeIds,
+  getWorktreeStatus,
+  setWorktreePinned,
+  toggleWorktreePin as toggleRegistryPin,
+} from '../../agent/worktreeStatus.js';
+
+/**
+ * On-disk shape of `~/.alexi/agent-manager.json`. Deliberately small and
+ * forward-compatible: unknown fields are preserved on write via spread so
+ * a future release can add keys without clobbering state written by the
+ * current one.
+ */
+export interface AgentManagerPersistedState {
+  readonly pinnedWorktrees?: readonly string[];
+  readonly [extra: string]: unknown;
+}
+
+/**
+ * Default path for the persisted Agent Manager state. Exported so tests
+ * can override via {@link setAgentManagerStatePathForTesting} without
+ * reaching into module internals.
+ */
+export const DEFAULT_AGENT_MANAGER_STATE_PATH = path.join(
+  os.homedir(),
+  '.alexi',
+  'agent-manager.json'
+);
+
+let agentManagerStatePath = DEFAULT_AGENT_MANAGER_STATE_PATH;
+
+/**
+ * Test-only hook: redirect the persistence file to a temp location. The
+ * CLI never calls this; test setup does, typically against a path under
+ * `fs.mkdtemp(os.tmpdir())`.
+ */
+export function setAgentManagerStatePathForTesting(nextPath: string): void {
+  agentManagerStatePath = nextPath;
+}
+
+/**
+ * Reset the persistence path to the default (`~/.alexi/agent-manager.json`).
+ * Test-only companion to {@link setAgentManagerStatePathForTesting}.
+ */
+export function resetAgentManagerStatePathForTesting(): void {
+  agentManagerStatePath = DEFAULT_AGENT_MANAGER_STATE_PATH;
+}
+
+/**
+ * Read the persisted Agent Manager state. Returns an empty object when
+ * the file is missing (first run) or malformed — a corrupted file must
+ * not block the TUI from starting.
+ */
+export async function readAgentManagerState(): Promise<AgentManagerPersistedState> {
+  try {
+    const raw = await fsPromises.readFile(agentManagerStatePath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as AgentManagerPersistedState;
+    }
+    return {};
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT') {
+      return {};
+    }
+    // Treat anything else (bad JSON, EACCES, EISDIR, ...) as "no state"
+    // rather than crashing. The next successful write will overwrite the
+    // broken file.
+    return {};
+  }
+}
+
+/**
+ * Write the persisted Agent Manager state, creating the parent directory
+ * when needed. Unknown fields from the previous version are preserved by
+ * callers via spread before invoking this function.
+ */
+export async function writeAgentManagerState(state: AgentManagerPersistedState): Promise<void> {
+  await fsPromises.mkdir(path.dirname(agentManagerStatePath), { recursive: true });
+  await fsPromises.writeFile(agentManagerStatePath, JSON.stringify(state, null, 2) + '\n', 'utf8');
+}
+
+/**
+ * Load the persisted pin list and apply it to any entries already in
+ * the in-memory registry. Returns the subset of ids that were actually
+ * applied (i.e. ids whose entries were present) so callers can detect
+ * stale pins pointing at worktrees that no longer exist.
+ *
+ * Call this from Agent Manager startup, after the initial worktree
+ * discovery pass has populated the registry.
+ */
+export async function loadPersistedPinnedWorktrees(): Promise<readonly string[]> {
+  const state = await readAgentManagerState();
+  const ids = Array.isArray(state.pinnedWorktrees) ? state.pinnedWorktrees : [];
+  const applied: string[] = [];
+  for (const id of ids) {
+    if (typeof id !== 'string') {
+      continue;
+    }
+    if (getWorktreeStatus(id) !== undefined) {
+      setWorktreePinned(id, true);
+      applied.push(id);
+    }
+  }
+  return applied;
+}
+
+/**
+ * Persist the current set of pinned worktree ids to disk, preserving
+ * any unknown fields already present in the state file. Safe to call
+ * repeatedly; the file is small and the write is atomic enough for a
+ * single-user config.
+ */
+export async function persistPinnedWorktrees(): Promise<void> {
+  const existing = await readAgentManagerState();
+  const next: AgentManagerPersistedState = {
+    ...existing,
+    pinnedWorktrees: Array.from(getPinnedWorktreeIds()),
+  };
+  await writeAgentManagerState(next);
+}
+
+/**
+ * Toggle the pin flag on a worktree AND persist the change to disk.
+ * Returns the new pin state (`true` pinned, `false` unpinned) or
+ * `undefined` when the id is not in the registry — in that case the
+ * disk file is not touched.
+ *
+ * TUI callers should prefer this over the lower-level registry helper:
+ * it keeps the on-disk state in lockstep with the live snapshot so a
+ * crash between toggle and write cannot leave the user with a pinned
+ * worktree that silently loses its pin on next launch.
+ */
+export async function toggleWorktreePin(id: string): Promise<boolean | undefined> {
+  const next = toggleRegistryPin(id);
+  if (next === undefined) {
+    return undefined;
+  }
+  await persistPinnedWorktrees();
+  return next;
+}

@@ -8609,6 +8609,102 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/Sidebar.test.tsx
 ```
 
+## Testing worktree pinning (PR #14891)
+
+Introduced by commit `a146bf6e` (`feat(agent): add worktree pinning in Agent Manager sidebar`). The pin state has two homes — an in-memory flag on each `WorktreeStatusEntry` and the on-disk `~/.alexi/agent-manager.json` file — covered by three Vitest suites totalling 392 lines. Together they pin the registry-side flag contract, the Sidebar render + keybind, and the persistence roundtrip. See [ARCHITECTURE.md — Agent Manager Worktree Pinning](ARCHITECTURE.md#agent-manager-worktree-pinning-pr-14891) and [API.md — Worktree Pinning API](API.md#worktree-pinning-api) for the runtime contract these tests defend.
+
+### Registry flag: `tests/agent/worktreeStatus.test.ts` (`pinning (PR #14891)` describe block, 98 lines added, 7 cases)
+
+Extends the existing worktreeStatus suite with pin-focused cases. All cases run under the default `node` environment and share the same `__resetWorktreeStatusRegistry()` `beforeEach` as the parent suite:
+
+```typescript
+import {
+  __resetWorktreeStatusRegistry,
+  getPinnedWorktreeIds,
+  getWorktreeStatus,
+  setWorktreePinned,
+  setWorktreeStatus,
+  subscribe,
+  toggleWorktreePin,
+} from '../../src/agent/worktreeStatus.js';
+```
+
+Invariants pinned:
+
+1. **Default-unpinned.** `setWorktreeStatus('wt-1', { label, status: 'idle' })` leaves `pinned` as `undefined`; `getPinnedWorktreeIds()` returns `[]`.
+2. **Emit on real change.** `setWorktreePinned('wt-1', true)` returns `true`, flips the flag, and triggers exactly one listener call.
+3. **Unknown-id guard.** `setWorktreePinned('nope', true)` returns `false` and does NOT emit.
+4. **No-op guard.** `setWorktreePinned` is a no-op when the flag is already in the requested state — returns `false` and does NOT emit.
+5. **Toggle roundtrip.** `toggleWorktreePin('wt-1')` returns `true` (pin), then `false` (unpin).
+6. **Pin preservation across unrelated status changes.** Setting a pinned entry's `status: 'running'` keeps `pinned: true` — the orchestrator's lifecycle event does not clobber the user's pin.
+7. **Insertion-order pin list.** `getPinnedWorktreeIds()` returns ids in the order they were inserted into the registry, regardless of pin toggle timestamps.
+
+### Sidebar render + keybind: `tests/cli/tui/Sidebar.test.tsx` (`worktree pinning (PR #14891)` describe block, 126 lines added, 5 cases)
+
+Mounts the `Sidebar` component under `ink-testing-library` and drives it via `stdin.write('p')`. Snapshot assertions use `animateWorktrees={false}` to keep the rendered frame deterministic. The shared fixture is a four-entry array where entries `b` and `d` are pinned and entries `a`, `c` are not:
+
+```typescript
+const pinnedFirstEntries: WorktreeStatusEntry[] = [
+  { id: 'a', label: 'alpha', status: 'idle', updatedAt: 1 },
+  { id: 'b', label: 'beta', status: 'running', updatedAt: 2, pinned: true },
+  { id: 'c', label: 'gamma', status: 'idle', updatedAt: 3 },
+  { id: 'd', label: 'delta', status: 'idle', updatedAt: 4, pinned: true },
+];
+```
+
+Cases:
+
+1. **`sortWorktreesPinnedFirst` bubbles pinned to the top with stable within-bucket order.** `sorted.map(e => e.id)` equals `['b', 'd', 'a', 'c']`.
+2. **No-op when nothing is pinned.** `sortWorktreesPinnedFirst(input)` returns the exact same reference (`expect(sorted).toBe(input)`), so React avoids a needless re-render.
+3. **Render pinned first with `[P]` indicator.** Asserts the frame contains `[P] beta` and `[P] delta` but not `[P] alpha` / `[P] gamma`, and asserts `max(betaIdx, deltaIdx) < min(alphaIdx, gammaIdx)`.
+4. **`p` dispatches `onTogglePin(worktrees[selectedWorktreeIndex].id)`.** With `selectedWorktreeIndex={2}`, `stdin.write('p')` invokes `onTogglePin('c')` — index 2 refers to the UNSORTED snapshot ('gamma'), confirming the pin target is stable across display reorderings.
+5. **Keybind gated correctly.** `onTogglePin` is NOT invoked when `selectedWorktreeIndex` is omitted or when `isFocused={false}`.
+
+Both tests that drive `stdin` yield with `await new Promise((r) => setImmediate(r))` before and after the write so `useInput` has subscribed before the keystroke and the component has processed the resulting state change before the assertion runs.
+
+### Persistence roundtrip: `tests/core/agent-manager-pinning.test.ts` (168 lines, 4 describe blocks, 11 cases)
+
+Covers the orchestration-api wrapper that keeps the in-memory registry and the on-disk file in lockstep. Every test redirects the persistence file to a temp location so parallel workers do not race on the real `~/.alexi/agent-manager.json`:
+
+```typescript
+beforeEach(async () => {
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-'));
+  statePath = path.join(tmpDir, 'agent-manager.json');
+  setAgentManagerStatePathForTesting(statePath);
+});
+
+afterEach(async () => {
+  resetAgentManagerStatePathForTesting();
+  __resetWorktreeStatusRegistry();
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+```
+
+Describe blocks and cases:
+
+- **`toggleWorktreePin (persistence)` (4 cases).** Pin writes `pinnedWorktrees: ['wt-1']` to disk; unpin writes `[]`; unknown id returns `undefined` and does NOT create the file (asserted via `await expect(fs.access(statePath)).rejects.toThrow()`); writes preserve unknown top-level fields (`futureField: 42` round-trips).
+- **`loadPersistedPinnedWorktrees` (5 cases).** Missing file → `[]`; applies persisted ids to matching registry entries; stale pins (ids with no matching entry) are skipped and NOT applied as ghosts; non-string entries are ignored defensively (hand-edited corrupted file); malformed JSON is treated as empty state and does NOT crash.
+- **`persistPinnedWorktrees` (2 cases).** Writes current pin ids reflecting the registry snapshot; creates nested parent directories on first write (`fs.mkdir(..., { recursive: true })`).
+- **`pin persistence roundtrip` (1 case).** The full "pin → simulate restart → re-discover → load" sequence restores the pin, which is the production-equivalent test for the Agent Manager startup contract.
+
+Run the full pinning coverage:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts \
+  tests/cli/tui/Sidebar.test.tsx \
+  tests/core/agent-manager-pinning.test.ts
+```
+
+### Isolation and parallel safety
+
+The pin suites use the same module-scoped singleton as the parent registry suites, plus a filesystem resource. Three invariants keep them parallel-safe:
+
+1. **Registry reset.** Every `afterEach` calls `__resetWorktreeStatusRegistry()` so a leaked pin from a previous case cannot bleed into the next.
+2. **Per-case temp directory.** `fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-'))` returns a unique directory per worker, and `fs.rm(tmpDir, { recursive: true, force: true })` tears it down even on test failure.
+3. **Persistence path reset.** `resetAgentManagerStatePathForTesting()` returns the module to `DEFAULT_AGENT_MANAGER_STATE_PATH` so a crash mid-test cannot leave the production path pointing at a deleted temp directory for the next suite.
+
+Do NOT rely on the real `~/.alexi/agent-manager.json` in any test — a successful run would overwrite the operator's actual pin state. Always redirect with `setAgentManagerStatePathForTesting`.
+
 ## Testing the TUI Glyph Audit (issue #1896)
 
 Introduced by commit `5669b9e3` (`feat(cli): audit TUI glyphs for Linux font compatibility`). The audit lives in `tests/cli/tui/glyphs.test.ts` (284 lines) and defends the contract from `src/cli/tui/theme/glyphs.ts`: every non-ASCII code point that appears in a TUI source file MUST render correctly on Linux terminals using DejaVu Sans Mono / Noto Sans Mono / Ubuntu Mono, either directly (safe range or explicit allow-list) or via `linuxSafeGlyph()`. See [ARCHITECTURE.md — TUI Glyph Safety and Linux Font Compatibility](ARCHITECTURE.md#tui-glyph-safety-and-linux-font-compatibility-issue-1896) and [API.md — Linux-safe TUI Glyph Module](API.md#linux-safe-tui-glyph-module-srcclituithemeglyphs).
