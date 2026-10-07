@@ -6640,3 +6640,75 @@ Resolution order inside `getConfigMemoryModel`:
 
 `resolveMemoryModel(sessionModel, isModelAvailable?)` falls back to the session model when `memory_model` is unset, malformed, or `isModelAvailable` reports it as unavailable. A thrown availability check is treated as "unavailable" and logged at warn level — on SAP AI Core, model availability varies by subaccount, so a cheap fallback must never fail the turn. See [CONFIGURATION.md — `models.memory`](CONFIGURATION.md#modelsmemory-auxiliary-task-model) for the config shape.
 
+## Todo Progress Chip API (`src/utils/todo.ts`)
+
+Introduced in commit `af35b6c1` (`feat(tools): add todo progress chip to TUI status bar`). Framework-agnostic helpers for deriving a compact `"N/M todos"` summary from the global `todowrite` tool state. See [ARCHITECTURE.md — TUI Todo Progress Chip](ARCHITECTURE.md#tui-todo-progress-chip-srcclituicomponentstodoprogresschiptsx) for the subscription wiring.
+
+```typescript
+import type { Todo } from '../tool/tools/todowrite.js';
+
+export interface TodoProgress {
+  /** Number of todos whose status is `completed`. */
+  completed: number;
+  /** Total number of todos in the list, including cancelled ones. */
+  total: number;
+}
+
+export type TodoProgressState = 'empty' | 'idle' | 'active' | 'done';
+
+export function computeTodoProgress(todos: readonly Todo[]): TodoProgress;
+export function todoProgressState(progress: TodoProgress): TodoProgressState;
+export function formatTodoChipLabel(progress: TodoProgress): string;
+```
+
+Semantics:
+
+- `computeTodoProgress` counts only entries whose `status === 'completed'`. Cancelled todos count toward `total` so the ratio reflects the declared plan (matching how the `todowrite` tool reports `totalCount` itself).
+- `todoProgressState` maps the tuple to one of four states so the TUI (and future surfaces) can pick a color without duplicating the comparison logic. `completed >= total` returns `'done'` defensively — a provider that reports more completions than declared cannot flip the chip into an invalid state. `total === 0` returns `'empty'` which the TUI treats as "render nothing".
+- `formatTodoChipLabel` returns `'N/M todos'` for a non-empty list and the empty string for `total === 0`. Callers can treat the empty string as a "render nothing" sentinel without re-implementing the empty-list check.
+
+### `TodoProgressChip` component (`src/cli/tui/components/TodoProgressChip.tsx`)
+
+```typescript
+import type { Todo } from '../../../tool/tools/todowrite.js';
+
+export interface TodoProgressChipProps {
+  /**
+   * Explicit todo list for tests and non-interactive callers. When omitted
+   * the component subscribes to the global `todowrite` tool state so the
+   * chip updates automatically as the agent edits todos. The explicit prop
+   * takes precedence — passing an empty array is treated as "no todos".
+   */
+  todos?: readonly Todo[];
+  /**
+   * Background color used behind the chip. Defaults to the theme's darker
+   * status-bar background so the chip blends into the StatusBar segment
+   * strip without needing additional wrapper padding.
+   */
+  backgroundColor?: string;
+}
+
+export function TodoProgressChip(
+  props: TodoProgressChipProps
+): React.JSX.Element | null;
+```
+
+Behaviour:
+
+- **Live subscription by default.** When `todos` is omitted the component reads `getTodos()` on mount and subscribes via `onTodosChange(cb)` from `src/tool/tools/todowrite.ts`. The unsubscriber returned by `onTodosChange` is wired to the `useEffect` cleanup.
+- **Explicit prop takes precedence.** Passing a `todos` array (including `[]`) skips the subscription. Tests use this form to pin specific progress tuples without touching the global state.
+- **Hidden when the list is empty.** `todoProgressState({ completed: 0, total: 0 }) === 'empty'` short-circuits to `return null`.
+- **Color mapping.** `done → colors.success` (green), `active → colors.warning` (yellow), `idle → colors.dimText` (gray). Background defaults to `colors.backgroundDarker`.
+
+### Todowrite tool state hooks (`src/tool/tools/todowrite.ts`)
+
+The chip consumes three exports from the `todowrite` tool module:
+
+```typescript
+export function getTodos(): Todo[];
+export function onTodosChange(callback: (todos: Todo[]) => void): () => void;
+export function clearTodos(): void;
+```
+
+`getTodos()` returns a defensive copy of the current list (never a reference to internal state). `onTodosChange` registers a listener and returns an unsubscriber. `clearTodos()` resets the list and notifies all listeners — tests use it in `afterEach` so subscription-mode cases do not leak state into the next case.
+
