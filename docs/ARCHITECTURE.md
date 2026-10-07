@@ -7178,6 +7178,95 @@ Classification table:
 
 The 25 MB file cap (`MAX_FILE_BYTES`) and 5,000-row per-sheet cap (`MAX_ROWS_PER_SHEET`) are unchanged. See [TESTING.md — Testing XLSX Cell Fidelity](TESTING.md#testing-xlsx-cell-fidelity) for the four regression cases that pin the shapes.
 
+## TUI Todo Progress Chip (`src/cli/tui/components/TodoProgressChip.tsx`)
+
+Introduced in commit `af35b6c1` (`feat(tools): add todo progress chip to TUI status bar`). The Ink `StatusBar` now renders a compact `"N/M todos"` chip tied to the global `todowrite` tool state so the user can see live progress against the declared plan without opening the full list. Three concerns are deliberately split across three modules:
+
+1. **State owner.** `src/tool/tools/todowrite.ts` is the single source of truth for the todo list. The chip never writes to it.
+2. **Pure derivation.** `src/utils/todo.ts` holds framework-agnostic helpers (`computeTodoProgress`, `todoProgressState`, `formatTodoChipLabel`) so the TUI, tests, and any future surface (status endpoint, log line, hook) can share the same classification logic.
+3. **Render + subscribe.** `src/cli/tui/components/TodoProgressChip.tsx` is the only module that touches React. It subscribes to the tool state via `onTodosChange` and maps the derived state to theme colors.
+
+### Data flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Agent loop (agenticChat.ts)
+    participant Tool as todowrite tool
+    participant State as currentTodos (module-level)
+    participant Listeners as todoListeners[]
+    participant Chip as TodoProgressChip (Ink)
+    participant Bar as StatusBar
+
+    Bar->>Chip: mount (no `todos` prop)
+    Chip->>Tool: getTodos() -> readonly Todo[]
+    Chip->>Tool: onTodosChange(cb) -> unsub fn
+    Note over Chip: Initial render based on getTodos()
+    Agent->>Tool: todowrite({ todos: [...updated] })
+    Tool->>State: currentTodos = params.todos
+    Tool->>Listeners: notify each listener(currentTodos)
+    Listeners->>Chip: cb(nextTodos)
+    Chip->>Chip: setLiveTodos(nextTodos)
+    Chip->>Chip: computeTodoProgress / todoProgressState
+    alt state === 'empty'
+        Chip-->>Bar: null (chip hidden)
+    else
+        Chip-->>Bar: <Box><Text>N/M todos</Text></Box>
+    end
+    Bar->>Chip: unmount -> useEffect cleanup -> unsub()
+```
+
+### Chip state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> empty: total === 0
+    empty --> idle: todowrite({ pending/in_progress todos })
+    idle --> active: first completion
+    active --> done: completed === total
+    done --> active: new pending todo added
+    active --> idle: all completions reverted (defensive)
+    idle --> empty: todos cleared
+    active --> empty: todos cleared
+    done --> empty: todos cleared
+    note right of empty
+        Chip renders null.
+        Color unused.
+    end note
+    note right of idle
+        Color: colors.dimText (gray).
+    end note
+    note right of active
+        Color: colors.warning (yellow).
+    end note
+    note right of done
+        Color: colors.success (green).
+    end note
+```
+
+### Contract points
+
+- **Chip is hidden when the list is empty.** `todoProgressState({ completed: 0, total: 0 }) === 'empty'` short-circuits to `return null`. The alternative — showing `0/0 todos` during an idle session — was noisy in practice.
+- **Live subscription vs explicit prop.** When `todos` is omitted, the component mirrors the global `todowrite` state. Passing an explicit `todos` prop (including `[]`) skips the subscription. Tests use the explicit form to pin specific progress tuples without touching the global state; the StatusBar uses the subscription form so the chip updates automatically as the agent edits the todo list.
+- **Cleanup is non-optional.** The `useEffect` returns the unsubscriber from `onTodosChange`, so the chip detaches cleanly on unmount. Leaking a subscription per mount would accumulate stale closures across TUI re-mounts (dialog overlay open/close, session switch, …).
+- **Cancelled todos count toward the total.** `computeTodoProgress` treats `status === 'cancelled'` as part of `total` so the ratio reflects how much of the declared plan has actually been shipped — matching how the `todowrite` tool reports `totalCount`.
+- **Defensive `done`.** `todoProgressState` returns `'done'` for `completed >= total`, not just `completed === total`. A provider that reports more completions than declared cannot flip the chip into an invalid state.
+
+### Theming
+
+Colors come from the active theme via `useTheme()`:
+
+| State    | Color token           | Default theme render |
+| -------- | --------------------- | -------------------- |
+| `empty`  | n/a                   | null (not rendered)  |
+| `idle`   | `colors.dimText`      | gray                 |
+| `active` | `colors.warning`      | yellow               |
+| `done`   | `colors.success`      | green                |
+
+The background defaults to `colors.backgroundDarker` so the chip blends into the StatusBar segment strip; callers can override it via the `backgroundColor` prop (used by alternative themes or by test fixtures that want a transparent chip).
+
+See [API.md — Todo Progress Chip API](API.md#todo-progress-chip-api-srcutilstodots) for the exported helper types and [TESTING.md — Testing the TUI Todo Progress Chip](TESTING.md#testing-the-tui-todo-progress-chip) for the fixture pattern.
+
 ## MCP OAuth Issuer-Rotation Detection (`src/mcp/oauth-issuer.ts`)
 
 Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `84b26c697` "fix(cli): let configured MCP OAuth clients re-authorize at a new authorization server"). Pure helpers that compare a cached MCP OAuth client record against the metadata discovered live via `.well-known/oauth-authorization-server` and signal when the authorization server has moved. Only exercised when an operator wires a third-party OAuth-protected MCP server (e.g. GitHub, Linear) into Alexi — SAP AI Core's own transport authenticates via `AICORE_SERVICE_KEY` client-credentials and never touches this surface.

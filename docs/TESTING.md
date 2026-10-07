@@ -10165,6 +10165,66 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 npm test -- src/tool/tools/__tests__/read-office.xlsx-cell.test.ts
 ```
 
+## Testing the TUI Todo Progress Chip
+
+The TUI todo progress chip (`src/cli/tui/components/TodoProgressChip.tsx` + `src/utils/todo.ts`, commit `af35b6c1`) is covered at two layers. See [ARCHITECTURE.md — TUI Todo Progress Chip](ARCHITECTURE.md#tui-todo-progress-chip-srcclituicomponentstodoprogresschiptsx) for the subscription wiring and [API.md — Todo Progress Chip API](API.md#todo-progress-chip-api-srcutilstodots) for the exported helper surface.
+
+### Pure derivation (`tests/utils/todo.test.ts`, 74 lines)
+
+Three `describe` blocks, 10 cases total — no React, no Ink, no mocks. Covers every public helper in `src/utils/todo.ts`:
+
+- `computeTodoProgress`:
+  - Empty list returns `{ completed: 0, total: 0 }`.
+  - Counts only entries whose `status === 'completed'` (`pending`, `in_progress`, `cancelled` do not contribute to `completed`).
+  - Reports `completed === total` when every todo is done.
+  - Cancelled todos count toward `total` but not toward `completed` so the ratio reflects the declared plan.
+- `todoProgressState`:
+  - `0/0` → `'empty'`, `0/N` → `'idle'`, partial → `'active'`, `N/N` → `'done'`.
+  - `completed > total` → `'done'` (defensive — a provider that reports more completions than declared cannot flip the chip into an invalid state).
+- `formatTodoChipLabel`:
+  - `0/0` → `''` (empty-string sentinel).
+  - Non-empty → `'N/M todos'`.
+
+### Rendering + subscription (`tests/cli/tui/TodoProgressChip.test.tsx`, 79 lines)
+
+Uses `ink-testing-library` to render the chip inside the real `ThemeProvider` and asserts on the frame text. The suite imports `clearTodos` from `src/tool/tools/todowrite.ts` and calls it in `afterEach` so subscription-mode cases do not leak state across cases:
+
+```typescript
+import { render } from 'ink-testing-library';
+import { TodoProgressChip } from '../../../src/cli/tui/components/TodoProgressChip.js';
+import { ThemeProvider } from '../../../src/cli/tui/context/ThemeContext.js';
+import { clearTodos, type Todo } from '../../../src/tool/tools/todowrite.js';
+
+afterEach(() => {
+  clearTodos();
+});
+
+function todo(status: Todo['status'], content = 't'): Todo {
+  return { content, status, priority: 'medium' };
+}
+```
+
+Five cases pin the regression:
+
+1. **Empty explicit prop renders nothing.** `<TodoProgressChip todos={[]} />` → `lastFrame()` is the empty string.
+2. **Explicit todos render `"N/M todos"`.** With 3 completed + 1 in_progress + 1 pending, the frame contains `"3/5 todos"`.
+3. **Done-state chip.** Two completed todos render `"2/2 todos"` (the color assertion is implicit — the frame rendering is non-null).
+4. **Idle-state chip.** Three pending todos render `"0/3 todos"`.
+5. **Subscription-mode default is hidden on an empty global state.** `<TodoProgressChip />` with no `todos` prop and no prior `todowrite` call renders the empty string.
+
+Fixture rules that are easy to miss:
+
+- **Wrap in `ThemeProvider`.** `useTheme()` throws without a provider; the suite's `Wrapper` component wraps every render.
+- **Use `clearTodos()` in `afterEach`.** The module-level `currentTodos` array in `src/tool/tools/todowrite.ts` is process-wide. A test that falls back to the subscription-mode default (no `todos` prop) will see whatever the previous test left behind unless the state is reset.
+- **Do NOT mock `todowrite.ts`.** The subscription contract is part of the regression surface. Mocking the module would collapse the `getTodos` / `onTodosChange` / `clearTodos` chain and hide a regression that broke the live-update path.
+
+### Running
+
+```bash
+npm test -- tests/utils/todo.test.ts
+npm test -- tests/cli/tui/TodoProgressChip.test.tsx
+```
+
 ## Testing MCP OAuth Issuer-Rotation Detection
 
 The MCP OAuth issuer-rotation detector (`src/mcp/oauth-issuer.ts`, commit `26c7603c`, ports kilocode `84b26c697`) is a pure function pair with no I/O, so the regression suite is a plain input / output table. See [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts) and [API.md — MCP OAuth Issuer-Rotation API](API.md#mcp-oauth-issuer-rotation-api).

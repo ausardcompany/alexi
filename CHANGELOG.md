@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI StatusBar todo progress chip (`feat(tools): add todo progress chip to TUI status bar`, commit `af35b6c1`)** (`src/cli/tui/components/TodoProgressChip.tsx` +103 lines, `src/utils/todo.ts` +75 lines, `src/cli/tui/components/StatusBar.tsx` +5 lines, `tests/cli/tui/TodoProgressChip.test.tsx` +79 lines, `tests/utils/todo.test.ts` +74 lines). Renders a compact `"N/M todos"` chip inside the Ink `StatusBar` so the user sees live progress against the global `todowrite` tool state without having to open the full list. The chip reflects `todowrite` state in real time via the existing `onTodosChange(cb)` subscription exported from `src/tool/tools/todowrite.ts`, so moving a todo through `pending -> in_progress -> completed` updates the ratio on the next React paint without any poll loop.
+
+  New pure helpers in `src/utils/todo.ts` (framework-agnostic, no React / Ink dependency):
+
+  - `computeTodoProgress(todos: readonly Todo[]): TodoProgress` — returns `{ completed, total }`. `completed` counts entries whose `status === 'completed'`. Cancelled todos count toward `total` so the ratio reflects the declared plan (matching how the `todowrite` tool reports `totalCount` itself).
+  - `todoProgressState(progress: TodoProgress): TodoProgressState` — classifies the tuple into `'empty' | 'idle' | 'active' | 'done'` so the chip can pick a color without duplicating the comparison logic. `completed >= total` returns `'done'` defensively — a provider that reports more completions than declared cannot flip the chip into an invalid state.
+  - `formatTodoChipLabel(progress: TodoProgress): string` — compact `"N/M todos"` label, or the empty string when `total === 0` so callers can treat the empty string as a "render nothing" sentinel.
+
+  New component `src/cli/tui/components/TodoProgressChip.tsx`:
+
+  - **Live subscription by default.** When `todos` is omitted the component mirrors the global state: on mount it reads `getTodos()` and subscribes via `onTodosChange(cb)`; the returned unsubscriber is wired to the `useEffect` cleanup so the chip detaches cleanly on unmount.
+  - **Explicit prop takes precedence.** Passing a `todos` array (including `[]`) skips the subscription and renders directly from the prop — this is the pattern tests use to pin specific progress tuples without touching the global state.
+  - **Hidden when the list is empty.** `todoProgressState({ completed: 0, total: 0 }) === 'empty'` short-circuits to `return null` so a chip never shows "0/0 todos" during an idle session (which was noisy in practice).
+  - **Color mapping via theme tokens.** `done` → `colors.success` (green), `active` → `colors.warning` (yellow), `idle` → `colors.dimText` (gray). The background defaults to `colors.backgroundDarker` so the chip blends into the StatusBar segment strip without a wrapper padding adjustment.
+  - **Chip renders inside the StatusBar segment strip.** `src/cli/tui/components/StatusBar.tsx:202-204` imports `TodoProgressChip` and renders it between the `cwd` segment and the live-catalog indicator, inheriting the surrounding `colors.backgroundDarker` background. No layout math — the chip is a `<Box>` with inline `<Text>` children.
+
+  Test coverage (two suites, 10 cases total):
+
+  - `tests/utils/todo.test.ts` (74 lines): `computeTodoProgress` returns `0/0` for an empty list; counts only `status === 'completed'`; reports `completed === total` when every todo is done; counts cancelled todos toward total but not completed. `todoProgressState` returns `'empty'` for `0/0`, `'idle'` for `0/N`, `'active'` for partials, `'done'` for `N/N` and defensively when `completed > total`. `formatTodoChipLabel` returns `''` for `0/0` and `'N/M todos'` otherwise.
+  - `tests/cli/tui/TodoProgressChip.test.tsx` (79 lines): renders nothing when the explicit todo list is empty; renders `"3/5 todos"` when 3 of 5 are completed; renders a done-state chip (`2/2 todos`) when every todo is completed; renders an idle-state chip (`0/3 todos`) when none are completed; falls back to the global subscription and renders nothing on an empty default state. The suite imports `clearTodos` from `src/tool/tools/todowrite.ts` and calls it in `afterEach` so subscription-mode cases do not leak state into the next case.
+
+  No new runtime dependencies, no new environment variables, no new CLI subcommands, no new permissions. The chip is purely additive — removing the chip is a one-line delete at the StatusBar call site and the module can be removed without touching the `todowrite` tool itself. See [docs/API.md — Todo Progress Chip API](docs/API.md#todo-progress-chip-api-srcutilstodots) for the public helper surface, [docs/ARCHITECTURE.md — TUI Todo Progress Chip](docs/ARCHITECTURE.md#tui-todo-progress-chip-srcclituicomponentstodoprogresschiptsx) for the subscription wiring, and [docs/TESTING.md — Testing the TUI Todo Progress Chip](docs/TESTING.md#testing-the-tui-todo-progress-chip) for the fixture pattern.
+
 - **Agent Manager worktree pinning in the TUI sidebar (upstream kilocode PR #14891)** (`src/agent/worktreeStatus.ts` +87 lines, `src/cli/tui/components/Sidebar.tsx` +93 lines, `src/core/agent-manager/orchestration-api.ts` +165 lines, `tests/agent/worktreeStatus.test.ts` +98 lines, `tests/cli/tui/Sidebar.test.tsx` +126 lines, `tests/core/agent-manager-pinning.test.ts` +168 lines, commit `a146bf6e` `feat(agent): add worktree pinning in Agent Manager sidebar`). Ports upstream kilocode PR #14891 (worktree pinning) into the Alexi-native status registry and the Ink sidebar. Users can now pin critical worktrees to the top of the Agent Manager sidebar so they stay visible when the fleet grows beyond what fits on screen, and the pin state survives TUI restarts via a tiny on-disk file under `~/.alexi/agent-manager.json`.
 
   New public surface on `src/agent/worktreeStatus.ts`:
