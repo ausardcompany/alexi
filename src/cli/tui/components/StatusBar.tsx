@@ -10,6 +10,7 @@ import { useTheme } from '../context/ThemeContext.js';
 import { linuxSafeGlyph } from '../theme/glyphs.js';
 import { formatCwdShort } from '../utils/pathFormat.js';
 import { Spinner } from './Spinner.js';
+import { TodoProgressChip } from './TodoProgressChip.js';
 import {
   getCatalogStatus,
   getLiveModels,
@@ -198,6 +199,10 @@ export function StatusBar({
             {formatCwdShort(cwd)}
           </Text>
         )}
+        {/* Todo progress chip — hidden when no todos exist. See docs on
+            TodoProgressChip for the color mapping (gray / yellow / green). */}
+        <TodoProgressChip backgroundColor={colors.backgroundDarker} />
+
         {/* Live model catalog indicator: ● N live / ⟳ loading / ○ offline */}
         {catalogStatus === 'ready' && liveModelCount > 0 && (
           <Text color={colors.dimText} backgroundColor={colors.backgroundDarker}>
