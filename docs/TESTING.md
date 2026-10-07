@@ -10068,3 +10068,94 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 ```bash
 npm test -- src/tool/tools/__tests__/read-office.xlsx-cell.test.ts
 ```
+
+## Testing MCP OAuth Issuer-Rotation Detection
+
+The MCP OAuth issuer-rotation detector (`src/mcp/oauth-issuer.ts`, commit `26c7603c`, ports kilocode `84b26c697`) is a pure function pair with no I/O, so the regression suite is a plain input / output table. See [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts) and [API.md — MCP OAuth Issuer-Rotation API](API.md#mcp-oauth-issuer-rotation-api).
+
+Regression contract (`src/mcp/__tests__/oauth-issuer.test.ts`, 80 lines, 8 cases):
+
+- **Fresh install / legacy record → not drift.** `hasIssuerChanged(undefined, DISCOVERED)` and `hasIssuerChanged({}, DISCOVERED)` both return `false`. There is nothing to compare against yet, so a caller should proceed with registration — this is NOT a drift signal.
+- **Exact match → no drift.** When stored and discovered agree on `issuer` AND `authorization_endpoint`, `hasIssuerChanged` returns `false`.
+- **`issuer` moved → drift.** Different stored `issuer` returns `true`.
+- **`authorization_endpoint` moved → drift.** Different stored `authorization_endpoint` returns `true`.
+- **Legacy record missing `authorization_endpoint` → drift.** `{ issuer: X }` with no `authorization_endpoint` returns `true` — we cannot prove it matches, so re-register.
+- **`requireReregistration` plumbing.** Returns `'none'` for `undefined` stored and for current stored; returns `'issuer_rotated'` when both `issuer` and `authorization_endpoint` have moved.
+
+Fixtures use plain object literals — no filesystem, no network, no mocks. The DISCOVERED fixture carries all three metadata fields (`issuer`, `authorization_endpoint`, `token_endpoint`) even though only the first two feed the comparison, so a future contract that also diffs `token_endpoint` can extend without touching the setup.
+
+### Running
+
+```bash
+npm test -- src/mcp/__tests__/oauth-issuer.test.ts
+```
+
+## Testing Prompt-Safe Schema-Failure Diagnostics
+
+The schema-failure diagnostics helpers (`src/core/message-diagnostics.ts`, commit `26c7603c`, ports kilocode `a8fbcc356` et al.) must survive two kinds of input: well-formed zod-ish errors AND pathological inputs that pretend to be a zod error but aren't. The regression suite covers both, plus the load-bearing no-leak contract.
+
+Regression contract (`src/core/__tests__/message-diagnostics.test.ts`, 121 lines, 10 cases):
+
+**`summarizeSchemaFailure`:**
+
+- **Empty on `null` / `undefined` / primitives.** `summarizeSchemaFailure(null).issues === []`, same for `undefined`, string, number.
+- **Zod-ish `.issues` extraction.** `{ issues: [{ path: ['messages', 0, 'content'], code: 'invalid_type', message: 'secret prompt text' }, ...] }` renders as `{ path: 'messages.0.content', code: 'invalid_type', messageKind: 'string' }` — the `message` field itself is NEVER copied. The no-leak contract is pinned by `expect(JSON.stringify(summary)).not.toContain('secret prompt text')`.
+- **`.errors` alias accepted.** `{ errors: [{ path: ['x'], code: 'c', message: 'm' }] }` renders identically to `{ issues: [...] }`.
+- **Truncation.** A 60-issue list truncates to 50 with `truncated: true`.
+- **Pathological fallbacks.** Non-array `path` → `'<root>'`; non-string `code` → `'unknown_code'`; 500-char `code` → `'unknown_code'`; `undefined` `message` → `messageKind: 'undefined'`.
+
+**`summarizeMessageEnvelope`:**
+
+- **Well-formed message.** `{ id, role, parts: [{ type: 'text', text: 'LEAK CANDIDATE' }, { type: 'image', url: 'https://leak.example' }] }` renders as `{ role: 'user', partCount: 2, partKinds: ['text', 'image'], hasId: true }`. `JSON.stringify(shape)` MUST NOT contain `'LEAK CANDIDATE'` OR `'leak.example'`.
+- **Non-object defensive handling.** `summarizeMessageEnvelope(null) === { shape: 'object' }`; `summarizeMessageEnvelope(42) === { shape: 'number' }`.
+
+**`summarizeMessageArrayFailure`:**
+
+- **Combined summary without leaking content.** Given `messages: [{ role: 'user', parts: [{ type: 'text', text: 'SECRET' }] }, ...]` + a zod error with `message: 'secret'`, the result combines both summaries and `JSON.stringify(result)` MUST NOT contain `'SECRET'`.
+
+### Running
+
+```bash
+npm test -- src/core/__tests__/message-diagnostics.test.ts
+```
+
+## Testing Config Overlay Shadowed-Write Detection
+
+The shadowed-write detector (`src/config/overlay.ts`, commit `26c7603c`, ports kilocode `b9e4b1e98` et al.) is a pure function pair; the regression suite is a plain input / output table over a hand-crafted `OverlayLayer[]`.
+
+Regression contract (`src/config/__tests__/overlay.test.ts`, 77 lines, 7 cases):
+
+- **No shadowing when no higher-precedence layer defines the key.** `detectShadowedWrite('routing.timeout', 'user', layers) === null` even if a higher-precedence layer exists but does not define that specific key.
+- **No shadowing when writing to the highest-precedence layer.** Writing to the `managed` layer in a `[managed, user]` setup is always safe.
+- **Shadowing by a single higher-precedence layer.** `[managed(100, ['routing.model']), user(50, ['routing.model'])]` + `detectShadowedWrite('routing.model', 'user', ...)` → `{ shadowedBy: 'managed' }`.
+- **Highest-precedence shadower wins.** With `[policy(200), managed(100), project(75), user(50)]` all defining `routing.model`, writing to `user` reports `shadowedBy: 'policy'` — not `managed`, not `project`.
+- **Unknown target overlay → `null`.** `detectShadowedWrite('x', 'ghost', [managed(100, ['x'])]) === null`.
+- **Same-precedence ties do NOT shadow.** `[a(50, ['x']), b(50, ['x'])]` + `detectShadowedWrite('x', 'a', ...)` returns `null`. The strict inequality `layer.precedence > target.precedence` matters here.
+- **Warning text includes key, target, shadower, and the word `shadowed`.** `formatShadowedWriteWarning('routing.model', 'user', { shadowedBy: 'managed' })` MUST contain `routing.model`, `"user"`, `"managed"`, and `shadowed`.
+
+Fixtures use a `layer(id, precedence, keys)` factory that wraps the three fields into an `OverlayLayer` with `keys: new Set(...)`. No filesystem, no mocks.
+
+### Running
+
+```bash
+npm test -- src/config/__tests__/overlay.test.ts
+```
+
+## Testing Shared Agent Board Self-Post Refusal
+
+The `kilo_board_write` self-post refusal (commit `26c7603c`, ports kilocode `759a6ef99`) is pinned by a single regression case appended to the existing recipient-state-warnings suite. See [ARCHITECTURE.md — Shared Agent Board: Roster + Self-Post Refusal](ARCHITECTURE.md#shared-agent-board-roster--self-post-refusal) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api).
+
+Regression contract (`tests/tool/tools/board-write-recipient.test.ts:149-168`, new case `'refuses a post to self with an actionable error (kilocode 759a6ef99)'`):
+
+- **Result is a failure.** `result.success === false`.
+- **Error text identifies the self session.** `result.error` contains the self session id, matches `/self/i`, and mentions `kilo_board_read` so the agent sees the remediation hint.
+- **No write attempted.** The mocked `BoardStore.write` (`writeMock`) MUST NOT be called — the refusal is checked up-front.
+- **No recipient probe.** The mocked `BoardStore.read` (`readMock`) MUST NOT be called either — the recipient-looks-stopped probe is skipped because the refusal is checked before the probe.
+
+Fixtures use the pre-existing `SELF_SESSION` / `BOARD_ID` constants and the `ctx()` helper that constructs a minimal `ToolContext` with `sessionId: SELF_SESSION`. Both `BoardStore.write` and `BoardStore.read` are mocked via `vi.mock('../../../src/core/database/boardStore.js', ...)` at module load time; the `BoardContext.resolve` mock returns `BOARD_ID` deterministically so the gate doesn't short-circuit on "no board attached".
+
+### Running
+
+```bash
+npm test -- tests/tool/tools/board-write-recipient.test.ts
+```

@@ -3186,6 +3186,49 @@ Introduced in commit `b591e606` (2026-10-06 upstream sync). References: [ARCHITE
 - **Classify by format code, not by heuristic.** The `/\[(h+|m+|s+)\]/i` + `!/[dy]/i.test(format) && /[hs]/i.test(format)` matchers are the only correct way to tell a time-only cell from a datetime cell. Dropping either regex regresses the time-only case to the old date-only slice.
 - **Date-only cells (`T00:00:00.000Z`) stay on `YYYY-MM-DD`.** This is the only backwards-compat invariant: cells that were already date-only must emit the same string as before.
 
+## MCP OAuth Issuer-Rotation Detection (`src/mcp/oauth-issuer.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `84b26c697`). References: [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts), [API.md — MCP OAuth Issuer-Rotation API](API.md#mcp-oauth-issuer-rotation-api), [TESTING.md — Testing MCP OAuth Issuer-Rotation Detection](TESTING.md#testing-mcp-oauth-issuer-rotation-detection).
+
+- **Pure, no I/O.** Keep it that way. The helpers compare two plain records; the discovery fetch belongs to the caller, not this module.
+- **Fresh install is NOT drift.** `hasIssuerChanged(undefined, …)` and `hasIssuerChanged({}, …)` return `false`. Changing this contract would turn every first-time registration into a confusing "issuer rotated" warning.
+- **Missing `authorization_endpoint` on the stored side IS drift.** A legacy record that only has `issuer` must trigger re-registration — we cannot prove the endpoint matches, so we conservatively re-register. Do not relax this.
+- **Return a string action, not a boolean.** `requireReregistration` returns `'none' | 'issuer_rotated'`. A future `'scope_change'` kind must be addable without a signature change.
+
+## Prompt-Safe Schema-Failure Diagnostics (`src/core/message-diagnostics.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `a8fbcc356` et al.). References: [ARCHITECTURE.md — Prompt-Safe Schema-Failure Diagnostics](ARCHITECTURE.md#prompt-safe-schema-failure-diagnostics-srccoremessage-diagnosticsts), [API.md — Schema Failure Diagnostics API](API.md#schema-failure-diagnostics-api), [TESTING.md — Testing Prompt-Safe Schema-Failure Diagnostics](TESTING.md#testing-prompt-safe-schema-failure-diagnostics).
+
+- **No raw content EVER leaves the module.** `issue.message` must be recorded only as `messageKind: typeof issue.message`. `parts[i].text` and `.url` are NEVER read. The no-leak contract is pinned by `expect(JSON.stringify(summary)).not.toContain('secret prompt text')`-style assertions — do not relax them.
+- **Zod-like defensive parsing.** Accept `.issues` OR `.errors`. Guard against non-array `path`, non-string `code`, 500-char code strings, and non-object messages. A pathological input must degrade gracefully, not throw.
+- **Caps are intentional.** `MAX_ISSUES = 50`, `MAX_PATH_SEGMENTS = 32`, `MAX_CODE_LENGTH = 128`, `MAX_MESSAGES = 20`. Over-cap inputs set the matching `truncated` / `truncatedMessages` flag — do not silently drop them without the flag, callers rely on it to know they saw a partial view.
+- **Pure, no logging.** Callers decide `debug` vs `warn`. Do not add a `logger.*` call inside the summariser or a test will fail on log noise.
+
+## Config Overlay Shadowed-Write Detection (`src/config/overlay.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `b9e4b1e98` et al.). References: [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts), [API.md — Config Overlay API](API.md#config-overlay-api), [CONFIGURATION.md — Managed Preferences and the Overlay Precedence Model](CONFIGURATION.md#managed-preferences-and-the-overlay-precedence-model), [TESTING.md — Testing Config Overlay Shadowed-Write Detection](TESTING.md#testing-config-overlay-shadowed-write-detection).
+
+- **Highest-precedence shadower wins.** When multiple layers conflict, return the one that will actually win at read time. Returning an arbitrary intermediate layer would mislead the operator.
+- **Strict `>` on precedence.** Same-precedence ties do NOT shadow. The runtime read ordering is undefined for ties, so a warning would be false.
+- **Warning text is centralised.** `formatShadowedWriteWarning` is the ONE source of truth for the sentence. Every CLI / TUI call site must route through it; do not inline the text.
+- **The module is a forward-looking helper today.** It is pure and has no call site inside the save path yet. When wiring it in, build the `OverlayLayer[]` from the live state (snapshot `managed` keys from `readManagedPreferences`, snapshot `user` keys from `loadFullConfig`) at the save site — do not cache the layers across saves, the managed overlay can change between process starts.
+
+## Shared Agent Board Self-Post Refusal (`src/tool/tools/board.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `759a6ef99`). References: [ARCHITECTURE.md — Shared Agent Board: Roster + Self-Post Refusal](ARCHITECTURE.md#shared-agent-board-roster--self-post-refusal), [API.md — Shared Agent Board API](API.md#shared-agent-board-api), [TESTING.md — Testing Shared Agent Board Self-Post Refusal](TESTING.md#testing-shared-agent-board-self-post-refusal).
+
+- **Refuse up-front, before the recipient probe.** `kilo_board_write` with `recipient === context.sessionId` returns `{ success: false }` with no write and no `BoardStore.read` call. Reordering so the probe runs first is a regression — the suite asserts both mocks are untouched.
+- **Caller is always on the roster.** `kilo_board_read` always includes `context.sessionId` in the roster, even when they have not posted yet, so `self: true` is deterministically observable. Removing the `seen.add(context.sessionId)` guard regresses the first-turn case.
+- **Error text names the sessionId AND `kilo_board_read`.** The error is actionable: it tells the agent which session it is, that posting to self is refused, and where to look for its own row. The regression suite pins all three substrings — do not shorten the error.
+
+## Commit-Message Error Accessor (`src/git/commitMessage.ts`)
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `f54e713dd`). References: [API.md — Commit-Message Error Accessor](API.md#commit-message-error-accessor).
+
+- **"Consume" semantics prevent stale re-surface.** `consumeLastCommitMessageError()` clears the module-local `lastLlmError` after returning it. Callers get the error exactly once per attempt — a second read sees `null` even if the first attempt's error was ignored. Do not add a non-consuming getter without a strong reason.
+- **Reset at the start of every attempt.** `lastLlmError = null` is the first line of `generateWithLLM`. Removing this would carry a previous attempt's error into a current success.
+- **Fallback-to-heuristic is still contractual.** The accessor exposes the error for diagnostic surfaces; it does NOT change the fall-back path. On provider failure, `generateCommitMessage` still returns a heuristic message. Operators who care about the provider failure read `consumeLastCommitMessageError()`; operators who do not still get a usable commit message.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
