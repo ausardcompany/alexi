@@ -26,6 +26,8 @@ vi.mock('../core/router.js', () => ({
 import {
   buildRulesSection,
   COMMIT_RULES_PREAMBLE,
+  CommitMessageError,
+  consumeLastCommitMessageError,
   generateCommitMessage,
 } from './commitMessage.js';
 import type { GitConfig } from './config.js';
@@ -223,5 +225,101 @@ describe('generateCommitMessage rules wiring', () => {
     const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
     expect(systemMsg.content).toContain('<rule file="override.md">');
     expect(systemMsg.content).toContain('Custom override rule.');
+  });
+});
+
+describe('generateCommitMessage provider-error preservation', () => {
+  // Ports upstream kilocode `f54e713dd` ("fix(cli): preserve
+  // commit-message provider errors"). Previously, provider failures
+  // were swallowed as a warn log and callers only observed the
+  // heuristic fallback. The regression test below locks in that the
+  // originating provider error is now reachable via
+  // `consumeLastCommitMessageError` so the CLI / AutoCommitManager can
+  // surface it to operators.
+  let completeFn: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Drain any leftover state from previous suites so this test's
+    // consume() reads reflect ONLY this test's attempt.
+    consumeLastCommitMessageError();
+    completeFn = vi.fn();
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: { complete: completeFn } as never,
+      effectiveModelId: 'gpt-4o-mini',
+      usedFallback: false,
+    });
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('preserves the originating provider error for the caller', async () => {
+    const providerError = new Error('SAP AI Core: 503 Service Unavailable');
+    completeFn.mockRejectedValueOnce(providerError);
+
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-error-'));
+    try {
+      // Still returns a heuristic — generator never rejects.
+      const msg = await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        empty
+      );
+      expect(typeof msg).toBe('string');
+      expect(msg.length).toBeGreaterThan(0);
+
+      const preserved = consumeLastCommitMessageError();
+      expect(preserved).toBeInstanceOf(CommitMessageError);
+      expect(preserved?.message).toContain('503 Service Unavailable');
+      // The originating error is reachable via `.cause` so callers can
+      // branch on provider-specific types without regex-matching the
+      // message.
+      expect(preserved?.cause).toBe(providerError);
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('consume() is idempotent — second read returns null', async () => {
+    completeFn.mockRejectedValueOnce(new Error('boom'));
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-error-'));
+    try {
+      await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        empty
+      );
+      expect(consumeLastCommitMessageError()).not.toBeNull();
+      expect(consumeLastCommitMessageError()).toBeNull();
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('clears the stored error on a subsequent successful call', async () => {
+    completeFn.mockRejectedValueOnce(new Error('transient')).mockResolvedValueOnce({
+      text: 'feat: ok',
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-error-'));
+    try {
+      await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        empty
+      );
+      // Second call succeeds and must clear the error BEFORE returning.
+      await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        empty
+      );
+      expect(consumeLastCommitMessageError()).toBeNull();
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
   });
 });

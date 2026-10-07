@@ -8,12 +8,66 @@ import { formatUsageBlock, type UsageEntry } from '../utils/formatUsage.js';
 import { StatusIcon } from './StatusIcon.js';
 import type { WorktreeStatusEntry } from '../../../agent/worktreeStatus.js';
 
+/**
+ * Prefix rendered next to a pinned worktree in the sidebar. Kept as an
+ * ASCII token rather than an emoji so the Encoding Guard workflow does
+ * not have to make an exception and so terminals without emoji fonts
+ * still render it legibly. See upstream kilocode PR #14891.
+ */
+export const PIN_INDICATOR = '[P]';
+
+/**
+ * Stable-sort the worktree list so pinned entries bubble to the top
+ * while preserving relative order within each bucket. Exported so the
+ * sidebar tests can exercise sort behaviour without rendering.
+ *
+ * The sort is intentionally NOT in-place — the input array is a
+ * readonly snapshot from the registry.
+ */
+export function sortWorktreesPinnedFirst(
+  worktrees: readonly WorktreeStatusEntry[]
+): readonly WorktreeStatusEntry[] {
+  if (worktrees.length < 2) {
+    return worktrees;
+  }
+  const pinned: WorktreeStatusEntry[] = [];
+  const rest: WorktreeStatusEntry[] = [];
+  for (const wt of worktrees) {
+    if (wt.pinned === true) {
+      pinned.push(wt);
+    } else {
+      rest.push(wt);
+    }
+  }
+  if (pinned.length === 0) {
+    return worktrees;
+  }
+  return [...pinned, ...rest];
+}
+
 export interface SidebarProps {
   files: FileChange[];
   selectedIndex: number;
   onSelect: (index: number) => void;
   onActivate: (path: string) => void;
   isFocused: boolean;
+  /**
+   * Optional index of the currently-selected worktree in the
+   * `worktrees` array. When set, pressing `p` while the sidebar is
+   * focused toggles the pin on the entry at this index. The index is
+   * applied against the UNSORTED `worktrees` snapshot the caller
+   * passes in so the TUI's selection cursor and the pin target stay
+   * consistent regardless of pinned-first display order.
+   */
+  selectedWorktreeIndex?: number;
+  /**
+   * Pin-toggle callback. Invoked with the worktree id (from the entry
+   * at `selectedWorktreeIndex`) when the user presses the pin keybind.
+   * Typically wired to `toggleWorktreePin` from
+   * `src/core/agent-manager/orchestration-api.ts` so the toggle is
+   * persisted to `~/.alexi/agent-manager.json`.
+   */
+  onTogglePin?: (id: string) => void;
   /**
    * Optional per-model token/cost breakdown. When provided (even as an
    * empty array), the Sidebar renders a compact "Usage" section beneath
@@ -118,16 +172,24 @@ function WorktreesSection({
     return null;
   }
 
+  // Pinned entries bubble to the top. This matches upstream kilocode
+  // PR #14891: pinned worktrees sit above unpinned ones in the sidebar
+  // regardless of their original insertion position. The relative
+  // order within each bucket is preserved so a pin toggle does not
+  // reshuffle the whole list.
+  const ordered = sortWorktreesPinnedFirst(worktrees);
+
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text color={colors.text} bold>
         Worktrees ({worktrees.length})
       </Text>
-      {worktrees.map((wt) => (
+      {ordered.map((wt) => (
         <Box key={wt.id}>
           <StatusIcon status={wt.status} animate={animate} />
           <Text color={colors.text} wrap="truncate-end">
             {' '}
+            {wt.pinned === true ? `${PIN_INDICATOR} ` : ''}
             {wt.label}
           </Text>
           {wt.detail !== undefined && wt.detail !== '' && (
@@ -163,13 +225,40 @@ export function Sidebar({
   usage,
   worktrees,
   animateWorktrees = true,
+  selectedWorktreeIndex,
+  onTogglePin,
 }: SidebarProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
 
   useInput(
     (input, key) => {
-      if (!isFocused || files.length === 0) {
+      if (!isFocused) {
+        return;
+      }
+
+      // Pin-toggle keybind (`p`). Fires regardless of whether there
+      // are any file changes so a user with only Agent Manager
+      // worktrees in the sidebar can still pin entries. The handler
+      // only runs when the caller wired both an index and a callback,
+      // which the TUI does when it owns the selection cursor.
+      if (
+        input === 'p' &&
+        !key.ctrl &&
+        !key.meta &&
+        onTogglePin !== undefined &&
+        worktrees !== undefined &&
+        worktrees.length > 0 &&
+        selectedWorktreeIndex !== undefined
+      ) {
+        const target = worktrees[selectedWorktreeIndex];
+        if (target !== undefined) {
+          onTogglePin(target.id);
+          return;
+        }
+      }
+
+      if (files.length === 0) {
         return;
       }
 

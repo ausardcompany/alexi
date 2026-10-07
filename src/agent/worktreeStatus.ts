@@ -53,6 +53,20 @@ export interface WorktreeStatusEntry {
   readonly detail?: string;
   /** Wall-clock ms when the status was last updated. */
   readonly updatedAt: number;
+  /**
+   * Whether this worktree is pinned to the top of the Agent Manager
+   * sidebar. Ports upstream kilocode PR #14891 (worktree pinning):
+   * users keep critical worktrees visible when the fleet grows beyond
+   * what fits on screen. `undefined` and `false` are equivalent and
+   * mean "not pinned" — the field is optional so legacy entries do not
+   * need migration.
+   *
+   * Pin state is orthogonal to lifecycle status: a pinned worktree can
+   * be running, idle, errored, blocked, or unknown. Unpinning returns
+   * the entry to its original insertion-order slot rather than removing
+   * it from the registry.
+   */
+  readonly pinned?: boolean;
 }
 
 /**
@@ -94,14 +108,21 @@ function emit(): void {
  */
 export function setWorktreeStatus(
   id: string,
-  update: { label: string; status: WorktreeStatus; detail?: string }
+  update: { label: string; status: WorktreeStatus; detail?: string; pinned?: boolean }
 ): void {
   const existing = entries.get(id);
+  // Preserve the current pin state unless the caller explicitly passes
+  // one. `setWorktreeStatus` is driven by the orchestrator's lifecycle
+  // events (running / idle / error / ...) and should NOT clobber a pin
+  // that the user set via the sidebar. Pin toggles go through
+  // {@link setWorktreePinned}, which does supply this field.
+  const nextPinned = update.pinned !== undefined ? update.pinned : existing?.pinned;
   if (
     existing !== undefined &&
     existing.label === update.label &&
     existing.status === update.status &&
-    existing.detail === update.detail
+    existing.detail === update.detail &&
+    (existing.pinned ?? false) === (nextPinned ?? false)
   ) {
     return;
   }
@@ -111,8 +132,70 @@ export function setWorktreeStatus(
     status: update.status,
     detail: update.detail,
     updatedAt: Date.now(),
+    pinned: nextPinned,
   });
   emit();
+}
+
+/**
+ * Set the pinned flag on an existing entry. Returns `true` when a
+ * change was applied (and listeners were notified), `false` when the
+ * id is unknown or the flag is already in the requested state.
+ *
+ * Pinning is deliberately a separate function rather than a parameter
+ * of {@link setWorktreeStatus} so the orchestrator's status events can
+ * flow freely without carrying the pin flag through every call site.
+ * {@link toggleWorktreePin} wraps this with "flip the current value".
+ *
+ * Ports upstream kilocode PR #14891.
+ */
+export function setWorktreePinned(id: string, pinned: boolean): boolean {
+  const existing = entries.get(id);
+  if (existing === undefined) {
+    return false;
+  }
+  if ((existing.pinned ?? false) === pinned) {
+    return false;
+  }
+  entries.set(id, {
+    ...existing,
+    pinned,
+    updatedAt: Date.now(),
+  });
+  emit();
+  return true;
+}
+
+/**
+ * Flip the pinned flag on an entry. Returns the new pinned value
+ * (`true` after a pin, `false` after an unpin) or `undefined` when the
+ * id does not exist in the registry. Callers that want to persist the
+ * change should check for a defined return before writing to disk.
+ */
+export function toggleWorktreePin(id: string): boolean | undefined {
+  const existing = entries.get(id);
+  if (existing === undefined) {
+    return undefined;
+  }
+  const next = !(existing.pinned ?? false);
+  setWorktreePinned(id, next);
+  return next;
+}
+
+/**
+ * Return the ids of every currently-pinned worktree in insertion
+ * order. Convenience helper used by the persistence layer so it can
+ * write a stable `pinnedWorktrees: string[]` array without having to
+ * project the full snapshot itself.
+ */
+export function getPinnedWorktreeIds(): readonly string[] {
+  const result: string[] = [];
+  for (const entry of entries.values()) {
+    if (entry.pinned === true) {
+      result.push(entry.id);
+    }
+  }
+  return result;
 }
 
 /**

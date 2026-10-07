@@ -6491,6 +6491,14 @@ contributors do not re-introduce them by hand:
    // pass in commit 8ea08827 — the previous three-line break fit within 100
    // columns once the first argument sat at 98 columns)
    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
+
+   // src/config/__tests__/overlay.test.ts:6 (canonical form after the
+   // 2026-10-07 auto-fix pass in commit b02d6ad2 — a three-binding named
+   // import plus the `from '../overlay.js';` clause sits at 97 columns and
+   // fits under the 100-column ceiling, including the TS 5.0+ inline-
+   // type-only `type OverlayLayer` qualifier that was preserved verbatim
+   // through the collapse)
+   import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../overlay.js';
    ```
 
    Only break these onto multiple lines when the resulting single line would
@@ -6613,6 +6621,43 @@ contributors do not re-introduce them by hand:
    would exceed 100 columns; short fixtures (six or fewer short strings) should
    be inlined so `npm run format:check` stays green without an auto-fix
    follow-up commit.
+
+   The same rule applies to fixture arrays whose elements are **helper
+   function calls** rather than string literals. The 2026-10-07 auto-fix pass
+   in commit `b02d6ad2` collapsed four `const layers = [...]` fixtures in
+   `src/config/__tests__/overlay.test.ts` where each element was a
+   `layer(id, precedence, keys)` factory call. The three sibling cases
+   (`'returns null when no higher-precedence layer defines the key'`,
+   `'returns null when writing to the highest-precedence layer'`,
+   `'detects shadowing by a single higher-precedence layer'`) each had the
+   same two-element fixture hand-authored as four lines:
+
+   ```typescript
+   // Anti-pattern — reformatted by auto-fix (four lines)
+   const layers = [
+     layer('managed', 100, ['routing.model']),
+     layer('user', 50, ['routing.model']),
+   ];
+
+   // Canonical form after auto-fix (single 98-column line)
+   const layers = [layer('managed', 100, ['routing.model']), layer('user', 50, ['routing.model'])];
+   ```
+
+   The sibling case `'ignores same-precedence layers (ties do NOT shadow)'`
+   at line 47 received the same collapse (`const layers = [layer('a', 50,
+   ['x']), layer('b', 50, ['x'])];`, 63 columns on a single line). The
+   four-element `layers` fixture in the `'picks the highest-precedence
+   shadower when multiple layers conflict'` case at lines 30-36 is NOT
+   collapsed because its single-line form would overflow `printWidth: 100`
+   — the auto-fix pass is strictly idempotent on the expand-direction
+   branch. The assertion semantics on `detectShadowedWrite(key, target,
+   layers)` and `formatShadowedWriteWarning(key, target, shadow)` are
+   byte-identical before and after the reflow: the shadowed-write
+   detection still returns `null` on no-shadower, `{ shadowedBy: 'managed'
+   }` on single-shadower detection, `{ shadowedBy: 'policy' }` on the
+   multi-shadower precedence tie-break, and `null` on same-precedence
+   ties. Running `npm run format` before committing avoids the
+   `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up commit.
 
 5. **Collapse short `tool.executeUnsafe(params, context)` call sites onto a
    single line when they fit under 100 columns.** Tool tests routinely invoke
@@ -8564,6 +8609,102 @@ npm test -- tests/agent/worktreeStatus.test.ts \
   tests/cli/tui/Sidebar.test.tsx
 ```
 
+## Testing worktree pinning (PR #14891)
+
+Introduced by commit `a146bf6e` (`feat(agent): add worktree pinning in Agent Manager sidebar`). The pin state has two homes — an in-memory flag on each `WorktreeStatusEntry` and the on-disk `~/.alexi/agent-manager.json` file — covered by three Vitest suites totalling 392 lines. Together they pin the registry-side flag contract, the Sidebar render + keybind, and the persistence roundtrip. See [ARCHITECTURE.md — Agent Manager Worktree Pinning](ARCHITECTURE.md#agent-manager-worktree-pinning-pr-14891) and [API.md — Worktree Pinning API](API.md#worktree-pinning-api) for the runtime contract these tests defend.
+
+### Registry flag: `tests/agent/worktreeStatus.test.ts` (`pinning (PR #14891)` describe block, 98 lines added, 7 cases)
+
+Extends the existing worktreeStatus suite with pin-focused cases. All cases run under the default `node` environment and share the same `__resetWorktreeStatusRegistry()` `beforeEach` as the parent suite:
+
+```typescript
+import {
+  __resetWorktreeStatusRegistry,
+  getPinnedWorktreeIds,
+  getWorktreeStatus,
+  setWorktreePinned,
+  setWorktreeStatus,
+  subscribe,
+  toggleWorktreePin,
+} from '../../src/agent/worktreeStatus.js';
+```
+
+Invariants pinned:
+
+1. **Default-unpinned.** `setWorktreeStatus('wt-1', { label, status: 'idle' })` leaves `pinned` as `undefined`; `getPinnedWorktreeIds()` returns `[]`.
+2. **Emit on real change.** `setWorktreePinned('wt-1', true)` returns `true`, flips the flag, and triggers exactly one listener call.
+3. **Unknown-id guard.** `setWorktreePinned('nope', true)` returns `false` and does NOT emit.
+4. **No-op guard.** `setWorktreePinned` is a no-op when the flag is already in the requested state — returns `false` and does NOT emit.
+5. **Toggle roundtrip.** `toggleWorktreePin('wt-1')` returns `true` (pin), then `false` (unpin).
+6. **Pin preservation across unrelated status changes.** Setting a pinned entry's `status: 'running'` keeps `pinned: true` — the orchestrator's lifecycle event does not clobber the user's pin.
+7. **Insertion-order pin list.** `getPinnedWorktreeIds()` returns ids in the order they were inserted into the registry, regardless of pin toggle timestamps.
+
+### Sidebar render + keybind: `tests/cli/tui/Sidebar.test.tsx` (`worktree pinning (PR #14891)` describe block, 126 lines added, 5 cases)
+
+Mounts the `Sidebar` component under `ink-testing-library` and drives it via `stdin.write('p')`. Snapshot assertions use `animateWorktrees={false}` to keep the rendered frame deterministic. The shared fixture is a four-entry array where entries `b` and `d` are pinned and entries `a`, `c` are not:
+
+```typescript
+const pinnedFirstEntries: WorktreeStatusEntry[] = [
+  { id: 'a', label: 'alpha', status: 'idle', updatedAt: 1 },
+  { id: 'b', label: 'beta', status: 'running', updatedAt: 2, pinned: true },
+  { id: 'c', label: 'gamma', status: 'idle', updatedAt: 3 },
+  { id: 'd', label: 'delta', status: 'idle', updatedAt: 4, pinned: true },
+];
+```
+
+Cases:
+
+1. **`sortWorktreesPinnedFirst` bubbles pinned to the top with stable within-bucket order.** `sorted.map(e => e.id)` equals `['b', 'd', 'a', 'c']`.
+2. **No-op when nothing is pinned.** `sortWorktreesPinnedFirst(input)` returns the exact same reference (`expect(sorted).toBe(input)`), so React avoids a needless re-render.
+3. **Render pinned first with `[P]` indicator.** Asserts the frame contains `[P] beta` and `[P] delta` but not `[P] alpha` / `[P] gamma`, and asserts `max(betaIdx, deltaIdx) < min(alphaIdx, gammaIdx)`.
+4. **`p` dispatches `onTogglePin(worktrees[selectedWorktreeIndex].id)`.** With `selectedWorktreeIndex={2}`, `stdin.write('p')` invokes `onTogglePin('c')` — index 2 refers to the UNSORTED snapshot ('gamma'), confirming the pin target is stable across display reorderings.
+5. **Keybind gated correctly.** `onTogglePin` is NOT invoked when `selectedWorktreeIndex` is omitted or when `isFocused={false}`.
+
+Both tests that drive `stdin` yield with `await new Promise((r) => setImmediate(r))` before and after the write so `useInput` has subscribed before the keystroke and the component has processed the resulting state change before the assertion runs.
+
+### Persistence roundtrip: `tests/core/agent-manager-pinning.test.ts` (168 lines, 4 describe blocks, 11 cases)
+
+Covers the orchestration-api wrapper that keeps the in-memory registry and the on-disk file in lockstep. Every test redirects the persistence file to a temp location so parallel workers do not race on the real `~/.alexi/agent-manager.json`:
+
+```typescript
+beforeEach(async () => {
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-'));
+  statePath = path.join(tmpDir, 'agent-manager.json');
+  setAgentManagerStatePathForTesting(statePath);
+});
+
+afterEach(async () => {
+  resetAgentManagerStatePathForTesting();
+  __resetWorktreeStatusRegistry();
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+```
+
+Describe blocks and cases:
+
+- **`toggleWorktreePin (persistence)` (4 cases).** Pin writes `pinnedWorktrees: ['wt-1']` to disk; unpin writes `[]`; unknown id returns `undefined` and does NOT create the file (asserted via `await expect(fs.access(statePath)).rejects.toThrow()`); writes preserve unknown top-level fields (`futureField: 42` round-trips).
+- **`loadPersistedPinnedWorktrees` (5 cases).** Missing file → `[]`; applies persisted ids to matching registry entries; stale pins (ids with no matching entry) are skipped and NOT applied as ghosts; non-string entries are ignored defensively (hand-edited corrupted file); malformed JSON is treated as empty state and does NOT crash.
+- **`persistPinnedWorktrees` (2 cases).** Writes current pin ids reflecting the registry snapshot; creates nested parent directories on first write (`fs.mkdir(..., { recursive: true })`).
+- **`pin persistence roundtrip` (1 case).** The full "pin → simulate restart → re-discover → load" sequence restores the pin, which is the production-equivalent test for the Agent Manager startup contract.
+
+Run the full pinning coverage:
+
+```bash
+npm test -- tests/agent/worktreeStatus.test.ts \
+  tests/cli/tui/Sidebar.test.tsx \
+  tests/core/agent-manager-pinning.test.ts
+```
+
+### Isolation and parallel safety
+
+The pin suites use the same module-scoped singleton as the parent registry suites, plus a filesystem resource. Three invariants keep them parallel-safe:
+
+1. **Registry reset.** Every `afterEach` calls `__resetWorktreeStatusRegistry()` so a leaked pin from a previous case cannot bleed into the next.
+2. **Per-case temp directory.** `fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-'))` returns a unique directory per worker, and `fs.rm(tmpDir, { recursive: true, force: true })` tears it down even on test failure.
+3. **Persistence path reset.** `resetAgentManagerStatePathForTesting()` returns the module to `DEFAULT_AGENT_MANAGER_STATE_PATH` so a crash mid-test cannot leave the production path pointing at a deleted temp directory for the next suite.
+
+Do NOT rely on the real `~/.alexi/agent-manager.json` in any test — a successful run would overwrite the operator's actual pin state. Always redirect with `setAgentManagerStatePathForTesting`.
+
 ## Testing the TUI Glyph Audit (issue #1896)
 
 Introduced by commit `5669b9e3` (`feat(cli): audit TUI glyphs for Linux font compatibility`). The audit lives in `tests/cli/tui/glyphs.test.ts` (284 lines) and defends the contract from `src/cli/tui/theme/glyphs.ts`: every non-ASCII code point that appears in a TUI source file MUST render correctly on Linux terminals using DejaVu Sans Mono / Noto Sans Mono / Ubuntu Mono, either directly (safe range or explicit allow-list) or via `linuxSafeGlyph()`. See [ARCHITECTURE.md — TUI Glyph Safety and Linux Font Compatibility](ARCHITECTURE.md#tui-glyph-safety-and-linux-font-compatibility-issue-1896) and [API.md — Linux-safe TUI Glyph Module](API.md#linux-safe-tui-glyph-module-srcclituithemeglyphs).
@@ -10082,4 +10223,95 @@ Fixture rules that are easy to miss:
 ```bash
 npm test -- tests/utils/todo.test.ts
 npm test -- tests/cli/tui/TodoProgressChip.test.tsx
+```
+
+## Testing MCP OAuth Issuer-Rotation Detection
+
+The MCP OAuth issuer-rotation detector (`src/mcp/oauth-issuer.ts`, commit `26c7603c`, ports kilocode `84b26c697`) is a pure function pair with no I/O, so the regression suite is a plain input / output table. See [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts) and [API.md — MCP OAuth Issuer-Rotation API](API.md#mcp-oauth-issuer-rotation-api).
+
+Regression contract (`src/mcp/__tests__/oauth-issuer.test.ts`, 80 lines, 8 cases):
+
+- **Fresh install / legacy record → not drift.** `hasIssuerChanged(undefined, DISCOVERED)` and `hasIssuerChanged({}, DISCOVERED)` both return `false`. There is nothing to compare against yet, so a caller should proceed with registration — this is NOT a drift signal.
+- **Exact match → no drift.** When stored and discovered agree on `issuer` AND `authorization_endpoint`, `hasIssuerChanged` returns `false`.
+- **`issuer` moved → drift.** Different stored `issuer` returns `true`.
+- **`authorization_endpoint` moved → drift.** Different stored `authorization_endpoint` returns `true`.
+- **Legacy record missing `authorization_endpoint` → drift.** `{ issuer: X }` with no `authorization_endpoint` returns `true` — we cannot prove it matches, so re-register.
+- **`requireReregistration` plumbing.** Returns `'none'` for `undefined` stored and for current stored; returns `'issuer_rotated'` when both `issuer` and `authorization_endpoint` have moved.
+
+Fixtures use plain object literals — no filesystem, no network, no mocks. The DISCOVERED fixture carries all three metadata fields (`issuer`, `authorization_endpoint`, `token_endpoint`) even though only the first two feed the comparison, so a future contract that also diffs `token_endpoint` can extend without touching the setup.
+
+### Running
+
+```bash
+npm test -- src/mcp/__tests__/oauth-issuer.test.ts
+```
+
+## Testing Prompt-Safe Schema-Failure Diagnostics
+
+The schema-failure diagnostics helpers (`src/core/message-diagnostics.ts`, commit `26c7603c`, ports kilocode `a8fbcc356` et al.) must survive two kinds of input: well-formed zod-ish errors AND pathological inputs that pretend to be a zod error but aren't. The regression suite covers both, plus the load-bearing no-leak contract.
+
+Regression contract (`src/core/__tests__/message-diagnostics.test.ts`, 121 lines, 10 cases):
+
+**`summarizeSchemaFailure`:**
+
+- **Empty on `null` / `undefined` / primitives.** `summarizeSchemaFailure(null).issues === []`, same for `undefined`, string, number.
+- **Zod-ish `.issues` extraction.** `{ issues: [{ path: ['messages', 0, 'content'], code: 'invalid_type', message: 'secret prompt text' }, ...] }` renders as `{ path: 'messages.0.content', code: 'invalid_type', messageKind: 'string' }` — the `message` field itself is NEVER copied. The no-leak contract is pinned by `expect(JSON.stringify(summary)).not.toContain('secret prompt text')`.
+- **`.errors` alias accepted.** `{ errors: [{ path: ['x'], code: 'c', message: 'm' }] }` renders identically to `{ issues: [...] }`.
+- **Truncation.** A 60-issue list truncates to 50 with `truncated: true`.
+- **Pathological fallbacks.** Non-array `path` → `'<root>'`; non-string `code` → `'unknown_code'`; 500-char `code` → `'unknown_code'`; `undefined` `message` → `messageKind: 'undefined'`.
+
+**`summarizeMessageEnvelope`:**
+
+- **Well-formed message.** `{ id, role, parts: [{ type: 'text', text: 'LEAK CANDIDATE' }, { type: 'image', url: 'https://leak.example' }] }` renders as `{ role: 'user', partCount: 2, partKinds: ['text', 'image'], hasId: true }`. `JSON.stringify(shape)` MUST NOT contain `'LEAK CANDIDATE'` OR `'leak.example'`.
+- **Non-object defensive handling.** `summarizeMessageEnvelope(null) === { shape: 'object' }`; `summarizeMessageEnvelope(42) === { shape: 'number' }`.
+
+**`summarizeMessageArrayFailure`:**
+
+- **Combined summary without leaking content.** Given `messages: [{ role: 'user', parts: [{ type: 'text', text: 'SECRET' }] }, ...]` + a zod error with `message: 'secret'`, the result combines both summaries and `JSON.stringify(result)` MUST NOT contain `'SECRET'`.
+
+### Running
+
+```bash
+npm test -- src/core/__tests__/message-diagnostics.test.ts
+```
+
+## Testing Config Overlay Shadowed-Write Detection
+
+The shadowed-write detector (`src/config/overlay.ts`, commit `26c7603c`, ports kilocode `b9e4b1e98` et al.) is a pure function pair; the regression suite is a plain input / output table over a hand-crafted `OverlayLayer[]`.
+
+Regression contract (`src/config/__tests__/overlay.test.ts`, 77 lines, 7 cases):
+
+- **No shadowing when no higher-precedence layer defines the key.** `detectShadowedWrite('routing.timeout', 'user', layers) === null` even if a higher-precedence layer exists but does not define that specific key.
+- **No shadowing when writing to the highest-precedence layer.** Writing to the `managed` layer in a `[managed, user]` setup is always safe.
+- **Shadowing by a single higher-precedence layer.** `[managed(100, ['routing.model']), user(50, ['routing.model'])]` + `detectShadowedWrite('routing.model', 'user', ...)` → `{ shadowedBy: 'managed' }`.
+- **Highest-precedence shadower wins.** With `[policy(200), managed(100), project(75), user(50)]` all defining `routing.model`, writing to `user` reports `shadowedBy: 'policy'` — not `managed`, not `project`.
+- **Unknown target overlay → `null`.** `detectShadowedWrite('x', 'ghost', [managed(100, ['x'])]) === null`.
+- **Same-precedence ties do NOT shadow.** `[a(50, ['x']), b(50, ['x'])]` + `detectShadowedWrite('x', 'a', ...)` returns `null`. The strict inequality `layer.precedence > target.precedence` matters here.
+- **Warning text includes key, target, shadower, and the word `shadowed`.** `formatShadowedWriteWarning('routing.model', 'user', { shadowedBy: 'managed' })` MUST contain `routing.model`, `"user"`, `"managed"`, and `shadowed`.
+
+Fixtures use a `layer(id, precedence, keys)` factory that wraps the three fields into an `OverlayLayer` with `keys: new Set(...)`. No filesystem, no mocks.
+
+### Running
+
+```bash
+npm test -- src/config/__tests__/overlay.test.ts
+```
+
+## Testing Shared Agent Board Self-Post Refusal
+
+The `kilo_board_write` self-post refusal (commit `26c7603c`, ports kilocode `759a6ef99`) is pinned by a single regression case appended to the existing recipient-state-warnings suite. See [ARCHITECTURE.md — Shared Agent Board: Roster + Self-Post Refusal](ARCHITECTURE.md#shared-agent-board-roster--self-post-refusal) and [API.md — Shared Agent Board API](API.md#shared-agent-board-api).
+
+Regression contract (`tests/tool/tools/board-write-recipient.test.ts:149-168`, new case `'refuses a post to self with an actionable error (kilocode 759a6ef99)'`):
+
+- **Result is a failure.** `result.success === false`.
+- **Error text identifies the self session.** `result.error` contains the self session id, matches `/self/i`, and mentions `kilo_board_read` so the agent sees the remediation hint.
+- **No write attempted.** The mocked `BoardStore.write` (`writeMock`) MUST NOT be called — the refusal is checked up-front.
+- **No recipient probe.** The mocked `BoardStore.read` (`readMock`) MUST NOT be called either — the recipient-looks-stopped probe is skipped because the refusal is checked before the probe.
+
+Fixtures use the pre-existing `SELF_SESSION` / `BOARD_ID` constants and the `ctx()` helper that constructs a minimal `ToolContext` with `sessionId: SELF_SESSION`. Both `BoardStore.write` and `BoardStore.read` are mocked via `vi.mock('../../../src/core/database/boardStore.js', ...)` at module load time; the `BoardContext.resolve` mock returns `BOARD_ID` deterministically so the gate doesn't short-circuit on "no board attached".
+
+### Running
+
+```bash
+npm test -- tests/tool/tools/board-write-recipient.test.ts
 ```

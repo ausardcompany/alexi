@@ -2284,6 +2284,53 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
 
 No environment variable currently overrides this at process start — override it programmatically at the SDK-adapter layer when needed, or pass `timeout: 0` to opt out entirely and fall back to the platform default. On a slow SAP corporate VPN or a degraded gateway, expect Ctrl+C at the TUI to abort the underlying fetch immediately (the caller signal composes with the internal timeout via `AbortSignal.any`).
 
+## Managed Preferences and the Overlay Precedence Model
+
+Alexi reads its persistent user configuration from two sources with distinct precedence. Higher precedence wins at read time:
+
+| Overlay   | Source                                                                           | Precedence (higher wins) | Introspection                           |
+| --------- | -------------------------------------------------------------------------------- | ------------------------ | --------------------------------------- |
+| `managed` | macOS Managed Preferences on the `ai.alexi.cli` domain (read via `defaults read`) | 100                      | `defaults read ai.alexi.cli`            |
+| `user`    | `~/.alexi/config.json` on every supported platform                                | 50                       | `cat ~/.alexi/config.json`              |
+
+The managed overlay is populated by macOS MDM, is only enumerated on `os.platform() === 'darwin'`, and currently supports four keys (`src/config/userConfig.ts:24-29`): `disableTelemetry` (coerces to `telemetryEnabled: !value`), `defaultModel`, `proxyUrl`, and `allowedProviders` (comma-separated). On every other platform the overlay is empty and all reads resolve against the user overlay.
+
+### Shadowed-write detection
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, `src/config/overlay.ts`). A pure helper detects when a write to a lower-precedence overlay (`user`) would be silently shadowed by a higher-precedence overlay (`managed`) that already defines the same key. Pre-fix, an operator editing `~/.alexi/config.json` for a key also set by macOS MDM would save, re-read, and see the managed value — no warning. Post-fix, callers surface a structured warning so the operator understands why their edit will have no effect.
+
+```typescript
+import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../src/config/overlay.js';
+
+const layers: OverlayLayer[] = [
+  { id: 'managed', precedence: 100, keys: new Set(['defaultModel']) },
+  { id: 'user',    precedence: 50,  keys: new Set(['defaultModel', 'telemetryEnabled']) },
+];
+
+const shadow = detectShadowedWrite('defaultModel', 'user', layers);
+if (shadow) {
+  console.warn(formatShadowedWriteWarning('defaultModel', 'user', shadow));
+}
+// => Config key "defaultModel" written to the "user" overlay will be shadowed by
+//    the "managed" overlay, which defines the same key at a higher precedence.
+//    The write will persist, but reads will continue to see the "managed" value.
+```
+
+The write is NOT blocked — the shadow warning is advisory. The caller is expected to persist the value anyway, surface the warning on `stderr` or in a TUI toast, and let the operator reconcile by clearing the managed preference or accepting the shadow.
+
+The module is currently a forward-looking helper: Alexi has no abstracted "write to layer X" code path yet, so the warning is only emitted if a CLI subcommand (`alexi config set`, the model picker's persistence path, the TUI config editor) explicitly wires it in. See [API.md — Config Overlay API](API.md#config-overlay-api) and [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts).
+
+### Keys covered by the managed overlay today
+
+| User key           | Managed source                | Coercion                               |
+| ------------------ | ----------------------------- | -------------------------------------- |
+| `telemetryEnabled` | `disableTelemetry`            | Inverted: `telemetryEnabled = !value`  |
+| `defaultModel`     | `defaultModel`                | Verbatim string                        |
+| `proxyUrl`         | `proxyUrl`                    | Verbatim string                        |
+| `allowedProviders` | `allowedProviders`            | Comma-separated split with `.trim()`   |
+
+Writing to any of the four keys above from `~/.alexi/config.json` on a macOS host whose MDM has set the matching managed value will be silently shadowed. All other keys (`memory_model`, `models.*`, `experimental.*`, `rulesPath`, …) are user-only and never shadowed.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

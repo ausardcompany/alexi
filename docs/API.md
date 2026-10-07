@@ -6086,6 +6086,13 @@ export interface WorktreeStatusEntry {
   readonly detail?: string;
   /** Wall-clock ms when the status was last updated. */
   readonly updatedAt: number;
+  /**
+   * True when the user has pinned this worktree to the top of the Agent
+   * Manager sidebar. `undefined` and `false` are equivalent and mean
+   * "not pinned" — legacy entries without the field do not need migration.
+   * See [Worktree Pinning API](#worktree-pinning-api).
+   */
+  readonly pinned?: boolean;
 }
 
 export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) => void;
@@ -6098,8 +6105,12 @@ export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) 
 ```typescript
 export function setWorktreeStatus(
   id: string,
-  update: { label: string; status: WorktreeStatus; detail?: string }
+  update: { label: string; status: WorktreeStatus; detail?: string; pinned?: boolean }
 ): void;
+
+export function setWorktreePinned(id: string, pinned: boolean): boolean;
+export function toggleWorktreePin(id: string): boolean | undefined;
+export function getPinnedWorktreeIds(): readonly string[];
 
 export function removeWorktreeStatus(id: string): void;
 
@@ -6112,7 +6123,10 @@ export function subscribe(listener: WorktreeStatusListener): () => void;
 
 Behaviour contract:
 
-- `setWorktreeStatus(id, update)` — inserts a new entry or replaces an existing one. The registry stamps `updatedAt = Date.now()` for the caller. When `(label, status, detail)` all match the current entry, the call is a no-op and does NOT emit; publishers may safely fire redundant `idle` events during a quiet period without triggering re-render storms.
+- `setWorktreeStatus(id, update)` — inserts a new entry or replaces an existing one. The registry stamps `updatedAt = Date.now()` for the caller. When `(label, status, detail, pinned)` all match the current entry, the call is a no-op and does NOT emit; publishers may safely fire redundant `idle` events during a quiet period without triggering re-render storms. When `update.pinned` is omitted, the current pin state is preserved so orchestrator-driven lifecycle events do NOT clobber a pin that the user set via the sidebar.
+- `setWorktreePinned(id, pinned)` — set the flag on an existing entry. Returns `true` when a change was applied (listeners notified), `false` when the id is unknown or the flag is already in the requested state. Pin toggles go through this helper rather than `setWorktreeStatus` so the orchestrator's status events can flow freely without carrying the pin flag through every call site.
+- `toggleWorktreePin(id)` — flip the current value. Returns the new pin state (`true` after a pin, `false` after an unpin) or `undefined` when the id is not in the registry. Callers that need to persist the change should check for a defined return before writing to disk — or use the persistence-aware wrapper in `src/core/agent-manager/orchestration-api.ts` (see [Worktree Pinning API](#worktree-pinning-api) below).
+- `getPinnedWorktreeIds()` — return the ids of every currently-pinned worktree in insertion order. Convenience projector used by the persistence layer to write a stable `pinnedWorktrees: string[]` array without having to walk the full snapshot.
 - `removeWorktreeStatus(id)` — removes an entry and emits once. Returns `void`; the underlying `Map.delete` return value is not exposed. This is the only path that drops an entry; every other transition — including `error` — leaves the entry visible so failures stay on-screen until the operator dismisses them.
 - `getWorktreeStatuses()` — returns an immutable snapshot in `Map` insertion order. Suitable for one-shot reads (CLI subcommands, tests). React consumers should use `subscribe` or the `useWorktreeStatus` hook instead so they receive future updates.
 - `getWorktreeStatus(id)` — returns a defensive copy of the single entry or `undefined` when the id has never been reported. An entry explicitly set to `status: 'unknown'` still returns a defined `WorktreeStatusEntry` — the `undefined` return distinguishes "never seen" from "known but not yet classified".
@@ -6145,11 +6159,11 @@ Returns the current full snapshot. Callers project it into whatever shape their 
 
 ### Sidebar props
 
-`SidebarProps` (`src/cli/tui/components/Sidebar.tsx`) gains two optional fields:
+`SidebarProps` (`src/cli/tui/components/Sidebar.tsx`) gains four optional fields:
 
 ```typescript
 export interface SidebarProps {
-  // ...existing fields (files, focusable, isCollapsed, onActivate, isFocused, usage)...
+  // ...existing fields (files, selectedIndex, onSelect, onActivate, isFocused, usage)...
 
   /**
    * Optional Agent Manager worktree list. When provided (and non-empty),
@@ -6165,8 +6179,43 @@ export interface SidebarProps {
    * rendered frame deterministic.
    */
   animateWorktrees?: boolean;
+
+  /**
+   * Optional index of the currently-selected worktree in the `worktrees`
+   * array. Applied against the UNSORTED snapshot the caller passes in so
+   * the TUI's selection cursor and the pin target stay consistent
+   * regardless of pinned-first display order. See PR #14891.
+   */
+  selectedWorktreeIndex?: number;
+
+  /**
+   * Pin-toggle callback. Invoked with the worktree id (from the entry at
+   * `selectedWorktreeIndex`) when the user presses `p` while the sidebar
+   * is focused. Typically wired to `toggleWorktreePin` from
+   * `src/core/agent-manager/orchestration-api.ts`.
+   */
+  onTogglePin?: (id: string) => void;
 }
 ```
+
+Pin-related exports from the same module:
+
+```typescript
+export const PIN_INDICATOR = '[P]'; // ASCII — safe under the Encoding Guard.
+
+export function sortWorktreesPinnedFirst(
+  worktrees: readonly WorktreeStatusEntry[]
+): readonly WorktreeStatusEntry[];
+```
+
+`sortWorktreesPinnedFirst` is a stable sort that bubbles pinned entries to the top while preserving relative order within each bucket (`[...pinned, ...rest]`). Returns the input array unchanged when `worktrees.length < 2` or no entries are pinned, so the identity check `sorted === input` succeeds in those cases. The sort is intentionally NOT in-place — the input is a readonly snapshot from the registry.
+
+Keybind contract (`src/cli/tui/components/Sidebar.tsx:244-259`):
+
+- Fires only when `isFocused && !key.ctrl && !key.meta && input === 'p'`.
+- Requires `onTogglePin !== undefined && selectedWorktreeIndex !== undefined && worktrees !== undefined && worktrees.length > 0`.
+- Invokes `onTogglePin(worktrees[selectedWorktreeIndex].id)` against the UNSORTED snapshot — the sort for display does not shift the selection target.
+- Does NOT depend on `files.length > 0`, so a sidebar that shows only Agent Manager worktrees can still pin entries.
 
 ### StatusIcon component
 
@@ -6301,7 +6350,109 @@ function tearDownWorktree(id: string): void {
 }
 ```
 
-Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`) are safe and free: they short-circuit before touching the listener set.
+Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`, `pinned`) are safe and free: they short-circuit before touching the listener set.
+
+## Worktree Pinning API
+
+Introduced by commit `a146bf6e` (upstream kilocode PR #14891). Persistence wrapper on top of the Worktree Status Registry documented above. Exported by `src/core/agent-manager/orchestration-api.ts` so the TUI can toggle a pin AND write the change to `~/.alexi/agent-manager.json` in a single call. See [ARCHITECTURE.md — Agent Manager Worktree Pinning](ARCHITECTURE.md#agent-manager-worktree-pinning-pr-14891) for the runtime sequence.
+
+### Persisted state
+
+```typescript
+export interface AgentManagerPersistedState {
+  readonly pinnedWorktrees?: readonly string[];
+  readonly [extra: string]: unknown;
+}
+
+export const DEFAULT_AGENT_MANAGER_STATE_PATH: string;
+// = path.join(os.homedir(), '.alexi', 'agent-manager.json')
+```
+
+The index signature on `AgentManagerPersistedState` is deliberate: a future release can add top-level keys without clobbering state written by the current one. Writes use `{ ...existing, pinnedWorktrees: Array.from(getPinnedWorktreeIds()) }` so unknown fields are preserved verbatim.
+
+### Public functions
+
+```typescript
+export async function readAgentManagerState(): Promise<AgentManagerPersistedState>;
+export async function writeAgentManagerState(state: AgentManagerPersistedState): Promise<void>;
+export async function loadPersistedPinnedWorktrees(): Promise<readonly string[]>;
+export async function persistPinnedWorktrees(): Promise<void>;
+export async function toggleWorktreePin(id: string): Promise<boolean | undefined>;
+```
+
+Behaviour contract:
+
+- `readAgentManagerState()` — reads the file. Returns `{}` when the file is missing (`ENOENT`), malformed (`JSON.parse` throws), or carries a non-object top-level value. Any other filesystem error (`EACCES`, `EISDIR`, ...) is also treated as empty state so a corrupted file does NOT block the TUI from starting. The next successful write overwrites the broken file.
+- `writeAgentManagerState(state)` — writes the state file after `fs.mkdir(path.dirname(agentManagerStatePath), { recursive: true })`, so the parent directory is created on first write. Serialises with `JSON.stringify(state, null, 2)` and a trailing newline.
+- `loadPersistedPinnedWorktrees()` — read the persisted pin list and apply it to any entries already in the in-memory registry via `setWorktreePinned(id, true)`. Returns the subset of ids that were actually applied (ids present in the registry) so callers can detect stale pins. Defensively skips non-string entries so a hand-edited corrupted file does not crash. Call this from Agent Manager startup, AFTER the initial worktree discovery pass has populated the registry.
+- `persistPinnedWorktrees()` — write the current pin set to disk, preserving unknown fields from the previous state via spread.
+- `toggleWorktreePin(id)` — flip the registry flag AND persist in a single call. Returns the new pin state (`true` pinned, `false` unpinned) or `undefined` when the id is not in the registry — in that case the disk file is NOT touched. TUI callers should prefer this over the lower-level registry helper of the same name so the on-disk state stays in lockstep with the live snapshot.
+
+Note that `toggleWorktreePin` is exported from TWO modules:
+
+| Module | Return | Behaviour |
+| ------ | ------ | --------- |
+| `src/agent/worktreeStatus.ts` | `boolean \| undefined` (synchronous) | In-memory only; caller is responsible for persistence. |
+| `src/core/agent-manager/orchestration-api.ts` | `Promise<boolean \| undefined>` | In-memory + disk write in one call. |
+
+Use the orchestration-api variant from the TUI; use the worktreeStatus variant in test setups that need to drive the flag without touching the filesystem.
+
+### Test hooks
+
+```typescript
+export function setAgentManagerStatePathForTesting(nextPath: string): void;
+export function resetAgentManagerStatePathForTesting(): void;
+```
+
+Redirect the persistence file to a temp location — typically `path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-')), 'agent-manager.json')`. The CLI never calls these; test setup does. `resetAgentManagerStatePathForTesting()` returns the module to the default `DEFAULT_AGENT_MANAGER_STATE_PATH` and belongs in an `afterEach` block alongside `__resetWorktreeStatusRegistry()`.
+
+### Usage example: wiring the TUI pin keybind end to end
+
+```typescript
+import {
+  Sidebar,
+  sortWorktreesPinnedFirst,
+} from './cli/tui/components/Sidebar.js';
+import { useWorktreeStatus } from './cli/tui/hooks/useWorktreeStatus.js';
+import {
+  loadPersistedPinnedWorktrees,
+  toggleWorktreePin,
+} from './core/agent-manager/orchestration-api.js';
+import { setWorktreeStatus } from './agent/worktreeStatus.js';
+
+// At startup, after discovery:
+for (const wt of discoveredWorktrees) {
+  setWorktreeStatus(wt.id, { label: wt.label, status: 'unknown' });
+}
+const applied = await loadPersistedPinnedWorktrees();
+if (applied.length < persistedIds.length) {
+  logger.debug('stale pins skipped on startup', {
+    skipped: persistedIds.filter((id) => !applied.includes(id)),
+  });
+}
+
+// In the ChatPage / Agent Manager page:
+function AgentManagerPanel(): React.JSX.Element {
+  const worktrees = useWorktreeStatus();
+  const [selectedWorktreeIndex, setSelectedWorktreeIndex] = useState(0);
+  return (
+    <Sidebar
+      files={files}
+      selectedIndex={selectedIndex}
+      onSelect={setSelectedIndex}
+      onActivate={onActivate}
+      isFocused={isFocused}
+      worktrees={worktrees}
+      selectedWorktreeIndex={selectedWorktreeIndex}
+      onTogglePin={(id) => {
+        // Fire-and-forget: errors from the write are logged but do not
+        // block the TUI; the in-memory flag has already been toggled.
+        void toggleWorktreePin(id).catch((err) => logger.warn('pin write failed', err));
+      }}
+    />
+  );
+}
+```
 
 ## Network Transport Classification
 
@@ -6661,7 +6812,197 @@ export function todoProgressState(progress: TodoProgress): TodoProgressState;
 export function formatTodoChipLabel(progress: TodoProgress): string;
 ```
 
+See behaviour notes further below under "Todo Progress Chip semantics".
+
+## MCP OAuth Issuer-Rotation API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `84b26c697`). Pure helpers re-exported from `src/mcp/index.ts:20-30`. See [ARCHITECTURE.md — MCP OAuth Issuer-Rotation Detection](ARCHITECTURE.md#mcp-oauth-issuer-rotation-detection-srcmcpoauth-issuerts) for the decision flow.
+
+```typescript
+export interface StoredOAuthClient {
+  issuer?: string;
+  authorization_endpoint?: string;
+  token_endpoint?: string;
+  client_id?: string;
+}
+
+export interface DiscoveredOAuthMetadata {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint?: string;
+}
+
+export type ReregistrationAction = 'none' | 'issuer_rotated';
+
+export function hasIssuerChanged(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): boolean;
+
+export function requireReregistration(
+  stored: StoredOAuthClient | undefined,
+  discovered: DiscoveredOAuthMetadata
+): ReregistrationAction;
+```
+
+Behaviour contract:
+
+- `hasIssuerChanged(undefined, …)` and `hasIssuerChanged({}, …)` both return `false` — a fresh install or legacy record is not drift, it is simply "no stored copy to compare against yet". The caller should treat this as "proceed with registration".
+- `hasIssuerChanged({ issuer: X }, { issuer: X, authorization_endpoint: Y })` returns `true` when the stored side is missing `authorization_endpoint` — we cannot prove it matches, so re-register.
+- `requireReregistration` returns `'none'` for the empty / current cases and `'issuer_rotated'` when `hasIssuerChanged` fires. Using the string (instead of a boolean) keeps the signature stable for future `ReregistrationAction` kinds.
+
+Alexi's SAP AI Core transport does not use OAuth. This surface is only exercised when an operator wires a third-party OAuth-protected MCP server (GitHub, Linear, …) into Alexi; everything in the module is pure, so there is no runtime cost on an OAuth-free deployment.
+
+## Schema Failure Diagnostics API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `a8fbcc356` et al.). Three pure helpers in `src/core/message-diagnostics.ts` that produce structural summaries of a `ModelMessage[]` schema failure without ever including raw prompt text, tool arguments, or user content. See [ARCHITECTURE.md — Prompt-Safe Schema-Failure Diagnostics](ARCHITECTURE.md#prompt-safe-schema-failure-diagnostics-srccoremessage-diagnosticsts) for the no-leak invariants.
+
+```typescript
+export interface SchemaFailureIssue {
+  path: string;
+  code: string;
+  messageKind: string; // typeof issue.message, NEVER its content
+}
+
+export interface SchemaFailureSummary {
+  issues: ReadonlyArray<SchemaFailureIssue>;
+  truncated: boolean;
+}
+
+export function summarizeSchemaFailure(error: unknown): SchemaFailureSummary;
+
+export function summarizeMessageEnvelope(message: unknown): Record<string, unknown>;
+
+export function summarizeMessageArrayFailure(
+  messages: unknown,
+  error: unknown
+): {
+  schemaFailure: SchemaFailureSummary;
+  messageShapes: ReadonlyArray<Record<string, unknown>>;
+  truncatedMessages: boolean;
+};
+```
+
+Behaviour contract:
+
+- Accepts either `error.issues` (zod >= 4) or `error.errors` (legacy zod / Effect-like) and treats both aliases identically.
+- `issue.message` is NEVER copied — only `typeof issue.message` becomes `messageKind` (`'string' | 'number' | 'undefined' | ...`).
+- `summarizeMessageEnvelope` returns `{ role, partCount, partKinds, hasId }`; `partKinds` is the first 20 `parts[i].type` strings. No `parts[i].text` or `.url` is ever read.
+- Caps: `MAX_ISSUES = 50`, `MAX_PATH_SEGMENTS = 32`, `MAX_CODE_LENGTH = 128`, `MAX_MESSAGES = 20`. Over-cap inputs set the matching `truncated` / `truncatedMessages` flag.
+- Pathological inputs degrade: non-array `path` → `'<root>'`; non-string / 500-char `code` → `'unknown_code'`; non-object `message` → `{ shape: typeof message }`.
+
+Suggested call site: a provider adapter catches a zod error at the point where it serialises `ModelMessage[]` for the SAP AI Core wire format and routes `summarizeMessageArrayFailure(messages, error)` through `logger.warn` for diagnostic observability without PII at risk.
+
+## Config Overlay API
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `b9e4b1e98` et al.). Pure shadowed-write detection in `src/config/overlay.ts`. See [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts) for the algorithm.
+
+```typescript
+export type OverlayId = string;
+
+export interface OverlayLayer {
+  id: OverlayId;
+  precedence: number;
+  keys: ReadonlySet<string>;
+}
+
+export interface ShadowedWrite {
+  shadowedBy: OverlayId;
+}
+
+export function detectShadowedWrite(
+  key: string,
+  targetOverlay: OverlayId,
+  layers: ReadonlyArray<OverlayLayer>
+): ShadowedWrite | null;
+
+export function formatShadowedWriteWarning(
+  key: string,
+  targetOverlay: OverlayId,
+  shadow: ShadowedWrite
+): string;
+```
+
+Behaviour contract:
+
+- Returns `null` when the target overlay is the highest-precedence layer defining the key, when no higher-precedence layer defines the key, and when `targetOverlay` is unknown.
+- When multiple higher-precedence layers define the key, returns `{ shadowedBy }` for the HIGHEST-precedence one — the layer that will actually win at read time.
+- Same-precedence ties do NOT shadow (`layer.precedence > target.precedence` is a strict inequality) — the runtime read ordering is undefined for ties, so a warning would be misleading.
+- `formatShadowedWriteWarning` emits a stable sentence: `Config key "<key>" written to the "<target>" overlay will be shadowed by the "<shadower>" overlay, which defines the same key at a higher precedence. The write will persist, but reads will continue to see the "<shadower>" value.`
+
+Example wiring (not yet in the code path — see the forward-wiring plan in [ARCHITECTURE.md — Config Overlay Shadowed-Write Detection](ARCHITECTURE.md#config-overlay-shadowed-write-detection-srcconfigoverlayts)):
+
+```typescript
+import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../config/overlay.js';
+import { readManagedPreferences, loadFullConfig } from '../config/userConfig.js';
+
+function warnIfShadowed(key: string): void {
+  const managedKeys = new Set(Object.keys(readManagedPreferences() ?? {}));
+  const userKeys = new Set(Object.keys(loadFullConfig()));
+  const layers: OverlayLayer[] = [
+    { id: 'managed', precedence: 100, keys: managedKeys },
+    { id: 'user', precedence: 50, keys: userKeys },
+  ];
+  const shadow = detectShadowedWrite(key, 'user', layers);
+  if (shadow) {
+    // eslint-disable-next-line no-console
+    console.warn(formatShadowedWriteWarning(key, 'user', shadow));
+  }
+}
+```
+
+## Shared Agent Board API
+
+Updated in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `759a6ef99`). The pre-existing `kilo_board_read` / `kilo_board_write` tools (gated behind `experimental.sharedAgentBoard` in `~/.alexi/config.json`) gained roster output + self-post refusal. See [ARCHITECTURE.md — Shared Agent Board: Roster + Self-Post Refusal](ARCHITECTURE.md#shared-agent-board-roster--self-post-refusal) for the design.
+
+### `kilo_board_read` result (updated)
+
+```typescript
+interface BoardParticipant {
+  sessionID: string;
+  /** True when this row describes the current calling session. */
+  self: boolean;
+}
+
+interface BoardReadResult {
+  messages: BoardMessage[];
+  boardId?: string;
+  /**
+   * Roster of session ids observed on the board (derived from recent
+   * message authors). The current caller's row carries `self: true`.
+   * Always includes the caller even if they have not posted yet.
+   */
+  roster?: BoardParticipant[];
+}
+```
+
+### `kilo_board_write` recipient contract (updated)
+
+- `recipient === context.sessionId` → `{ success: false, error: 'Refusing board post to self (<sessionId>). Use kilo_board_read to review your own row (self: true) instead.' }`. The write is NEVER attempted, and the `recipientLooksStopped` probe is skipped because the refusal is checked first.
+- `recipient` set to a session id that does not appear in the recent 100 messages → `{ success: true, data: { ..., deliveryStatus: 'no-recipient' }, hint: 'Warning: recipient subagent "<id>" is stopped or does not exist. Message posted but will not be delivered.' }` (unchanged behaviour from kilocode `7febec58f`).
+- `recipient` omitted (broadcast) → `deliveryStatus: 'delivered'` without the recipient probe.
+
+## Commit-Message Error Accessor
+
+Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `f54e713dd` "fix(cli): preserve commit-message provider errors"). New export from `src/git/commitMessage.ts` so callers can surface SAP AI Core provider failures to the UI instead of silently falling back to the heuristic path.
+
+```typescript
+export class CommitMessageError extends Error {
+  constructor(message: string, public readonly cause?: unknown);
+}
+
+export function consumeLastCommitMessageError(): CommitMessageError | null;
+```
+
 Semantics:
+
+- `generateWithLLM` (the private LLM path invoked by `generateCommitMessage`) resets a module-local `lastLlmError` to `null` at the start of every call. On failure, it stores a `CommitMessageError` wrapping the originating `cause`.
+- `consumeLastCommitMessageError()` returns (and clears) that error. Returns `null` when the previous LLM call succeeded or when there has been no call yet. The "consume" semantics prevent a stale error from being surfaced twice.
+- The fall-back-to-heuristic behaviour is byte-identical to pre-fix: `generateWithLLM` still returns `null` on failure, and `generateCommitMessage` still falls through to `buildHeuristicMessage(files, conventional)`. The only observable change is that `lastLlmError` is now populated for callers who care to read it.
+
+Suggested call site: `AutoCommitManager` or the CLI diagnostic surface calls `consumeLastCommitMessageError()` immediately after `generateCommitMessage` and, if the result is non-null, logs the originating provider error at `warn` or surfaces it in a TUI toast. Without this, a 401 / 403 / 500 from SAP AI Core produces a heuristic commit message with no obvious diagnostic trail.
+
+## Todo Progress Chip semantics
 
 - `computeTodoProgress` counts only entries whose `status === 'completed'`. Cancelled todos count toward `total` so the ratio reflects the declared plan (matching how the `todowrite` tool reports `totalCount` itself).
 - `todoProgressState` maps the tuple to one of four states so the TUI (and future surfaces) can pick a color without duplicating the comparison logic. `completed >= total` returns `'done'` defensively — a provider that reports more completions than declared cannot flip the chip into an invalid state. `total === 0` returns `'empty'` which the TUI treats as "render nothing".
