@@ -6539,14 +6539,19 @@ export interface WorktreeStatusEntry {
   readonly detail?: string;
   /** Wall-clock ms when the status was last updated. */
   readonly updatedAt: number;
+  /** True when the user has pinned this worktree to the top of the sidebar. */
+  readonly pinned?: boolean;
 }
 
 export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) => void;
 
 export function setWorktreeStatus(
   id: string,
-  update: { label: string; status: WorktreeStatus; detail?: string }
+  update: { label: string; status: WorktreeStatus; detail?: string; pinned?: boolean }
 ): void;
+export function setWorktreePinned(id: string, pinned: boolean): boolean;
+export function toggleWorktreePin(id: string): boolean | undefined;
+export function getPinnedWorktreeIds(): readonly string[];
 export function removeWorktreeStatus(id: string): void;
 export function getWorktreeStatuses(): readonly WorktreeStatusEntry[];
 export function getWorktreeStatus(id: string): WorktreeStatusEntry | undefined;
@@ -6554,6 +6559,8 @@ export function subscribe(listener: WorktreeStatusListener): () => void;
 ```
 
 `__resetWorktreeStatusRegistry()` is a test-only helper that wipes both the entry Map and the listener Set. It is intentionally not re-exported through any barrel and must be imported directly from `src/agent/worktreeStatus.ts` under a test file.
+
+The `pinned` field and the three pin-focused helpers are added by upstream kilocode PR #14891 — see [Agent Manager Worktree Pinning](#agent-manager-worktree-pinning-pr-14891) below for the persistence layer and TUI wiring.
 
 ### TUI wiring
 
@@ -6599,6 +6606,105 @@ The registry has no built-in publisher. Callers on the orchestrator, tool, or Ag
 5. Call `removeWorktreeStatus(id)` only when the worktree is fully torn down (worktree directory removed, session archived, or the operator dismisses the row).
 
 The `updatedAt` field on every entry is populated by the registry itself (`Date.now()`), so publishers do not need to pass a timestamp. A future headless orchestrator can drive the same pipeline in-process without any changes to the registry or the TUI.
+
+## Agent Manager Worktree Pinning (PR #14891)
+
+Introduced by commit `a146bf6e` (`feat(agent): add worktree pinning in Agent Manager sidebar`). Ports upstream kilocode PR #14891 (worktree pinning) on top of the Worktree Status Registry documented above. Users pin individual worktrees to the top of the Agent Manager sidebar so critical ones stay visible when the fleet grows beyond what fits on screen, and the pin state survives TUI restarts via a tiny on-disk file.
+
+Pin state is tracked in two decoupled layers:
+
+1. **In-memory flag.** `WorktreeStatusEntry.pinned?: boolean` on each registry entry (`src/agent/worktreeStatus.ts`), projected into sort order on every TUI snapshot. `undefined` and `false` are equivalent and mean "not pinned", so legacy entries without the field do not need migration. Pin state is orthogonal to lifecycle status — a pinned worktree can be `running`, `idle`, `error`, `blocked`, or `unknown`.
+2. **On-disk persistence.** A small JSON file at `~/.alexi/agent-manager.json` with the shape `{ pinnedWorktrees: string[], [extra: string]: unknown }`. The unknown-field index signature is deliberate so a future release can add keys without clobbering state written by the current one — writes go through `{ ...existing, pinnedWorktrees: Array.from(getPinnedWorktreeIds()) }` so unknown fields are preserved on every save.
+
+The two layers are kept in lockstep by the `src/core/agent-manager/orchestration-api.ts` module. The TUI pushes pin events through `toggleWorktreePin` (updates registry + persists in a single call); startup code calls `loadPersistedPinnedWorktrees` to seed the registry from the file AFTER the initial worktree discovery pass has populated it.
+
+### Pin lifecycle
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Sidebar as Sidebar (Ink)
+    participant Orchestration as orchestration-api
+    participant Registry as worktreeStatus.ts
+    participant Disk as ~/.alexi/agent-manager.json
+
+    rect rgb(240, 240, 255)
+    note over User, Disk: Session N: user pins a worktree
+    User->>Sidebar: Press "p" with selectedWorktreeIndex=k
+    Sidebar->>Sidebar: target = worktrees[k]
+    Sidebar->>Orchestration: toggleWorktreePin(target.id)
+    Orchestration->>Registry: toggleRegistryPin(id) returns true
+    Registry->>Registry: entries.set(id, { ..., pinned: true, updatedAt: Date.now() })
+    Registry-->>Sidebar: emit snapshot (listener)
+    Sidebar->>Sidebar: sortWorktreesPinnedFirst(worktrees) re-renders
+    Orchestration->>Disk: readAgentManagerState()
+    Disk-->>Orchestration: { ...existing }
+    Orchestration->>Disk: writeAgentManagerState({ ...existing, pinnedWorktrees: [...] })
+    Orchestration-->>Sidebar: resolves true
+    end
+
+    rect rgb(240, 255, 240)
+    note over User, Disk: Session N+1: TUI restart
+    User->>Orchestration: discover worktrees (registry seeded)
+    Orchestration->>Disk: loadPersistedPinnedWorktrees()
+    Disk-->>Orchestration: { pinnedWorktrees: [id, ...] }
+    loop for each id
+      Orchestration->>Registry: getWorktreeStatus(id)
+      alt entry present
+        Orchestration->>Registry: setWorktreePinned(id, true)
+        Registry-->>Sidebar: emit snapshot
+      else stale pin
+        Orchestration->>Orchestration: skip (reported in applied[])
+      end
+    end
+    end
+```
+
+Key invariants pinned by `tests/agent/worktreeStatus.test.ts` (pinning describe block), `tests/cli/tui/Sidebar.test.tsx` (worktree pinning describe block), and `tests/core/agent-manager-pinning.test.ts`:
+
+1. **Lifecycle events preserve the pin.** `setWorktreeStatus(id, { label, status: 'idle' })` on a pinned entry carries `pinned` forward via `nextPinned = update.pinned !== undefined ? update.pinned : existing?.pinned`. The orchestrator can freely stream `running` → `idle` events without clobbering a pin that the user set via the sidebar.
+2. **No-op de-duplication includes the pin flag.** The equality guard in `setWorktreeStatus` reads `(existing.pinned ?? false) === (nextPinned ?? false)` so a pin-only toggle still fires an emit, and a redundant lifecycle event on a pinned entry still short-circuits.
+3. **Pinned-first display, insertion-order selection.** `sortWorktreesPinnedFirst(worktrees)` returns `[...pinned, ...rest]` with stable relative order within each bucket. The sidebar's selection index refers to the UNSORTED snapshot so pinning the currently-selected worktree does not shift the cursor onto a neighbour.
+4. **Pin-only toggles do not reshuffle the whole list.** Because the within-bucket order is preserved, flipping one entry's pin flag only moves that entry between buckets.
+5. **Stale pins are discarded, not applied as ghosts.** `loadPersistedPinnedWorktrees` only calls `setWorktreePinned(id, true)` when `getWorktreeStatus(id) !== undefined`. The returned `applied[]` is the subset actually seeded, so callers can detect ids pointing at worktrees that no longer exist.
+6. **Corrupted state file does not block startup.** `readAgentManagerState` catches `ENOENT`, `JSON.parse` throws, non-object top-level values, and any other filesystem error (`EACCES`, `EISDIR`) and returns `{}`. The next successful write overwrites the broken file.
+7. **Unknown-id toggle does not touch the disk.** `toggleWorktreePin('nope')` returns `undefined` and the state file is NOT created, so a mis-wired caller cannot write an empty state file against a worktree that does not exist.
+8. **Unknown fields are preserved across writes.** `persistPinnedWorktrees` reads the current state, spreads it, and sets `pinnedWorktrees`. A hand-written `{ futureField: 42, pinnedWorktrees: [] }` round-trips with `futureField` intact.
+
+### TUI wiring
+
+The Ink sidebar in `src/cli/tui/components/Sidebar.tsx` gains two optional props and one keybind:
+
+```typescript
+export interface SidebarProps {
+  // ...existing fields...
+  selectedWorktreeIndex?: number; // Index into the UNSORTED worktrees snapshot.
+  onTogglePin?: (id: string) => void; // Pin-toggle callback.
+  worktrees?: readonly WorktreeStatusEntry[];
+  animateWorktrees?: boolean;
+}
+
+export const PIN_INDICATOR = '[P]'; // ASCII, not emoji — Encoding Guard safe.
+
+export function sortWorktreesPinnedFirst(
+  worktrees: readonly WorktreeStatusEntry[]
+): readonly WorktreeStatusEntry[];
+```
+
+The `p` keybind in `Sidebar.tsx:244-259` fires regardless of whether there are file changes so a user whose sidebar shows only Agent Manager worktrees can still pin entries. It is gated on `isFocused`, `!key.ctrl`, `!key.meta`, a defined `onTogglePin`, a defined `selectedWorktreeIndex`, and `worktrees.length > 0`. Unrelated `p` keystrokes elsewhere in the TUI are never captured because `useInput` is scoped per component.
+
+Rendered rows are produced by `sortWorktreesPinnedFirst(worktrees).map(wt => ...)`; the `[P]` indicator is prepended to the label only when `wt.pinned === true`. The `Worktrees (N)` header still shows the ORIGINAL `worktrees.length`, not the sorted count, so pinning does not change the visible total.
+
+### Startup wiring (future orchestrator)
+
+The expected startup sequence for a headless or Ink-based Agent Manager runner:
+
+1. Discover worktrees — publish each with `setWorktreeStatus(id, { label, status: 'unknown' })` (or whatever the initial lifecycle status is).
+2. Call `await loadPersistedPinnedWorktrees()`. Use the returned `applied[]` to log stale pins at `debug` level without surfacing an error.
+3. Mount the TUI. The sidebar subscribes to the registry via `useWorktreeStatus()` and immediately sees the pinned-first order.
+4. On a `p` keystroke, the sidebar invokes `onTogglePin(id)` wired to `toggleWorktreePin` from this module — this updates the registry AND writes the file atomically from the caller's perspective (a crash between the registry update and the disk write loses the pin for the current session but does not corrupt the file).
+
+Alexi does not (yet) ship a live Agent Manager runner, so the above sequence is infrastructure: the registry, persistence helpers, and sidebar wiring all exist and are covered by tests, waiting for the orchestrator caller.
 
 ## TUI Glyph Safety and Linux Font Compatibility (issue #1896)
 

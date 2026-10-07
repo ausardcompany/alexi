@@ -6086,6 +6086,13 @@ export interface WorktreeStatusEntry {
   readonly detail?: string;
   /** Wall-clock ms when the status was last updated. */
   readonly updatedAt: number;
+  /**
+   * True when the user has pinned this worktree to the top of the Agent
+   * Manager sidebar. `undefined` and `false` are equivalent and mean
+   * "not pinned" — legacy entries without the field do not need migration.
+   * See [Worktree Pinning API](#worktree-pinning-api).
+   */
+  readonly pinned?: boolean;
 }
 
 export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) => void;
@@ -6098,8 +6105,12 @@ export type WorktreeStatusListener = (snapshot: readonly WorktreeStatusEntry[]) 
 ```typescript
 export function setWorktreeStatus(
   id: string,
-  update: { label: string; status: WorktreeStatus; detail?: string }
+  update: { label: string; status: WorktreeStatus; detail?: string; pinned?: boolean }
 ): void;
+
+export function setWorktreePinned(id: string, pinned: boolean): boolean;
+export function toggleWorktreePin(id: string): boolean | undefined;
+export function getPinnedWorktreeIds(): readonly string[];
 
 export function removeWorktreeStatus(id: string): void;
 
@@ -6112,7 +6123,10 @@ export function subscribe(listener: WorktreeStatusListener): () => void;
 
 Behaviour contract:
 
-- `setWorktreeStatus(id, update)` — inserts a new entry or replaces an existing one. The registry stamps `updatedAt = Date.now()` for the caller. When `(label, status, detail)` all match the current entry, the call is a no-op and does NOT emit; publishers may safely fire redundant `idle` events during a quiet period without triggering re-render storms.
+- `setWorktreeStatus(id, update)` — inserts a new entry or replaces an existing one. The registry stamps `updatedAt = Date.now()` for the caller. When `(label, status, detail, pinned)` all match the current entry, the call is a no-op and does NOT emit; publishers may safely fire redundant `idle` events during a quiet period without triggering re-render storms. When `update.pinned` is omitted, the current pin state is preserved so orchestrator-driven lifecycle events do NOT clobber a pin that the user set via the sidebar.
+- `setWorktreePinned(id, pinned)` — set the flag on an existing entry. Returns `true` when a change was applied (listeners notified), `false` when the id is unknown or the flag is already in the requested state. Pin toggles go through this helper rather than `setWorktreeStatus` so the orchestrator's status events can flow freely without carrying the pin flag through every call site.
+- `toggleWorktreePin(id)` — flip the current value. Returns the new pin state (`true` after a pin, `false` after an unpin) or `undefined` when the id is not in the registry. Callers that need to persist the change should check for a defined return before writing to disk — or use the persistence-aware wrapper in `src/core/agent-manager/orchestration-api.ts` (see [Worktree Pinning API](#worktree-pinning-api) below).
+- `getPinnedWorktreeIds()` — return the ids of every currently-pinned worktree in insertion order. Convenience projector used by the persistence layer to write a stable `pinnedWorktrees: string[]` array without having to walk the full snapshot.
 - `removeWorktreeStatus(id)` — removes an entry and emits once. Returns `void`; the underlying `Map.delete` return value is not exposed. This is the only path that drops an entry; every other transition — including `error` — leaves the entry visible so failures stay on-screen until the operator dismisses them.
 - `getWorktreeStatuses()` — returns an immutable snapshot in `Map` insertion order. Suitable for one-shot reads (CLI subcommands, tests). React consumers should use `subscribe` or the `useWorktreeStatus` hook instead so they receive future updates.
 - `getWorktreeStatus(id)` — returns a defensive copy of the single entry or `undefined` when the id has never been reported. An entry explicitly set to `status: 'unknown'` still returns a defined `WorktreeStatusEntry` — the `undefined` return distinguishes "never seen" from "known but not yet classified".
@@ -6145,11 +6159,11 @@ Returns the current full snapshot. Callers project it into whatever shape their 
 
 ### Sidebar props
 
-`SidebarProps` (`src/cli/tui/components/Sidebar.tsx`) gains two optional fields:
+`SidebarProps` (`src/cli/tui/components/Sidebar.tsx`) gains four optional fields:
 
 ```typescript
 export interface SidebarProps {
-  // ...existing fields (files, focusable, isCollapsed, onActivate, isFocused, usage)...
+  // ...existing fields (files, selectedIndex, onSelect, onActivate, isFocused, usage)...
 
   /**
    * Optional Agent Manager worktree list. When provided (and non-empty),
@@ -6165,8 +6179,43 @@ export interface SidebarProps {
    * rendered frame deterministic.
    */
   animateWorktrees?: boolean;
+
+  /**
+   * Optional index of the currently-selected worktree in the `worktrees`
+   * array. Applied against the UNSORTED snapshot the caller passes in so
+   * the TUI's selection cursor and the pin target stay consistent
+   * regardless of pinned-first display order. See PR #14891.
+   */
+  selectedWorktreeIndex?: number;
+
+  /**
+   * Pin-toggle callback. Invoked with the worktree id (from the entry at
+   * `selectedWorktreeIndex`) when the user presses `p` while the sidebar
+   * is focused. Typically wired to `toggleWorktreePin` from
+   * `src/core/agent-manager/orchestration-api.ts`.
+   */
+  onTogglePin?: (id: string) => void;
 }
 ```
+
+Pin-related exports from the same module:
+
+```typescript
+export const PIN_INDICATOR = '[P]'; // ASCII — safe under the Encoding Guard.
+
+export function sortWorktreesPinnedFirst(
+  worktrees: readonly WorktreeStatusEntry[]
+): readonly WorktreeStatusEntry[];
+```
+
+`sortWorktreesPinnedFirst` is a stable sort that bubbles pinned entries to the top while preserving relative order within each bucket (`[...pinned, ...rest]`). Returns the input array unchanged when `worktrees.length < 2` or no entries are pinned, so the identity check `sorted === input` succeeds in those cases. The sort is intentionally NOT in-place — the input is a readonly snapshot from the registry.
+
+Keybind contract (`src/cli/tui/components/Sidebar.tsx:244-259`):
+
+- Fires only when `isFocused && !key.ctrl && !key.meta && input === 'p'`.
+- Requires `onTogglePin !== undefined && selectedWorktreeIndex !== undefined && worktrees !== undefined && worktrees.length > 0`.
+- Invokes `onTogglePin(worktrees[selectedWorktreeIndex].id)` against the UNSORTED snapshot — the sort for display does not shift the selection target.
+- Does NOT depend on `files.length > 0`, so a sidebar that shows only Agent Manager worktrees can still pin entries.
 
 ### StatusIcon component
 
@@ -6301,7 +6350,109 @@ function tearDownWorktree(id: string): void {
 }
 ```
 
-Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`) are safe and free: they short-circuit before touching the listener set.
+Publishers should not attempt to pre-compute the `updatedAt` timestamp — the registry stamps it on write. Redundant idempotent writes (same `label`, `status`, `detail`, `pinned`) are safe and free: they short-circuit before touching the listener set.
+
+## Worktree Pinning API
+
+Introduced by commit `a146bf6e` (upstream kilocode PR #14891). Persistence wrapper on top of the Worktree Status Registry documented above. Exported by `src/core/agent-manager/orchestration-api.ts` so the TUI can toggle a pin AND write the change to `~/.alexi/agent-manager.json` in a single call. See [ARCHITECTURE.md — Agent Manager Worktree Pinning](ARCHITECTURE.md#agent-manager-worktree-pinning-pr-14891) for the runtime sequence.
+
+### Persisted state
+
+```typescript
+export interface AgentManagerPersistedState {
+  readonly pinnedWorktrees?: readonly string[];
+  readonly [extra: string]: unknown;
+}
+
+export const DEFAULT_AGENT_MANAGER_STATE_PATH: string;
+// = path.join(os.homedir(), '.alexi', 'agent-manager.json')
+```
+
+The index signature on `AgentManagerPersistedState` is deliberate: a future release can add top-level keys without clobbering state written by the current one. Writes use `{ ...existing, pinnedWorktrees: Array.from(getPinnedWorktreeIds()) }` so unknown fields are preserved verbatim.
+
+### Public functions
+
+```typescript
+export async function readAgentManagerState(): Promise<AgentManagerPersistedState>;
+export async function writeAgentManagerState(state: AgentManagerPersistedState): Promise<void>;
+export async function loadPersistedPinnedWorktrees(): Promise<readonly string[]>;
+export async function persistPinnedWorktrees(): Promise<void>;
+export async function toggleWorktreePin(id: string): Promise<boolean | undefined>;
+```
+
+Behaviour contract:
+
+- `readAgentManagerState()` — reads the file. Returns `{}` when the file is missing (`ENOENT`), malformed (`JSON.parse` throws), or carries a non-object top-level value. Any other filesystem error (`EACCES`, `EISDIR`, ...) is also treated as empty state so a corrupted file does NOT block the TUI from starting. The next successful write overwrites the broken file.
+- `writeAgentManagerState(state)` — writes the state file after `fs.mkdir(path.dirname(agentManagerStatePath), { recursive: true })`, so the parent directory is created on first write. Serialises with `JSON.stringify(state, null, 2)` and a trailing newline.
+- `loadPersistedPinnedWorktrees()` — read the persisted pin list and apply it to any entries already in the in-memory registry via `setWorktreePinned(id, true)`. Returns the subset of ids that were actually applied (ids present in the registry) so callers can detect stale pins. Defensively skips non-string entries so a hand-edited corrupted file does not crash. Call this from Agent Manager startup, AFTER the initial worktree discovery pass has populated the registry.
+- `persistPinnedWorktrees()` — write the current pin set to disk, preserving unknown fields from the previous state via spread.
+- `toggleWorktreePin(id)` — flip the registry flag AND persist in a single call. Returns the new pin state (`true` pinned, `false` unpinned) or `undefined` when the id is not in the registry — in that case the disk file is NOT touched. TUI callers should prefer this over the lower-level registry helper of the same name so the on-disk state stays in lockstep with the live snapshot.
+
+Note that `toggleWorktreePin` is exported from TWO modules:
+
+| Module | Return | Behaviour |
+| ------ | ------ | --------- |
+| `src/agent/worktreeStatus.ts` | `boolean \| undefined` (synchronous) | In-memory only; caller is responsible for persistence. |
+| `src/core/agent-manager/orchestration-api.ts` | `Promise<boolean \| undefined>` | In-memory + disk write in one call. |
+
+Use the orchestration-api variant from the TUI; use the worktreeStatus variant in test setups that need to drive the flag without touching the filesystem.
+
+### Test hooks
+
+```typescript
+export function setAgentManagerStatePathForTesting(nextPath: string): void;
+export function resetAgentManagerStatePathForTesting(): void;
+```
+
+Redirect the persistence file to a temp location — typically `path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-pin-')), 'agent-manager.json')`. The CLI never calls these; test setup does. `resetAgentManagerStatePathForTesting()` returns the module to the default `DEFAULT_AGENT_MANAGER_STATE_PATH` and belongs in an `afterEach` block alongside `__resetWorktreeStatusRegistry()`.
+
+### Usage example: wiring the TUI pin keybind end to end
+
+```typescript
+import {
+  Sidebar,
+  sortWorktreesPinnedFirst,
+} from './cli/tui/components/Sidebar.js';
+import { useWorktreeStatus } from './cli/tui/hooks/useWorktreeStatus.js';
+import {
+  loadPersistedPinnedWorktrees,
+  toggleWorktreePin,
+} from './core/agent-manager/orchestration-api.js';
+import { setWorktreeStatus } from './agent/worktreeStatus.js';
+
+// At startup, after discovery:
+for (const wt of discoveredWorktrees) {
+  setWorktreeStatus(wt.id, { label: wt.label, status: 'unknown' });
+}
+const applied = await loadPersistedPinnedWorktrees();
+if (applied.length < persistedIds.length) {
+  logger.debug('stale pins skipped on startup', {
+    skipped: persistedIds.filter((id) => !applied.includes(id)),
+  });
+}
+
+// In the ChatPage / Agent Manager page:
+function AgentManagerPanel(): React.JSX.Element {
+  const worktrees = useWorktreeStatus();
+  const [selectedWorktreeIndex, setSelectedWorktreeIndex] = useState(0);
+  return (
+    <Sidebar
+      files={files}
+      selectedIndex={selectedIndex}
+      onSelect={setSelectedIndex}
+      onActivate={onActivate}
+      isFocused={isFocused}
+      worktrees={worktrees}
+      selectedWorktreeIndex={selectedWorktreeIndex}
+      onTogglePin={(id) => {
+        // Fire-and-forget: errors from the write are logged but do not
+        // block the TUI; the in-memory flag has already been toggled.
+        void toggleWorktreePin(id).catch((err) => logger.warn('pin write failed', err));
+      }}
+    />
+  );
+}
+```
 
 ## Network Transport Classification
 
