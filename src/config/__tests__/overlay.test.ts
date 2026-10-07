@@ -3,11 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import {
-  detectShadowedWrite,
-  formatShadowedWriteWarning,
-  type OverlayLayer,
-} from '../overlay.js';
+import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../overlay.js';
 
 function layer(id: string, precedence: number, keys: string[]): OverlayLayer {
   return { id, precedence, keys: new Set(keys) };
@@ -15,26 +11,17 @@ function layer(id: string, precedence: number, keys: string[]): OverlayLayer {
 
 describe('detectShadowedWrite', () => {
   it('returns null when no higher-precedence layer defines the key', () => {
-    const layers = [
-      layer('managed', 100, ['routing.model']),
-      layer('user', 50, ['routing.model']),
-    ];
+    const layers = [layer('managed', 100, ['routing.model']), layer('user', 50, ['routing.model'])];
     expect(detectShadowedWrite('routing.timeout', 'user', layers)).toBeNull();
   });
 
   it('returns null when writing to the highest-precedence layer', () => {
-    const layers = [
-      layer('managed', 100, ['routing.model']),
-      layer('user', 50, ['routing.model']),
-    ];
+    const layers = [layer('managed', 100, ['routing.model']), layer('user', 50, ['routing.model'])];
     expect(detectShadowedWrite('routing.model', 'managed', layers)).toBeNull();
   });
 
   it('detects shadowing by a single higher-precedence layer', () => {
-    const layers = [
-      layer('managed', 100, ['routing.model']),
-      layer('user', 50, ['routing.model']),
-    ];
+    const layers = [layer('managed', 100, ['routing.model']), layer('user', 50, ['routing.model'])];
     expect(detectShadowedWrite('routing.model', 'user', layers)).toEqual({
       shadowedBy: 'managed',
     });
@@ -58,10 +45,7 @@ describe('detectShadowedWrite', () => {
   });
 
   it('ignores same-precedence layers (ties do NOT shadow)', () => {
-    const layers = [
-      layer('a', 50, ['x']),
-      layer('b', 50, ['x']),
-    ];
+    const layers = [layer('a', 50, ['x']), layer('b', 50, ['x'])];
     expect(detectShadowedWrite('x', 'a', layers)).toBeNull();
   });
 });
