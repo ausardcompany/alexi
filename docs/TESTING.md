@@ -6491,6 +6491,14 @@ contributors do not re-introduce them by hand:
    // pass in commit 8ea08827 — the previous three-line break fit within 100
    // columns once the first argument sat at 98 columns)
    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
+
+   // src/config/__tests__/overlay.test.ts:6 (canonical form after the
+   // 2026-10-07 auto-fix pass in commit b02d6ad2 — a three-binding named
+   // import plus the `from '../overlay.js';` clause sits at 97 columns and
+   // fits under the 100-column ceiling, including the TS 5.0+ inline-
+   // type-only `type OverlayLayer` qualifier that was preserved verbatim
+   // through the collapse)
+   import { detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer } from '../overlay.js';
    ```
 
    Only break these onto multiple lines when the resulting single line would
@@ -6613,6 +6621,43 @@ contributors do not re-introduce them by hand:
    would exceed 100 columns; short fixtures (six or fewer short strings) should
    be inlined so `npm run format:check` stays green without an auto-fix
    follow-up commit.
+
+   The same rule applies to fixture arrays whose elements are **helper
+   function calls** rather than string literals. The 2026-10-07 auto-fix pass
+   in commit `b02d6ad2` collapsed four `const layers = [...]` fixtures in
+   `src/config/__tests__/overlay.test.ts` where each element was a
+   `layer(id, precedence, keys)` factory call. The three sibling cases
+   (`'returns null when no higher-precedence layer defines the key'`,
+   `'returns null when writing to the highest-precedence layer'`,
+   `'detects shadowing by a single higher-precedence layer'`) each had the
+   same two-element fixture hand-authored as four lines:
+
+   ```typescript
+   // Anti-pattern — reformatted by auto-fix (four lines)
+   const layers = [
+     layer('managed', 100, ['routing.model']),
+     layer('user', 50, ['routing.model']),
+   ];
+
+   // Canonical form after auto-fix (single 98-column line)
+   const layers = [layer('managed', 100, ['routing.model']), layer('user', 50, ['routing.model'])];
+   ```
+
+   The sibling case `'ignores same-precedence layers (ties do NOT shadow)'`
+   at line 47 received the same collapse (`const layers = [layer('a', 50,
+   ['x']), layer('b', 50, ['x'])];`, 63 columns on a single line). The
+   four-element `layers` fixture in the `'picks the highest-precedence
+   shadower when multiple layers conflict'` case at lines 30-36 is NOT
+   collapsed because its single-line form would overflow `printWidth: 100`
+   — the auto-fix pass is strictly idempotent on the expand-direction
+   branch. The assertion semantics on `detectShadowedWrite(key, target,
+   layers)` and `formatShadowedWriteWarning(key, target, shadow)` are
+   byte-identical before and after the reflow: the shadowed-write
+   detection still returns `null` on no-shadower, `{ shadowedBy: 'managed'
+   }` on single-shadower detection, `{ shadowedBy: 'policy' }` on the
+   multi-shadower precedence tie-break, and `null` on same-precedence
+   ties. Running `npm run format` before committing avoids the
+   `style(ci): auto-fix lint/format issues [alexi-bot]` follow-up commit.
 
 5. **Collapse short `tool.executeUnsafe(params, context)` call sites onto a
    single line when they fit under 100 columns.** Tool tests routinely invoke
