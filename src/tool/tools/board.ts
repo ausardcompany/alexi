@@ -43,9 +43,23 @@ const BoardReadParamsSchema = z.object({
     .describe('Maximum number of messages to return (default 50, cap 100)'),
 });
 
+interface BoardParticipant {
+  /** Session id of the participant. */
+  sessionID: string;
+  /** True when this row describes the current calling session. */
+  self: boolean;
+}
+
 interface BoardReadResult {
   messages: BoardMessage[];
   boardId?: string;
+  /**
+   * Roster of session ids observed on the board (derived from recent
+   * message authors). The current caller's row carries `self: true` so
+   * agents can distinguish themselves from peers — ports kilocode
+   * `759a6ef99` (expose self identity on the roster).
+   */
+  roster?: BoardParticipant[];
 }
 
 export const boardReadTool = defineTool<typeof BoardReadParamsSchema, BoardReadResult>({
@@ -53,7 +67,9 @@ export const boardReadTool = defineTool<typeof BoardReadParamsSchema, BoardReadR
   description:
     'Read messages from the shared agent board for the current task. ' +
     'Use this to catch up on status updates from peer subagents before ' +
-    'deciding what to do next. Requires experimental.sharedAgentBoard.',
+    'deciding what to do next. The roster field lists session ids seen on ' +
+    'the board; your own row is flagged self: true. ' +
+    'Requires experimental.sharedAgentBoard.',
   parameters: BoardReadParamsSchema,
   async execute(params, context: ToolContext): Promise<ToolResult<BoardReadResult>> {
     const boardId = await BoardContext.resolve(context.sessionId);
@@ -77,9 +93,27 @@ export const boardReadTool = defineTool<typeof BoardReadParamsSchema, BoardReadR
         messages.map((m) => m.id)
       );
     }
+    // Ports kilocode `759a6ef99`: expose a roster derived from the
+    // observed message authors so agents can see who else is on the
+    // board. The caller's own row (if present) is tagged `self: true`.
+    const seen = new Set<string>();
+    for (const m of messages) {
+      if (m.sessionID) {
+        seen.add(m.sessionID);
+      }
+    }
+    if (context.sessionId) {
+      // Ensure the caller always appears on the roster, even if they
+      // have not posted yet, so `self: true` is always observable.
+      seen.add(context.sessionId);
+    }
+    const roster: BoardParticipant[] = Array.from(seen).map((sessionID) => ({
+      sessionID,
+      self: sessionID === context.sessionId,
+    }));
     return {
       success: true,
-      data: { messages, boardId },
+      data: { messages, boardId, roster },
       metadata: { count: messages.length, boardId },
     };
   },
@@ -96,7 +130,8 @@ const BoardWriteParamsSchema = z.object({
     .optional()
     .describe(
       'Optional session id of a specific peer subagent this message targets. ' +
-        'When set, the tool warns if that subagent is stopped or does not exist.'
+        'Your own row from board_read is flagged self: true (the current session is the board root), ' +
+        'and a post to yourself is refused. When set, the tool warns if that subagent is stopped or does not exist.'
     ),
 });
 
@@ -139,7 +174,7 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
   name: 'kilo_board_write',
   description:
     'Post a message to the shared agent board for coordination with peer ' +
-    'subagents. Use for status updates, blockers, or hand-offs. ' +
+    'subagents (parents, children, and background siblings). Use for status updates, blockers, or hand-offs. ' +
     'Requires experimental.sharedAgentBoard and an active swarm session.',
   parameters: BoardWriteParamsSchema,
   async execute(params, context: ToolContext): Promise<ToolResult<BoardWriteResult>> {
@@ -148,6 +183,19 @@ export const boardWriteTool = defineTool<typeof BoardWriteParamsSchema, BoardWri
       return {
         success: false,
         error: 'No shared board is attached to this session — cannot post.',
+      };
+    }
+    // Ports kilocode `759a6ef99`: posts to self are refused with an
+    // actionable error. The agent's own participant row is already
+    // flagged `self: true` in `board_read` output, so no-op messaging
+    // yourself provides no value and makes multi-agent interactions
+    // non-deterministic.
+    if (params.recipient && context.sessionId && params.recipient === context.sessionId) {
+      return {
+        success: false,
+        error:
+          `Refusing board post to self (${context.sessionId}). ` +
+          `Use kilo_board_read to review your own row (self: true) instead.`,
       };
     }
     // Ports kilocode `7febec58f`: warn (don't fail) when the intended

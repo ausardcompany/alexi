@@ -17,6 +17,18 @@ export {
   type ClientMetadataDocument,
 } from './client-metadata.js';
 
+// MCP OAuth issuer-rotation detection (kilocode `84b26c697`). Pure
+// helpers; used by any future OAuth-provider wiring to detect when a
+// third-party MCP server has moved to a new authorization server and
+// trigger re-registration instead of looping on stale credentials.
+export {
+  hasIssuerChanged,
+  requireReregistration,
+  type StoredOAuthClient,
+  type DiscoveredOAuthMetadata,
+  type ReregistrationAction,
+} from './oauth-issuer.js';
+
 // MCP Capability Interface Metadata (CIMD) validation. Detects
 // breaking-change drift between an expected `expectedCapabilities`
 // manifest and the manifest observed on the wire at connect time.
