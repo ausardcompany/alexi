@@ -3258,6 +3258,23 @@ Introduced in commit `26c7603c` (2026-10-07 upstream sync, ports kilocode `f54e7
 - **Reset at the start of every attempt.** `lastLlmError = null` is the first line of `generateWithLLM`. Removing this would carry a previous attempt's error into a current success.
 - **Fallback-to-heuristic is still contractual.** The accessor exposes the error for diagnostic surfaces; it does NOT change the fall-back path. On provider failure, `generateCommitMessage` still returns a heuristic message. Operators who care about the provider failure read `consumeLastCommitMessageError()`; operators who do not still get a usable commit message.
 
+## Dead-flag audits (`src/cli/commands/*.ts`)
+
+Introduced in commit `2ee1ce7e refactor(cli): remove unused CLI option declarations` (2026-10-08, issue #1972, pattern from upstream Cline PR #14931). References: [CHANGELOG — Unreleased / Removed](../CHANGELOG.md#removed), [docs/API.md — sessions](API.md#sessions), [docs/SERVER.md — CLI subcommands](SERVER.md#cli-subcommands), [docs/TESTING.md — Testing dead-flag rejection](TESTING.md#testing-dead-flag-rejection-testsclidead-flagstestts-issue-1972).
+
+Commander accepts `.option()` declarations silently — a flag that is declared but never read by the action handler still shows up in `--help`, still parses without error, and still makes its way into shell completion scripts. Users then read the help text, pass the flag, and get a silently different code path than they expected because the handler never consulted `opts.<flag>`. Three such flags were in the Alexi CLI as of 2026-10-08: `sessions --all`, `revert --yes`, and `server start -d, --detach`. The audit removed all three.
+
+Convention for new `.option()` declarations:
+
+- **Every declared option MUST be read by the action handler.** If the handler does not reference `opts.<name>`, delete the `.option()` call. "Self-documenting default" is NOT a reason to keep a declaration — it just teaches users to pass a flag that does nothing.
+- **"Default behaviour" belongs in `.description(...)`, not in a dead flag.** The `sessions` description now explicitly states "omit both [--here and --workdir] to list every saved session"; `server start`'s help text no longer advertises a `--detach` flag that pointed at behaviour the subcommand already had.
+- **Removal is a `refactor(cli)` commit, not `feat` or `fix`.** The user-visible contract shrinks (an argument that used to parse now exits with `error: unknown option`), but no behaviour changes for any caller who was not already passing the dead flag.
+- **Add a rejection regression test.** Model it on `tests/cli/dead-flags.test.ts`: install `program.exitOverride()` on a fresh `Command`, suppress stderr/stdout via `program.configureOutput`, run the specific `register<Name>Command(program)` registrar in isolation, and assert the thrown `CommanderError` carries `code === 'commander.unknownOption'` AND includes the offending flag in its message. Keep the test parallel-safe — do not reuse a module-level `Command` across cases.
+- **Document the removal in the entry-point header.** `src/cli/program.ts:7-21` carries an inline comment listing each removed flag, its original `--help` text, and the one-line reason it was dead. A `git blame` on that comment should surface the audit without requiring a round-trip to the changelog.
+- **Update every doc that mentioned the flag.** Options tables in `docs/API.md`, `docs/SERVER.md`, and any `--help` quotations elsewhere must drop the removed row — a flag that is advertised in docs but rejected at parse time is a worse experience than silently ignoring it was.
+
+Future refactor: Alexi would benefit from a static check that walks each `register*Command` module, extracts the set of `.option(name, ...)` declarations, and asserts each `name` is read by the action handler. The current regression suite is per-flag rather than general, so it only catches re-introduction of the three audited flags. A general linter would catch the next instance before it ships.
+
 ## Reserved Command-Name Registry (`src/command/reserved.ts`)
 
 Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `47151ca0c` + `b4b51f252`). References: [ARCHITECTURE.md — Reserved Command-Name Registry](ARCHITECTURE.md#reserved-command-name-registry), [API.md — Reserved Command-Name API](API.md#reserved-command-name-api), [CONFIGURATION.md — Reserved Slash Command Names](CONFIGURATION.md#reserved-slash-command-names).

@@ -16,7 +16,6 @@ export interface RevertOptions {
   session?: string;
   to: string;
   preview?: boolean;
-  yes?: boolean;
 }
 
 /**
@@ -123,7 +122,6 @@ export function registerRevertCommand(program: Command): void {
     .option('--session <id>', 'Session id (defaults to the most recent session)')
     .requiredOption('--to <stepId>', 'Snapshot step id to revert to')
     .option('--preview', 'Print the per-file plan and exit without writing')
-    .option('--yes', 'Skip the interactive confirm when not in a TTY')
     .action(async (opts: RevertOptions) => {
       const code = await runRevert(opts);
       if (code !== 0) {

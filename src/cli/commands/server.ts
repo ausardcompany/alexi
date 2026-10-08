@@ -16,7 +16,6 @@ import type { Command } from 'commander';
 
 interface ServerStartOptions {
   socket?: string;
-  detach?: boolean;
 }
 
 interface ServerStopOptions {
@@ -77,10 +76,6 @@ export function registerServerCommand(program: Command): void {
     .command('start')
     .description('Start the UNIX socket server for remote slash commands')
     .option('-s, --socket <path>', 'Socket path (default ~/.alexi/server.sock)')
-    .option(
-      '-d, --detach',
-      'Run the server in the current process and block until SIGINT/SIGTERM (default)'
-    )
     .action(async (opts: ServerStartOptions) => {
       try {
         // Lazy imports (#1769): only load the socket-server / command

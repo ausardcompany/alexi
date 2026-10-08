@@ -172,6 +172,26 @@ Rules the refactor codifies (enforced by `tests/cli/lazyLoading.test.ts`):
 
 Non-command entry points (the socket server, direct programmatic use of `sendChat`, the TUI when spawned from `startTui` outside the CLI) are unaffected — they import their dependencies statically at the call site.
 
+#### Dead CLI option audit (issue #1972, 2026-10-08)
+
+Commander's `.option(flag, description)` call is purely declarative — it adds a flag to `--help`, teaches the parser to accept it, and attaches the parsed value to `opts.<name>` for the matching `.action(...)` closure. Nothing in Commander checks that the action handler actually reads `opts.<name>`, so a dead declaration (declared, parsed, never read) is a silent trap: users read `--help`, pass the flag under the mistaken belief that it does something, and get the exact same code path as if they had omitted it. Commit `2ee1ce7e refactor(cli): remove unused CLI option declarations` (ports upstream Cline PR #14931's dead-flag audit) removed three such declarations:
+
+```mermaid
+flowchart LR
+    Help["--help text<br/>'--all List all sessions (default)'"] --> User[User passes --all]
+    User --> Parse[Commander parses opts.all = true]
+    Parse --> Action[.action(opts) runs]
+    Action --> Reader{Does the handler<br/>read opts.all?}
+    Reader -->|no — dead flag| Silent[Same behaviour as omitting --all<br/>User's intent lost]
+    Reader -->|yes — live flag| Real[Flag actually changes behaviour]
+
+    Silent -.audit removes.-> Reject[Commander exits with<br/>'error: unknown option --all']
+```
+
+Removed flags (`src/cli/commands/sessions.ts`, `src/cli/commands/revert.ts`, `src/cli/commands/server.ts`): `sessions --all` (handler never inspected `opts.all` — omitting both `--here` and `--workdir` already produced the unfiltered listing), `revert --yes` (handler had no interactive confirm to skip — `runRevert` always executes `revertTo(snapshot)` once the snapshot resolves), `server start -d, --detach` (described the default behaviour — the server already blocks the current process until `SIGINT` / `SIGTERM`). The removal is purely contractual: no runtime API, no public tool, no provider wiring, no permission grant, no environment variable, and no on-disk schema is affected. A `git blame` on `src/cli/program.ts:7-21` surfaces the audit date, the issue number, and each removed flag's original help text and dead reason inline.
+
+The rejection contract (unknown-option exit for each removed flag) is pinned by `tests/cli/dead-flags.test.ts` — see [docs/TESTING.md — Testing dead-flag rejection](TESTING.md#testing-dead-flag-rejection-testsclidead-flagstestts-issue-1972). The convention for future `.option()` declarations is documented at [docs/CONTRIBUTING.md — Dead-flag audits](CONTRIBUTING.md#dead-flag-audits-srcclicommandsts).
+
 > **Not part of the CLI surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`) emitted a 5-line orphan file `src/cli/remote.ts` containing a non-exported `executeRemoteCommand(command: string): void` function that references an undeclared `isValidCommand` free identifier. It is **not** wired into `src/cli/program.ts`, does not correspond to any `alexi <subcommand>` on the [CLI Commands](API.md#cli-commands) reference, and fails `npm run typecheck` with `TS2304: Cannot find name 'isValidCommand'`. There is no `alexi remote` subcommand; remote LLM invocation goes through the SAP AI Core Orchestration provider (`src/providers/sapOrchestration.ts`), and remote MCP tool surfaces live under `src/mcp/`. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26.
 
 ### Core Layer

@@ -4,6 +4,20 @@
  *
  * This is the main CLI entry point that uses the modular command structure.
  * Individual commands are implemented in the ./commands/ directory.
+ *
+ * Dead CLI option audit performed 2026-10-08 (issue #1972).
+ * Removed options that were declared with `.option()` but never read:
+ *   - `sessions --all`      (sessions.ts) — described as "default behavior,
+ *                             explicit no-filter form"; the handler never
+ *                             inspected `opts.all`, so omitting both --here
+ *                             and --workdir is already the no-filter form.
+ *   - `revert --yes`        (revert.ts) — described as "skip the interactive
+ *                             confirm when not in a TTY"; `runRevert` has no
+ *                             interactive confirm, so the flag was a no-op.
+ *   - `server start -d/--detach` (server.ts) — described as the default; the
+ *                             server already runs in the current process
+ *                             until SIGINT/SIGTERM, so the flag was a no-op.
+ * Reference: .github/research/2026-10-08-research.md (Cline PR #14931).
  */
 
 import { Command } from 'commander';
