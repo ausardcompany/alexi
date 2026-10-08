@@ -10315,3 +10315,61 @@ Fixtures use the pre-existing `SELF_SESSION` / `BOARD_ID` constants and the `ctx
 ```bash
 npm test -- tests/tool/tools/board-write-recipient.test.ts
 ```
+
+## Testing dead-flag rejection (`tests/cli/dead-flags.test.ts`, issue #1972)
+
+The 2026-10-08 dead-flag audit (commit `2ee1ce7e refactor(cli): remove unused CLI option declarations`) deleted three Commander `.option()` declarations that were accepted at parse time but never read by their action handlers: `sessions --all`, `revert --yes`, and `server start -d, --detach`. See [CHANGELOG — Unreleased / Removed](../CHANGELOG.md#removed) for the full rationale and [docs/API.md — sessions](API.md#sessions) + [docs/SERVER.md — CLI subcommands](SERVER.md#cli-subcommands) for the user-facing contract.
+
+The regression suite at `tests/cli/dead-flags.test.ts` (+118 lines) pins the rejection shape so a future refactor cannot silently re-introduce one of the removed flags.
+
+### Suite shape
+
+Each case constructs a fresh `Command` with `program.exitOverride()` so Commander throws a `CommanderError` instead of calling `process.exit`, suppresses stderr/stdout via `program.configureOutput({ writeErr: () => {}, writeOut: () => {} })`, and invokes exactly one of the three `register*Command(program)` registrars under test. The `expectUnknownOption(program, argv, flag)` helper asserts the thrown error satisfies both `err instanceof CommanderError && err.code === 'commander.unknownOption'` and `err.message.includes(flag)`.
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import { Command, CommanderError } from 'commander';
+import { registerSessionCommands } from '../../src/cli/commands/sessions.js';
+import { registerRevertCommand } from '../../src/cli/commands/revert.js';
+import { registerServerCommand } from '../../src/cli/commands/server.js';
+
+function buildProgram(register: (program: Command) => void): Command {
+  const program = new Command();
+  program.exitOverride();
+  program.configureOutput({ writeErr: () => {}, writeOut: () => {} });
+  register(program);
+  return program;
+}
+
+async function expectUnknownOption(program: Command, argv: string[], flag: string): Promise<void> {
+  await expect(program.parseAsync(['node', 'alexi', ...argv])).rejects.toSatisfy((err) => {
+    if (!(err instanceof CommanderError)) {
+      return false;
+    }
+    return err.code === 'commander.unknownOption' && err.message.includes(flag);
+  });
+}
+```
+
+### Cases
+
+- **`sessions --all` is rejected** (one case). Parses `['sessions', '--all']` against the `registerSessionCommands` registrar and asserts the `--all` substring appears in the thrown error message.
+- **`revert --yes` is rejected** (one case). The parser is primed with the still-required `--to <stepId>` option (`['revert', '--to', 'step-1', '--yes']`) so the parse gets past required-option validation and lands squarely on the unknown-option rejection for `--yes`. Without the `--to` prefix, Commander would raise `commander.missingMandatoryOptionValue` first and the test would fail-closed for the wrong reason.
+- **`server start --detach` and `server start -d` are both rejected** (two cases). Separate cases pin the long form AND the short alias so a future contributor cannot restore only one half.
+
+### Regression safety for sibling flags
+
+The suite also contains two "surviving flag" cases that confirm the audit did NOT drag down adjacent options on the same subcommand:
+
+- `revert --preview` still parses (the `revert` action is driven under `process.exit` spying so the downstream "no sessions" exit does not tear down the harness).
+- `server status --json` still parses.
+
+These are shallow parse-acceptance checks, not behaviour checks — the richer behaviour tests live in `src/cli/commands/__tests__/sessions.test.ts` for `sessions`, and the `server status` / `revert` command actions have their own dedicated suites.
+
+### Running
+
+```bash
+npm test -- tests/cli/dead-flags.test.ts
+```
+
+The suite completes in under a second because none of the cases boot the TUI, the orchestrator, or the agent loop — they only exercise Commander's option parser against three in-isolation registrars.

@@ -397,11 +397,12 @@ alexi sessions --search "api refactor"
 | `--json` | flag | Emit a stable JSON array (`{ id, title, model, updatedAt, messageCount, totalTokens, workdir }`) for scripting |
 | `--here` | flag | Only list sessions created in the current working directory |
 | `--workdir <dir>` | string | Only list sessions created in the specified directory |
-| `--all` | flag | Default behaviour (explicit no-filter form) |
 | `--search <query>` | string | FTS5-ranked search across session titles (e.g. `"api refactor"`, `"openai OR anthropic"`, `"auth*"`) |
 | `--cleanup` | flag | Run the session retention sweep now (deletes sessions older than `retention.maxAgeDays`; ignores listing flags) |
 
-`--here` and `--workdir` are mutually exclusive and the command exits with `Error: --here and --workdir are mutually exclusive` when both are supplied.
+`--here` and `--workdir` are mutually exclusive and the command exits with `Error: --here and --workdir are mutually exclusive` when both are supplied. Omit both for the default no-filter behaviour: every saved session is listed, including legacy ones with no recorded `workdir`.
+
+> **Dead-flag audit (2026-10-08, issue #1972).** The `--all` flag was removed in commit `2ee1ce7e refactor(cli): remove unused CLI option declarations`. It was declared in Commander but never read by the action handler — omitting both `--here` and `--workdir` was already the no-filter form, so the flag only existed as a self-documenting marker. Passing `alexi sessions --all` now exits with Commander's `error: unknown option '--all'`. See `tests/cli/dead-flags.test.ts` for the rejection contract.
 
 **Graceful degradation on scoping errors.** When the scoping/filter path fails — for example the SQLite FTS index is missing, or a workdir stat error is raised inside `sessionManager.listSessions(filter)` / `sessionManager.searchSessions(query, filter)` — the command no longer crashes. It logs `Warning: scoped session listing failed (<err>); falling back to all sessions` to stderr and re-issues an unfiltered `sessionManager.listSessions()` so the user still gets a usable listing across multi-project workspaces. This ports upstream opencode `627501673 fix(cli): list sessions across all projects instead of crashing`. The `--json` output shape is preserved on the fallback path.
 
