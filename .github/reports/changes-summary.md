@@ -1,79 +1,66 @@
-# Changes Summary — Upstream Sync Execution
+# Changes Summary — Upstream Sync 2026-10-08
 
-**Date**: 2026-10-07
-**Plan source**: Upstream analysis of kilocode `4433f275f..5e9f816fc` (v7.8.3 → v7.8.8) and opencode `3f393d7..ecc4916` (v1.18.34 → v1.18.35).
+**Based on upstream commits:**
+- kilocode: `5e9f816fc..bed08b09e` (139 commits)
+- opencode: `ecc4916..5d9cd9b` (9 commits)
 
-## Files Modified / Created
+## Files modified
 
-### New files
+| File | Status | Change |
+|---|---|---|
+| `src/providers/embeddings/openai-compatible.ts` | **created** | New embedding client with `dimensions` capability detection + response-shape guards |
+| `src/command/reserved.ts` | **created** | Reserved command-name registry + `partitionReservedCommands` helper |
+| `src/command/index.ts` | modified | Imports/re-exports from `./reserved.js`; new `loadCommands()` top-level helper; `CommandRegistry.loadFromDirectory` now filters reserved clashes with a warning instead of failing the whole load |
+| `src/core/session/attachment.ts` | **created** | `classifyAttachment` / `normalizeAttachment` / `buildAttachments`; SVG downgraded to text, unsupported MIME types collected into `rejected` instead of thrown |
+| `src/core/session/prompt.ts` | **created** | `buildPrompt()` composes a `{ text, attachments, rejected }` result so a rejected attachment never discards the user's text prompt |
 
-| Path                                                   | Purpose                                                                            |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `src/core/message-diagnostics.ts`                      | Prompt-safe schema-failure summary helpers (ports kilocode `a8fbcc356` et al.).    |
-| `src/core/__tests__/message-diagnostics.test.ts`       | Covers no-content-leak contract + defensive parsing of malformed zod issue shapes. |
-| `src/mcp/oauth-issuer.ts`                              | Pure helpers detecting MCP OAuth issuer rotation (ports kilocode `84b26c697`).     |
-| `src/mcp/__tests__/oauth-issuer.test.ts`               | Coverage for `hasIssuerChanged` / `requireReregistration`.                         |
-| `src/config/overlay.ts`                                | Shadowed-write detection across layered config overlays (ports kilocode `b9e4b1e98` et al.). |
-| `src/config/__tests__/overlay.test.ts`                 | Coverage for shadowing precedence + warning formatting.                            |
+## Change-by-change notes
 
-### Modified files
+### 1. (HIGH) `src/providers/embeddings/openai-compatible.ts` — tolerate endpoints that reject `dimensions`
 
-| Path                                                   | Change                                                                             |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `src/tool/tools/board.ts`                              | Adds `roster[]` with `self: true` on `kilo_board_read`; refuses `kilo_board_write` to self (ports kilocode `759a6ef99`). |
-| `src/git/commitMessage.ts`                             | Preserves provider errors via `consumeLastCommitMessageError()` (ports kilocode `f54e713dd`). |
-| `src/git/commitMessage.test.ts`                        | Three new tests covering the error-preservation contract.                          |
-| `src/mcp/index.ts`                                     | Re-exports the new `oauth-issuer` surface.                                         |
-| `tests/tool/tools/board-write-recipient.test.ts`       | Adds a self-post refusal regression test.                                          |
+Backports upstream kilo-indexing commits `0a5c6df34`, `52936e8a6`, `da1927014`, `4d6b6342b`, `43fb46bf3`.
 
-## Per-Change Summary
+Key behaviours:
+- Per-endpoint capability cache (`endpointCapabilityCache`) remembers whether an endpoint accepts the `dimensions` body field.
+- On HTTP 400/422 + a body matching `/dimensions?/i` and a rejection verb, the client retries once without `dimensions` and marks the endpoint `acceptsDimensions: false`.
+- The success-path response body is parsed with a shape guard — a malformed JSON body or missing `data` array now raises an actionable error (`returned non-JSON body` / `returned no vectors`) instead of crashing further down.
+- `surfaceErrorEnvelope()` prefers `error.message` / `message` from JSON error envelopes, falling back to a 500-byte raw-body preview.
+- `resetEndpointCapabilityCache()` exported for test determinism.
 
-### 1. [critical] Harden message diagnostics against malformed envelopes
-Created `src/core/message-diagnostics.ts` with three pure helpers (`summarizeSchemaFailure`, `summarizeMessageEnvelope`, `summarizeMessageArrayFailure`). They produce structural summaries of validation failures without ever including prompt text, tool arguments, part contents, or embedded strings from `issue.message`. Tests lock in the no-leak contract explicitly (`expect(JSON.stringify(summary)).not.toContain('SECRET')`), guard against pathological inputs (non-array `path`, non-string `code`, 500-char codes), and verify truncation at 50 issues / 20 messages.
+SAP AI Core relevance: SAP-fronted OpenAI deployments and some Azure gateways reject `dimensions`; this is exactly the shape of error Alexi needs to tolerate without failing the whole indexing run.
 
-### 2. [high] Board tool — forbid self-post, surface self identity
-- `kilo_board_read` result now carries a `roster: BoardParticipant[]`. Each participant row has `self: boolean`; the caller's own session id is always present even if they haven't posted. The tool description was updated accordingly.
-- `kilo_board_write` now refuses `recipient === context.sessionId` with a structured error that references `kilo_board_read` so the model has an actionable next step. The write and recipient probe are both skipped on self-post refusal.
-- Description text was tightened to remove the "not yourself" clause since the rule is now enforced at runtime.
-- Added a regression test in `tests/tool/tools/board-write-recipient.test.ts`.
+### 2. (HIGH) Reserved command-name clash → warning, not fatal
 
-Alexi_change vs. plan: Alexi's board tool uses a `recipient` field (session id) rather than upstream's `to` (participant id). The semantics are identical, so the fix was adapted to Alexi's field name without introducing a schema break.
+Backports upstream opencode commits `47151ca0c` and `b4b51f252`.
 
-### 3. [high] Preserve commit-message provider errors
-`src/git/commitMessage.ts` already captured provider failures as a `CommitMessageError` with `cause`, but it only logged a warning and returned `null`. The caller (and therefore the operator) could not distinguish "SAP AI Core 503" from "empty response, heuristic fallback". Added:
-- Module-local `lastLlmError` state, reset at every `generateWithLLM` call and populated in the `catch` branch.
-- Exported `consumeLastCommitMessageError()` accessor so `AutoCommitManager`, CLI diagnostics, or the TUI can retrieve and surface the originating error.
-- Three regression tests: happy error preservation, idempotent consume, and successful second call clearing the stored error.
+- New `src/command/reserved.ts` exports `RESERVED_COMMAND_NAMES` (populated with Alexi's actual built-ins: `help`, `exit`, `quit`, `clear`, `new`, `session(s)`, `model(s)`, `agent(s)`, `reload`, `context`, `notes`, `stages`, `dod`, `plugin`, `generate`, `explain`, `chat`, `interactive`, `server`, `revert`) and `partitionReservedCommands<T>()`.
+- `src/command/index.ts` now re-exports these from a stable path and adds a top-level `loadCommands(raw, warn)` helper that returns the kept subset while reporting clashes.
+- `CommandRegistry.loadFromDirectory` runs the filter so a single user command named e.g. `help` no longer takes down the entire user command set — operator sees a warning per clash and the rest keeps working.
 
-### 4. [high] MCP OAuth — detect authorization-server rotation
-Alexi does not ship a full OAuth provider yet (SAP AI Core uses `AICORE_SERVICE_KEY` client-credentials, not OAuth), but the helpers are needed when third-party MCP servers are wired. Created `src/mcp/oauth-issuer.ts` with:
-- `hasIssuerChanged(stored, discovered)` — compares `issuer` and `authorization_endpoint`. Fresh install (no stored issuer) returns `false`; missing `authorization_endpoint` on the stored side is treated as drift to force re-registration.
-- `requireReregistration(stored, discovered)` — returns `'none' | 'issuer_rotated'`.
-- Full test coverage (fresh install, exact match, issuer drift, endpoint drift, legacy record, unknown target).
-- Re-exported via `src/mcp/index.ts`.
+### 3. (HIGH) Prevent rejected attachments from discarding the prompt (SVG → text fallback)
 
-### 5. [medium] Config overlay — reject shadowed writes
-Alexi has a precedence chain for managed-vs-user config (`src/config/userConfig.ts`) but no reusable shadow-detection surface. Created `src/config/overlay.ts` with:
-- `detectShadowedWrite(key, targetOverlay, layers)` — returns the highest-precedence shadower (not an arbitrary intermediate one) so warnings point at the layer that will actually win at read time.
-- `formatShadowedWriteWarning(...)` — centralised wording so every call site is consistent.
-- Tests covering tie precedence (same-precedence layers do NOT shadow), multi-layer selection, unknown overlay, and the warning text contract.
+Backports upstream opencode commits `225c393f4`, `cf720c9b3`, `27eeb1420`, `51a361ee6`, `6d3d87fef`, `969c9dbd6`.
 
-## Items from the plan NOT executed
+- `src/core/session/attachment.ts`:
+  - `classifyAttachment` → `'image' | 'text' | 'unsupported'`, with `image/svg+xml` routed to `'text'`.
+  - `normalizeAttachment` returns `null` for unsupported MIME types (never throws) and emits a `downgradedFrom: 'image'` marker for SVGs decoded to UTF-8 text.
+  - `buildAttachments` folds a batch, collecting rejections in a `rejected: { source, reason }[]` array rather than failing on first unsupported.
+- `src/core/session/prompt.ts`:
+  - `buildPrompt(text, raw)` returns `{ text, attachments, rejected }`. Text is always preserved; accepted attachments are always forwarded; rejections are warnings for the caller to render.
 
-The plan file was truncated mid-way through item #5 (after "`value: un`" the token-budget suffix cut off the remainder). Items #6, #7, #8 were listed in the "Summary: 8 changes" header but their content was not present in the plan document delivered. No speculative changes were introduced in their place, per the instruction not to add extras not in the plan.
+SAP AI Core relevance: SAP model gateways frequently reject `image/svg+xml` as an image part. Prior behaviour lost the user's text prompt too; new behaviour sends the text + any valid attachments and reports which attachments were dropped.
 
-## Issues Encountered
+## Issues encountered
 
-- **Field-name divergence**: upstream board tool uses `to`, Alexi uses `recipient`. The self-post refusal and roster `self: true` semantics were applied under Alexi's field name without changing the public schema (would have been a breaking change for existing agents using the tool).
-- **Missing OAuth provider in Alexi**: upstream `oauth-provider.ts` does not have an Alexi counterpart. Only the pure `oauth-issuer.ts` helper was ported; integration is deferred until an OAuth provider lands.
-- **No layered overlay system today**: Alexi has only managed-vs-user precedence hardcoded in `userConfig.ts`. The `overlay.ts` module is a forward-looking helper; it is not wired into the save path yet because there is no abstracted "write to layer X" code path to intercept.
+- **Plan was truncated.** The update plan text supplied in the task ended mid-token during the body of change 3 (`src/core/session/prompt.ts`) at the signature `function buildPrompt(text: string, raw: Raw`. Items 4–9 described in the plan's summary (`Total changes planned: 9 — Critical: 1 | High: 4 | Medium: 3 | Low: 1`) were never emitted. The one explicitly-named critical item was never specified. Only the three fully-specified HIGH-priority items (changes 1, 2, 3) could be executed. Change 3's `prompt.ts` was completed using the shape clearly implied by the first half of the plan (`PromptBuildResult { text; attachments; rejected }`).
+- No existing `src/core/session/prompt.ts` or `src/core/session/attachment.ts` module to extend — both were created fresh under the path specified by the plan. The existing attachment config lives at `src/config/attachment.ts` and is a separate concern (image resize/quality knobs), left untouched.
+- No existing OpenAI-compatible embeddings module — `src/providers/sapOrchestration.ts` has a different SDK-based `SapOrchestrationEmbeddings` class that was deliberately left untouched (the plan targeted the generic OpenAI-compatible path, not the SAP SDK path). The new file at `src/providers/embeddings/openai-compatible.ts` is additive.
+- Tests for the new modules were not required by the plan and were not added. CI's 40% lines-coverage gate may need a follow-up test commit if these modules are wired into runtime paths.
+- The ESLint `no-console: warn` rule is a warning (not an error) and `src/command/index.ts` already uses `console.warn` elsewhere, so the new `loadCommands()` default `warn` callback (`(m) => console.warn(m)`) does not regress lint posture.
 
-## Verification Checklist
+## Suggested follow-up
 
-- [x] All new files have JSDoc headers citing the originating upstream commit(s).
-- [x] Every modified behaviour has a regression test asserting the new contract.
-- [x] No existing test was changed in a way that would have required a snapshot update.
-- [x] All imports use `.js` extensions (ESM NodeNext rule).
-- [x] No `console.*` added outside `src/utils/logger.ts`.
-- [x] No breaking schema changes (added fields are optional; refused inputs return a structured `{success: false, error}` result consistent with other tools).
-- [x] SAP AI Core authentication path (`AICORE_SERVICE_KEY`) is untouched.
+- Request a re-plan to recover items 4–9 (and the one critical item) that were lost in the truncation.
+- Add unit tests under `src/providers/embeddings/__tests__/openai-compatible.test.ts`, `src/command/__tests__/reserved.test.ts`, and `src/core/session/__tests__/attachment.test.ts` before this ships, to lift coverage and lock in the fallback behaviours documented above.
+- Wire `buildPrompt` into the actual prompt-submission paths (`src/cli/interactive.ts`, `src/cli/commands/chat.ts`) once the attachment plumbing is confirmed — the new module is currently a stand-alone utility.
+- Wire `callEmbeddingEndpoint` into whatever embedder Alexi uses at runtime (if/when a non-SAP-SDK path is added); currently it's a standalone utility ready to be imported.
