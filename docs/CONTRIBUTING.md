@@ -3275,6 +3275,36 @@ Convention for new `.option()` declarations:
 
 Future refactor: Alexi would benefit from a static check that walks each `register*Command` module, extracts the set of `.option(name, ...)` declarations, and asserts each `name` is read by the action handler. The current regression suite is per-flag rather than general, so it only catches re-introduction of the three audited flags. A general linter would catch the next instance before it ships.
 
+## Reserved Command-Name Registry (`src/command/reserved.ts`)
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `47151ca0c` + `b4b51f252`). References: [ARCHITECTURE.md — Reserved Command-Name Registry](ARCHITECTURE.md#reserved-command-name-registry), [API.md — Reserved Command-Name API](API.md#reserved-command-name-api), [CONFIGURATION.md — Reserved Slash Command Names](CONFIGURATION.md#reserved-slash-command-names).
+
+- **Partition, not merge.** `partitionReservedCommands` returns `{ kept, clashes }`. A reserved clash is NEVER promoted into `kept` and is NEVER silently merged or overridden. The only resolution is a rename at the source — the warning text spells this out verbatim. Do not add an "override reserved" escape hatch; the whole point of the registry is to protect the REPL/TUI built-ins.
+- **A single clash must not disable the directory.** `CommandRegistry.loadFromDirectory` now routes every candidate through `loadCommands` before `register`. The regression suite pins this behaviour; adding a `throw` or a fall-through-abort inside the loop is a regression.
+- **Centralised warning text.** `loadCommands(raw, warn)` is the one place the warning sentence lives. Call sites that want to filter clashes must route through `loadCommands` rather than inlining the string, so a future wording change touches one line.
+- **New slash verbs tighten the registry.** When a new top-level CLI slash command is added, append its name to `RESERVED_COMMAND_NAMES` in the same PR so a later user command cannot shadow it. The shared `scope-enum` in `commitlint.config.cjs` applies to the commit; use the `cli` or `core` scope depending on where the new verb lives.
+
+## Attachment Normalization (`src/core/session/attachment.ts`, `src/core/session/prompt.ts`)
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `225c393f4`, `cf720c9b3`, `27eeb1420`, `51a361ee6`, `6d3d87fef`, `969c9dbd6`). References: [ARCHITECTURE.md — Attachment Classification and Prompt Builder](ARCHITECTURE.md#attachment-classification-and-prompt-builder), [API.md — Attachment Normalization API](API.md#attachment-normalization-api), [CONFIGURATION.md — Attachment MIME Handling](CONFIGURATION.md#attachment-mime-handling).
+
+- **`buildPrompt` must never throw on an unsupported attachment.** Rejections flow through `result.rejected` so the user's text prompt and the accepted attachments still make it to the model. Adding a throw path inside `buildPrompt` or `buildAttachments` is a regression — the suite asserts that a mixed batch (one accepted + one unsupported) produces one accepted attachment and one rejection, not a thrown error.
+- **SVGs ride as text with `downgradedFrom: 'image'`.** `classifyAttachment` maps `image/svg+xml` to `text`, and `normalizeAttachment` decodes bytes as UTF-8 and sets `downgradedFrom: 'image'`. Do not change this — SAP AI Core model gateways reject SVG image parts, and the downgrade is the actionable fix. The `downgradedFrom` field is a UI hint; the TUI/HTTP/REPL callers render "we downgraded your SVG" from it.
+- **Rejection source is caller-populated.** `buildAttachments` picks `source = r.path ?? r.url ?? '<inline>'`. Call sites that resolve attachments from disk or URL must set `path` or `url` so the warning points at a concrete file — a `<inline>` rejection is a last-resort fallback, not a target.
+- **No MIME sniffing inside the module.** The classifier trusts the caller-provided `mimeType`. Do not add a filesystem read or a magic-byte sniff inside `classifyAttachment` or `normalizeAttachment`; sniffing lives in the loader. This keeps the module pure, synchronous, and parallel-safe under vitest.
+- **UTF-8 decoding only.** SVG decoding uses `new TextDecoder('utf-8')`. SVG payloads with a non-UTF-8 encoding declaration are rare in practice; adding an encoding-detection step would push the module into a non-pure dependency surface. If this becomes a real problem, add it in the loader before building the `RawAttachment`.
+
+## OpenAI-Compatible Embeddings Client (`src/providers/embeddings/openai-compatible.ts`)
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream kilo-indexing hardening `0a5c6df34`, `52936e8a6`, `da1927014`, `4d6b6342b`, `43fb46bf3`). References: [ARCHITECTURE.md — Error Handling](ARCHITECTURE.md), [API.md — OpenAI-Compatible Embeddings API](API.md#openai-compatible-embeddings-api), [PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client), [CONFIGURATION.md — OpenAI-Compatible Embedding Deployments](CONFIGURATION.md#openai-compatible-embedding-deployments).
+
+- **One retry maximum for `dimensions` rejection.** `callEmbeddingEndpoint` retries exactly once with `dimensions: undefined` when `looksLikeDimensionsRejection` matches. Do NOT loop or add a second retry — a persistently-failing endpoint should surface the real error, not spin.
+- **Cache the omission per endpoint URL, not per model id.** Dimensions support is a gateway property. Keying the cache on `endpoint` keeps it small and consistent with the retry-once-then-remember contract. Rewriting the cache to key on `model` would silently re-probe the same endpoint for every model, defeating the point.
+- **`looksLikeDimensionsRejection` is intentionally conservative.** It requires both a `400`/`422` status AND a body text that mentions `dimensions` AND one of `unsupported|invalid|not allowed|unknown|rejected`. A generic `400` must NOT trigger a silent retry — the error should surface so the operator can diagnose it. Expanding the regex is a load-bearing change; do it with regression coverage.
+- **Response-shape guard is total.** `decodeEmbeddings` accepts any `unknown` payload and returns `number[][]`. Do not throw inside the decoder — the caller surfaces `Embedding endpoint <url> returned no vectors` as a clean actionable error. The decoder's filter semantics (keep rows where `row.embedding` is an array of numbers) means malformed rows are silently skipped so a partially-good response still produces usable vectors.
+- **Error envelopes carry context.** `surfaceErrorEnvelope` reads `error.message` / `message` from the JSON body and falls back to the first 500 characters of the raw body. The thrown error is `Embedding endpoint <url> failed: <status> <envelope>` — do not shorten it; the gateway complaint is the diagnostic.
+- **Capability cache is module-local and process-scoped.** `resetEndpointCapabilityCache()` is a test hook, not a CLI knob. Tests MUST call it in `afterEach` when they exercise multiple endpoints, because the cache survives between test cases otherwise and makes assertions on first-call behaviour flaky.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

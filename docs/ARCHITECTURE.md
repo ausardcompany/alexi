@@ -7514,3 +7514,140 @@ The pre-existing `kilo_board_write` recipient-looks-stopped probe (ports kilocod
 
 Regression coverage lives in `tests/tool/tools/board-write-recipient.test.ts:149-168` (new case `'refuses a post to self with an actionable error (kilocode 759a6ef99)'`); see [TESTING.md — Testing Shared Agent Board Self-Post Refusal](TESTING.md#testing-shared-agent-board-self-post-refusal).
 
+## Reserved Command-Name Registry
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `47151ca0c` + `b4b51f252`). Lives in `src/command/reserved.ts` with the call-site in `src/command/index.ts:580-595` (`CommandRegistry.loadFromDirectory`).
+
+**Pre-fix bug.** `CommandRegistry.loadFromDirectory` iterated the directory listing and called `register(command)` on every entry. A user- or plugin-authored command claiming a reserved name (e.g. `help`, `exit`, `clear`, `session`, `model`, `agent`, `interactive`, `server`, `revert`) could cause `register` to throw and the remaining commands in the directory were silently dropped. From the operator's point of view the whole slash-command table disappeared and no diagnostic made it to the console.
+
+**Post-fix contract.** The reserved registry is now a pure partition:
+
+```typescript
+export function partitionReservedCommands<T extends { name: string; source?: string }>(
+  commands: T[]
+): { kept: T[]; clashes: ReservedClash[] };
+
+export interface ReservedClash {
+  name: string;
+  source: string; // plugin id or config path; defaults to 'unknown'
+}
+
+export const RESERVED_COMMAND_NAMES: ReadonlySet<string>;
+// help, exit, quit, clear, new, session, sessions, model, models, agent,
+// agents, reload, context, notes, stages, dod, plugin, generate, explain,
+// chat, interactive, server, revert
+```
+
+The thin wrapper `loadCommands(raw, warn)` folds the partition into a warning stream — one `warn(msg)` per clash, with the actionable text `Command "<name>" from <source> uses a reserved name and will be ignored. Rename the command to re-enable it.`. `CommandRegistry.loadFromDirectory` now routes every candidate command through `loadCommands` before `register`, so a single clash can no longer disable the rest of the directory.
+
+```mermaid
+flowchart TD
+  Dir[loadCommandsFromDirectory dir] --> Raw[Command list]
+  Raw --> Part[partitionReservedCommands]
+  Part -->|kept| Keep[Non-clashing commands]
+  Part -->|clashes| Clash[ReservedClash list]
+  Clash --> Warn[warn Command name from source ...]
+  Keep --> Reg[CommandRegistry.register one at a time]
+  Warn --> Done((directory load complete))
+  Reg --> Done
+```
+
+Design notes:
+
+- **Generic over the row type.** `partitionReservedCommands` is generic over `T extends { name: string; source?: string }`, so plugin loaders and config-file loaders can both consume it without a cast. `source` defaults to `'unknown'` so a legacy row that forgot to populate it still produces a readable warning.
+- **No overwrite path.** A reserved clash is NEVER silently merged into or layered on top of the built-in. The partition is one-way: clashes are returned to the caller to warn about, never promoted into `kept`.
+- **The warning stream is injectable.** `loadCommands(raw, warn)` defaults the `warn` callback to `console.warn`, but the CLI, the TUI, and future test harnesses can inject a custom sink (collector array, logger, toast surface) without pulling in a global.
+- **Reserved set is deliberately small and conservative.** Only the REPL/TUI built-ins and widely-expected slash verbs (`help`, `exit`, `quit`, `clear`, `new`) are included. Adding a new slash command verb to the CLI should also add its name to `RESERVED_COMMAND_NAMES` so a later user command cannot shadow it; the shared scope-enum in `commitlint.config.cjs` applies to the commit.
+
+## Attachment Classification and Prompt Builder
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `225c393f4`, `cf720c9b3`, `27eeb1420`, `51a361ee6`, `6d3d87fef`, `969c9dbd6`). Lives in `src/core/session/attachment.ts` + `src/core/session/prompt.ts`.
+
+**Pre-fix bugs.** The old session prompt path threw on the first unsupported attachment and the user's text prompt — plus any already-accepted attachments — was silently discarded. A second, SAP-AI-Core-specific pain point: `image/svg+xml` attachments were sent as image parts and the gateway rejected the request, triggering the same whole-prompt loss.
+
+**Post-fix contract.** The attachment module is a pair of pure helpers that normalize per-attachment and collect rejections. The prompt builder stitches them into a batch result that always carries the text through.
+
+```typescript
+export type AttachmentKind = 'image' | 'text' | 'unsupported';
+
+export interface RawAttachment {
+  path?: string;
+  url?: string;
+  mimeType?: string;
+  bytes?: Uint8Array;
+}
+
+export interface NormalizedAttachment {
+  kind: AttachmentKind;
+  mimeType: string;
+  content: Uint8Array | string;
+  downgradedFrom?: AttachmentKind; // set when we downgraded (svg -> text)
+}
+
+export function classifyAttachment(a: RawAttachment): AttachmentKind;
+export function normalizeAttachment(a: RawAttachment): NormalizedAttachment | null;
+
+export interface AttachmentBuildResult {
+  attachments: NormalizedAttachment[];
+  rejected: { source: string; reason: string }[];
+}
+export function buildAttachments(raw: RawAttachment[]): AttachmentBuildResult;
+
+export interface PromptBuildResult {
+  text: string;
+  attachments: NormalizedAttachment[];
+  rejected: { source: string; reason: string }[];
+}
+export function buildPrompt(text: string, raw?: RawAttachment[]): PromptBuildResult;
+```
+
+Classification rules (`classifyAttachment`):
+
+1. Empty / missing `mimeType` → `'unsupported'`.
+2. `image/svg+xml` → `'text'` (SVGs are sent as text under SAP AI Core).
+3. `image/*` → `'image'`.
+4. `text/*` → `'text'`.
+5. Anything else → `'unsupported'`.
+
+Normalization semantics (`normalizeAttachment`):
+
+- Unsupported MIME types return `null` so `buildAttachments` can collect them into `rejected` with the source URL / path and a `Unsupported MIME type: <mimeType>` reason.
+- SVG payloads are decoded as UTF-8 via `new TextDecoder('utf-8').decode(a.bytes)`, flagged `downgradedFrom: 'image'`, and emitted as a `text` kind with `mimeType: 'image/svg+xml'` preserved. Callers that render a mini-preview can still show the SVG as an inline source snippet.
+- Everything else is passed through with `mimeType ?? 'application/octet-stream'` and `content: a.bytes ?? ''` (empty binary payloads flow through unchanged — the content gate is a caller responsibility).
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Prompt as buildPrompt
+    participant Batch as buildAttachments
+    participant Norm as normalizeAttachment
+    participant Gateway as SAP AI Core
+
+    User->>Prompt: buildPrompt(text, [raw...])
+    Prompt->>Batch: buildAttachments(raw)
+    loop one per RawAttachment
+        Batch->>Norm: normalizeAttachment(r)
+        alt supported MIME
+            Norm-->>Batch: NormalizedAttachment
+        else SVG
+            Norm-->>Batch: NormalizedAttachment downgraded to text
+        else unsupported
+            Norm-->>Batch: null
+            Batch->>Batch: push { source, reason } to rejected
+        end
+    end
+    Batch-->>Prompt: { attachments, rejected }
+    Prompt-->>User: PromptBuildResult { text, attachments, rejected }
+    User->>Gateway: submit text + accepted attachments
+    User->>User: surface rejected list as non-fatal warning
+```
+
+Design notes:
+
+- **Non-fatal rejections.** `buildPrompt` NEVER throws because of an unsupported attachment. The caller gets `rejected` back as data, decides how to render it (a toast, a warning line, a dialog), and still submits `text + attachments` to the model. This matches the upstream opencode contract and preserves the user's turn across network blips and gateway-specific MIME quirks.
+- **`downgradedFrom` is a UI hint, not a correctness signal.** It exists so the TUI / HTTP server / interactive REPL can show "we sent your SVG as text because the model gateway rejects SVG images" instead of silently converting. Consumers that do not render it can ignore it.
+- **Rejection sources are stable.** `buildAttachments` picks `source = r.path ?? r.url ?? '<inline>'`. Call sites should populate `path` or `url` when available so the warning text points the user at a concrete file.
+- **No MIME sniffing.** The classifier trusts the caller-provided `mimeType`. Callers that resolve attachments from disk should sniff before building the `RawAttachment` and pass the resolved type in. This keeps the pure-helper surface free of filesystem dependencies and keeps the module parallel-safe under vitest.
+
+Regression coverage lives in the attachment and prompt test files under `tests/core/session/`.
+
