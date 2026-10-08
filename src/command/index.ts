@@ -12,6 +12,10 @@ import os from 'os';
 import matter from 'gray-matter';
 import { readUtf8FileSyncStripBom } from '../utils/frontmatter.js';
 import { parseFileMentions, quoteFilePath } from '../utils/file-mention.js';
+import { partitionReservedCommands } from './reserved.js';
+
+export { RESERVED_COMMAND_NAMES, partitionReservedCommands } from './reserved.js';
+export type { ReservedClash } from './reserved.js';
 
 // ============ Schema Definitions ============
 
@@ -396,6 +400,27 @@ export function loadCommandsFromDirectory(dirPath: string): Command[] {
   return commands;
 }
 
+/**
+ * Filter a raw command list through the reserved-name registry, emitting a
+ * warning per clash via the provided `warn` callback. Previously a single
+ * reserved clash could throw and discard the whole command set; now the
+ * remainder of the commands survive while the operator gets a clear note
+ * about the clash. See `src/command/reserved.ts`.
+ */
+export function loadCommands(
+  raw: Command[],
+  warn: (msg: string) => void = (m) => console.warn(m)
+): Command[] {
+  const { kept, clashes } = partitionReservedCommands(raw);
+  for (const c of clashes) {
+    warn(
+      `Command "${c.name}" from ${c.source} uses a reserved name and will be ignored. ` +
+        `Rename the command to re-enable it.`
+    );
+  }
+  return kept;
+}
+
 // ============ Helper Function ============
 
 /**
@@ -557,9 +582,12 @@ export class CommandRegistry {
    */
   async loadFromDirectory(dir: string): Promise<number> {
     const commands = loadCommandsFromDirectory(dir);
+    // Filter out reserved-name clashes but keep everything else — previously
+    // a single reserved clash in a directory could discard the whole set.
+    const safe = loadCommands(commands);
     let count = 0;
 
-    for (const command of commands) {
+    for (const command of safe) {
       this.register(command);
       count++;
     }

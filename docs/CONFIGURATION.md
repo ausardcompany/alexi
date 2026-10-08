@@ -2331,6 +2331,54 @@ The module is currently a forward-looking helper: Alexi has no abstracted "write
 
 Writing to any of the four keys above from `~/.alexi/config.json` on a macOS host whose MDM has set the matching managed value will be silently shadowed. All other keys (`memory_model`, `models.*`, `experimental.*`, `rulesPath`, …) are user-only and never shadowed.
 
+## Reserved Slash Command Names
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync). User- and plugin-defined slash commands cannot re-use any of the following names:
+
+```
+help, exit, quit, clear, new, session, sessions, model, models,
+agent, agents, reload, context, notes, stages, dod, plugin,
+generate, explain, chat, interactive, server, revert
+```
+
+A command claiming a reserved name is **ignored** (not merged, not overridden) and the operator sees a per-clash warning at load time:
+
+```
+Command "help" from .alexi/commands/help.md uses a reserved name and will be ignored.
+Rename the command to re-enable it.
+```
+
+Previously a single clash disabled the whole directory of commands. The new behaviour keeps every non-clashing command registered — rename the clashing file (`help.md` → `my-help.md`, `exit.md` → `quit-session.md`, etc.) to re-enable it. See [docs/ARCHITECTURE.md — Reserved Command-Name Registry](ARCHITECTURE.md#reserved-command-name-registry) and [docs/API.md — Reserved Command-Name API](API.md#reserved-command-name-api).
+
+The full set is exported as `RESERVED_COMMAND_NAMES` from `src/command/index.ts` — plugin authors can import it to validate at build time rather than discovering a clash at runtime.
+
+## Attachment MIME Handling
+
+Introduced in commit `dd5cd8c5`. Alexi now classifies attachments into three kinds before submitting them to SAP AI Core:
+
+| MIME type pattern | Kind | Notes |
+| --- | --- | --- |
+| `image/svg+xml` | `text` | SVGs are sent as text (SAP AI Core model gateways frequently reject SVG as an image part). The response carries `downgradedFrom: 'image'` so the TUI can surface the downgrade. |
+| `image/*` | `image` | Standard image attachment. |
+| `text/*` | `text` | Standard text attachment. |
+| empty / anything else | `unsupported` | Rejected per-attachment; the user's text prompt and other accepted attachments still make it through. |
+
+Rejections are collected into `result.rejected` (one entry per unsupported attachment, with `source` and `reason`) instead of discarding the user's turn. Callers render each entry as a non-fatal warning. There is no configuration knob — the classification is deterministic.
+
+See [docs/ARCHITECTURE.md — Attachment Classification and Prompt Builder](ARCHITECTURE.md#attachment-classification-and-prompt-builder) for the full contract and [docs/API.md — Attachment Normalization API](API.md#attachment-normalization-api) for the public TypeScript surface.
+
+## OpenAI-Compatible Embedding Deployments
+
+Introduced in commit `dd5cd8c5`. The embeddings client at `src/providers/embeddings/openai-compatible.ts` targets any OpenAI-compatible endpoint — direct OpenAI, Azure OpenAI, or a SAP-AI-Core-fronted OpenAI deployment. The client is a `fetch` wrapper, so configuration is driven entirely by the arguments passed to `callEmbeddingEndpoint(endpoint, apiKey, opts)` rather than a dedicated environment variable.
+
+Deployment-side behaviour the client auto-handles:
+
+- **`dimensions` request parameter.** When the gateway rejects the field with a `400`/`422` whose body mentions `dimensions` AND one of `unsupported|invalid|not allowed|unknown|rejected`, the client retries once with `dimensions` omitted and remembers the omission per endpoint URL for the rest of the process lifetime. Operators do not need to pre-configure "my gateway does not accept dimensions" anywhere.
+- **Non-standard error envelopes.** The client extracts `error.message` / `message` from the response body and surfaces it in the thrown error. Operators see the actual gateway complaint instead of a bare status code.
+- **Malformed success responses.** Non-numeric embedding rows and missing `data` arrays are tolerated by the decoder; the caller sees `Embedding endpoint <url> returned no vectors` rather than a `TypeError`.
+
+Capability learning is per-process; a restart re-probes once per endpoint. See [docs/PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client) for the retry contract and [docs/API.md — OpenAI-Compatible Embeddings API](API.md#openai-compatible-embeddings-api) for the public surface.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

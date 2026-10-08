@@ -7053,3 +7053,139 @@ export function clearTodos(): void;
 
 `getTodos()` returns a defensive copy of the current list (never a reference to internal state). `onTodosChange` registers a listener and returns an unsubscriber. `clearTodos()` resets the list and notifies all listeners — tests use it in `afterEach` so subscription-mode cases do not leak state into the next case.
 
+## Reserved Command-Name API
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `47151ca0c` + `b4b51f252`). Exported from `src/command/index.ts` (re-exports from `src/command/reserved.ts`).
+
+```typescript
+export const RESERVED_COMMAND_NAMES: ReadonlySet<string>;
+
+export interface ReservedClash {
+  name: string;
+  source: string; // plugin id or config path; 'unknown' when the row omits source
+}
+
+export function partitionReservedCommands<T extends { name: string; source?: string }>(
+  commands: T[]
+): { kept: T[]; clashes: ReservedClash[] };
+
+export function loadCommands(
+  raw: Command[],
+  warn?: (msg: string) => void
+): Command[];
+```
+
+Semantics:
+
+- `RESERVED_COMMAND_NAMES` contains the REPL/TUI built-ins and widely-expected slash verbs: `help`, `exit`, `quit`, `clear`, `new`, `session`, `sessions`, `model`, `models`, `agent`, `agents`, `reload`, `context`, `notes`, `stages`, `dod`, `plugin`, `generate`, `explain`, `chat`, `interactive`, `server`, `revert`. The set is `ReadonlySet<string>` so attempts to mutate the registry at runtime fail at the type layer.
+- `partitionReservedCommands` is pure and total: every input row goes to exactly one of `kept` or `clashes`. The partition preserves insertion order inside each bucket. `source` defaults to `'unknown'` when the input row omits it so a legacy plugin loader still produces a readable warning.
+- `loadCommands(raw, warn)` is the convenience wrapper used by `CommandRegistry.loadFromDirectory`. It calls `partitionReservedCommands`, invokes `warn` once per clash with the text `Command "<name>" from <source> uses a reserved name and will be ignored. Rename the command to re-enable it.`, and returns `kept`. `warn` defaults to `console.warn` and is injectable so tests can collect warnings without touching the global console.
+- `CommandRegistry.loadFromDirectory(dir)` (`src/command/index.ts:582-595`) now calls `loadCommands(commands)` before iterating `register`. A single reserved clash no longer prevents the directory's non-clashing commands from registering.
+
+Design notes:
+
+- **Partition, not merge.** A reserved clash is NEVER promoted into `kept`. The only way to "fix" a clash is to rename the user command — the warning text spells this out verbatim.
+- **Generic over the row type.** The `T extends { name: string; source?: string }` bound lets plugin loaders and config-file loaders share one partition without a cast. Only `name` and `source` are read; every other field is passed through unchanged in `kept`.
+- **`loadCommands` is the only place the warning text is centralised.** New call sites that want to filter reserved clashes should route through `loadCommands` rather than inlining the warning string, so a future wording change touches one line.
+
+## Attachment Normalization API
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream opencode `225c393f4`, `cf720c9b3`, `27eeb1420`, `51a361ee6`, `6d3d87fef`, `969c9dbd6`). Exported from `src/core/session/attachment.ts` + `src/core/session/prompt.ts`.
+
+```typescript
+// src/core/session/attachment.ts
+export type AttachmentKind = 'image' | 'text' | 'unsupported';
+
+export interface RawAttachment {
+  path?: string;
+  url?: string;
+  mimeType?: string;
+  bytes?: Uint8Array;
+}
+
+export interface NormalizedAttachment {
+  kind: AttachmentKind;
+  mimeType: string;
+  content: Uint8Array | string;
+  downgradedFrom?: AttachmentKind;
+}
+
+export interface AttachmentBuildResult {
+  attachments: NormalizedAttachment[];
+  rejected: { source: string; reason: string }[];
+}
+
+export function classifyAttachment(a: RawAttachment): AttachmentKind;
+export function normalizeAttachment(a: RawAttachment): NormalizedAttachment | null;
+export function buildAttachments(raw: RawAttachment[]): AttachmentBuildResult;
+
+// src/core/session/prompt.ts
+export interface PromptBuildResult {
+  text: string;
+  attachments: NormalizedAttachment[];
+  rejected: { source: string; reason: string }[];
+}
+
+export function buildPrompt(text: string, raw?: RawAttachment[]): PromptBuildResult;
+```
+
+Semantics:
+
+- `classifyAttachment(a)` resolves the MIME type to one of `'image' | 'text' | 'unsupported'`. `image/svg+xml` maps to `'text'` — SAP AI Core model gateways frequently reject SVG as an image part, so SVGs ride as text attachments. Empty / missing `mimeType` returns `'unsupported'` so the batch builder can collect a readable `Unsupported MIME type: <none>` rejection.
+- `normalizeAttachment(a)` returns `null` for unsupported MIME types so `buildAttachments` can collect per-source rejections. For SVG, the bytes are decoded as UTF-8 and the result carries `downgradedFrom: 'image'` so the UI can note the downgrade without a second round-trip through the classifier.
+- `buildAttachments(raw)` folds a batch of raw attachments: supported ones end up in `attachments`, unsupported ones end up in `rejected` with `source = r.path ?? r.url ?? '<inline>'` and `reason = 'Unsupported MIME type: <mimeType>'`. The function NEVER throws.
+- `buildPrompt(text, raw)` wraps `buildAttachments` and keeps the text through regardless of attachment rejections. Callers forward `result.attachments` to the model and surface `result.rejected` as a non-fatal per-attachment warning. This replaces the pre-fix behaviour where an attachment rejection discarded the user's text prompt.
+
+Call-site contract:
+
+- The caller is responsible for sniffing / resolving the MIME type before building a `RawAttachment`. The classifier does not touch the filesystem.
+- When `rejected.length > 0`, the caller should render one warning per entry (TUI toast, HTTP response envelope, interactive REPL warning line). Suppressing the warning is a regression — the user needs to know their SVG was downgraded or their PDF was dropped.
+- `downgradedFrom` is a UI hint; consumers that do not render it can ignore it without breaking any contract.
+
+## OpenAI-Compatible Embeddings API
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream kilo-indexing hardening `0a5c6df34`, `52936e8a6`, `da1927014`, `4d6b6342b`, `43fb46bf3`). Exported from `src/providers/embeddings/openai-compatible.ts`.
+
+```typescript
+export interface EmbeddingRequestOptions {
+  model: string;
+  input: string | string[];
+  dimensions?: number;
+}
+
+export async function callEmbeddingEndpoint(
+  endpoint: string,
+  apiKey: string,
+  opts: EmbeddingRequestOptions
+): Promise<number[][]>;
+
+export function looksLikeDimensionsRejection(status: number, body: string): boolean;
+export function surfaceErrorEnvelope(body: string): string;
+export function decodeEmbeddings(parsed: unknown): number[][];
+
+/** Test-only: clear the per-endpoint capability cache between cases. */
+export function resetEndpointCapabilityCache(): void;
+```
+
+Request semantics (`callEmbeddingEndpoint`):
+
+1. Build a `POST <endpoint>` with `Content-Type: application/json` and `Authorization: Bearer <apiKey>`. The body always carries `model` and `input`; `dimensions` is included only when `opts.dimensions !== undefined` AND the per-endpoint capability cache either has no entry or reports `acceptsDimensions: true`.
+2. Read the response body text exactly once (`await res.text()`) so the same string can be used for both the error envelope AND the success-path JSON parse.
+3. On a non-2xx response, if `includeDimensions === true` AND `looksLikeDimensionsRejection(status, body)` matches, remember `acceptsDimensions: false` for the endpoint and retry recursively with `dimensions: undefined`. Any other non-2xx throws `Embedding endpoint <endpoint> failed: <status> <surfaceErrorEnvelope(body)>`.
+4. On a 2xx response, `JSON.parse` the body (throws `Embedding endpoint <endpoint> returned non-JSON body` on parse failure). `decodeEmbeddings(parsed)` tolerates missing `data`, non-array `data`, and non-numeric embedding rows — a malformed body yields `[]` and the caller throws `Embedding endpoint <endpoint> returned no vectors` rather than a `TypeError`.
+5. When `includeDimensions === false` (meaning we omitted `dimensions` on this attempt) AND `opts.dimensions !== undefined` (meaning the caller cared about dimensions), remember `confirmedUsableFallback: true` so subsequent calls skip the pre-flight attempt entirely.
+
+Helper semantics:
+
+- `looksLikeDimensionsRejection(status, body)` matches only when the status is `400` or `422` AND the body text matches both `/dimensions?/i` AND one of `/(unsupported|invalid|not allowed|unknown|rejected)/i`. The two-filter check is intentional — a generic `400` with no mention of `dimensions` must NOT trigger a silent retry.
+- `surfaceErrorEnvelope(body)` tries to parse the body as JSON and returns `error.message` or `message` when present. On parse failure or missing fields it returns the first 500 characters of the raw body. This keeps "the actual error message from the gateway" visible in the thrown error instead of a bare `500 Internal Server Error`.
+- `decodeEmbeddings(parsed)` extracts `data` from the top-level object, iterates it as an array, and keeps only rows where `embedding` is an array of numbers. Non-conforming rows are silently skipped so a partially-malformed response still produces usable vectors.
+- `resetEndpointCapabilityCache()` is intended for vitest `afterEach`. The CLI never calls it; the cache lives for the process lifetime.
+
+Design notes:
+
+- **Per-endpoint capability caching, not per-model.** Capability is a property of the gateway, not the model id — a SAP AI Core-fronted OpenAI deployment that rejects `dimensions` rejects it for every model it fronts. Keying on `endpoint` keeps the cache small and makes the retry-once-then-remember contract trivial to reason about.
+- **One retry maximum.** The dimensions-fallback is a single recursive call with `dimensions: undefined`. If the retry fails for an unrelated reason, the error is thrown as-is — we do not re-retry.
+- **No cross-process persistence.** The capability cache is a module-local `Map`. Restarting the process re-probes once per endpoint. This is intentional: a gateway operator who flips the dimensions support back on should see it on the next CLI run without a manual cache clear.
+- **Suitable for SAP AI Core-fronted embedding deployments.** The retry contract is driven exactly by the SAP AI Core proxy behaviour where some embedding deployments ignore or reject `dimensions`. See [docs/PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client) for the deployment-side notes.
+

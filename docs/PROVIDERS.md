@@ -3527,6 +3527,97 @@ Without the hook, retried streams concatenate the retried turn's reasoning onto 
 - A thrown `finalize()` is swallowed with a warning. The retry proceeds because a failed cleanup emit must never turn a recoverable transient into a permanent failure.
 - Hook errors thrown out of `onRetry` itself are also swallowed with a warning for the same reason.
 
+## OpenAI-Compatible Embeddings Client
+
+Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream kilo-indexing hardening `0a5c6df34`, `52936e8a6`, `da1927014`, `4d6b6342b`, `43fb46bf3`). Lives at `src/providers/embeddings/openai-compatible.ts`.
+
+Alexi's chat path routes through SAP AI Core Orchestration exclusively. The embeddings path is separate: Alexi talks to OpenAI-compatible embedding endpoints — either a native OpenAI deployment, an Azure OpenAI deployment, or a SAP-AI-Core-fronted OpenAI embedding deployment — using a small `fetch`-based client that mirrors the OpenAI embeddings REST shape and adapts to gateway-specific quirks.
+
+### Why a dedicated client
+
+SAP-AI-Core-fronted OpenAI embedding deployments are not fully transparent proxies: some reject the `dimensions` request parameter with `400`/`422`, and the failure envelope is non-standard (sometimes `{ "error": { "message": "..." } }`, sometimes `{ "message": "..." }`, sometimes a plain text body). A general-purpose client would surface the raw status code and leave the operator guessing. The embeddings client in `src/providers/embeddings/openai-compatible.ts` handles the three recurring failure modes directly.
+
+### Capability detection (dimensions)
+
+Pre-fix, a `400`/`422` from an embedding endpoint that rejected `dimensions` crashed the indexer. The client now:
+
+1. Builds the request body with `dimensions` ONLY when the caller supplies it AND the per-endpoint cache has either no entry or `acceptsDimensions: true`.
+2. On a non-2xx response, calls `looksLikeDimensionsRejection(status, body)` to check whether the failure is specifically about `dimensions` (status is `400`/`422` AND the body mentions both `dimensions` AND one of `unsupported`/`invalid`/`not allowed`/`unknown`/`rejected`).
+3. When the check matches, remembers `acceptsDimensions: false` for the endpoint URL and retries recursively with `dimensions: undefined`. Any other non-2xx throws immediately — a `429` or a `5xx` is NOT retried here (the surrounding provider layer handles transient backoff per [docs/ARCHITECTURE.md — Error Handling](ARCHITECTURE.md)).
+4. On the retry's success, remembers `confirmedUsableFallback: true` so subsequent calls skip the pre-flight attempt entirely.
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Client as callEmbeddingEndpoint
+    participant Cache as endpointCapabilityCache
+    participant Gateway as Embedding endpoint
+
+    Caller->>Client: call(endpoint, apiKey, { model, input, dimensions })
+    Client->>Cache: get(endpoint)
+    Cache-->>Client: entry or undefined
+    Client->>Client: includeDimensions = dimensions set AND cache allows
+    alt includeDimensions
+        Client->>Gateway: POST { model, input, dimensions }
+    else fallback known
+        Client->>Gateway: POST { model, input }
+    end
+    Gateway-->>Client: status + body
+    alt 2xx
+        Client->>Client: decode embeddings, confirm fallback if used
+        Client-->>Caller: number[][]
+    else looksLikeDimensionsRejection
+        Client->>Cache: set { acceptsDimensions: false }
+        Client->>Client: retry recursively without dimensions
+    else other error
+        Client->>Client: throw with surfaceErrorEnvelope(body)
+    end
+```
+
+Design notes:
+
+- **Keyed on endpoint URL, not model id.** Dimensions support is a gateway property; the same endpoint will reject or accept `dimensions` for every model it fronts. Keying on the URL keeps the cache small and makes retry-once-then-remember trivial.
+- **One retry maximum.** The fallback path never calls itself a third time. If the retry fails for an unrelated reason, the error propagates as-is.
+- **No persistence.** The cache is a module-local `Map`; a process restart re-probes once per endpoint. This is intentional — a gateway operator flipping support back on should see it on the next run without a manual cache purge.
+
+### Non-standard error envelopes
+
+`surfaceErrorEnvelope(body)` attempts to parse the response body as JSON and returns the first of `error.message` / `message` that it finds. On parse failure or when neither field exists, it returns the first 500 characters of the raw body. The thrown error becomes:
+
+```
+Embedding endpoint <endpoint> failed: <status> <surfaceErrorEnvelope(body)>
+```
+
+Operators therefore see the actual gateway error message in logs instead of a bare `500 Internal Server Error`. This is particularly useful under SAP AI Core where the gateway may surface SAP-specific auth or deployment-not-found envelopes.
+
+### Response-shape guard
+
+`decodeEmbeddings(parsed)` is total: it accepts any `unknown` payload and returns `number[][]`. It:
+
+- Returns `[]` when the top-level value is not an object.
+- Returns `[]` when `data` is missing or not an array.
+- Keeps only rows where `row.embedding` is an array of numbers.
+
+Partially-malformed responses therefore produce usable vectors instead of a `TypeError`. When the final decoded list is empty, `callEmbeddingEndpoint` throws `Embedding endpoint <endpoint> returned no vectors` — a clear, actionable error pointing at the gateway rather than at the client.
+
+### Minimal usage example
+
+```typescript
+import { callEmbeddingEndpoint } from '../src/providers/embeddings/openai-compatible.js';
+
+const vectors = await callEmbeddingEndpoint(
+  process.env.EMBEDDING_ENDPOINT!,
+  process.env.EMBEDDING_API_KEY!,
+  {
+    model: 'text-embedding-ada-002',
+    input: ['hello', 'world'],
+    dimensions: 1536, // dropped automatically if the gateway rejects it
+  }
+);
+```
+
+For the full public API surface (`EmbeddingRequestOptions`, `callEmbeddingEndpoint`, `looksLikeDimensionsRejection`, `surfaceErrorEnvelope`, `decodeEmbeddings`, `resetEndpointCapabilityCache`) see [docs/API.md — OpenAI-Compatible Embeddings API](API.md#openai-compatible-embeddings-api).
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
