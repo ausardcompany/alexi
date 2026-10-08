@@ -10,11 +10,7 @@
  * rejections as a non-fatal warning for the caller to render.
  */
 
-import {
-  buildAttachments,
-  type NormalizedAttachment,
-  type RawAttachment,
-} from './attachment.js';
+import { buildAttachments, type NormalizedAttachment, type RawAttachment } from './attachment.js';
 
 export interface PromptBuildResult {
   text: string;
