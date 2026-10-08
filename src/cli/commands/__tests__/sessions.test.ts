@@ -169,7 +169,7 @@ describe('alexi sessions command', () => {
     });
   });
 
-  describe('--here / --workdir / --all flags', () => {
+  describe('--here / --workdir flags', () => {
     it('passes { workdir: process.cwd() } to listSessions when --here is set', async () => {
       listSessionsMock.mockReturnValue([]);
 
@@ -194,15 +194,6 @@ describe('alexi sessions command', () => {
 
       const program = buildProgram();
       await program.parseAsync(['node', 'alexi', 'sessions']);
-
-      expect(listSessionsMock).toHaveBeenCalledWith(undefined);
-    });
-
-    it('passes no filter to listSessions when --all is set', async () => {
-      listSessionsMock.mockReturnValue([]);
-
-      const program = buildProgram();
-      await program.parseAsync(['node', 'alexi', 'sessions', '--all']);
 
       expect(listSessionsMock).toHaveBeenCalledWith(undefined);
     });

@@ -30,8 +30,8 @@ export function registerSessionCommands(program: Command): void {
       'List all saved sessions. Use --json to emit a stable JSON array ' +
         '({ id, title, model, updatedAt, messageCount, totalTokens, workdir }) for scripting. ' +
         'Use --here to filter to sessions created in the current directory, ' +
-        '--workdir <dir> to filter to a specific directory, or --all (default) ' +
-        'to list every saved session including legacy ones with no recorded workdir. ' +
+        '--workdir <dir> to filter to a specific directory, or omit both to ' +
+        'list every saved session including legacy ones with no recorded workdir. ' +
         'Use --search <query> to run an FTS5-ranked search against session titles ' +
         '(e.g. --search "api refactor", --search "openai OR anthropic", --search "auth*"); ' +
         'results are ordered by relevance instead of chronologically.'
@@ -39,7 +39,6 @@ export function registerSessionCommands(program: Command): void {
     .option('--json', 'Output sessions as JSON array')
     .option('--here', 'Only list sessions created in the current working directory')
     .option('--workdir <dir>', 'Only list sessions created in the specified directory')
-    .option('--all', 'List all sessions (default behavior; explicit no-filter form)')
     .option(
       '--search <query>',
       'FTS5-ranked search across session titles (empty query lists chronologically)'
@@ -53,7 +52,6 @@ export function registerSessionCommands(program: Command): void {
         json?: boolean;
         here?: boolean;
         workdir?: string;
-        all?: boolean;
         search?: string;
         cleanup?: boolean;
       }) => {
