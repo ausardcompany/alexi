@@ -167,15 +167,26 @@ export function registerServerCommand(program: Command): void {
         console.log(`Alexi server listening on ${handle.socketPath}`);
         console.log(`Auth token file: ${tokenPath}`);
 
-        const shutdown = async (): Promise<void> => {
+        // Bounded shutdown (kilocode #14823, kilocode #14830): a stuck
+        // `handle.stop()` or `killAllTracked()` could otherwise hang the
+        // process indefinitely on SIGINT/SIGTERM. `shutdownWithDeadline`
+        // races both against `DEFAULT_SHUTDOWN_DEADLINE_MS` and logs
+        // stragglers on timeout; the caller still owns `process.exit`.
+        let shuttingDown = false;
+        const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
+          if (shuttingDown) {
+            return;
+          }
+          shuttingDown = true;
+          console.log(`Received ${sig}, shutting down...`);
           try {
             await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
           } finally {
             process.exit(0);
           }
         };
-        process.once('SIGINT', shutdown);
-        process.once('SIGTERM', shutdown);
+        process.once('SIGINT', () => void shutdown('SIGINT'));
+        process.once('SIGTERM', () => void shutdown('SIGTERM'));
       } catch (e) {
         console.error(`Failed to start server: ${e instanceof Error ? e.message : String(e)}`);
         process.exit(1);

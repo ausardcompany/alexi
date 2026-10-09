@@ -7715,3 +7715,200 @@ Design notes:
 
 Regression coverage lives in the attachment and prompt test files under `tests/core/session/`.
 
+## Session-Scoped Temp Directory
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync, ports upstream kilocode `packages/opencode/src/kilocode/tool/shell-tmp.ts`). Lives in `src/tool/shell-tmp.ts` and is consumed by `src/tool/tools/shell/env.ts`.
+
+**Problem.** Cloud / sandboxed Alexi sessions run under an `external_directory` allowlist that permits only `/tmp/<SESSION_ID>/**` plus a handful of session-scoped roots and denies every other filesystem location. Without this helper, the shell tool description advertises `os.tmpdir()` — which follows the `TMPDIR` environment variable and typically points at the shared `/tmp` root — and every model-generated `mktemp` call would land on a denied path. The resulting cascade of permission errors was both confusing and expensive (every tool call that touched a scratch file wasted a provider round-trip).
+
+**Contract.** `sessionTmp(): string` returns a path the shell tool can safely advertise:
+
+```typescript
+// src/tool/shell-tmp.ts
+export function sessionTmp(): string;
+```
+
+Resolution rules, in order:
+
+1. If `process.env.KILO_CLOUD_AGENT` (lower-cased) is neither `'true'` nor `'1'`, return `os.tmpdir()`. This is the default local path and preserves byte-identical behaviour for the normal CLI.
+2. If `process.env.SESSION_ID` is missing or does not match `/^[A-Za-z0-9_-]+$/`, return `os.tmpdir()`. The regex is deliberately strict — any character outside this set could be interpreted by the shell (quoting, globbing, redirection), so a malformed id disables the cloud path rather than widening it.
+3. Compute `dir = path.join('/tmp', SESSION_ID)`. The allowlist root is the literal string `'/tmp'` and NOT `os.tmpdir()`: deriving from `os.tmpdir()` could point the model back at a denied path if a `TMPDIR` override ever reached the server process.
+4. `mkdirSync(dir, { recursive: true, mode: 0o700 })` and then `lstatSync(dir).isDirectory()`. The `lstat` call (not `stat`) is intentional — a pre-existing symlink from `/tmp/<SESSION_ID>` to some other path must not be allowed to redirect the advertised dir outside the allowlist root.
+5. On any mkdir or lstat failure, fall back to `os.tmpdir()`.
+
+Advertisement in the shell description:
+
+```typescript
+// src/tool/tools/shell/env.ts  — formatShellEnvSummary(env)
+parts.push(`tmp: ${sessionTmp()}`);
+return `Environment: ${parts.join('. ')}.`;
+```
+
+The `tmp: <path>` field is appended after `Available tools:` so the model sees the session-scoped dir alongside the other environment signals (`shell: ...`, `PATH: ...`, `Available tools: ...`). In non-cloud runs this is the OS temp dir and matches what `mktemp` would pick anyway, so there is zero behavioural drift for existing local users.
+
+```mermaid
+flowchart TD
+    Start[sessionTmp called] --> Env{KILO_CLOUD_AGENT = true or 1?}
+    Env -- no --> Default[return os.tmpdir]
+    Env -- yes --> Session{SESSION_ID matches [A-Za-z0-9_-]+?}
+    Session -- no --> Default
+    Session -- yes --> Make[mkdir /tmp/SESSION_ID mode 0o700 recursive]
+    Make -->|throws| Default
+    Make -->|ok| Lstat{lstatSync is a directory?}
+    Lstat -- no --> Default
+    Lstat -- yes --> Return[return /tmp/SESSION_ID]
+```
+
+Design notes:
+
+- **Zero runtime dependency on `TMPDIR`.** The helper hardcodes `/tmp` as the allowlist root because the cloud sandbox explicitly denies writes outside that root. Reading `TMPDIR` here would be a security regression: a parent process could override `TMPDIR` and silently widen the writable surface.
+- **`lstat` over `stat`.** A symlink that resolves to a directory would pass `stat(...).isDirectory()` but could point outside the allowlist. `lstat` reports the symlink itself, so an existing-link path returns `false` and the helper falls back to `os.tmpdir()` instead of advertising the symlink.
+- **Mode `0o700`.** The per-session dir is owner-only. Multiple concurrent cloud sessions on the same host each get their own subtree, so a leaked write descriptor cannot see another session's scratch files.
+- **No cleanup.** The helper only creates; the surrounding runtime (session teardown or the sandbox host) owns the eventual removal. This keeps the helper synchronous and side-effect-free beyond the one `mkdirSync`.
+
+## MCP Cleanup-on-Interrupt
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync). Lives in `src/mcp/cleanup.ts` and is called from `src/mcp/client.ts` inside the connect-attempt catch block of `McpClientManager`.
+
+**Problem.** When an MCP client startup is cancelled — user Ctrl-C during `initialize`, parent-session abort signal, a mid-handshake throw, or a transient failure that will be retried — the `@modelcontextprotocol/client` SDK does NOT automatically tear down the transport or the spawned stdio child process. Over the course of a long-running `alexi server` session, repeated interruptions accumulate: file descriptors leak, zombie child processes hang around, and the host can end up refusing new sockets.
+
+**Contract.** The helper is intentionally minimal and structural so it can run against any SDK revision and against test stubs:
+
+```typescript
+// src/mcp/cleanup.ts
+export interface CleanableClient {
+  close?: () => Promise<void> | void;
+  transport?: { close?: () => Promise<void> | void };
+}
+
+export interface CleanableProcess {
+  kill?: (signal?: NodeJS.Signals | number) => boolean;
+  killed?: boolean;
+}
+
+export async function cleanupInterrupted(
+  serverName: string,
+  client?: CleanableClient,
+  childProcess?: CleanableProcess
+): Promise<void>;
+```
+
+Teardown is attempted in a fixed order:
+
+1. `client.close()` — the SDK's graceful shutdown entry point.
+2. `client.transport?.close()` — explicit transport close. Some SDK builds leave the transport open when `close()` fails mid-handshake, so this is a belt-and-braces step rather than a duplicate.
+3. `process.kill()` — hard kill the spawned stdio child when present and not already killed.
+
+Every call is wrapped in try/catch and routed through `logger.debug(...)` with the shape `MCP cleanup: <op> failed for <serverName>: <error>`. The caller is already inside an error path and should surface the ORIGINAL cancellation error, not a cleanup failure.
+
+Integration in the client manager:
+
+```typescript
+// src/mcp/client.ts — inside the connect-attempt catch block
+connection.lastErrorAt = Date.now();
+connection.error = formatConnectError(config.name, error);
+
+// Clean up the half-connected client / stdio child before we
+// either retry (fresh Client built below) or give up.
+await cleanupInterrupted(config.name, connection.client, connection.process);
+
+const classification = classifyConnectError(error);
+const attemptsRemaining = policy.maxAttempts - attempt;
+```
+
+```mermaid
+sequenceDiagram
+    participant Mgr as McpClientManager
+    participant SDK as MCP Client (@modelcontextprotocol)
+    participant Child as stdio child process
+    participant Clean as cleanupInterrupted
+
+    Mgr->>SDK: new Client() + initialize
+    SDK->>Child: spawn (stdio transport)
+    Note over SDK,Child: handshake in progress
+
+    alt interrupted (abort, throw, transient failure)
+        SDK--xMgr: error
+        Mgr->>Clean: cleanupInterrupted(name, client, child)
+        Clean->>SDK: client.close()
+        Clean->>SDK: client.transport.close()
+        Clean->>Child: process.kill()
+        Clean-->>Mgr: resolved (debug-log on failure, never throws)
+        Mgr->>Mgr: classifyConnectError + retry or give up
+    else success
+        SDK-->>Mgr: client ready
+    end
+```
+
+Design notes:
+
+- **Structural typing over imports.** `CleanableClient` and `CleanableProcess` are the smallest subsets of the real SDK / `ChildProcess` types the helper needs. This lets vitest cases drive the helper with plain stubs (`{ close: vi.fn() }`) and lets the module keep compiling across SDK revisions.
+- **Debug-level logging only.** Cleanup failures are expected in abort paths (the child process may already be exiting on `SIGTERM`, the transport may already be closed). Promoting those to `warn` or `error` would create noise on every Ctrl-C.
+- **`killed` guard.** If the child process has already set `killed === true` the helper skips the kill call. This avoids `ERR_IPC_DISCONNECTED` and similar on a child that is mid-exit.
+- **No ordering dependency on the retry loop.** The helper is called BEFORE classification, so a fresh `Client` instance built later in the retry loop never sees the half-connected transport.
+
+## Bounded Server Shutdown Deadline
+
+Introduced in commit `0d6349a2` (ports upstream kilocode #14823). Lives in `src/cli/commands/server.ts` inside the `alexi server start` action.
+
+**Problem.** The previous shutdown path was `const shutdown = async () => { try { await handle.stop(); } finally { process.exit(0); } };` with handlers wired via `process.once('SIGINT' | 'SIGTERM', shutdown)`. A stuck socket connection on `handle.stop()` would hang the process indefinitely, so systemd / orchestration layers had no predictable upper bound on how long shutdown would take and had to kill `-9` the process after their own timeout.
+
+**Contract.** The signal handler now runs under a bounded deadline:
+
+```typescript
+const SHUTDOWN_DEADLINE_MS = 10_000;
+let shuttingDown = false;
+const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
+  if (shuttingDown) return;              // idempotent on repeated signals
+  shuttingDown = true;
+  console.log(`Received ${sig}, shutting down...`);
+  const forceExit = setTimeout(() => {
+    console.error(`Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`);
+    process.exit(1);                     // deadline hit — exit 1
+  }, SHUTDOWN_DEADLINE_MS);
+  forceExit.unref?.();                   // do not keep the loop alive past success
+  try {
+    await handle.stop();
+  } catch (e) {
+    console.error(`Shutdown error: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(forceExit);
+    process.exit(0);                     // graceful — exit 0
+  }
+};
+process.once('SIGINT', () => void shutdown('SIGINT'));
+process.once('SIGTERM', () => void shutdown('SIGTERM'));
+```
+
+```mermaid
+sequenceDiagram
+    participant OS as systemd / shell
+    participant Proc as alexi server
+    participant Timer as 10s force-exit timer
+    participant Stop as handle.stop
+
+    OS->>Proc: SIGTERM
+    Proc->>Proc: shuttingDown = true, log "Received ..."
+    Proc->>Timer: setTimeout(10000).unref()
+    Proc->>Stop: await handle.stop
+    alt stop resolves before deadline
+        Stop-->>Proc: ok
+        Proc->>Timer: clearTimeout
+        Proc->>OS: process.exit(0)
+    else stop throws
+        Stop-->>Proc: error (logged)
+        Proc->>Timer: clearTimeout
+        Proc->>OS: process.exit(0)
+    else deadline hits first
+        Timer-->>Proc: force-exit callback
+        Proc->>OS: process.exit(1) with "Graceful shutdown exceeded 10000ms"
+    end
+```
+
+Design notes:
+
+- **`setTimeout(...).unref?.()`** — the force-exit timer must not keep the Node event loop alive past a successful graceful shutdown. Optional chain on `unref` keeps the code compatible with timer polyfills that lack the method.
+- **Idempotent on repeated signals.** A second `SIGINT`/`SIGTERM` while shutdown is in progress is a no-op via the `shuttingDown` guard rather than racing into a double-exit or re-arming the timer.
+- **Separate exit codes.** `0` on graceful shutdown (even if `handle.stop()` logged an error — the socket was gone by then), `1` on deadline. Systemd / orchestrators can distinguish "clean" from "wedged" from the exit code alone without parsing stderr.
+- **Logs are predictable.** `Received SIGTERM, shutting down...` on entry; `Shutdown error: <message>` on a stop failure; `Graceful shutdown exceeded 10000ms, forcing exit` on the deadline. Operators grepping for these strings get stable signals across releases.
+

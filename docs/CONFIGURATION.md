@@ -167,6 +167,36 @@ Override the maximum subagent nesting depth for the `task` tool. A top-level use
 export MAX_SUBAGENT_DEPTH=5
 ```
 
+#### Cloud Session Sandbox: `KILO_CLOUD_AGENT` + `SESSION_ID`
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync, ports upstream kilocode `shell-tmp` helper). These two environment variables control whether the shell tool advertises a session-scoped temp directory instead of `os.tmpdir()`.
+
+| Variable | Default | Values | Effect |
+|----------|---------|--------|--------|
+| `KILO_CLOUD_AGENT` | unset | `true` / `1` (case-insensitive) | When one of these values, Alexi assumes it is running inside a cloud / sandboxed session that enforces a `/tmp/<SESSION_ID>/**` allowlist. Any other value (or unset) returns `os.tmpdir()` from `sessionTmp()` and the shell description falls back to the OS temp dir. |
+| `SESSION_ID` | unset | Must match `/^[A-Za-z0-9_-]+$/` to be used | When valid, `sessionTmp()` returns `/tmp/<SESSION_ID>` (created with `mode 0o700` and verified with `lstat` so a pre-existing symlink cannot redirect it). Malformed or missing values disable the cloud path even when `KILO_CLOUD_AGENT` is set. |
+
+```bash
+# Cloud / sandboxed session
+export KILO_CLOUD_AGENT=1
+export SESSION_ID=job-20261009-abc123
+# shell tool now advertises: Environment: ... tmp: /tmp/job-20261009-abc123.
+```
+
+```bash
+# Local development (default)
+unset KILO_CLOUD_AGENT
+# shell tool advertises: Environment: ... tmp: /tmp (or whatever os.tmpdir() returns).
+```
+
+Security notes:
+
+- The allowlist root is the literal string `/tmp`, NOT `os.tmpdir()`: this prevents a parent process that overrides `TMPDIR` from widening the writable surface.
+- `SESSION_ID` is matched against a strict regex (`^[A-Za-z0-9_-]+$`) so shell metacharacters cannot slip through into the path argument.
+- The directory is verified with `lstat` instead of `stat`, so a pre-existing symlink from `/tmp/<SESSION_ID>` is rejected (the helper falls back to `os.tmpdir()`) rather than silently redirecting writes outside the allowlist.
+
+See [docs/ARCHITECTURE.md — Session-Scoped Temp Directory](ARCHITECTURE.md#session-scoped-temp-directory) for the full resolution logic and [docs/API.md — Session-Scoped Temp Directory API](API.md#session-scoped-temp-directory-api) for the exported function.
+
 #### ALEXI_OTEL_TRACES_EXPORTER
 
 Enable the privacy-preserving OTLP tracing relay for SAP AI Core provider calls. Introduced in 1.22.19 (2026-09-13, port of Cline PR #13974 landed via commit `486cbe03`). Must be set to one of `grpc`, `http/json`, or `http/protobuf` — any other value keeps tracing disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`. Unset (the default) keeps tracing off. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability) for the full contract.
