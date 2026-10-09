@@ -37,6 +37,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { detectShell, type ShellInfo, type ShellType } from './id.js';
+// Alexi: cloud sessions enforce a `/tmp/<SESSION_ID>/**` allowlist. Advertise
+// the session-scoped dir in the shell description so the model doesn't try
+// to write to a denied path. See `src/tool/shell-tmp.ts`. Mirrors kilocode
+// `packages/opencode/src/kilocode/tool/shell-tmp.ts`.
+import { sessionTmp } from '../../shell-tmp.js';
 
 /**
  * Runtime snapshot of the shell environment. All fields are optional
@@ -282,6 +287,12 @@ export function formatShellEnvSummary(env: ShellEnv): string {
   if (env.availableTools.length > 0) {
     parts.push(`Available tools: ${env.availableTools.join(', ')}`);
   }
+
+  // Alexi: expose the session-scoped temp dir to the model so it writes
+  // scratch files inside the allowlisted path rather than the shared
+  // `/tmp` root (which is denied in cloud sessions). In non-cloud runs
+  // this is just the OS temp dir and matches what `mktemp` would pick.
+  parts.push(`tmp: ${sessionTmp()}`);
 
   return `Environment: ${parts.join('. ')}.`;
 }

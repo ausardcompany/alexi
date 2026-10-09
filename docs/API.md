@@ -656,6 +656,60 @@ type Refresher = () => Promise<void>;
 
 See [ARCHITECTURE.md — `/reload` Command Primitive](ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts) for the design contract.
 
+### server
+
+Manage the local UNIX socket server that exposes Alexi's slash command surface to remote clients (VS Code extension, JetBrains plugin, test harnesses). Registered by `src/cli/commands/server.ts`. The full wire protocol lives in [`docs/SERVER.md`](SERVER.md).
+
+```bash
+alexi server start   [-s, --socket <path>]
+alexi server stop    [-s, --socket <path>]
+alexi server status  [-s, --socket <path>] [--json]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `start` | Bind the socket, generate a token if needed, and block the current process until `SIGINT` / `SIGTERM`. On signal, runs the bounded shutdown sequence described below and exits `0`. |
+| `stop` | If a server is reachable, send an `exit` frame; if the socket file is stale, unlink it. To fully stop a running daemon the operator must still signal the server process itself (`SIGTERM` to the PID). |
+| `status` | Report whether a server is reachable on the socket path. With `--json`, emits `{ socketPath, exists, alive }`. |
+
+#### Server Shutdown API (`shutdownWithDeadline`, issue #1979)
+
+The `SIGINT` / `SIGTERM` handler installed by `registerServerCommand` races `handle.stop()` plus `killAllTracked()` against a 30-second deadline so a hanging subsystem cannot block the handler indefinitely. The helper is exported for programmatic callers that embed the socket server (e.g. the HTTP server mode, scheduled retention workers, test harnesses) and need the same bounded shutdown contract without re-implementing the race.
+
+```typescript
+import {
+  DEFAULT_SHUTDOWN_DEADLINE_MS,
+  shutdownWithDeadline,
+  type ShutdownTarget,
+} from './cli/commands/server.js';
+
+// The timeout defaults to DEFAULT_SHUTDOWN_DEADLINE_MS (30_000). Pass
+// a shorter timeout from tests or short-lived embedding hosts.
+const result = await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
+if (result.timedOut) {
+  // handle.stop() or killAllTracked() hung past the deadline. Stderr
+  // already carries "Server shutdown exceeded <ms>ms deadline, forcing
+  // exit" and the IDs of any still-tracked background processes.
+}
+// The helper never calls process.exit — the caller decides.
+process.exit(0);
+```
+
+Public surface:
+
+- `DEFAULT_SHUTDOWN_DEADLINE_MS: 30_000` — the default deadline in milliseconds. Chosen to stay well below the ~10s SIGKILL grace schedule used by Docker and systemd defaults after the first `SIGTERM`.
+- `interface ShutdownTarget { stop(): Promise<void> }` — minimal shape the helper requires. Defined locally so tests can supply a fake handle without importing the full `SocketServerHandle` interface (and dragging the server module graph into tests that only exercise shutdown timing).
+- `shutdownWithDeadline(handle: ShutdownTarget, timeoutMs?: number): Promise<{ timedOut: boolean }>` — races `Promise.allSettled([handle.stop(), killAllTracked()])` against a `setTimeout(timeoutMs)` deadline. The timer is `unref()`-ed so it never keeps the event loop alive on its own. Resolves `{ timedOut: false }` on clean shutdown; on timeout logs `Server shutdown exceeded <ms>ms deadline, forcing exit[ (timed-out processes: id(pid=P), ...)]` to stderr and resolves `{ timedOut: true }`. **Never calls `process.exit`** — the caller is responsible for terminating the process after awaiting the returned promise.
+
+Behaviour contract:
+
+- **`Promise.allSettled`, not `Promise.all`.** A misbehaving `handle.stop()` cannot prevent `killAllTracked()` from running, and vice versa. If `stop()` rejects while `killAllTracked()` resolves within the deadline, the overall shutdown still reports `{ timedOut: false }`.
+- **The deadline is strict `<`.** A `stop()` that resolves at exactly `deadline - 1 ms` is considered clean; a `stop()` that resolves at the deadline tick itself races the timer non-deterministically and the regression suite pins the clean side at `deadline - 1 ms` to document the ordering.
+- **The suffix is conditional.** `listBackgroundProcesses()` is read only on the timeout branch; an empty list omits the `(timed-out processes: ...)` suffix entirely so a stuck `stop()` with no background work still logs a readable sentence.
+- **No signal is sent by the helper.** The caller controls the signal surface. `registerServerCommand` installs `process.once('SIGINT', shutdown)` + `process.once('SIGTERM', shutdown)`; a second signal of either kind bypasses the deadline and lets the Node runtime terminate normally.
+
+See [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979) for the design flow and [docs/TESTING.md — Testing the server shutdown deadline](TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer regression pattern.
+
 ### code-review
 
 Run a structured correctness-bug review over the current `git diff`. The command reuses the
@@ -7189,4 +7243,78 @@ Design notes:
 - **One retry maximum.** The dimensions-fallback is a single recursive call with `dimensions: undefined`. If the retry fails for an unrelated reason, the error is thrown as-is — we do not re-retry.
 - **No cross-process persistence.** The capability cache is a module-local `Map`. Restarting the process re-probes once per endpoint. This is intentional: a gateway operator who flips the dimensions support back on should see it on the next CLI run without a manual cache clear.
 - **Suitable for SAP AI Core-fronted embedding deployments.** The retry contract is driven exactly by the SAP AI Core proxy behaviour where some embedding deployments ignore or reject `dimensions`. See [docs/PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client) for the deployment-side notes.
+
+## Session-Scoped Temp Directory API
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync). Exported from `src/tool/shell-tmp.ts`.
+
+```typescript
+/** Returns `/tmp/<SESSION_ID>` when under KILO_CLOUD_AGENT with a safe SESSION_ID; otherwise os.tmpdir(). */
+export function sessionTmp(): string;
+```
+
+Behaviour summary (full architecture notes in [docs/ARCHITECTURE.md — Session-Scoped Temp Directory](ARCHITECTURE.md#session-scoped-temp-directory)):
+
+- Returns `os.tmpdir()` unless `process.env.KILO_CLOUD_AGENT` (lower-cased) is `'true'` or `'1'`.
+- Still returns `os.tmpdir()` when `process.env.SESSION_ID` is missing or does not match `/^[A-Za-z0-9_-]+$/`.
+- Otherwise creates `/tmp/<SESSION_ID>` with `mode: 0o700` (recursive), verifies the path with `lstat` (not `stat`) so a pre-existing symlink cannot redirect it out of the allowlist, and returns it.
+- Any mkdir / lstat failure also falls back to `os.tmpdir()`.
+
+Call-site contract:
+
+- Called from `formatShellEnvSummary(env)` in `src/tool/tools/shell/env.ts` to append `tmp: <path>` after `Available tools:` in the shell tool's environment summary. New tools that need a session-scoped scratch dir should call `sessionTmp()` directly rather than reading `os.tmpdir()` so cloud sessions get the allowlisted path automatically.
+
+## MCP Cleanup API
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync). Exported from `src/mcp/cleanup.ts`.
+
+```typescript
+export interface CleanableClient {
+  close?: () => Promise<void> | void;
+  transport?: { close?: () => Promise<void> | void };
+}
+
+export interface CleanableProcess {
+  kill?: (signal?: NodeJS.Signals | number) => boolean;
+  killed?: boolean;
+}
+
+/**
+ * Best-effort teardown of a half-connected MCP client. Tries, in order:
+ *   client.close() -> client.transport.close() -> process.kill().
+ * All failures are swallowed and logged at debug level so the caller
+ * can surface the original cancellation error.
+ */
+export async function cleanupInterrupted(
+  serverName: string,
+  client?: CleanableClient,
+  childProcess?: CleanableProcess
+): Promise<void>;
+```
+
+Call-site contract:
+
+- `McpClientManager` calls `cleanupInterrupted(config.name, connection.client, connection.process)` inside the connect-attempt catch block in `src/mcp/client.ts`, BEFORE classifying the error and deciding whether to retry. This prevents repeated interruptions during long-running `alexi server` sessions from leaking file descriptors or spawning zombie child processes.
+- New MCP integration code that spawns transports should route interrupt / abort paths through this helper rather than inlining a `client.close()` call; the helper's try/catch wrapping is designed to never shadow the original error.
+- Structural typing of `CleanableClient` / `CleanableProcess` is deliberate — vitest cases can call `cleanupInterrupted('test', { close: vi.fn() })` without pulling in the `@modelcontextprotocol/client` SDK.
+
+## Server Shutdown Deadline
+
+Introduced in commit `0d6349a2` (ports upstream kilocode #14823). Implemented inline in `registerServerCommand`'s `start` action (`src/cli/commands/server.ts`).
+
+`alexi server start` now bounds its graceful shutdown at **10 seconds** (`SHUTDOWN_DEADLINE_MS = 10_000`). The signal handler:
+
+1. Logs `Received <SIGINT|SIGTERM>, shutting down...` and guards against double-entry via a `shuttingDown` boolean.
+2. Starts a `setTimeout(..., 10_000)` whose callback logs `Graceful shutdown exceeded 10000ms, forcing exit` and `process.exit(1)`. The timer is `unref`'d so a successful graceful shutdown does not keep the event loop alive past completion.
+3. Awaits `handle.stop()` inside a try/catch. On throw, logs `Shutdown error: <message>` but still proceeds to the clean exit path.
+4. On success or caught error, clears the force-exit timer and `process.exit(0)`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Graceful shutdown — `handle.stop()` returned or threw, deadline not hit. |
+| `1` | Deadline exceeded — `handle.stop()` was still pending after 10 seconds. |
+
+Systemd / orchestrator operators can distinguish "clean" from "wedged" from the exit code alone without parsing stderr. See [docs/ARCHITECTURE.md — Bounded Server Shutdown Deadline](ARCHITECTURE.md#bounded-server-shutdown-deadline) for the sequence diagram and design notes.
 
