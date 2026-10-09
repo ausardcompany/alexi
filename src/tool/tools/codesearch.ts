@@ -15,6 +15,8 @@ import { defineTool, truncateOutput, type ToolResult } from '../index.js';
 import { getIndexingExtensions } from '../../config/userConfig.js';
 import { mergeExtensionSet, mergeIncludePattern } from './includePattern.js';
 import { isUnsafeWorkspaceRoot, UNSAFE_WORKSPACE_ROOT_MESSAGE } from '../../utils/filesystem.js';
+import { requestEmbedding, type EmbeddingClient } from '../../providers/embeddings.js';
+import { getSharedDimensionCache, type DimensionCache } from '../../providers/embedding-cache.js';
 
 // Hard cap on matches/symbols returned per query, to prevent context-window
 // blow-ups on broad queries over large repos. Aligns with grep.ts (1000) but
@@ -501,6 +503,34 @@ When independent reads, searches, or edits are also needed, emit those tool call
     }
   },
 });
+
+// ============ Embedding Helper ============
+
+/**
+ * Request a code-embedding vector through the shared dimension-retry
+ * pipeline.
+ *
+ * Codesearch today is regex-only; this helper is the integration point
+ * for the future semantic-search path and is already wired through the
+ * same cache + retry policy so an OpenAI-compatible local server (LM
+ * Studio, Ollama, vLLM) that rejects the `dimensions` request parameter
+ * is handled transparently.
+ *
+ * See `src/providers/embeddings.ts` for the full retry contract. The
+ * cache defaults to the module-level singleton so repeat calls across
+ * tool invocations share the same hint.
+ *
+ * Source: Alexi issue #1968, kilocode PR #14921.
+ */
+export async function requestCodeEmbedding(
+  model: string,
+  input: string,
+  dimensions: number,
+  client: EmbeddingClient,
+  cache: DimensionCache = getSharedDimensionCache()
+): Promise<number[]> {
+  return requestEmbedding({ model, input, dimensions, cache, client });
+}
 
 // ============ Formatting Utilities ============
 

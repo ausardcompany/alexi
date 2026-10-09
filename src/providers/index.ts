@@ -113,6 +113,27 @@ export {
 // Re-export image response transforms (issue #1389)
 export { extractImageChunk, extractImageChunks, type NormalizedImageChunk } from './transform.js';
 
+// Re-export embedding dimension-retry helpers (issue #1968, kilocode PR #14921).
+// OpenAI-compatible embedding servers (LM Studio, Ollama, vLLM) can reject
+// the optional `dimensions` parameter; `requestEmbedding` retries without it
+// and `DimensionCache` persists the hint across runs so future requests
+// skip the doomed first attempt.
+export {
+  requestEmbedding,
+  isDimensionRejectError,
+  EmbeddingDimensionMismatchError,
+  DIMENSION_REJECT_STATUS_CODES,
+  type EmbeddingRequest,
+  type EmbeddingClient,
+  type RequestEmbeddingOptions,
+} from './embeddings.js';
+export {
+  DimensionCache,
+  DEFAULT_EMBEDDING_CACHE_PATH,
+  getSharedDimensionCache,
+  resetSharedDimensionCache,
+} from './embedding-cache.js';
+
 // Re-export auxiliary-task model selection (kilocode `1e73d3862` +
 // opencode provider.ts +14/-3). See `./model-selection.ts` for the full
 // rationale — auxiliary tasks (title, summary, compaction) must not fall
