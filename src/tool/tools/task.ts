@@ -177,6 +177,18 @@ export interface SubagentConfig {
 // Task tool utilities
 export const TaskTool = {
   /**
+   * Short description surfaced in the `task` tool's prompt to disambiguate
+   * it from `agent_manager`. Subagents spawned here are INTERNAL to the
+   * current session (no visible session row, no worktree, no cost beyond
+   * the provider round-trip) — this is the right tool for silent
+   * delegation. `agent_manager` is for user-visible fan-out that the
+   * user explicitly asked for. Ports upstream kilocode
+   * `KiloTask.usageDescription` (packages/opencode/src/kilocode/tool/task.ts).
+   */
+  usageDescription:
+    'Subagents launched with this tool are internal to the current session and create no worktrees or interactive sessions. To start visible Agent Manager sessions, use `agent_manager` only when the user explicitly asks.',
+
+  /**
    * Whether a session at `currentDepth` may spawn another subagent without
    * exceeding `maxDepth`. A top-level session is depth 0; each spawned
    * subagent is one level deeper. Returns `false` when spawning would
@@ -399,6 +411,13 @@ export function getTaskStore() {
 export const taskTool = defineTool<typeof TaskParamsSchema, TaskResult>({
   name: 'task',
   description: `Launch a subagent to handle complex, multistep tasks autonomously.
+
+${
+  // kilocode_change — surface the task/agent_manager disambiguation at the
+  // top of the description so the model picks the right tool. See
+  // `TaskTool.usageDescription` for rationale.
+  ''
+}Subagents launched with this tool are internal to the current session and create no worktrees or interactive sessions. To start visible Agent Manager sessions, use \`agent_manager\` only when the user explicitly asks.
 
 Available agent types:
 - general: General-purpose agent for researching and multi-step tasks

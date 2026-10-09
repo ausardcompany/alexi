@@ -7190,3 +7190,77 @@ Design notes:
 - **No cross-process persistence.** The capability cache is a module-local `Map`. Restarting the process re-probes once per endpoint. This is intentional: a gateway operator who flips the dimensions support back on should see it on the next CLI run without a manual cache clear.
 - **Suitable for SAP AI Core-fronted embedding deployments.** The retry contract is driven exactly by the SAP AI Core proxy behaviour where some embedding deployments ignore or reject `dimensions`. See [docs/PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client) for the deployment-side notes.
 
+## Session-Scoped Temp Directory API
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync). Exported from `src/tool/shell-tmp.ts`.
+
+```typescript
+/** Returns `/tmp/<SESSION_ID>` when under KILO_CLOUD_AGENT with a safe SESSION_ID; otherwise os.tmpdir(). */
+export function sessionTmp(): string;
+```
+
+Behaviour summary (full architecture notes in [docs/ARCHITECTURE.md — Session-Scoped Temp Directory](ARCHITECTURE.md#session-scoped-temp-directory)):
+
+- Returns `os.tmpdir()` unless `process.env.KILO_CLOUD_AGENT` (lower-cased) is `'true'` or `'1'`.
+- Still returns `os.tmpdir()` when `process.env.SESSION_ID` is missing or does not match `/^[A-Za-z0-9_-]+$/`.
+- Otherwise creates `/tmp/<SESSION_ID>` with `mode: 0o700` (recursive), verifies the path with `lstat` (not `stat`) so a pre-existing symlink cannot redirect it out of the allowlist, and returns it.
+- Any mkdir / lstat failure also falls back to `os.tmpdir()`.
+
+Call-site contract:
+
+- Called from `formatShellEnvSummary(env)` in `src/tool/tools/shell/env.ts` to append `tmp: <path>` after `Available tools:` in the shell tool's environment summary. New tools that need a session-scoped scratch dir should call `sessionTmp()` directly rather than reading `os.tmpdir()` so cloud sessions get the allowlisted path automatically.
+
+## MCP Cleanup API
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync). Exported from `src/mcp/cleanup.ts`.
+
+```typescript
+export interface CleanableClient {
+  close?: () => Promise<void> | void;
+  transport?: { close?: () => Promise<void> | void };
+}
+
+export interface CleanableProcess {
+  kill?: (signal?: NodeJS.Signals | number) => boolean;
+  killed?: boolean;
+}
+
+/**
+ * Best-effort teardown of a half-connected MCP client. Tries, in order:
+ *   client.close() -> client.transport.close() -> process.kill().
+ * All failures are swallowed and logged at debug level so the caller
+ * can surface the original cancellation error.
+ */
+export async function cleanupInterrupted(
+  serverName: string,
+  client?: CleanableClient,
+  childProcess?: CleanableProcess
+): Promise<void>;
+```
+
+Call-site contract:
+
+- `McpClientManager` calls `cleanupInterrupted(config.name, connection.client, connection.process)` inside the connect-attempt catch block in `src/mcp/client.ts`, BEFORE classifying the error and deciding whether to retry. This prevents repeated interruptions during long-running `alexi server` sessions from leaking file descriptors or spawning zombie child processes.
+- New MCP integration code that spawns transports should route interrupt / abort paths through this helper rather than inlining a `client.close()` call; the helper's try/catch wrapping is designed to never shadow the original error.
+- Structural typing of `CleanableClient` / `CleanableProcess` is deliberate — vitest cases can call `cleanupInterrupted('test', { close: vi.fn() })` without pulling in the `@modelcontextprotocol/client` SDK.
+
+## Server Shutdown Deadline
+
+Introduced in commit `0d6349a2` (ports upstream kilocode #14823). Implemented inline in `registerServerCommand`'s `start` action (`src/cli/commands/server.ts`).
+
+`alexi server start` now bounds its graceful shutdown at **10 seconds** (`SHUTDOWN_DEADLINE_MS = 10_000`). The signal handler:
+
+1. Logs `Received <SIGINT|SIGTERM>, shutting down...` and guards against double-entry via a `shuttingDown` boolean.
+2. Starts a `setTimeout(..., 10_000)` whose callback logs `Graceful shutdown exceeded 10000ms, forcing exit` and `process.exit(1)`. The timer is `unref`'d so a successful graceful shutdown does not keep the event loop alive past completion.
+3. Awaits `handle.stop()` inside a try/catch. On throw, logs `Shutdown error: <message>` but still proceeds to the clean exit path.
+4. On success or caught error, clears the force-exit timer and `process.exit(0)`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Graceful shutdown — `handle.stop()` returned or threw, deadline not hit. |
+| `1` | Deadline exceeded — `handle.stop()` was still pending after 10 seconds. |
+
+Systemd / orchestrator operators can distinguish "clean" from "wedged" from the exit code alone without parsing stderr. See [docs/ARCHITECTURE.md — Bounded Server Shutdown Deadline](ARCHITECTURE.md#bounded-server-shutdown-deadline) for the sequence diagram and design notes.
+
