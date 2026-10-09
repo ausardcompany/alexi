@@ -25,6 +25,11 @@ import {
 } from './cimd.js';
 import { validateMcpResponse } from './validator.js';
 import { McpBreakageTracker, McpBreakageExceededError } from './breakage-tracker.js';
+// Alexi: on an interrupted MCP startup (abort, mid-handshake throw, or
+// a classified-transient failure that is about to be retried), the SDK
+// does not auto-cleanup the half-connected client or the spawned stdio
+// child. Mirrors kilocode's cleanup-on-interrupt behaviour.
+import { cleanupInterrupted } from './cleanup.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -1142,6 +1147,12 @@ export class McpClientManager {
         lastError = error;
         connection.lastErrorAt = Date.now();
         connection.error = formatConnectError(config.name, error);
+
+        // Clean up the half-connected client / stdio child before we
+        // either retry (fresh Client built below) or give up. Without
+        // this, repeated interruptions during `alexi server` runs leak
+        // file descriptors and leave zombie child processes behind.
+        await cleanupInterrupted(config.name, connection.client, connection.process);
 
         const classification = classifyConnectError(error);
         const attemptsRemaining = policy.maxAttempts - attempt;

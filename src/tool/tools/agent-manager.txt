@@ -1,5 +1,11 @@
 Manage and orchestrate multiple agent sessions and workflows.
 
+Start sessions only when the user explicitly asks for new Agent Manager
+sessions or worktrees, or after you confirm with the user first. Never
+start them on your own to parallelize, delegate, or organize routine
+work: each session is user-visible and each worktree costs disk space
+and tokens.
+
 Actions:
 - create: Create a new agent session with optional configuration.
   Optional params: worktreeId, config.

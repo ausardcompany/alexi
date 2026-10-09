@@ -101,15 +101,41 @@ export function registerServerCommand(program: Command): void {
         console.log(`Alexi server listening on ${handle.socketPath}`);
         console.log(`Auth token file: ${tokenPath}`);
 
-        const shutdown = async (): Promise<void> => {
+        // Bounded shutdown deadline (kilocode #14823): a stuck connection
+        // on `handle.stop()` could otherwise hang the process indefinitely
+        // on SIGINT/SIGTERM. The force-exit fallback keeps shutdown time
+        // bounded at SHUTDOWN_DEADLINE_MS so systemd / orchestration
+        // layers get a predictable upper bound.
+        const SHUTDOWN_DEADLINE_MS = 10_000;
+        let shuttingDown = false;
+        const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
+          if (shuttingDown) {
+            return;
+          }
+          shuttingDown = true;
+          console.log(`Received ${sig}, shutting down...`);
+          const forceExit = setTimeout(() => {
+            console.error(
+              `Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`
+            );
+            process.exit(1);
+          }, SHUTDOWN_DEADLINE_MS);
+          // `unref` so the force-exit timer itself does not keep the
+          // event loop alive past a successful graceful shutdown.
+          forceExit.unref?.();
           try {
             await handle.stop();
+          } catch (e) {
+            console.error(
+              `Shutdown error: ${e instanceof Error ? e.message : String(e)}`
+            );
           } finally {
+            clearTimeout(forceExit);
             process.exit(0);
           }
         };
-        process.once('SIGINT', shutdown);
-        process.once('SIGTERM', shutdown);
+        process.once('SIGINT', () => void shutdown('SIGINT'));
+        process.once('SIGTERM', () => void shutdown('SIGTERM'));
       } catch (e) {
         console.error(`Failed to start server: ${e instanceof Error ? e.message : String(e)}`);
         process.exit(1);

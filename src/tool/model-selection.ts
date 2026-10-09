@@ -103,9 +103,20 @@ export function lookup(all: Candidate[], value: string): { pool: Candidate[]; na
     return { pool: [], names: [] };
   }
 
-  const exactId = all.filter(
-    (item) => `${item.providerID}/${item.model.id}`.toLowerCase() === query
-  );
+  // Guard against malformed `provider/model` queries that would produce
+  // an empty half after `split('/')`. Upstream kilocode #14037: when a
+  // user supplies a bare model name (e.g. `codestral`) or a display
+  // name containing a slash (`codestral (latest)`), naive splitters
+  // yield an empty modelID and the exact-match path silently fails.
+  // We detect that case and skip the qualified-match tier so the name
+  // / fuzzy tiers below can still resolve the model.
+  const slashIdx = query.indexOf('/');
+  const qualifiedMatchable =
+    slashIdx === -1 || (slashIdx > 0 && slashIdx < query.length - 1);
+
+  const exactId = qualifiedMatchable
+    ? all.filter((item) => `${item.providerID}/${item.model.id}`.toLowerCase() === query)
+    : [];
   const exactName =
     exactId.length > 0 ? exactId : all.filter((item) => item.model.name.toLowerCase() === query);
 
