@@ -3527,6 +3527,202 @@ Without the hook, retried streams concatenate the retried turn's reasoning onto 
 - A thrown `finalize()` is swallowed with a warning. The retry proceeds because a failed cleanup emit must never turn a recoverable transient into a permanent failure.
 - Hook errors thrown out of `onRetry` itself are also swallowed with a warning for the same reason.
 
+## Embedding Dimension-Retry (`src/providers/embeddings.ts`, `src/providers/embedding-cache.ts`)
+
+Introduced in commit `8160c9ef` (`feat(providers): add embedding dimension-retry for OpenAI-compatible endpoints`, Alexi issue #1968, ports kilocode PR #14921). Several OpenAI-compatible embedding servers that Alexi can be pointed at via `SAP_PROXY_*` or a local override — LM Studio, Ollama's OpenAI adapter, and vLLM — reject the optional `dimensions` request parameter with HTTP `400` or `422`. The retry helper transparently reissues the request without that parameter, validates the returned vector length against the configured dimension, and persists a per-model hint so the doomed first attempt is skipped on subsequent calls.
+
+The helper is transport-agnostic: it accepts an `EmbeddingClient` function and does not import the SAP AI SDK directly, so the same policy applies whether the embedding backend is the dedicated `text-embedding-ada-002` SAP deployment or a local OpenAI-compatible server fronted by `SAP_PROXY_BASE_URL`.
+
+### Policy
+
+1. Consult the per-model `DimensionCache` (`src/providers/embedding-cache.ts`). If the model has previously rejected `dimensions`, send the request WITHOUT it on the first attempt.
+2. Otherwise send the request WITH `dimensions`.
+3. If that first attempt fails with HTTP `400` or `422` (`DIMENSION_REJECT_STATUS_CODES`), retry WITHOUT `dimensions`.
+4. Validate the returned vector length against the requested `dimensions`. A mismatch raises `EmbeddingDimensionMismatchError` — using a wrong-length vector against an existing index is never acceptable.
+5. On a successful retry, record the omission in the cache (and, by default, persist to `~/.alexi/embedding-cache.json`) so future calls skip step 2.
+
+Non-400/422 errors are rethrown unchanged. Retrying an auth or network failure without `dimensions` would not help and would risk caching a wrong hint.
+
+### Public surface
+
+Re-exported from `src/providers/index.ts`:
+
+```typescript
+// From src/providers/embeddings.ts
+export const DIMENSION_REJECT_STATUS_CODES: readonly number[] = [400, 422];
+
+export interface EmbeddingRequest {
+  model: string;
+  input: string;
+  dimensions?: number;
+}
+
+export type EmbeddingClient = (request: EmbeddingRequest) => Promise<number[]>;
+
+export interface RequestEmbeddingOptions {
+  model: string;
+  input: string;
+  dimensions: number;
+  cache: DimensionCache;
+  client: EmbeddingClient;
+  /** Default: true. Set false to batch persistence at the call site. */
+  persist?: boolean;
+}
+
+export function requestEmbedding(options: RequestEmbeddingOptions): Promise<number[]>;
+export function isDimensionRejectError(err: unknown): boolean;
+
+export class EmbeddingDimensionMismatchError extends Error {
+  readonly model: string;
+  readonly expected: number;
+  readonly actual: number;
+}
+
+// From src/providers/embedding-cache.ts
+export const DEFAULT_EMBEDDING_CACHE_PATH: string; // ~/.alexi/embedding-cache.json
+
+export class DimensionCache {
+  constructor(filePath?: string);
+  shouldOmit(model: string): boolean;
+  recordOmission(model: string): void;
+  clear(model: string): void;
+  clearAll(): void;
+  entries(): ReadonlyMap<string, boolean>;
+  load(): void;
+  save(): void;
+}
+
+export function getSharedDimensionCache(): DimensionCache;
+/** @internal — test-only swap of the module-level singleton. */
+export function resetSharedDimensionCache(filePath?: string): DimensionCache;
+```
+
+### Error classification
+
+`isDimensionRejectError` accepts the four error shapes real transports throw:
+
+- `{ status: 400 }` — native `fetch` / undici style.
+- `{ statusCode: 422 }` — older HTTP libraries.
+- `{ response: { status: 400 } }` — axios style.
+- `new Error('HTTP 400: unknown field dimensions')` — plain message. The message test is deliberately conservative: it requires BOTH a `400` / `422` status indicator AND an explicit mention of `dimensions`. A bare `400 bad request` string does NOT match, so unrelated validation failures are not silently retried.
+
+Unrelated statuses (`401`, `500`) and network failures (`ECONNRESET`) always return `false`.
+
+### Cache file (`~/.alexi/embedding-cache.json`)
+
+```json
+{
+  "version": 1,
+  "omitDimensions": {
+    "text-embedding-nomic-local": true
+  }
+}
+```
+
+The file is strictly a hint:
+
+- **Missing file**: silently initialises an empty cache.
+- **Corrupt JSON or wrong schema**: silently ignored; the in-memory cache is unchanged and the next successful write overwrites the broken file.
+- **Permission errors on write**: swallowed. The next request pays one wasted round trip and then re-learns the omission, but still produces a correct vector.
+
+The parent directory is created on demand on first write via `fs.mkdirSync(dir, { recursive: true })`.
+
+### Call-flow diagram
+
+```mermaid
+sequenceDiagram
+    participant Caller as Codesearch / embedding consumer
+    participant Helper as requestEmbedding
+    participant Cache as DimensionCache
+    participant Client as EmbeddingClient (SAP / local)
+
+    Caller->>Helper: { model, input, dimensions, cache, client }
+    Helper->>Cache: shouldOmit(model)?
+    alt Hint present
+        Cache-->>Helper: true
+        Helper->>Client: { model, input }  (no dimensions)
+        Client-->>Helper: vector
+    else No hint
+        Cache-->>Helper: false
+        Helper->>Client: { model, input, dimensions }
+        alt 400 / 422
+            Client-->>Helper: HTTP 4xx (dimensions rejected)
+            Helper->>Client: retry { model, input }
+            Client-->>Helper: vector
+            Helper->>Cache: recordOmission(model) + save()
+        else other error
+            Client-->>Helper: throw
+            Helper-->>Caller: rethrow (unchanged)
+        end
+    end
+    Helper->>Helper: vector.length === dimensions ?
+    alt mismatch
+        Helper-->>Caller: throw EmbeddingDimensionMismatchError
+    else ok
+        Helper-->>Caller: vector
+    end
+```
+
+### Codesearch integration
+
+`src/tool/tools/codesearch.ts:525` exports a thin wrapper that pins the shared singleton cache so repeat tool invocations in the same CLI session accrue hints:
+
+```typescript
+import { requestEmbedding, type EmbeddingClient } from '../../providers/embeddings.js';
+import { getSharedDimensionCache, type DimensionCache } from '../../providers/embedding-cache.js';
+
+export async function requestCodeEmbedding(
+  model: string,
+  input: string,
+  dimensions: number,
+  client: EmbeddingClient,
+  cache: DimensionCache = getSharedDimensionCache()
+): Promise<number[]> {
+  return requestEmbedding({ model, input, dimensions, cache, client });
+}
+```
+
+Codesearch is regex-only today; this helper is the pre-wired integration point for the future semantic-search path, so the first time a semantic query runs against an OpenAI-compatible local server the retry is already in place and the cache begins accumulating hints without a code change.
+
+### Usage pattern
+
+```typescript
+import {
+  requestEmbedding,
+  getSharedDimensionCache,
+  type EmbeddingClient,
+} from 'alexi/providers';
+
+const client: EmbeddingClient = async ({ model, input, dimensions }) => {
+  const res = await fetch(`${baseUrl}/v1/embeddings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, input, ...(dimensions ? { dimensions } : {}) }),
+  });
+  if (!res.ok) {
+    const err = new Error(`HTTP ${res.status}: ${await res.text()}`);
+    (err as { status?: number }).status = res.status;
+    throw err;
+  }
+  const body = (await res.json()) as { data: Array<{ embedding: number[] }> };
+  return body.data[0].embedding;
+};
+
+const vector = await requestEmbedding({
+  model: 'text-embedding-nomic-local',
+  input: 'hello',
+  dimensions: 768,
+  cache: getSharedDimensionCache(),
+  client,
+});
+```
+
+### Guarantees
+
+- **No silent correctness loss.** A short vector always throws `EmbeddingDimensionMismatchError` — callers cannot accidentally insert a 384-float vector into a 768-dimension index.
+- **No wasted retries for permanent failures.** Only HTTP `400` / `422` triggers the retry. Auth (`401`/`403`), rate-limit (`429`), server errors (`5xx`), and network failures (`ECONNRESET`, `ETIMEDOUT`) propagate unchanged and are handled by the surrounding `ErrorBackoff` layer per [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix).
+- **Hint, never required.** Every disk operation is best-effort. A missing, corrupt, or unwritable cache file degrades to "pay one wasted round trip" — never a failed request.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

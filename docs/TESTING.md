@@ -10315,3 +10315,72 @@ Fixtures use the pre-existing `SELF_SESSION` / `BOARD_ID` constants and the `ctx
 ```bash
 npm test -- tests/tool/tools/board-write-recipient.test.ts
 ```
+
+## Testing the Embedding Dimension-Retry Pipeline
+
+Added in commit `8160c9ef` (`feat(providers): add embedding dimension-retry for OpenAI-compatible endpoints`, Alexi issue #1968, ports kilocode PR #14921). The suite in `tests/tool/tools/codesearch-dimension-retry.test.ts` (478 lines, 5 describe blocks) pins the retry policy, vector-length validation, cache persistence, and the shared integration point exported from `src/tool/tools/codesearch.ts`.
+
+See [docs/PROVIDERS.md — Embedding Dimension-Retry](PROVIDERS.md#embedding-dimension-retry-srcprovidersembeddingsts-srcprovidersembedding-cachets) for the policy under test.
+
+### What the suite covers
+
+1. **Error classification (`isDimensionRejectError`).** The four shapes real transports throw — `{ status: 400 }` (undici / native `fetch`), `{ statusCode: 422 }` (older libraries), `{ response: { status: 400 } }` (axios), and a plain `Error('HTTP 400: unknown field dimensions')`. Negative cases pin that unrelated statuses (`401`, `500`), network failures (`ECONNRESET`), and a bare `400 bad request` string without a `dimensions` mention are NOT misclassified as retryable. Non-object inputs (`null`, `undefined`, strings, numbers) return `false` without throwing.
+2. **Happy path (`requestEmbedding`).** The first attempt carries `dimensions`, succeeds, and does NOT populate the cache (`cache.shouldOmit(model) === false` afterwards).
+3. **400 and 422 recovery.** Both status codes trigger exactly one retry without `dimensions`. The suite asserts the request transcript: `seen[0].dimensions === DIMS`, `seen[1].dimensions === undefined`, and the cache gains the omission entry.
+4. **Cache-hit short-circuit.** When the cache is primed with `cache.recordOmission(model)` before the call, the client sees exactly one request with `dimensions === undefined` — the doomed first attempt is skipped.
+5. **Dimension-mismatch validation.** A client returning a vector of length `DIMS + 1` for a `dimensions: DIMS` request throws `EmbeddingDimensionMismatchError`. This is the hard-error guard that keeps a wrong-length vector from being accepted against an existing index.
+6. **Permanent-failure propagation.** HTTP `401` (and by extension any non-400/422 status) is rethrown unchanged — no retry, no cache mutation. This is the invariant that keeps the retry from being wasted on auth or routing errors.
+7. **Programmer-error guard.** `dimensions: 0` and `dimensions: 1.5` throw `TypeError` before any network traffic.
+8. **Persistence toggle.** `persist: true` (default) writes `~/.alexi/embedding-cache.json` so a fresh `DimensionCache.load()` from another test instance observes the omission; `persist: false` leaves disk untouched. The suite pins both branches.
+9. **`DimensionCache` round-trip.** `save` → `load` restores entries; `save` creates the parent directory on demand (`fs.existsSync(path.join(tempDir, 'nested', 'dir', 'embedding-cache.json')) === true`); a missing file loads cleanly; a corrupt `'{not valid json'` file loads cleanly; a `{ version: 99, ... }` file (unknown schema) is silently ignored. `clear(model)` removes one entry; `clearAll()` wipes memory without touching disk.
+10. **Codesearch wrapper.** `requestCodeEmbedding(model, input, dimensions, client, cache)` from `src/tool/tools/codesearch.ts` delegates to `requestEmbedding` with the supplied cache, and the client is called exactly once with `dimensions === DIMS` on the happy path.
+11. **Integration against a mock dimension-rejecting server.** A real `http.createServer` is spun up on `127.0.0.1:0` that returns `400 { error: { message: "'dimensions' is not supported by this model" } }` whenever `dimensions` is present and a valid OpenAI-shape payload otherwise. The suite pins two cases:
+    - First call hits the server twice (`hitCount === 2`), the final hit carries no `dimensions`, and the cache records the omission.
+    - A second call with the same cache hits the server exactly once (`hitCount === 1`), without `dimensions`, confirming the hint survives across requests.
+
+### Fixture patterns to reuse
+
+**Per-test temp directory.** Every describe block creates its own temp dir with `fs.mkdtemp(path.join(os.tmpdir(), 'dim-retry-'))` in `beforeEach` and tears it down with `fs.rm(..., { recursive: true, force: true })` in `afterEach`. Each `DimensionCache` is rooted at `<tempDir>/embedding-cache.json` via a `freshCache(dir)` factory, so parallel vitest workers never collide and the test file never touches `~/.alexi/`.
+
+```typescript
+beforeEach(async () => {
+  tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dim-retry-'));
+  cache = freshCache(tempDir);
+});
+
+afterEach(async () => {
+  await fsp.rm(tempDir, { recursive: true, force: true });
+});
+```
+
+**Request-transcript recording.** Rather than mocking per-call return values, the client captures every invocation into a `seen: EmbeddingRequest[]` array. Assertions then compare the transcript (`seen.length`, `seen[0].dimensions`, `seen[1].dimensions`). This catches both "retried the wrong way" (second attempt still carried `dimensions`) and "retried when it should not have" (second attempt made at all) with the same primitive.
+
+```typescript
+const seen: EmbeddingRequest[] = [];
+const client: EmbeddingClient = async (req) => {
+  seen.push(req);
+  if (req.dimensions !== undefined) {
+    throw Object.assign(new Error('unknown field dimensions'), { status: 400 });
+  }
+  return fakeVector(DIMS);
+};
+```
+
+**Deterministic fake vectors.** `fakeVector(length)` returns `Array.from({ length }, (_, i) => i / length)` so tests can assert on `vec.length` without caring about exact float values but still get a stable comparison surface for debugging.
+
+**Real HTTP server over a mock.** The integration describe block uses `http.createServer(...).listen(0, '127.0.0.1', ...)` and resolves the ephemeral port from `server.address() as AddressInfo`. The test uses the global `fetch` so no transport is mocked — this is the layer that catches regressions where the retry contract is broken by a header or body-encoding change the pure-function tests would miss.
+
+**Isolate the shared singleton.** When a test needs to touch `getSharedDimensionCache()`, call `resetSharedDimensionCache(path.join(tempDir, 'cache.json'))` first — this test-only hook swaps the module-level singleton for a fresh instance rooted at the temp path. Never call `getSharedDimensionCache()` in a test without resetting it, or state will leak into the next test file.
+
+### Guarantees the suite enforces
+
+- **No silent correctness loss.** A short vector always throws `EmbeddingDimensionMismatchError`.
+- **No wasted retries.** Only HTTP `400` / `422` triggers the retry; `401`, `500`, and network errors propagate unchanged.
+- **Hint, never required.** Missing / corrupt / wrong-schema cache files degrade to "pay one wasted round trip", never a failed request.
+- **Programmer errors fail fast.** Non-positive-integer dimensions throw `TypeError` before any network traffic.
+
+### Running
+
+```bash
+npm test -- tests/tool/tools/codesearch-dimension-retry.test.ts
+```
