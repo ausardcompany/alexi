@@ -656,6 +656,60 @@ type Refresher = () => Promise<void>;
 
 See [ARCHITECTURE.md — `/reload` Command Primitive](ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts) for the design contract.
 
+### server
+
+Manage the local UNIX socket server that exposes Alexi's slash command surface to remote clients (VS Code extension, JetBrains plugin, test harnesses). Registered by `src/cli/commands/server.ts`. The full wire protocol lives in [`docs/SERVER.md`](SERVER.md).
+
+```bash
+alexi server start   [-s, --socket <path>]
+alexi server stop    [-s, --socket <path>]
+alexi server status  [-s, --socket <path>] [--json]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `start` | Bind the socket, generate a token if needed, and block the current process until `SIGINT` / `SIGTERM`. On signal, runs the bounded shutdown sequence described below and exits `0`. |
+| `stop` | If a server is reachable, send an `exit` frame; if the socket file is stale, unlink it. To fully stop a running daemon the operator must still signal the server process itself (`SIGTERM` to the PID). |
+| `status` | Report whether a server is reachable on the socket path. With `--json`, emits `{ socketPath, exists, alive }`. |
+
+#### Server Shutdown API (`shutdownWithDeadline`, issue #1979)
+
+The `SIGINT` / `SIGTERM` handler installed by `registerServerCommand` races `handle.stop()` plus `killAllTracked()` against a 30-second deadline so a hanging subsystem cannot block the handler indefinitely. The helper is exported for programmatic callers that embed the socket server (e.g. the HTTP server mode, scheduled retention workers, test harnesses) and need the same bounded shutdown contract without re-implementing the race.
+
+```typescript
+import {
+  DEFAULT_SHUTDOWN_DEADLINE_MS,
+  shutdownWithDeadline,
+  type ShutdownTarget,
+} from './cli/commands/server.js';
+
+// The timeout defaults to DEFAULT_SHUTDOWN_DEADLINE_MS (30_000). Pass
+// a shorter timeout from tests or short-lived embedding hosts.
+const result = await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
+if (result.timedOut) {
+  // handle.stop() or killAllTracked() hung past the deadline. Stderr
+  // already carries "Server shutdown exceeded <ms>ms deadline, forcing
+  // exit" and the IDs of any still-tracked background processes.
+}
+// The helper never calls process.exit — the caller decides.
+process.exit(0);
+```
+
+Public surface:
+
+- `DEFAULT_SHUTDOWN_DEADLINE_MS: 30_000` — the default deadline in milliseconds. Chosen to stay well below the ~10s SIGKILL grace schedule used by Docker and systemd defaults after the first `SIGTERM`.
+- `interface ShutdownTarget { stop(): Promise<void> }` — minimal shape the helper requires. Defined locally so tests can supply a fake handle without importing the full `SocketServerHandle` interface (and dragging the server module graph into tests that only exercise shutdown timing).
+- `shutdownWithDeadline(handle: ShutdownTarget, timeoutMs?: number): Promise<{ timedOut: boolean }>` — races `Promise.allSettled([handle.stop(), killAllTracked()])` against a `setTimeout(timeoutMs)` deadline. The timer is `unref()`-ed so it never keeps the event loop alive on its own. Resolves `{ timedOut: false }` on clean shutdown; on timeout logs `Server shutdown exceeded <ms>ms deadline, forcing exit[ (timed-out processes: id(pid=P), ...)]` to stderr and resolves `{ timedOut: true }`. **Never calls `process.exit`** — the caller is responsible for terminating the process after awaiting the returned promise.
+
+Behaviour contract:
+
+- **`Promise.allSettled`, not `Promise.all`.** A misbehaving `handle.stop()` cannot prevent `killAllTracked()` from running, and vice versa. If `stop()` rejects while `killAllTracked()` resolves within the deadline, the overall shutdown still reports `{ timedOut: false }`.
+- **The deadline is strict `<`.** A `stop()` that resolves at exactly `deadline - 1 ms` is considered clean; a `stop()` that resolves at the deadline tick itself races the timer non-deterministically and the regression suite pins the clean side at `deadline - 1 ms` to document the ordering.
+- **The suffix is conditional.** `listBackgroundProcesses()` is read only on the timeout branch; an empty list omits the `(timed-out processes: ...)` suffix entirely so a stuck `stop()` with no background work still logs a readable sentence.
+- **No signal is sent by the helper.** The caller controls the signal surface. `registerServerCommand` installs `process.once('SIGINT', shutdown)` + `process.once('SIGTERM', shutdown)`; a second signal of either kind bypasses the deadline and lets the Node runtime terminate normally.
+
+See [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979) for the design flow and [docs/TESTING.md — Testing the server shutdown deadline](TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer regression pattern.
+
 ### code-review
 
 Run a structured correctness-bug review over the current `git diff`. The command reuses the

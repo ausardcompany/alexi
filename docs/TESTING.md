@@ -10373,3 +10373,46 @@ npm test -- tests/cli/dead-flags.test.ts
 ```
 
 The suite completes in under a second because none of the cases boot the TUI, the orchestrator, or the agent loop — they only exercise Commander's option parser against three in-isolation registrars.
+
+## Testing the server shutdown deadline (issue #1979)
+
+The 30-second shutdown deadline added by commit `3fc1090a feat(server): add 30s shutdown deadline to server start command` is pinned by `src/cli/commands/__tests__/server.shutdown.test.ts` (77 lines, four cases). The suite covers the force-exit branch, the clean-shutdown branch, the strict `<` deadline boundary, and the `DEFAULT_SHUTDOWN_DEADLINE_MS === 30_000` constant. See [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979) for the design flow and [docs/API.md — Server Shutdown API](API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the public surface.
+
+### Fake-timer pattern
+
+`vi.useFakeTimers()` lets a single test case advance 30 virtual seconds in a microtask without waiting the wall-clock duration. The suite also spies on `console.error` so the force-exit sentence can be asserted without clobbering real stderr during the test run:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_SHUTDOWN_DEADLINE_MS, shutdownWithDeadline } from '../server.js';
+
+describe('shutdownWithDeadline', () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    errSpy.mockRestore();
+  });
+  // ...
+});
+```
+
+### Cases
+
+- **Clean shutdown resolves `{ timedOut: false }`.** The handle's `stop()` is a `vi.fn(async () => {})`; the test calls `shutdownWithDeadline(handle, 30_000)`, flushes pending microtasks with `await vi.advanceTimersByTimeAsync(0)` so `Promise.allSettled` observes the already-resolved `stop()` before racing the timer, and asserts `{ timedOut: false }`, that `stop` was called exactly once, and that `console.error` was never called. The microtask flush is deliberate — without it, the real `Promise.race` could race against the fake timer in a nondeterministic order.
+- **Hanging `stop()` triggers the force-exit log.** The handle supplies `stop: vi.fn(() => new Promise<void>(() => {}))` (a promise that never resolves). The test calls `shutdownWithDeadline(handle, 30_000)`, awaits `vi.advanceTimersByTimeAsync(30_000)` to drive the timer, and asserts `{ timedOut: true }`, that `console.error` was called exactly once, and that the captured message includes the substring `Server shutdown exceeded 30000ms deadline, forcing exit`. The suffix with timed-out process IDs is not asserted here because the vitest worker has no tracked background processes — the base sentence is the stable part of the contract.
+- **No early timeout at `deadline - 1 ms`.** The handle's `stop()` resolves via `setTimeout(resolve, 29_999)`. The test calls `shutdownWithDeadline(handle, 30_000)`, awaits `vi.advanceTimersByTimeAsync(29_999)`, and asserts `{ timedOut: false }` with no `console.error`. This pins the strict `<` boundary — a `stop()` that resolves on the deadline tick itself is explicitly out of scope and the regression suite does not assert either outcome for that case.
+- **`DEFAULT_SHUTDOWN_DEADLINE_MS === 30_000`.** A one-line constant check guards the numeric value so a careless refactor (`30_000` -> `3_000` or `300_000`) fails fast at review time instead of surfacing as a production incident.
+
+### Running
+
+```bash
+npm test -- src/cli/commands/__tests__/server.shutdown.test.ts
+```
+
+The suite completes in milliseconds because the fake-timer scheduler never waits the real 30 seconds. It is parallel-safe — no filesystem, no network, no shared global state — so it stays in the default vitest pool.

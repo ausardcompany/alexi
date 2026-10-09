@@ -10,9 +10,75 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import type { Command } from 'commander';
+import { killAllTracked, listBackgroundProcesses } from '../../tool/tools/background-process.js';
 // Server modules (socket, auth, protocol, built-in slash commands) are
 // loaded lazily per-subcommand — see #1769 — so callers of unrelated
 // commands do not pay for the server module graph.
+
+/**
+ * Default deadline (in milliseconds) for the SIGINT / SIGTERM shutdown
+ * sequence. Chosen to stay well below the ~10s SIGKILL grace period used
+ * by Docker and systemd defaults, while still leaving ample room for a
+ * normal `handle.stop()` + `killAllTracked()` cycle which typically
+ * completes in under a second.
+ */
+export const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
+
+/**
+ * Minimal shape of the socket-server handle this module needs for
+ * shutdown. Defined locally so tests can supply a fake handle without
+ * importing the full `SocketServerHandle` interface (and dragging the
+ * server module graph into tests that only exercise shutdown timing).
+ */
+export interface ShutdownTarget {
+  stop(): Promise<void>;
+}
+
+/**
+ * Race `handle.stop()` and {@link killAllTracked} against a hard
+ * `timeoutMs` deadline. Resolves `{ timedOut: false }` on a clean
+ * shutdown; on timeout, logs the message
+ * `"Server shutdown exceeded <ms>ms deadline, forcing exit"` plus the
+ * IDs of any still-tracked background processes, and resolves
+ * `{ timedOut: true }`.
+ *
+ * The caller is responsible for calling `process.exit(0)` after this
+ * promise settles — this helper never calls `process.exit` itself so
+ * tests can exercise the timeout branch without tearing down the
+ * vitest worker.
+ *
+ * Shutdown and `killAllTracked` are run with `Promise.allSettled` so a
+ * misbehaving `stop()` cannot prevent background cleanup, and vice
+ * versa. Modeled on kilocode PR #14830.
+ */
+export async function shutdownWithDeadline(
+  handle: ShutdownTarget,
+  timeoutMs: number = DEFAULT_SHUTDOWN_DEADLINE_MS
+): Promise<{ timedOut: boolean }> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+    // Do not keep the event loop alive solely for the deadline timer —
+    // this matters when the caller does not call `process.exit` (tests).
+    timer.unref?.();
+  });
+  const shutdown: Promise<'done'> = Promise.allSettled([handle.stop(), killAllTracked()]).then(
+    () => 'done' as const
+  );
+
+  const result = await Promise.race([shutdown, timeout]);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+
+  if (result === 'timeout') {
+    const stragglers = listBackgroundProcesses().map((p) => `${p.id}(pid=${p.pid})`);
+    const suffix = stragglers.length > 0 ? ` (timed-out processes: ${stragglers.join(', ')})` : '';
+    console.error(`Server shutdown exceeded ${timeoutMs}ms deadline, forcing exit${suffix}`);
+    return { timedOut: true };
+  }
+  return { timedOut: false };
+}
 
 interface ServerStartOptions {
   socket?: string;
@@ -101,12 +167,11 @@ export function registerServerCommand(program: Command): void {
         console.log(`Alexi server listening on ${handle.socketPath}`);
         console.log(`Auth token file: ${tokenPath}`);
 
-        // Bounded shutdown deadline (kilocode #14823): a stuck connection
-        // on `handle.stop()` could otherwise hang the process indefinitely
-        // on SIGINT/SIGTERM. The force-exit fallback keeps shutdown time
-        // bounded at SHUTDOWN_DEADLINE_MS so systemd / orchestration
-        // layers get a predictable upper bound.
-        const SHUTDOWN_DEADLINE_MS = 10_000;
+        // Bounded shutdown (kilocode #14823, kilocode #14830): a stuck
+        // `handle.stop()` or `killAllTracked()` could otherwise hang the
+        // process indefinitely on SIGINT/SIGTERM. `shutdownWithDeadline`
+        // races both against `DEFAULT_SHUTDOWN_DEADLINE_MS` and logs
+        // stragglers on timeout; the caller still owns `process.exit`.
         let shuttingDown = false;
         const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
           if (shuttingDown) {
@@ -114,19 +179,9 @@ export function registerServerCommand(program: Command): void {
           }
           shuttingDown = true;
           console.log(`Received ${sig}, shutting down...`);
-          const forceExit = setTimeout(() => {
-            console.error(`Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`);
-            process.exit(1);
-          }, SHUTDOWN_DEADLINE_MS);
-          // `unref` so the force-exit timer itself does not keep the
-          // event loop alive past a successful graceful shutdown.
-          forceExit.unref?.();
           try {
-            await handle.stop();
-          } catch (e) {
-            console.error(`Shutdown error: ${e instanceof Error ? e.message : String(e)}`);
+            await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
           } finally {
-            clearTimeout(forceExit);
             process.exit(0);
           }
         };
