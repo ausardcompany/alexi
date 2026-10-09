@@ -13,6 +13,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
   - [Testing gray-matter Cache Poisoning Regression (issue #1945)](#testing-gray-matter-cache-poisoning-regression-issue-1945)
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
+- [Testing hook dispatcher coverage per `HookEvent`](#testing-hook-dispatcher-coverage-per-hookevent-testshooksdispatcher-coveragetestts)
 - [Testing Compaction](#testing-compaction)
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
@@ -5210,6 +5211,7 @@ The 2-second deadline keeps the test from hanging the suite when the SDK fails t
 
 - `tests/hooks/blockCap.test.ts` -- Tests consecutive Stop hook rejection cap
 - `tests/hooks/continueOnBlock.test.ts` -- Tests rejection feedback to model
+- `tests/hooks/dispatcher-coverage.test.ts` -- Pins that `HookManagerImpl.execute()` dispatches every `HookEvent` without falling through to an unknown branch (see [Testing hook dispatcher coverage per `HookEvent`](#testing-hook-dispatcher-coverage-per-hookevent-testshooksdispatcher-coveragetestts))
 
 ### Testing Block Cap
 
@@ -10373,3 +10375,83 @@ npm test -- tests/cli/dead-flags.test.ts
 ```
 
 The suite completes in under a second because none of the cases boot the TUI, the orchestrator, or the agent loop — they only exercise Commander's option parser against three in-isolation registrars.
+
+## Testing hook dispatcher coverage per `HookEvent` (`tests/hooks/dispatcher-coverage.test.ts`)
+
+The 2026-10-09 dispatcher-coverage audit (commit `db38119d test(tools): audit hook dispatcher coverage for all HookEvent types`) pins a contract that is easy to break on refactor: every event declared in the `HookEvent` union (`src/hooks/index.ts:24-32`) must be dispatched by `HookManagerImpl.execute()` without falling through to an unknown branch.
+
+### Why this suite exists
+
+Context from upstream: Cline PR #14945 (2026-10-09) fixed a dispatcher that fell through to a default branch for one event type (`agent_error`), returning a non-JSON failure instead of an empty-object success. Alexi's hook runtime is architected differently — event dispatch routes through a `Map<HookEvent, HookDefinition[]>` and then branches on `hook.type` (`command` / `http` / `script`), so there is no per-event switch that can silently drop an event. The suite pins that structural property by exercising the dispatcher once per event in the union: a future refactor that re-introduces a per-event switch (and forgets a case) fails the suite instead of regressing silently.
+
+### Suite shape
+
+Three nested `describe` blocks drive the same event list across different registration states, plus a fourth block that exercises the unknown-type default branch deliberately:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { HookManagerImpl, type HookContext, type HookEvent } from '../../src/hooks/index.js';
+
+/** Every event in the `HookEvent` union. Keep in sync with src/hooks/index.ts L24-32. */
+const ALL_EVENTS: HookEvent[] = [
+  'SessionStart',
+  'SessionEnd',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PermissionRequest',
+  'Stop',
+  'Error',
+];
+
+describe('Hook dispatcher coverage: every HookEvent type', () => {
+  let manager: HookManagerImpl;
+
+  beforeEach(() => {
+    manager = new HookManagerImpl();
+  });
+
+  afterEach(() => {
+    manager.clear();
+  });
+
+  describe('empty registry: dispatcher returns [] without throwing', () => {
+    for (const event of ALL_EVENTS) {
+      it(`returns [] for ${event} when no hooks registered`, async () => {
+        const context: HookContext = { event, timestamp: Date.now() };
+        const results = await manager.execute(event, context);
+        expect(results).toEqual([]);
+      });
+    }
+  });
+  // ... (command and http blocks follow)
+});
+```
+
+### Cases
+
+- **Empty registry (8 cases, one per event).** For every event in `ALL_EVENTS`, calling `manager.execute(event, ctx)` with no registered hooks returns `[]` and does not throw. This is the trivial-but-load-bearing baseline — a regression that threw on an unregistered event would propagate up through the orchestrator and break every tool call.
+- **Registered `command` hook (8 cases, one per event).** For each event, register a `type: 'command'` hook that runs `echo ok`, call `manager.execute(event, ctx)`, and assert:
+  - `results` has length `1`
+  - `result.success === true`
+  - `result.output?.trim() === 'ok'`
+  - `result.error ?? ''` does NOT match `/Unknown hook type/` — this is the structural proof that the dispatcher didn't fall through to the default branch
+  - `typeof result.duration === 'number'` so the timing field stays well-formed
+- **Registered `http` hook (5 cases, one per event in `httpCompatible`).** For `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, and `Stop`, stub `globalThis.fetch` via `vi.stubGlobal('fetch', ...)` to return `{ ok: true, status: 200, text: () => Promise.resolve('{}') }`, register a `type: 'http'` hook, and assert the dispatcher ran it once and surfaced `result.output === '{}'`. `SessionStart`, `SessionEnd`, and `Error` are command-only by design (see `COMMAND_ONLY_EVENTS` in `src/hooks/index.ts`) and are therefore covered only by the command-hook block above.
+- **Unknown hook type: default branch is safe (1 case).** Register a valid `type: 'command'` hook on `PostToolUse`, then mutate its `type` to `'bogus'` via `(registered as unknown as { type: string }).type = 'bogus'` to simulate a corrupted registry entry (or a future type the dispatcher does not know). Assert the dispatcher returns one result with `success: false` and `error` containing `'Unknown hook type'`. This case pins that the default branch is wired for safety — a regression that threw inside the dispatcher instead of returning a structured failure would break every call site that assumes `execute()` resolves with a `HookResult[]`.
+
+### Patterns worth internalising
+
+1. **Enumerate the union in a `const` tuple.** `ALL_EVENTS: HookEvent[]` is typed against the exported union, so adding a new event to `HookEvent` without extending `ALL_EVENTS` fails typecheck immediately — the suite is self-updating by construction.
+2. **Clear state in `afterEach`.** `HookManagerImpl` holds a module-local `Map<HookEvent, HookDefinition[]>` across cases via its instance; `manager.clear()` keeps the per-event loops hermetic. Without it, a case that registers two hooks for `PostToolUse` would leak into the next case's assertions on `results.length`.
+3. **Stub `fetch` globally only for the http block.** `vi.stubGlobal('fetch', mockFetch)` + `vi.unstubAllGlobals()` inside each case keeps the stub scoped and parallel-safe. Hoisting the stub to `beforeEach` would silently affect any other suite running in parallel.
+4. **Assert on `result.error` NOT matching the fallthrough substring, not on `result.success` alone.** A regression that routed every event through the unknown-type branch would still produce `success: false` with a well-formed shape; the only way to catch it specifically is to pin the error-message negation (`expect(result.error ?? '').not.toMatch(/Unknown hook type/)`).
+5. **Keep the unknown-type case deliberate.** The suite does NOT accidentally hit the default branch — the `'bogus'` type is set via an explicit `as unknown as { type: string }` cast after a valid registration, so the branch is exercised on purpose and the assertion documents what the branch returns.
+
+### Running
+
+```bash
+npm test -- tests/hooks/dispatcher-coverage.test.ts
+```
+
+The suite completes in well under a second — it mocks `fetch`, uses `echo ok` for the command cases (so the child process exits immediately), and never touches the SAP AI Core SDK, the filesystem beyond `echo`, or the TUI.
