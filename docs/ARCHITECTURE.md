@@ -194,6 +194,70 @@ The rejection contract (unknown-option exit for each removed flag) is pinned by 
 
 > **Not part of the CLI surface (2026-07-26 sync noise):** the 2026-07-26 upstream sync (commit `0985297e`) emitted a 5-line orphan file `src/cli/remote.ts` containing a non-exported `executeRemoteCommand(command: string): void` function that references an undeclared `isValidCommand` free identifier. It is **not** wired into `src/cli/program.ts`, does not correspond to any `alexi <subcommand>` on the [CLI Commands](API.md#cli-commands) reference, and fails `npm run typecheck` with `TS2304: Cannot find name 'isValidCommand'`. There is no `alexi remote` subcommand; remote LLM invocation goes through the SAP AI Core Orchestration provider (`src/providers/sapOrchestration.ts`), and remote MCP tool surfaces live under `src/mcp/`. The stub is pending autohealing deletion; see the CHANGELOG `### Added` entry for 2026-07-26.
 
+#### Server Shutdown Deadline (`src/cli/commands/server.ts`, issue #1979)
+
+`alexi server start` installs `SIGINT` / `SIGTERM` handlers via `process.once(...)` and must terminate the daemon on signal without ever leaving a hung Node process behind. Before #1979 the handler awaited `handle.stop()` directly, so a stuck remote-session drain or a background process that refused to die could block the handler indefinitely and force operators to send `SIGKILL` by hand (defeating the `~10 s` SIGKILL grace scheduled by Docker and systemd defaults after the first `SIGTERM`).
+
+The fix (commit `3fc1090a feat(server): add 30s shutdown deadline to server start command`, ports upstream kilocode PR #14830) wraps the shutdown surface in a bounded race:
+
+```mermaid
+sequenceDiagram
+    participant OS as OS / systemd / Docker
+    participant Handler as SIGINT/SIGTERM handler
+    participant Helper as shutdownWithDeadline
+    participant Server as handle.stop()
+    participant Bg as killAllTracked()
+    participant Timer as setTimeout(30s)
+
+    OS->>Handler: SIGTERM
+    Handler->>Helper: shutdownWithDeadline(handle, 30_000)
+    Helper->>Server: start()
+    Helper->>Bg: start()
+    Helper->>Timer: start()
+
+    par Clean path
+        Server-->>Helper: resolve/reject
+        Bg-->>Helper: resolve/reject
+        Note over Helper: Promise.allSettled -> 'done'
+    and Timeout path
+        Timer-->>Helper: 'timeout'
+        Helper->>Helper: listBackgroundProcesses()
+        Helper->>Helper: console.error(...)
+    end
+
+    Helper-->>Handler: { timedOut: false | true }
+    Handler->>OS: process.exit(0)
+```
+
+Public surface in `src/cli/commands/server.ts`:
+
+- `DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000` — the chosen ceiling. Smaller than the `~10 s` SIGKILL grace used by Docker and systemd defaults so a single `SIGTERM` always terminates the daemon without an escalation to `SIGKILL`, large enough that a normal `handle.stop()` + `killAllTracked()` cycle (which typically completes in under a second) always finishes well inside the window.
+- `interface ShutdownTarget { stop(): Promise<void> }` — the minimal shape the helper requires. Declared locally so unit tests can supply a fake handle (`{ stop: vi.fn(() => new Promise<void>(() => {})) }`) without importing the full `SocketServerHandle` interface and dragging the entire server module graph into tests that only exercise shutdown timing.
+- `shutdownWithDeadline(handle, timeoutMs?)` — the race itself. `handle.stop()` and `killAllTracked()` run under `Promise.allSettled`, not `Promise.all`, so a misbehaving `stop()` cannot prevent background cleanup and vice versa. The deadline timer is `unref()`-ed so a programmatic caller that imports the helper directly (test harness, embedded host) does not have the timer keep its event loop alive by itself.
+
+Call-site contract (`registerServerCommand` in `src/cli/commands/server.ts:169-177`):
+
+```typescript
+const shutdown = async (): Promise<void> => {
+  try {
+    await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
+  } finally {
+    process.exit(0);
+  }
+};
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
+```
+
+Design decisions:
+
+- **The helper never calls `process.exit`.** Keeping the exit side effect in the caller lets vitest exercise both branches (`{ timedOut: false }` and `{ timedOut: true }`) without tearing down the worker. The `try { ... } finally { process.exit(0); }` wrapping guarantees the process still exits on the timeout branch.
+- **`process.once` (not `process.on`).** A second `SIGINT` / `SIGTERM` while a shutdown is already in flight bypasses the handler and lets the Node runtime terminate normally. Operators who get impatient during a slow shutdown can still break out.
+- **Timeout branch logs stragglers.** `listBackgroundProcesses().map(p => `${p.id}(pid=${p.pid})`)` turns the still-tracked set into an operator-readable suffix (`(timed-out processes: bg-1(pid=12345), ...)`). The suffix is omitted when the list is empty so a stuck `handle.stop()` with no background work still logs a readable sentence.
+- **Deadline is strict `<`.** A `stop()` that resolves at `deadline - 1 ms` is clean; the regression suite pins this edge explicitly to document the ordering.
+
+See [docs/API.md — Server Shutdown API](API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the programmatic surface and [docs/TESTING.md — Testing the server shutdown deadline](TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer regression pattern. The operator-facing contract (what gets logged, which signals are intercepted) lives at [docs/SERVER.md — Shutdown deadline](SERVER.md#shutdown-deadline).
+
 ### Core Layer
 
 | Module | File | Description |
