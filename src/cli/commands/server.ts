@@ -115,9 +115,7 @@ export function registerServerCommand(program: Command): void {
           shuttingDown = true;
           console.log(`Received ${sig}, shutting down...`);
           const forceExit = setTimeout(() => {
-            console.error(
-              `Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`
-            );
+            console.error(`Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`);
             process.exit(1);
           }, SHUTDOWN_DEADLINE_MS);
           // `unref` so the force-exit timer itself does not keep the
@@ -126,9 +124,7 @@ export function registerServerCommand(program: Command): void {
           try {
             await handle.stop();
           } catch (e) {
-            console.error(
-              `Shutdown error: ${e instanceof Error ? e.message : String(e)}`
-            );
+            console.error(`Shutdown error: ${e instanceof Error ? e.message : String(e)}`);
           } finally {
             clearTimeout(forceExit);
             process.exit(0);

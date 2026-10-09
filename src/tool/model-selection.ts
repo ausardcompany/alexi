@@ -111,8 +111,7 @@ export function lookup(all: Candidate[], value: string): { pool: Candidate[]; na
   // We detect that case and skip the qualified-match tier so the name
   // / fuzzy tiers below can still resolve the model.
   const slashIdx = query.indexOf('/');
-  const qualifiedMatchable =
-    slashIdx === -1 || (slashIdx > 0 && slashIdx < query.length - 1);
+  const qualifiedMatchable = slashIdx === -1 || (slashIdx > 0 && slashIdx < query.length - 1);
 
   const exactId = qualifiedMatchable
     ? all.filter((item) => `${item.providerID}/${item.model.id}`.toLowerCase() === query)
