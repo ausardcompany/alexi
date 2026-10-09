@@ -3305,6 +3305,36 @@ Introduced in commit `dd5cd8c5` (2026-10-08 upstream sync, ports upstream kilo-i
 - **Error envelopes carry context.** `surfaceErrorEnvelope` reads `error.message` / `message` from the JSON body and falls back to the first 500 characters of the raw body. The thrown error is `Embedding endpoint <url> failed: <status> <envelope>` — do not shorten it; the gateway complaint is the diagnostic.
 - **Capability cache is module-local and process-scoped.** `resetEndpointCapabilityCache()` is a test hook, not a CLI knob. Tests MUST call it in `afterEach` when they exercise multiple endpoints, because the cache survives between test cases otherwise and makes assertions on first-call behaviour flaky.
 
+## Session-Scoped Temp Directory (`src/tool/shell-tmp.ts`)
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync, ports upstream kilocode `packages/opencode/src/kilocode/tool/shell-tmp.ts`). References: [ARCHITECTURE.md — Session-Scoped Temp Directory](ARCHITECTURE.md#session-scoped-temp-directory), [API.md — Session-Scoped Temp Directory API](API.md#session-scoped-temp-directory-api), [CONFIGURATION.md — `KILO_CLOUD_AGENT` and `SESSION_ID`](CONFIGURATION.md#cloud-session-sandbox-kilo_cloud_agent--session_id).
+
+- **`/tmp` is literal, not `os.tmpdir()`.** The allowlist root in `sessionTmp()` is the hardcoded string `/tmp`. Do NOT derive it from `os.tmpdir()` — that reads `TMPDIR` and a parent-process override could widen the writable surface, which is a sandbox-escape regression.
+- **`SESSION_ID` must pass the strict regex.** `/^[A-Za-z0-9_-]+$/` is the only accepted shape. Do not relax it to accept slashes, dots, or whitespace: the id is interpolated into a filesystem path and (indirectly) surfaced to the shell description, so metacharacters can slip through into model-generated commands. If a future deployment needs richer ids, encode them server-side before setting the env var.
+- **Use `lstat`, not `stat`.** The directory existence check uses `lstatSync(dir).isDirectory()`. `stat` would follow a pre-existing symlink from `/tmp/<SESSION_ID>` out to an arbitrary location — a sandbox-escape path. `lstat` reports the link itself and the helper falls back to `os.tmpdir()`.
+- **New scratch-dir callers go through `sessionTmp()`.** Any new tool that writes a temp file inside the shell / tool layer should call `sessionTmp()` instead of `os.tmpdir()` so cloud sessions get the allowlisted path. Reading `TMPDIR` directly in a new tool is a regression.
+- **Local-path behaviour is byte-identical.** With `KILO_CLOUD_AGENT` unset (the default), `sessionTmp()` returns `os.tmpdir()`. Do not introduce behaviour that only triggers on the cloud path — if a change breaks locally, it will break in the cloud too.
+
+## MCP Cleanup-on-Interrupt (`src/mcp/cleanup.ts`)
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync, ports upstream kilocode cleanup-on-interrupt behaviour). References: [ARCHITECTURE.md — MCP Cleanup-on-Interrupt](ARCHITECTURE.md#mcp-cleanup-on-interrupt), [API.md — MCP Cleanup API](API.md#mcp-cleanup-api), [MCP.md](MCP.md).
+
+- **Call `cleanupInterrupted` BEFORE classification.** `McpClientManager`'s connect-attempt catch block must invoke the helper before `classifyConnectError` / retry scheduling. Reordering this is a regression because the retry path builds a fresh `Client` and the old transport + stdio child need to be torn down first.
+- **Fixed teardown order.** `client.close()` → `client.transport?.close()` → `process.kill()`. Do not reorder — some SDK builds leave the transport open when `close()` fails mid-handshake, so the explicit transport close is the belt-and-braces step. Hard-killing before `close()` can race with the SDK's internal state machine.
+- **Never shadow the original error.** Every helper call is wrapped in try/catch and logged at `debug` level. Promoting a cleanup failure to `warn` or `error`, or throwing from the helper, is a regression — the caller is already inside an error path and the ORIGINAL cancellation error is what should surface to the user.
+- **Structural typing only.** `CleanableClient` and `CleanableProcess` are the smallest subsets of the real SDK types the helper needs. Do not import concrete types from `@modelcontextprotocol/client` — the helper must stay callable from tests with plain stubs and from different SDK revisions.
+- **Guard `kill` with `killed`.** The helper only calls `childProcess.kill?.()` when `childProcess.killed === false`. Removing the guard produces `ERR_IPC_DISCONNECTED` on a child that is already mid-exit.
+
+## Bounded `alexi server start` Shutdown (`src/cli/commands/server.ts`)
+
+Introduced in commit `0d6349a2` (2026-10-09 upstream sync, ports upstream kilocode #14823). References: [ARCHITECTURE.md — Bounded Server Shutdown Deadline](ARCHITECTURE.md#bounded-server-shutdown-deadline), [API.md — Server Shutdown Deadline](API.md#server-shutdown-deadline), [SERVER.md](SERVER.md).
+
+- **The deadline constant is centralised.** `SHUTDOWN_DEADLINE_MS = 10_000`. Do not inline a different number elsewhere in the signal handler; systemd / orchestration layers rely on the single value.
+- **The force-exit timer must `unref`.** `forceExit.unref?.()` prevents the timer from keeping the Node event loop alive after a successful graceful shutdown. Removing the `unref` is a regression that will hang clean shutdowns for the full deadline.
+- **Idempotent via `shuttingDown` guard.** A second `SIGINT`/`SIGTERM` during shutdown is a no-op. Do not remove the guard — a double-entry would re-arm the timer and could race into a double `process.exit`.
+- **Exit codes are a public contract.** `0` on graceful shutdown (even if `handle.stop()` threw — the error is logged but the shutdown path is still clean), `1` on deadline exceeded. Operators and systemd units distinguish "clean" from "wedged" from the exit code; changing the convention is a breaking change.
+- **Signals are wired via arrow wrappers.** `process.once('SIGINT', () => void shutdown('SIGINT'))` passes the signal name through for the log line. Do not revert to `process.once('SIGINT', shutdown)` — the log would lose which signal fired.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
