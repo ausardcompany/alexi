@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Distinct exit codes for the `alexi server start` shutdown path (issue #1986, commit `ccfae8e9 feat(server): wire SIGINT/SIGTERM to shutdownWithDeadline with distinct exit codes`)** (`src/cli/commands/server.ts` +50 / -19 lines, `src/cli/commands/__tests__/server.shutdown.test.ts` +92 lines, net `2 files changed, 146 insertions(+), 19 deletions(-)`). The `SIGINT` / `SIGTERM` handler installed by `registerServerCommand` now exits with status `0` on a clean shutdown and status `1` when the deadline forces a shutdown. Previously the handler always called `process.exit(0)` regardless of whether `handle.stop()` + `killAllTracked()` finished within the 30-second deadline or the force-exit branch fired — Docker, systemd, and other orchestrators had no way to distinguish a graceful cleanup from a hung daemon that only terminated because the deadline elapsed. The split exit code lets `Restart=on-failure` units react to the `1` and lets `docker inspect` surface the force-exit as a non-zero termination.
+
+  New public helper in `src/cli/commands/server.ts`:
+
+  - `createShutdownHandler(handle: ShutdownTarget, options?: { timeoutMs?: number; exit?: (code: number) => never; log?: (msg: string) => void }): (sig: NodeJS.Signals) => Promise<void>` — factory for the signal handler. Captures the three previously-inline concerns (the `shuttingDown` idempotency guard, the `Received <sig>, shutting down...` log line, and the `exit(timedOut ? 1 : 0)` call site) in one place so tests can exercise the exit-code contract with injected `exit` and `log` spies instead of wiring the full Commander subcommand. `timeoutMs` defaults to `DEFAULT_SHUTDOWN_DEADLINE_MS`, `exit` defaults to `process.exit`, and `log` defaults to `console.log`. The handler calls `exit(timedOut ? 1 : 0)` inside a `finally` block so even a synchronous throw from an injected spy still terminates — the production path cannot leak an unhandled rejection out of the signal handler.
+
+  Call-site contract. `registerServerCommand` now reads:
+
+  ```typescript
+  const shutdown = createShutdownHandler(handle);
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  ```
+
+  No new runtime dependencies, no new CLI flags, no new environment variables. The previously-inline `shutdown` closure (with its local `shuttingDown` flag and `try/finally { process.exit(0) }`) has been replaced by the handler returned from `createShutdownHandler`. The `shutdownWithDeadline` helper itself is unchanged — it still returns `{ timedOut: boolean }` and still never calls `process.exit`.
+
+  Exit-code table:
+
+  | Code | Meaning |
+  |------|---------|
+  | `0` | `shutdownWithDeadline` resolved `{ timedOut: false }` within the deadline. Clean teardown of the socket server plus tracked background processes. |
+  | `1` | `shutdownWithDeadline` resolved `{ timedOut: true }`. Stderr already carries `Server shutdown exceeded <ms>ms deadline, forcing exit` and the IDs of any still-tracked background processes. |
+
+  Regression coverage. `src/cli/commands/__tests__/server.shutdown.test.ts` gains a new `describe('createShutdownHandler', ...)` block with four cases: (1) `SIGINT` with a resolving `stop()` calls `exit(0)` once and logs `Received SIGINT, shutting down...`; (2) `SIGTERM` with a non-resolving `stop()` advances the fake clock 30 s, logs the force-exit sentence, and calls `exit(1)`; (3) a second signal fired while a shutdown is in flight is a no-op — `log`, `exit`, and `stop` are each called exactly once (the `shuttingDown` guard is pinned); (4) the handler defaults to `DEFAULT_SHUTDOWN_DEADLINE_MS` when `timeoutMs` is omitted. The pre-existing `describe('shutdownWithDeadline', ...)` block is untouched — the helper's `{ timedOut }` contract has not changed. See [docs/TESTING.md — Testing the server shutdown deadline](docs/TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer pattern and [docs/API.md — Server Shutdown API](docs/API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the public surface.
+
 - **Bounded server shutdown reports which signal fired (`src/cli/commands/server.ts` +12 lines)** (commit `9c830373`, extends issue #1979 / kilocode #14823 / #14830). The `SIGINT` / `SIGTERM` handler is now idempotent — a second signal while shutdown is in progress is a no-op via the `shuttingDown` guard rather than racing into a double-exit — and logs the triggering signal name (`Received SIGINT, shutting down...` / `Received SIGTERM, shutting down...`) so operators get a stable grep signal in service logs. The underlying race against `DEFAULT_SHUTDOWN_DEADLINE_MS` (30 s) via `shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS)` is unchanged. See [docs/ARCHITECTURE.md — Server Shutdown Deadline](docs/ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979).
 
 - **`agent_manager` tool prompt documents the `provider` config field (`src/tool/tools/agent-manager.txt` +6 lines, `src/tool/tools/agent-manager.ts` +2 lines)** (commit `0d6349a2`). The `config` object on `action: "create"` now explicitly documents the optional `provider` field used to constrain model resolution to one provider ID (e.g. `anthropic`, `sap-ai-core`). Specifying `provider` without `model` continues to be rejected at the tool layer with `config.provider requires config.model to be set`. The prompt also surfaces the rule that `agent_manager` sessions are user-visible — they must only be started on explicit user request. See [docs/API.md — `agent_manager` tool](docs/API.md#tool-system) and [docs/ARCHITECTURE.md — Agent System](docs/ARCHITECTURE.md#agent-system).

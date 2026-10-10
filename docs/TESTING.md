@@ -10448,7 +10448,7 @@ The suite completes in under a second because none of the cases boot the TUI, th
 
 ## Testing the server shutdown deadline (issue #1979)
 
-The 30-second shutdown deadline added by commit `3fc1090a feat(server): add 30s shutdown deadline to server start command` is pinned by `src/cli/commands/__tests__/server.shutdown.test.ts` (77 lines, four cases). The suite covers the force-exit branch, the clean-shutdown branch, the strict `<` deadline boundary, and the `DEFAULT_SHUTDOWN_DEADLINE_MS === 30_000` constant. See [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979) for the design flow and [docs/API.md — Server Shutdown API](API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the public surface.
+The 30-second shutdown deadline added by commit `3fc1090a feat(server): add 30s shutdown deadline to server start command` and the distinct-exit-code handler factory added by commit `ccfae8e9 feat(server): wire SIGINT/SIGTERM to shutdownWithDeadline with distinct exit codes` (issue #1986) are both pinned by `src/cli/commands/__tests__/server.shutdown.test.ts` (171 lines, eight cases across two `describe` blocks). The first block covers `shutdownWithDeadline` (the race itself): the force-exit branch, the clean-shutdown branch, the strict `<` deadline boundary, and the `DEFAULT_SHUTDOWN_DEADLINE_MS === 30_000` constant. The second block covers `createShutdownHandler` (the signal-handler factory): the exit-code split, the `shuttingDown` idempotency guard, and the default-timeout fallback. See [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979) for the design flow and [docs/API.md — Server Shutdown API](API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the public surface.
 
 ### Fake-timer pattern
 
@@ -10456,7 +10456,11 @@ The 30-second shutdown deadline added by commit `3fc1090a feat(server): add 30s 
 
 ```typescript
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_SHUTDOWN_DEADLINE_MS, shutdownWithDeadline } from '../server.js';
+import {
+  DEFAULT_SHUTDOWN_DEADLINE_MS,
+  createShutdownHandler,
+  shutdownWithDeadline,
+} from '../server.js';
 
 describe('shutdownWithDeadline', () => {
   let errSpy: ReturnType<typeof vi.spyOn>;
@@ -10474,12 +10478,21 @@ describe('shutdownWithDeadline', () => {
 });
 ```
 
-### Cases
+### `shutdownWithDeadline` cases
 
 - **Clean shutdown resolves `{ timedOut: false }`.** The handle's `stop()` is a `vi.fn(async () => {})`; the test calls `shutdownWithDeadline(handle, 30_000)`, flushes pending microtasks with `await vi.advanceTimersByTimeAsync(0)` so `Promise.allSettled` observes the already-resolved `stop()` before racing the timer, and asserts `{ timedOut: false }`, that `stop` was called exactly once, and that `console.error` was never called. The microtask flush is deliberate — without it, the real `Promise.race` could race against the fake timer in a nondeterministic order.
 - **Hanging `stop()` triggers the force-exit log.** The handle supplies `stop: vi.fn(() => new Promise<void>(() => {}))` (a promise that never resolves). The test calls `shutdownWithDeadline(handle, 30_000)`, awaits `vi.advanceTimersByTimeAsync(30_000)` to drive the timer, and asserts `{ timedOut: true }`, that `console.error` was called exactly once, and that the captured message includes the substring `Server shutdown exceeded 30000ms deadline, forcing exit`. The suffix with timed-out process IDs is not asserted here because the vitest worker has no tracked background processes — the base sentence is the stable part of the contract.
 - **No early timeout at `deadline - 1 ms`.** The handle's `stop()` resolves via `setTimeout(resolve, 29_999)`. The test calls `shutdownWithDeadline(handle, 30_000)`, awaits `vi.advanceTimersByTimeAsync(29_999)`, and asserts `{ timedOut: false }` with no `console.error`. This pins the strict `<` boundary — a `stop()` that resolves on the deadline tick itself is explicitly out of scope and the regression suite does not assert either outcome for that case.
 - **`DEFAULT_SHUTDOWN_DEADLINE_MS === 30_000`.** A one-line constant check guards the numeric value so a careless refactor (`30_000` -> `3_000` or `300_000`) fails fast at review time instead of surfacing as a production incident.
+
+### `createShutdownHandler` cases (issue #1986)
+
+The factory is tested with injected `exit` and `log` spies so the vitest worker is never torn down. Each case constructs `const exit = vi.fn<(code: number) => never>(() => undefined as never)` and passes it alongside a `log` spy into `createShutdownHandler(handle, { timeoutMs, exit, log })`. The handler returns a `(sig: NodeJS.Signals) => Promise<void>` closure that the test invokes with `SIGINT` or `SIGTERM` and then drives via `vi.advanceTimersByTimeAsync(...)`.
+
+- **Clean `SIGINT` exits with code `0`.** A resolving `stop()` plus `await vi.advanceTimersByTimeAsync(0)` lets the microtask queue drain. Assertions: `log` was called once with `'Received SIGINT, shutting down...'`, `handle.stop` was called once, `exit` was called once with `0`, and `console.error` was never called.
+- **Deadline-forced `SIGTERM` exits with code `1`.** A `stop()` that returns a never-resolving promise plus `await vi.advanceTimersByTimeAsync(30_000)` drives the timer. Assertions: `log` was called once with `'Received SIGTERM, shutting down...'`, `exit` was called once with `1`, `console.error` was called once, and the captured message contains `Server shutdown exceeded 30000ms deadline, forcing exit`. This is the core issue-#1986 contract — a hung daemon surfaces as a non-zero termination.
+- **A second signal during shutdown is a no-op.** With a `stop()` that resolves after `setTimeout(resolve, 5_000)`, the test fires `shutdown('SIGINT')` twice back-to-back, advances the clock 5 s, and awaits both pending promises. Assertions: `log` was called exactly once, `exit` was called exactly once with `0`, and `handle.stop` was called exactly once. The `shuttingDown` guard inside the factory swallows the repeat signal entirely — a flapping orchestrator cannot double-fire the shutdown path or cause a double-exit race.
+- **Default timeout falls back to `DEFAULT_SHUTDOWN_DEADLINE_MS`.** The handler is constructed without `timeoutMs`; a never-resolving `stop()` plus `await vi.advanceTimersByTimeAsync(DEFAULT_SHUTDOWN_DEADLINE_MS)` drives the implicit default. Assertion: `exit` was called with `1`. This pins the "no `timeoutMs` means 30 s" contract so a refactor that silently drops the default fails fast.
 
 ### Running
 

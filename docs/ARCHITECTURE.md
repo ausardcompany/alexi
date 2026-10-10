@@ -196,9 +196,9 @@ The rejection contract (unknown-option exit for each removed flag) is pinned by 
 
 #### Server Shutdown Deadline (`src/cli/commands/server.ts`, issue #1979)
 
-`alexi server start` installs `SIGINT` / `SIGTERM` handlers via `process.once(...)` and must terminate the daemon on signal without ever leaving a hung Node process behind. Before #1979 the handler awaited `handle.stop()` directly, so a stuck remote-session drain or a background process that refused to die could block the handler indefinitely and force operators to send `SIGKILL` by hand (defeating the `~10 s` SIGKILL grace scheduled by Docker and systemd defaults after the first `SIGTERM`).
+`alexi server start` installs `SIGINT` / `SIGTERM` handlers via `process.once(...)` and must terminate the daemon on signal without ever leaving a hung Node process behind. Before #1979 the handler awaited `handle.stop()` directly, so a stuck remote-session drain or a background process that refused to die could block the handler indefinitely and force operators to send `SIGKILL` by hand (defeating the `~10 s` SIGKILL grace scheduled by Docker and systemd defaults after the first `SIGTERM`). The deadline landed in commit `3fc1090a feat(server): add 30s shutdown deadline to server start command` (ports upstream kilocode PR #14830). Follow-up commit `ccfae8e9 feat(server): wire SIGINT/SIGTERM to shutdownWithDeadline with distinct exit codes` (issue #1986) then split the exit code so a clean shutdown reports `0` and a deadline-forced shutdown reports `1`, giving Docker, systemd, and other orchestrators a mechanical way to distinguish a graceful teardown from a hung daemon.
 
-The fix (commit `3fc1090a feat(server): add 30s shutdown deadline to server start command`, ports upstream kilocode PR #14830) wraps the shutdown surface in a bounded race:
+The combined fix wraps the shutdown surface in a bounded race whose exit code reflects which branch won:
 
 ```mermaid
 sequenceDiagram
@@ -226,7 +226,7 @@ sequenceDiagram
     end
 
     Helper-->>Handler: { timedOut: false | true }
-    Handler->>OS: process.exit(0)
+    Handler->>OS: process.exit(timedOut ? 1 : 0)
 ```
 
 Public surface in `src/cli/commands/server.ts`:
@@ -234,26 +234,36 @@ Public surface in `src/cli/commands/server.ts`:
 - `DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000` — the chosen ceiling. Smaller than the `~10 s` SIGKILL grace used by Docker and systemd defaults so a single `SIGTERM` always terminates the daemon without an escalation to `SIGKILL`, large enough that a normal `handle.stop()` + `killAllTracked()` cycle (which typically completes in under a second) always finishes well inside the window.
 - `interface ShutdownTarget { stop(): Promise<void> }` — the minimal shape the helper requires. Declared locally so unit tests can supply a fake handle (`{ stop: vi.fn(() => new Promise<void>(() => {})) }`) without importing the full `SocketServerHandle` interface and dragging the entire server module graph into tests that only exercise shutdown timing.
 - `shutdownWithDeadline(handle, timeoutMs?)` — the race itself. `handle.stop()` and `killAllTracked()` run under `Promise.allSettled`, not `Promise.all`, so a misbehaving `stop()` cannot prevent background cleanup and vice versa. The deadline timer is `unref()`-ed so a programmatic caller that imports the helper directly (test harness, embedded host) does not have the timer keep its event loop alive by itself.
+- `createShutdownHandler(handle, options?)` — factory returning a `(sig: NodeJS.Signals) => Promise<void>` closure that owns the three previously-inline concerns of the signal handler: the `shuttingDown` idempotency guard, the `Received <sig>, shutting down...` log line, and the `exit(timedOut ? 1 : 0)` termination. `options.timeoutMs` defaults to `DEFAULT_SHUTDOWN_DEADLINE_MS`; `options.exit` defaults to `process.exit`; `options.log` defaults to `console.log`. Introduced by commit `ccfae8e9` (issue #1986) so the exit-code contract can be exercised with injected spies in `src/cli/commands/__tests__/server.shutdown.test.ts` without wiring the full Commander subcommand.
 
-Call-site contract (`registerServerCommand` in `src/cli/commands/server.ts:169-177`):
+Call-site contract (`registerServerCommand` in `src/cli/commands/server.ts`):
 
 ```typescript
-const shutdown = async (): Promise<void> => {
-  try {
-    await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
-  } finally {
-    process.exit(0);
-  }
-};
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
+const shutdown = createShutdownHandler(handle);
+process.once('SIGINT', () => void shutdown('SIGINT'));
+process.once('SIGTERM', () => void shutdown('SIGTERM'));
 ```
+
+The factory returns an async closure that:
+
+1. Short-circuits with a no-op on a repeat invocation while a shutdown is already in flight (`shuttingDown` guard).
+2. Logs `Received ${sig}, shutting down...` via the injected `log`.
+3. Awaits `shutdownWithDeadline(handle, timeoutMs)` and keeps the `{ timedOut }` result.
+4. In a `finally` block, calls `exit(timedOut ? 1 : 0)` so a synchronous throw from an injected `exit` spy still terminates the production path and tests cannot leave the handler mid-promise.
+
+Exit-code contract (issue #1986):
+
+| Code | Meaning |
+|------|---------|
+| `0` | `shutdownWithDeadline` resolved `{ timedOut: false }` within the deadline. Clean teardown of the socket server plus tracked background processes. |
+| `1` | `shutdownWithDeadline` resolved `{ timedOut: true }`. Stderr already carries `Server shutdown exceeded <ms>ms deadline, forcing exit` plus the IDs of any still-tracked background processes. |
 
 Design decisions:
 
-- **The helper never calls `process.exit`.** Keeping the exit side effect in the caller lets vitest exercise both branches (`{ timedOut: false }` and `{ timedOut: true }`) without tearing down the worker. The `try { ... } finally { process.exit(0); }` wrapping guarantees the process still exits on the timeout branch.
-- **`process.once` (not `process.on`).** A second `SIGINT` / `SIGTERM` while a shutdown is already in flight bypasses the handler and lets the Node runtime terminate normally. Operators who get impatient during a slow shutdown can still break out.
-- **Timeout branch logs stragglers.** `listBackgroundProcesses().map(p => `${p.id}(pid=${p.pid})`)` turns the still-tracked set into an operator-readable suffix (`(timed-out processes: bg-1(pid=12345), ...)`). The suffix is omitted when the list is empty so a stuck `handle.stop()` with no background work still logs a readable sentence.
+- **The helper never calls `process.exit`.** Keeping the exit side effect in `createShutdownHandler` (not `shutdownWithDeadline`) lets vitest exercise both branches (`{ timedOut: false }` and `{ timedOut: true }`) without tearing down the worker. `createShutdownHandler` localises the `finally { exit(...) }` wrapper so every embedding host inherits the exit-code contract automatically.
+- **Distinct exit codes.** `0` versus `1` lets `Restart=on-failure` systemd units react only to the force-exit, and lets `docker inspect` or Kubernetes `terminationGracePeriodSeconds` reports surface a wedged daemon as a non-zero termination. The split is `timedOut ? 1 : 0` — a rejecting `handle.stop()` that still settles within the deadline (via `Promise.allSettled`) is treated as code `0`, because the socket-server shutdown surface is intentionally best-effort and `killAllTracked()` already ran.
+- **`process.once` (not `process.on`).** A second `SIGINT` / `SIGTERM` while a shutdown is already in flight bypasses the handler and lets the Node runtime terminate normally. Operators who get impatient during a slow shutdown can still break out. The handler's `shuttingDown` guard additionally ignores a second invocation that happens *through the same registered handler*, but `process.once` means the second signal normally re-reaches Node's default behaviour.
+- **Timeout branch logs stragglers.** `listBackgroundProcesses().map(p => \`${p.id}(pid=${p.pid})\`)` turns the still-tracked set into an operator-readable suffix (`(timed-out processes: bg-1(pid=12345), ...)`). The suffix is omitted when the list is empty so a stuck `handle.stop()` with no background work still logs a readable sentence.
 - **Deadline is strict `<`.** A `stop()` that resolves at `deadline - 1 ms` is clean; the regression suite pins this edge explicitly to document the ordering.
 
 See [docs/API.md — Server Shutdown API](API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the programmatic surface and [docs/TESTING.md — Testing the server shutdown deadline](TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer regression pattern. The operator-facing contract (what gets logged, which signals are intercepted) lives at [docs/SERVER.md — Shutdown deadline](SERVER.md#shutdown-deadline).
@@ -7863,68 +7873,7 @@ Design notes:
 
 ## Bounded Server Shutdown Deadline
 
-Introduced in commit `0d6349a2` (ports upstream kilocode #14823). Lives in `src/cli/commands/server.ts` inside the `alexi server start` action.
-
-**Problem.** The previous shutdown path was `const shutdown = async () => { try { await handle.stop(); } finally { process.exit(0); } };` with handlers wired via `process.once('SIGINT' | 'SIGTERM', shutdown)`. A stuck socket connection on `handle.stop()` would hang the process indefinitely, so systemd / orchestration layers had no predictable upper bound on how long shutdown would take and had to kill `-9` the process after their own timeout.
-
-**Contract.** The signal handler now runs under a bounded deadline:
-
-```typescript
-const SHUTDOWN_DEADLINE_MS = 10_000;
-let shuttingDown = false;
-const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
-  if (shuttingDown) return;              // idempotent on repeated signals
-  shuttingDown = true;
-  console.log(`Received ${sig}, shutting down...`);
-  const forceExit = setTimeout(() => {
-    console.error(`Graceful shutdown exceeded ${SHUTDOWN_DEADLINE_MS}ms, forcing exit`);
-    process.exit(1);                     // deadline hit — exit 1
-  }, SHUTDOWN_DEADLINE_MS);
-  forceExit.unref?.();                   // do not keep the loop alive past success
-  try {
-    await handle.stop();
-  } catch (e) {
-    console.error(`Shutdown error: ${e instanceof Error ? e.message : String(e)}`);
-  } finally {
-    clearTimeout(forceExit);
-    process.exit(0);                     // graceful — exit 0
-  }
-};
-process.once('SIGINT', () => void shutdown('SIGINT'));
-process.once('SIGTERM', () => void shutdown('SIGTERM'));
-```
-
-```mermaid
-sequenceDiagram
-    participant OS as systemd / shell
-    participant Proc as alexi server
-    participant Timer as 10s force-exit timer
-    participant Stop as handle.stop
-
-    OS->>Proc: SIGTERM
-    Proc->>Proc: shuttingDown = true, log "Received ..."
-    Proc->>Timer: setTimeout(10000).unref()
-    Proc->>Stop: await handle.stop
-    alt stop resolves before deadline
-        Stop-->>Proc: ok
-        Proc->>Timer: clearTimeout
-        Proc->>OS: process.exit(0)
-    else stop throws
-        Stop-->>Proc: error (logged)
-        Proc->>Timer: clearTimeout
-        Proc->>OS: process.exit(0)
-    else deadline hits first
-        Timer-->>Proc: force-exit callback
-        Proc->>OS: process.exit(1) with "Graceful shutdown exceeded 10000ms"
-    end
-```
-
-Design notes:
-
-- **`setTimeout(...).unref?.()`** — the force-exit timer must not keep the Node event loop alive past a successful graceful shutdown. Optional chain on `unref` keeps the code compatible with timer polyfills that lack the method.
-- **Idempotent on repeated signals.** A second `SIGINT`/`SIGTERM` while shutdown is in progress is a no-op via the `shuttingDown` guard rather than racing into a double-exit or re-arming the timer.
-- **Separate exit codes.** `0` on graceful shutdown (even if `handle.stop()` logged an error — the socket was gone by then), `1` on deadline. Systemd / orchestrators can distinguish "clean" from "wedged" from the exit code alone without parsing stderr.
-- **Logs are predictable.** `Received SIGTERM, shutting down...` on entry; `Shutdown error: <message>` on a stop failure; `Graceful shutdown exceeded 10000ms, forcing exit` on the deadline. Operators grepping for these strings get stable signals across releases.
+> **Superseded.** The initial 10-second inline deadline (commit `0d6349a2`, ports upstream kilocode #14823) was superseded on 2026-10-09 by the extracted `shutdownWithDeadline` helper + 30-second deadline (commit `3fc1090a`, issue #1979) and then by the distinct-exit-code handler factory (commit `ccfae8e9`, issue #1986). The current contract — the helper, the factory, the `0` / `1` exit codes, the force-exit log sentence, and the regression suite — is documented at [Server Shutdown Deadline](#server-shutdown-deadline-srcclicommandsserverts-issue-1979). This section is retained as an anchor target for older cross-references.
 
 ## Platform Support Diagnostics
 

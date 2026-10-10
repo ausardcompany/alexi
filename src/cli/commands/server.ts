@@ -80,6 +80,48 @@ export async function shutdownWithDeadline(
   return { timedOut: false };
 }
 
+/**
+ * Build a `SIGINT` / `SIGTERM` handler that drives
+ * {@link shutdownWithDeadline} and terminates the process via `exit`.
+ *
+ * Extracted from `registerServerCommand` so tests can exercise the
+ * exit-code contract (`0` on clean shutdown, `1` on deadline-forced
+ * exit, see issue #1986) without wiring the full Commander subcommand
+ * — the handler is `shuttingDown`-guarded so a repeat signal during a
+ * running shutdown is a no-op.
+ *
+ * `exit` defaults to `process.exit`; tests pass a spy. The handler
+ * never throws: `shutdownWithDeadline` already catches internally and
+ * resolves `{ timedOut }`, and `exit` is called inside a `finally` so
+ * even a synchronous throw from an injected spy still terminates.
+ */
+export function createShutdownHandler(
+  handle: ShutdownTarget,
+  options: {
+    timeoutMs?: number;
+    exit?: (code: number) => never;
+    log?: (msg: string) => void;
+  } = {}
+): (sig: NodeJS.Signals) => Promise<void> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const log = options.log ?? ((msg: string) => console.log(msg));
+  let shuttingDown = false;
+  return async (sig: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    log(`Received ${sig}, shutting down...`);
+    let timedOut = false;
+    try {
+      ({ timedOut } = await shutdownWithDeadline(handle, timeoutMs));
+    } finally {
+      exit(timedOut ? 1 : 0);
+    }
+  };
+}
+
 interface ServerStartOptions {
   socket?: string;
 }
@@ -167,24 +209,15 @@ export function registerServerCommand(program: Command): void {
         console.log(`Alexi server listening on ${handle.socketPath}`);
         console.log(`Auth token file: ${tokenPath}`);
 
-        // Bounded shutdown (kilocode #14823, kilocode #14830): a stuck
-        // `handle.stop()` or `killAllTracked()` could otherwise hang the
-        // process indefinitely on SIGINT/SIGTERM. `shutdownWithDeadline`
-        // races both against `DEFAULT_SHUTDOWN_DEADLINE_MS` and logs
-        // stragglers on timeout; the caller still owns `process.exit`.
-        let shuttingDown = false;
-        const shutdown = async (sig: NodeJS.Signals): Promise<void> => {
-          if (shuttingDown) {
-            return;
-          }
-          shuttingDown = true;
-          console.log(`Received ${sig}, shutting down...`);
-          try {
-            await shutdownWithDeadline(handle, DEFAULT_SHUTDOWN_DEADLINE_MS);
-          } finally {
-            process.exit(0);
-          }
-        };
+        // Bounded shutdown (kilocode #14823, kilocode #14830, issue
+        // #1986): a stuck `handle.stop()` or `killAllTracked()` could
+        // otherwise hang the process indefinitely on SIGINT/SIGTERM.
+        // `shutdownWithDeadline` races both against
+        // `DEFAULT_SHUTDOWN_DEADLINE_MS` and logs stragglers on timeout.
+        // Clean shutdowns exit with code `0`; deadline-forced exits use
+        // code `1` so Docker / systemd / orchestrators can distinguish
+        // a graceful cleanup from a force-exit after the deadline.
+        const shutdown = createShutdownHandler(handle);
         process.once('SIGINT', () => void shutdown('SIGINT'));
         process.once('SIGTERM', () => void shutdown('SIGTERM'));
       } catch (e) {
