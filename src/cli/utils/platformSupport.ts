@@ -15,11 +15,7 @@
  */
 
 /** Platforms Alexi has been exercised on in CI. */
-const SUPPORTED_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set([
-  'linux',
-  'darwin',
-  'win32',
-]);
+const SUPPORTED_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set(['linux', 'darwin', 'win32']);
 
 /** Architectures Alexi has been exercised on in CI. */
 const SUPPORTED_ARCHS: ReadonlySet<string> = new Set(['x64', 'arm64']);

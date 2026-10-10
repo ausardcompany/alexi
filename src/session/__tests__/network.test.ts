@@ -127,12 +127,12 @@ describe('isRetryableConnectionReset', () => {
   });
 
   it('returns true for ETIMEDOUT and EAI_AGAIN via .code', () => {
-    expect(
-      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ETIMEDOUT' }))
-    ).toBe(true);
-    expect(
-      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'EAI_AGAIN' }))
-    ).toBe(true);
+    expect(isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ETIMEDOUT' }))).toBe(
+      true
+    );
+    expect(isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'EAI_AGAIN' }))).toBe(
+      true
+    );
   });
 
   it('returns true for ECONNRESET detected via err.cause.code (undici fetch)', () => {
@@ -148,9 +148,9 @@ describe('isRetryableConnectionReset', () => {
   });
 
   it('returns false for non-reset error codes', () => {
-    expect(
-      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))
-    ).toBe(false);
+    expect(isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))).toBe(
+      false
+    );
     expect(isRetryableConnectionReset(new Error('validation failed'))).toBe(false);
     expect(isRetryableConnectionReset('boom')).toBe(false);
     expect(isRetryableConnectionReset(null)).toBe(false);

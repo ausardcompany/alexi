@@ -9,11 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import {
-  currentPlatform,
-  formatStartupError,
-  platformSupportWarning,
-} from '../platformSupport.js';
+import { currentPlatform, formatStartupError, platformSupportWarning } from '../platformSupport.js';
 
 describe('platformSupportWarning', () => {
   it('returns undefined on common linux-x64 setups', () => {
