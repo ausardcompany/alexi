@@ -89,7 +89,9 @@ export function formatDuration(ms: number): string {
  * can be made — callers should fall back to plain text in that case.
  */
 export function guessLanguageFromPath(filePath: string): string | undefined {
-  const match = /\.([a-zA-Z0-9]+)$/.exec(filePath);
+  // Match a trailing extension including `+` (for C++ vendor variants
+  // like `.c++m`) alongside the common alphanumeric characters.
+  const match = /\.([a-zA-Z0-9+]+)$/.exec(filePath);
   if (!match) {
     return undefined;
   }
@@ -117,6 +119,22 @@ export function guessLanguageFromPath(filePath: string): string | undefined {
     html: 'html',
     xml: 'xml',
     toml: 'toml',
+    // C/C++ sources and C++20 module interface units (opencode b2a3926).
+    // MSVC uses `.ixx`; Clang/standard uses `.cppm`; vendor variants
+    // `.ccm`, `.cxxm`, `.c++m` are also mapped to `cpp` for highlighting.
+    c: 'c',
+    h: 'c',
+    cpp: 'cpp',
+    cc: 'cpp',
+    cxx: 'cpp',
+    hpp: 'cpp',
+    hh: 'cpp',
+    hxx: 'cpp',
+    ixx: 'cpp',
+    cppm: 'cpp',
+    ccm: 'cpp',
+    cxxm: 'cpp',
+    'c++m': 'cpp',
   };
   return map[ext];
 }

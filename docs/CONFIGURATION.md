@@ -197,6 +197,20 @@ Security notes:
 
 See [docs/ARCHITECTURE.md — Session-Scoped Temp Directory](ARCHITECTURE.md#session-scoped-temp-directory) for the full resolution logic and [docs/API.md — Session-Scoped Temp Directory API](API.md#session-scoped-temp-directory-api) for the exported function.
 
+#### Platform / Architecture Support Matrix
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync). Alexi is pure TypeScript / Node and ships no native binary, so platform compatibility is driven entirely by `process.platform` + `process.arch` + the availability of a modern Node runtime (>= 22.12.0). The diagnostic helpers in `src/cli/utils/platformSupport.ts` codify the exercised matrix:
+
+| Axis | Supported values | Notes |
+|------|------------------|-------|
+| `platform` | `linux`, `darwin`, `win32` | Values outside this set emit the warning `Alexi: platform "<name>" is not in the supported set (linux, darwin, win32). The CLI may still work but is not covered by CI; please report any issues you encounter.` |
+| `arch` | `x64`, `arm64` | Values outside this set emit the warning `Alexi: architecture "<name>" is not in the supported set (x64, arm64). ...` |
+| `node` | `>= 22.12.0` | Enforced by `engines.node` in `package.json`. |
+
+Special case: `win32-arm64` is in the supported platform AND architecture sets individually, but optional native dependencies (`tree-sitter` grammars, `better-sqlite3` prebuilts) historically lack prebuilt binaries for this combo. Alexi emits a dedicated advisory recommending the x64 build under x64 emulation if a feature fails with `ENOENT` or a load-module error.
+
+See [docs/API.md — Platform Support API](API.md#platform-support-api) for the exported helpers (`currentPlatform`, `platformSupportWarning`, `formatStartupError`) and [docs/ARCHITECTURE.md — Platform Support Diagnostics](ARCHITECTURE.md#platform-support-diagnostics) for the resolution flow.
+
 #### ALEXI_OTEL_TRACES_EXPORTER
 
 Enable the privacy-preserving OTLP tracing relay for SAP AI Core provider calls. Introduced in 1.22.19 (2026-09-13, port of Cline PR #13974 landed via commit `486cbe03`). Must be set to one of `grpc`, `http/json`, or `http/protobuf` — any other value keeps tracing disabled with `disabledReason: 'ALEXI_OTEL_TRACES_EXPORTER value invalid'`. Unset (the default) keeps tracing off. See [`docs/PROVIDERS.md#otlp-tracing-relay-observability`](PROVIDERS.md#otlp-tracing-relay-observability) for the full contract.
