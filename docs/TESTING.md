@@ -14,6 +14,9 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Minify-Safe Telemetry Detection](#testing-minify-safe-telemetry-detection)
 - [Testing Hooks](#testing-hooks)
 - [Testing hook dispatcher coverage per `HookEvent`](#testing-hook-dispatcher-coverage-per-hookevent-testshooksdispatcher-coveragetestts)
+- [Testing platform support diagnostics](#testing-platform-support-diagnostics-srccliutils__tests__platformsupporttestts)
+- [Testing retryable connection-reset classification](#testing-retryable-connection-reset-classification-srcsession__tests__networktestts)
+- [Testing C++20 module-interface detection](#testing-c20-module-interface-detection-srcclituutilsformattooloutputtestts)
 - [Testing Compaction](#testing-compaction)
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
@@ -10498,3 +10501,119 @@ npm test -- tests/hooks/dispatcher-coverage.test.ts
 ```
 
 The suite completes in well under a second — it mocks `fetch`, uses `echo ok` for the command cases (so the child process exits immediately), and never touches the SAP AI Core SDK, the filesystem beyond `echo`, or the TUI.
+
+## Testing platform support diagnostics (`src/cli/utils/__tests__/platformSupport.test.ts`)
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync, mirrors upstream opencode `055d95b` in spirit). Three `describe` blocks (14 cases total) pin the behaviour of `platformSupportWarning`, `formatStartupError`, and `currentPlatform` across the full support matrix.
+
+### Why dependency-injected `PlatformInfo` matters
+
+The helpers in `src/cli/utils/platformSupport.ts` accept an optional `PlatformInfo` argument so tests can exercise `linux-x64`, `darwin-arm64`, `win32-arm64`, unsupported platforms (`freebsd`), and unsupported architectures (`riscv64`) without monkey-patching `process.platform` or `process.arch`. Follow this pattern for any new platform-conditional helper — swapping `process.platform` in a global `beforeEach` leaks across suites running in parallel under vitest.
+
+### Suite shape
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  currentPlatform,
+  formatStartupError,
+  platformSupportWarning,
+} from '../platformSupport.js';
+
+describe('platformSupportWarning', () => {
+  it('returns undefined on common linux-x64 setups', () => {
+    expect(
+      platformSupportWarning({ platform: 'linux', arch: 'x64', nodeVersion: '22.12.0' })
+    ).toBeUndefined();
+  });
+
+  it('emits a Windows ARM64 specific advisory', () => {
+    const msg = platformSupportWarning({
+      platform: 'win32',
+      arch: 'arm64',
+      nodeVersion: '22.12.0',
+    });
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/Windows ARM64/);
+    expect(msg).toMatch(/native dependencies/);
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **Positive AND negative cases per axis.** The suite pins both "returns `undefined` for the common case" (one case per common combo) AND "returns a non-empty, grep-able warning for the uncommon case" (one case per outlier). This catches both over- and under-triggering regressions.
+2. **Match on message substrings, not full strings.** `expect(msg).toMatch(/Windows ARM64/)` tolerates copy-edits to the surrounding wording. The architectural contract is "the advisory names the platform"; the exact phrasing is not.
+3. **`formatStartupError` is tested in composition.** Two cases run `formatStartupError(new Error('ENOENT: better-sqlite3'), { platform: 'win32', arch: 'arm64', ... })` and `formatStartupError(new Error('boom'), { platform: 'linux', arch: 'x64', ... })` — the first expects the Windows ARM64 advisory to be appended, the second expects it to be absent. Composition tests surface integration bugs that single-helper tests miss.
+4. **Non-`Error` throwables stringify.** `formatStartupError('something broke', { ... })` is pinned by one case so `String(err)` fallback is explicit (not accidental).
+5. **`currentPlatform()` is tested against the live process.** One case asserts `p.platform === process.platform` + `p.arch === process.arch` + `p.nodeVersion === process.versions.node`. Any wrapper that transforms these values would fail here immediately.
+
+### Running
+
+```bash
+npm test -- src/cli/utils/__tests__/platformSupport.test.ts
+```
+
+The suite is pure in-memory, has no I/O, and completes in <100 ms. No SAP AI Core credentials or network access required.
+
+## Testing retryable connection-reset classification (`src/session/__tests__/network.test.ts`)
+
+Extended in commit `9c830373` (2026-10-10 upstream sync, ports opencode `055d95b`) to pin two code-first detection paths that short-circuited around the message-wording fallback:
+
+1. **`err.code` wins over `.message` wording.** A regression test constructs an error whose message does NOT mention `ECONNRESET` but whose `.code` IS `ECONNRESET`, and asserts `classifyNetworkError` still returns `{ reason: 'socket', retriable: true }`. Prior to the fix, the message-only classifier returned `null` for this input.
+2. **`err.cause.code` is walked for undici `fetch failed`.** A second case nests `{ code: 'ECONNRESET' }` inside `err.cause` and asserts the same classification. Node's global `fetch` wraps the libuv code there, so missing the `cause` hop would let a corporate-proxy connection reset through as "non-network".
+
+```typescript
+it('prefers Node ErrnoException .code over message wording (opencode 055d95b)', () => {
+  const err = Object.assign(new Error('server reset'), { code: 'ECONNRESET' });
+  expect(classifyNetworkError(err)).toEqual({ reason: 'socket', retriable: true });
+});
+
+it('classifies ECONNRESET nested in err.cause.code (undici fetch)', () => {
+  const err = Object.assign(new Error('fetch failed'), {
+    cause: Object.assign(new Error('socket'), { code: 'ECONNRESET' }),
+  });
+  expect(classifyNetworkError(err)).toEqual({ reason: 'socket', retriable: true });
+});
+```
+
+### Pattern
+
+- **`Object.assign(new Error(msg), { code })`** is the canonical shape for synthesising a Node `ErrnoException` in tests. Prefer it over subclassing `Error`: it round-trips through `instanceof Error` and matches how the Node runtime actually constructs these objects.
+- **Deep `cause` chains.** Build undici-style wrappers with `Object.assign(new Error('fetch failed'), { cause: Object.assign(new Error('socket'), { code: 'ECONNRESET' }) })`. Any new classifier that walks `cause` further than one hop should extend the extractor in `src/session/network.ts` and add a test here with the deeper nesting.
+- **Both the authoritative and the fallback paths need coverage.** Keep the pre-existing message-wording cases alongside the new code-based cases so a refactor that drops the fallback (e.g. by removing `extractErrorCode`'s message heuristic entirely) is caught.
+
+### Running
+
+```bash
+npm test -- src/session/__tests__/network.test.ts
+```
+
+## Testing C++20 module-interface detection (`src/cli/tui/utils/formatToolOutput.test.ts`)
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync, ports opencode `b2a3926` "add c++ module interface files to filetype map"). The new suite pins `guessLanguageFromPath()`'s C/C++ filetype coverage across four groups of extensions.
+
+```typescript
+it('resolves C++20 module interface units (opencode b2a3926)', () => {
+  // MSVC convention.
+  expect(guessLanguageFromPath('math.ixx')).toBe('cpp');
+  // Clang / standard convention.
+  expect(guessLanguageFromPath('math.cppm')).toBe('cpp');
+  // Vendor variants.
+  expect(guessLanguageFromPath('math.ccm')).toBe('cpp');
+  expect(guessLanguageFromPath('math.cxxm')).toBe('cpp');
+  expect(guessLanguageFromPath('math.c++m')).toBe('cpp');
+});
+```
+
+### Patterns worth internalising
+
+1. **Match the regex AND the map in the same assertion.** The `c++m` case is the one that exercises both the widened extension regex (`/\.([a-zA-Z0-9+]+)$/`) and the new map entry. Dropping either would fail here. Keep this specific case even if other MSVC / Clang cases are refactored.
+2. **Negative cases for extensionless paths.** `expect(guessLanguageFromPath('Makefile')).toBeUndefined()` + `expect(guessLanguageFromPath('README')).toBeUndefined()` pin the "no match -> undefined" contract. Callers rely on this to fall back to plain text rendering.
+3. **TypeScript / JavaScript baseline still covered.** The suite keeps `ts`, `tsx`, and `mjs` cases alongside the C++ additions so a refactor that scopes the map to C++ only would fail immediately.
+
+### Running
+
+```bash
+npm test -- src/cli/tui/utils/formatToolOutput.test.ts
+```

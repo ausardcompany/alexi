@@ -3354,6 +3354,33 @@ Introduced in commit `3fc1090a feat(server): add 30s shutdown deadline to server
 - **Default deadline is a constant.** `DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000` is pinned by a regression case. Changing the ceiling requires explicit review — it is deliberately smaller than the `~10 s` SIGKILL grace of Docker and systemd defaults so a single `SIGTERM` always terminates the daemon without an escalation to `SIGKILL`, and large enough that the normal `stop()` + `killAllTracked()` cycle (which typically completes in under a second) always finishes well inside the window.
 - **Keep `ShutdownTarget` local.** The interface is intentionally minimal (`stop(): Promise<void>`) and lives next to the helper, not in `src/server/socket.ts`. Promoting it to the main server module graph would re-import the heavy server surface into tests that only exercise shutdown timing — defeating the point of the per-file dependency isolation documented at [ARCHITECTURE.md — CLI Command Lazy-Loading](ARCHITECTURE.md#cli-command-lazy-loading-issue-1769).
 
+## Server Shutdown Signal Handler (idempotent)
+
+Extended in commit `9c830373` (2026-10-10 upstream sync). References: [ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979), [API.md — Server Shutdown Deadline](API.md#server-shutdown-deadline).
+
+- **Idempotent signal handling.** The `shutdown` closure installed by `registerServerCommand` now guards against double-entry via a `shuttingDown` boolean. A second `SIGINT` or `SIGTERM` while shutdown is in progress is a no-op; it must NOT re-race `shutdownWithDeadline` or arm a second force-exit timer. Removing this guard is a regression even though the single-signal path still works.
+- **Log the fired signal verbatim.** The handler prints `Received SIGINT, shutting down...` or `Received SIGTERM, shutting down...` as its first line. Operators grep for these strings in systemd / Docker logs — shortening to `Received shutdown signal` or similar is a regression.
+- **Wrap the async handler.** `process.once('SIGINT', () => void shutdown('SIGINT'))` (and the SIGTERM twin) is the correct wiring. Passing `shutdown` directly to `process.once` would unhandle the returned promise's rejection; the `void` wrapper discards the promise explicitly so the Node runtime cannot complain. Do not switch to `await` here — the signal callback is synchronous by contract.
+
+## Platform Support Diagnostics (`src/cli/utils/platformSupport.ts`)
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync, mirrors upstream opencode `055d95b` in spirit). References: [ARCHITECTURE.md — Platform Support Diagnostics](ARCHITECTURE.md#platform-support-diagnostics), [API.md — Platform Support API](API.md#platform-support-api), [CONFIGURATION.md — Platform / Architecture Support Matrix](CONFIGURATION.md#platform--architecture-support-matrix), [TESTING.md — Testing platform support diagnostics](TESTING.md#testing-platform-support-diagnostics-srccliutils__tests__platformsupporttestts).
+
+- **Keep the helpers pure.** `platformSupportWarning` and `formatStartupError` accept an injectable `PlatformInfo` argument so tests can exercise every axis of the matrix without monkey-patching `process`. Introducing a module-level call to `process.platform` inside either helper is a regression — the dependency-inversion is the entire point.
+- **`win32-arm64` has its own branch.** The combo is in BOTH `SUPPORTED_PLATFORMS` AND `SUPPORTED_ARCHS` individually, so collapsing the dedicated advisory into the generic-platform or generic-arch branch is a regression — the Windows ARM64 advisory names the specific native dependencies that historically lack prebuilt binaries (`tree-sitter` grammars, `better-sqlite3`), and users need that remediation hint explicitly.
+- **Never call `process.exit`.** `formatStartupError` returns a string; the caller decides whether to exit. Promoting the helper to `exitWithStartupError(err)` that calls `process.exit(1)` is a regression — the string contract keeps the helper usable from tests, from an embedded host, and from a serialised error channel.
+- **Preserve the `Alexi failed to start on <platform>-<arch>: <message>` prefix verbatim.** Log aggregators grep for this string. Reordering the fields or dropping the `on <platform>-<arch>` hint is a regression.
+- **Alexi ships no native binary.** The exact upstream opencode failure class (no prebuilt binary for `win32-arm64`) cannot occur here. New advisories must stay scoped to **optional** native dependencies that the CLI can degrade without — do not add a "required native dependency" branch, because that would misrepresent Alexi's packaging.
+
+## Retryable Connection-Reset Classification (`src/session/network.ts`)
+
+Extended in commit `9c830373` (2026-10-10 upstream sync, ports upstream opencode `055d95b`). References: [ARCHITECTURE.md — Network Management](ARCHITECTURE.md#network-management), [API.md — Network Management](API.md#network-management), [TESTING.md — Testing retryable connection-reset classification](TESTING.md#testing-retryable-connection-reset-classification-srcsession__tests__networktestts).
+
+- **Code before wording.** `classifyNetworkError()` MUST consult `err.code` (and `err.cause.code`) BEFORE falling back to message-substring matching. Reordering the precedence is a regression — corporate proxies that drop long-lived connections emit errors whose message does not include the libuv code but whose `.code` field does; the message-only path would misclassify them as `null` and bypass the retry budget.
+- **Walk `cause` once.** `extractErrorCode()` walks `err.code` then `err.cause.code`. Node's global `fetch` wraps the libuv code there, so a single-level lookup misses it. Do NOT recurse further than one hop without extending the test suite — undici does not nest deeper, and over-walking opens a surface for `{ cause: { cause: { code: 'ECONNRESET' } } }` DoS from a hostile wrapper.
+- **Keep the message-wording fallback.** Tests and wrapped / stringified errors still rely on it. The fallback matches on `econnreset`, `etimedout`, `eai_again`, `socket hang up`. Removing it to "simplify" is a regression — it is the only path that handles rewrapped errors from older provider SDKs.
+- **`isRetryableConnectionReset` is a predicate, not a classifier.** The function returns `boolean` and is designed to be the single call site for the "should this flow through `withRetry`?" question. Do not inline the heuristic at call sites — centralising it is the whole point of the port.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
