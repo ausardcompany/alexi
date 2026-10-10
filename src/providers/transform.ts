@@ -945,3 +945,195 @@ export function bindThinkingToToolCallsAll<
   });
   return changed ? out : messages;
 }
+
+// ============================================================================
+// Bedrock Nova tool-result image placement (kilocode PR #14524)
+// ============================================================================
+//
+// Amazon Nova on Bedrock (`us.amazon.nova*`, `eu.amazon.nova*`,
+// `ap.amazon.nova*`, plus the SAP AI Core orchestration spellings
+// `amazon--nova-micro|lite|pro`) rejects tool-result messages that carry
+// image content blocks: the Bedrock Converse request returns HTTP 400
+// with a schema validation error. Claude on Bedrock, Nova's own text
+// turns, and non-Bedrock providers (OpenAI, Gemini direct) all accept
+// images on tool results, so a blanket strip would lose useful context
+// on every other model.
+//
+// The upstream fix (kilocode PR #14524, merged 2026-10-09) is to detect
+// Nova by model id and move the image content blocks from each
+// tool-result message into the user message that immediately follows it
+// in the conversation, preserving all non-image blocks (text, JSON) on
+// the tool result itself. When no user message follows (the tool result
+// is the last turn, or only assistant/system messages come after), a
+// synthetic user message is appended at the end carrying the pending
+// images and a short continuation hint.
+//
+// `transformNovaMessages` NEVER mutates its input. Non-Nova model ids
+// get a shallow copy of the input array back so callers can treat the
+// result as owned without worrying about aliasing. Non-Nova callers
+// should still call the helper on every request — the Nova check is
+// cheap and funnels the "is this Nova?" decision through one place.
+
+/**
+ * Minimal message shape consumed by {@link transformNovaMessages}. Kept
+ * structural (no provider-SDK import) so this transform composes with
+ * both the OpenAI-style `{ role, content }` messages the orchestrator
+ * emits and any adapter that normalises to the same union.
+ *
+ * `content` may be a plain string (the common text-only shape) or an
+ * array of content blocks (`{ type: 'text'|'image'|'image_url'|..., ... }`).
+ * Only the array form can contain image blocks; strings pass through
+ * untouched.
+ */
+export interface NovaMessageLike {
+  role: string;
+  content?: unknown;
+  [key: string]: unknown;
+}
+
+/**
+ * Return true when the given model id identifies an Amazon Nova
+ * deployment that this transform should fire for.
+ *
+ * Accepted spellings (case-insensitive substring match on the lowered id):
+ *   - Bedrock cross-region inference profiles: `us.amazon.nova-*`,
+ *     `eu.amazon.nova-*`, `ap.amazon.nova-*`, `apac.amazon.nova-*`
+ *     — all contain the substring `amazon.nova`.
+ *   - Bedrock short form: `amazon.nova-micro`, `amazon.nova-lite`, etc.
+ *     — also contain `amazon.nova`.
+ *   - SAP AI Core orchestration: `amazon--nova-micro`, `amazon--nova-lite`,
+ *     `amazon--nova-pro`, including the provider-prefixed form
+ *     `sap-ai-core/amazon--nova-pro` — contain `amazon--nova`.
+ *
+ * Empty strings, `undefined`, and ids that do not match return `false`
+ * so callers can funnel every request through
+ * {@link transformNovaMessages} unconditionally.
+ */
+export function isNovaModel(modelId: string | undefined): boolean {
+  if (typeof modelId !== 'string' || modelId.length === 0) {
+    return false;
+  }
+  const normalized = modelId.toLowerCase();
+  // `amazon.nova` covers all Bedrock cross-region + short forms; the
+  // SAP AI Core spelling uses the double-dash `amazon--nova` separator.
+  return normalized.includes('amazon.nova') || normalized.includes('amazon--nova');
+}
+
+/**
+ * Extract an image content block from a message content part, if present.
+ * Supports both Anthropic-style `{ type: 'image', ... }` and OpenAI-style
+ * `{ type: 'image_url', ... }` blocks. Returns `undefined` for any other
+ * shape (text, tool_use, tool_result, plain strings, nullish).
+ */
+function isImageBlock(part: unknown): part is Record<string, unknown> {
+  if (!part || typeof part !== 'object') {
+    return false;
+  }
+  const t = (part as { type?: unknown }).type;
+  return t === 'image' || t === 'image_url';
+}
+
+/**
+ * Move tool-result image content to the next user message when the target
+ * model is Amazon Nova. See the section comment above for the full
+ * rationale.
+ *
+ * Behaviour:
+ *   - When `modelId` is NOT Nova (per {@link isNovaModel}), the input is
+ *     returned as a shallow copy — no transform is applied.
+ *   - Tool-role messages (`role === 'tool'`) whose `content` is an array
+ *     are split into image blocks and non-image blocks. Non-image blocks
+ *     stay on the tool result; image blocks are buffered and inserted
+ *     into the next user message in the conversation. The buffered
+ *     images are prepended to the user message's content (preserving
+ *     their order) so the tool-call -> image -> text narrative stays
+ *     intact.
+ *   - If the user message has string content, it is first lifted to
+ *     `[{ type: 'text', text: <string> }]` so the images can be
+ *     prepended uniformly.
+ *   - If no user message follows a tool-result that had images, a
+ *     synthetic user message is appended at the end of the conversation
+ *     carrying all pending images plus a short continuation hint.
+ *   - A tool-result whose content array contained ONLY images is left
+ *     with a single empty-text block so the message still has a valid
+ *     body (Bedrock rejects empty-content tool results, same contract
+ *     violation that motivates the whole transform).
+ *   - Tool-role messages whose content is a plain string pass through
+ *     untouched — strings cannot carry images.
+ *   - All non-tool, non-user messages pass through untouched.
+ *
+ * NEVER mutates its input. Returns a new array; messages that were not
+ * modified are preserved by reference, so callers can cheaply diff the
+ * result against the input to detect whether any rewriting happened.
+ *
+ * @param messages - The message list about to be sent to the provider.
+ * @param modelId  - Target model id (bare or `<provider>/<id>` form).
+ * @returns A message list safe to send to the Amazon Nova family.
+ */
+export function transformNovaMessages<T extends NovaMessageLike>(
+  messages: readonly T[],
+  modelId: string | undefined
+): T[] {
+  if (!isNovaModel(modelId)) {
+    return messages.slice() as T[];
+  }
+
+  const out: T[] = [];
+  let pendingImages: Array<Record<string, unknown>> = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'tool' && Array.isArray(msg.content)) {
+      const content = msg.content as unknown[];
+      const images: Array<Record<string, unknown>> = [];
+      const nonImages: unknown[] = [];
+      for (const part of content) {
+        if (isImageBlock(part)) {
+          images.push(part);
+        } else {
+          nonImages.push(part);
+        }
+      }
+      if (images.length === 0) {
+        // No images on this tool result — leave the message as-is so
+        // reference equality holds for the unchanged path.
+        out.push(msg);
+        continue;
+      }
+      // Preserve tool-result text / JSON parts. If nothing remains after
+      // the image split, insert a single empty-text block so Bedrock does
+      // not see an empty tool-result body.
+      const toolContent: unknown[] =
+        nonImages.length > 0 ? nonImages : [{ type: 'text', text: '' }];
+      out.push({ ...msg, content: toolContent } as T);
+      pendingImages.push(...images);
+      continue;
+    }
+
+    if (pendingImages.length > 0 && msg.role === 'user') {
+      const existing = Array.isArray(msg.content)
+        ? (msg.content as unknown[])
+        : typeof msg.content === 'string'
+          ? [{ type: 'text', text: msg.content }]
+          : [];
+      const rewritten = {
+        ...msg,
+        content: [...pendingImages, ...existing],
+      } as T;
+      pendingImages = [];
+      out.push(rewritten);
+      continue;
+    }
+
+    out.push(msg);
+  }
+
+  if (pendingImages.length > 0) {
+    const synthetic = {
+      role: 'user',
+      content: [...pendingImages, { type: 'text', text: 'Continuing the conversation' }],
+    } as unknown as T;
+    out.push(synthetic);
+  }
+
+  return out;
+}
