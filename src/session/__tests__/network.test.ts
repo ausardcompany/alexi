@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   classifyNetworkError,
+  isRetryableConnectionReset,
   NetworkDisconnectEvent,
   reportNetworkDisconnect,
 } from '../network.js';
@@ -55,6 +56,20 @@ describe('classifyNetworkError', () => {
       reason: 'socket',
       retriable: true,
     });
+  });
+
+  it('prefers Node ErrnoException .code over message wording (opencode 055d95b)', () => {
+    // An error whose message does NOT mention a known transport code but
+    // whose `.code` IS a known transport code must still be classified.
+    const err = Object.assign(new Error('server reset'), { code: 'ECONNRESET' });
+    expect(classifyNetworkError(err)).toEqual({ reason: 'socket', retriable: true });
+  });
+
+  it('classifies ECONNRESET nested in err.cause.code (undici fetch)', () => {
+    const err = Object.assign(new Error('fetch failed'), {
+      cause: Object.assign(new Error('socket'), { code: 'ECONNRESET' }),
+    });
+    expect(classifyNetworkError(err)).toEqual({ reason: 'socket', retriable: true });
   });
 
   it('classifies ENOTFOUND as retriable dns', () => {
@@ -102,5 +117,42 @@ describe('reportNetworkDisconnect', () => {
     } finally {
       unsub();
     }
+  });
+});
+
+describe('isRetryableConnectionReset', () => {
+  it('returns true for ECONNRESET detected via .code (upstream 055d95b fix)', () => {
+    const err = Object.assign(new Error('server reset'), { code: 'ECONNRESET' });
+    expect(isRetryableConnectionReset(err)).toBe(true);
+  });
+
+  it('returns true for ETIMEDOUT and EAI_AGAIN via .code', () => {
+    expect(
+      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ETIMEDOUT' }))
+    ).toBe(true);
+    expect(
+      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'EAI_AGAIN' }))
+    ).toBe(true);
+  });
+
+  it('returns true for ECONNRESET detected via err.cause.code (undici fetch)', () => {
+    const err = Object.assign(new Error('fetch failed'), {
+      cause: Object.assign(new Error('socket'), { code: 'ECONNRESET' }),
+    });
+    expect(isRetryableConnectionReset(err)).toBe(true);
+  });
+
+  it('falls back to message detection when .code is absent', () => {
+    expect(isRetryableConnectionReset(new Error('read ECONNRESET'))).toBe(true);
+    expect(isRetryableConnectionReset(new Error('socket hang up'))).toBe(true);
+  });
+
+  it('returns false for non-reset error codes', () => {
+    expect(
+      isRetryableConnectionReset(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))
+    ).toBe(false);
+    expect(isRetryableConnectionReset(new Error('validation failed'))).toBe(false);
+    expect(isRetryableConnectionReset('boom')).toBe(false);
+    expect(isRetryableConnectionReset(null)).toBe(false);
   });
 });

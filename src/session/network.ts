@@ -71,13 +71,19 @@ export const NetworkDisconnectEvent = defineEvent('network.disconnected', Networ
  * results to their existing error path — this classifier deliberately
  * does NOT swallow non-network errors.
  *
- * Detection rules (first-match wins, case-insensitive on message):
+ * Detection order (first-match wins):
  *  1. `AbortError` (checked by `err.name`) → `abort`, not retriable.
- *  2. `ETIMEDOUT` / literal "timeout" substring → `timeout`, retriable.
- *  3. `ECONNRESET` / `EPIPE` / `ECONNREFUSED` / "socket hang up" → `socket`,
- *     retriable.
- *  4. `ENOTFOUND` / `EAI_AGAIN` → `dns`, retriable.
- *  5. `fetch failed` (undici wrapper) → `unknown`, retriable.
+ *  2. Node `ErrnoException.code` lookup — the authoritative signal when
+ *     available. This mirrors upstream opencode `055d95b` which switched
+ *     ECONNRESET detection from message-substring to error-code so that
+ *     retryable connection resets are routed through the normal
+ *     exponential-backoff retry path instead of being misclassified by
+ *     wording. See `isRetryableConnectionReset` below.
+ *  3. Case-insensitive message match (fallback for errors that carry the
+ *     Node code only in `.message`, e.g. `new Error('read ECONNRESET')`
+ *     constructed by tests or by callers that re-wrap the original).
+ *     Order: `ETIMEDOUT`/"timeout" → `ECONNRESET`/`EPIPE`/`ECONNREFUSED`/
+ *     "socket hang up" → `ENOTFOUND`/`EAI_AGAIN` → "fetch failed".
  */
 export function classifyNetworkError(
   err: unknown
@@ -88,6 +94,20 @@ export function classifyNetworkError(
   if (err.name === 'AbortError') {
     return { reason: 'abort', retriable: false };
   }
+
+  // Primary: detect by Node ErrnoException code (authoritative). Walking
+  // `err.code` + `err.cause.code` matches `src/core/network.ts` and the
+  // transient-error contract in AGENTS.md.
+  const code = extractErrorCode(err);
+  if (code) {
+    const classified = classifyByCode(code);
+    if (classified) {
+      return classified;
+    }
+  }
+
+  // Fallback: message-substring match for callers (and tests) that
+  // encode the code in the error message without setting `.code`.
   const msg = err.message.toLowerCase();
   if (msg.includes('etimedout') || msg.includes('timeout')) {
     return { reason: 'timeout', retriable: true };
@@ -107,6 +127,82 @@ export function classifyNetworkError(
     return { reason: 'unknown', retriable: true };
   }
   return null;
+}
+
+/**
+ * True when `err` is a connection-reset that should flow through the
+ * normal exponential-backoff retry path (see
+ * `src/core/session/retry.ts#withRetry`) instead of failing fast.
+ *
+ * Ports opencode `055d95b` "fix(session): retry retryable conn reset
+ * through the normal retry path". The upstream regression: callers were
+ * detecting `ECONNRESET` by wording and short-circuiting to a
+ * fail-fast "serverReset" branch, which bypassed the retry budget. Keying
+ * off the Node ErrnoException code fixes it on corporate proxies that
+ * drop long-lived SAP AI Core connections.
+ */
+export function isRetryableConnectionReset(err: unknown): boolean {
+  const code = extractErrorCode(err);
+  if (!code) {
+    // Fallback: message-based detection so wrapped/stringified errors
+    // still route through retry.
+    if (err instanceof Error) {
+      const msg = err.message.toLowerCase();
+      return (
+        msg.includes('econnreset') ||
+        msg.includes('etimedout') ||
+        msg.includes('eai_again') ||
+        msg.includes('socket hang up')
+      );
+    }
+    return false;
+  }
+  return code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'EAI_AGAIN';
+}
+
+/**
+ * Map a Node ErrnoException code to a classified disconnect reason, or
+ * return `null` if the code is not a recognised network transport error.
+ */
+function classifyByCode(
+  code: string
+): { reason: NetworkDisconnectReason; retriable: boolean } | null {
+  switch (code) {
+    case 'ETIMEDOUT':
+      return { reason: 'timeout', retriable: true };
+    case 'ECONNRESET':
+    case 'EPIPE':
+    case 'ECONNREFUSED':
+      return { reason: 'socket', retriable: true };
+    case 'ENOTFOUND':
+    case 'EAI_AGAIN':
+      return { reason: 'dns', retriable: true };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Walk `err.code` and `err.cause.code` to extract a Node ErrnoException
+ * code. Node's global `fetch` wraps the underlying libuv code inside
+ * `cause`, so a single-level lookup misses it. Mirrors the extractor in
+ * `src/core/network.ts`.
+ */
+function extractErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') {
+    return undefined;
+  }
+  const record = err as { code?: unknown; cause?: unknown };
+  if (typeof record.code === 'string') {
+    return record.code;
+  }
+  if (record.cause && typeof record.cause === 'object') {
+    const inner = record.cause as { code?: unknown };
+    if (typeof inner.code === 'string') {
+      return inner.code;
+    }
+  }
+  return undefined;
 }
 
 /**
