@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Distinct exit codes for the `alexi server start` shutdown path (issue #1986, commit `ccfae8e9 feat(server): wire SIGINT/SIGTERM to shutdownWithDeadline with distinct exit codes`)** (`src/cli/commands/server.ts` +50 / -19 lines, `src/cli/commands/__tests__/server.shutdown.test.ts` +92 lines, net `2 files changed, 146 insertions(+), 19 deletions(-)`). The `SIGINT` / `SIGTERM` handler installed by `registerServerCommand` now exits with status `0` on a clean shutdown and status `1` when the deadline forces a shutdown. Previously the handler always called `process.exit(0)` regardless of whether `handle.stop()` + `killAllTracked()` finished within the 30-second deadline or the force-exit branch fired — Docker, systemd, and other orchestrators had no way to distinguish a graceful cleanup from a hung daemon that only terminated because the deadline elapsed. The split exit code lets `Restart=on-failure` units react to the `1` and lets `docker inspect` surface the force-exit as a non-zero termination.
+
+  New public helper in `src/cli/commands/server.ts`:
+
+  - `createShutdownHandler(handle: ShutdownTarget, options?: { timeoutMs?: number; exit?: (code: number) => never; log?: (msg: string) => void }): (sig: NodeJS.Signals) => Promise<void>` — factory for the signal handler. Captures the three previously-inline concerns (the `shuttingDown` idempotency guard, the `Received <sig>, shutting down...` log line, and the `exit(timedOut ? 1 : 0)` call site) in one place so tests can exercise the exit-code contract with injected `exit` and `log` spies instead of wiring the full Commander subcommand. `timeoutMs` defaults to `DEFAULT_SHUTDOWN_DEADLINE_MS`, `exit` defaults to `process.exit`, and `log` defaults to `console.log`. The handler calls `exit(timedOut ? 1 : 0)` inside a `finally` block so even a synchronous throw from an injected spy still terminates — the production path cannot leak an unhandled rejection out of the signal handler.
+
+  Call-site contract. `registerServerCommand` now reads:
+
+  ```typescript
+  const shutdown = createShutdownHandler(handle);
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  ```
+
+  No new runtime dependencies, no new CLI flags, no new environment variables. The previously-inline `shutdown` closure (with its local `shuttingDown` flag and `try/finally { process.exit(0) }`) has been replaced by the handler returned from `createShutdownHandler`. The `shutdownWithDeadline` helper itself is unchanged — it still returns `{ timedOut: boolean }` and still never calls `process.exit`.
+
+  Exit-code table:
+
+  | Code | Meaning |
+  |------|---------|
+  | `0` | `shutdownWithDeadline` resolved `{ timedOut: false }` within the deadline. Clean teardown of the socket server plus tracked background processes. |
+  | `1` | `shutdownWithDeadline` resolved `{ timedOut: true }`. Stderr already carries `Server shutdown exceeded <ms>ms deadline, forcing exit` and the IDs of any still-tracked background processes. |
+
+  Regression coverage. `src/cli/commands/__tests__/server.shutdown.test.ts` gains a new `describe('createShutdownHandler', ...)` block with four cases: (1) `SIGINT` with a resolving `stop()` calls `exit(0)` once and logs `Received SIGINT, shutting down...`; (2) `SIGTERM` with a non-resolving `stop()` advances the fake clock 30 s, logs the force-exit sentence, and calls `exit(1)`; (3) a second signal fired while a shutdown is in flight is a no-op — `log`, `exit`, and `stop` are each called exactly once (the `shuttingDown` guard is pinned); (4) the handler defaults to `DEFAULT_SHUTDOWN_DEADLINE_MS` when `timeoutMs` is omitted. The pre-existing `describe('shutdownWithDeadline', ...)` block is untouched — the helper's `{ timedOut }` contract has not changed. See [docs/TESTING.md — Testing the server shutdown deadline](docs/TESTING.md#testing-the-server-shutdown-deadline-issue-1979) for the fake-timer pattern and [docs/API.md — Server Shutdown API](docs/API.md#server-shutdown-api-shutdownwithdeadline-issue-1979) for the public surface.
+
 ### Removed
 
 - **Dead CLI option audit (issue #1972, commit `2ee1ce7e refactor(cli): remove unused CLI option declarations`)** (`src/cli/commands/sessions.ts` -2 lines, `src/cli/commands/revert.ts` -2 lines, `src/cli/commands/server.ts` -5 lines, `src/cli/commands/__tests__/sessions.test.ts` -10 lines, `src/cli/program.ts` +14 line header comment, `tests/cli/dead-flags.test.ts` +118 lines, net `6 files changed, 135 insertions(+), 21 deletions(-)`). Removed three Commander `.option()` declarations that were accepted at parse time but never read by the action handler. Each flag was described in `--help` output as either the default behaviour or an interactive-mode shortcut that the handler did not actually implement, so users could pass them under the mistaken belief that they switched behaviour. The audit is modelled on upstream Cline PR #14931 (dead-flag audit for the Cline CLI) and the research note at `.github/research/2026-10-08-research.md`.
