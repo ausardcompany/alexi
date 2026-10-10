@@ -1047,6 +1047,73 @@ it('quotes shell-special paths for downstream parsers', () => {
 
 Reference tests: `tests/utils/file-mention.test.ts` and `tests/command/fileMention.test.ts`.
 
+### Testing the Bedrock Nova tool-result image transform
+
+`tests/providers/bedrock-nova.test.ts` (361 lines, 3 `describe` blocks, 17 cases) pins the contract for `isNovaModel` and `transformNovaMessages` in `src/providers/transform.ts`. The suite is a pure unit test — no SAP SDK, no provider mocks, no filesystem, no timers — because both helpers are pure functions on in-memory message arrays.
+
+Pattern highlights:
+
+1. **Group by concern, not by model id.** The suite has three describe blocks: `isNovaModel` (detection), `transformNovaMessages - non-Nova models` (fast-path pass-through), and `transformNovaMessages - Nova models` (rewrite behaviour). Follow this split when adding sibling provider transforms (e.g. a future `transformXMessages` for a different model family) — detection and transform are separate concerns and should fail separately.
+2. **Pin every spelling family of the id.** `isNovaModel` has to classify Bedrock cross-region (`us.amazon.nova-pro-v1:0`), Bedrock short-form (`amazon.nova-micro-v1:0`), SAP AI Core orchestration (`amazon--nova-pro`), case-folded forms (`US.AMAZON.NOVA-PRO-V1:0`), and provider-prefixed envelopes (`sap-ai-core/amazon--nova-pro`). Negative cases must include at least one sibling that could plausibly collide — in Alexi's suite that's `amazon.titan-text-express-v1` (Amazon-prefix but not Nova) and `us.anthropic.claude-3-5-sonnet-20241022-v2:0` (Bedrock cross-region but not Nova).
+3. **Assert reference equality on the non-Nova path.** The suite checks both `result !== messages` (new array) AND `result[1] === messages[1]` (unchanged messages are passed by reference). This locks the "cheap diff" property callers depend on — a regression that spread every message unconditionally would break the shallow-copy contract silently.
+4. **Pin the synthetic-user fallback.** Two cases cover the trailing-user case: (a) no user message follows at all, (b) only an `assistant` turn follows. The synthetic message must be appended at the end with the images prepended and the fixed continuation hint `'Continuing the conversation'` as the trailing text block.
+5. **Pin the empty-text sentinel.** When the tool-result had only images, the rewritten tool-result ends up with `content: [{ type: 'text', text: '' }]`. Bedrock rejects empty-content tool results, so this sentinel is load-bearing — a regression that produced `content: []` would re-introduce the HTTP 400 the whole transform exists to avoid.
+6. **Accumulation case.** Consecutive tool-results with images and no intervening user turn must accumulate their images into the same following user message (preserving order). This mirrors multi-step tool-call batches the agent loop emits — asserting the accumulation ensures the images do not get lost when the model runs two screenshot tools in a row before asking the user to compare them.
+7. **No-mutation invariant.** A dedicated case holds a reference to the input list and every input message, runs the transform, then re-asserts the originals are deep-equal to their pre-transform snapshots. This is the strongest guard against a stray in-place mutation — a regression that pushed into `msg.content` instead of spreading would fail this case even if every other case still passed.
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { isNovaModel, transformNovaMessages } from '../../src/providers/transform.js';
+
+describe('transformNovaMessages - Nova models', () => {
+  it('moves tool-result images into the next user message', () => {
+    const image = { type: 'image', source: { data: 'AAAA', mediaType: 'image/png' } };
+    const messages = [
+      { role: 'user', content: 'take a screenshot' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'shot' }] },
+      {
+        role: 'tool',
+        tool_call_id: 'c1',
+        content: [image, { type: 'text', text: 'captured OK' }],
+      },
+      { role: 'user', content: 'what do you see?' },
+    ];
+    const result = transformNovaMessages(messages, 'us.amazon.nova-pro-v1:0');
+
+    expect(result[2]).toEqual({
+      role: 'tool',
+      tool_call_id: 'c1',
+      content: [{ type: 'text', text: 'captured OK' }],
+    });
+    expect(result[3]).toEqual({
+      role: 'user',
+      content: [image, { type: 'text', text: 'what do you see?' }],
+    });
+    // Earlier messages are untouched (reference equality on the unchanged path).
+    expect(result[0]).toBe(messages[0]);
+    expect(result[1]).toBe(messages[1]);
+  });
+
+  it('creates a synthetic user message when no user turn follows', () => {
+    const image = { type: 'image_url', image_url: { url: 'https://example.com/a.png' } };
+    const messages = [
+      { role: 'user', content: 'look' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'shot' }] },
+      { role: 'tool', tool_call_id: 'c1', content: [image, { type: 'text', text: 'done' }] },
+    ];
+    const result = transformNovaMessages(messages, 'us.amazon.nova-lite-v1:0');
+
+    expect(result).toHaveLength(messages.length + 1);
+    expect(result[3]).toEqual({
+      role: 'user',
+      content: [image, { type: 'text', text: 'Continuing the conversation' }],
+    });
+  });
+});
+```
+
+See [docs/PROVIDERS.md — Bedrock Nova Tool-Result Image Placement](PROVIDERS.md#bedrock-nova-tool-result-image-placement-transformnovamessages-isnovamodel) for the full behaviour contract and sequence diagram.
+
 ## Testing Tool System
 
 ### Tool Test Architecture

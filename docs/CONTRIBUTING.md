@@ -1192,6 +1192,57 @@ Ports the pair of upstream fixes opencode `517ee736b` (redacted /
 empty replay guards) and kilocode `3f39a329c` (thinking↔tool-call
 rebind).
 
+### Provider request-shape fixes (scoped by model-id guard)
+
+When a specific model family rejects a message shape that every other
+provider accepts — Amazon Nova's HTTP 400 on tool-results that carry
+image content blocks is the canonical case — resist the urge to
+normalise the shape for every provider. A blanket rewrite loses
+useful context on the models that would have accepted the original
+shape (visual tool-result context on Claude on Bedrock, OpenAI, Gemini
+direct), breaks cache-breakpoint locality on providers that key off
+message boundaries, and can silently detach thinking signatures from
+their tool-call parts. The idiomatic fix lives in
+`src/providers/transform.ts` next to the reasoning-replay guards and
+follows four conventions:
+
+- **Case-insensitive substring guard on every spelling the id can
+  carry.** `isNovaModel(modelId)` normalises with `toLowerCase()` and
+  matches `amazon.nova` OR `amazon--nova` so Bedrock cross-region
+  profiles (`us.amazon.nova-pro-v1:0`), Bedrock short-form
+  (`amazon.nova-micro-v1:0`), SAP AI Core orchestration
+  (`amazon--nova-pro`), and provider-prefixed envelopes
+  (`sap-ai-core/amazon--nova-pro`, `bedrock/us.amazon.nova-pro-v1:0`)
+  all classify identically. Empty strings and `undefined` return
+  `false` so the transform can be funnelled through unconditionally
+  without a pre-check.
+- **Structural `MessageLike` input type, no SDK import.** Keep the
+  `role: string; content?: unknown; [key: string]: unknown` shape
+  loose so the transform composes with both the OpenAI-style messages
+  the orchestrator emits and any adapter that normalises to the same
+  union. The transform never calls into a provider SDK — a request
+  shape fix is pure data manipulation.
+- **Never mutate the input.** Non-matching ids get a shallow copy
+  (`messages.slice()`) back so callers can treat the result as owned.
+  Matching ids get a new array back; unchanged messages are preserved
+  by reference so callers can cheaply diff the result against the
+  input (`result[i] === messages[i]`) to detect whether rewriting
+  actually happened. A regression that pushes into `msg.content`
+  instead of spreading `{ ...msg, content: [...pending, ...existing] }`
+  fails the dedicated no-mutation case in the regression suite.
+- **Empty-body sentinel on structural rewrites.** When the rewrite
+  would leave a message with an empty `content` array (e.g.
+  Bedrock-rejects-empty-tool-results after moving every image off the
+  tool-result), insert a single `{ type: 'text', text: '' }` block so
+  the resulting message still has a valid body. The sentinel is
+  load-bearing — the test suite pins it explicitly.
+
+Ports kilocode PR #14524 (`transformNovaMessages`, merged 2026-10-09).
+When adding a sibling fix for a different model family, mirror the
+same `is<Family>Model` + `transform<Family>Messages` naming pair and
+keep both helpers in `src/providers/transform.ts` so the full set of
+provider request-shape rewrites is discoverable from one module.
+
 ### Third-party library caches with hidden invariants (`gray-matter` pattern)
 
 Some commonly used libraries carry a process-wide cache that is NOT clearly
