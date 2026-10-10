@@ -2652,6 +2652,12 @@ export function reportNetworkDisconnect(
   provider?: string
 ): { reason: NetworkDisconnectReason; retriable: boolean } | null;
 
+/**
+ * True when `err` is a connection-reset that should flow through the
+ * normal exponential-backoff retry path instead of failing fast.
+ */
+export function isRetryableConnectionReset(err: unknown): boolean;
+
 export const NetworkDisconnectEvent: BusEvent<NetworkDisconnectPayloadT>;
 ```
 
@@ -2664,6 +2670,14 @@ classification synchronously so callers that need retry semantics do not
 have to subscribe. The payload carries an optional `provider` field so
 the UI can surface WHICH deployment dropped when a chat is fanned out
 across multiple SAP AI Core deployments.
+
+**Detection precedence (updated 2026-10-10, commit `9c830373`, ports opencode `055d95b`).** `classifyNetworkError()` now consults the Node `ErrnoException` code BEFORE falling back to message-substring matching:
+
+1. `err.name === 'AbortError'` → `abort`, not retriable.
+2. `extractErrorCode(err)` walks `err.code` then `err.cause.code` and classifies against the authoritative transport-code set (`ETIMEDOUT`, `ECONNRESET`, `EPIPE`, `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`). The `cause` hop matters because Node's global `fetch` wraps the libuv code inside `err.cause` and a single-level lookup misses it.
+3. Case-insensitive message match (fallback for errors that encode the code only in `.message`, e.g. tests that construct `new Error('read ECONNRESET')`).
+
+The new `isRetryableConnectionReset(err)` predicate exports the "should this flow through `withRetry` instead of failing fast?" rule explicitly. It returns `true` for `ECONNRESET`, `ETIMEDOUT`, and `EAI_AGAIN` on either `err.code` or `err.cause.code`, and falls back to a message substring check on the four strings `econnreset`, `etimedout`, `eai_again`, `socket hang up` so wrapped / stringified errors still route through retry. Upstream regression context: callers were detecting `ECONNRESET` by wording and short-circuiting to a fail-fast `serverReset` branch, bypassing the retry budget on corporate proxies that drop long-lived SAP AI Core connections.
 
 ```mermaid
 sequenceDiagram
@@ -7860,4 +7874,55 @@ Design notes:
 ## Bounded Server Shutdown Deadline
 
 > **Superseded.** The initial 10-second inline deadline (commit `0d6349a2`, ports upstream kilocode #14823) was superseded on 2026-10-09 by the extracted `shutdownWithDeadline` helper + 30-second deadline (commit `3fc1090a`, issue #1979) and then by the distinct-exit-code handler factory (commit `ccfae8e9`, issue #1986). The current contract — the helper, the factory, the `0` / `1` exit codes, the force-exit log sentence, and the regression suite — is documented at [Server Shutdown Deadline](#server-shutdown-deadline-srcclicommandsserverts-issue-1979). This section is retained as an anchor target for older cross-references.
+
+## Platform Support Diagnostics
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync). Lives in `src/cli/utils/platformSupport.ts` with the companion test suite at `src/cli/utils/__tests__/platformSupport.test.ts`. Mirrors upstream opencode `055d95b` ("fix(cli): improve error message for missing binary on windows arm64") in spirit — Alexi ships no native binary, so the exact upstream failure class (no prebuilt binary for `win32-arm64`) cannot occur here, but the helpers surface a clearer platform-specific hint when an optional native dependency (`tree-sitter` grammars, `better-sqlite3`) fails to load on an uncommon runtime.
+
+### Design
+
+Three pure, side-effect-free exports:
+
+```typescript
+// src/cli/utils/platformSupport.ts
+export interface PlatformInfo {
+  platform: NodeJS.Platform;
+  arch: string;
+  nodeVersion: string;
+}
+export function currentPlatform(): PlatformInfo;
+export function platformSupportWarning(info?: PlatformInfo): string | undefined;
+export function formatStartupError(err: unknown, info?: PlatformInfo): string;
+```
+
+- `currentPlatform()` reads `process.platform`, `process.arch`, and `process.versions.node` once and returns the snapshot. Callers that want hermetic unit tests pass a synthetic `PlatformInfo` instead of monkey-patching `process` globally.
+- `platformSupportWarning(info)` returns `undefined` on common `linux-x64` / `darwin-arm64` / `win32-x64` setups, an explicit **`Windows ARM64`** advisory on `win32-arm64` (Node runs natively but optional native deps lack prebuilt binaries there), a `platform "<name>" is not in the supported set (linux, darwin, win32)` warning on unsupported `NodeJS.Platform` values, and a `architecture "<name>" is not in the supported set (x64, arm64)` warning on unsupported arches. The returned string is meant for stderr; the helper itself NEVER writes.
+- `formatStartupError(err, info)` composes a startup-failure diagnostic that always begins with `Alexi failed to start on <platform>-<arch>: <message>` and appends the `platformSupportWarning()` text when applicable. Non-`Error` throwables are stringified via `String(err)`. The helper never calls `process.exit` — the caller decides.
+
+### Resolution flow
+
+```mermaid
+flowchart TD
+    Start[formatStartupError called] --> Snap[currentPlatform or injected info]
+    Snap --> Base["base = `Alexi failed to start on {platform}-{arch}: {message}`"]
+    Base --> Warn{platformSupportWarning returns a string?}
+    Warn -- No --> Out1[Return base]
+    Warn -- Yes --> Compose[Return base + newline + warning]
+    subgraph platformSupportWarning
+        Enter[platformSupportWarning] --> Win{platform = win32 and arch = arm64?}
+        Win -- Yes --> AdvWin[Return Windows ARM64 advisory]
+        Win -- No --> PlatOk{platform in SUPPORTED_PLATFORMS?}
+        PlatOk -- No --> AdvPlat[Return unsupported-platform warning]
+        PlatOk -- Yes --> ArchOk{arch in SUPPORTED_ARCHS?}
+        ArchOk -- No --> AdvArch[Return unsupported-arch warning]
+        ArchOk -- Yes --> None[Return undefined]
+    end
+```
+
+### Design notes
+
+- **No native binary.** Alexi runs as pure TypeScript / Node, so a missing prebuilt binary cannot be the root cause of a startup failure. The advisory is deliberately scoped to **optional** native dependencies (`tree-sitter` grammars, `better-sqlite3`) that the CLI can degrade without.
+- **`win32-arm64` is "soft unsupported".** Both `win32` and `arm64` are individually in the supported sets, so the generic warning branches never fire for this combo. The specific branch returns an informational advisory with a concrete remediation path (install the x64 build and run under x64 emulation, or file an issue).
+- **Pure helpers.** No globals are mutated; both `platformSupportWarning()` and `formatStartupError()` accept an injected `PlatformInfo` so tests cover all four axes (common, win32-arm64, unsupported platform, unsupported arch) without touching `process`.
+- **Consumers.** `formatStartupError()` is intended for the CLI boot path (`src/cli/program.ts` error boundaries) and for any ad-hoc startup script that needs a user-friendly diagnostic. The helper intentionally returns a string instead of printing so callers can route it through the shared logger, a serialised error channel, or stderr as appropriate.
 

@@ -3324,6 +3324,7 @@ render a "reconnecting…" line instead of hanging on the spinner.
 ```typescript
 import {
   classifyNetworkError,
+  isRetryableConnectionReset,
   reportNetworkDisconnect,
   NetworkDisconnectEvent,
   type NetworkDisconnectReason,
@@ -3338,6 +3339,12 @@ if (classified === null) {
 const { reason, retriable } = classified;
 // reason: 'timeout' | 'abort' | 'socket' | 'dns' | 'unknown'
 // retriable: boolean (false only for 'abort')
+
+// Standalone predicate for the "flow through retry" question:
+if (isRetryableConnectionReset(err)) {
+  // ECONNRESET / ETIMEDOUT / EAI_AGAIN (or an equivalent cause.code);
+  // send through withRetry() instead of failing fast.
+}
 
 // Or classify AND publish in one call:
 const result = reportNetworkDisconnect(err, 'aicore-anthropic');
@@ -3357,9 +3364,21 @@ Behaviour contract:
 - `classifyNetworkError` returns `null` for non-`Error` values,
   authentication / validation errors, and any error whose message does
   not match one of the well-known socket / DNS / timeout patterns.
+- Detection precedence (updated 2026-10-10, commit `9c830373`, ports
+  opencode `055d95b`): (1) `err.name === 'AbortError'`,
+  (2) `extractErrorCode(err)` — walks `err.code` then `err.cause.code`
+  and classifies against the authoritative transport-code set, (3) case-
+  insensitive message substring match as a fallback. The `cause` hop
+  matters because Node's global `fetch` wraps the libuv code inside
+  `err.cause` and a single-level lookup misses it.
 - `AbortError` (user-initiated cancel) is classified with
   `retriable: false` so upstream retry logic does NOT try to reconnect
   against a cancelled request.
+- `isRetryableConnectionReset(err)` returns `true` for `ECONNRESET`,
+  `ETIMEDOUT`, and `EAI_AGAIN` on either `err.code` or `err.cause.code`,
+  and falls back to a message substring check on `econnreset`,
+  `etimedout`, `eai_again`, `socket hang up` so wrapped / stringified
+  errors still route through retry.
 - `reportNetworkDisconnect` NEVER re-throws. A subscriber that throws
   from its handler is swallowed so the underlying network error is not
   masked.
@@ -3864,7 +3883,7 @@ export function formatDuration(ms: number): string;
 export function guessLanguageFromPath(filePath: string): string | undefined;
 ```
 
-`guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. Returns `undefined` for unknown extensions so callers can fall back to plain text.
+`guessLanguageFromPath` supports `ts`, `tsx`, `js`, `jsx`, `mjs`, `cjs`, `json`, `md`, `yml`, `yaml`, `sh`, `bash`, `py`, `rb`, `go`, `rs`, `java`, `css`, `scss`, `html`, `xml`, `toml`. From commit `9c830373` (2026-10-10, ports opencode `b2a3926`) the mapping also covers C / C++ sources (`c`, `h`, `cpp`, `cc`, `cxx`, `hpp`, `hh`, `hxx`) and the C++20 module-interface units `ixx` (MSVC), `cppm` (Clang / standard), `ccm`, `cxxm`, and `c++m` — the trailing-extension regex was widened from `/\.([a-zA-Z0-9]+)$/` to `/\.([a-zA-Z0-9+]+)$/` so vendor variants containing `+` are captured. Returns `undefined` for unknown extensions so callers can fall back to plain text.
 
 ### `linkify` helper (`src/cli/tui/utils/linkify.ts`)
 
@@ -7322,4 +7341,51 @@ Call-site contract:
 ## Server Shutdown Deadline
 
 > **Superseded.** The initial 10-second inline deadline (commit `0d6349a2`, ports upstream kilocode #14823) was superseded on 2026-10-09 by the extracted `shutdownWithDeadline` helper + 30-second deadline (commit `3fc1090a`, issue #1979). The exit-code contract (`0` clean, `1` force-exit) is preserved and reinforced by commit `ccfae8e9` (issue #1986), which introduces `createShutdownHandler` as the factory that wires the handler, logs the entry sentence, and calls `exit(timedOut ? 1 : 0)` in a `finally` block. The authoritative API surface, exit-code table, and behaviour contract live at [Server Shutdown API](#server-shutdown-api-shutdownwithdeadline-issue-1979). The design flow and sequence diagram live at [docs/ARCHITECTURE.md — Server Shutdown Deadline](ARCHITECTURE.md#server-shutdown-deadline-srcclicommandsserverts-issue-1979). This section is retained as an anchor target for older cross-references.
+
+## Platform Support API
+
+Introduced in commit `9c830373` (2026-10-10 upstream sync). Exported from `src/cli/utils/platformSupport.ts`.
+
+```typescript
+export interface PlatformInfo {
+  platform: NodeJS.Platform;
+  arch: string;
+  nodeVersion: string;
+}
+
+export function currentPlatform(): PlatformInfo;
+export function platformSupportWarning(info?: PlatformInfo): string | undefined;
+export function formatStartupError(err: unknown, info?: PlatformInfo): string;
+```
+
+Behaviour summary (full design in [docs/ARCHITECTURE.md — Platform Support Diagnostics](ARCHITECTURE.md#platform-support-diagnostics)):
+
+- `currentPlatform()` snapshots `process.platform`, `process.arch`, and `process.versions.node` into a value. Tests inject a synthetic `PlatformInfo` instead of monkey-patching `process`.
+- `platformSupportWarning(info)` returns `undefined` on common `linux-x64` / `darwin-arm64` / `win32-x64` setups. On `win32-arm64` it returns an informational advisory mentioning `tree-sitter` and `better-sqlite3` prebuilt-binary gaps. On platforms outside `{linux, darwin, win32}` or architectures outside `{x64, arm64}` it returns a `platform "<name>" is not in the supported set (…)` / `architecture "<name>" is not in the supported set (…)` warning.
+- `formatStartupError(err, info)` composes a startup-failure diagnostic of the form `Alexi failed to start on <platform>-<arch>: <message>` and appends the `platformSupportWarning()` text when applicable. Non-`Error` throwables are stringified via `String(err)`. The helper never calls `process.exit` — the caller decides.
+
+Example:
+
+```typescript
+import {
+  currentPlatform,
+  formatStartupError,
+  platformSupportWarning,
+} from './cli/utils/platformSupport.js';
+
+try {
+  await startAlexi();
+} catch (err) {
+  console.error(formatStartupError(err, currentPlatform()));
+  process.exit(1);
+}
+
+// Or surface the warning proactively:
+const advisory = platformSupportWarning();
+if (advisory) {
+  console.error(advisory);
+}
+```
+
+Alexi ships no native binary, so the exact upstream opencode `055d95b` failure class (no prebuilt binary for `win32-arm64`) cannot occur here — the helpers are scoped to **optional** native dependencies (`tree-sitter` grammars, `better-sqlite3`) that the CLI can degrade without.
 

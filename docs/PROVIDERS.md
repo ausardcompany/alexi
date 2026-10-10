@@ -2922,6 +2922,96 @@ so the paired upstream `@ai-sdk/anthropic 3.0.111` bump is a no-op for
 us — the helpers ship as pure functions for anything that might replay
 Anthropic-shaped assistant messages through the transform pipeline.
 
+## Bedrock Nova Tool-Result Image Placement (`transformNovaMessages`, `isNovaModel`)
+
+Added 2026-10-10 (ports kilocode PR #14524, merged 2026-10-09). Lives in `src/providers/transform.ts` alongside the other replay guards. Fixes an HTTP 400 schema validation error that Amazon Nova on Bedrock returns whenever a `role: 'tool'` message carries an image content block: the Bedrock Converse request shape allows images on `user` messages but not on `tool` results. Claude on Bedrock, Nova's own text turns, and non-Bedrock providers (OpenAI, Gemini direct) all accept images on tool results, so a blanket strip would lose useful context on every other model — the fix is scoped to the Nova family only.
+
+### Model detection (`isNovaModel`)
+
+```typescript
+// src/providers/transform.ts
+export function isNovaModel(modelId: string | undefined): boolean;
+```
+
+Returns `true` for any id whose lowercased form contains `amazon.nova` OR `amazon--nova`. The two substrings between them cover every Nova spelling Alexi can reach:
+
+| Spelling family                      | Example                                           | Matched substring |
+| ------------------------------------ | ------------------------------------------------- | ----------------- |
+| Bedrock cross-region inference       | `us.amazon.nova-pro-v1:0`, `eu.amazon.nova-lite-v1:0`, `ap.amazon.nova-micro-v1:0`, `apac.amazon.nova-pro-v1:0` | `amazon.nova`     |
+| Bedrock short form                   | `amazon.nova-micro-v1:0`, `amazon.nova-pro`       | `amazon.nova`     |
+| SAP AI Core orchestration            | `amazon--nova-micro`, `amazon--nova-lite`, `amazon--nova-pro` | `amazon--nova` |
+| Provider-prefixed envelopes          | `sap-ai-core/amazon--nova-pro`, `bedrock/us.amazon.nova-pro-v1:0` | either          |
+
+Case is normalised with `toLowerCase()` before the substring match, so `US.AMAZON.NOVA-PRO-V1:0` and `Amazon--Nova-Lite` classify identically. Empty strings and `undefined` return `false`, so callers can funnel every request through `transformNovaMessages` unconditionally without a pre-check. The guard deliberately does NOT match other Amazon Bedrock families (`amazon.titan-*`, `amazon.rerank-*`) — the schema violation is specific to the Nova Converse surface.
+
+### Message rewrite (`transformNovaMessages`)
+
+```typescript
+export interface NovaMessageLike {
+  role: string;
+  content?: unknown;
+  [key: string]: unknown;
+}
+
+export function transformNovaMessages<T extends NovaMessageLike>(
+  messages: readonly T[],
+  modelId: string | undefined
+): T[];
+```
+
+Behaviour contract:
+
+- **Non-Nova fast path.** When `isNovaModel(modelId)` is `false`, the input is returned as a shallow copy (`messages.slice()`). No rewrite happens. The output is a new array so callers can treat it as owned, but every message object is referentially identical to the input.
+- **Image split on `role: 'tool'` with array `content`.** For each tool-role message whose `content` is an array, the parts are split into image blocks (`type === 'image'` or `type === 'image_url'`) and non-image blocks (text, JSON, etc.). The non-image blocks stay on the tool-result message; the image blocks are buffered and inserted into the NEXT `role: 'user'` message in the conversation.
+- **Preserve order.** Buffered images are prepended to the following user message's content, preserving their original left-to-right order. The tool-call → image → text narrative is preserved end-to-end.
+- **String-content lift.** If the next user message's `content` is a plain string, it is first lifted to `[{ type: 'text', text: <string> }]` so the images can be prepended uniformly.
+- **Empty-content guard.** If the tool-result's content array contained ONLY images, the rewritten tool-result ends up with a single empty-text block `[{ type: 'text', text: '' }]`. Bedrock rejects empty-content tool results, so the empty-text sentinel keeps the message valid.
+- **Synthetic trailing user message.** If no user message follows a tool-result that had images (the tool-result is the last turn, or only assistant/system messages come after), a synthetic user message is appended at the end of the output: `{ role: 'user', content: [...pendingImages, { type: 'text', text: 'Continuing the conversation' }] }`. The continuation hint keeps the Bedrock Converse request shape valid.
+- **Accumulation across consecutive tool-results.** When two or more tool-result messages carry images with no intervening user turn, their images accumulate into the same following user message (or the synthetic trailing message when no user turn follows).
+- **Pass-through cases.** Tool-role messages whose `content` is a plain string are returned by reference untouched (strings cannot carry images). Tool-role messages whose `content` array contains no images are also returned by reference, so `result[i] === messages[i]` holds on the unchanged path and callers can cheaply diff the result against the input to detect rewriting.
+- **Never mutates.** The input array and every input message object are read-only — the helper always allocates a new array and spreads `{ ...msg, content: ... }` for any message it rewrites. Callers that retain the input list see no observable change.
+
+### Call site
+
+`transformNovaMessages(messages, modelId)` is invoked by `SAPOrchestrationProvider` as the final step in request assembly, after `applyCacheBreakpoint` and the reasoning-replay guards described in [Reasoning Replay Guards](#reasoning-replay-guards-hasbedrockreasoningsignature-bindthinkingtotoolcall). Because the Nova check short-circuits for every non-Nova id, the helper is safe to call unconditionally — the extra work is one `toLowerCase()` + two `includes()` per request on the non-Nova hot path.
+
+### Sequence: Nova request with a screenshot tool-result
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agentic chat loop
+    participant Transform as transformNovaMessages
+    participant Nova as SAP AI Core (Nova)
+
+    Agent->>Transform: [user, assistant+tool_calls, tool(image+text), user]
+    Transform->>Transform: isNovaModel("amazon--nova-pro") -> true
+    Transform->>Transform: Split tool content<br/>images=[image], nonImages=[text]
+    Transform->>Transform: Rewrite tool-result (text only)
+    Transform->>Transform: Buffer image for next user turn
+    Transform->>Transform: Prepend image to next user content
+    Transform-->>Agent: [user, assistant+tool_calls, tool(text), user(image+text)]
+    Agent->>Nova: Converse request (schema-valid)
+    Nova-->>Agent: Completion
+```
+
+### Why not strip images entirely?
+
+A simpler fix would be to drop image blocks from tool-results on Nova. That would avoid the schema violation but silently discard visual context that the model needs to answer the user's follow-up (`"what do you see?"`). Moving the images to the next user turn preserves the full narrative and matches the shape Nova's Converse API accepts natively — the test `moves tool-result images into the next user message` in `tests/providers/bedrock-nova.test.ts` pins the exact rewrite.
+
+### Why not run the transform on every model?
+
+Claude on Bedrock, OpenAI direct, and Gemini direct all accept images on tool-results without issue. Running the Nova rewrite on those providers would move images away from the tool call that produced them, breaking cache-breakpoint locality and (for Anthropic) the thinking-signature binding on the tool-call part. The guard-first design keeps every non-Nova provider on its native message shape.
+
+### Test suite
+
+The behaviour contract is pinned by `tests/providers/bedrock-nova.test.ts` (361 lines) with the following coverage shape:
+
+- `isNovaModel` detection for Bedrock cross-region, Bedrock short form, SAP AI Core orchestration, provider-prefixed envelopes, and case-insensitive matches. Negative cases pin Claude on Bedrock, OpenAI, Gemini, Titan, and empty/`undefined` ids.
+- `transformNovaMessages` non-Nova fast path: shallow copy, reference equality on unchanged messages, no rewrite for Claude on Bedrock.
+- `transformNovaMessages` Nova path: single-image move, mixed image + text preservation on the tool-result, synthetic trailing user message when no user turn follows, synthetic trailing message when only assistant/system turns follow, empty-text sentinel when the tool-result had only images, pass-through for tool-results with no images, pass-through for string-content tool-results, accumulation across consecutive tool-results, user-content-already-array handling, and a no-mutation assertion on the input list.
+
+Follow the [Nova image-placement regression pattern](TESTING.md#testing-the-bedrock-nova-tool-result-image-transform) when adding further Nova / Bedrock Converse request-shape fixes so the same contract shape is reused for sibling providers.
+
 ## Bedrock Model ID Resolution (`src/providers/bedrock-model-id.ts`)
 
 Introduced 2026-09-11 (`1.22.17`, ports opencode `ac1758c`). Standalone helper that classifies Amazon Bedrock model IDs and applies the correct cross-region prefix policy. Alexi has no direct Bedrock provider — every LLM call still goes through SAP AI Core Orchestration — but SAP AI Core transparently proxies Anthropic-on-Bedrock and other Bedrock-backed deployments (see the `aicore-bedrock-*` references in `src/providers/transform.ts`). This helper is exported so any future direct Bedrock integration or SAP AI Core deployment mapping code can use a single, tested classifier instead of re-deriving the prefix rules.
