@@ -15,6 +15,7 @@ import {
   buildUserRejectedToolReason,
   type PermissionAction,
 } from '../permission/index.js';
+import { DEFAULT_POLICY_ENFORCER, type PolicyEnforcer } from '../permission/policy.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { SessionManager } from '../core/sessionManager.js';
 
@@ -579,6 +580,22 @@ class ToolRegistry {
   private dynamicTools: Map<string, Tool<any, any>> = new Map();
   private indexingTools: Map<string, Tool<any, any>> = new Map();
   private indexingInitialized = false;
+  // Alexi_change (opencode 613ef8ba / d016db85, 2026-10): optional
+  // managed-policy enforcer that filters tool enumeration and lookup.
+  // Defaults to the open-world DEFAULT_POLICY_ENFORCER so legacy
+  // behaviour is preserved for installations that do not configure a
+  // policy. SAP enterprise deployments can swap this via
+  // `setPolicyEnforcer` to centrally disable high-risk tools (shell,
+  // network fetch, etc.) across the whole process.
+  private policy: PolicyEnforcer = DEFAULT_POLICY_ENFORCER;
+
+  setPolicy(policy: PolicyEnforcer): void {
+    this.policy = policy;
+  }
+
+  getPolicy(): PolicyEnforcer {
+    return this.policy;
+  }
 
   register<TParams extends z.ZodType, TResult>(tool: Tool<TParams, TResult>): void {
     this.tools.set(tool.name, tool);
@@ -624,11 +641,22 @@ class ToolRegistry {
   }
 
   get(name: string): Tool<any, any> | undefined {
+    // Policy check first — if the operator has denied this tool,
+    // treat it as if it were not registered at all. This is stricter
+    // than hiding it from `list()`: a model that already knows the
+    // tool name (e.g. from cached schemas) still cannot invoke it.
+    if (!this.policy.isToolAllowed(name)) {
+      return undefined;
+    }
     return this.tools.get(name) || this.dynamicTools.get(name);
   }
 
   list(): Tool<any, any>[] {
-    return [...Array.from(this.tools.values()), ...Array.from(this.dynamicTools.values())];
+    const all = [
+      ...Array.from(this.tools.values()),
+      ...Array.from(this.dynamicTools.values()),
+    ];
+    return all.filter((t) => this.policy.isToolAllowed(t.name));
   }
 
   getSchemas(): Array<{
@@ -693,6 +721,19 @@ export function getAllToolNames(): string[] {
   return getToolRegistry()
     .list()
     .map((t) => t.name);
+}
+
+/**
+ * Install a managed policy enforcer on the global tool registry.
+ *
+ * Alexi_change (opencode 613ef8ba / d016db85, 2026-10): entry point for
+ * enterprise deployments to centrally deny tools / integrations / skills
+ * via `src/permission/policy.ts`. Pass a `PolicyEnforcer` constructed
+ * from the operator's managed configuration (typically loaded at
+ * startup from a JSON file or SAP AI Core deployment-level config).
+ */
+export function setToolPolicy(policy: PolicyEnforcer): void {
+  getToolRegistry().setPolicy(policy);
 }
 
 // Re-export for convenience

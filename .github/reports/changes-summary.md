@@ -1,166 +1,52 @@
-# Alexi Upstream-Sync Change Summary
+# Upstream Sync Changes Summary — 2026-10-11
 
-**Generated**: 2026-10-10
-**Plan source**: Upstream analysis of kilocode (fb7e96eda, defcd7dff, e3552defc,
-32491185e, 31fed7f43, a1fbca087) and opencode (055d95b, b2a3926).
+Generated: 2026-10-11
+Based on update plan derived from opencode `055d95bb..d21b0790` (100 commits).
 
----
+## Files Modified
 
-## Files Modified / Created
+### Created
+- `src/session-ui/timeline-links.ts` — Deterministic file-link detection for timeline rendering.
+- `src/permission/policy.ts` — Managed integration / tool / skill policy enforcement (`PolicyEnforcer`, `ManagedPolicySchema`).
+- `src/providers/github-copilot.ts` — Copilot endpoint selector + stream parser helpers (ready for a future Copilot adapter; no live wiring).
+- `src/providers/xai-image-filter.ts` — xAI mime-type allowlist (PNG / JPEG / WebP) with partitioning helper.
 
-| Change | File | Status |
-| --- | --- | --- |
-| 3 | `src/session/network.ts` | **modified** |
-| 3 | `src/session/__tests__/network.test.ts` | **modified** |
-| 4 | `src/cli/utils/platformSupport.ts` | **created** |
-| 4 | `src/cli/utils/__tests__/platformSupport.test.ts` | **created** |
-| 5 | `src/cli/tui/utils/formatToolOutput.ts` | **modified** |
-| 5 | `src/cli/tui/utils/formatToolOutput.test.ts` | **created** |
+### Edited
+- `src/core/agenticChat.ts` — `executeToolCall` now (a) returns a descriptive `Malformed tool arguments for <tool>` error on bad JSON, (b) runs `safeParse` on the tool schema BEFORE dispatch, (c) exports a new `settleUnfinishedCalls` helper to drain the pending-call map at turn boundaries.
+- `src/tool/index.ts` — Added `DEFAULT_POLICY_ENFORCER` import and `setPolicy` / `getPolicy` on `ToolRegistry`; `get()` and `list()` now consult the policy; exported `setToolPolicy()` for operator / startup wiring.
 
----
+## Changes by Priority
 
-## Change-by-change notes
+### Critical
 
-### Changes 1 & 2 — Copilot interleaved `reasoning_opaque` handling — SKIPPED (N/A)
+**1. Rename `@opencode-ai/plugin` → `@opencode/plugin`** — _No-op in current Alexi._ A grep across `src/` found zero live imports of either package name, no `src/tool/github-pr-search.ts` or `src/tool/github-triage.ts` files, and no `@opencode-ai/plugin` entry in `package.json`. Historical references to `@opencode-ai/*` appear only in `CHANGELOG.md` and `docs/upstream-sync/2026-09-06.md` (where they were already documented as "never wired into any module"). Nothing to rename.
 
-**Reason**: Alexi has no GitHub Copilot provider. Alexi's provider surface is
-SAP AI Core (`src/providers/sapOrchestration.ts`) + SAP Orchestration, with
-reasoning handled in `src/providers/reasoning.ts` using the Anthropic-native
-`thinking` shape (`{ type: 'enabled', budget_tokens }`). The
-`convert-to-openai-compatible-chat-messages.ts` and
-`openai-compatible-chat-language-model.ts` files referenced in the plan do
-not exist in Alexi's tree, and the `reasoning_opaque` wire-field is a
-Copilot-only concept (Copilot's VS Code client contract). The upstream bug
-— "`InvalidResponseDataError` on second `reasoning_opaque` delta" — cannot
-occur in Alexi because Alexi's SAP Anthropic path consumes `thinking` deltas
-with per-block `signature` values, not opaque strings.
+**2. Reject malformed tool arguments + settle unfinished calls** — Done in `src/core/agenticChat.ts`:
+   - `JSON.parse` failure now produces a structured `Malformed tool arguments for <toolName>: <detail>` error that names the tool and includes the raw payload for debugging.
+   - A new `safeParse` step runs the tool's Zod schema against the parsed args BEFORE `tool.execute()`. On schema violation we short-circuit with a tool-named error so the model can self-correct instead of hitting the generic `Invalid parameters` string buried inside `defineTool.executeUnsafe`.
+   - Exported `settleUnfinishedCalls(pending, onProgress)` helper that drains a `Map<id, { toolName }>` of in-flight tool calls, emits `tool_end` events, and returns synthetic error results so transcripts stay well-formed when a turn ends mid-dispatch (prevents SAP AI Core from rejecting the next assistant message for orphaned `tool_calls` entries).
 
-**Verification**: `grep -r 'reasoning_opaque\|reasoningOpaque' src/` → 0 matches.
-No action required to preserve SAP AI Core compatibility.
+### High
 
----
+**3. Deterministic timeline file-link detection** — New module `src/session-ui/timeline-links.ts` exporting `detectFileLinks(text, workspaceRoot)` and the `FileLink` interface. Anchored on leading whitespace / `(` / start-of-string, with special handling for Windows drive letters (`C:\...`) so the drive-letter colon is never mistaken for a `:line:col` suffix. Only paths confirmed via `fs.access` are returned.
 
-### Change 3 — Classify ECONNRESET by error `.code` so retryable resets flow through standard backoff — **applied**
+**4. Managed integration + tool + skill policy enforcement** — New module `src/permission/policy.ts` exporting:
+   - `ManagedPolicySchema` (Zod) + inferred `ManagedPolicy` type
+   - `PolicyEnforcer` with `isToolAllowed`, `isIntegrationAllowed`, `isSkillAllowed`, `snapshot()`
+   - `DEFAULT_POLICY_ENFORCER` singleton (open-world: everything allowed) so existing installations behave identically unless a policy is explicitly installed.
+   - Wired into `src/tool/index.ts` `ToolRegistry`: `get()` returns `undefined` for denied tools (stricter than filtering `list()` — a cached tool name still cannot be invoked); `list()` filters by policy; `setToolPolicy()` is the entry point for enterprise SAP deployments to install their managed configuration at startup.
 
-**File**: `src/session/network.ts`
+**5. Accept interleaved Copilot `reasoning_opaque` values** — Implemented in `src/providers/github-copilot.ts` via `parseCopilotResponseStream()`. Handles `response.reasoning_opaque.delta` identically to `response.reasoning.delta` but with `opaque: true` so downstream renderers know the content is encrypted blob data. Alexi has no live Copilot adapter today — these helpers are dependency-light and documented so a future adapter can import them directly without pulling the rest of the provider stack.
 
-Rewrote `classifyNetworkError` to detect network transport failures by
-Node `ErrnoException.code` first (walking both `err.code` and
-`err.cause.code` for undici fetch wrappers) and only fall back to
-message-substring matching when no code is present. This mirrors upstream
-opencode `055d95b`'s core insight: callers that short-circuit on wording
-(`"server reset"`, `"ECONNRESET"` in the message) misclassify any error
-whose message was rewritten by a middleware, bypassing the normal
-exponential-backoff retry path implemented in `src/core/session/retry.ts`.
+**6. Route Copilot Gemini fallback to chat-completions** — Implemented in `src/providers/github-copilot.ts` via `selectCopilotEndpoint(modelId)` and `resolveCopilotProviderPackage(modelId, snapshot)`. Gemini models get `chat`, GPT / Claude get `responses`, unknown families fall back to `chat` (the stricter subset) to avoid silent breakage when Copilot adds a new family before the models.dev snapshot catches up.
 
-Added a new exported predicate `isRetryableConnectionReset(err)` returning
-`true` for `ECONNRESET` / `ETIMEDOUT` / `EAI_AGAIN` (code-first, message
-fallback). Callers who need to route retryable resets through
-`withRetry()` instead of a fail-fast path can import this predicate.
+### Medium / Low
 
-**Tests added** (`src/session/__tests__/network.test.ts`):
-- `classifyNetworkError` prefers `.code` over message wording — covers the
-  exact regression (an `Error` with message `"server reset"` but
-  `code: 'ECONNRESET'`).
-- Classification walks `err.cause.code` for undici-style `fetch failed`
-  wrappers.
-- Full `isRetryableConnectionReset` suite: `.code` detection,
-  `.cause.code` detection, message-fallback detection, and negative
-  cases (`ENOTFOUND`, non-Error inputs).
+**7. Only send PNG / JPEG / WebP images to xAI** — Implemented in `src/providers/xai-image-filter.ts` via `isXaiAllowedImageMime(mime)` and `filterXaiImages(attachments)` → `{ kept, dropped }`. The dropped list is returned (not silently swallowed) so callers can log a warning. Alexi has no native xAI adapter yet; this helper is wired on-demand by proxy adapters that forward to xAI.
 
-**SAP AI Core impact**: Positive. SAP AI Core sits behind corporate
-proxies that routinely drop long-lived streams; the new behaviour makes
-every retryable reset flow through the shared backoff formula.
+## Issues Encountered
 
----
-
-### Change 4 — Clearer startup diagnostic on uncommon platforms (spirit of win32-arm64 fix) — **applied with scope adjustment**
-
-**Files**: `src/cli/utils/platformSupport.ts` (new),
-`src/cli/utils/__tests__/platformSupport.test.ts` (new)
-
-**Scope adjustment**: Alexi has no native binary — `package.json` declares
-`"bin": { "alexi": "dist/cli/program.js", "ax": "dist/cli/program.js" }`
-and there is no postinstall script. The upstream opencode fix for
-"no prebuilt binary available for win32-arm64" literally cannot apply
-(Node runs natively on win32-arm64; Alexi has no prebuilt binary
-dependency to fail on). Rather than fabricate a nonexistent binary
-dispatcher, I added a lightweight diagnostic utility that honours the
-spirit of the plan:
-
-- `platformSupportWarning(info?)` — returns a human-readable advisory
-  for win32-arm64 (optional native deps like `tree-sitter`,
-  `better-sqlite3` historically lack arm64 wheels), unsupported
-  platforms (anything outside `linux` / `darwin` / `win32`), or
-  unsupported architectures (anything outside `x64` / `arm64`).
-- `formatStartupError(err, info?)` — composes a startup error message
-  with the platform/arch triple and, when applicable, the advisory from
-  `platformSupportWarning`.
-- `currentPlatform()` — pure accessor returning a
-  `{ platform, arch, nodeVersion }` snapshot.
-
-All three helpers accept an injected `PlatformInfo` so tests do not need
-to monkey-patch `process`. The utility is not yet wired into
-`program.ts`; it is available for `src/cli/program.ts` and any future
-startup smoke-test to call when a fatal error is caught.
-
-**Tests added**: 7 unit tests covering linux-x64 (no warning),
-darwin-arm64 (no warning), win32-arm64 (Windows ARM64 advisory),
-freebsd (platform-not-supported warning), linux-riscv64 (arch-not-supported
-warning), and the `formatStartupError` composition on each branch.
-
-**SAP AI Core impact**: None (no provider code changed).
-
----
-
-### Change 5 — C++ module interface units in filetype map — **applied**
-
-**File**: `src/cli/tui/utils/formatToolOutput.ts`
-
-Alexi's filetype → syntax-highlighter language map lives in
-`guessLanguageFromPath` (used by `DiffView.tsx` to drive `cli-highlight`).
-Added entries for:
-
-- `.c`, `.h` → `c`
-- `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` → `cpp`
-- **C++20 module interface units** (opencode `b2a3926`):
-  `.ixx` (MSVC), `.cppm` (Clang/standard), `.ccm`, `.cxxm`, `.c++m`
-  (vendor variants) → `cpp`
-
-Widened the extension-matching regex from `/\.([a-zA-Z0-9]+)$/` to
-`/\.([a-zA-Z0-9+]+)$/` so `.c++m` is detected. No other call-sites of
-`guessLanguageFromPath` were affected (verified by `grep`).
-
-**Tests added** (`src/cli/tui/utils/formatToolOutput.test.ts`): 4 unit
-tests covering existing TS/JS mappings (regression), standard C/C++
-sources, every new module-interface extension including the vendor
-variants, and the unknown/extension-less fallback path.
-
-**SAP AI Core impact**: None (TUI-only presentation change).
-
----
-
-## Verification steps
-
-- `grep -r 'reasoning_opaque\|reasoningOpaque' src/` → 0 hits (confirms
-  Changes 1 & 2 are correctly skipped).
-- All new/modified files follow Alexi conventions: `.js` extensions on
-  local imports, Prettier-compatible formatting (100 cols, single
-  quotes, `trailingComma: es5`), ESLint-strict (no `console.*` outside
-  `src/utils/logger.ts`, `eqeqeq` everywhere, unused vars prefixed `_`).
-- No changes to `src/providers/**` — SAP AI Core adapter paths are
-  untouched.
-- No new runtime dependencies.
-
-## Issues encountered
-
-- **Plan vs. reality mismatch for Changes 1, 2, 4**: Alexi's architecture
-  (no Copilot provider, no native binary) means those upstream fixes do
-  not have a direct target. Change 1/2 is a true no-op (documented
-  above); Change 4 was reinterpreted as a platform diagnostic utility
-  that mirrors the user-facing spirit (clearer error messages on
-  uncommon platforms) without fabricating a non-existent native binary
-  dispatcher.
-- No test regressions expected; the modified `src/session/network.ts`
-  preserves the previous message-fallback semantics so every pre-existing
-  assertion in `src/session/__tests__/network.test.ts` continues to hold.
+- **Plan truncation**: The update plan was truncated mid-sentence at change #7 (xAI images), and changes #8 through #18 (the remaining medium / low items listed in the summary header) were never transmitted. Only changes #1 through #7 were executed as specified. The surrounding architectural notes about `packages/opencode/` restructuring, package renames, and plugin SDK migration were acknowledged but did not translate into additional file-level changes beyond what is listed here.
+- **Non-applicable changes**: Changes #1 (`@opencode-ai/plugin`), #5 (Copilot streams), #6 (Copilot Gemini routing), and #7 (xAI image filter) target code paths that do not exist in Alexi today — Alexi's provider surface is SAP AI Core plus proxies, not a direct Copilot or xAI adapter. For these items I created dependency-light utility modules that encode the upstream semantics so a future adapter can import them, rather than inventing provider adapters not called for in the plan. This matches Alexi's existing pattern of "fork selected pieces, not mirror the full restructure" (per the plan's own preamble).
+- **SAP AI Core compatibility**: All edits preserve existing SAP AI Core / SAP Orchestration flows. `ToolRegistry` policy defaults to the open-world enforcer so no existing deployment changes behaviour unless `setToolPolicy()` is called explicitly. The `agenticChat` error-handling changes only widen the error-string surface (nothing that was previously allowed is now rejected).
+- No tests were added for the new modules in this execution per the plan's scope. Existing tests under `src/core/__tests__/agenticChat.test.ts` and `src/tool/registry.test.ts` continue to exercise the modified call sites.

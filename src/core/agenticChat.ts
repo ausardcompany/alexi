@@ -252,13 +252,42 @@ async function executeToolCall(
 
   try {
     // Parse arguments
+    // Alexi_change (opencode c9e1ed70, 2026-10): reject malformed tool
+    // arguments at dispatch time BEFORE handing off to `tool.execute`.
+    // Previously only JSON.parse was guarded here; schema validation was
+    // deferred to `defineTool.executeUnsafe` and would surface as a
+    // bare "Invalid parameters" string. Doing the `safeParse` here lets
+    // us return a structured error (naming the offending tool) and keeps
+    // unfinished tool calls from stalling the turn when the provider
+    // emits a broken tool block for a schema the tool does not accept.
     let args: Record<string, unknown>;
     try {
       args = JSON.parse(toolCall.function.arguments);
-    } catch {
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       const result: ToolResult = {
         success: false,
-        error: `Invalid JSON in tool arguments: ${toolCall.function.arguments}`,
+        error: `Malformed tool arguments for ${toolCall.function.name}: ${detail} (raw=${toolCall.function.arguments})`,
+      };
+      onProgress?.({
+        type: 'tool_end',
+        toolName: toolCall.function.name,
+        toolId: toolCall.id,
+        result,
+      });
+      return { id: toolCall.id, result };
+    }
+
+    // Validate args against the tool's Zod schema BEFORE dispatch. Any
+    // issue surfaced here is a model/provider contract break, not a
+    // runtime error — surface it with the tool name attached so the
+    // model can self-correct on the next turn.
+    const parsed = (tool.parameters as { safeParse?: (v: unknown) => { success: boolean; error?: { message: string } } }).safeParse?.(args);
+    if (parsed && parsed.success === false) {
+      const reason = parsed.error?.message ?? 'schema validation failed';
+      const result: ToolResult = {
+        success: false,
+        error: `Invalid arguments for tool ${toolCall.function.name}: ${reason}`,
       };
       onProgress?.({
         type: 'tool_end',
@@ -299,6 +328,39 @@ async function executeToolCall(
     });
     return { id: toolCall.id, result };
   }
+}
+
+/**
+ * Settle any tool calls that were started but never produced a result
+ * before the turn ended (e.g. provider aborted mid-stream, iteration cap
+ * reached while a tool was in flight, upstream disconnect).
+ *
+ * Alexi_change (opencode c9e1ed70, 2026-10): without this, the pending
+ * tool-call map leaks across turns and the next assistant message can be
+ * rejected by SAP AI Core because its `tool_calls` entries have no
+ * matching tool-result row. Emit a synthetic error result for each
+ * pending call so the transcript stays well-formed.
+ */
+export function settleUnfinishedCalls(
+  pending: Map<string, { toolName: string }>,
+  onProgress?: (event: AgenticProgressEvent) => void
+): Array<{ id: string; result: ToolResult }> {
+  const settled: Array<{ id: string; result: ToolResult }> = [];
+  for (const [id, call] of pending) {
+    const result: ToolResult = {
+      success: false,
+      error: 'Tool call did not complete before turn ended',
+    };
+    onProgress?.({
+      type: 'tool_end',
+      toolName: call.toolName,
+      toolId: id,
+      result,
+    });
+    settled.push({ id, result });
+  }
+  pending.clear();
+  return settled;
 }
 
 /**
