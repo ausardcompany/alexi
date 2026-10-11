@@ -3054,6 +3054,91 @@ Example error messages and their classification:
   permanent outcome and, after `routeFailureThreshold` matches, disables
   the route for the rest of the session.
 
+### Retry-budget exhaustion contract (issue #1994)
+
+`ErrorBackoff.isFatal(err?)` has **three** lookup paths, not two.
+Historically the method only consulted the permanent-marker short-circuit
+(`isFreeTierRateLimitError`, `isContentFilterError`) and the internal
+`fatalNotified` flag written by prior `recordError` calls. That left a
+gap for transient classes (`429`, xAI capacity errors, `ECONNRESET`-shape
+failures) once the inner retry budget was exhausted: `recordError`
+intentionally does NOT flip `fatalNotified` for a 429 (because the
+rate-limit window will eventually reset), so an outer retry layer that
+re-asked `isFatal(err)` after the inner budget was spent kept seeing
+`false` and kept retrying — forever on a flaky `ECONNRESET`.
+
+The third path closes that gap:
+
+```typescript
+// src/core/error-backoff.ts:296
+isFatal(err?: unknown): boolean {
+  // 1. Permanent marker short-circuit (works without recordError).
+  if (err !== undefined && (isFreeTierRateLimitError(err) || isContentFilterError(err))) {
+    return true;
+  }
+  // 2. Retry-budget exhaustion (NEW, issue #1994).
+  //    Only fires for transient classes — permanent failures are
+  //    already handled by path 1 or by recordError's 4xx branch.
+  if (
+    err !== undefined &&
+    isRetryableError(err) &&
+    this.consecutiveErrors >= this.config.maxRetries
+  ) {
+    return true;
+  }
+  // 3. Fallback for the no-arg form.
+  return this.fatalNotified;
+}
+```
+
+Composition with the outer retry layers:
+
+```mermaid
+flowchart TB
+    Call[provider.complete / fetch] -->|throws transient| Record[ErrorBackoff.recordError]
+    Record --> Count{consecutiveErrors<br/>&ge; maxRetries?}
+    Count -->|no| Transient[fatalNotified stays false<br/>outer loop may retry]
+    Count -->|yes| Exhausted[budget spent]
+    Outer[Outer retry layer<br/>NetworkManager / KILO_RETRIES] -->|calls| Ask[ErrorBackoff.isFatal&#40;err&#41;]
+    Ask --> P1{permanent marker?}
+    P1 -->|yes| Fatal1[return true]
+    P1 -->|no| P2{isRetryableError<br/>AND exhausted?}
+    P2 -->|yes| Fatal2[return true<br/>stop retrying]
+    P2 -->|no| P3[return fatalNotified]
+    Transient -.-> P2
+    Exhausted -.-> P2
+```
+
+Invariants pinned by `src/core/__tests__/error-backoff.test.ts`:
+
+- **Transient class, budget exhausted** → `isFatal(err)` returns `true`.
+  Covers `{ statusCode: 429 }` and the xAI capacity shape
+  (`{ message: 'xAI capacity exceeded' }`). The inner retry budget is
+  spent; the outer layer MUST stop.
+- **Transient class, budget still available** → `isFatal(err)` returns
+  `false`. The outer layer may still retry under its own budget.
+- **Permanent class, budget exhausted** → `isFatal(err)` does NOT flip
+  via this new path. A `NoRefreshTokenError` or any 4xx-shape error is
+  already fatal via path 1 or via `recordError`'s 4xx branch; the
+  exhaustion check is scoped to the transient classifier so it cannot
+  spuriously re-classify a permanent error.
+- **Zero-argument form** → `isFatal()` consults only `fatalNotified`.
+  Legacy callers that invoke the no-arg variant after `recordError` keep
+  the pre-#1994 behaviour and are not retroactively flipped to fatal on
+  429 exhaustion.
+- **`reset()` clears the exhaustion state.** `consecutiveErrors` is
+  zeroed by `reset()` so a session restart (or a successful call that
+  calls `recordSuccess()` to zero the counter) re-opens the retry budget.
+
+Cross-references:
+
+- Public surface and example composition:
+  [docs/API.md — Error Backoff API](./API.md#error-backoff-api).
+- Regression test pattern (fake-timer-free, pure state assertions):
+  [docs/TESTING.md — Testing retry-budget exhaustion in `ErrorBackoff.isFatal`](./TESTING.md#testing-retry-budget-exhaustion-in-errorbackoffisfatal-issue-1994).
+- Transient-vs-permanent contract that `isRetryableError` encodes:
+  [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix).
+
 ### Turn-level retry wrapper (`retryProviderCall`, issue #1737)
 
 Between the caller (`agenticChat`) and the provider-layer `ErrorBackoff`

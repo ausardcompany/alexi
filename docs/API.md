@@ -4396,7 +4396,7 @@ export function getDefaultWatcherInstance(): InstanceWatcher;
 
 ## Error Backoff API
 
-`src/core/error-backoff.ts` exposes error classifiers that higher-level retry drivers use to decide whether a failure is worth another attempt. Extended in 1.21.4 with `isXAICapacityError` and `isRetryableError` (port of opencode `71d08e9`).
+`src/core/error-backoff.ts` exposes error classifiers that higher-level retry drivers use to decide whether a failure is worth another attempt. Extended in 1.21.4 with `isXAICapacityError` and `isRetryableError` (port of opencode `71d08e9`). Extended again in the current cycle (issue #1994) with a retry-budget exhaustion check inside `ErrorBackoff.isFatal(err)`.
 
 ```typescript
 // src/core/error-backoff.ts
@@ -4432,6 +4432,72 @@ export function extractStatusCode(err: unknown): number | undefined;
 /** True for auth failures that will NOT recover on retry. */
 export function isPermanentAuthFailure(err: unknown): boolean;
 ```
+
+### `ErrorBackoff.isFatal(err?)` — three lookup paths (issue #1994)
+
+`isFatal` is overloaded by argument shape and now resolves across three paths. The third path (retry-budget exhaustion) is the issue #1994 fix: without it, an outer retry layer that re-asked `isFatal(err)` after the inner `ErrorBackoff` budget was already spent kept seeing `false` for 429 / xAI-capacity / `ECONNRESET`-shaped failures (`recordError` deliberately does not flip `fatalNotified` for a 429 because the rate-limit window will eventually reset), and the outer loop would retry forever on a flaky `ECONNRESET`.
+
+```typescript
+class ErrorBackoff {
+  /**
+   * Return true when the current state (or the supplied `err`) is a
+   * permanent failure that must not be retried.
+   *
+   * Three lookup paths:
+   *   1. When `err` is provided, check whether it carries the
+   *      `free_tier_rate_limit` or `content_filter` marker. Lets
+   *      callers make a fatal decision without first calling
+   *      `recordError` — useful for short-circuit checks in tests and
+   *      CLI error rendering.
+   *   2. When `err` is provided AND `isRetryableError(err)` is true AND
+   *      this instance has already recorded `maxRetries` or more
+   *      consecutive errors, treat the error as fatal — the transient
+   *      retry budget is spent and an outer retry loop
+   *      (`NetworkManager`, agent-workflow `KILO_RETRIES`) must stop.
+   *      Permanent errors are NOT re-classified by this path: they are
+   *      already fatal via path 1 or via `recordError`'s 4xx branch.
+   *   3. When `err` is omitted, fall back to the internal
+   *      `fatalNotified` flag set by prior `recordError` calls.
+   */
+  isFatal(err?: unknown): boolean;
+}
+```
+
+Example — the outer retry loop consults `isFatal(err)` on every attempt and the exhaustion path exits the loop deterministically:
+
+```typescript
+import { ErrorBackoff, isRetryableError } from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({ maxRetries: 3, initialDelayMs: 1000 });
+
+async function callWithBudget<T>(fn: () => Promise<T>): Promise<T> {
+  for (;;) {
+    try {
+      const result = await fn();
+      backoff.recordSuccess();
+      return result;
+    } catch (err) {
+      backoff.recordError(undefined, err);
+      // Path 2: once consecutiveErrors >= maxRetries, isFatal(err) flips
+      // to true for 429 / xAI-capacity / ECONNRESET-shaped errors.
+      if (backoff.isFatal(err)) {
+        throw err; // budget exhausted — do not keep retrying
+      }
+      if (!isRetryableError(err)) {
+        throw err; // permanent class — exit immediately
+      }
+      await new Promise((r) => setTimeout(r, backoff.getRemainingBackoffMs()));
+    }
+  }
+}
+```
+
+Invariants and edge cases:
+
+- `isFatal()` (no argument) is unchanged — it still consults only the internal `fatalNotified` flag written by `recordError`. The exhaustion path requires the error argument so legacy no-arg callers keep their pre-#1994 behaviour.
+- A permanent error (`{ name: 'NoRefreshTokenError' }`) is NOT flipped by the exhaustion path; its fatal classification comes from path 1 or from `recordError`'s 4xx branch.
+- `reset()` zeroes `consecutiveErrors`, so a subsequent `isFatal(err)` call for the same `err` returns `false` again — the exhaustion state is session-scoped.
+- The exhaustion threshold is `consecutiveErrors >= maxRetries` (greater-or-equal, not strictly greater), so a `maxRetries: 3` instance flips to fatal on the third recorded error, not the fourth.
 
 Example — gate a retry loop on `isRetryableError`:
 

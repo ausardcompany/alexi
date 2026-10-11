@@ -7508,6 +7508,74 @@ Reference patterns:
 - **Regex coverage matrix.** Assert canonical (`'xAI capacity exceeded, please retry'`), generic (`'capacity exceeded for grok-2'`), and case-insensitive (`'XAI CAPACITY overloaded'`) forms all return `true`. Negative cases: unrelated messages, HTTP 429 alone (goes through `isRateLimitError`), and non-object inputs (`null`, `undefined`, plain strings) return `false`.
 - **`isRetryableError` composition.** True for rate limits (`{ code: 'free_tier_rate_limit' }`, `{ statusCode: 429 }`) and xAI capacity errors. False for permanent auth failures (`{ name: 'NoRefreshTokenError' }`) and `null` / `undefined`. Cover both branches so a future regression that inverts the OR is caught.
 
+### Testing retry-budget exhaustion in `ErrorBackoff.isFatal` (issue #1994)
+
+`src/core/__tests__/error-backoff.test.ts` gained a `describe('ErrorBackoff retry-budget exhaustion (issue #1994)', ...)` block (six cases) that pins the new third lookup path in `isFatal(err)`. The suite is pure state-assertion — no fake timers, no mocked network — so the pattern composes with any new transient classifier added to `isRetryableError`.
+
+Reference cases:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ErrorBackoff } from '../error-backoff.js';
+
+describe('ErrorBackoff retry-budget exhaustion (issue #1994)', () => {
+  it('isFatal(err) returns true when a transient error has recorded maxRetries times', () => {
+    const b = new ErrorBackoff({ maxRetries: 3, initialDelayMs: 10 });
+    const err = { statusCode: 429 }; // transient per isRetryableError
+    b.recordError(429, err);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(false);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('isFatal(err) is true for ECONNRESET-style xAI capacity error at budget exhaustion', () => {
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { message: 'xAI capacity exceeded' };
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(false);
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('isFatal(err) remains false for a non-retryable error even at budget exhaustion', () => {
+    const b = new ErrorBackoff({ maxRetries: 1, initialDelayMs: 10 });
+    const err = { name: 'NoRefreshTokenError' };
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(false);
+  });
+
+  it('isFatal() without an err argument still falls back to the fatalNotified flag', () => {
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { statusCode: 429 };
+    b.recordError(429, err);
+    b.recordError(429, err);
+    expect(b.isFatal()).toBe(false); // no-arg form unchanged
+    expect(b.isFatal(err)).toBe(true); // err-form flips via exhaustion
+  });
+
+  it('reset() clears the exhaustion state so isFatal(err) returns false again', () => {
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { statusCode: 429 };
+    b.recordError(429, err);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+    b.reset();
+    expect(b.isFatal(err)).toBe(false);
+  });
+});
+```
+
+Invariants the suite pins:
+
+- **Positive — transient + exhausted.** `{ statusCode: 429 }` or xAI capacity error at `consecutiveErrors === maxRetries` flips `isFatal(err)` to `true`. The boundary is greater-or-equal (`>=`), so the third `recordError` call on a `maxRetries: 3` instance is the one that flips.
+- **Negative — transient + budget still available.** A 429 at `consecutiveErrors < maxRetries` keeps `isFatal(err)` at `false` so the outer loop may still retry.
+- **Negative — permanent + exhausted.** `{ name: 'NoRefreshTokenError' }` is NOT flipped by the exhaustion path (permanence comes from `recordError`'s 4xx branch, not from `isRetryableError`). Keeps the retry-budget check scoped and prevents a permanent error from being re-classified via an unrelated path.
+- **No-arg contract preserved.** `isFatal()` (no argument) consults only `fatalNotified` — legacy callers that invoked the no-arg form after `recordError` are not retroactively flipped to fatal on 429 exhaustion.
+- **`reset()` clears exhaustion.** Zeroing `consecutiveErrors` via `reset()` re-opens the budget; subsequent `isFatal(err)` returns `false` on the same error shape.
+
+When adding a new transient classifier to `isRetryableError`, extend this block with one positive case (budget exhaustion flips the new shape) and one negative case (budget still available keeps it transient). The retry-budget exhaustion path shares its classifier with every other transient driver — a false positive here flows into `NetworkManager`, `retryProviderCall`, and the agent-workflow `KILO_RETRIES` loop.
+
 ### Hook `contextModification` persistence tests
 
 `tests/orchestrator-hooks.test.ts` gained a persistence test asserting that hook `contextModification` payloads are written to the session with `displayRole: 'system'`. The pattern:
