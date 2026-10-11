@@ -282,7 +282,11 @@ async function executeToolCall(
     // issue surfaced here is a model/provider contract break, not a
     // runtime error — surface it with the tool name attached so the
     // model can self-correct on the next turn.
-    const parsed = (tool.parameters as { safeParse?: (v: unknown) => { success: boolean; error?: { message: string } } }).safeParse?.(args);
+    const parsed = (
+      tool.parameters as {
+        safeParse?: (v: unknown) => { success: boolean; error?: { message: string } };
+      }
+    ).safeParse?.(args);
     if (parsed && parsed.success === false) {
       const reason = parsed.error?.message ?? 'schema validation failed';
       const result: ToolResult = {

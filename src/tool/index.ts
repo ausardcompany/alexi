@@ -652,10 +652,7 @@ class ToolRegistry {
   }
 
   list(): Tool<any, any>[] {
-    const all = [
-      ...Array.from(this.tools.values()),
-      ...Array.from(this.dynamicTools.values()),
-    ];
+    const all = [...Array.from(this.tools.values()), ...Array.from(this.dynamicTools.values())];
     return all.filter((t) => this.policy.isToolAllowed(t.name));
   }
 

@@ -15,8 +15,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 
-const FILE_LINK_RE =
-  /(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g;
+const FILE_LINK_RE = /(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g;
 
 export interface FileLink {
   /** Raw matched substring, including any `:line:col` suffix. */
@@ -37,10 +36,7 @@ export interface FileLink {
  * are discarded (not returned with `exists: false`) because the whole point
  * of the deterministic matcher is to suppress false positives.
  */
-export async function detectFileLinks(
-  text: string,
-  workspaceRoot: string
-): Promise<FileLink[]> {
+export async function detectFileLinks(text: string, workspaceRoot: string): Promise<FileLink[]> {
   const matches = [...text.matchAll(FILE_LINK_RE)];
   const results: FileLink[] = [];
   for (const m of matches) {
@@ -69,9 +65,7 @@ export async function detectFileLinks(
       lineStr = parts[1];
       colStr = parts[2];
     }
-    const abs = path.isAbsolute(filePart)
-      ? filePart
-      : path.resolve(workspaceRoot, filePart);
+    const abs = path.isAbsolute(filePart) ? filePart : path.resolve(workspaceRoot, filePart);
     let exists = false;
     try {
       await fs.access(abs);
