@@ -57,7 +57,7 @@ import {
   type LanguageModelV2Prompt,
 } from './openai/prompt-cache.js';
 import { isCacheError, stripAnthropicCacheControl, type AnthropicMessage } from './cache-error.js';
-import { logger } from '../utils/logger.js';
+import { formatError, logger } from '../utils/logger.js';
 import { loadToken, clearToken } from '../utils/tokenStorage.js';
 import { getConfigPersistAuthTokens } from '../config/userConfig.js';
 import {
@@ -1761,7 +1761,7 @@ export class SapOrchestrationProvider {
         // detector and the full rationale.
         logger.warn(
           `Prompt cache error, retrying without cache (chat ${this.config.modelName}): ` +
-            `${err instanceof Error ? err.message : String(err)}. ` +
+            `${formatError(err)}. ` +
             `Hint: usually a transient cache eviction; if it repeats, ` +
             `check prompt stability or provider cache status.`
         );
@@ -1898,7 +1898,7 @@ export class SapOrchestrationProvider {
         // with cache markers stripped. See `./cache-error.ts`.
         logger.warn(
           `Prompt cache error, retrying without cache (stream ${this.config.modelName}): ` +
-            `${err instanceof Error ? err.message : String(err)}. ` +
+            `${formatError(err)}. ` +
             `Hint: usually a transient cache eviction; if it repeats, ` +
             `check prompt stability or provider cache status.`
         );
