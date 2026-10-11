@@ -1446,6 +1446,24 @@ actionable hint reach the surface the user is looking at:
    }
    ```
 
+   The `msg` value is produced by `scrubUrlsFromString()` from
+   `src/utils/logger.ts`, so a refresh error that embeds a signed URL
+   from the SAP AI Core deployment endpoint renders as
+   `https://api.ai.prod.<region>.hana.ondemand.com/v2/lm/deployments?[REDACTED]`
+   in the log line and in the catalog's `errorClass` payload. Without
+   the scrub, bearer-token-equivalent query strings (such as
+   presigned-URL callbacks the proxy occasionally echoes back) would
+   land in `~/.alexi/logs/` and in any status badge that renders the
+   reason verbatim. The redaction preserves scheme, host, port, and
+   pathname so operators can still correlate the failure with the
+   deployment they expect.
+
+   Similarly, `src/providers/sapOrchestration.ts` runs its prompt-cache
+   retry warnings through `formatError(err)` (both in the chat path and
+   in the streaming path) so a cache-eviction error that happens to
+   carry a URL in its message is scrubbed before it is logged with the
+   `"retrying without cache"` hint.
+
 Contract summary — every surface that can render "no models" now also
 prints WHY:
 

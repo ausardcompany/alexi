@@ -2764,6 +2764,18 @@ owns local child-process and system-call error classification. Transient
 5xx / network failures at the provider layer are NOT recorded via
 `recordRouteOutcome` -- they remain owned by `ErrorBackoff`.
 
+### Error logging with URL redaction (commit `be4e1340`)
+
+Separate from classification is the question of what the error *looks like* once it has been chosen for logging. The shared logger module `src/utils/logger.ts` exports three helpers that every error-logging call site now uses to turn an unknown thrown value into a single log line without leaking credentials embedded in URLs:
+
+- `scrubUrl(url)` — redacts the query string and hash fragment of a single URL, preserving `scheme://host:port/pathname` so the destination is still identifiable in logs. Non-URL input is returned unchanged.
+- `scrubUrlsFromString(text)` — runs the URL-detection regex over free-form text, trims trailing sentence punctuation out of each match before scrubbing, and leaves non-URL content untouched. Short-circuits on inputs that do not contain the substring `http`.
+- `formatError(err, includeStack = true)` — produces a single scrubbed string from an unknown value. For `Error` instances it uses `err.message || err.name || 'Error'`; for non-Error throws it falls back to `String(err)`. Appends the scrubbed stack trace on a new line only when the logger is at `debug` level (`logger.getLevel() === 'debug'`), so operational logs at `info` / `warn` / `error` stay compact.
+
+The rule across the codebase: when embedding a caught error into a `logger.*` call, use template-string interpolation with `formatError(err)` rather than passing the raw error as a second argument. The old `logger.error('msg', err)` form rendered as `[ERROR] msg [object Object]` for provider errors whose `toString()` dropped the message; the new form renders as `[ERROR] msg: <scrubbed error message>` and never leaks a token inside a URL.
+
+Known migrated call sites: `src/core/task-scheduler.ts` (3 — `tasks.json` load / save / task execution), `src/mcp/client.ts` (7 — optional metadata list calls, client / process close paths, periodic list refreshes), `src/providers/sapOrchestration.ts` (2 — prompt-cache retry in chat and streaming), and `src/providers/modelCatalog.ts` (catalog refresh error surfaced via the status badge). `formatConnectError(serverName, error)` in `src/mcp/client.ts` additionally runs the raw error message through `scrubUrlsFromString()` before composing the operator-facing hint, because MCP OAuth / HTTP transports frequently surface the full callback URL (with `?token=...`, `?code=...`) when a handshake fails. See [docs/API.md — Logger introspection and error-formatting helpers](API.md#logger-introspection-and-error-formatting-helpers-srcutilsloggerts) for the exported signatures and [docs/TESTING.md](TESTING.md) for the mocking pattern tests must now follow.
+
 ### User-facing auth error rewriting (issue #1625)
 
 The interactive REPL (`src/cli/interactive.ts:handleStreamingError`) has
