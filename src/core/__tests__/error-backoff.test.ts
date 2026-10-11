@@ -197,6 +197,76 @@ describe('ErrorBackoff rate-limit handling', () => {
   });
 });
 
+describe('ErrorBackoff retry-budget exhaustion (issue #1994)', () => {
+  it('isFatal(err) returns true when a transient error has recorded maxRetries times', () => {
+    // Mirror kilocode PR #14893: a flaky ECONNRESET that has consumed the
+    // retry budget must be classified as fatal so outer retry loops
+    // (NetworkManager, agent-workflow KILO_RETRIES) stop retrying.
+    const b = new ErrorBackoff({ maxRetries: 3, initialDelayMs: 10 });
+    const err = { statusCode: 429 }; // transient per isRetryableError
+    b.recordError(429, err);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(false);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('isFatal(err) returns false while the transient-error budget is still available', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { statusCode: 429 };
+    for (let i = 0; i < 4; i++) {
+      b.recordError(429, err);
+    }
+    expect(b.isFatal(err)).toBe(false);
+  });
+
+  it('isFatal(err) is true for ECONNRESET-style xAI capacity error at budget exhaustion', () => {
+    // isRetryableError matches `isXAICapacityError` too, so capacity
+    // errors share the same budget-exhaustion fatal classification.
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { message: 'xAI capacity exceeded' };
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(false);
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('isFatal(err) remains false for a non-retryable error even at budget exhaustion', () => {
+    // A permanent auth failure (NoRefreshTokenError) is NOT transient, so
+    // the exhaustion check must not spuriously flip it to fatal via this
+    // path — the fatal classification comes from the 4xx branch of
+    // recordError, not from the new retry-budget check.
+    const b = new ErrorBackoff({ maxRetries: 1, initialDelayMs: 10 });
+    const err = { name: 'NoRefreshTokenError' };
+    // Note: no 4xx status recorded here, so fatalNotified stays false.
+    b.recordError(undefined, err);
+    expect(b.isFatal(err)).toBe(false);
+  });
+
+  it('isFatal() without an err argument still falls back to the fatalNotified flag', () => {
+    // Preserve the pre-#1994 behaviour for callers that invoke the
+    // no-argument form after `recordError`.
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { statusCode: 429 };
+    b.recordError(429, err);
+    b.recordError(429, err);
+    // Budget is exhausted, but the no-arg path only consults the
+    // internal fatalNotified flag (unchanged by this fix for 429s).
+    expect(b.isFatal()).toBe(false);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('reset() clears the exhaustion state so isFatal(err) returns false again', () => {
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { statusCode: 429 };
+    b.recordError(429, err);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+    b.reset();
+    expect(b.isFatal(err)).toBe(false);
+  });
+});
+
 describe('extractStatusCode', () => {
   it('extracts a 4xx / 5xx status code from an error message', () => {
     expect(extractStatusCode('request failed with status: 429')).toBe(429);

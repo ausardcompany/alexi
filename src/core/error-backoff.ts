@@ -273,7 +273,7 @@ export class ErrorBackoff {
    * Return true when the current state (or the supplied `err`) is a
    * permanent failure that must not be retried.
    *
-   * Two lookup paths:
+   * Three lookup paths:
    *   1. When `err` is provided, check whether it carries the
    *      `free_tier_rate_limit` or `content_filter` marker. This lets
    *      callers make a fatal decision *without* first calling
@@ -281,11 +281,27 @@ export class ErrorBackoff {
    *      CLI error rendering. Content-filter is treated identically to
    *      a 4xx validation error (issue #1903): retrying the same prompt
    *      against the same policy will hit the same block.
-   *   2. When `err` is omitted, fall back to the internal
+   *   2. When `err` is provided AND `isRetryableError(err)` is true AND
+   *      this backoff instance has already recorded `maxRetries` or more
+   *      consecutive errors, treat the error as fatal: the transient
+   *      retry budget is spent, and an outer retry loop (NetworkManager,
+   *      agent-workflow `KILO_RETRIES`, etc.) must not keep retrying.
+   *      Without this check an outer layer would ignore the exhausted
+   *      budget and loop forever on a flaky `ECONNRESET`, violating the
+   *      retry contract in `docs/ARCHITECTURE.md#error-handling` and
+   *      disabling graceful degradation. Issue #1994.
+   *   3. When `err` is omitted, fall back to the internal
    *      `fatalNotified` flag set by prior `recordError` calls.
    */
   isFatal(err?: unknown): boolean {
     if (err !== undefined && (isFreeTierRateLimitError(err) || isContentFilterError(err))) {
+      return true;
+    }
+    if (
+      err !== undefined &&
+      isRetryableError(err) &&
+      this.consecutiveErrors >= this.config.maxRetries
+    ) {
       return true;
     }
     return this.fatalNotified;
