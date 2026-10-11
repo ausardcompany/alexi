@@ -9375,9 +9375,21 @@ it('treats structurally equal schemas with reordered keys as matching', () => {
 ```typescript
 const { loggerWarnMock } = vi.hoisted(() => ({ loggerWarnMock: vi.fn() }));
 vi.mock('../../src/utils/logger.js', () => ({
-  logger: { info: vi.fn(), warn: loggerWarnMock, error: vi.fn(), debug: vi.fn() },
+  logger: {
+    info: vi.fn(),
+    warn: loggerWarnMock,
+    error: vi.fn(),
+    debug: vi.fn(),
+    getLevel: vi.fn(() => 'info'),
+    setLevel: vi.fn(),
+  },
+  formatError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  scrubUrlsFromString: (text: string) => text,
+  scrubUrl: (url: string) => url,
 }));
 ```
+
+The `getLevel` / `setLevel` stubs and the three named helper exports (`formatError`, `scrubUrlsFromString`, `scrubUrl`) are required because `src/mcp/client.ts` and other MCP code now imports those symbols at module load time (see commit `be4e1340 feat(core): add error detail logging with URL redaction`). A mock factory that returns only the `logger` object will fail at test collection with `SyntaxError: The requested module '../../src/utils/logger.js' does not provide an export named 'formatError'`. The identity-function stubs for the three helpers keep assertions on the final log line readable — tests that assert URL scrubbing specifically should instead `vi.unmock` the module and import the real helpers, since the production regex is simple enough that a bespoke stub tends to drift from the real behaviour.
 
 Six cases cover the client-side surface:
 
@@ -9507,9 +9519,16 @@ vi.mock('../../src/utils/logger.js', () => ({
     warn: loggerWarnMock,
     error: vi.fn(),
     debug: vi.fn(),
+    getLevel: vi.fn(() => 'info'),
+    setLevel: vi.fn(),
   },
+  formatError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  scrubUrlsFromString: (text: string) => text,
+  scrubUrl: (url: string) => url,
 }));
 ```
+
+Same expanded mock shape as the CIMD suite — commit `be4e1340` added `getLevel` / `setLevel` plus the `formatError`, `scrubUrlsFromString`, and `scrubUrl` named exports to `src/utils/logger.ts`, and `src/mcp/client.ts` imports `formatError` at module scope to turn caught errors into scrubbed log strings. A mock that omits any of those exports fails at collection; the identity-function stubs keep the test readable.
 
 Cases pin four load-bearing properties the pure suites cannot reach:
 
@@ -10765,3 +10784,167 @@ it('resolves C++20 module interface units (opencode b2a3926)', () => {
 ```bash
 npm test -- src/cli/tui/utils/formatToolOutput.test.ts
 ```
+
+## Testing error-detail logging with URL redaction (`tests/utils/logger.test.ts`)
+
+Introduced in commit `be4e1340 feat(core): add error detail logging with URL redaction`. The suite is a pure-unit test — no network, no filesystem, no mocks — covering the three new exports from `src/utils/logger.ts` plus the `getLevel()` introspection accessor.
+
+The four `describe` blocks pin orthogonal properties:
+
+1. **`scrubUrl` — single-URL redaction.** Query strings (`?token=`, `?code=`, `?api_key=`, `?access_token=`) collapse to `?[REDACTED]`; hash fragments carrying OAuth implicit-flow tokens collapse to `#[REDACTED]`; URLs with both carry `?[REDACTED]#[REDACTED]`; URLs without either are returned verbatim so `scrubUrl` is cheap on healthy inputs; scheme, host, port, and pathname are preserved so operators can still identify the destination; non-URL input (empty string, `ECONNRESET: socket hang up`, arbitrary prose) is passed through unchanged.
+2. **`scrubUrlsFromString` — in-situ scrubbing within free-form text.** URLs embedded inside error sentences, multiple URLs within one message, URLs without query parameters (untouched), and trailing sentence punctuation (preserved outside the redacted URL) are all covered. The suite also asserts the negative contract: a bare `token=` or `api_key=` value NEVER survives in the output for inputs that contained a secret in the query string.
+3. **`formatError` — scrubbed single-line formatting.** Covers `Error.message` taking precedence over `Error.name`, non-Error throws falling back to `String(err)`, URL-in-message scrubbing, and the stack-trace rule — stack is appended on a new line ONLY when `logger.getLevel()` is `'debug'`, and the stack's first line (which repeats the message) is dropped and replaced by the scrubbed message so a token inside the message cannot leak through the stack header. Toggling the logger back to `info` for the next assertion is mandatory: a leaked `debug` level in a shared process pollutes every downstream test.
+4. **`logger.getLevel` + `logger.setLevel` round-trip.** Pinned explicitly so a future refactor that introduces a per-call context carrier does not break the `formatError` branch that consults the level.
+
+Reference pattern — stack-trace rule:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { formatError, logger } from '../../src/utils/logger.js';
+
+describe('formatError', () => {
+  beforeEach(() => {
+    logger.setLevel('info');
+  });
+  afterEach(() => {
+    logger.setLevel('info');
+  });
+
+  it('does NOT append the stack at info level', () => {
+    const err = new Error('boom');
+    const out = formatError(err);
+    expect(out).toBe('boom');
+    expect(out).not.toContain('at ');
+  });
+
+  it('appends the scrubbed stack at debug level', () => {
+    logger.setLevel('debug');
+    const err = new Error('fail https://api.example.com/t?token=secret');
+    const out = formatError(err);
+    expect(out.split('\n')[0]).toBe('fail https://api.example.com/t?[REDACTED]');
+    expect(out).toContain('\n');
+    expect(out).not.toContain('token=secret');
+  });
+});
+```
+
+### Patterns worth internalising (error-detail logging)
+
+1. **Always restore the log level in `afterEach`.** `currentLevel` is module-local state, so a case that calls `logger.setLevel('debug')` and does NOT restore it leaks into every subsequent test file loaded in the same vitest worker. Pair every `setLevel('debug')` with an `afterEach(() => logger.setLevel('info'))`.
+2. **Assert the negative — the token MUST NOT survive.** Positive-only assertions (`expect(out).toContain('[REDACTED]')`) pass even when the token is appended somewhere else in the string. Always pair a redaction assertion with `expect(out).not.toContain('<the secret>')`.
+3. **Prefer `toBe` for scrubbed outputs, `toContain` for stack lines.** Full equality on scrubbed single-URL cases catches off-by-one errors in the regex (trailing slash, missing hash); `toContain` is appropriate for stack frames because the exact path varies between CI and local runs.
+4. **Do NOT mock `src/utils/logger.js` in this suite.** The whole point is that the real `scrubUrl` / `scrubUrlsFromString` / `formatError` react to real inputs. Suites that transitively import logger code (MCP, task scheduler, provider tests) MUST install an expanded mock (`logger`, `formatError`, `scrubUrlsFromString`, `scrubUrl`, plus `getLevel` / `setLevel` on the logger object) — see the MCP breakage-detection and CIMD mock patterns above for the full shape.
+
+### Running
+
+```bash
+npm test -- tests/utils/logger.test.ts
+```
+
+## Testing the Managed Policy Enforcer
+
+Added in commit `ca4ae92f` (2026-10-11 upstream sync). The policy enforcer lives in `src/permission/policy.ts` and is wired into `src/tool/index.ts` via `setToolPolicy()`.
+
+### Pure-helper tests
+
+The enforcer is a pure value — no I/O, no globals, no clock dependency — so tests just instantiate it and assert the yes/no answer.
+
+```typescript
+import { PolicyEnforcer, ManagedPolicySchema } from '../../src/permission/policy.js';
+
+describe('PolicyEnforcer', () => {
+  it('open-world default allows everything', () => {
+    const p = new PolicyEnforcer();
+    expect(p.isToolAllowed('bash')).toBe(true);
+    expect(p.isSkillAllowed('any-skill')).toBe(true);
+  });
+
+  it('denied wins over allowed', () => {
+    const p = new PolicyEnforcer({
+      tools: { allowed: ['bash', 'read'], denied: ['bash'] },
+    });
+    expect(p.isToolAllowed('bash')).toBe(false);
+    expect(p.isToolAllowed('read')).toBe(true);
+  });
+
+  it('allowed is closed-world when set', () => {
+    const p = new PolicyEnforcer({ tools: { allowed: ['read'] } });
+    expect(p.isToolAllowed('read')).toBe(true);
+    expect(p.isToolAllowed('bash')).toBe(false);
+  });
+
+  it('ManagedPolicySchema rejects non-string entries', () => {
+    expect(() =>
+      ManagedPolicySchema.parse({ tools: { denied: [42] } })
+    ).toThrow();
+  });
+});
+```
+
+### Registry integration tests
+
+When testing the registry wiring, remember that `setToolPolicy()` mutates module-level state on the global registry. Reset it in `afterEach` so other suites in the same vitest worker are not affected.
+
+```typescript
+import {
+  getTool,
+  getAllToolNames,
+  setToolPolicy,
+} from '../../src/tool/index.js';
+import { PolicyEnforcer, DEFAULT_POLICY_ENFORCER } from '../../src/permission/policy.js';
+
+afterEach(() => {
+  setToolPolicy(DEFAULT_POLICY_ENFORCER);
+});
+
+it('denied tool is invisible to the registry', () => {
+  setToolPolicy(new PolicyEnforcer({ tools: { denied: ['bash'] } }));
+  expect(getTool('bash')).toBeUndefined();
+  expect(getAllToolNames()).not.toContain('bash');
+});
+```
+
+### Patterns worth internalising (managed policy)
+
+1. **Reset the policy in `afterEach`.** `setToolPolicy` mutates a module-scope singleton. Leaving a restrictive policy installed will cascade into unrelated tests that call `getTool()`.
+2. **Test both `get` and `list`.** The enforcer gates both paths; a bug that only filters `list()` would still let a cached-schema invocation of `getTool('bash')` through. Pin both in the regression suite.
+3. **Prefer schema parsing over handcrafted objects.** Running `ManagedPolicySchema.parse()` on the test fixture catches shape drift at the test boundary rather than inside the enforcer.
+
+## Testing Timeline File-Link Detection
+
+Added in commit `ca4ae92f`. The detector lives in `src/session-ui/timeline-links.ts` and performs real `fs.access` probes, so tests need a temp workspace.
+
+```typescript
+import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { detectFileLinks } from '../../src/session-ui/timeline-links.js';
+
+let workspace: string;
+beforeEach(async () => {
+  workspace = await mkdtemp(join(tmpdir(), 'alexi-tl-'));
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'foo.ts'), 'export const x = 1;\n');
+});
+
+it('returns only paths that actually exist', async () => {
+  const links = await detectFileLinks(
+    'See ./src/foo.ts:1 and ./src/missing.ts',
+    workspace
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0].absolutePath).toBe(join(workspace, 'src', 'foo.ts'));
+  expect(links[0].line).toBe(1);
+});
+
+it('ignores bare words in prose', async () => {
+  const links = await detectFileLinks('look at foo.ts for the fix', workspace);
+  expect(links).toEqual([]);
+});
+```
+
+### Patterns worth internalising
+
+1. **Temp workspace per test.** The detector only returns existing paths; a shared workspace risks cross-test contamination. `mkdtemp` + `afterEach(rm { recursive, force })` keeps every case hermetic.
+2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
+3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.

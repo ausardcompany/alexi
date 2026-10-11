@@ -19,7 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
 
-import { logger } from '../utils/logger.js';
+import { formatError, logger } from '../utils/logger.js';
 import type { Todo } from '../tool/tools/todowrite.js';
 
 /** Default check interval: run the due-task sweep once a minute. */
@@ -154,7 +154,7 @@ export class TaskScheduler {
         };
       }
     } catch (err) {
-      logger.error('Failed to load tasks.json', err);
+      logger.error(`Failed to load tasks.json: ${formatError(err)}`);
       this.state = { tasks: [], workspaces: {} };
     }
   }
@@ -168,7 +168,7 @@ export class TaskScheduler {
       }
       fs.writeFileSync(this.tasksFile, JSON.stringify(this.state, null, 2), 'utf-8');
     } catch (err) {
-      logger.error('Failed to save tasks.json', err);
+      logger.error(`Failed to save tasks.json: ${formatError(err)}`);
     }
   }
 
@@ -245,7 +245,7 @@ export class TaskScheduler {
           task.status = 'completed';
         }
       } catch (err) {
-        logger.error(`Task ${task.id} execution failed`, err);
+        logger.error(`Task ${task.id} execution failed: ${formatError(err)}`);
         task.status = 'pending';
       }
       this.save();

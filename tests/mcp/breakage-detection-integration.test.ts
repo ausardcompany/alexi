@@ -43,7 +43,12 @@ vi.mock('../../src/utils/logger.js', () => ({
     warn: loggerWarnMock,
     error: vi.fn(),
     debug: vi.fn(),
+    getLevel: vi.fn(() => 'info'),
+    setLevel: vi.fn(),
   },
+  formatError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  scrubUrlsFromString: (text: string) => text,
+  scrubUrl: (url: string) => url,
 }));
 
 import { McpClientManager } from '../../src/mcp/client.js';

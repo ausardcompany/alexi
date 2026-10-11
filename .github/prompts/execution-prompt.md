@@ -4,240 +4,323 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
-```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-10
-Based on upstream commits analyzed:
-- kilocode: fb7e96eda, defcd7dff, e3552defc, 32491185e, 31fed7f43, a1fbca087
-- opencode: 055d95b, b2a3926
+Generated: 2026-10-11
+Based on upstream commits: opencode 055d95bb..d21b0790 (100 commits analyzed; kilocode no changes)
 
 ## Summary
-- Total changes planned: 5
-- Critical: 0 | High: 2 | Medium: 2 | Low: 1
+- Total changes planned: 18
+- Critical: 2 | High: 6 | Medium: 7 | Low: 3
+
+## Context: Major Upstream Restructuring
+
+The upstream opencode repository underwent **massive architectural restructuring** in this window:
+
+1. **`packages/opencode/` entirely removed** — all code migrated to `packages/core/`, `packages/cli/`, `packages/server/`, `packages/tui/`, `packages/ai/`
+2. **Tool system refactored** into a plugin-based model: individual tool files moved from `packages/opencode/src/tool/*.ts` to `packages/core/src/tool/plugin/*.ts` with a shared `runtime.ts`
+3. **Agent system removed from `packages/opencode/src/agent/`** — logic now lives in `packages/core/src/session/` (subagent-job, subagent-completion, run-coordinator)
+4. **Permission system consolidated** — moved from `packages/opencode/src/permission/` to `packages/core/src/permission.ts`
+5. **New `packages/ai/` package** replaces `packages/llm/` with expanded provider support
+6. **Package rename**: `@opencode-ai/*` → `@opencode/*` (plugin SDK import path change)
+7. **Managed integration/skill/tool policies** added (`packages/core/src/managed-policy.ts`)
+8. **Shell parser rewrite** with WASM backend, PowerShell safety scanning
+9. **Models.dev snapshot refreshes** and new provider routes (Vertex Mistral, Vertex Interactions, Azure CLI auth)
+
+Since Alexi forks selected pieces, this plan focuses on **targeted, high-value adoptions** rather than mirroring the full restructure.
 
 ## Changes
 
-### 1. Fix Copilot interleaved `reasoning_opaque` handling in message conversion
-**File**: `src/providers/github-copilot/chat/convert-to-openai-compatible-chat-messages.ts` (or equivalent in Alexi's provider layer; if the file does not exist, locate the SAP AI Core / Copilot message-conversion module and apply the equivalent logic)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Claude models via Copilot use *interleaved thinking*, emitting a new `reasoning_opaque` before each tool call. The previous "first-wins" behavior drops subsequent opaque values and only keeps the first reasoning segment, causing multi-turn Claude reasoning to break. The fix concatenates reasoning text and keeps the latest opaque (matching Copilot's VS Code client).
+### 1. Rename plugin SDK import from `@opencode-ai/plugin` to `@opencode/plugin`
+**File**: `src/tool/github-pr-search.ts`, `src/tool/github-triage.ts`, and any other files importing from `@opencode-ai/plugin`
+**Priority**: critical
+**Type**: refactor (breaking dependency rename)
+**Reason**: Upstream renamed the plugin SDK package. Keeping the old name will break once Alexi upgrades the plugin dependency. Grep for `@opencode-ai` across the repo.
 
 **Current code**:
 ```typescript
-for (const part of content) {
-  const partMetadata = getOpenAIMetadata(part)
-  // Check for reasoningOpaque on any part (may be attached to text/tool-call)
-  const partOpaque = (part.providerOptions as { copilot?: { reasoningOpaque?: string } })?.copilot
-    ?.reasoningOpaque
-  if (partOpaque && !reasoningOpaque) {
-    reasoningOpaque = partOpaque
-  }
-
-  switch (part.type) {
-    // ...
-    case "reasoning": {
-      if (part.text) reasoningText = part.text
-      break
-    }
-    // ...
-  }
-}
+import { tool } from "@opencode-ai/plugin"
 ```
 
 **New code**:
 ```typescript
-for (const part of content) {
-  const partMetadata = getOpenAIMetadata(part)
-  // reasoningOpaque may be attached to any part. Interleaved thinking yields one per
-  // reasoning segment; like the Copilot VS Code client, replay the latest opaque value
-  // with the concatenated reasoning text.
-  const partOpaque = (part.providerOptions as { copilot?: { reasoningOpaque?: string } })?.copilot
-    ?.reasoningOpaque
-  if (partOpaque) {
-    reasoningOpaque = partOpaque
-  }
+import { tool } from "@opencode/plugin"
+```
 
-  switch (part.type) {
-    // ...
-    case "reasoning": {
-      if (part.text) reasoningText = (reasoningText ?? "") + part.text
-      break
-    }
-    // ...
+Also update `package.json` dependencies:
+```json
+{
+  "dependencies": {
+-   "@opencode-ai/plugin": "^1.x",
++   "@opencode/plugin": "^2.x",
   }
 }
 ```
 
 ---
 
-### 2. Accept multiple `reasoning_opaque` deltas in Copilot stream parser
-**File**: `src/providers/github-copilot/chat/openai-compatible-chat-language-model.ts` (or equivalent streaming language model in Alexi)
-**Priority**: high
-**Type**: bugfix
-**Reason**: The current implementation throws `InvalidResponseDataError` when a stream sends more than one `reasoning_opaque`. Claude's interleaved thinking legitimately produces multiple values. This breaks all Claude-via-Copilot tool-calling flows. Fix is to keep the latest value instead of throwing.
+### 2. Reject malformed tool arguments and settle unfinished calls
+**File**: `src/tool/runtime.ts` (or wherever tool invocation is dispatched in Alexi)
+**Priority**: critical
+**Type**: bugfix / security
+**Reason**: Upstream fix (c9e1ed70) prevents stuck sessions when a model emits malformed JSON args, and settles any still-pending tool calls at turn boundary. Without this, Alexi sessions can hang or leak state when providers emit broken tool blocks.
 
-**Current code**:
+**New code** (dispatch wrapper):
 ```typescript
-// Capture reasoning_opaque for Copilot multi-turn reasoning
-if (delta.reasoning_opaque) {
-  if (reasoningOpaque != null) {
-    throw new InvalidResponseDataError({
-      data: delta,
-      message:
-        "Multiple reasoning_opaque values received in a single response. Only one thinking part per response is supported.",
+async function invokeTool(call: ToolCall, ctx: ToolContext) {
+  // Validate args JSON before invocation
+  let args: unknown
+  try {
+    args = typeof call.input === "string" ? JSON.parse(call.input) : call.input
+  } catch (err) {
+    return {
+      status: "error" as const,
+      error: `Malformed tool arguments: ${(err as Error).message}`,
+      toolCallId: call.id,
+    }
+  }
+
+  // Validate against tool schema
+  const tool = registry.get(call.name)
+  if (!tool) {
+    return {
+      status: "error" as const,
+      error: `Unknown tool: ${call.name}`,
+      toolCallId: call.id,
+    }
+  }
+
+  const parsed = tool.parameters.safeParse(args)
+  if (!parsed.success) {
+    return {
+      status: "error" as const,
+      error: `Invalid tool arguments: ${parsed.error.message}`,
+      toolCallId: call.id,
+    }
+  }
+
+  return tool.execute(parsed.data, ctx)
+}
+
+// At end of turn, settle any unfinished calls
+function settleUnfinishedCalls(pending: Map<string, ToolCall>) {
+  for (const [id, call] of pending) {
+    emit({
+      type: "tool.error",
+      toolCallId: id,
+      error: "Tool call did not complete before turn ended",
     })
   }
-  reasoningOpaque = delta.reasoning_opaque
+  pending.clear()
 }
 ```
+
+---
+
+### 3. Adopt deterministic timeline file-link detection
+**File**: `src/session-ui/timeline-links.ts` (new) or existing timeline rendering code
+**Priority**: high
+**Type**: feature
+**Reason**: Upstream commit f43903d8 adds deterministic file link detection/resolution in the timeline. Prevents false positives when model output contains path-like strings that aren't real files.
 
 **New code**:
 ```typescript
-// Interleaved thinking (Claude) sends a new reasoning_opaque before each tool call.
-// Keep the latest, matching the Copilot VS Code client, which replays only that one.
-if (delta.reasoning_opaque) reasoningOpaque = delta.reasoning_opaque
-```
+import * as path from "node:path"
+import * as fs from "node:fs/promises"
 
-**Note**: If Alexi emits `reasoning-end` events, verify that the opaque is attached per-segment (before each `tool-call`) rather than only at stream completion. Consult the upstream test fixture `interleavedReasoningOpaque` to confirm emission order:
-- `reasoning-delta` → `reasoning-end` (with opaque-first) → `tool-call` (opaque-first) → `reasoning-delta` → `reasoning-end` (opaque-second) → `tool-call` (opaque-second).
+const FILE_LINK_RE = /(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g
+
+export interface FileLink {
+  raw: string
+  absolutePath: string
+  line?: number
+  column?: number
+  exists: boolean
+}
+
+export async function detectFileLinks(
+  text: string,
+  workspaceRoot: string,
+): Promise<FileLink[]> {
+  const matches = [...text.matchAll(FILE_LINK_RE)]
+  const results: FileLink[] = []
+  for (const m of matches) {
+    const raw = m[1]
+    const [filePart, lineStr, colStr] = raw.split(":")
+    const abs = path.isAbsolute(filePart)
+      ? filePart
+      : path.resolve(workspaceRoot, filePart)
+    let exists = false
+    try {
+      await fs.access(abs)
+      exists = true
+    } catch {
+      /* not a real file */
+    }
+    if (exists) {
+      results.push({
+        raw,
+        absolutePath: abs,
+        line: lineStr ? Number(lineStr) : undefined,
+        column: colStr ? Number(colStr) : undefined,
+        exists,
+      })
+    }
+  }
+  return results
+}
+```
 
 ---
 
-### 3. Retry retryable connection resets through normal backoff path (ECONNRESET)
-**File**: `src/core/session/retry.ts` and `src/core/session/network.ts` (or equivalent Alexi retry/network modules)
+### 4. Enforce managed integration and tool policies
+**File**: `src/permission/policy.ts` (new) and `src/tool/registry.ts`
+**Priority**: high
+**Type**: security
+**Reason**: Upstream commits 613ef8ba and d016db85 add managed policy enforcement — organizations can disable specific tools/integrations/skills centrally. Essential for enterprise SAP deployments where IT needs to lock down what agents can do.
+
+**New file** `src/permission/policy.ts`:
+```typescript
+import { z } from "zod"
+
+export const ManagedPolicy = z.object({
+  tools: z
+    .object({
+      allowed: z.array(z.string()).optional(),
+      denied: z.array(z.string()).optional(),
+    })
+    .optional(),
+  integrations: z
+    .object({
+      allowed: z.array(z.string()).optional(),
+      denied: z.array(z.string()).optional(),
+    })
+    .optional(),
+  skills: z
+    .object({
+      allowed: z.array(z.string()).optional(),
+      denied: z.array(z.string()).optional(),
+    })
+    .optional(),
+})
+
+export type ManagedPolicy = z.infer<typeof ManagedPolicy>
+
+export class PolicyEnforcer {
+  constructor(private policy: ManagedPolicy = {}) {}
+
+  isToolAllowed(name: string): boolean {
+    const t = this.policy.tools
+    if (!t) return true
+    if (t.denied?.includes(name)) return false
+    if (t.allowed && !t.allowed.includes(name)) return false
+    return true
+  }
+
+  isIntegrationAllowed(id: string): boolean {
+    const i = this.policy.integrations
+    if (!i) return true
+    if (i.denied?.includes(id)) return false
+    if (i.allowed && !i.allowed.includes(id)) return false
+    return true
+  }
+
+  isSkillAllowed(name: string): boolean {
+    const s = this.policy.skills
+    if (!s) return true
+    if (s.denied?.includes(name)) return false
+    if (s.allowed && !s.allowed.includes(name)) return false
+    return true
+  }
+}
+```
+
+**Update** `src/tool/registry.ts`:
+```typescript
+import { PolicyEnforcer } from "../permission/policy"
+
+export class ToolRegistry {
+  constructor(private policy: PolicyEnforcer) {}
+
+  list(): Tool[] {
+    return Array.from(this.tools.values()).filter((t) =>
+      this.policy.isToolAllowed(t.name),
+    )
+  }
+
+  get(name: string): Tool | undefined {
+    const tool = this.tools.get(name)
+    if (tool && !this.policy.isToolAllowed(name)) return undefined
+    return tool
+  }
+}
+```
+
+---
+
+### 5. Accept interleaved Copilot `reasoning_opaque` values
+**File**: `src/providers/github-copilot.ts` (or wherever Copilot responses are decoded)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Previously `ECONNRESET` errors were being classified as `serverReset` based on error wording, bypassing the normal exponential backoff retry path. The upstream fix keys `serverReset` detection off the error **code** and routes retryable connection resets back into the standard retry loop. Important for stability on flaky networks and behind corporate proxies — common in SAP enterprise environments.
+**Reason**: Upstream fix 9f282f8c handles the Copilot responses API emitting `reasoning_opaque` interleaved with content deltas; without it, Copilot sessions break on reasoning models.
 
-**Suggested changes** (`network.ts`):
+**New code**:
 ```typescript
-// Before: detection via error message string match
-export function isServerReset(err: unknown): boolean {
-  const msg = (err as Error)?.message ?? ""
-  return msg.includes("server reset") || msg.includes("ECONNRESET")
-}
-
-// After: detect via error code (Node ErrnoException), with explicit retryable mapping
-export function isServerReset(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code
-  return code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT"
-}
-
-export function isRetryableConnectionReset(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code
-  // Treat these as retryable through the normal backoff path
-  return code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EAI_AGAIN"
-}
-```
-
-**Suggested changes** (`retry.ts`):
-```typescript
-// Route retryable resets through the normal retry/backoff path
-if (isRetryableConnectionReset(err)) {
-  // Fall through to standard backoff instead of marking as serverReset-fail-fast
-  return { shouldRetry: true, strategy: "backoff" }
-}
-```
-
-Add a regression test mirroring `test/kilocode/session-processor-retry-limit.test.ts` ensuring that an injected `ECONNRESET` is retried N times via exponential backoff rather than failing immediately.
-
----
-
-### 4. Improve CLI error message for missing binary on Windows ARM64
-**File**: `src/cli/postinstall.ts` and `src/cli/bin/alexi` (or Alexi equivalent)
-**Priority**: medium
-**Type**: feature (UX)
-**Reason**: Windows ARM64 users receive a cryptic error when the native binary is missing. Upstream added a clearer diagnostic. SAP developers increasingly use ARM64 Windows (Dev Boxes, Surface devices), so this improves the enterprise onboarding story.
-
-**Suggested changes** (CLI bootstrap):
-```typescript
-// bin wrapper (equivalent of packages/opencode/bin/kilo)
-function fail(binPath: string) {
-  const platform = process.platform
-  const arch = process.arch
-  if (platform === "win32" && arch === "arm64") {
-    console.error(
-      `Alexi: no prebuilt binary available for Windows ARM64 at ${binPath}.\n` +
-      `Native binaries for win32-arm64 are not currently published.\n` +
-      `Workarounds:\n` +
-      `  • Install the x64 build and run under x64 emulation.\n` +
-      `  • Track support at: https://github.com/<org>/alexi/issues\n`,
-    )
-  } else {
-    console.error(`Alexi: missing binary for ${platform}-${arch} at ${binPath}.`)
+function parseCopilotResponseStream(chunk: StreamChunk) {
+  switch (chunk.type) {
+    case "response.output_text.delta":
+      return { type: "text", text: chunk.delta }
+    case "response.reasoning.delta":
+    case "response.reasoning_opaque.delta": // NEW: accept opaque reasoning
+      return { type: "reasoning", text: chunk.delta ?? "", opaque: true }
+    case "response.output_item.added":
+      if (chunk.item.type === "reasoning") {
+        return { type: "reasoning_start", id: chunk.item.id }
+      }
+      break
+    // ... existing cases
   }
-  process.exit(1)
 }
 ```
-
-**Suggested changes** (`postinstall.ts`):
-```typescript
-// Detect win32-arm64 at install time and emit a warning rather than silently failing
-if (process.platform === "win32" && process.arch === "arm64") {
-  console.warn(
-    "[alexi] Warning: no native binary is published for win32-arm64. " +
-    "The CLI may not work until support is added.",
-  )
-}
-```
-
-Add a startup smoke test (mirror `test/kilocode/bin-startup.test.ts`) that asserts the improved error message is surfaced on unsupported platforms.
 
 ---
 
-### 5. Add C++ module interface files to TUI/filetype detection
-**File**: `src/tui/util/filetype.ts` or `src/cli/util/filetype.ts` (or wherever Alexi maintains file-extension → language mappings)
-**Priority**: low
-**Type**: feature
-**Reason**: C++20 module interface units (`.ixx`, `.cppm`, `.mxx`) and some vendor-specific extensions are not currently highlighted. Minor UX improvement; no SAP-specific impact.
+### 6. Route Copilot Gemini fallback to chat completions
+**File**: `src/providers/github-copilot.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix 1a9e29a0 — Gemini via Copilot must use the chat completions endpoint, not responses. Models.dev snapshot does not advertise this, so hardcoded routing is required.
 
-**New code** (add to the filetype map):
+**New code**:
 ```typescript
-export const FILETYPE_MAP: Record<string, string> = {
-  // ... existing entries
-  ".ixx": "cpp",   // MSVC module interface
-  ".cppm": "cpp",  // Clang/standard module interface
-  ".ccm": "cpp",
-  ".cxxm": "cpp",
-  ".c++m": "cpp",
+function selectCopilotEndpoint(modelId: string): "responses" | "chat" {
+  // Gemini models through Copilot only work via chat completions
+  if (modelId.toLowerCase().startsWith("gemini")) return "chat"
+  // GPT and Claude use responses API
+  if (modelId.toLowerCase().startsWith("gpt-")) return "responses"
+  if (modelId.toLowerCase().startsWith("claude")) return "responses"
+  return "chat" // safe default
 }
 ```
 
-If Alexi delegates to tree-sitter or Monarch grammars, extend the extension-to-grammar lookup instead.
+Also follow models.dev packages for Copilot fallback routing (commit 823ac87f):
+```typescript
+import modelsDev from "./models-dev-snapshot.json"
+
+function resolveCopilotProviderPackage(modelId: string): string {
+  const info = modelsDev.copilot?.models?.[modelId]
+  return info?.providerPackage ?? "openai-compatible"
+}
+```
 
 ---
 
-## Testing Recommendations
+### 7. Only send PNG, JPEG, and WebP images to xAI
+**File**:
+{"prompt_tokens":269923,"completion_tokens":4096,"total_tokens":274019,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-1. **Copilot interleaved reasoning** (Changes 1 & 2):
-   - Add a stream fixture mirroring upstream `interleavedReasoningOpaque` (Claude via Copilot with two reasoning + two tool-call deltas) and assert each `reasoning-end` carries its own opaque.
-   - Add a message-conversion test asserting `reasoning_text` is concatenated and `reasoning_opaque` equals the *latest* value when replaying an assistant turn.
-   - Smoke test: invoke a Claude-via-Copilot tool-call flow end-to-end; verify no `InvalidResponseDataError` and that a follow-up turn succeeds.
-
-2. **Retry/backoff** (Change 3):
-   - Unit test: inject an `ECONNRESET` into the HTTP client mock; assert N retry attempts occur with growing delays.
-   - Unit test: inject an error with the *message* "server reset" but no `.code`; assert it is no longer treated as `serverReset`.
-   - Integration test against SAP AI Core proxy, if feasible, under forced TCP RST.
-
-3. **Windows ARM64 CLI** (Change 4):
-   - Mock `process.platform = 'win32'`, `process.arch = 'arm64'`; invoke the bin wrapper with a missing binary and assert the ARM64-specific message.
-   - Verify postinstall does not fail on win32-arm64, just warns.
-
-4. **Filetype map** (Change 5):
-   - Snapshot test: `.ixx`, `.cppm`, `.ccm` resolve to `cpp`.
-
-5. **Regression**:
-   - Full existing provider test suite, with emphasis on SAP AI Core adapter paths, to confirm the Copilot changes don't leak into SAP-specific message conversion.
-
-## Potential Risks
-
-- **Change 1/2 (Copilot opaque concatenation)**: If Alexi has an SAP AI Core adapter that reuses the same `convert-to-openai-compatible-chat-
-{"prompt_tokens":5920,"completion_tokens":4096,"total_tokens":10016,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
-
-[Session: aeb9dfbb-9377-42d1-8059-853d0ae01c09]
-[Messages: 2, Tokens: 10016]
+[Session: 042684c4-e796-4108-8e43-fe45c054d7bb]
+[Messages: 2, Tokens: 274019]
 
 ## Execution Instructions
 

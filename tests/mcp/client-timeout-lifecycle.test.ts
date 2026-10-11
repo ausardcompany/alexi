@@ -329,17 +329,16 @@ describe('MCP timeout lifecycle', () => {
       await vi.advanceTimersByTimeAsync(1000);
       await refreshPromise;
 
-      // logger.error(`Failed to refresh tools from ${name}:`, error)
-      // The Error object is the second argument.
+      // logger.error now receives a single formatted string including the
+      // underlying error.message (see src/utils/logger.ts#formatError).
       const call = errorSpy.mock.calls.find(([msg]) =>
         String(msg).includes('Failed to refresh tools from refresh-slow')
       );
       expect(call).toBeDefined();
-      const err = call![1] as Error;
-      expect(err).toBeInstanceOf(Error);
-      expect(err.message).toMatch(/^MCP tools\/list timed out after 1000ms /);
-      expect(err.message).toContain("(request timeout for server 'refresh-slow')");
-      expect(err.message).toContain("increase 'timeout.request' in mcp-servers.json");
+      const line = String(call![0]);
+      expect(line).toMatch(/MCP tools\/list timed out after 1000ms /);
+      expect(line).toContain("(request timeout for server 'refresh-slow')");
+      expect(line).toContain("increase 'timeout.request' in mcp-servers.json");
     });
   });
 

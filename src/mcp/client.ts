@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { spawn, type ChildProcess } from 'child_process';
 import path from 'path';
-import { logger } from '../utils/logger.js';
+import { formatError, logger, scrubUrlsFromString } from '../utils/logger.js';
 import {
   DEFAULT_CONNECT_TIMEOUT_MS,
   loadMcpConfig,
@@ -379,7 +379,11 @@ function classifyConnectError(error: unknown): 'transient' | 'config' {
  * or environment variable an operator needs to change.
  */
 function formatConnectError(serverName: string, error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error ?? '');
+  // Always scrub URLs out of the raw message before we embed it in any
+  // log line — MCP OAuth / HTTP transports often surface the full
+  // callback URL (with `?token=...`, `?code=...`) when a handshake
+  // fails, and that must not land in `~/.alexi/logs/` or stderr.
+  const raw = scrubUrlsFromString(error instanceof Error ? error.message : String(error ?? ''));
   const code = (error as { code?: unknown } | null)?.code;
 
   // Remote-transport connect timeouts already carry an actionable,
@@ -1062,7 +1066,7 @@ export class McpClientManager {
         this.withRequestTimeout(serverName, 'resources/list', (opts) =>
           listResources({}, opts)
         ).catch((error: unknown) => {
-          logger.debug(`MCP resources/list unavailable for ${serverName}:`, error);
+          logger.debug(`MCP resources/list unavailable for ${serverName}: ${formatError(error)}`);
         })
       );
     }
@@ -1071,7 +1075,7 @@ export class McpClientManager {
       optionalMetadata.push(
         this.withRequestTimeout(serverName, 'prompts/list', (opts) => listPrompts({}, opts)).catch(
           (error: unknown) => {
-            logger.debug(`MCP prompts/list unavailable for ${serverName}:`, error);
+            logger.debug(`MCP prompts/list unavailable for ${serverName}: ${formatError(error)}`);
           }
         )
       );
@@ -1417,7 +1421,7 @@ export class McpClientManager {
     try {
       await connection.client.close();
     } catch (error) {
-      logger.warn(`Error closing MCP client ${name}:`, error);
+      logger.warn(`Error closing MCP client ${name}: ${formatError(error)}`);
     }
 
     if (connection.process) {
@@ -1466,7 +1470,7 @@ export class McpClientManager {
             };
           }
         } catch (error) {
-          logger.warn(`Failed to initialize MCP server ${server.name}:`, error);
+          logger.warn(`Failed to initialize MCP server ${server.name}: ${formatError(error)}`);
           return {
             server: server.name,
             status: 'failed',
@@ -1569,7 +1573,7 @@ export class McpClientManager {
         this.markBreakageDisabled(serverName, error.message);
         return;
       }
-      logger.error(`Failed to refresh tools from ${serverName}:`, error);
+      logger.error(`Failed to refresh tools from ${serverName}: ${formatError(error)}`);
     }
   }
 
@@ -1605,7 +1609,7 @@ export class McpClientManager {
         this.markBreakageDisabled(serverName, error.message);
         return;
       }
-      logger.error(`Failed to refresh resources from ${serverName}:`, error);
+      logger.error(`Failed to refresh resources from ${serverName}: ${formatError(error)}`);
     }
   }
 
@@ -1638,7 +1642,7 @@ export class McpClientManager {
         this.markBreakageDisabled(serverName, error.message);
         return;
       }
-      logger.error(`Failed to refresh prompts from ${serverName}:`, error);
+      logger.error(`Failed to refresh prompts from ${serverName}: ${formatError(error)}`);
     }
   }
 
@@ -1698,7 +1702,7 @@ export class McpClientManager {
       // debounce cycle instead of resetting the just-fired one.
       this.refreshDebounces.delete(key);
       void this.performListRefresh(serverName, kind).catch((error) => {
-        logger.error(`MCP list refresh failed for ${serverName} (${kind}):`, error);
+        logger.error(`MCP list refresh failed for ${serverName} (${kind}): ${formatError(error)}`);
       });
     }, delay);
 
@@ -2083,12 +2087,14 @@ export class McpClientManager {
     connection.lastErrorAt = Date.now();
     void connection.client
       .close()
-      .catch((error) => logger.warn(`Error closing MCP client ${serverName}:`, error));
+      .catch((error) =>
+        logger.warn(`Error closing MCP client ${serverName}: ${formatError(error)}`)
+      );
     if (connection.process) {
       try {
         connection.process.kill();
       } catch (error) {
-        logger.warn(`Error killing MCP process ${serverName}:`, error);
+        logger.warn(`Error killing MCP process ${serverName}: ${formatError(error)}`);
       }
     }
   }

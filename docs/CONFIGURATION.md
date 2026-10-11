@@ -2423,6 +2423,65 @@ Deployment-side behaviour the client auto-handles:
 
 Capability learning is per-process; a restart re-probes once per endpoint. See [docs/PROVIDERS.md — OpenAI-Compatible Embeddings Client](PROVIDERS.md#openai-compatible-embeddings-client) for the retry contract and [docs/API.md — OpenAI-Compatible Embeddings API](API.md#openai-compatible-embeddings-api) for the public surface.
 
+## Managed Policy Enforcement
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `613ef8ba` + `d016db85`). Enterprise SAP installations can centrally deny individual tools, integrations, or skills via a `ManagedPolicy` installed on the global tool registry at startup. No new environment variable or CLI flag is added — the mechanism is opt-in via the `setToolPolicy(policy)` API (see [docs/API.md — Managed Policy API](API.md#managed-policy-api) for the schema).
+
+### Policy document shape
+
+```json
+{
+  "tools": {
+    "allowed": ["read", "glob", "grep"],
+    "denied": ["bash", "shell"]
+  },
+  "integrations": {
+    "denied": ["web_fetch"]
+  },
+  "skills": {
+    "allowed": ["kilo-config"]
+  }
+}
+```
+
+Evaluation rule (identical for all three categories):
+
+| Policy state | Result for a given name |
+|--------------|-------------------------|
+| neither `allowed` nor `denied` set | permit (open-world default) |
+| `denied` contains the name | **deny** (hard reject, regardless of `allowed`) |
+| `allowed` is set and does NOT contain the name | deny (closed-world membership required) |
+| otherwise | permit |
+
+`denied` wins over `allowed`, so an item listed in both is denied. Omitting the whole category object leaves the historical open-world behaviour untouched.
+
+### Example boot wiring
+
+Alexi does NOT auto-load a policy from disk — the operator wires it into their deployment harness or boot script. One typical pattern:
+
+```typescript
+import { readFile } from 'fs/promises';
+import { setToolPolicy } from './tool/index.js';
+import { PolicyEnforcer, ManagedPolicySchema } from './permission/policy.js';
+
+const path = process.env.ALEXI_MANAGED_POLICY_PATH ?? '/etc/alexi/policy.json';
+try {
+  const raw = JSON.parse(await readFile(path, 'utf-8'));
+  const policy = ManagedPolicySchema.parse(raw);
+  setToolPolicy(new PolicyEnforcer(policy));
+} catch {
+  // Missing or malformed policy -> fall back to open-world defaults.
+}
+```
+
+Operators who need to lock down a high-risk tool (shell, web_fetch, …) across every session on a shared host set `denied` on the `tools` list. Operators who need a strict allow-list (regulated environments where only a short list of tools is approved) set `allowed`. The registry filters both `getTool()` lookups and `getAllToolNames()` listings through the enforcer, so denied tools are never surfaced in the function-tool schema the orchestrator hands to SAP AI Core.
+
+### Scenario presets
+
+- **Read-only agents.** `tools.allowed = ["read", "glob", "grep", "task"]` blocks every file-write tool, every shell tool, and every network tool while keeping the exploration + delegation surface intact.
+- **No external network.** `tools.denied = ["web_fetch", "web_search"]` + `integrations.denied = ["github", "slack"]` keeps the agent fully local without disrupting file / shell work.
+- **Pilot scope.** `skills.allowed = ["kilo-config"]` restricts skill-based workflows to a single approved skill while leaving the baseline tool surface open.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs
