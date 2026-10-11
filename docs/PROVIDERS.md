@@ -3708,6 +3708,86 @@ const vectors = await callEmbeddingEndpoint(
 
 For the full public API surface (`EmbeddingRequestOptions`, `callEmbeddingEndpoint`, `looksLikeDimensionsRejection`, `surfaceErrorEnvelope`, `decodeEmbeddings`, `resetEndpointCapabilityCache`) see [docs/API.md — OpenAI-Compatible Embeddings API](API.md#openai-compatible-embeddings-api).
 
+## GitHub Copilot Helpers (dormant)
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `9f282f8c`, `1a9e29a0`, `823ac87f`). Lives in `src/providers/github-copilot.ts`.
+
+Alexi routes LLM calls through SAP AI Core and SAP proxy adapters — it does **not** currently ship a first-class GitHub Copilot provider. These helpers are therefore dormant: importing the module has no side effects on the SAP AI Core happy path, and no code in `src/providers/index.ts` wires them in. They are kept in-tree so that any future Copilot adapter can replicate the upstream opencode fixes verbatim without re-discovering them.
+
+### Endpoint selection (`selectCopilotEndpoint`)
+
+```typescript
+export type CopilotEndpoint = 'responses' | 'chat';
+export function selectCopilotEndpoint(modelId: string): CopilotEndpoint;
+```
+
+Decision table (first match wins; case-insensitive prefix match):
+
+| Model prefix | Endpoint | Rationale |
+|--------------|----------|-----------|
+| `gemini*` | `chat` | Gemini via Copilot only works through chat-completions (opencode `1a9e29a0`). models.dev does not advertise this constraint, so a hardcoded rule is required. |
+| `gpt-*`, `claude*` | `responses` | OpenAI and Anthropic families use the Copilot responses API. |
+| anything else | `chat` | Chat-completions is a strict subset of what responses supports, so defaulting there avoids silent breakage when Copilot adds a new family before the models.dev snapshot catches up. |
+
+### Stream decoder (`parseCopilotResponseStream`)
+
+```typescript
+export type ParsedCopilotEvent =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string; opaque: boolean }
+  | { type: 'reasoning_start'; id: string }
+  | { type: 'ignored'; reason: string };
+
+export function parseCopilotResponseStream(chunk: CopilotStreamChunk): ParsedCopilotEvent;
+```
+
+Normalises Copilot responses-API events into a discriminated union. The key fix (opencode `9f282f8c`) is treating `response.reasoning_opaque.delta` identically to `response.reasoning.delta` but with `opaque: true` so downstream renderers know the content is encrypted blob data rather than human-readable reasoning text. Without this, Copilot reasoning models (o3-family) break because the opaque reasoning blocks produce an unhandled event type and the stream decoder either drops subsequent text deltas or errors out of the loop.
+
+Event mapping:
+
+| Chunk `type` | Normalised event |
+|--------------|------------------|
+| `response.output_text.delta` | `{ type: 'text', text: delta ?? '' }` |
+| `response.reasoning.delta` | `{ type: 'reasoning', text: delta ?? '', opaque: false }` |
+| `response.reasoning_opaque.delta` | `{ type: 'reasoning', text: delta ?? '', opaque: true }` |
+| `response.output_item.added` with `item.type === 'reasoning'` | `{ type: 'reasoning_start', id }` |
+| anything else | `{ type: 'ignored', reason: <chunk type> }` |
+
+### Provider-package resolution (`resolveCopilotProviderPackage`)
+
+```typescript
+export function resolveCopilotProviderPackage(
+  modelId: string,
+  snapshot: { copilot?: { models?: Record<string, { providerPackage?: string }> } }
+): string;
+```
+
+Looks up the correct provider-compat package for a Copilot fallback routing decision from an injected models.dev snapshot, falling back to `openai-compatible` when the snapshot has no entry. Dependency injection keeps the helper free of a hard dependency on the on-disk file layout (see `src/providers/catalog.ts` for how Alexi loads provider manifests today).
+
+## xAI Image-Mime Filter
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode 2026-10 fix). Lives in `src/providers/xai-image-filter.ts`.
+
+The xAI (Grok) multimodal endpoint silently drops or 400-rejects uploads whose mime type is outside its narrow allow-list. Only PNG, JPEG, and WebP are forwarded; GIF, BMP, TIFF, HEIC, and anything else must be filtered out BEFORE the request is built so the model gets a text-only turn instead of a silent failure.
+
+```typescript
+export interface MultimodalAttachment {
+  mimeType: string;
+  data: unknown;
+  [k: string]: unknown;
+}
+
+export function isXaiAllowedImageMime(mimeType: string): boolean;
+export function filterXaiImages<T extends MultimodalAttachment>(
+  attachments: readonly T[]
+): { kept: T[]; dropped: T[] };
+```
+
+- Allow-list (case-insensitive, after stripping any `;charset=...` parameters): `image/png`, `image/jpeg`, `image/jpg`, `image/webp`. The non-standard `image/jpg` is accepted because it is commonly emitted by browsers and tools.
+- `filterXaiImages` partitions a list into `{ kept, dropped }`. The dropped set is returned so callers can log a warning or surface a UX message instead of swallowing content silently.
+
+Alexi routes multimodal requests through SAP AI Core and does not yet have a native xAI adapter — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
