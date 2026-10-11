@@ -47,7 +47,7 @@ export async function detectFileLinks(text: string, workspaceRoot: string): Prom
     // Windows drive letters (`C:\...`) contain colons that we must NOT
     // interpret as `:line:col`. Split only when the leading byte sequence
     // is not a drive letter.
-    let filePart = raw;
+    let filePart: string;
     let lineStr: string | undefined;
     let colStr: string | undefined;
     const driveRe = /^[a-zA-Z]:\\/;
@@ -61,7 +61,7 @@ export async function detectFileLinks(text: string, workspaceRoot: string): Prom
       colStr = parts[2];
     } else {
       const parts = raw.split(':');
-      filePart = parts[0];
+      filePart = parts[0]!;
       lineStr = parts[1];
       colStr = parts[2];
     }
