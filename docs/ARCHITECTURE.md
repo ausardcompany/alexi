@@ -7926,3 +7926,122 @@ flowchart TD
 - **Pure helpers.** No globals are mutated; both `platformSupportWarning()` and `formatStartupError()` accept an injected `PlatformInfo` so tests cover all four axes (common, win32-arm64, unsupported platform, unsupported arch) without touching `process`.
 - **Consumers.** `formatStartupError()` is intended for the CLI boot path (`src/cli/program.ts` error boundaries) and for any ad-hoc startup script that needs a user-friendly diagnostic. The helper intentionally returns a string instead of printing so callers can route it through the shared logger, a serialised error channel, or stderr as appropriate.
 
+## Managed Policy Enforcement
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports upstream opencode `613ef8ba` + `d016db85`). Lives in `src/permission/policy.ts` and is wired into the tool registry at `src/tool/index.ts`. Lets enterprise SAP installations centrally disable specific tools, integrations, or skills without maintaining a fork.
+
+### Design
+
+Three independent categories, same evaluation rule:
+
+```mermaid
+flowchart LR
+    Caller[Caller: get(toolName)] --> Policy{policy for category present?}
+    Policy -- no --> Allow[isAllowed = true]
+    Policy -- yes --> Denied{name in denied?}
+    Denied -- yes --> Reject[isAllowed = false]
+    Denied -- no --> Allowed{allowed list defined?}
+    Allowed -- no --> Allow
+    Allowed -- yes --> InAllowed{name in allowed?}
+    InAllowed -- yes --> Allow
+    InAllowed -- no --> Reject
+```
+
+- `denied` is checked first (hard reject regardless of `allowed`).
+- When `allowed` is set, membership is required (closed-world).
+- When neither is set, everything passes (open-world — matches the pre-policy default).
+
+### Wiring in the tool registry
+
+The global registry's `get(name)` short-circuits with `undefined` when `policy.isToolAllowed(name)` is `false`, and `list()` filters the registered + dynamic tools through the same predicate before returning. This is strictly stronger than hiding tools from `list()`: a model that already cached the schema still cannot invoke a denied tool, because `getTool()` returns `undefined` and the orchestrator never dispatches.
+
+The default policy (`DEFAULT_POLICY_ENFORCER`) is open-world so legacy installations preserve current behaviour. Enterprise operators install a policy at startup:
+
+```typescript
+import { setToolPolicy } from './tool/index.js';
+import { PolicyEnforcer, ManagedPolicySchema } from './permission/policy.js';
+const policy = ManagedPolicySchema.parse(JSON.parse(fs.readFileSync('/etc/alexi/policy.json', 'utf-8')));
+setToolPolicy(new PolicyEnforcer(policy));
+```
+
+### Design notes
+
+- **Three categories, one shape.** `tools`, `integrations`, and `skills` each use the same `{ allowed?, denied? }` schema so operators learn the semantics once. Only the tool category is wired into the registry today; the integration / skill accessors are provided so MCP integration bootstraps and the skill loader can enforce the same contract when wiring arrives in a later patch.
+- **Immutable instance.** `PolicyEnforcer` holds the backing `ManagedPolicy` as a `readonly` field; the only way to update enforcement is to swap the whole instance with `setToolPolicy(...)`. This avoids the "half-rotated policy" race during live config reload.
+- **No implicit load.** Alexi does NOT auto-load a policy from disk — the entire mechanism is opt-in via `setToolPolicy(...)`. Operators who want file-backed enforcement wire it into their deployment harness or boot script.
+
+## Agentic Tool Dispatch
+
+Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70`). Lives in `src/core/agenticChat.ts`. Hardens two tool-call failure modes that previously left the agent loop in a wedged state.
+
+### Argument validation at dispatch time
+
+```mermaid
+flowchart TD
+    Call[LLM tool_call block] --> Parse{JSON.parse arguments?}
+    Parse -- throws --> Malformed[Emit tool_end with:\nMalformed tool arguments for &lt;tool&gt;: &lt;detail&gt; raw=&lt;args&gt;]
+    Parse -- ok --> Schema{tool.parameters.safeParse ok?}
+    Schema -- no --> Invalid[Emit tool_end with:\nInvalid arguments for tool &lt;tool&gt;: &lt;reason&gt;]
+    Schema -- ok --> Dispatch[tool.execute args ctx]
+    Dispatch --> Result[ToolResult success true/false]
+```
+
+- **Rejected JSON parses** no longer surface as a bare `Invalid parameters` string. The structured error names the tool and includes the raw payload so the model can see what it emitted and self-correct on the next turn.
+- **Schema validation runs before dispatch**, not inside `defineTool.executeUnsafe`. This matters when the provider emits a broken tool block for a schema the tool does not accept — stalling the turn with an unresolved tool call used to force the whole conversation into an error state; the schema check at dispatch time cuts the failure short and keeps the transcript well-formed.
+
+### Settling pending calls on turn end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Agent loop
+    participant Pending as pending Map
+    participant Provider as SAP AI Core
+    participant Tool as Tool
+
+    Agent->>Provider: stream request
+    Provider-->>Agent: tool_call block id=42
+    Agent->>Pending: pending.set(42, { toolName: 'bash' })
+    Agent->>Tool: execute(args)
+    Note over Provider,Agent: Provider aborts / iteration cap hits / disconnect
+
+    Agent->>Agent: settleUnfinishedCalls(pending)
+    loop every pending entry
+        Agent->>Agent: result = { success: false, error: 'Tool call did not complete before turn ended' }
+        Agent->>Agent: onProgress tool_end
+    end
+    Agent->>Pending: pending.clear()
+```
+
+Without `settleUnfinishedCalls`, the pending-call map leaked across turns and SAP AI Core rejected the next assistant message with a schema violation — every `tool_calls` entry needs a matching tool-result row, and the dropped call left an orphan. The settler emits a synthetic error-result for each orphan so the transcript stays well-formed and the TUI tool-row renders a terminal failure state instead of an infinite spinner.
+
+## Timeline File-Link Detection
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports upstream opencode `f43903d8`). Lives in `src/session-ui/timeline-links.ts`. Scans model output / timeline strings for file-path references and returns only paths that actually exist on disk.
+
+### Design
+
+```mermaid
+flowchart LR
+    Text[Model output / timeline string] --> Regex[FILE_LINK_RE match]
+    Regex --> Drive{Starts with [A-Za-z]:\\?}
+    Drive -- yes --> StripDrive[Split: drive-letter + rest, split rest on :]
+    Drive -- no --> SplitRest[Split raw match on :]
+    StripDrive --> Resolve[path.resolve workspaceRoot filePart]
+    SplitRest --> Resolve
+    Resolve --> Access{fs.access ok?}
+    Access -- no --> Drop[skip]
+    Access -- yes --> Emit[Push FileLink raw / absolutePath / line / column / exists = true]
+```
+
+- The matcher regex `/(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g` requires:
+  - A leading boundary (`^`, whitespace, or `(`), so bare `foo.ts` inside prose does NOT match.
+  - A recognisable path prefix (`./`, `../`, `/`, `~/`, Windows drive letter).
+  - Optional `:line` and `:line:col` suffixes.
+- Windows drive letters are detected before the `:line:col` split to avoid treating the drive-letter colon as a `:line` separator (`C:\path\file.ts:12:3` is parsed as `C:\path\file.ts` + line `12` + col `3`).
+- The returned `FileLink` only has `exists: true` entries — non-existent matches are **discarded**, not returned with `exists: false`. The deterministic matcher's purpose is suppressing false positives: a path that fails `fs.access` is treated as a false positive and dropped.
+
+### Consumers
+
+The helper is a building block for the session-UI timeline renderer and any CLI post-processor that wants to turn plain-text model output into actionable links. The I/O is `await fs.access` per match, so callers should not run it on hot streaming paths; the intended use is on committed timeline frames.
+
