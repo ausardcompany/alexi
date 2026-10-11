@@ -3828,6 +3828,45 @@ logger.print('Raw output');  // Always outputs, for CLI display
 | `warn` | 2 | `[WARN] message` |
 | `error` | 3 | `[ERROR] message` |
 
+### Logger introspection and error-formatting helpers (`src/utils/logger.ts`)
+
+Added in commit `be4e1340 feat(core): add error detail logging with URL redaction`. The shared logger module now exports three helpers and one introspection method that callers use to turn an unknown thrown value into a single log line without leaking credentials.
+
+```typescript
+export function scrubUrl(url: string): string;
+export function scrubUrlsFromString(text: string): string;
+export function formatError(err: unknown, includeStack?: boolean): string;
+
+export const logger: {
+  setLevel(level: LogLevel): void;
+  getLevel(): LogLevel;
+  debug(message: string, ...args: unknown[]): void;
+  info(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+  print(message: string): void;
+};
+```
+
+- **`scrubUrl(url)`** parses `url` with the WHATWG `URL` constructor and returns `${origin}${pathname}?[REDACTED]` when a query string is present, `${origin}${pathname}#[REDACTED]` when only a hash fragment is present, and the original URL when neither is present. Non-URL input is returned unchanged, so the helper is safe to call on arbitrary strings. OAuth implicit-flow access tokens that appear in `#access_token=...` are redacted the same way as `?token=...`, `?code=...`, `?access_token=...`, and `?api_key=...`.
+- **`scrubUrlsFromString(text)`** walks `text` with the module-local regex `/https?:\/\/[^\s<>"'`\\^|{}[\]]+/gi`, trims trailing sentence punctuation (`.,;:!?)]}'"\``) from each match before scrubbing, re-attaches that punctuation after redaction, and leaves non-URL content untouched. It short-circuits on inputs that do not contain the substring `http`, so cost is zero for most log lines.
+- **`formatError(err, includeStack = true)`** returns a single string suitable for `logger.error(\`...: ${formatError(err)}\`)`. For `Error` instances it uses `err.message || err.name || 'Error'`; for non-`Error` throws it falls back to `String(err)`. The result is always passed through `scrubUrlsFromString()`. When the logger is at `debug` level (via `logger.getLevel() === 'debug'`) and `includeStack` is `true`, the scrubbed stack trace is appended on a new line after the first (message-repeating) stack line is dropped. Stack traces are intentionally omitted at `info`, `warn`, and `error` levels so operational logs stay compact.
+- **`logger.getLevel()`** returns the currently-configured level. Used by `formatError()` to decide whether to append the stack and by test mocks that need to assert the pre-call level.
+
+Call-site pattern. The entire codebase replaced the `logger.error('msg', err)` form (which rendered as `[ERROR] msg [object Object]` for provider errors whose `toString()` lost the message) with:
+
+```typescript
+import { formatError, logger } from '../utils/logger.js';
+
+try {
+  await mcp.listTools();
+} catch (err) {
+  logger.error(`Failed to refresh tools from ${serverName}: ${formatError(err)}`);
+}
+```
+
+Known migrated call sites: `src/core/task-scheduler.ts` (3 sites — `tasks.json` load / save / task execution), `src/mcp/client.ts` (7 sites — `resources/list`, `prompts/list`, client close, server init, list refreshes, process kill), `src/providers/sapOrchestration.ts` (2 sites — prompt-cache retry in both chat and stream paths), and `src/providers/modelCatalog.ts` (catalog refresh error embedded in the status badge). The MCP connect-error formatter `formatConnectError(serverName, error)` additionally runs the raw error message through `scrubUrlsFromString()` before composing the operator-facing hint, because MCP OAuth / HTTP transports often surface the full callback URL (with `?token=...`, `?code=...`) when a handshake fails and that URL must not land in `~/.alexi/logs/` or on stderr.
+
 ## TUI Tool-Call Rendering API
 
 Introduced in 1.20.2. See `docs/ARCHITECTURE.md#tui-tool-call-disclosure` for the full flow.

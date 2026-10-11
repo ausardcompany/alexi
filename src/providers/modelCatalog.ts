@@ -30,7 +30,7 @@ import {
   type FetchErrorClass,
   type FetchRetryOptions,
 } from './modelFetchErrors.js';
-import { logger } from '../utils/logger.js';
+import { logger, scrubUrlsFromString } from '../utils/logger.js';
 
 // ============================================================================
 // Constants
@@ -323,12 +323,9 @@ export async function refreshModelCatalog(
     // message; for non-classified errors fall back to the raw message.
     // Keep existing entries (static or previous live), just mark as error
     // so `alexi models` (and the TUI status indicator) can surface it.
-    const msg =
-      err instanceof ModelFetchError
-        ? err.reason
-        : err instanceof Error
-          ? err.message
-          : String(err);
+    const msg = scrubUrlsFromString(
+      err instanceof ModelFetchError ? err.reason : err instanceof Error ? err.message : String(err)
+    );
     const errorClass: FetchErrorClass =
       err instanceof ModelFetchError
         ? {
