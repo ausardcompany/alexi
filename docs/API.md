@@ -7428,3 +7428,162 @@ if (advisory) {
 
 Alexi ships no native binary, so the exact upstream opencode `055d95b` failure class (no prebuilt binary for `win32-arm64`) cannot occur here — the helpers are scoped to **optional** native dependencies (`tree-sitter` grammars, `better-sqlite3`) that the CLI can degrade without.
 
+## Managed Policy API
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `613ef8ba` + `d016db85`). Exported from `src/permission/policy.ts`.
+
+```typescript
+import { z } from 'zod';
+
+export const ManagedPolicySchema = z.object({
+  tools: z.object({ allowed: z.array(z.string()).optional(), denied: z.array(z.string()).optional() }).optional(),
+  integrations: z.object({ allowed: z.array(z.string()).optional(), denied: z.array(z.string()).optional() }).optional(),
+  skills: z.object({ allowed: z.array(z.string()).optional(), denied: z.array(z.string()).optional() }).optional(),
+});
+
+export type ManagedPolicy = z.infer<typeof ManagedPolicySchema>;
+
+export class PolicyEnforcer {
+  constructor(policy?: ManagedPolicy);
+  isToolAllowed(name: string): boolean;
+  isIntegrationAllowed(id: string): boolean;
+  isSkillAllowed(name: string): boolean;
+  snapshot(): ManagedPolicy;
+}
+
+export const DEFAULT_POLICY_ENFORCER: PolicyEnforcer;
+```
+
+Semantics (identical for all three categories — tools, integrations, skills):
+
+| Policy state | `isAllowed(name)` |
+|--------------|-------------------|
+| neither `allowed` nor `denied` set | always `true` (open-world default) |
+| `denied` contains `name` | `false` (hard reject, regardless of `allowed`) |
+| `allowed` is set and does NOT contain `name` | `false` (closed-world membership required) |
+| otherwise | `true` |
+
+The `denied` list is checked first, so a name on both lists is denied. `DEFAULT_POLICY_ENFORCER` is the empty-policy singleton used when no managed policy has been installed.
+
+### Wiring into the tool registry
+
+The global tool registry (`src/tool/index.ts`) holds a `PolicyEnforcer` and consults it from both `get(name)` and `list()`. A denied tool is treated as if it were never registered — a model that already cached the schema still cannot invoke it, because `getTool()` returns `undefined`.
+
+```typescript
+import { setToolPolicy } from './tool/index.js';
+import { PolicyEnforcer, ManagedPolicySchema } from './permission/policy.js';
+
+// Typically loaded at startup from a JSON file or deployment-level config.
+const raw = JSON.parse(await fs.readFile('/etc/alexi/policy.json', 'utf-8'));
+const policy = ManagedPolicySchema.parse(raw);
+setToolPolicy(new PolicyEnforcer(policy));
+```
+
+Example JSON policy:
+
+```json
+{
+  "tools": {
+    "denied": ["bash", "shell", "web_fetch"]
+  },
+  "skills": {
+    "allowed": ["kilo-config"]
+  }
+}
+```
+
+With that policy loaded, `getTool('bash')` returns `undefined`, `getAllToolNames()` omits `bash` / `shell` / `web_fetch`, and the orchestrator never surfaces them in the function-tool schema list it hands to SAP AI Core. The policy is read on each lookup, so swapping the enforcer with another `setToolPolicy(...)` call takes effect for the next tool invocation.
+
+## Agentic Tool Dispatch
+
+Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70`). Lives in `src/core/agenticChat.ts`.
+
+### Argument validation at dispatch time
+
+`executeToolCall` validates each tool call before handing off to `tool.execute`:
+
+1. **JSON parse.** A `JSON.parse` failure on `toolCall.function.arguments` returns a structured error of the form `Malformed tool arguments for <tool>: <detail> (raw=<arguments>)` and emits a `tool_end` progress event.
+2. **Zod schema check.** When the tool exposes a Zod schema with `safeParse`, the parsed arguments are validated BEFORE dispatch. A schema failure returns `Invalid arguments for tool <tool>: <reason>`, naming the offending tool so the model can self-correct on the next turn.
+
+Both error paths emit a `tool_end` progress event so the TUI tool-row renders a failure state immediately rather than hanging on an unresolved call.
+
+### `settleUnfinishedCalls(pending, onProgress?)`
+
+```typescript
+export function settleUnfinishedCalls(
+  pending: Map<string, { toolName: string }>,
+  onProgress?: (event: AgenticProgressEvent) => void
+): Array<{ id: string; result: ToolResult }>;
+```
+
+Emits a synthetic `Tool call did not complete before turn ended` error-result for each still-pending tool call when the provider aborts mid-stream, the iteration cap is reached, or the upstream disconnects. The helper clears the `pending` map and emits a `tool_end` event for each settled call. Without this, the pending-call map leaked across turns and SAP AI Core rejected the next assistant message because `tool_calls` entries had no matching tool-result rows.
+
+Callers invoke `settleUnfinishedCalls` from the turn-wrap-up path alongside the existing abort handling — it is a defensive sink, not a replacement for provider-level retries.
+
+## Timeline File-Link Detection
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `f43903d8`). Exported from `src/session-ui/timeline-links.ts`.
+
+```typescript
+export interface FileLink {
+  /** Raw matched substring, including any `:line:col` suffix. */
+  raw: string;
+  /** Absolute, resolved path on disk. */
+  absolutePath: string;
+  /** Optional 1-based line number parsed from a `:N` suffix. */
+  line?: number;
+  /** Optional 1-based column number parsed from a `:N:M` suffix. */
+  column?: number;
+  /** `true` once `fs.access` has confirmed the path exists. */
+  exists: boolean;
+}
+
+export function detectFileLinks(
+  text: string,
+  workspaceRoot: string
+): Promise<FileLink[]>;
+```
+
+Behaviour:
+
+- The matcher is intentionally conservative. It anchors on a leading whitespace / `(` / start-of-string so bare words like `foo.ts` buried in prose do not get linkified, and only paths whose leading segment is a recognisable path prefix (`./`, `../`, `/`, `~/`, `C:\`) survive the regex `/(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g`.
+- Windows drive letters (`C:\path\...`) are detected first and have their `C:` prefix stripped before splitting the rest on `:` — the `C:` colon is NOT treated as a `:line:col` separator.
+- Each match is resolved against `workspaceRoot` (relative paths) or used as-is (absolute paths) and probed with `fs.access`. **Only paths that actually exist on disk are returned**; non-existent matches are discarded (not returned with `exists: false`) because the whole point of the deterministic matcher is to suppress false positives.
+- Line and column numbers from `:N` / `:N:M` suffixes are parsed to numbers (NaN inputs are dropped to `undefined`).
+
+Example:
+
+```typescript
+import { detectFileLinks } from './session-ui/timeline-links.js';
+
+const links = await detectFileLinks(
+  'Error at ./src/foo.ts:12 — see also ~/docs/README.md and C:\\proj\\main.cpp:3:5',
+  process.cwd()
+);
+for (const link of links) {
+  console.log(`${link.absolutePath}:${link.line ?? ''}:${link.column ?? ''}`);
+}
+```
+
+## xAI Image-Mime Filter
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode 2026-10 fix). Exported from `src/providers/xai-image-filter.ts`.
+
+```typescript
+export interface MultimodalAttachment {
+  mimeType: string;
+  data: unknown;
+  [k: string]: unknown;
+}
+
+export function isXaiAllowedImageMime(mimeType: string): boolean;
+export function filterXaiImages<T extends MultimodalAttachment>(
+  attachments: readonly T[]
+): { kept: T[]; dropped: T[] };
+```
+
+- `isXaiAllowedImageMime(mime)` — case-insensitive; strips any `;charset=...` parameters before matching against `{image/png, image/jpeg, image/jpg, image/webp}`. Returns `false` for an empty string, `undefined` mime, or any other mime (GIF, BMP, TIFF, HEIC, …).
+- `filterXaiImages(attachments)` — partitions a list into `kept` (safe to forward) and `dropped` (silently rejected by xAI). The dropped list is returned so callers can log a warning or surface a UX hint instead of swallowing content silently.
+
+Alexi routes multimodal requests through SAP AI Core by default — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
+

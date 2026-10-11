@@ -3434,6 +3434,25 @@ Extended in commit `9c830373` (2026-10-10 upstream sync, ports upstream opencode
 - **Keep the message-wording fallback.** Tests and wrapped / stringified errors still rely on it. The fallback matches on `econnreset`, `etimedout`, `eai_again`, `socket hang up`. Removing it to "simplify" is a regression — it is the only path that handles rewrapped errors from older provider SDKs.
 - **`isRetryableConnectionReset` is a predicate, not a classifier.** The function returns `boolean` and is designed to be the single call site for the "should this flow through `withRetry`?" question. Do not inline the heuristic at call sites — centralising it is the whole point of the port.
 
+## Managed Policy Enforcement (`src/permission/policy.ts`)
+
+Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `613ef8ba` + `d016db85`). References: [ARCHITECTURE.md — Managed Policy Enforcement](ARCHITECTURE.md#managed-policy-enforcement), [API.md — Managed Policy API](API.md#managed-policy-api), [CONFIGURATION.md — Managed Policy Enforcement](CONFIGURATION.md#managed-policy-enforcement), [TESTING.md — Testing the Managed Policy Enforcer](TESTING.md#testing-the-managed-policy-enforcer).
+
+- **`denied` wins over `allowed`.** The three categories (`tools`, `integrations`, `skills`) share the same `{ allowed?, denied? }` schema. Reordering the checks so `allowed` short-circuits before `denied` is a security regression — a tool on both lists must be denied.
+- **No implicit disk load.** Alexi does not auto-load a policy from a well-known path. The entire mechanism is opt-in via `setToolPolicy(policy)`. Do not add a `~/.alexi/policy.json` autoloader without an opt-out flag; silent policy pickup would surprise operators who rely on the open-world default.
+- **Gate `get` AND `list`.** The registry filters both `get(name)` and `list()` through the enforcer. Hiding a tool only from `list()` is strictly weaker than denying it: a model that already cached the schema would still invoke it. Keep both call sites gated.
+- **Immutable `PolicyEnforcer`.** The backing `ManagedPolicy` is a `readonly` field. Mutating the policy in place (e.g. appending to `denied`) races with concurrent tool lookups. Rotate the policy by constructing a new `PolicyEnforcer` and calling `setToolPolicy(new PolicyEnforcer(...))` — never by mutating the existing instance's backing object.
+- **The default enforcer is a singleton.** `DEFAULT_POLICY_ENFORCER` is the open-world fallback used in tests and when no managed policy has been installed. Resetting with `setToolPolicy(DEFAULT_POLICY_ENFORCER)` is the canonical teardown step in regression tests.
+
+## Agentic Tool Dispatch (`src/core/agenticChat.ts`)
+
+Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70`). References: [ARCHITECTURE.md — Agentic Tool Dispatch](ARCHITECTURE.md#agentic-tool-dispatch), [API.md — Agentic Tool Dispatch](API.md#agentic-tool-dispatch).
+
+- **Validate arguments at the dispatcher, not just inside the tool.** The dispatcher runs `JSON.parse` and `safeParse` BEFORE handing off to `tool.execute`. Letting the tool's own `executeUnsafe` catch a schema violation is strictly worse because the error message no longer names the offending tool and the transcript can be left with an orphan `tool_call`.
+- **Preserve the raw payload in the parse-error message.** The format `Malformed tool arguments for <tool>: <detail> (raw=<arguments>)` lets the model see what it emitted and self-correct. Dropping the raw payload "to shorten the message" is a regression — the loop recovery depends on this feedback.
+- **Always emit `tool_end` on failure.** Both the parse-failure and schema-failure branches emit a `tool_end` progress event so the TUI tool-row renders a terminal failure state. Returning the error without emitting the event leaves the row spinning.
+- **Call `settleUnfinishedCalls` on every turn-end path.** Provider abort, iteration-cap hit, and upstream disconnect are the three paths that can leave a pending tool call unresolved. All three must go through the settler so the next turn's `tool_calls` + tool-result transcript stays well-formed; SAP AI Core rejects orphan `tool_calls` entries with a schema violation.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

@@ -10760,7 +10760,7 @@ describe('formatError', () => {
 });
 ```
 
-### Patterns worth internalising
+### Patterns worth internalising (error-detail logging)
 
 1. **Always restore the log level in `afterEach`.** `currentLevel` is module-local state, so a case that calls `logger.setLevel('debug')` and does NOT restore it leaks into every subsequent test file loaded in the same vitest worker. Pair every `setLevel('debug')` with an `afterEach(() => logger.setLevel('info'))`.
 2. **Assert the negative — the token MUST NOT survive.** Positive-only assertions (`expect(out).toContain('[REDACTED]')`) pass even when the token is appended somewhere else in the string. Always pair a redaction assertion with `expect(out).not.toContain('<the secret>')`.
@@ -10772,3 +10772,111 @@ describe('formatError', () => {
 ```bash
 npm test -- tests/utils/logger.test.ts
 ```
+
+## Testing the Managed Policy Enforcer
+
+Added in commit `ca4ae92f` (2026-10-11 upstream sync). The policy enforcer lives in `src/permission/policy.ts` and is wired into `src/tool/index.ts` via `setToolPolicy()`.
+
+### Pure-helper tests
+
+The enforcer is a pure value — no I/O, no globals, no clock dependency — so tests just instantiate it and assert the yes/no answer.
+
+```typescript
+import { PolicyEnforcer, ManagedPolicySchema } from '../../src/permission/policy.js';
+
+describe('PolicyEnforcer', () => {
+  it('open-world default allows everything', () => {
+    const p = new PolicyEnforcer();
+    expect(p.isToolAllowed('bash')).toBe(true);
+    expect(p.isSkillAllowed('any-skill')).toBe(true);
+  });
+
+  it('denied wins over allowed', () => {
+    const p = new PolicyEnforcer({
+      tools: { allowed: ['bash', 'read'], denied: ['bash'] },
+    });
+    expect(p.isToolAllowed('bash')).toBe(false);
+    expect(p.isToolAllowed('read')).toBe(true);
+  });
+
+  it('allowed is closed-world when set', () => {
+    const p = new PolicyEnforcer({ tools: { allowed: ['read'] } });
+    expect(p.isToolAllowed('read')).toBe(true);
+    expect(p.isToolAllowed('bash')).toBe(false);
+  });
+
+  it('ManagedPolicySchema rejects non-string entries', () => {
+    expect(() =>
+      ManagedPolicySchema.parse({ tools: { denied: [42] } })
+    ).toThrow();
+  });
+});
+```
+
+### Registry integration tests
+
+When testing the registry wiring, remember that `setToolPolicy()` mutates module-level state on the global registry. Reset it in `afterEach` so other suites in the same vitest worker are not affected.
+
+```typescript
+import {
+  getTool,
+  getAllToolNames,
+  setToolPolicy,
+} from '../../src/tool/index.js';
+import { PolicyEnforcer, DEFAULT_POLICY_ENFORCER } from '../../src/permission/policy.js';
+
+afterEach(() => {
+  setToolPolicy(DEFAULT_POLICY_ENFORCER);
+});
+
+it('denied tool is invisible to the registry', () => {
+  setToolPolicy(new PolicyEnforcer({ tools: { denied: ['bash'] } }));
+  expect(getTool('bash')).toBeUndefined();
+  expect(getAllToolNames()).not.toContain('bash');
+});
+```
+
+### Patterns worth internalising (managed policy)
+
+1. **Reset the policy in `afterEach`.** `setToolPolicy` mutates a module-scope singleton. Leaving a restrictive policy installed will cascade into unrelated tests that call `getTool()`.
+2. **Test both `get` and `list`.** The enforcer gates both paths; a bug that only filters `list()` would still let a cached-schema invocation of `getTool('bash')` through. Pin both in the regression suite.
+3. **Prefer schema parsing over handcrafted objects.** Running `ManagedPolicySchema.parse()` on the test fixture catches shape drift at the test boundary rather than inside the enforcer.
+
+## Testing Timeline File-Link Detection
+
+Added in commit `ca4ae92f`. The detector lives in `src/session-ui/timeline-links.ts` and performs real `fs.access` probes, so tests need a temp workspace.
+
+```typescript
+import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { detectFileLinks } from '../../src/session-ui/timeline-links.js';
+
+let workspace: string;
+beforeEach(async () => {
+  workspace = await mkdtemp(join(tmpdir(), 'alexi-tl-'));
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'foo.ts'), 'export const x = 1;\n');
+});
+
+it('returns only paths that actually exist', async () => {
+  const links = await detectFileLinks(
+    'See ./src/foo.ts:1 and ./src/missing.ts',
+    workspace
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0].absolutePath).toBe(join(workspace, 'src', 'foo.ts'));
+  expect(links[0].line).toBe(1);
+});
+
+it('ignores bare words in prose', async () => {
+  const links = await detectFileLinks('look at foo.ts for the fix', workspace);
+  expect(links).toEqual([]);
+});
+```
+
+### Patterns worth internalising
+
+1. **Temp workspace per test.** The detector only returns existing paths; a shared workspace risks cross-test contamination. `mkdtemp` + `afterEach(rm { recursive, force })` keeps every case hermetic.
+2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
+3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.
