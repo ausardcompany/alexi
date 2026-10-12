@@ -31,7 +31,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        # H5 remediation (role-security audit 2026-10-12 R8, carry-over
+        # from 2026-06-22): the release runner later sees NPM_TOKEN /
+        # GH_PAT, so a malicious transitive `postinstall` could
+        # exfiltrate those secrets before the publish step masks them.
+        # No current dependency requires install scripts for the
+        # release artefact; `npm run build` executes `tsc` explicitly.
+        run: npm ci --ignore-scripts
 
       - name: Run tests
         run: npm test
@@ -84,7 +90,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: npm ci
+        # H5 remediation (role-security audit 2026-10-12 R8, carry-over
+        # from 2026-06-22). Second install step in the publish job -
+        # same guarantee: no package in the current tree needs an
+        # install script to produce the published artefact.
+        run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build

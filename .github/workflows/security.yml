@@ -21,8 +21,16 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - name: Run npm audit
-        run: npm audit --audit-level=high
-        continue-on-error: true
+        # H4 remediation (role-security audit 2026-10-12 R3, carry-over
+        # from 2026-09-21 R6): the gate had `continue-on-error: true`
+        # for six consecutive audits, so high-severity findings
+        # accumulated silently. Enforce `critical` now (0 criticals
+        # today -- see audit 2026-10-12 Summary) so the job cannot
+        # pass green on future critical regressions; tighten to
+        # `--audit-level=high` once C2 / H1 / H2 / H6 clear. Scope to
+        # `--omit=dev` so dev-only chains (brace-expansion, nested
+        # nanoid, etc.) do not drive the gate.
+        run: npm audit --audit-level=critical --omit=dev
 
   codeql:
     name: CodeQL Analysis
