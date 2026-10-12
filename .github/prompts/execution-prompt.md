@@ -4,323 +4,246 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
+```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-11
-Based on upstream commits: opencode 055d95bb..d21b0790 (100 commits analyzed; kilocode no changes)
+Generated: 2026-10-12
+Based on upstream commits analyzed:
+- opencode: `0cb43477` fix(core): preserve mixed line endings in edit tool (#53166)
+- opencode: `4fbdea2d` fix(core): throw error on codemode fetch using file:// (#54510)
+- opencode: `e5f4bf4c` test(core): match codemode file fetch error message (#54699)
+- opencode: `e41e7e90` refactor(ai): rename OpenCodeZen provider to OpenCode (#54767)
+- opencode: `35ef2294` feat(core): raise ChatGPT OAuth context for gpt-6.1-sol to 500k (#54668)
+- opencode: `707de583` fix(cli): prioritize path-matched package manager and extend probe timeout (#54622)
+- opencode: `47e5e715` fix(cli): resolve symlinked home path when detecting curl installs (#54609)
+- opencode: `e5a557ef` fix(cli): return unavailable in updater.check when install method is unknown (#54672)
+- opencode: `38454c6e` feat(cli): ask before pair --remote first exposes the server (#54561)
+- opencode: `3e78cd58` fix(app): ignore collapsed side-panel tabs when closing a tab (#54695)
+- opencode: `d306a15c` fix(app): show submitted prompt in frame composer clears (#54047)
+- kilocode: `5d61e1ed9` fix(vscode): render synthetic wakeup prompts as scheduled notes
+- kilocode: `1ecce5a79` fix(vscode): label scheduled cron and wakeup prompts
+- kilocode: `ff1cc7a4c` fix: remove community labels from maintainer PRs in the sweep
 
 ## Summary
-- Total changes planned: 18
-- Critical: 2 | High: 6 | Medium: 7 | Low: 3
-
-## Context: Major Upstream Restructuring
-
-The upstream opencode repository underwent **massive architectural restructuring** in this window:
-
-1. **`packages/opencode/` entirely removed** — all code migrated to `packages/core/`, `packages/cli/`, `packages/server/`, `packages/tui/`, `packages/ai/`
-2. **Tool system refactored** into a plugin-based model: individual tool files moved from `packages/opencode/src/tool/*.ts` to `packages/core/src/tool/plugin/*.ts` with a shared `runtime.ts`
-3. **Agent system removed from `packages/opencode/src/agent/`** — logic now lives in `packages/core/src/session/` (subagent-job, subagent-completion, run-coordinator)
-4. **Permission system consolidated** — moved from `packages/opencode/src/permission/` to `packages/core/src/permission.ts`
-5. **New `packages/ai/` package** replaces `packages/llm/` with expanded provider support
-6. **Package rename**: `@opencode-ai/*` → `@opencode/*` (plugin SDK import path change)
-7. **Managed integration/skill/tool policies** added (`packages/core/src/managed-policy.ts`)
-8. **Shell parser rewrite** with WASM backend, PowerShell safety scanning
-9. **Models.dev snapshot refreshes** and new provider routes (Vertex Mistral, Vertex Interactions, Azure CLI auth)
-
-Since Alexi forks selected pieces, this plan focuses on **targeted, high-value adoptions** rather than mirroring the full restructure.
+- Total changes planned: 8
+- Critical: 1 | High: 3 | Medium: 3 | Low: 1
 
 ## Changes
 
-### 1. Rename plugin SDK import from `@opencode-ai/plugin` to `@opencode/plugin`
-**File**: `src/tool/github-pr-search.ts`, `src/tool/github-triage.ts`, and any other files importing from `@opencode-ai/plugin`
+### 1. Preserve mixed line endings in edit tool
+**File**: `src/tool/edit.ts`
 **Priority**: critical
-**Type**: refactor (breaking dependency rename)
-**Reason**: Upstream renamed the plugin SDK package. Keeping the old name will break once Alexi upgrades the plugin dependency. Grep for `@opencode-ai` across the repo.
+**Type**: bugfix
+**Reason**: Upstream `packages/core/src/tool/plugin/edit.ts` received a +113/-11 change ensuring that files with mixed CRLF/LF line endings are not silently normalized when edits are applied. This is a data-integrity issue — Windows-authored files that mix line endings (common in SAP enterprise codebases via Git `autocrlf`) would otherwise be mangled, producing noisy diffs and breaking downstream build/sign pipelines. Alexi inherits the same edit replacement path.
+
+**Current code** (expected shape):
+```typescript
+// Normalizes to \n for replacement, then writes with os.EOL
+const normalizedContent = content.replace(/\r\n/g, "\n");
+const result = normalizedContent.replace(oldString, newString);
+await fs.writeFile(filePath, result);
+```
+
+**New code**:
+```typescript
+// Detect dominant line ending of the ORIGINAL file and the ORIGINAL match region.
+// Preserve mixed endings by only normalizing for comparison, not for writing.
+function detectLineEnding(text: string): "\r\n" | "\n" | "mixed" {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  if (crlf > 0 && lf > 0) return "mixed";
+  if (crlf > 0) return "\r\n";
+  return "\n";
+}
+
+export async function applyEdit(filePath: string, oldString: string, newString: string) {
+  const original = await fs.readFile(filePath, "utf8");
+  const originalEol = detectLineEnding(original);
+
+  // Try exact match first (preserves whatever line endings exist in `oldString`)
+  if (original.includes(oldString)) {
+    const updated = original.replace(oldString, newString);
+    await fs.writeFile(filePath, updated);
+    return updated;
+  }
+
+  // Fallback: normalize both sides for matching, then re-apply using the file's
+  // dominant line ending — but only for the replacement region.
+  const normalizedOriginal = original.replace(/\r\n/g, "\n");
+  const normalizedOld = oldString.replace(/\r\n/g, "\n");
+  const normalizedNew = newString.replace(/\r\n/g, "\n");
+
+  if (!normalizedOriginal.includes(normalizedOld)) {
+    throw new Error(`edit: oldString not found in ${filePath}`);
+  }
+
+  const targetEol = originalEol === "\r\n" ? "\r\n" : "\n";
+  const replacedNormalized = normalizedOriginal.replace(
+    normalizedOld,
+    normalizedNew.replace(/\n/g, targetEol),
+  );
+
+  // If the file was "mixed", restore original CRLF positions outside the edit
+  // region by splicing: find the pre/post boundaries in the ORIGINAL.
+  if (originalEol === "mixed") {
+    const idx = normalizedOriginal.indexOf(normalizedOld);
+    const pre = sliceOriginalByNormalizedIndex(original, 0, idx);
+    const post = sliceOriginalByNormalizedIndex(original, idx + normalizedOld.length, normalizedOriginal.length);
+    const final = pre + normalizedNew.replace(/\n/g, targetEol) + post;
+    await fs.writeFile(filePath, final);
+    return final;
+  }
+
+  await fs.writeFile(filePath, replacedNormalized);
+  return replacedNormalized;
+}
+
+// Maps an index in the LF-normalized string back to the index in the original string
+function sliceOriginalByNormalizedIndex(original: string, normStart: number, normEnd: number): string {
+  let origIdx = 0;
+  let normIdx = 0;
+  let startOrig = 0;
+  let endOrig = original.length;
+  while (origIdx < original.length && normIdx <= normEnd) {
+    if (normIdx === normStart) startOrig = origIdx;
+    if (normIdx === normEnd) { endOrig = origIdx; break; }
+    if (original[origIdx] === "\r" && original[origIdx + 1] === "\n") {
+      origIdx += 2;
+    } else {
+      origIdx += 1;
+    }
+    normIdx += 1;
+  }
+  return original.slice(startOrig, endOrig);
+}
+```
+
+Also add tests mirroring `packages/core/test/tool-edit.test.ts` (+157 lines) covering: pure LF, pure CRLF, mixed, and edit spanning both.
+
+---
+
+### 2. Reject `file://` URIs in codemode web fetch
+**File**: `src/core/codemode/web.ts` (create if absent)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream `packages/core/src/codemode/web.ts` (+2 lines) and the test file (`test/tool-execute.test.ts` +9) explicitly reject `file://` schemes. Without this guard, codemode-synthesized fetch calls can exfiltrate local secrets (SAP service keys, `~/.aicore/credentials`, destination configs) via SSRF. This is a direct security hardening we must mirror.
+
+**New code** (add at the top of the fetch helper):
+```typescript
+export async function codemodeFetch(url: string, init?: RequestInit): Promise<Response> {
+  const parsed = new URL(url);
+  if (parsed.protocol === "file:") {
+    throw new Error(`codemode: refusing to fetch file:// URL (${url})`);
+  }
+  // existing fetch logic...
+  return fetch(url, init);
+}
+```
+
+**Test** (match upstream error wording for parity):
+```typescript
+it("rejects file:// urls", async () => {
+  await expect(codemodeFetch("file:///etc/passwd")).rejects.toThrow(
+    /refusing to fetch file:\/\//,
+  );
+});
+```
+
+---
+
+### 3. Rename `opencode-zen` provider → `opencode`
+**File**: `src/providers/opencode.ts` (rename from `src/providers/opencode-zen.ts` if present) and `src/providers/index.ts`
+**Priority**: medium
+**Type**: refactor
+**Reason**: Upstream `packages/ai/src/providers/{opencode-zen.ts => opencode.ts}` renamed the provider identity. If Alexi re-exports or references this provider id (for routing fallbacks), the id string must be updated or users relying on `opencode-zen` in config will silently miss provider resolution. Because Alexi's primary provider is SAP AI Core, this is medium — only impacts users with mixed configs.
+
+**Current code** (`src/providers/index.ts`):
+```typescript
+export { opencodeZen } from "./opencode-zen";
+```
+
+**New code**:
+```typescript
+export { opencode } from "./opencode";
+// Back-compat alias (keep for 1 release cycle, log deprecation):
+export { opencode as opencodeZen } from "./opencode";
+```
+
+In `src/providers/opencode.ts`:
+```typescript
+export const opencode = {
+  id: "opencode",
+  // emit a one-time warning if user configured "opencode-zen"
+  legacyIds: ["opencode-zen"],
+  // ...rest unchanged
+};
+```
+
+Update provider resolver to accept `legacyIds` and warn once per session.
+
+---
+
+### 4. Fix OpenAI-compatible provider edge case
+**File**: `src/providers/openai.ts` (or wherever the OpenAI-compatible shim lives)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream `packages/core/src/plugin/provider/openai.ts` has a +4/-1 fix with a matching recorded test (`test/plugin/provider-openai.test.ts` +17). The small size suggests a header/param handling fix (likely around `Authorization` or `baseURL` normalization). Review the exact upstream diff and port — this is the shim Alexi uses for ChatGPT OAuth and SAP's OpenAI-compatible endpoints.
+
+**Action**: Pull the actual diff from upstream commit; apply conservatively. Likely shape:
+```typescript
+// Before
+headers: { Authorization: `Bearer ${apiKey}` }
+
+// After — handle missing apiKey when using OAuth session token
+headers: apiKey
+  ? { Authorization: `Bearer ${apiKey}` }
+  : session?.accessToken
+    ? { Authorization: `Bearer ${session.accessToken}` }
+    : {}
+```
+
+Port the recorded test fixture as well.
+
+---
+
+### 5. Raise ChatGPT OAuth context window for `gpt-6.1-sol` to 500k
+**File**: `src/providers/chatgpt-oauth.ts` (or model-config constants)
+**Priority**: medium
+**Type**: feature
+**Reason**: Upstream `35ef2294` raises context to 500k for `gpt-6.1-sol`. If Alexi's ChatGPT OAuth path hard-codes model→context limits for request budgeting / truncation, update to match or users will hit premature truncation.
 
 **Current code**:
 ```typescript
-import { tool } from "@opencode-ai/plugin"
+const MODEL_CONTEXT: Record<string, number> = {
+  "gpt-6.1-sol": 200_000,
+  // ...
+};
 ```
 
 **New code**:
 ```typescript
-import { tool } from "@opencode/plugin"
+const MODEL_CONTEXT: Record<string, number> = {
+  "gpt-6.1-sol": 500_000,
+  // ...
+};
 ```
 
-Also update `package.json` dependencies:
-```json
-{
-  "dependencies": {
--   "@opencode-ai/plugin": "^1.x",
-+   "@opencode/plugin": "^2.x",
-  }
-}
-```
+Note: Does NOT apply to SAP AI Core-hosted GPT models (those keep SAP-advertised limits).
 
 ---
 
-### 2. Reject malformed tool arguments and settle unfinished calls
-**File**: `src/tool/runtime.ts` (or wherever tool invocation is dispatched in Alexi)
-**Priority**: critical
-**Type**: bugfix / security
-**Reason**: Upstream fix (c9e1ed70) prevents stuck sessions when a model emits malformed JSON args, and settles any still-pending tool calls at turn boundary. Without this, Alexi sessions can hang or leak state when providers emit broken tool blocks.
-
-**New code** (dispatch wrapper):
-```typescript
-async function invokeTool(call: ToolCall, ctx: ToolContext) {
-  // Validate args JSON before invocation
-  let args: unknown
-  try {
-    args = typeof call.input === "string" ? JSON.parse(call.input) : call.input
-  } catch (err) {
-    return {
-      status: "error" as const,
-      error: `Malformed tool arguments: ${(err as Error).message}`,
-      toolCallId: call.id,
-    }
-  }
-
-  // Validate against tool schema
-  const tool = registry.get(call.name)
-  if (!tool) {
-    return {
-      status: "error" as const,
-      error: `Unknown tool: ${call.name}`,
-      toolCallId: call.id,
-    }
-  }
-
-  const parsed = tool.parameters.safeParse(args)
-  if (!parsed.success) {
-    return {
-      status: "error" as const,
-      error: `Invalid tool arguments: ${parsed.error.message}`,
-      toolCallId: call.id,
-    }
-  }
-
-  return tool.execute(parsed.data, ctx)
-}
-
-// At end of turn, settle any unfinished calls
-function settleUnfinishedCalls(pending: Map<string, ToolCall>) {
-  for (const [id, call] of pending) {
-    emit({
-      type: "tool.error",
-      toolCallId: id,
-      error: "Tool call did not complete before turn ended",
-    })
-  }
-  pending.clear()
-}
-```
-
----
-
-### 3. Adopt deterministic timeline file-link detection
-**File**: `src/session-ui/timeline-links.ts` (new) or existing timeline rendering code
-**Priority**: high
-**Type**: feature
-**Reason**: Upstream commit f43903d8 adds deterministic file link detection/resolution in the timeline. Prevents false positives when model output contains path-like strings that aren't real files.
-
-**New code**:
-```typescript
-import * as path from "node:path"
-import * as fs from "node:fs/promises"
-
-const FILE_LINK_RE = /(?:^|[\s(])((?:\.{0,2}\/|[a-zA-Z]:\\|~\/)[\w./\\-]+(?::\d+)?(?::\d+)?)/g
-
-export interface FileLink {
-  raw: string
-  absolutePath: string
-  line?: number
-  column?: number
-  exists: boolean
-}
-
-export async function detectFileLinks(
-  text: string,
-  workspaceRoot: string,
-): Promise<FileLink[]> {
-  const matches = [...text.matchAll(FILE_LINK_RE)]
-  const results: FileLink[] = []
-  for (const m of matches) {
-    const raw = m[1]
-    const [filePart, lineStr, colStr] = raw.split(":")
-    const abs = path.isAbsolute(filePart)
-      ? filePart
-      : path.resolve(workspaceRoot, filePart)
-    let exists = false
-    try {
-      await fs.access(abs)
-      exists = true
-    } catch {
-      /* not a real file */
-    }
-    if (exists) {
-      results.push({
-        raw,
-        absolutePath: abs,
-        line: lineStr ? Number(lineStr) : undefined,
-        column: colStr ? Number(colStr) : undefined,
-        exists,
-      })
-    }
-  }
-  return results
-}
-```
-
----
-
-### 4. Enforce managed integration and tool policies
-**File**: `src/permission/policy.ts` (new) and `src/tool/registry.ts`
-**Priority**: high
-**Type**: security
-**Reason**: Upstream commits 613ef8ba and d016db85 add managed policy enforcement — organizations can disable specific tools/integrations/skills centrally. Essential for enterprise SAP deployments where IT needs to lock down what agents can do.
-
-**New file** `src/permission/policy.ts`:
-```typescript
-import { z } from "zod"
-
-export const ManagedPolicy = z.object({
-  tools: z
-    .object({
-      allowed: z.array(z.string()).optional(),
-      denied: z.array(z.string()).optional(),
-    })
-    .optional(),
-  integrations: z
-    .object({
-      allowed: z.array(z.string()).optional(),
-      denied: z.array(z.string()).optional(),
-    })
-    .optional(),
-  skills: z
-    .object({
-      allowed: z.array(z.string()).optional(),
-      denied: z.array(z.string()).optional(),
-    })
-    .optional(),
-})
-
-export type ManagedPolicy = z.infer<typeof ManagedPolicy>
-
-export class PolicyEnforcer {
-  constructor(private policy: ManagedPolicy = {}) {}
-
-  isToolAllowed(name: string): boolean {
-    const t = this.policy.tools
-    if (!t) return true
-    if (t.denied?.includes(name)) return false
-    if (t.allowed && !t.allowed.includes(name)) return false
-    return true
-  }
-
-  isIntegrationAllowed(id: string): boolean {
-    const i = this.policy.integrations
-    if (!i) return true
-    if (i.denied?.includes(id)) return false
-    if (i.allowed && !i.allowed.includes(id)) return false
-    return true
-  }
-
-  isSkillAllowed(name: string): boolean {
-    const s = this.policy.skills
-    if (!s) return true
-    if (s.denied?.includes(name)) return false
-    if (s.allowed && !s.allowed.includes(name)) return false
-    return true
-  }
-}
-```
-
-**Update** `src/tool/registry.ts`:
-```typescript
-import { PolicyEnforcer } from "../permission/policy"
-
-export class ToolRegistry {
-  constructor(private policy: PolicyEnforcer) {}
-
-  list(): Tool[] {
-    return Array.from(this.tools.values()).filter((t) =>
-      this.policy.isToolAllowed(t.name),
-    )
-  }
-
-  get(name: string): Tool | undefined {
-    const tool = this.tools.get(name)
-    if (tool && !this.policy.isToolAllowed(name)) return undefined
-    return tool
-  }
-}
-```
-
----
-
-### 5. Accept interleaved Copilot `reasoning_opaque` values
-**File**: `src/providers/github-copilot.ts` (or wherever Copilot responses are decoded)
-**Priority**: high
+### 6. CLI updater robustness improvements
+**File**: `src/cli/updater.ts`
+**Priority**: medium
 **Type**: bugfix
-**Reason**: Upstream fix 9f282f8c handles the Copilot responses API emitting `reasoning_opaque` interleaved with content deltas; without it, Copilot sessions break on reasoning models.
+**Reason**: Three upstream fixes converge on the updater:
+- `707de583`: prioritize path-matched package manager + extend probe timeout
+- `47e5e715`: resolve symlinked `$HOME` when detecting curl installs
+- `e5a557ef`
+{"prompt_tokens":26897,"completion_tokens":4096,"total_tokens":30993,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-**New code**:
-```typescript
-function parseCopilotResponseStream(chunk: StreamChunk) {
-  switch (chunk.type) {
-    case "response.output_text.delta":
-      return { type: "text", text: chunk.delta }
-    case "response.reasoning.delta":
-    case "response.reasoning_opaque.delta": // NEW: accept opaque reasoning
-      return { type: "reasoning", text: chunk.delta ?? "", opaque: true }
-    case "response.output_item.added":
-      if (chunk.item.type === "reasoning") {
-        return { type: "reasoning_start", id: chunk.item.id }
-      }
-      break
-    // ... existing cases
-  }
-}
-```
-
----
-
-### 6. Route Copilot Gemini fallback to chat completions
-**File**: `src/providers/github-copilot.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix 1a9e29a0 — Gemini via Copilot must use the chat completions endpoint, not responses. Models.dev snapshot does not advertise this, so hardcoded routing is required.
-
-**New code**:
-```typescript
-function selectCopilotEndpoint(modelId: string): "responses" | "chat" {
-  // Gemini models through Copilot only work via chat completions
-  if (modelId.toLowerCase().startsWith("gemini")) return "chat"
-  // GPT and Claude use responses API
-  if (modelId.toLowerCase().startsWith("gpt-")) return "responses"
-  if (modelId.toLowerCase().startsWith("claude")) return "responses"
-  return "chat" // safe default
-}
-```
-
-Also follow models.dev packages for Copilot fallback routing (commit 823ac87f):
-```typescript
-import modelsDev from "./models-dev-snapshot.json"
-
-function resolveCopilotProviderPackage(modelId: string): string {
-  const info = modelsDev.copilot?.models?.[modelId]
-  return info?.providerPackage ?? "openai-compatible"
-}
-```
-
----
-
-### 7. Only send PNG, JPEG, and WebP images to xAI
-**File**:
-{"prompt_tokens":269923,"completion_tokens":4096,"total_tokens":274019,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
-
-[Session: 042684c4-e796-4108-8e43-fe45c054d7bb]
-[Messages: 2, Tokens: 274019]
+[Session: 118ec9ff-04de-4e74-a413-9068eaf30cf4]
+[Messages: 2, Tokens: 30993]
 
 ## Execution Instructions
 
