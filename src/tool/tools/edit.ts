@@ -86,8 +86,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
       // we treat LF as dominant (keeps CRLF regions intact via the exact-
       // match fast path above), and for 'crlf' we treat CRLF as dominant.
       const isMixed = crlfCount > 0 && lfOnlyCount > 0;
-      const dominantLineEnding: '\n' | '\r\n' =
-        !isMixed && crlfCount > 0 ? '\r\n' : '\n';
+      const dominantLineEnding: '\n' | '\r\n' = !isMixed && crlfCount > 0 ? '\r\n' : '\n';
 
       const normalizeLineEndings = (text: string): string => text.replaceAll('\r\n', '\n');
       const convertToLineEnding = (text: string, ending: '\n' | '\r\n'): string => {
