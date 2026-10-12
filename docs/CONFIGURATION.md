@@ -938,6 +938,100 @@ interface ModelCapability {
 }
 ```
 
+### Model Catalog Entries in `routing-config.json`
+
+The `models` array in the project-level `routing-config.json` enumerates the ids the router may select from and their capability tags. Each entry conforms to the `ModelCapability` shape above (`id`, `type`, `costTier`, `strengths`, `maxTokens`, `reasoning`, `enabled`). The current repo-level file ships with the following entries (ids kept in sync with `ORCHESTRATION_MODELS` in `src/providers/sapOrchestration.ts`; see
+[docs/PROVIDERS.md — OpenAI GPT Models](./PROVIDERS.md#openai-gpt-models) for the authoritative catalog):
+
+```json
+{
+  "models": [
+    {
+      "id": "gpt-4o-mini",
+      "type": "openai",
+      "costTier": "cheap",
+      "strengths": ["simple-qa", "classification", "extraction", "summarization"],
+      "maxTokens": 16000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "gpt-4o",
+      "type": "openai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "creative-writing", "complex-qa", "vision"],
+      "maxTokens": 128000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "gpt-4.1",
+      "type": "openai",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-math", "research", "advanced-coding"],
+      "maxTokens": 128000,
+      "reasoning": true,
+      "enabled": true
+    },
+    {
+      "id": "gpt-5.5",
+      "type": "openai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "creative-writing", "complex-qa"],
+      "maxTokens": 128000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "anthropic--claude-4.5-sonnet",
+      "type": "claude",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "long-context", "technical-writing"],
+      "maxTokens": 200000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
+      "id": "anthropic--claude-4.5-opus",
+      "type": "claude",
+      "costTier": "expensive",
+      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research"],
+      "maxTokens": 200000,
+      "reasoning": true,
+      "enabled": true
+    }
+  ]
+}
+```
+
+**`gpt-5.5` entry (2026-10-12, commit `6a5aff3b`).** The `routing-config.json` ships a `gpt-5.5` capability record with `costTier: "medium"`, `maxTokens: 128000`, `reasoning: false`, and `strengths: ["coding", "analysis", "creative-writing", "complex-qa"]`. The strengths list intentionally overlaps `gpt-4o`'s general-purpose coverage so the router can treat `gpt-5.5` as a drop-in replacement when it is available; the `reasoning: false` flag keeps it out of the `requiresReasoning: true` rule bucket (see the `reasoning-for-math` rule at `routing-config.json:97-105`), so prompts matching `prove|derive|equation|theorem|calculus|integral` keep routing to `gpt-4.1` / `anthropic--claude-4.5-opus`. Field-by-field notes:
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `id` | `"gpt-5.5"` | Matches the entry in `ORCHESTRATION_MODELS` (`src/providers/sapOrchestration.ts:2369`). An id mismatch here would make the router pick a model the provider rejects at dispatch. |
+| `type` | `"openai"` | Routes capability queries through the OpenAI family dispatch in `src/providers/model-match.ts`. |
+| `costTier` | `"medium"` | Matches `preferences.defaultCostTier`, so the router does not need to down- or up-shift to reach `gpt-5.5` when no cost-tier override is set. |
+| `strengths` | `["coding", "analysis", "creative-writing", "complex-qa"]` | Mirrors the `gpt-4o` general-purpose profile. A `simple-qa` prompt is already captured by the `cheap-for-simple` rule → `gpt-4o-mini`, so there is no need to repeat `"simple-qa"` here. |
+| `maxTokens` | `128000` | Matches the family context window. |
+| `reasoning` | `false` | Excludes the id from the `requiresReasoning` rule gate — see the `reasoning-for-math` example rule in `routing-config.json`. |
+| `enabled` | `true` | Set to `false` to disable without deleting the record (keeps git history clean when toggling model availability per environment). |
+
+To force an environment to use `gpt-5.5` for all `coding`-tagged prompts without disabling other medium-cost models, add a rule to the `rules` array at a priority above the default routing (`priority: 100` or higher) and pin `modelId: "gpt-5.5"`:
+
+```json
+{
+  "name": "prefer-gpt-5-5-for-coding",
+  "description": "Route coding prompts to gpt-5.5 while it is on trial",
+  "condition": {
+    "taskTypes": ["coding"]
+  },
+  "modelId": "gpt-5.5",
+  "priority": 110
+}
+```
+
+The rule will be evaluated before the `force-claude-for-long-context` rule at `priority: 100`, so a long coding prompt that also exceeds 10,000 characters would still route to `gpt-5.5`. Reorder the two rules (swap the priorities, or drop the new rule to `priority: 90`) if the long-context Claude preference should win.
+
 ## Compaction Configuration
 
 Context compaction manages conversation length when approaching token limits.

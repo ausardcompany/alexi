@@ -332,6 +332,64 @@ Additional patterns worth internalising from this suite:
 3. **Pin the `sap-ai-core/` prefix form in the SAME suite.** The provider-prefix stripping in `modelHasCapability` is a separate code path from the raw-id lookup. A regression that tightened the guard to an exact match would pass every non-prefixed assertion and fail only the prefixed variants — asserting both shapes for every id catches the regression on the first sibling instead of after the router hot loop degrades in production.
 4. **Assert the exact `capabilities` array, not a superset.** `expect(meta?.capabilities).toEqual(['tools'])` fails if the metadata entry was accidentally seeded with extra tags (`['tools', 'image-generation']`). If the port ever legitimately adds a second capability to these ids, the intent-preserving update is to change the expected array in ONE place — the `it.each` factors the assertion out of the per-id loop for free.
 
+##### Family-inheritance assertion for a single new id (gpt-5.5, 2026-10-12)
+
+When a single new id joins an existing family that already has a tested sibling — e.g. `gpt-5.5` joining the `gpt-5` family on 2026-10-12 (commit `6a5aff3b`, `feat(providers): add gpt-5.5 model support`) — the parametrised shape is overkill, but the per-matcher contract still has to be pinned. The companion block in `src/providers/__tests__/modelCatalog.test.ts` is the reference:
+
+```typescript
+// Aider added gpt-5.5 settings across providers on 2026-10-12. SAP AI Core
+// routes OpenAI deployments by exact id (and by the `gpt-` prefix heuristic
+// in the live catalog), so adding gpt-5.5 to the static catalog is enough
+// to unblock OpenRouter / proxy users requesting the model. Capability
+// profile matches the rest of the gpt-5 family: tool calling supported.
+describe('modelCatalog: gpt-5.5 entry', () => {
+  it('is present in the static ORCHESTRATION_MODELS list', () => {
+    expect((ORCHESTRATION_MODELS as readonly string[]).includes('gpt-5.5')).toBe(true);
+  });
+
+  it('is accepted by isOrchestrationModel()', () => {
+    expect(isOrchestrationModel('gpt-5.5')).toBe(true);
+  });
+
+  it('is exposed via getAvailableModels()', () => {
+    expect(getAvailableModels()).toContain('gpt-5.5');
+  });
+
+  it('is accepted by isAvailableModel()', () => {
+    expect(isAvailableModel('gpt-5.5')).toBe(true);
+  });
+
+  it('has a metadata entry matching the gpt-5 capability profile', () => {
+    const v55Meta = ORCHESTRATION_MODEL_METADATA['gpt-5.5'];
+    const v5Meta = ORCHESTRATION_MODEL_METADATA['gpt-5'];
+    expect(v55Meta).toBeDefined();
+    expect(v5Meta).toBeDefined();
+    expect(v55Meta?.capabilities).toEqual(v5Meta?.capabilities);
+  });
+
+  it('exposes the metadata through getModelMetadata()', () => {
+    const meta = getModelMetadata('gpt-5.5');
+    expect(meta).toBeDefined();
+    expect(meta?.capabilities).toContain('tools');
+  });
+
+  it('advertises the tools capability', () => {
+    expect(modelHasCapability('gpt-5.5', 'tools')).toBe(true);
+  });
+
+  it('advertises tools even when queried through the sap-ai-core/ prefix', () => {
+    expect(modelHasCapability('sap-ai-core/gpt-5.5', 'tools')).toBe(true);
+  });
+});
+```
+
+Patterns worth internalising for a one-id-at-a-time add:
+
+1. **Prefer the sibling-equality assertion (`v55Meta?.capabilities` vs `v5Meta?.capabilities`) over a literal `['tools']`.** The two-line assertion encodes the intent — "`gpt-5.5` inherits the `gpt-5` capability profile" — in a form that survives a future family-wide capability update. The additional `expect(meta?.capabilities).toContain('tools')` case in the next `it(...)` block pins the literal where it matters for the agentic tool-dispatch gate, so a regression that silently stripped `'tools'` from the shared family profile still trips a specific test.
+2. **Keep the eight-case shape even for a single id.** `isOrchestrationModel`, `isAvailableModel`, the metadata map lookup, `getAvailableModels`, `getModelMetadata`, `modelHasCapability`, and the `sap-ai-core/`-prefixed form of `modelHasCapability` are seven separate code paths. The parametrised shape above collapses them for a sibling family; the single-id shape expands them so a regression in any one path (say, a refactor that broke the `sap-ai-core/` prefix strip in `modelHasCapability`) fails a named test instead of surfacing in production routing.
+3. **Do NOT add a reasoning-effort assertion for the `gpt-` family.** `modelSupportsReasoningEffort` returns `'levels'` only for ids that match the `deepseek` substring guard (plus the explicit allowlist in `src/providers/model-match.ts:223`); OpenAI family ids rely on provider-level reasoning-effort handling. Adding `expect(modelSupportsReasoningEffort('gpt-5.5')).toBe('levels')` would wrongly pin a `deepseek`-shaped contract on an OpenAI id and fail as soon as the matcher is tightened.
+4. **Routing-config entry is a separate concern.** The `routing-config.json` entry for `gpt-5.5` (see [docs/CONFIGURATION.md — Model Catalog Entries in `routing-config.json`](./CONFIGURATION.md#model-catalog-entries-in-routing-configjson)) is validated by the router's integration tests, not by `modelCatalog.test.ts`. Keep the two surfaces separate so a static-catalog regression and a routing-config regression fail distinct suites.
+
 ### Testing model-fetch error classification (`tests/providers/modelFetchErrors.test.ts`)
 
 `src/providers/modelFetchErrors.ts` is a pure module — no SAP SDK, no

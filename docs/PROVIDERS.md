@@ -340,19 +340,52 @@ When to prefer which shape:
 #### OpenAI GPT Models
 
 ```typescript
+// src/providers/sapOrchestration.ts (excerpt — authoritative static catalog)
 const OPENAI_MODELS = [
-  'gpt-4.1',
   'gpt-4o',
   'gpt-4o-mini',
-  'gpt-4-turbo',
+  'gpt-4.1',
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5.5', // added 2026-10-12 (commit 6a5aff3b, feat(providers): add gpt-5.5 model support)
 ];
 ```
 
 **Characteristics**:
+
 - Extended reasoning with GPT-4.1
 - Fast inference with GPT-4o
 - Cost-effective with GPT-4o-mini
+- GPT-5 family (`gpt-5`, `gpt-5-mini`, `gpt-5.5`) — strong tool-calling, aligned capability profile
 - Strong general-purpose capabilities
+
+**`gpt-5.5` capability profile (2026-10-12).** The id was added to the static
+`ORCHESTRATION_MODELS` list and the `ORCHESTRATION_MODEL_METADATA` map in a
+single commit so the two sides stay in lockstep (see
+[Dynamic Model Catalog](#dynamic-model-catalog)). The metadata entry mirrors
+the `gpt-5` family profile verbatim — `capabilities: ['tools']` — so the
+agentic tool loop registers function-calling schemas for this model exactly
+as it does for `gpt-5` / `gpt-5-mini`. The regression suite in
+`src/providers/__tests__/modelCatalog.test.ts` pins the full membership
+contract (string list, metadata map, `isOrchestrationModel`,
+`isAvailableModel`, `getAvailableModels`, `getModelMetadata`,
+`modelHasCapability`, and the `sap-ai-core/gpt-5.5` provider-prefixed form
+used by the router). Routing surface: the project-level
+`routing-config.json` carries a `gpt-5.5` entry with `type: 'openai'`,
+`costTier: 'medium'`, `maxTokens: 128000`, and `strengths: ["coding",
+"analysis", "creative-writing", "complex-qa"]` — see
+[docs/CONFIGURATION.md — Routing Configuration](./CONFIGURATION.md#routing-configuration)
+for the full schema and example-selection rules. Because the catalog's prefix
+heuristic already recognises `gpt-` (see
+[Dynamic Model Catalog](#dynamic-model-catalog)), a live SAP AI Core
+deployment named `gpt-5.5` is also picked up by the dynamic catalog without
+any further wiring; the static entry just unblocks callers that reach
+`isOrchestrationModel('gpt-5.5')` before `refreshModelCatalog()` has
+completed. Downstream classifiers (`getModelFamily`,
+`modelSupportsReasoningEffort`, the `openai` family dispatch in
+`src/providers/model-match.ts`) all key off the `gpt-` prefix, so the id
+automatically inherits the OpenAI family's reasoning-effort API and request
+transform without any per-id special case.
 
 #### Google Gemini Models
 
