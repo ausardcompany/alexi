@@ -62,7 +62,6 @@
     "marked-terminal": "^7.3.0",
     "nanoid": "^6.0.1",
     "node-notifier": "^10.0.1",
-    "pptxgenjs": "^4.0.1",
     "react": "^19.3.0",
     "simple-git": "^4.0.2",
     "terminal-image": "^5.0.1",
