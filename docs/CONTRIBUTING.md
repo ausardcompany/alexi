@@ -1618,6 +1618,35 @@ Contract for a new discovery module:
 
 The rules-discovery module (`src/config/rulesDiscovery.ts`) exemplifies the contract: `discoverRules({ workdir?, homedir?, customPaths?, silent? })` returns a `RulesDiscoveryResult` with `rules`, `allFiles`, `conflicts`, and `scannedDirs`; every branch that could throw is wrapped in a `try / catch` that degrades to `[]` or `null`; and `resetRulesDiscoveryLogCache()` in `src/agent/system.ts` is exposed only for tests. Adding a new default directory to `DEFAULT_PROJECT_RULE_DIRS` (as commit `6ce4ab8c` did for the Cline flat layout `.cline/`) MUST be accompanied by a companion test in `tests/rulesDiscovery.test.ts` that pins both the membership of the new entry AND its precedence relative to the surrounding entries — a directory rename or reorder that passes typecheck can still change which rule text lands in the assembled system prompt.
 
+#### Symlink-aware filesystem traversal
+
+Filesystem-discovery modules that walk a directory with `fs.readdirSync(dir, { withFileTypes: true })` MUST accept symlink dirents in addition to regular-file dirents when the operator-facing contract is "any markdown file in this directory is a rule" (or any analogous content-key contract). `readdirSync` returns the dirent's own type, not the resolved target's type, so a `fs.Dirent` for a symlink reports `isFile() === false` even when the link target is a regular file — a filter that only accepts `e.isFile()` silently strips every symlinked entry from the scan.
+
+The canonical shape, applied in `src/config/rulesDiscovery.ts:248` (`listMarkdownFiles`) and `src/config/rulesDiscovery.ts:204` (`loadRuleFile`) by commit `06c2a958 feat(config): support symlinked rule files in rulesDiscovery`:
+
+```typescript
+// Dirent-level filter — accept both regular files and symbolic links.
+// Broken symlinks are filtered later when the per-file loader statSyncs
+// them (the stat throws and the loader returns null).
+if (!e.isFile() && !e.isSymbolicLink()) {
+  continue;
+}
+
+// Per-file stat guard inside the loader — statSync FOLLOWS the symlink,
+// so a valid link resolves to the target's stat (isFile() === true).
+// The isSymbolicLink() fallback is defensive against platforms where
+// the stat still reports the link type on a followed call.
+if (!stat.isFile() && !stat.isSymbolicLink()) {
+  return null;
+}
+```
+
+Three invariants a new discovery module MUST preserve when it adopts the pattern:
+
+1. **Broken symlinks degrade silently.** Wrap the `statSync` call in a `try / catch` and return `null` on throw. A broken link under `<workdir>/.kilo/rules/` must NEVER bubble a `ENOENT` out of the discovery call — a monorepo setup that temporarily broke a shared rule file target must not break prompt assembly or session bootstrap. Pin both the "did not throw" positive and the "not in `result.rules`" negative in the companion test (see [docs/TESTING.md — Testing symlinked rule files in `discoverRules`](./TESTING.md#testing-symlinked-rule-files-in-discoverrules)).
+2. **Symlinks that resolve to a directory are rejected.** `statSync` follows the link; the resolved directory stat satisfies neither the `isFile()` nor the `isSymbolicLink()` branch of the widened guard. A regression that collapsed the guard to `!stat.isFile() || stat.isSymbolicLink()` (OR instead of AND, or inverted branch) would silently load every directory an operator ever symlinked into a scanned path. Pin the directory-link case explicitly.
+3. **Symlinks do not change the result shape.** The returned record for a symlinked entry MUST be structurally indistinguishable from the record for a regular file — same `fileName`, same `source`, same `originDir`, same `sizeBytes`, same `content`. Downstream consumers (the `<rule file="...">` prompt wrapper, `conflicts` resolution by rule key, the `scannedDirs` audit list) must not need a branch for the symlinked case. The test suite enforces this with `expect(result.rules[0].source).toBe('project')` and plain content-string assertions on the symlinked case.
+
 ### Zero-result fallback paths (mutually-exclusive with the primary path)
 
 When a tool's primary search returns zero results and a bounded fallback path takes over (the canonical example is `src/tool/tools/recall.ts` under commit `3516c8c0` — the title-level typo-tolerant scan added for issue #1745), test coverage MUST pin BOTH the mutual-exclusivity contract and the fallback-only invariants. A change that flipped the fallback to run in parallel with the primary path — or that always set the fallback marker flag regardless of which path fired — would silently corrupt every downstream renderer that uses the flag to decide whether to prompt the user to refine their query.
