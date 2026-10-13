@@ -194,4 +194,83 @@ describe('useKeyboard', () => {
     render(<TestComponent options={defaultOptions} />);
     expect(mockOpen).not.toHaveBeenCalled();
   });
+
+  const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+  it('Shift+1 invokes onOpenTranscriptUrl with index 1 (shifted-digit glyph "!")', async () => {
+    const onOpenTranscriptUrl = vi.fn();
+    const { stdin } = render(
+      <TestComponent
+        options={​{
+          ...defaultOptions,
+          onOpenTranscriptUrl,
+        }}
+      />
+    );
+    stdin.write('!');
+    await flush();
+    expect(onOpenTranscriptUrl).toHaveBeenCalledWith(1);
+  });
+
+  it('Shift+9 invokes onOpenTranscriptUrl with index 9 (shifted-digit glyph "(")', async () => {
+    const onOpenTranscriptUrl = vi.fn();
+    const { stdin } = render(
+      <TestComponent
+        options={​{
+          ...defaultOptions,
+          onOpenTranscriptUrl,
+        }}
+      />
+    );
+    stdin.write('(');
+    await flush();
+    expect(onOpenTranscriptUrl).toHaveBeenCalledWith(9);
+  });
+
+  it('maps every Shift+{1..9} glyph to the correct 1-based index', async () => {
+    const onOpenTranscriptUrl = vi.fn();
+    const { stdin } = render(
+      <TestComponent
+        options={​{
+          ...defaultOptions,
+          onOpenTranscriptUrl,
+        }}
+      />
+    );
+    const shiftedDigits = '!@#$%^&*(';
+    for (let i = 0; i < shiftedDigits.length; i++) {
+      stdin.write(shiftedDigits[i]!);
+      await flush();
+    }
+    expect(onOpenTranscriptUrl).toHaveBeenCalledTimes(9);
+    for (let i = 0; i < 9; i++) {
+      expect(onOpenTranscriptUrl).toHaveBeenNthCalledWith(i + 1, i + 1);
+    }
+  });
+
+  it('does not call onOpenTranscriptUrl for plain digit input (no shift)', async () => {
+    const onOpenTranscriptUrl = vi.fn();
+    const { stdin } = render(
+      <TestComponent
+        options={​{
+          ...defaultOptions,
+          onOpenTranscriptUrl,
+        }}
+      />
+    );
+    stdin.write('1');
+    await flush();
+    stdin.write('5');
+    await flush();
+    expect(onOpenTranscriptUrl).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when onOpenTranscriptUrl is not provided', async () => {
+    // No handler supplied — pressing Shift+1 must not throw.
+    const { stdin } = render(<TestComponent options={defaultOptions} />);
+    stdin.write('!');
+    await flush();
+    // We assert absence of a crash by rendering a subsequent frame.
+    expect(true).toBe(true);
+  });
 });

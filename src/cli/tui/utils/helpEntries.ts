@@ -36,6 +36,12 @@ export function getHelpEntries(): HelpEntry[] {
       condition: 'subagent active',
     },
     { key: 'Escape', description: 'Abort stream / cancel', category: 'chat', condition: null },
+    {
+      key: 'Shift+1..9',
+      description: 'Open the Nth transcript URL in browser',
+      category: 'chat',
+      condition: null,
+    },
 
     // Leader mode
     { key: 'Ctrl+X', description: 'Activate leader mode', category: 'leader', condition: null },
