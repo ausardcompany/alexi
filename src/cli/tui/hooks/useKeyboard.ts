@@ -26,14 +26,35 @@ export interface UseKeyboardOptions {
   isInputActive: boolean;
   /** Available slash commands (passed to command palette when opened via Ctrl+K) */
   commands?: SlashCommand[];
+  /**
+   * Called with the 1-based index when Shift+{1-9} is pressed.
+   *
+   * Hooked up by `App.tsx` to open the Nth URL extracted from the current
+   * transcript in the default browser (ports upstream kilocode PR #14910).
+   * The handler itself owns the "no URL at this index" no-op behaviour so
+   * the hook stays stateless w.r.t. transcript content.
+   */
+  onOpenTranscriptUrl?: (index: number) => void;
 }
+
+// ---------------------------------------------------------------------------
+// Internal constants
+// ---------------------------------------------------------------------------
+
+/**
+ * The shifted-digit glyphs on a US QWERTY layout, indexed by digit-1.
+ * `!` is Shift+1, `@` is Shift+2, ... `(` is Shift+9. We match on these
+ * because many terminals report Shift+digit as the shifted punctuation
+ * glyph rather than the digit itself (see useInput handler for details).
+ */
+const SHIFTED_DIGITS = '!@#$%^&*(';
 
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
 export function useKeyboard(options: UseKeyboardOptions): void {
-  const { onExit, onClear, onNewSession, commands = [] } = options;
+  const { onExit, onClear, onNewSession, commands = [], onOpenTranscriptUrl } = options;
 
   const { cycleAgent } = useSession();
   const { state: keybindState, activateLeader, deactivateLeader } = useKeybind();
@@ -54,6 +75,27 @@ export function useKeyboard(options: UseKeyboardOptions): void {
     if (key.tab && key.shift) {
       cycleAgent(false);
       return;
+    }
+
+    // Shift+{1-9} — open the Nth URL from the transcript in the default
+    // browser. Terminals report shifted digits in two different ways
+    // depending on OS / keyboard layout:
+    //   1. As the shifted-punctuation glyph on a US layout (`!@#$%^&*(`)
+    //      with `key.shift === false`. Most Linux and macOS terminals
+    //      take this path.
+    //   2. As the digit itself (`1`..`9`) with `key.shift === true`.
+    //      Some terminal multiplexers / Windows terminals do this.
+    // We handle both so the keybind works everywhere.
+    if (onOpenTranscriptUrl !== undefined && !keybindState.leaderActive && !key.ctrl && !key.meta) {
+      const shiftedDigitIndex = SHIFTED_DIGITS.indexOf(input);
+      if (shiftedDigitIndex >= 0) {
+        onOpenTranscriptUrl(shiftedDigitIndex + 1);
+        return;
+      }
+      if (key.shift && input.length === 1 && input >= '1' && input <= '9') {
+        onOpenTranscriptUrl(Number.parseInt(input, 10));
+        return;
+      }
     }
 
     // Ctrl+X — activate leader mode

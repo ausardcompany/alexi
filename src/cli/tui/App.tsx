@@ -19,6 +19,9 @@ import { useFileChanges } from './hooks/useFileChanges.js';
 import { usePermission } from './hooks/usePermission.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
 import { useCommands } from './hooks/useCommands.js';
+import { extractUrlsFromMessages } from './utils/extractUrls.js';
+import { openUrl } from '../../core/open.js';
+import { logger } from '../../utils/logger.js';
 
 import { PermissionDialog } from './dialogs/PermissionDialog.js';
 import type { PermissionDialogProps } from './dialogs/PermissionDialog.js';
@@ -311,6 +314,32 @@ function AppLayout(): React.JSX.Element {
     chat.clearCompletedToolCalls,
   ]);
 
+  // Shift+{1-9} — open the Nth URL from the current transcript in the
+  // default browser. URLs are extracted from assistant messages only and
+  // de-duplicated by href while preserving first-seen order. See
+  // utils/extractUrls.ts for the matcher semantics.
+  const handleOpenTranscriptUrl = useCallback(
+    (index: number): void => {
+      const urls = extractUrlsFromMessages(messages);
+      const url = urls[index - 1];
+      if (url === undefined) {
+        if (urls.length === 0) {
+          addSystemMessage('No URLs in transcript to open');
+        } else {
+          addSystemMessage(`URL #${index} not found (transcript has ${urls.length})`);
+        }
+        return;
+      }
+      void openUrl(url).catch((err: unknown) => {
+        logger.debug(
+          `Failed to open transcript URL #${index}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        addSystemMessage(`Failed to open URL #${index}: ${url}`);
+      });
+    },
+    [messages, addSystemMessage]
+  );
+
   useKeyboard({
     onExit: exit,
     onClear: () => setMessages([]),
@@ -319,6 +348,7 @@ function AppLayout(): React.JSX.Element {
     },
     isInputActive: !keybindState.leaderActive,
     commands,
+    onOpenTranscriptUrl: handleOpenTranscriptUrl,
   });
 
   const handleSubmit = useCallback(
