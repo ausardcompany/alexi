@@ -1243,6 +1243,28 @@ same `is<Family>Model` + `transform<Family>Messages` naming pair and
 keep both helpers in `src/providers/transform.ts` so the full set of
 provider request-shape rewrites is discoverable from one module.
 
+### Adding a model to the SAP AI Core Orchestration catalog
+
+When a new model id becomes available on SAP AI Core and needs to be routable from Alexi, the change touches four surfaces in lockstep. Skipping any one of them silently degrades the router — a model present in the string list but missing from the metadata map is invisible to `modelHasCapability('<id>', 'tools')`, and a model present in `routing-config.json` but missing from `ORCHESTRATION_MODELS` is rejected by the provider at dispatch. The canonical reference is commit `6a5aff3b` (`feat(providers): add gpt-5.5 model support`, 2026-10-12, net `3 files changed, 56 insertions(+)`).
+
+Four-surface checklist:
+
+1. **`src/providers/sapOrchestration.ts` — add the id to `ORCHESTRATION_MODELS`.** The authoritative static catalog. Place the entry inside the family comment block that already groups its siblings (`// OpenAI models`, `// Anthropic models`, `// Google models`, `// DeepSeek models`). A dated-snapshot id (`anthropic--claude-opus-4-7-20260416`) goes under the dated-snapshot sub-block, not the moving-tag block.
+
+2. **`src/providers/sapOrchestration.ts` — add the metadata entry to `ORCHESTRATION_MODEL_METADATA`.** Mirror the family's capability profile. For an id that inherits an existing family's tool-calling profile (`gpt-5.5` inherits `gpt-5`'s `['tools']`; `anthropic--claude-opus-4-7-20260416` inherits `anthropic--claude-4.7-opus`'s `['tools']`), copy the sibling's `capabilities` array verbatim. Do NOT invent a new capability tag for a new id — if the model advertises something genuinely new (e.g. native image generation), add the capability to the `ModelCapability` union in a separate commit so the type-system surface is reviewed independently.
+
+3. **`routing-config.json` — add the capability record to the `models` array.** The record conforms to the `ModelCapability` shape (`id`, `type`, `costTier`, `strengths`, `maxTokens`, `reasoning`, `enabled`). Keep `reasoning: false` unless the model is a dedicated reasoning snapshot (`anthropic--claude-4.5-opus`, `gpt-4.1`) — the `reasoning-for-math` rule bucket in the config picks the explicit reasoning models and incorrectly promoting a non-reasoning id would misroute prompts. Mirror an existing sibling's `strengths` list for medium-tier general-purpose ids rather than reinventing the taxonomy; see [docs/CONFIGURATION.md — Model Catalog Entries in `routing-config.json`](./CONFIGURATION.md#model-catalog-entries-in-routing-configjson) for the field-by-field rationale.
+
+4. **`src/providers/__tests__/modelCatalog.test.ts` — pin the eight-case membership contract.** Walk the new id through every string-based matcher a caller might reach: `ORCHESTRATION_MODELS.includes(...)`, `isOrchestrationModel(...)`, `getAvailableModels().toContain(...)`, `isAvailableModel(...)`, `ORCHESTRATION_MODEL_METADATA[...]` with a sibling-equality assertion, `getModelMetadata(...)`, `modelHasCapability(...)`, and the `sap-ai-core/<id>` provider-prefixed form of `modelHasCapability`. The sibling-equality assertion (`v55Meta?.capabilities).toEqual(v5Meta?.capabilities)`) is strictly preferred over a literal (`['tools']`) because it encodes the "inherits the family profile" intent in a form that survives a future family-wide capability update. See [docs/TESTING.md — Family-inheritance assertion for a single new id (gpt-5.5, 2026-10-12)](./TESTING.md#family-inheritance-assertion-for-a-single-new-id-gpt-55-2026-10-12) for the full fixture and the "do NOT pin a `deepseek`-shaped reasoning-effort contract on an OpenAI id" guard-rail.
+
+What NOT to touch unless the family genuinely needs it:
+
+- `src/providers/model-match.ts` — `getModelFamily`, `modelSupportsReasoningEffort`, and the family dispatch all key off prefix substrings (`gpt-`, `anthropic--`, `gemini-`, `deepseek`, `amazon.nova` / `amazon--nova`). A new id that fits an existing prefix inherits every family-level behaviour without an edit to this file. A new family (first `openai--o1-*` id, for example) is a separate, scoped change — do NOT fold it into a model-id addition.
+- `src/providers/modelCatalog.ts` prefix heuristic — the eight registered prefixes (`gpt-`, `anthropic--`, `gemini-`, `amazon--`, `mistralai--`, `meta--`, `deepseek-`, `sap-`) cover every family currently supported. A new id under an existing prefix is picked up by the live catalog automatically; a new family prefix is a scoped change gated behind its own commit and test suite.
+- `src/providers/sapOrchestration.ts` reasoning handling, prompt-cache gates, provider request transforms — these are family-level concerns. A new id in an existing family inherits them without edits.
+
+Commit scope. Per `commitlint.config.cjs`, the commit MUST use scope `providers`. The 2026-10-12 reference commit (`feat(providers): add gpt-5.5 model support`) is the canonical shape.
+
 ### Third-party library caches with hidden invariants (`gray-matter` pattern)
 
 Some commonly used libraries carry a process-wide cache that is NOT clearly

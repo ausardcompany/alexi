@@ -2366,6 +2366,7 @@ export const ORCHESTRATION_MODELS = [
   'gpt-4.1',
   'gpt-5',
   'gpt-5-mini',
+  'gpt-5.5',
   // Anthropic models
   'anthropic--claude-3.7-sonnet',
   'anthropic--claude-4.5-haiku',
@@ -2534,6 +2535,7 @@ export const ORCHESTRATION_MODEL_METADATA: Readonly<
   'gpt-4.1': { capabilities: ['tools'] },
   'gpt-5': { capabilities: ['tools'] },
   'gpt-5-mini': { capabilities: ['tools'] },
+  'gpt-5.5': { capabilities: ['tools'] },
   // Anthropic Claude: tool calling supported by every id in the catalog.
   'anthropic--claude-3.7-sonnet': { capabilities: ['tools'] },
   'anthropic--claude-4.5-haiku': { capabilities: ['tools'] },

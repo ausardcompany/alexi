@@ -46,6 +46,15 @@
       "enabled": true
     },
     {
+      "id": "gpt-5.5",
+      "type": "openai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis", "creative-writing", "complex-qa"],
+      "maxTokens": 128000,
+      "reasoning": false,
+      "enabled": true
+    },
+    {
       "id": "anthropic--claude-4.5-opus",
       "type": "claude",
       "costTier": "expensive",

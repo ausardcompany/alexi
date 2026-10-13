@@ -106,3 +106,48 @@ describe('modelCatalog: recent Claude dated snapshots (Aider #5173)', () => {
     }
   );
 });
+
+// Aider added gpt-5.5 settings across providers on 2026-10-12. SAP AI Core
+// routes OpenAI deployments by exact id (and by the `gpt-` prefix heuristic
+// in the live catalog), so adding gpt-5.5 to the static catalog is enough
+// to unblock OpenRouter / proxy users requesting the model. Capability
+// profile matches the rest of the gpt-5 family: tool calling supported.
+describe('modelCatalog: gpt-5.5 entry', () => {
+  it('is present in the static ORCHESTRATION_MODELS list', () => {
+    expect((ORCHESTRATION_MODELS as readonly string[]).includes('gpt-5.5')).toBe(true);
+  });
+
+  it('is accepted by isOrchestrationModel()', () => {
+    expect(isOrchestrationModel('gpt-5.5')).toBe(true);
+  });
+
+  it('is exposed via getAvailableModels()', () => {
+    expect(getAvailableModels()).toContain('gpt-5.5');
+  });
+
+  it('is accepted by isAvailableModel()', () => {
+    expect(isAvailableModel('gpt-5.5')).toBe(true);
+  });
+
+  it('has a metadata entry matching the gpt-5 capability profile', () => {
+    const v55Meta = ORCHESTRATION_MODEL_METADATA['gpt-5.5'];
+    const v5Meta = ORCHESTRATION_MODEL_METADATA['gpt-5'];
+    expect(v55Meta).toBeDefined();
+    expect(v5Meta).toBeDefined();
+    expect(v55Meta?.capabilities).toEqual(v5Meta?.capabilities);
+  });
+
+  it('exposes the metadata through getModelMetadata()', () => {
+    const meta = getModelMetadata('gpt-5.5');
+    expect(meta).toBeDefined();
+    expect(meta?.capabilities).toContain('tools');
+  });
+
+  it('advertises the tools capability', () => {
+    expect(modelHasCapability('gpt-5.5', 'tools')).toBe(true);
+  });
+
+  it('advertises tools even when queried through the sap-ai-core/ prefix', () => {
+    expect(modelHasCapability('sap-ai-core/gpt-5.5', 'tools')).toBe(true);
+  });
+});
