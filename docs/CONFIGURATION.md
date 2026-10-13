@@ -2576,11 +2576,13 @@ Operators who need to lock down a high-risk tool (shell, web_fetch, …) across 
 - **No external network.** `tools.denied = ["web_fetch", "web_search"]` + `integrations.denied = ["github", "slack"]` keeps the agent fully local without disrupting file / shell work.
 - **Pilot scope.** `skills.allowed = ["kilo-config"]` restricts skill-based workflows to a single approved skill while leaving the baseline tool surface open.
 
-## Experimental Glob Include-Ignored Allowlist (`experimental.glob_include_ignored`)
+## Experimental Glob-Ignored Allowlist (`experimental.glob_include_ignored`)
 
-Introduced in commit `ab25e0f8` (2026-10-13 upstream sync, mirrors kilocode `experimental.glob_include_ignored` from `packages/core/src/v1/config/config.ts` + `packages/opencode/src/kilocode/tool/glob-ignored.ts`). A workspace-relative allowlist of folders or exact files that the `glob` tool and the ripgrep-backed `grep` tool should search even when they are ignored by `.gitignore` or hidden. The default is "no allowlist" (vanilla ignore handling), so operators upgrading do not see any change in search behaviour.
+Introduced in the 2026-10-13 upstream sync (`1.22.46`, ports upstream kilocode `packages/opencode/src/kilocode/tool/glob-ignored.ts`). Adds a workspace-relative allowlist of folders (or exact files) that the `glob` and `grep` tools should search even when they are ignored by `.gitignore` or hidden. Nested ignored folders inside an allowlisted folder stay skipped — the allowlist opts specific paths back in without disabling ignore handling globally.
 
-### Shape
+Default is an empty array so vanilla Alexi behaviour is preserved on upgrade.
+
+### Enabling
 
 Add the flag to `~/.alexi/config.json`:
 
@@ -2589,10 +2591,9 @@ Add the flag to `~/.alexi/config.json`:
   "experimental": {
     "glob_include_ignored": [
       "build",
-      "dist",
-      "node_modules/@my-org/private-sdk",
-      "# Blank lines and lines beginning with # are ignored",
-      "generated/"
+      "node_modules/@sap",
+      "# comment lines are ignored",
+      "dist/schemas/**"
     ]
   }
 }
@@ -2603,81 +2604,43 @@ Or programmatically:
 ```typescript
 import { setConfigGlobIncludeIgnored } from './config/userConfig.js';
 
-setConfigGlobIncludeIgnored(['build', 'dist', 'node_modules/@my-org/private-sdk']);
+setConfigGlobIncludeIgnored(['build', 'node_modules/@sap']);
 ```
 
-The read helper `getConfigGlobIncludeIgnored()` returns `[]` when `experimental` is missing, non-object, an array, or when `glob_include_ignored` is not an array. Non-string entries are filtered out so downstream resolvers never see `undefined`. The write helper `setConfigGlobIncludeIgnored(patterns)` rejects non-array input and non-string entries with a hard error at the config layer rather than letting malformed entries flow into ripgrep arguments; it merges the field into the existing `experimental` object so sibling flags (`code_mode`, `contextTools`, …) stay intact.
+The read helper `getConfigGlobIncludeIgnored(): string[]` returns `[]` for missing, non-array, or malformed shapes — a corrupt config never accidentally enables the feature. Non-string entries are filtered out defensively so downstream `resolveAllowlist` never sees `undefined`. The setter rejects non-array input and non-string entries at the write boundary.
 
-### Pattern-expansion rules
+### Pattern rules
 
-Patterns are expanded by `resolveAllowlist(patterns, cwd)` in `src/tool/glob-ignored.ts` into ripgrep `--glob=` include patterns. Rules match the upstream kilocode port verbatim:
+Mirrors the opencode kilocode port verbatim (`src/tool/glob-ignored.ts:resolveAllowlist`):
 
-| User-facing pattern | Expanded `--glob=` entries | Matches |
-|---------------------|----------------------------|---------|
-| `build` | `**/build/**` and `**/build` | A folder named `build` at ANY depth plus its contents |
-| `node_modules/@my-org/private-sdk` | `node_modules/@my-org/private-sdk` and `node_modules/@my-org/private-sdk/**` | Exact workspace-relative path plus its subtree |
-| `generated/` | `generated/` and `generated//**` | Exact workspace-relative path plus its subtree (trailing slash preserved) |
-| blank line | (ignored) | — |
-| `# comment` | (ignored) | — |
+- Blank lines and lines starting with `#` are ignored (so inline comments are tolerated).
+- A pattern **without** a `/` matches a folder named `<pattern>` at any depth. The resolver emits both `**/<pattern>/**` (the folder's contents) and `**/<pattern>` (the folder entry itself) so a folder listing surfaces the directory too.
+- A pattern **with** a `/` is treated as a path relative to the workspace root. The resolver appends `/<pattern>/**` so a listed folder also includes its descendants (unless the pattern already ends in `/**`).
 
-Rules of thumb:
+### Runtime behaviour
 
-- A pattern without a `/` matches a folder NAMED `<pattern>` at any depth. Alexi emits both the folder entry itself (`**/<pattern>`) and its contents (`**/<pattern>/**`).
-- A pattern with a `/` is treated as workspace-relative. If it does not already end in `/**`, Alexi appends `/**` so that listing a folder also includes its descendants.
-- Nested ignored folders INSIDE an allowlisted folder stay skipped. The allowlist opts specific paths back in — it does NOT disable `.gitignore` globally.
-- When the allowlist is non-empty, `noRequireGit: true` is forwarded to ripgrep so `.gitignore` / `.ignore` handling runs even when the search root is not inside a git working tree.
+- `resolveAllowlist(patterns, cwd): IgnoredAllowlist` returns `{ include: readonly string[]; noRequireGit: boolean }`. When the allowlist is non-empty, `noRequireGit` is set so ripgrep's ignore-file handling still runs — nested ignored folders inside an allowlisted folder are honored — even if the search root is not inside a git working tree.
+- The `grep` tool's `RgExecuteOptions` interface accepts an `includeGlobs?: readonly string[]` passed to `rg` as `--glob=<pattern>` (no leading `!`). Paired with the existing `exclude` option (which uses `--glob=!<pattern>`), the two interact additively: an excluded pattern wins over an included pattern inside ripgrep.
+- The `glob` tool's `GlobResult` grows an optional `includeIgnored?: readonly string[]` reporting the resolved allowlist back to UI / log consumers. The Alexi JS walker does not yet apply `.gitignore` filtering, so the allowlist is a forward-compatible signal consumed by callers that layer their own ignore logic on top (and by the grep fast-path today).
 
-### Example matrix
+### Example scenarios
 
-Scenario — the operator wants `grep` to search a generated `dist/` folder (normally ignored by `.gitignore`) and a vendored private SDK under `node_modules/`:
+- **Opt vendored SAP SDK back in.** `["node_modules/@sap"]` lets the grep tool search Alexi's SAP AI Core SDK sources even though `node_modules` is ignored. Nested `node_modules` inside the SDK stay skipped.
+- **Searchable build output.** `["build"]` searches `build/` folders at any depth. Useful on repos that generate TypeScript declarations into `build/` and need the agent to grep across them.
+- **Precise single-folder opt-in.** `["dist/schemas/**"]` is treated as a workspace-relative glob rather than a folder-name match — only `dist/schemas` under the workspace root is included, not `src/dist/schemas` elsewhere.
 
-```json
-{
-  "experimental": {
-    "glob_include_ignored": [
-      "dist",
-      "node_modules/@my-org/private-sdk"
-    ]
-  }
-}
-```
-
-Resulting `rg --glob=` arguments (in order, after the standard excludes):
-
-```
---glob=**/dist/**
---glob=**/dist
---glob=node_modules/@my-org/private-sdk
---glob=node_modules/@my-org/private-sdk/**
-```
-
-Scenario — the operator wants `glob` to find hidden `.env.sample` files anywhere in the workspace (hidden files are normally skipped):
-
-```json
-{
-  "experimental": {
-    "glob_include_ignored": [".env.sample"]
-  }
-}
-```
-
-### Tool wiring
-
-- The `glob` tool (`src/tool/tools/glob.ts`) resolves the allowlist once per invocation and surfaces the resolved patterns on the `GlobResult` as `includeIgnored?: readonly string[]` when non-empty, on both successful responses and timeout responses. The current JS walker does not yet apply `.gitignore` filtering, so the field is a forward-compatible signal consumed by callers that layer their own ignore logic.
-- The `grep` tool (`src/tool/tools/grep.ts`) accepts an `includeGlobs?: readonly string[]` option on `RgExecuteOptions`. Each entry is forwarded to `rg` as `--glob=<pattern>` (no leading `!`), applied AFTER the existing exclude flags so a denylist still trumps an allowlist. Mirrors upstream opencode's ripgrep `include` option in `packages/core/src/ripgrep.ts`.
-
-See the exported `IgnoredAllowlist` interface and `resolveAllowlist` function in [`src/tool/glob-ignored.ts`](../src/tool/glob-ignored.ts) for the full contract.
+See [docs/CONTRIBUTING.md — Glob/Grep Ignored Allowlist](CONTRIBUTING.md#glob-grep-ignored-allowlist-srctoolglob-ignoredts) for the port-maintenance invariants.
 
 ## Per-Provider Compatibility Block (`providers.<id>.compatibility`)
 
-Introduced in commit `ab25e0f8` (2026-10-13 upstream sync, ports opencode PRs `#54945` and `#54911`). Lets a SAP-fronted provider toggle Anthropic-style prompt-cache breakpoints, the per-request cache-key injection, and the request-body encoding independently of what a direct call to the same model family would do. This matters when SAP AI Core sits in front of a Claude deployment that is itself behind a corporate gateway that strips cache-control headers, or when a specific SAP tenant mandates `application/x-www-form-urlencoded` request bodies.
+Introduced in the 2026-10-13 upstream sync (`1.22.46`, ports opencode PR #54945 / #54911). Attaches compatibility knobs to an individual provider entry in `~/.alexi/config.json` so a SAP AI Core deployment that proxies Claude (or another gateway-fronted model family) can diverge from the direct-API contract when the gateway requires it. Does NOT replace the global provider config — only overrides provider-specific wire-format decisions.
 
 ### Shape
 
 ```json
 {
   "providers": {
-    "anthropic--claude-4.7-opus": {
+    "sap-anthropic": {
       "compatibility": {
         "cacheFormat": "anthropic",
         "cacheKey": true,
@@ -2688,44 +2651,27 @@ Introduced in commit `ab25e0f8` (2026-10-13 upstream sync, ports opencode PRs `#
 }
 ```
 
-TypeScript surface (`src/config/userConfig.ts`):
+| Field                | Type                             | Purpose                                                                                                   |
+| -------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `cacheFormat`        | `'anthropic' \| 'none'`          | Toggles Anthropic-style `cache_control` breakpoint insertion. `'none'` disables it even when the model would normally support it. |
+| `cacheKey`           | `boolean`                        | Sets whether the provider should emit a cache-key header. Opts a SAP Claude integration in or out of the breakpoint path. |
+| `body.encoding`      | `'json' \| 'form'`               | Overrides the request-body encoding for OAuth-style endpoints that reject `application/json`.             |
 
-```typescript
-export type ProviderCacheFormat = 'anthropic' | 'none';
+Any value that does not match the schema is silently dropped by the reader — the stored config can carry forward-compatible fields, but the current build only honors the three above.
 
-export interface ProviderCompatibility {
-  cacheFormat?: ProviderCacheFormat;
-  cacheKey?: boolean;
-  body?: {
-    encoding?: 'json' | 'form';
-  };
-}
+### Reader contract (`getProviderCompatibility(providerId)`)
 
-export function getProviderCompatibility(providerId: string): ProviderCompatibility;
-```
+- Returns `{}` (an empty object, NOT `undefined`) when the provider is missing from the config, when the `compatibility` block is absent, or when any of the recognised values is malformed. Callers can safely use optional chaining without a null check.
+- Legacy migration: `providers.<id>.setCacheKey` (upstream opencode PR #54911 legacy name) is folded into `compatibility.cacheKey` on read only when the new key is absent. Writes always use the new shape — once a setter is called the config file converges on `compatibility`.
+- Defensively guards against array / non-object entries in `providers` or `providers.<id>`, so a hand-edited corrupt config never accidentally enables cache breakpoints.
 
-### Reader semantics
+### Example scenarios
 
-- Returns an empty object (NOT `undefined`) when `providers` is missing, non-object, an array, or when the provider id has no entry — callers can safely use optional chaining without a null guard.
-- `cacheFormat` is only accepted as the string literal `'anthropic'` or `'none'`. Any other value (`'auto'`, a typo, `null`) is silently dropped so a malformed config cannot flip the branch to an undefined behaviour.
-- `cacheKey` is only accepted as a boolean.
-- `body.encoding` is only accepted as the string literal `'json'` or `'form'`. The surrounding `body` object is omitted from the returned shape when the encoding is absent or invalid.
+- **SAP Claude needs Anthropic-style caching.** Set `cacheFormat: 'anthropic'` + `cacheKey: true` on the `sap-anthropic` provider so the request assembly path inserts explicit `cache_control` breakpoints for long-system-prompt tokens — matching what a direct Anthropic API call would do.
+- **SAP Claude does NOT support caching on a given gateway.** Set `cacheFormat: 'none'` + `cacheKey: false` so the breakpoint logic is bypassed. The provider still works; it just pays the full prompt-token price every turn.
+- **OAuth-form endpoint.** Set `body.encoding: 'form'` for a BYOK OAuth provider whose token endpoint only accepts `application/x-www-form-urlencoded`. JSON-encoding is the default.
 
-### Legacy `setCacheKey` migration
-
-Upstream opencode PR `#54911` previously stored the cache-key knob at the top level of the provider entry as `setCacheKey`. The reader folds that legacy flag into the new shape:
-
-- When `compatibility.cacheKey` is NOT explicitly set AND the provider entry has `setCacheKey: boolean`, the reader returns `compatibility.cacheKey = <value of setCacheKey>`.
-- Writes stay in the new shape — a subsequent `setConfigProviderCompatibility` (or any other persistence pass that re-serialises the entry) converges on the new field layout.
-- Both flags present at once? `compatibility.cacheKey` wins. The legacy field is only consulted when the new one is absent.
-
-This is read-only migration: Alexi never silently rewrites `~/.alexi/config.json` just to flatten a legacy field. Operators who want to drop the legacy field manually can delete `setCacheKey` from the provider entry at their leisure.
-
-### Scenario presets
-
-- **SAP-fronted Claude with full Anthropic caching.** `compatibility: { cacheFormat: 'anthropic', cacheKey: true }` — forces the Anthropic prompt-cache breakpoint path and the per-request cache-key stamp, matching what a direct Anthropic API call would do.
-- **SAP-fronted Claude with the gateway stripping cache-control.** `compatibility: { cacheFormat: 'none' }` — disables the Anthropic breakpoint path entirely so Alexi does not pay a cache-formatting cost for a cache the gateway will not honour.
-- **Form-encoded body for a legacy SAP tenant.** `compatibility: { body: { encoding: 'form' } }` — switches the request body encoding on providers that reject `application/json`.
+See [docs/PROVIDERS.md — Per-provider compatibility knobs](PROVIDERS.md#per-provider-compatibility-knobs-providersidcompatibility) for the TypeScript surface and [docs/CHANGELOG.md — Unreleased](../CHANGELOG.md#unreleased) for the port history.
 
 ## Related Documentation
 

@@ -1749,6 +1749,88 @@ export function getDefaultModel(): string {
 }
 ```
 
+### Provider HTTP transport (`src/providers/http-transport.ts`)
+
+Introduced in the 2026-10-13 upstream sync (ports opencode PR #55032 and PR #55007). Centralises the chunk-timeout and Bun-fetch idle-timeout settings that cover long-running SAP AI Core streaming requests. These are cross-cutting knobs that otherwise get scattered across provider modules — the module exports two surfaces:
+
+```typescript
+// src/providers/http-transport.ts
+export const DEFAULT_CHUNK_TIMEOUT = 900_000; // 15 minutes
+
+export function withBunIdleTimeoutDisabled<T extends RequestInit>(
+  baseOptions: T
+): T & { idleTimeout: number } {
+  return {
+    ...baseOptions,
+    idleTimeout: 0, // 0 = disabled (Bun-specific; ignored under Node)
+  };
+}
+```
+
+- `DEFAULT_CHUNK_TIMEOUT = 900_000` — maximum time a stream may idle between chunks before the caller aborts. SAP AI Core enterprise models (`gpt-5`, `anthropic--claude-4.7-opus`) can take > 5 min for complex reasoning turns; the previous 5-minute default caused spurious mid-stream failures. The 15-minute default matches opencode PR #55032. Callers that want "never time out" pass `0` or a negative number to their stream wrapper. Callers that want a tighter deadline (unit tests, cheap models) should pass an explicit override.
+- `withBunIdleTimeoutDisabled<T>(baseOptions)` — builds fetch options that disable Bun's default fetch idle timeout. Bun injects an `idleTimeout` option on `fetch()` that silently closes sockets after a fixed idle window, causing streaming provider responses to fail with ECONNRESET while the model is still reasoning. Setting `idleTimeout: 0` disables the Bun-specific cap. Under Node, the extra `idleTimeout` key is ignored — the `fetch()` implementation drops unknown init keys — so the helper is a no-op on Node and only takes effect under Bun. Mirrors opencode PR #55007.
+
+`buildFetch()` in `src/providers/provider.ts:122-128` now threads every outgoing request through `withBunIdleTimeoutDisabled({ ...init, signal })` before handing the options to `globalThis.fetch`, so every SAP AI Core provider request (direct chat, streaming, catalog refresh, embeddings) picks up the fix without touching individual call sites:
+
+```typescript
+// src/providers/provider.ts
+import { withBunIdleTimeoutDisabled } from './http-transport.js';
+
+// ...inside buildFetch():
+const callerSignal = init?.signal ?? undefined;
+const signal = callerSignal ? anySignal([callerSignal, controller.signal]) : controller.signal;
+
+const bunSafeInit = withBunIdleTimeoutDisabled({ ...init, signal });
+
+return globalThis.fetch(input as RequestInfo, bunSafeInit).finally(() => clearTimeout(timer));
+```
+
+Both knobs remain compatible with SAP AI Core: it is a gateway that preserves the upstream model's streaming behaviour, so the timeout contract is identical to a direct provider call.
+
+### Per-provider compatibility knobs (`providers.<id>.compatibility`)
+
+Introduced in the 2026-10-13 upstream sync (ports opencode PR #54945 / PR #54911). Allows the SAP Claude integration to toggle Anthropic-style cache breakpoints and request-body encoding independently of what the direct Anthropic API would do — a SAP AI Core deployment that proxies Claude can diverge from the upstream contract when the gateway requires it. Read via `getProviderCompatibility(providerId)` in `src/config/userConfig.ts`:
+
+```typescript
+export type ProviderCacheFormat = 'anthropic' | 'none';
+
+export interface ProviderCompatibility {
+  cacheFormat?: ProviderCacheFormat;
+  cacheKey?: boolean;
+  body?: {
+    encoding?: 'json' | 'form';
+  };
+}
+
+export function getProviderCompatibility(providerId: string): ProviderCompatibility;
+```
+
+Config shape stored under `providers.<id>.compatibility` in `~/.alexi/config.json`:
+
+```json
+{
+  "providers": {
+    "sap-anthropic": {
+      "compatibility": {
+        "cacheFormat": "anthropic",
+        "cacheKey": true,
+        "body": { "encoding": "json" }
+      }
+    }
+  }
+}
+```
+
+Reader semantics:
+
+- Returns `{}` (not `undefined`) for missing / malformed / non-object / array entries so callers can use optional chaining without a null check.
+- Only recognised values are kept: `cacheFormat` is restricted to the two literal values; `cacheKey` must be a boolean; `body.encoding` is restricted to `'json'` / `'form'`.
+- Legacy migration: `providers.<id>.setCacheKey` is folded into `compatibility.cacheKey` on read only when the new key is absent, so an older config keeps working without a schema migration. Writes always use the new shape — once the setter is called the file converges on `compatibility`.
+
+Consumers that need to type the field explicitly can import both the interface and the `ProviderCacheFormat` alias. There is no setter yet — callers persist the block via `saveFullConfig` after mutating the top-level `providers` map.
+
+See [docs/CONFIGURATION.md — Per-Provider Compatibility Block](CONFIGURATION.md#per-provider-compatibility-block-providersidcompatibility) for the full config-file surface, enablement precedence, and worked examples.
+
 ### Prompt Cache Breakpoint Preparation
 
 The provider module exports a `prepareRequest<T>` helper (`src/providers/sapOrchestration.ts:395`) that is applied to outgoing OpenAI-family requests before they hit the Vercel AI SDK path. It applies explicit prompt-cache breakpoints when the provider/model combination supports them and the caller is not on a ChatGPT subscription (which caches implicitly).
