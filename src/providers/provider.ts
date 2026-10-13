@@ -18,6 +18,8 @@
  * over the timeout when either fires first.
  */
 
+import { withBunIdleTimeoutDisabled } from './http-transport.js';
+
 /** Default provider request timeout (ms). Matches opencode 35fc7a7. */
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000;
 
@@ -117,8 +119,12 @@ export function buildFetch(opts: BuildFetchOptions = {}): FetchLike {
     const callerSignal = init?.signal ?? undefined;
     const signal = callerSignal ? anySignal([callerSignal, controller.signal]) : controller.signal;
 
-    return globalThis
-      .fetch(input as RequestInfo, { ...init, signal })
-      .finally(() => clearTimeout(timer));
+    // Thread init through `withBunIdleTimeoutDisabled` so Bun's default
+    // fetch idle-timeout cannot silently cut long-running SAP AI Core
+    // streams while the model is still reasoning. No-op under Node.
+    // Mirrors opencode PR #55007.
+    const bunSafeInit = withBunIdleTimeoutDisabled({ ...init, signal });
+
+    return globalThis.fetch(input as RequestInfo, bunSafeInit).finally(() => clearTimeout(timer));
   };
 }

@@ -1335,6 +1335,37 @@ What NOT to touch unless the family genuinely needs it:
 
 Commit scope. Per `commitlint.config.cjs`, the commit MUST use scope `providers`. The 2026-10-12 reference commit (`feat(providers): add gpt-5.5 model support`) is the canonical shape.
 
+### Centralising cross-cutting HTTP knobs (`src/providers/http-transport.ts` pattern)
+
+When a provider-layer knob is called from more than one site — the single-shot fetch wrapper AND a streaming-chunk watchdog, or two sibling provider modules — put it in `src/providers/http-transport.ts` rather than duplicating the constant. The canonical reference is commit `ab25e0f8` (2026-10-13 upstream sync, ports opencode PRs `#55032` and `#55007`): the per-chunk streaming timeout `DEFAULT_CHUNK_TIMEOUT = 900_000` and the Bun idle-timeout disable helper `withBunIdleTimeoutDisabled` live in one module and are imported by `src/providers/provider.ts` (and future streaming paths). A future bump — say moving from 15 min to 30 min when SAP AI Core onboards an even slower reasoning model — then happens in exactly one place.
+
+Rules of thumb that generalise:
+
+1. **Constant with a provider-tunable default?** Export it as a named `const` from `src/providers/http-transport.ts`. Document the upstream reference (PR number, opencode commit) in the JSDoc so a future reader can diff against the source port.
+2. **Helper that touches `RequestInit`?** Export it as a type-preserving generic (`<T extends RequestInit>(options: T): T & { ... }`), not as a `RequestInit`-returning function. The intersection type lets callers thread additional per-request fields (`signal`, custom headers, body) through the helper without losing the extended type.
+3. **Document the no-op platform.** If the knob only takes effect under Bun (or only under Node 20+), state that explicitly in the JSDoc — a reader looking at the Node runtime should not have to guess whether the helper is wired or inert.
+4. **Threading at the call site is a single line.** `const bunSafeInit = withBunIdleTimeoutDisabled({ ...init, signal });` is the shape to copy. Resist the urge to spread the helper's return value into another object — the type intersection carries the Bun-only key, and losing it defeats the purpose.
+
+### Mirroring upstream kilocode `experimental.*` allowlists
+
+The `experimental.glob_include_ignored` allowlist (commit `ab25e0f8`, mirrors kilocode `experimental.glob_include_ignored`) is the canonical pattern for porting an upstream opt-in surface:
+
+1. **Config read helper is defensive.** `getConfigGlobIncludeIgnored()` returns `[]` when `experimental` is missing, non-object, an array, or when the field is not an array — a corrupt config never accidentally enables a feature. Filter non-strings out defensively so downstream code never sees `undefined`.
+2. **Config write helper rejects malformed input at the config layer.** `setConfigGlobIncludeIgnored(patterns)` throws on non-array input or non-string entries. The failure must happen at the write boundary, not after the malformed entry has already flown into ripgrep arguments.
+3. **Pattern-expansion is a pure helper in `src/tool/`.** `resolveAllowlist(patterns, cwd)` lives in `src/tool/glob-ignored.ts` alongside the tool it serves. No I/O, no module-level state. Easy to unit-test with a static input matrix.
+4. **Expose a thin façade.** `src/tool/glob.ts` re-exports both the tool entry point (`globTool`, `GLOB_SEARCH_TIMEOUT_MS`, `extendGlobPattern`) AND the allowlist helpers (`resolveAllowlist`, `IgnoredAllowlist`). Upstream ports targeting the opencode / kilocode layout at `src/tool/glob.ts` then land cleanly without a tree reshuffle.
+5. **Surface the resolved allowlist on the tool result.** The `glob` tool returns `includeIgnored?: readonly string[]` on both successful and timeout responses when non-empty. This gives UI/log consumers a confirmation of which ignored or hidden paths were opted back in, and makes forward-compatible wiring possible (callers that layer their own ignore logic see the signal).
+6. **Document the pattern-expansion rules in `docs/CONFIGURATION.md`.** The expansion matrix — "pattern without `/` matches a folder at any depth and emits both `**/<pattern>` and `**/<pattern>/**`", "pattern with `/` is workspace-relative and gets a trailing `/**` appended" — is the user-facing contract. If you touch `resolveAllowlist`, update the matrix in the same PR.
+
+### Mirroring upstream opencode per-provider `compatibility` blocks
+
+When upstream opencode introduces a per-provider knob (`compatibility.cacheFormat`, `compatibility.cacheKey`, `compatibility.body.encoding`), port it as a reader-only entry point in `src/config/userConfig.ts` so the SAP AI Core happy path is unaffected until a caller explicitly opts in:
+
+1. **Return an empty object, never `undefined`.** `getProviderCompatibility(providerId)` returns `{}` when the provider id has no entry so callers can safely use `?.cacheFormat` without a null guard.
+2. **Validate each field in-place with a string-literal match.** `cacheFormat === 'anthropic' || cacheFormat === 'none'` rather than casting an `unknown` to the union — a malformed value is silently dropped so a hand-edited config cannot flip the branch to an undefined behaviour.
+3. **Migrate legacy top-level flags on read, not on write.** The `setCacheKey` → `compatibility.cacheKey` migration from opencode PR `#54911` folds on read when the new field is absent. Writes stay in the new shape so the file converges on the new field layout at the next persistence pass. Alexi never silently rewrites `~/.alexi/config.json` just to flatten a legacy field.
+4. **Keep the TypeScript surface exported.** `ProviderCacheFormat` and `ProviderCompatibility` are exported from `src/config/userConfig.ts` so callers that embed the shape in their own types (test fixtures, provider adapters, documentation examples) do not need to re-declare it.
+
 ### Third-party library caches with hidden invariants (`gray-matter` pattern)
 
 Some commonly used libraries carry a process-wide cache that is NOT clearly
@@ -3577,6 +3608,36 @@ Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70
 - **Preserve the raw payload in the parse-error message.** The format `Malformed tool arguments for <tool>: <detail> (raw=<arguments>)` lets the model see what it emitted and self-correct. Dropping the raw payload "to shorten the message" is a regression — the loop recovery depends on this feedback.
 - **Always emit `tool_end` on failure.** Both the parse-failure and schema-failure branches emit a `tool_end` progress event so the TUI tool-row renders a terminal failure state. Returning the error without emitting the event leaves the row spinning.
 - **Call `settleUnfinishedCalls` on every turn-end path.** Provider abort, iteration-cap hit, and upstream disconnect are the three paths that can leave a pending tool call unresolved. All three must go through the settler so the next turn's `tool_calls` + tool-result transcript stays well-formed; SAP AI Core rejects orphan `tool_calls` entries with a schema violation.
+
+## Provider HTTP transport module (`src/providers/http-transport.ts`)
+
+Introduced in the 2026-10-13 upstream sync (ports opencode PR #55032 and PR #55007). References: [docs/PROVIDERS.md — Provider HTTP transport](PROVIDERS.md#provider-http-transport-srcprovidershttp-transportts), [docs/CHANGELOG.md — Unreleased](../CHANGELOG.md#unreleased).
+
+- **`DEFAULT_CHUNK_TIMEOUT = 900_000` is the canonical 15-minute per-chunk ceiling.** Reducing it (even to the old 5-minute default) is a regression — SAP AI Core enterprise models routinely take > 5 min for complex reasoning turns and the previous ceiling caused spurious mid-stream failures. If a specific caller needs a tighter deadline (unit tests, cheap models), pass an explicit override at the call site rather than lowering the module constant.
+- **`withBunIdleTimeoutDisabled` is a pure wrapper.** It returns a new object with `idleTimeout: 0` merged in; it does NOT mutate the input. Introducing an in-place mutation is a regression because the same `RequestInit` can be reused by the caller after the wrapper call. The type intersection `T & { idleTimeout: number }` is load-bearing — downstream callers rely on the typed field.
+- **Node ignores `idleTimeout`.** The `fetch()` implementation drops unknown init keys, so the helper is a no-op on Node and only takes effect under Bun. Do NOT add a `typeof Bun !== 'undefined'` runtime gate — the no-op property on Node is the whole point of the single-codepath design, and runtime-gating would reintroduce the "which runtime are we on" surface the module was built to avoid.
+- **Wire through `buildFetch`, not individual provider call sites.** `src/providers/provider.ts:122-128` threads every outgoing request through the wrapper inside `buildFetch()` so every SAP AI Core provider request (direct chat, streaming, catalog refresh, embeddings) picks up the fix without touching individual call sites. Adding a bespoke `withBunIdleTimeoutDisabled` call inside a specific provider module is strictly worse — it duplicates coverage and risks drift if the shared `buildFetch` is swapped out later.
+- **Both knobs stay compatible with SAP AI Core.** SAP AI Core is a gateway that preserves the upstream model's streaming behaviour, so the timeout contract is identical to a direct provider call. New knobs added to this module must satisfy the same invariant — if a knob only makes sense when talking to a direct provider, it does not belong here.
+
+## Glob / Grep Ignored Allowlist (`src/tool/glob-ignored.ts`)
+
+Introduced in the 2026-10-13 upstream sync (ports upstream kilocode `packages/opencode/src/kilocode/tool/glob-ignored.ts`). References: [docs/CONFIGURATION.md — Experimental Glob-Ignored Allowlist](CONFIGURATION.md#experimental-glob-ignored-allowlist-experimentalglob_include_ignored), [docs/CHANGELOG.md — Unreleased](../CHANGELOG.md#unreleased).
+
+- **`resolveAllowlist` is pure, not file-system-aware.** It takes a `readonly string[]` of raw user patterns plus a `cwd` string (currently unused — kept in the signature for future workspace-relative features) and returns `{ include: readonly string[]; noRequireGit: boolean }`. Do NOT read the file system here — path existence checks belong in the tool caller, not in the resolver. The pure contract keeps the regression suite fast and parallel-safe.
+- **Blank / `#` lines are skipped silently.** Users commonly paste `.gitignore`-style config, which includes comments and blank separators. Treat them as valid input and skip at parse time — raising a validation error on `#` is a regression because the setter in `src/config/userConfig.ts` only enforces "must be a string", not "must be a non-blank non-comment".
+- **Pattern expansion is folder-vs-path, not glob-vs-literal.** A pattern without `/` is a FOLDER NAME matched at any depth (`**/<pattern>/**` + `**/<pattern>`). A pattern with `/` is a workspace-relative PATH that gets a `/**` descendant form appended when missing. Reversing this heuristic (e.g. treating `foo/` as a folder-name match) is a regression — the opencode upstream contract is specifically pinned by `packages/opencode/src/kilocode/tool/glob-ignored.ts`.
+- **`noRequireGit = true` is deliberately paired with a non-empty allowlist.** The rationale: when the user opted specific folders back in, ripgrep's ignore-file handling must still honor nested ignored folders inside those allowlisted roots, even if the search root is not inside a git working tree. Dropping the flag when the search root happens to be a git repo is a regression — it breaks the "nested ignored folders stay skipped" contract.
+- **`src/tool/glob.ts` is a thin façade.** It re-exports `globTool`, `GLOB_SEARCH_TIMEOUT_MS`, `extendGlobPattern` from `./tools/glob.js` and `resolveAllowlist`, `IgnoredAllowlist` from `./glob-ignored.js`. Upstream ports targeting the opencode / kilocode layout (`src/tool/glob.ts`) land cleanly against this facade — do not inline the implementation into `glob.ts`, that would make future ports noisier.
+- **Grep's `includeGlobs` option emits `--glob=<pattern>` without a leading `!`.** It is paired with the existing `exclude` option which uses `--glob=!<pattern>`. The two interact additively: an excluded pattern wins over an included pattern inside ripgrep. Swapping the sign on either side is a regression.
+
+## Per-Provider Compatibility Block (`providers.<id>.compatibility`)
+
+Introduced in the 2026-10-13 upstream sync (ports opencode PR #54945 / #54911). References: [docs/CONFIGURATION.md — Per-Provider Compatibility Block](CONFIGURATION.md#per-provider-compatibility-block-providersidcompatibility), [docs/PROVIDERS.md — Per-provider compatibility knobs](PROVIDERS.md#per-provider-compatibility-knobs-providersidcompatibility).
+
+- **The reader returns `{}`, never `undefined`.** Callers rely on optional chaining without a null check (`compat.cacheFormat === 'anthropic'`). Changing the return type to `ProviderCompatibility | undefined` is a regression — every call site would need a null guard and the open-world default (empty object = no overrides) would become invisible.
+- **Legacy `setCacheKey` migrates on READ only.** `providers.<id>.setCacheKey` is folded into `compatibility.cacheKey` on read when the new key is absent. The reader does NOT persist the migration — writes always use the new shape via the setter path, so the config file converges on `compatibility` naturally. Writing from the reader would race with concurrent reads and risk clobbering a user edit.
+- **Keep the whitelist tight.** `cacheFormat` is restricted to the two literal values `'anthropic'` / `'none'`. `cacheKey` must be a boolean. `body.encoding` is restricted to `'json'` / `'form'`. Any other value is silently dropped so the stored config can carry forward-compatible fields without breaking current builds. Adding a `'default'` fallback value is a regression — the empty object is the correct "no override" signal.
+- **Defensive guards on `providers` / `providers.<id>`.** The reader defends against array / non-object / malformed entries at every level. A hand-edited corrupt config must never accidentally enable cache breakpoints. The defensive style here is more verbose than a plain `config.providers?.[id]?.compatibility` chain on purpose — the shape is persisted to disk and read from untrusted inputs.
 
 ## License
 
