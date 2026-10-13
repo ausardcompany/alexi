@@ -265,6 +265,78 @@ describe('discoverRules — default project paths', () => {
   });
 });
 
+describe('discoverRules — symlinked rule files', () => {
+  let root: string;
+  let workdir: string;
+  let home: string;
+  let externalDir: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-symlink-'));
+    workdir = path.join(root, 'project');
+    home = path.join(root, 'home');
+    externalDir = path.join(root, 'external');
+    fs.mkdirSync(workdir, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(externalDir, { recursive: true });
+    fs.mkdirSync(path.join(workdir, '.kilo', 'rules'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('loads a symlinked rule file as if it were a regular file', () => {
+    const target = path.join(externalDir, 'shared.md');
+    fs.writeFileSync(target, '# shared rule\nmonorepo-wide content', 'utf-8');
+    const link = path.join(workdir, '.kilo', 'rules', 'shared.md');
+    fs.symlinkSync(target, link);
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].fileName).toBe('shared.md');
+    expect(result.rules[0].content).toContain('shared rule');
+    expect(result.rules[0].content).toContain('monorepo-wide content');
+    expect(result.rules[0].source).toBe('project');
+  });
+
+  it('skips broken symlinks silently (no error, not loaded)', () => {
+    const link = path.join(workdir, '.kilo', 'rules', 'broken.md');
+    fs.symlinkSync(path.join(root, 'nonexistent-target.md'), link);
+
+    // Must not throw.
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules.map((r) => r.fileName)).not.toContain('broken.md');
+  });
+
+  it('loads a valid symlink alongside a broken symlink in the same dir', () => {
+    const target = path.join(externalDir, 'ok.md');
+    fs.writeFileSync(target, '# ok rule', 'utf-8');
+    fs.symlinkSync(target, path.join(workdir, '.kilo', 'rules', 'ok.md'));
+    fs.symlinkSync(
+      path.join(root, 'does-not-exist.md'),
+      path.join(workdir, '.kilo', 'rules', 'broken.md')
+    );
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    const names = result.rules.map((r) => r.fileName).sort();
+    expect(names).toEqual(['ok.md']);
+    expect(result.rules[0].content).toContain('ok rule');
+  });
+
+  it('does not treat a symlink to a directory as a rule file', () => {
+    // Symlink pointing at a directory: statSync() follows and returns a
+    // directory stat, so loadRuleFile skips it (not a file, not useful).
+    const targetDir = path.join(externalDir, 'nested');
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(path.join(targetDir, 'inner.md'), '# inner', 'utf-8');
+    fs.symlinkSync(targetDir, path.join(workdir, '.kilo', 'rules', 'linkeddir.md'));
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules.map((r) => r.fileName)).not.toContain('linkeddir.md');
+  });
+});
+
 describe('discoverRules — custom rulesPath precedence', () => {
   let root: string;
   let workdir: string;

@@ -2970,6 +2970,93 @@ Additional integration-test invariants:
 
 Directory-list membership is additionally pinned by direct assertions against `DEFAULT_PROJECT_RULE_DIRS` (`expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline/rules')` / `expect(DEFAULT_PROJECT_RULE_DIRS).toContain('.cline')`) so a rename of either directory string is caught before any filesystem interaction — see the `discoverRules — default project paths` describe block in `tests/rulesDiscovery.test.ts`.
 
+#### Testing symlinked rule files in `discoverRules`
+
+Commit `06c2a958 feat(config): support symlinked rule files in rulesDiscovery` widened the two filesystem guards in `src/config/rulesDiscovery.ts` so a `*.md` entry whose dirent reports `isSymbolicLink() === true` is accepted alongside regular files. Monorepo setups that symlink a shared rule file into `<workdir>/.kilo/rules/`, `<workdir>/.alexi/rules/`, or any of the other six default project directories now surface the symlinked content in the assembled system prompt. Four cases pin the contract — two happy paths (valid link alone, valid link next to a broken sibling) and two guard paths (broken link, directory link):
+
+```typescript
+describe('discoverRules — symlinked rule files', () => {
+  let root: string;
+  let workdir: string;
+  let home: string;
+  let externalDir: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-rules-symlink-'));
+    workdir = path.join(root, 'project');
+    home = path.join(root, 'home');
+    externalDir = path.join(root, 'external');
+    fs.mkdirSync(workdir, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(externalDir, { recursive: true });
+    fs.mkdirSync(path.join(workdir, '.kilo', 'rules'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('loads a symlinked rule file as if it were a regular file', () => {
+    const target = path.join(externalDir, 'shared.md');
+    fs.writeFileSync(target, '# shared rule\nmonorepo-wide content', 'utf-8');
+    const link = path.join(workdir, '.kilo', 'rules', 'shared.md');
+    fs.symlinkSync(target, link);
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0].fileName).toBe('shared.md');
+    expect(result.rules[0].content).toContain('shared rule');
+    expect(result.rules[0].content).toContain('monorepo-wide content');
+    expect(result.rules[0].source).toBe('project');
+  });
+
+  it('skips broken symlinks silently (no error, not loaded)', () => {
+    const link = path.join(workdir, '.kilo', 'rules', 'broken.md');
+    fs.symlinkSync(path.join(root, 'nonexistent-target.md'), link);
+
+    // Must not throw.
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules.map((r) => r.fileName)).not.toContain('broken.md');
+  });
+
+  it('loads a valid symlink alongside a broken symlink in the same dir', () => {
+    const target = path.join(externalDir, 'ok.md');
+    fs.writeFileSync(target, '# ok rule', 'utf-8');
+    fs.symlinkSync(target, path.join(workdir, '.kilo', 'rules', 'ok.md'));
+    fs.symlinkSync(
+      path.join(root, 'does-not-exist.md'),
+      path.join(workdir, '.kilo', 'rules', 'broken.md')
+    );
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    const names = result.rules.map((r) => r.fileName).sort();
+    expect(names).toEqual(['ok.md']);
+    expect(result.rules[0].content).toContain('ok rule');
+  });
+
+  it('does not treat a symlink to a directory as a rule file', () => {
+    // Symlink pointing at a directory: statSync() follows and returns a
+    // directory stat, so loadRuleFile skips it (not a file, not useful).
+    const targetDir = path.join(externalDir, 'nested');
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(path.join(targetDir, 'inner.md'), '# inner', 'utf-8');
+    fs.symlinkSync(targetDir, path.join(workdir, '.kilo', 'rules', 'linkeddir.md'));
+
+    const result = discoverRules({ workdir, homedir: home, silent: true });
+    expect(result.rules.map((r) => r.fileName)).not.toContain('linkeddir.md');
+  });
+});
+```
+
+Patterns worth internalising:
+
+1. **Create the link's parent directory explicitly in `beforeEach`.** `discoverRules` only scans directories that actually exist on disk — `fs.mkdirSync(path.join(workdir, '.kilo', 'rules'), { recursive: true })` is load-bearing; without it, the first case passes vacuously because the scanner never enters the directory and the broken-symlink and valid-symlink assertions both reduce to `expect([]).not.toContain(...)`. Pin the `.kilo/rules` seed in `beforeEach` so every case starts from a scannable directory.
+2. **Seed the symlink target OUTSIDE the scanned directory tree.** `externalDir = path.join(root, 'external')` lives next to `workdir`, not under it. This models the real monorepo use case (a shared rule file in a sibling directory linked INTO the project's rules directory) and also guarantees the symlink target does not accidentally appear as a sibling markdown file that `listMarkdownFiles` would pick up on its own.
+3. **Assert the fallback path on the broken-link case.** `expect(result.rules.map((r) => r.fileName)).not.toContain('broken.md')` is the negative assertion; the positive counterpart is "the discovery call did not throw". The `// Must not throw.` comment above the `discoverRules(...)` call is the human-readable form of that positive assertion — the test passes only when both hold. A regression that let the `statSync` exception escape `loadRuleFile` would surface as an unhandled rejection in the vitest worker, not a `.toContain` failure.
+4. **Pin both the valid and broken paths COEXISTING in one directory.** The third case (valid alongside broken) is the load-bearing scenario — a regression that stopped iterating siblings after the first broken symlink (`for ... break` instead of `for ... continue`) would still pass the single-link cases. Sorting the file names (`names.sort()`) in the assertion keeps the test deterministic across platforms that return directory entries in different orders.
+5. **Pin the directory-link case explicitly.** The guard `!stat.isFile() && !stat.isSymbolicLink()` in `loadRuleFile` is a two-branch check: `isFile()` is `true` for a symlink that `statSync` followed to a regular file, and the `isSymbolicLink()` fallback catches platforms that report the link type on the followed stat. For a symlink pointing at a directory, `statSync` follows the link and returns a directory stat — `isFile()` is `false` AND `isSymbolicLink()` is `false`, so the guard rejects it. Without this case, a regression that collapsed the guard to `!stat.isFile() || stat.isSymbolicLink()` (OR instead of AND, inverted branch) would silently load every directory the operator ever symlinked into a rules dir.
+6. **Pass `silent: true` to suppress the `logger.info` summary.** Without the flag, every case emits a `Loaded rules from ...` INFO line and the test output drowns under the discovery log. The flag only suppresses the discovery call's own logs; the `fs.rmSync` cleanup in `afterEach` still removes the tmp tree deterministically.
+
 ### Testing session response classifier and output budget
 
 `tests/session/upstream-ports.test.ts` (added in 1.22.1) covers the three pure helpers ported from upstream (`evaluateCompleteness`, `usableOutputBudget`, `preserveCompletionLimit`):

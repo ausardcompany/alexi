@@ -208,11 +208,14 @@ function loadRuleFile(
 ): DiscoveredRule | null {
   let stat: fs.Stats;
   try {
+    // `statSync` follows symlinks, so a valid symlink to a file resolves to
+    // the target's stat (isFile() === true). A broken symlink throws and is
+    // skipped silently via the catch below.
     stat = fs.statSync(filePath);
   } catch {
     return null;
   }
-  if (!stat.isFile()) {
+  if (!stat.isFile() && !stat.isSymbolicLink()) {
     return null;
   }
   let raw: string;
@@ -251,7 +254,12 @@ function listMarkdownFiles(dir: string): string[] {
   }
   const out: string[] = [];
   for (const e of entries) {
-    if (!e.isFile()) {
+    // Accept both regular files and symbolic links. A symlink dirent reports
+    // `isFile() === false` because `readdirSync` returns the entry's own
+    // type, not the target's. Broken symlinks are filtered later when
+    // `loadRuleFile` tries to `statSync` them (the stat throws and the
+    // helper returns null, so no error bubbles to the caller).
+    if (!e.isFile() && !e.isSymbolicLink()) {
       continue;
     }
     if (!e.name.toLowerCase().endsWith('.md')) {
