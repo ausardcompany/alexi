@@ -3127,6 +3127,161 @@ export interface RenderReport {
 
 The helper guarantees `unmount()` is called before returning so timers and effects do not leak between tests. Test environment is `node` (not `jsdom`) — Ink renders directly to a captured string, no DOM shim needed.
 
+### Testing the transcript URL extractor and Shift+{1-9} binding
+
+The transcript URL quick-open feature (ports upstream kilocode PR #14910) is covered by two independent test files that reflect its two-layer design — a pure URL extractor plus a hook-level dispatcher. Keeping them separate means the extractor can evolve under unit-test pressure without pulling in the Ink keypress harness, and the hook test does not need to synthesise realistic markdown fixtures.
+
+**Pure extractor (`tests/cli/tui/extractUrls.test.ts`, +129 lines, 2 `describe` blocks, 17 cases).**
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  extractUrlsFromText,
+  extractUrlsFromMessages,
+  type TranscriptEntry,
+} from '../../../src/cli/tui/utils/extractUrls.js';
+
+describe('extractUrlsFromText', () => {
+  it('returns [] for empty input', () => {
+    expect(extractUrlsFromText('')).toEqual([]);
+  });
+
+  it('extracts a bare https URL', () => {
+    expect(extractUrlsFromText('see https://example.com for details')).toEqual([
+      'https://example.com',
+    ]);
+  });
+
+  it('strips trailing sentence punctuation', () => {
+    expect(extractUrlsFromText('check https://example.com.')).toEqual(['https://example.com']);
+    expect(extractUrlsFromText('(https://a.test/x)')).toEqual(['https://a.test/x']);
+  });
+
+  it('unwraps markdown inline links', () => {
+    expect(extractUrlsFromText('[docs](https://docs.example.com/guide)')).toEqual([
+      'https://docs.example.com/guide',
+    ]);
+  });
+
+  it('does not double-count a URL inside a markdown link', () => {
+    const text = 'before [name](https://x.test/a) after';
+    expect(extractUrlsFromText(text)).toEqual(['https://x.test/a']);
+  });
+
+  it('ignores non-http(s) schemes', () => {
+    const text = 'try ftp://nope.test or file:///etc/passwd or javascript:alert(1)';
+    expect(extractUrlsFromText(text)).toEqual([]);
+  });
+
+  it('is defensive against non-string input', () => {
+    // @ts-expect-error — intentionally wrong type to exercise guard
+    expect(extractUrlsFromText(null)).toEqual([]);
+  });
+});
+```
+
+Case matrix (`describe('extractUrlsFromText', ...)`):
+
+| Case | Asserts |
+|------|---------|
+| Empty input | Returns `[]`. |
+| No-URL text | Returns `[]`. |
+| Bare `https` | Returns `['https://example.com']`. |
+| Bare `http` | Returns `['http://foo.test/path']`. |
+| Trailing punctuation | Period, comma, closing-paren are stripped (`https://example.com.` → `https://example.com`). |
+| Markdown inline link | `[docs](https://...)` unwraps to raw href. |
+| Markdown autolink | `<https://...>` unwraps. |
+| No double-count | A URL inside a markdown link is emitted ONCE, not twice (markdown pass claims the range before the bare-URL pass). |
+| Multiple URLs in visual order | Three URLs via three different syntaxes come back in left-to-right order. |
+| Non-`http(s)` scheme filter | `ftp://`, `file:///`, `javascript:` all drop to `[]`. |
+| Multiline content | Line-split input returns both URLs. |
+| Defensive type guard | `null` and `42` return `[]` (the matcher short-circuits on `typeof text !== 'string'`). |
+
+Case matrix (`describe('extractUrlsFromMessages', ...)`):
+
+| Case | Asserts |
+|------|---------|
+| Empty transcript | `[]`. |
+| User-only transcript | `[]` (user prompts are not scanned). |
+| Mixed transcript, in order | Assistant messages contribute URLs in document order. |
+| Repeat URL across messages | De-duplicated by href, first-seen order preserved. |
+| `displayRole: 'system'` | Suppressed from the output even though `role === 'assistant'`. |
+
+**Hook dispatcher (`tests/cli/tui/useKeyboard.test.tsx`, +79 lines, 5 new cases).**
+
+The test uses `ink-testing-library` with a `TestComponent` wrapper that calls `useKeyboard(options)` inside an Ink render tree. `stdin.write('<glyph>')` synthesises a keypress; a `flush()` helper (`new Promise(r => setImmediate(r))`) drains the ink input queue so the hook's `useInput` callback runs before assertions.
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+// Context mocks (SessionContext, KeybindContext, DialogContext, SidebarContext,
+// PageContext, SubagentContext, ChatContext) are declared BEFORE importing
+// useKeyboard — see the top of tests/cli/tui/useKeyboard.test.tsx for the
+// full set.
+
+const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+it('Shift+1 invokes onOpenTranscriptUrl with index 1 (shifted-digit glyph "!")', async () => {
+  const onOpenTranscriptUrl = vi.fn();
+  const { stdin } = render(
+    <TestComponent options={{ ...defaultOptions, onOpenTranscriptUrl }} />
+  );
+  stdin.write('!');
+  await flush();
+  expect(onOpenTranscriptUrl).toHaveBeenCalledWith(1);
+});
+
+it('maps every Shift+{1..9} glyph to the correct 1-based index', async () => {
+  const onOpenTranscriptUrl = vi.fn();
+  const { stdin } = render(
+    <TestComponent options={{ ...defaultOptions, onOpenTranscriptUrl }} />
+  );
+  const shiftedDigits = '!@#$%^&*(';
+  for (let i = 0; i < shiftedDigits.length; i++) {
+    stdin.write(shiftedDigits[i]!);
+    await flush();
+  }
+  expect(onOpenTranscriptUrl).toHaveBeenCalledTimes(9);
+  for (let i = 0; i < 9; i++) {
+    expect(onOpenTranscriptUrl).toHaveBeenNthCalledWith(i + 1, i + 1);
+  }
+});
+
+it('does not call onOpenTranscriptUrl for plain digit input (no shift)', async () => {
+  const onOpenTranscriptUrl = vi.fn();
+  const { stdin } = render(
+    <TestComponent options={{ ...defaultOptions, onOpenTranscriptUrl }} />
+  );
+  stdin.write('1');
+  await flush();
+  stdin.write('5');
+  await flush();
+  expect(onOpenTranscriptUrl).not.toHaveBeenCalled();
+});
+
+it('is a no-op when onOpenTranscriptUrl is not provided', async () => {
+  const { stdin } = render(<TestComponent options={defaultOptions} />);
+  stdin.write('!');
+  await flush();
+  // Absence of a crash is the assertion — the hook MUST return early
+  // when the option is undefined.
+  expect(true).toBe(true);
+});
+```
+
+Hook test invariants:
+
+| Invariant | Case |
+|-----------|------|
+| `Shift+1` glyph (`!`) → index 1 | Single `stdin.write('!')`, assert `toHaveBeenCalledWith(1)`. |
+| `Shift+9` glyph (`(`) → index 9 | Single `stdin.write('(')`, assert `toHaveBeenCalledWith(9)`. |
+| Full glyph table maps correctly | Loop `!@#$%^&*(`, assert nine calls with indices 1..9 in order. |
+| Plain `'1'` or `'5'` without `Shift` is NOT a URL open | Neither triggers the handler — the hook only matches shifted-punctuation glyphs or `key.shift === true && input in '1'..'9'`. |
+| Handler absent → silent no-op | Omit `onOpenTranscriptUrl`; the hook returns early and does not throw. |
+
+**Why no end-to-end test for `openUrl`.** The browser-launch call is deliberately out of scope for these two suites. `openUrl` has its own test file (`tests/core/open.test.ts`) that validates the scheme allow-list and the per-platform launcher; the quick-open handler in `App.tsx` only composes `extractUrlsFromMessages` and `openUrl`, both of which are independently covered. Mocking `child_process.spawn` from a TUI render harness would couple the test to launcher behaviour that is already pinned elsewhere.
+
 ### Testing Per-Task Model Selection
 
 The `experimental.task_model_selection` flag gates the `task`, `agent_manager`, and `agent_manager_models` tools. Tests that exercise resolution paths should snapshot the flag, mutate it, and restore afterwards so per-test state does not leak. The recommended pattern:

@@ -1118,6 +1118,76 @@ alias resolution) has exactly one edit site. When adding similar
    skipped, but tests must NOT assert on log output — the warning is
    best-effort visibility, not a public contract.
 
+### TUI pure-helper + stateless hook option pattern (transcript URL quick-open)
+
+The transcript URL quick-open feature (`Shift+1..9`, commit `90837728`,
+ports upstream kilocode PR #14910) is a reference example of how to add a
+new TUI keybind without coupling the hook to transcript content. The split
+is three layers:
+
+- `src/cli/tui/utils/extractUrls.ts` — pure URL extractor. Two exports:
+  `extractUrlsFromText(text)` and `extractUrlsFromMessages(messages)`. No
+  I/O, no React, no Ink. Reusable from `tests/cli/tui/extractUrls.test.ts`
+  without any mocking, and reusable from a hypothetical non-TUI call site
+  (headless transcript export, `alexi explain`-style tooling) because the
+  `TranscriptEntry` input type is a structural subset of `MessageDisplay`
+  and does NOT import the TUI's React component types.
+- `src/cli/tui/hooks/useKeyboard.ts` — stateless hook option. New
+  `onOpenTranscriptUrl?: (index: number) => void` option. The hook decodes
+  the keypress (both shifted-punctuation glyph and `key.shift + digit`
+  conventions) and dispatches to the callback with a 1-based index. It
+  does NOT read the transcript — the "which URL is index N" and
+  "what to do when the index is out of range" concerns live in the
+  caller.
+- `src/cli/tui/App.tsx` — handler composition. A `useCallback` that reads
+  `messages`, calls `extractUrlsFromMessages`, picks the Nth entry, and
+  dispatches to `openUrl` (the shared scheme-allow-listed browser launcher
+  in `src/core/open.ts`). All error branches resolve the promise so the
+  TUI never crashes on a bad launch; user feedback is one of three system
+  messages (`No URLs in transcript to open`, `URL #N not found (transcript
+  has M)`, `Failed to open URL #N: <url>`).
+
+Follow the same shape when adding similar keybinds (open PR link, open
+file in editor, copy URL to clipboard):
+
+1. **Extractor is pure.** Keep the matcher regexes and the filter rules
+   in a `utils/` module that imports nothing from `react`, `ink`, or any
+   TUI context. Export the input type (`TranscriptEntry`) as the
+   structural shape the extractor needs, not the TUI's own render type.
+   This decouples future TUI renames (`MessageDisplay` → `TranscriptRow`,
+   etc.) from the extractor contract.
+2. **Hook is stateless.** New options on `useKeyboard` must receive their
+   state as arguments and dispatch to callbacks — the hook does NOT reach
+   into any context to read messages, scroll position, or similar. Both
+   terminal keypress conventions (`SHIFTED_DIGITS` glyph vs
+   `key.shift + digit`) are decoded inside the hook so the caller sees a
+   single 1-based `index: number`.
+3. **Handler owns UX.** The `useCallback` in `App.tsx` is the only place
+   that composes the extractor and the launcher. All three failure
+   outcomes (empty transcript, out-of-range index, launch failure)
+   produce a system message through `addSystemMessage`; none throw out of
+   the handler. `logger.debug` records the exception detail without
+   bothering the user.
+4. **Help entry is unconditional.** `getHelpEntries()` in
+   `src/cli/tui/utils/helpEntries.ts` gets one row with
+   `condition: null` so the help overlay (`?`, `Ctrl+/`, `leader+h`)
+   always lists the binding. Avoid `condition: '<feature flag>'` strings
+   that users would see without knowing how to flip the flag.
+5. **Two independent test files.** Pure extractor tests go next to the
+   module (`tests/cli/tui/extractUrls.test.ts`); hook dispatcher tests go
+   under `tests/cli/tui/useKeyboard.test.tsx` with `ink-testing-library`
+   and the `stdin.write(...) + flush()` pattern. Do NOT fold the two into
+   a single integration test — the extractor would then need the Ink
+   render harness to exercise its matchers, which hides defects behind
+   render-order flakes.
+
+Both terminal keypress conventions MUST be covered in the hook test.
+Linux and macOS terminals typically deliver `Shift+1` as the glyph `!`
+with `key.shift === false`; terminal multiplexers (tmux, screen) and
+Windows Terminal often deliver the digit `'1'` with `key.shift === true`.
+Omitting either path means the keybind silently fails on half the user
+base.
+
 ### Normalizing serialized-empty-string quirks (`normalizeMovePath` style)
 
 Upstream ports frequently need to guard against fields that survive JSON

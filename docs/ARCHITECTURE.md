@@ -5060,6 +5060,144 @@ Correctness invariant: for any single call, `incrementalLinkifier(text)` is byte
 
 Performance: on a synthetic 2000-chunk workload (mixed URL / `path:line` / progress lines), the incremental path is 5-20x faster than repeated `linkify()` calls; the test suite asserts a conservative 1.5x lower bound to stay stable under CI variance.
 
+## TUI Transcript URL Quick-Open (Shift+{1-9})
+
+Since commit `90837728 feat(cli): add Shift+number shortcuts to open transcript URLs` (ports upstream kilocode PR #14910) the Ink TUI exposes `Shift+1`..`Shift+9` as a quick-open keybind that launches the Nth distinct `http(s)` URL from the current transcript in the user's default browser. The feature is composed of three cleanly separated layers so the matcher is reusable from tests and non-TUI call sites, the hook stays stateless with respect to transcript content, and the browser-launch path reuses the shared `openUrl` scheme allow-list introduced earlier in `src/core/open.ts`.
+
+```mermaid
+flowchart LR
+    KeyPress[Shift+N keypress]
+    Hook[useKeyboard<br/>src/cli/tui/hooks/useKeyboard.ts]
+    App[handleOpenTranscriptUrl<br/>src/cli/tui/App.tsx]
+    Extract[extractUrlsFromMessages<br/>src/cli/tui/utils/extractUrls.ts]
+    Open[openUrl<br/>src/core/open.ts]
+    Browser[Default browser]
+    System[addSystemMessage<br/>transcript hint]
+
+    KeyPress --> Hook
+    Hook -->|1-based index| App
+    App --> Extract
+    Extract -->|ordered, deduped URLs| App
+    App -->|index in range| Open
+    Open --> Browser
+    App -->|index out of range<br/>or no URLs| System
+    Open -.->|launcher error| System
+```
+
+### Keybind decoding (`src/cli/tui/hooks/useKeyboard.ts:80-99`)
+
+The hook accepts an optional `onOpenTranscriptUrl?: (index: number) => void` option and dispatches on it exactly when all of the following hold:
+
+- `onOpenTranscriptUrl` is defined (handler is wired).
+- `keybindState.leaderActive === false` — leader mode owns its own key dispatch table and MUST NOT compete with transcript URL quick-open.
+- `key.ctrl === false && key.meta === false` — `Ctrl+Shift+<digit>` and `Meta+Shift+<digit>` are reserved for future keybinds and are left untouched.
+
+Two reporting conventions are supported — terminals do not agree on how `Shift+<digit>` is encoded, and the hook accepts both so the keybind works on Linux terminals, macOS Terminal.app and iTerm2, WezTerm, Ghostty, Windows Terminal, and inside tmux / screen multiplexers:
+
+| Convention | Example (`Shift+1`) | Example (`Shift+9`) | `key.shift` | Decoder |
+|------------|---------------------|---------------------|-------------|---------|
+| Shifted-punctuation glyph (US QWERTY) | `!` | `(` | `false` | `SHIFTED_DIGITS.indexOf(input)` where `SHIFTED_DIGITS = '!@#$%^&*('` |
+| Digit with Shift modifier | `'1'` | `'9'` | `true` | `Number.parseInt(input, 10)` |
+
+Both paths resolve to a 1-based index and call `onOpenTranscriptUrl(index)` then `return` so no downstream keybind sees the same event. The `SHIFTED_DIGITS` constant deliberately covers only `1`..`9` — `Shift+0` is not a URL slot (and is `)` on US QWERTY, which the matcher does not list).
+
+### URL extraction (`src/cli/tui/utils/extractUrls.ts`)
+
+Two pure helpers, both exported for direct re-use:
+
+```typescript
+export function extractUrlsFromText(text: string): string[];
+
+export interface TranscriptEntry {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  displayRole?: 'user' | 'assistant' | 'system';
+}
+export function extractUrlsFromMessages(messages: readonly TranscriptEntry[]): string[];
+```
+
+`extractUrlsFromText(text)` runs three regex passes in a single scan and returns URLs in visual (left-to-right, top-to-bottom) order:
+
+1. **Markdown inline link** — `/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g`. Captures the raw href and records the full match range (so the bare-URL pass does not re-emit the same href).
+2. **Markdown autolink** — `/<(https?:\/\/[^\s>]+)>/g`. Same treatment.
+3. **Bare http(s) URL** — `/\bhttps?:\/\/[^\s<>`"'()]+/g`. Stops at whitespace, angle brackets, backticks, parentheses, and quotes so markdown fences and inline-code delimiters are not swallowed. The pass skips any range already consumed by passes 1 and 2.
+
+Each match goes through `cleanAndFilter(url)`:
+
+- `stripTrailingPunctuation(url)` — removes a trailing run of `.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `}`, `>` so the URL does not keep sentence punctuation. Example: `See https://example.com.` → `https://example.com` (the period stays in the surrounding text, not in the URL).
+- The result is validated against `^https?:\/\//i` and discarded otherwise. Non-`http(s)` schemes (`ftp://`, `file://`, `javascript:alert(1)`, `mailto:`, `tel:`) are suppressed at this boundary — they would also be rejected by `openUrl`, but filtering here keeps the quick-open index tight.
+
+Non-string input (`null`, `undefined`, `number`) short-circuits to `[]` via a `typeof text !== 'string'` guard.
+
+`extractUrlsFromMessages(messages)` layers transcript policy on top:
+
+- `msg.displayRole === 'system'` → skip. Matches `MessageArea.tsx`'s own filter so URLs the TUI hides from the user are not quick-openable.
+- `msg.role !== 'assistant'` → skip. User-authored URLs are deliberately not reachable through this binding — the feature's intent is "open URLs the model mentioned", not "open URLs the user pasted".
+- URLs are de-duplicated across messages via a `Set<string> + ordered[]` pair so the ordered list contains each href at most once in first-seen order. `Shift+1` therefore always refers to the first distinct URL regardless of how many times the model cited it.
+
+### Handler composition (`src/cli/tui/App.tsx:318-342`)
+
+The `AppLayout` component owns the transcript (`messages: MessageDisplay[]`) and the system-message helper (`addSystemMessage`). It composes a `useCallback` handler and passes it into `useKeyboard` through the new option:
+
+```tsx
+const handleOpenTranscriptUrl = useCallback(
+  (index: number): void => {
+    const urls = extractUrlsFromMessages(messages);
+    const url = urls[index - 1];
+    if (url === undefined) {
+      if (urls.length === 0) {
+        addSystemMessage('No URLs in transcript to open');
+      } else {
+        addSystemMessage(`URL #${index} not found (transcript has ${urls.length})`);
+      }
+      return;
+    }
+    void openUrl(url).catch((err: unknown) => {
+      logger.debug(
+        `Failed to open transcript URL #${index}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      addSystemMessage(`Failed to open URL #${index}: ${url}`);
+    });
+  },
+  [messages, addSystemMessage]
+);
+```
+
+Three observable outcomes. All three are strictly non-crashing — a bad `openUrl` throw never bubbles out of the TUI event loop:
+
+| Case | User-facing effect |
+|------|--------------------|
+| URL at `index` resolves | Browser launches via `openUrl` (fire-and-forget `detached` spawn). No transcript message. |
+| Transcript is empty of URLs | System message `No URLs in transcript to open` appears inline. |
+| Index exceeds URL count (e.g. `Shift+5` with 2 URLs) | System message `URL #5 not found (transcript has 2)`. |
+| `openUrl` rejects (unsupported scheme reaches `openUrl`, no launcher found, spawn failure) | `logger.debug` records the exception; system message `Failed to open URL #<index>: <url>`. |
+
+Re-extraction on every press is intentional: URLs are cheap to re-match (the regex passes are linear in text length, and transcripts stay in the single-digit megabytes), the extractor has no cache invalidation hazard, and the memoisation surface shrinks to zero.
+
+### Help overlay integration (`src/cli/tui/utils/helpEntries.ts:39-44`)
+
+`getHelpEntries()` adds one entry:
+
+```typescript
+{
+  key: 'Shift+1..9',
+  description: 'Open the Nth transcript URL in browser',
+  category: 'chat',
+  condition: null,
+}
+```
+
+The entry is unconditional (`condition: null`), so the help overlay (`?`, `Ctrl+/`, `leader+h`) lists the binding whenever the TUI is running. It sorts alongside the existing `chat` category entries — `Enter`, `Shift+Enter`, `Ctrl+C`, `Ctrl+L`, `Ctrl+S` (subagent steering), and `Escape`.
+
+### Why only `http(s)` and only assistant messages
+
+- Only `http:` and `https:` are allowed. `openUrl` itself enforces a scheme allow-list (see `src/core/open.ts`) to prevent `javascript:`, `file://`, `ms-msdt:`, and UNC-path injection from LLM output. Filtering at `extractUrlsFromText` keeps the quick-open index from containing entries that would always fail the launcher, so the Nth-URL mapping is stable across TUI themes and does not shift when a model emits a `file://` link in the middle of a response.
+- Only `assistant`-role messages are scanned. User prompts frequently contain URLs the user is already looking at (and often pasted intentionally for context), so surfacing them under `Shift+<digit>` would duplicate the clipboard, not add value. Hidden instrumentation messages (`displayRole: 'system'`) are filtered because they are not displayed in the transcript — their URLs would appear in the quick-open list without any visible referent, which is confusing.
+
+### Interaction with the output linkifier
+
+The transcript URL quick-open path is independent of the OSC-8 output linkifier (`src/cli/tui/utils/linkify.ts`). The linkifier wraps URLs in tool-output rows with terminal-level hyperlink escapes so a mouse-click opens the URL in supporting terminals; the quick-open binding operates on the full transcript (assistant messages, not tool outputs) and does not require OSC-8 support. On a non-OSC-8 terminal where `linkify()` degrades to plain text, `Shift+1..9` still works unchanged — it is a keyboard binding, not a terminal capability.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
