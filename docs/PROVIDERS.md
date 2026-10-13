@@ -3634,6 +3634,60 @@ Contract pinned by `src/providers/provider.test.ts` (six cases):
 
 The wrapper is a plain function, so it can be dropped into any SDK that accepts a custom `fetch` implementation.
 
+## Provider HTTP Transport Settings (`src/providers/http-transport.ts`)
+
+Introduced in commit `ab25e0f8` (2026-10-13 upstream sync, ports opencode PRs `#55032` and `#55007`). Centralises the two cross-cutting HTTP knobs that otherwise got scattered across provider modules: the per-chunk streaming timeout for long-running SAP AI Core reasoning turns, and the Bun `fetch` idle-timeout disable flag. Both knobs are compatible with SAP AI Core because the gateway preserves the upstream model's streaming behaviour verbatim — the timeout contract is identical to a direct provider call.
+
+### `DEFAULT_CHUNK_TIMEOUT`
+
+```typescript
+// src/providers/http-transport.ts
+export const DEFAULT_CHUNK_TIMEOUT = 900_000; // 15 minutes
+```
+
+Maximum time a stream may idle between chunks before the caller aborts. SAP AI Core enterprise models (`gpt-5`, `anthropic--claude-opus-*` via SAP) routinely take > 5 min for complex reasoning turns; the previous 5-minute default caused spurious mid-stream failures. 15 minutes matches the opencode default from PR `#55032`. Callers that want "never time out" pass `0` or a negative number to their stream wrapper. Unit tests and cheap-model paths pass an explicit tighter override.
+
+### `withBunIdleTimeoutDisabled(baseOptions)`
+
+```typescript
+// src/providers/http-transport.ts
+export function withBunIdleTimeoutDisabled<T extends RequestInit>(
+  baseOptions: T
+): T & { idleTimeout: number };
+```
+
+Builds fetch options that disable Bun's default fetch idle timeout. Bun injects a non-standard `idleTimeout` option on `fetch` that silently closes sockets after a fixed idle window, causing streaming provider responses to fail with `ECONNRESET` while the model is still reasoning. Setting `idleTimeout: 0` disables the Bun-specific cap.
+
+Under Node the extra `idleTimeout` key is ignored because the standard `fetch()` implementation drops unknown init keys — the helper is a no-op on Node and only takes effect under Bun. Mirrors opencode PR `#55007`.
+
+### Wiring in `buildFetch`
+
+The provider fetch wrapper in `src/providers/provider.ts` threads the init through `withBunIdleTimeoutDisabled` before every outbound call:
+
+```typescript
+// src/providers/provider.ts
+import { withBunIdleTimeoutDisabled } from './http-transport.js';
+
+// Inside buildFetch(opts).return (input, init):
+const callerSignal = init?.signal ?? undefined;
+const signal = callerSignal ? anySignal([callerSignal, controller.signal]) : controller.signal;
+
+// Thread init through `withBunIdleTimeoutDisabled` so Bun's default
+// fetch idle-timeout cannot silently cut long-running SAP AI Core
+// streams while the model is still reasoning. No-op under Node.
+const bunSafeInit = withBunIdleTimeoutDisabled({ ...init, signal });
+
+return globalThis
+  .fetch(input as RequestInfo, bunSafeInit)
+  .finally(() => clearTimeout(timer));
+```
+
+The behaviour change is strictly additive and only observable under Bun — a Node runtime sees byte-identical fetch options. The `AbortSignal.any` composition, the `unref`'d timeout timer, the "timeout <= 0 disables wrapping entirely" short-circuit, and the preserved caller-abort reason are all unchanged.
+
+### Why this is a dedicated module
+
+Both constants are called from multiple provider modules (the `buildFetch` wrapper for the single-shot request path, and stream-chunk watchers that enforce per-chunk deadlines on the streaming path). Keeping them in `src/providers/http-transport.ts` means a future bump — say moving from 15 min to 30 min when SAP AI Core onboards an even slower reasoning model — happens in exactly one place with no risk of a provider silently retaining the old value.
+
 ## Reasoning Finalize on Stream Retry
 
 Introduced in commit `b591e606` (2026-10-06 upstream sync, ports kilocode `54eacd5ff`). SAP AI Core streams through the orchestration provider routinely surface transient failures on reasoning-heavy models (socket hang up, premature close, ETIMEDOUT). The shared `withRetry` wrapper in `src/core/session/retry.ts` now carries an optional `onRetry(attempt, error)` hook that is awaited BEFORE the backoff sleep, so a caller can finalize any in-flight reasoning / thinking block before the next attempt opens a fresh stream.

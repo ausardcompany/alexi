@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`experimental.glob_include_ignored` allowlist** (`src/config/userConfig.ts` +60 lines, `src/tool/glob-ignored.ts` +63 lines new, `src/tool/glob.ts` thin façade, `src/tool/tools/glob.ts` wiring +12 lines, `src/tool/tools/grep.ts` `includeGlobs` param +18 lines) (commit `ab25e0f8 feat(sync): apply upstream changes (2026-10-13)`, net `6 files changed, 299 insertions(+), 10 deletions(-)`). Mirrors upstream kilocode's `experimental.glob_include_ignored` (`packages/core/src/v1/config/config.ts` + `packages/opencode/src/kilocode/tool/glob-ignored.ts`) — a workspace-relative allowlist of folders or exact files that the `glob` tool should search even when they are ignored by `.gitignore` or hidden. Nested ignored folders inside an allowlisted folder stay skipped so the opt-in is scoped and does not globally disable ignore handling.
+
+  Config read / write helpers in `src/config/userConfig.ts`:
+
+  - `getConfigGlobIncludeIgnored(): string[]` returns the raw allowlist from `experimental.glob_include_ignored` in `~/.alexi/config.json`. Defensive: returns `[]` when `experimental` is missing, non-object, an array, or when `glob_include_ignored` is not an array. Non-string entries are filtered out so downstream resolvers never see `undefined`.
+  - `setConfigGlobIncludeIgnored(patterns: string[]): void` persists the allowlist while preserving sibling `experimental.*` flags. Rejects non-array input and non-string entries with a hard error at the config layer rather than letting malformed entries flow into ripgrep arguments.
+
+  Pattern resolver in `src/tool/glob-ignored.ts`:
+
+  - `resolveAllowlist(patterns, cwd): IgnoredAllowlist` turns the user-facing patterns into ripgrep `--glob=` include patterns. Blank lines and `#`-prefixed comment lines are ignored. A pattern without a `/` matches a folder named `<pattern>` at any depth and emits both `**/<pattern>/**` (contents) and `**/<pattern>` (the folder entry itself). A pattern with a `/` is treated as workspace-relative and gets a trailing `/**` appended so a bare `build/` opts the entire subtree back in. When the resolved include set is non-empty, `noRequireGit: true` is set so ripgrep's ignore-file handling still runs even if the search root is outside a git working tree.
+  - `IgnoredAllowlist` is exported through the `src/tool/glob.ts` façade alongside `globTool`, `GLOB_SEARCH_TIMEOUT_MS`, and `extendGlobPattern` so upstream ports targeting the opencode / kilocode layout at `src/tool/glob.ts` land cleanly.
+
+  Tool wiring in `src/tool/tools/glob.ts`:
+
+  - The `glob` tool now resolves the allowlist once per invocation (immediately before the bounded traversal deadline) and surfaces the resolved patterns on the `GlobResult` as `includeIgnored?: readonly string[]` when non-empty, both on successful responses and on timeout responses. The current JS walker does not yet apply `.gitignore` filtering, so the field is a forward-compatible signal consumed by callers that layer their own ignore logic (notably the ripgrep-backed `grep` tool).
+
+  Ripgrep wiring in `src/tool/tools/grep.ts`:
+
+  - `RgExecuteOptions` gains an `includeGlobs?: readonly string[]` field. Each entry is forwarded to `rg` as `--glob=<pattern>` (no leading `!`), applied AFTER the existing exclude flags so a denylist still trumps an allowlist. Mirrors upstream opencode's ripgrep `include` option (`packages/core/src/ripgrep.ts`).
+
+  See [docs/CONFIGURATION.md — Experimental Glob Include-Ignored Allowlist](docs/CONFIGURATION.md#experimental-glob-include-ignored-allowlist-experimentalglob_include_ignored) for the config shape, pattern-expansion rules, and example matrix.
+
+- **Per-provider `compatibility` block (`compatibility.cacheFormat`, `compatibility.cacheKey`, `compatibility.body.encoding`)** (`src/config/userConfig.ts` +60 lines) (commit `ab25e0f8`, ports opencode PRs `#54945` and `#54911`). New `ProviderCompatibility` TypeScript interface and `getProviderCompatibility(providerId)` reader on top of `providers.<id>.compatibility` in `~/.alexi/config.json`. The block lets the SAP-fronted Claude integration toggle Anthropic-style prompt-cache breakpoints independently of what a direct Anthropic API call would do, which matters when SAP AI Core sits in front of a Claude deployment that is itself behind a corporate gateway that strips cache-control headers.
+
+  Shape stored under `providers.<id>.compatibility`:
+
+  ```json
+  {
+    "providers": {
+      "anthropic--claude-4.7-opus": {
+        "compatibility": {
+          "cacheFormat": "anthropic",
+          "cacheKey": true,
+          "body": { "encoding": "json" }
+        }
+      }
+    }
+  }
+  ```
+
+  Reader semantics (`getProviderCompatibility(providerId): ProviderCompatibility`):
+
+  - Returns an empty object (NOT `undefined`) when `providers` is missing, non-object, an array, or when the id has no entry — callers can safely use optional chaining without a null guard.
+  - `cacheFormat` is only accepted as the string literal `'anthropic'` or `'none'`; any other value is silently dropped so a malformed config cannot flip the branch to an undefined behaviour.
+  - `cacheKey` is only accepted as a boolean. The reader also migrates the legacy top-level `setCacheKey` flag (upstream opencode PR `#54911`) into `compatibility.cacheKey` on read when `compatibility.cacheKey` is not explicitly set — writes stay in the new shape so the migration converges on the next persistence pass.
+  - `body.encoding` is only accepted as the string literal `'json'` or `'form'`; the surrounding `body` key is omitted when the encoding is absent or invalid.
+
+- **`src/providers/http-transport.ts` — centralised chunk-timeout and Bun idle-timeout controls** (`src/providers/http-transport.ts` +61 lines new, `src/providers/provider.ts` +8 / -2 lines wiring) (commit `ab25e0f8`, ports opencode PRs `#55032` and `#55007`). New module that centralises the two cross-cutting HTTP knobs that otherwise got scattered across provider modules: the per-chunk streaming timeout for long-running SAP AI Core reasoning turns, and the Bun fetch idle-timeout disable flag.
+
+  - `DEFAULT_CHUNK_TIMEOUT = 900_000` (15 minutes). Default maximum idle time between stream chunks before the caller aborts. SAP AI Core enterprise models (gpt-5, claude-opus via SAP) routinely take > 5 min for complex reasoning turns; the previous 5-minute default caused spurious mid-stream failures. Matches the opencode default from PR `#55032`. Callers that want "never time out" pass `0` or a negative number; unit tests and cheap-model paths pass an explicit tighter override.
+  - `withBunIdleTimeoutDisabled<T extends RequestInit>(baseOptions: T): T & { idleTimeout: number }` merges `idleTimeout: 0` into the fetch init so Bun's default fetch idle-timeout cannot silently close sockets while a model is still reasoning. Under Node the extra `idleTimeout` key is ignored by `fetch`, so the helper is a no-op there and only takes effect under Bun. Mirrors opencode PR `#55007`.
+
+  Provider fetch wrapper in `src/providers/provider.ts` now threads the init through `withBunIdleTimeoutDisabled({ ...init, signal })` before the single `globalThis.fetch` call inside `buildFetch`. The `AbortSignal.any` composition, the `unref`'d timeout timer, the "timeout <= 0 disables wrapping entirely" short-circuit, and the preserved caller-abort reason are all unchanged. The behaviour change is strictly additive and only observable under Bun — a Node runtime sees byte-identical fetch options.
+
+  See [docs/PROVIDERS.md — Provider HTTP Transport Settings (`src/providers/http-transport.ts`)](docs/PROVIDERS.md#provider-http-transport-settings-srcprovidershttp-transportts) for the full contract and interaction with the existing `buildFetch` wrapper.
+
 ### Fixed
 
 - **Prettier reflow on the `dominantLineEnding` ternary in the `edit` tool** (commit `343454d9 style(ci): auto-fix lint/format issues [alexi-bot]`, `1 file changed, 1 insertion(+), 2 deletions(-)`). Autoheal pass from the CI format/lint job. The mixed-EOL dominant-line-ending derivation at `src/tool/tools/edit.ts:88-89` previously spanned two lines (`const dominantLineEnding: '\n' | '\r\n' =\n        !isMixed && crlfCount > 0 ? '\r\n' : '\n';`) and was collapsed by Prettier onto a single 92-column line (`const dominantLineEnding: '\n' | '\r\n' = !isMixed && crlfCount > 0 ? '\r\n' : '\n';`) because the collapsed form fits under `printWidth: 100`. Same collapse-direction rule as the 2026-09-17 `isCurrentExplicit` reflow in `src/core/modelPreference.ts:66-70` applied to a `const` initialiser whose right-hand side is a boolean-`&&`/ternary chain. No semantic change: the mixed-EOL classification (`crlfCount > 0 && lfOnlyCount > 0` → `'mixed'`; else `'crlf'` when CRLF-only, else `'lf'`) and the dominant-ending selection (LF for `'mixed'` and `'lf'`, CRLF only for pure-CRLF files) are byte-identical. The downstream contract — mixed-EOL files written by Windows tooling under Git `core.autocrlf` are NOT silently normalised to CRLF, and non-edited regions remain byte-identical — is preserved verbatim per the module header at `src/tool/tools/edit.ts:67-81` referencing upstream `0cb43477 fix(core): preserve mixed line endings in edit tool`. No new tests were added — the existing `tests/tool/edit.test.ts` cases that pin the mixed-EOL preservation contract continue to pass. Operators do not need to take any action on upgrade. See [docs/CONTRIBUTING.md — Style Auto-Fix](docs/CONTRIBUTING.md#style-auto-fix) for the standing convention on single-line ternary collapses.
