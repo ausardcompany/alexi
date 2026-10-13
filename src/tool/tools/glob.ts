@@ -6,8 +6,9 @@ import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { defineTool, type ToolResult } from '../index.js';
+import { resolveAllowlist } from '../glob-ignored.js';
 import { getReferenceService } from '../../reference/reference.js';
-import { getIndexingExtensions } from '../../config/userConfig.js';
+import { getConfigGlobIncludeIgnored, getIndexingExtensions } from '../../config/userConfig.js';
 import { isUnsafeWorkspaceRoot, UNSAFE_WORKSPACE_ROOT_MESSAGE } from '../../utils/filesystem.js';
 
 const GlobParamsSchema = z.object({
@@ -33,6 +34,14 @@ interface GlobResult {
    * paths can flag partial results without conflating the two.
    */
   truncated?: boolean;
+  /**
+   * Reports the resolved `experimental.glob_include_ignored` allowlist
+   * applied to this search, when any. Surfaced so a UI/log consumer can
+   * confirm which ignored or hidden paths were opted back in. Mirrors
+   * upstream kilocode's opt-in allowlist (PR added to
+   * `packages/opencode/src/kilocode/tool/glob-ignored.ts`).
+   */
+  includeIgnored?: readonly string[];
 }
 
 /**
@@ -282,6 +291,16 @@ When independent reads, searches, or edits are also needed, emit those tool call
       const additionalExtensions = getIndexingExtensions(context.workdir);
       const effectivePattern = extendGlobPattern(params.pattern, additionalExtensions);
 
+      // Resolve the user's optional `experimental.glob_include_ignored`
+      // allowlist. When present, the search opts the listed folders/files
+      // back in even if they would normally be skipped by `.gitignore`
+      // or hidden-folder rules. Mirrors upstream kilocode's opt-in
+      // allowlist. We currently surface the resolved includes in the
+      // result metadata; the Alexi JS walker does not yet apply
+      // `.gitignore` filtering, so the allowlist is a forward-compatible
+      // signal consumed by callers that layer their own ignore logic.
+      const allowlist = resolveAllowlist(getConfigGlobIncludeIgnored(), context.workdir);
+
       // Bound the traversal with a deadline so a hung filesystem call
       // cannot stall an agent turn indefinitely. Mirrors kilocode's
       // upstream ripgrep timeout fix (PR #13805): on timeout we surface a
@@ -331,6 +350,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
             count: 0,
             timedOut: true,
             truncated: true,
+            ...(allowlist.include.length > 0 ? { includeIgnored: allowlist.include } : {}),
           },
         };
       }
@@ -358,6 +378,7 @@ When independent reads, searches, or edits are also needed, emit those tool call
         data: {
           matches: relativePaths,
           count: matches.length,
+          ...(allowlist.include.length > 0 ? { includeIgnored: allowlist.include } : {}),
         },
       };
     } catch (err) {

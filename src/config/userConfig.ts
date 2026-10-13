@@ -793,6 +793,126 @@ export function setConfigCodeMode(enabled: boolean): void {
 }
 
 /**
+ * Experimental feature flag: `glob_include_ignored` — a workspace-relative
+ * allowlist of folders (or exact files) that the glob tool should search
+ * even when they are ignored by `.gitignore` or hidden.
+ *
+ * Mirrors upstream kilocode's `experimental.glob_include_ignored`
+ * (packages/core/src/v1/config/config.ts). Patterns without a slash match
+ * folders at any depth; patterns with a slash are workspace-relative.
+ * Nested ignored folders inside an allowlisted folder stay skipped.
+ *
+ * Returns an empty array when the flag is absent, non-array, or any
+ * other invalid shape — the glob tool treats that as "no allowlist".
+ */
+export function getConfigGlobIncludeIgnored(): string[] {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return [];
+  }
+  const value = (experimental as Record<string, unknown>).glob_include_ignored;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  // Filter non-strings defensively; downstream `resolveAllowlist` trims
+  // and comment-strips, but we must not emit `undefined` entries here.
+  return value.filter((v): v is string => typeof v === 'string');
+}
+
+/**
+ * Persist the `experimental.glob_include_ignored` allowlist. The caller
+ * is responsible for validating entries beyond "must be a string" — the
+ * downstream `resolveAllowlist` tolerates blanks and `#` comments.
+ */
+export function setConfigGlobIncludeIgnored(patterns: string[]): void {
+  if (!Array.isArray(patterns)) {
+    throw new Error('experimental.glob_include_ignored must be an array of strings');
+  }
+  const normalized = patterns.map((p) => {
+    if (typeof p !== 'string') {
+      throw new Error('experimental.glob_include_ignored entries must be strings');
+    }
+    return p;
+  });
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, glob_include_ignored: normalized };
+  saveFullConfig(config);
+}
+
+/**
+ * Compatibility settings per provider. Mirrors opencode PR #54945 /
+ * #54911 which introduced per-provider `compatibility.cacheFormat` and
+ * `compatibility.cacheKey` knobs. Allows the SAP Claude integration to
+ * toggle Anthropic-style cache breakpoints independently of what the
+ * direct Anthropic API would do.
+ *
+ * Shape stored under `providers.<id>.compatibility`:
+ *   {
+ *     cacheFormat?: 'anthropic' | 'none',
+ *     cacheKey?: boolean,
+ *     body?: { encoding?: 'json' | 'form' }
+ *   }
+ */
+export type ProviderCacheFormat = 'anthropic' | 'none';
+
+export interface ProviderCompatibility {
+  cacheFormat?: ProviderCacheFormat;
+  cacheKey?: boolean;
+  body?: {
+    encoding?: 'json' | 'form';
+  };
+}
+
+/**
+ * Read the compatibility block for a given provider id. Returns an empty
+ * object (not undefined) so callers can safely use optional chaining
+ * without a null check. Also migrates the legacy `setCacheKey` flag
+ * (upstream opencode PR #54911) into `compatibility.cacheKey` on read —
+ * writes stay in the new shape.
+ */
+export function getProviderCompatibility(providerId: string): ProviderCompatibility {
+  const config = loadFullConfig();
+  const providers = config.providers;
+  if (!providers || typeof providers !== 'object' || Array.isArray(providers)) {
+    return {};
+  }
+  const entry = (providers as Record<string, unknown>)[providerId];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return {};
+  }
+  const raw = entry as Record<string, unknown>;
+  const compat: ProviderCompatibility = {};
+  const rawCompat = raw.compatibility;
+  if (rawCompat && typeof rawCompat === 'object' && !Array.isArray(rawCompat)) {
+    const c = rawCompat as Record<string, unknown>;
+    if (c.cacheFormat === 'anthropic' || c.cacheFormat === 'none') {
+      compat.cacheFormat = c.cacheFormat;
+    }
+    if (typeof c.cacheKey === 'boolean') {
+      compat.cacheKey = c.cacheKey;
+    }
+    if (c.body && typeof c.body === 'object' && !Array.isArray(c.body)) {
+      const b = c.body as Record<string, unknown>;
+      if (b.encoding === 'json' || b.encoding === 'form') {
+        compat.body = { encoding: b.encoding };
+      }
+    }
+  }
+  // Legacy migration: `providers.<id>.setCacheKey` -> compatibility.cacheKey.
+  if (compat.cacheKey === undefined && typeof raw.setCacheKey === 'boolean') {
+    compat.cacheKey = raw.setCacheKey;
+  }
+  return compat;
+}
+
+/**
  * Experimental feature flag: `contextTools` — expose `context_inspect` and
  * `context_summarize` tools so the agent can introspect its own token budget
  * and proactively request compaction before overflow.

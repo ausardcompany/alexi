@@ -345,6 +345,15 @@ export interface RgExecuteOptions {
    */
   exclude?: readonly string[];
   /**
+   * Additional whitelist glob patterns to INCLUDE. Each entry is passed
+   * to rg as `--glob=<pattern>` (no leading `!`). Used by the
+   * `experimental.glob_include_ignored` allowlist so specific
+   * ignored/hidden folders (e.g. `build/`, `node_modules/some-pkg/`)
+   * can be opted back into the search. Mirrors upstream opencode's
+   * ripgrep `include` option (`packages/core/src/ripgrep.ts`).
+   */
+  includeGlobs?: readonly string[];
+  /**
    * When true, pass `--no-require-git` so rg honors `.gitignore` /
    * `.ignore` files even when the search root is not inside a git
    * working tree. Mirrors the suggestion-scan behavior upstream now
@@ -371,7 +380,7 @@ async function executeWithRg(
           signal,
         }
       : patternOrOpts;
-  const { pattern, searchDir: dir, include: inc, signal: sig, exclude, noRequireGit } = opts;
+  const { pattern, searchDir: dir, include: inc, signal: sig, exclude, includeGlobs, noRequireGit } = opts;
   const args: string[] = ['--json', '--no-heading', '--line-number', '--no-messages', '--stats'];
   if (noRequireGit) {
     // Upstream kilocode 93519a31c: honor `.gitignore` / `.ignore` files
@@ -393,6 +402,13 @@ async function executeWithRg(
   if (exclude && exclude.length > 0) {
     for (const glob of exclude) {
       args.push(`--glob=!${glob}`);
+    }
+  }
+  // Upstream opencode allowlist: additional whitelist globs opt specific
+  // ignored/hidden paths back in. Emitted as `--glob=<pattern>` (no `!`).
+  if (includeGlobs && includeGlobs.length > 0) {
+    for (const glob of includeGlobs) {
+      args.push(`--glob=${glob}`);
     }
   }
   if (inc) {
