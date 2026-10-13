@@ -125,8 +125,6 @@ export function buildFetch(opts: BuildFetchOptions = {}): FetchLike {
     // Mirrors opencode PR #55007.
     const bunSafeInit = withBunIdleTimeoutDisabled({ ...init, signal });
 
-    return globalThis
-      .fetch(input as RequestInfo, bunSafeInit)
-      .finally(() => clearTimeout(timer));
+    return globalThis.fetch(input as RequestInfo, bunSafeInit).finally(() => clearTimeout(timer));
   };
 }

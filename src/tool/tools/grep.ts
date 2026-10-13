@@ -380,7 +380,15 @@ async function executeWithRg(
           signal,
         }
       : patternOrOpts;
-  const { pattern, searchDir: dir, include: inc, signal: sig, exclude, includeGlobs, noRequireGit } = opts;
+  const {
+    pattern,
+    searchDir: dir,
+    include: inc,
+    signal: sig,
+    exclude,
+    includeGlobs,
+    noRequireGit,
+  } = opts;
   const args: string[] = ['--json', '--no-heading', '--line-number', '--no-messages', '--stats'];
   if (noRequireGit) {
     // Upstream kilocode 93519a31c: honor `.gitignore` / `.ignore` files
