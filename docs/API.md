@@ -1256,6 +1256,20 @@ The TUI provides Tab completion for:
 - **Model names**: After `/model `, Tab completes against the **live catalog** (`src/providers/modelCatalog.ts`) when it has loaded, falling back to `ORCHESTRATION_MODELS` while the first refresh is still in flight. Autocomplete never blocks on network I/O.
 - **File paths**: After `/export ` or `/import `, Tab completes paths
 
+### Transcript URL Quick-Open (Shift+1..9)
+
+In the Ink TUI, `Shift+1` through `Shift+9` open the Nth distinct `http(s)` URL from the current transcript in the user's default browser. Only URLs from assistant-authored messages are indexed; user prompts and hidden instrumentation (`displayRole: 'system'`) are skipped. URLs are de-duplicated across the transcript by href while preserving first-seen order so `Shift+1` always refers to the first distinct URL regardless of how many times the model repeated it.
+
+Markdown inline links (`[text](https://...)`) and autolinks (`<https://...>`) are unwrapped to the raw href; trailing sentence punctuation is stripped. Non-`http(s)` schemes (`ftp://`, `file://`, `javascript:`, `mailto:`) are filtered out at the matcher boundary — they would also be rejected by the `openUrl` scheme allow-list, so excluding them keeps the Nth-URL mapping stable.
+
+The keybind works regardless of how the terminal reports `Shift+<digit>`:
+- Shifted-punctuation glyph (US QWERTY): `!` = Shift+1, `@` = Shift+2, ..., `(` = Shift+9.
+- Digit with Shift modifier (Windows Terminal, some multiplexers): raw `'1'`..`'9'` with `key.shift === true`.
+
+Error UX: `Shift+<N>` on a transcript with no URLs emits `No URLs in transcript to open` as a system message; an out-of-range index emits `URL #<N> not found (transcript has <count>)`; a browser-launch failure emits `Failed to open URL #<N>: <url>` and records the underlying error at `debug` level in the shared logger.
+
+See `docs/ARCHITECTURE.md#tui-transcript-url-quick-open-shift19` for the composition, and the **TUI Transcript URL Quick-Open (Shift+1..9)** API section below for the public helpers.
+
 ### File mentions (`@` references)
 
 Since v1.22.4, `@`-file mentions in user messages, custom command templates, and any other input that flows through `parseFileMentions()` support **three forms** (`src/utils/file-mention.ts:parseFileMentions`):
@@ -4009,6 +4023,147 @@ export function supportsHyperlinks(stream?: NodeJS.WriteStream): boolean;
   - `WT_SESSION` is set (Windows Terminal).
 
 When `supportsHyperlinks()` returns `false`, `hyperlink(url)` returns `url` and `hyperlink(url, label)` returns `label (url)` (or just `url` when `label === url`). When `true`, the return value is `ESC]8;;<url>ESC\<label>ESC]8;;ESC\` — the standard OSC-8 wrap.
+
+## TUI Transcript URL Quick-Open (Shift+1..9)
+
+Introduced in commit `90837728 feat(cli): add Shift+number shortcuts to open transcript URLs` (ports upstream kilocode PR #14910). See `docs/ARCHITECTURE.md#tui-transcript-url-quick-open-shift19` for the end-to-end flow and `docs/TESTING.md#testing-the-transcript-url-extractor-and-shift19-binding` for the test contract.
+
+The keybind layer is a single new option on `useKeyboard`, consumed by `AppLayout` and dispatched to the shared `openUrl` entry point. Three new public surfaces: the hook option, the pure URL extractor, and the single new help entry.
+
+### `useKeyboard` option (`src/cli/tui/hooks/useKeyboard.ts`)
+
+```typescript
+export interface UseKeyboardOptions {
+  onExit: () => void;
+  onClear: () => void;
+  onNewSession: () => void;
+  isInputActive: boolean;
+  commands?: SlashCommand[];
+
+  /**
+   * Called with the 1-based index when Shift+{1-9} is pressed.
+   * The hook is stateless w.r.t. transcript content; the handler owns
+   * the "no URL at this index" no-op behaviour.
+   */
+  onOpenTranscriptUrl?: (index: number) => void;
+}
+```
+
+Dispatch gates (all must hold before the hook calls `onOpenTranscriptUrl(index)` and `return`s):
+
+- `onOpenTranscriptUrl !== undefined`.
+- `keybindState.leaderActive === false`.
+- `key.ctrl === false && key.meta === false`.
+- `input` matches either `SHIFTED_DIGITS = '!@#$%^&*('` (shifted-punctuation glyph with `key.shift === false`, most Linux / macOS terminals) OR `input` is `'1'`..`'9'` with `key.shift === true` (terminal multiplexers, Windows Terminal).
+
+Both encodings resolve to a 1-based index in `[1, 9]`. There is no `Shift+0` binding.
+
+### Transcript URL extractor (`src/cli/tui/utils/extractUrls.ts`)
+
+Pure, test-friendly helpers. Exported for reuse from non-TUI call sites (e.g. a hypothetical headless `alexi transcript urls` command) and from the regression suite.
+
+```typescript
+/**
+ * Extract ordered http(s) URLs from one piece of text.
+ * Markdown inline links [label](https://...) and autolinks <https://...>
+ * are unwrapped to the raw href; bare URLs are matched with a stop-set
+ * of whitespace, angle brackets, backticks, parentheses, and quotes;
+ * trailing sentence punctuation is stripped.
+ * Non-http(s) schemes are filtered out at the matcher boundary.
+ * Non-string input returns [].
+ */
+export function extractUrlsFromText(text: string): string[];
+
+/**
+ * Transcript entry shape consumed by extractUrlsFromMessages.
+ * Deliberately decoupled from MessageDisplay to keep the extractor
+ * reusable from tests and from other call sites that only have raw
+ * text + role.
+ */
+export interface TranscriptEntry {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  displayRole?: 'user' | 'assistant' | 'system';
+}
+
+/**
+ * Extract ordered, de-duplicated http(s) URLs from the full transcript.
+ * Only assistant-authored messages are scanned. Messages flagged
+ * displayRole: 'system' are skipped. Duplicates are collapsed by href
+ * while preserving first-seen order so Shift+1 always refers to the
+ * first distinct URL.
+ */
+export function extractUrlsFromMessages(messages: readonly TranscriptEntry[]): string[];
+```
+
+Matcher precedence (one pass over the text with three regex sweeps):
+
+1. `/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g` — markdown inline link; emits captured href, records the full match range.
+2. `/<(https?:\/\/[^\s>]+)>/g` — markdown autolink; same treatment.
+3. `/\bhttps?:\/\/[^\s<>`"'()]+/g` — bare URL; skips any range already consumed by passes 1 or 2.
+
+Matches are sorted by start offset and returned in order. The de-duplication done by `extractUrlsFromMessages` happens AFTER per-text extraction, so the per-text order is left-to-right / top-to-bottom.
+
+Trailing punctuation stripped from each match: `.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`, `}`, `>`.
+
+### Transcript URL handler (`src/cli/tui/App.tsx`)
+
+Composed with `useCallback` and wired to `useKeyboard`:
+
+```tsx
+const handleOpenTranscriptUrl = useCallback(
+  (index: number): void => {
+    const urls = extractUrlsFromMessages(messages);
+    const url = urls[index - 1];
+    if (url === undefined) {
+      if (urls.length === 0) {
+        addSystemMessage('No URLs in transcript to open');
+      } else {
+        addSystemMessage(`URL #${index} not found (transcript has ${urls.length})`);
+      }
+      return;
+    }
+    void openUrl(url).catch((err: unknown) => {
+      logger.debug(
+        `Failed to open transcript URL #${index}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      addSystemMessage(`Failed to open URL #${index}: ${url}`);
+    });
+  },
+  [messages, addSystemMessage]
+);
+
+useKeyboard({
+  // ... existing options ...
+  onOpenTranscriptUrl: handleOpenTranscriptUrl,
+});
+```
+
+Observable outcomes:
+
+| Case | User-facing effect |
+|------|--------------------|
+| Transcript has a URL at `index` | `openUrl(url)` launches the default browser; no transcript message. |
+| Transcript has no URLs | System message `No URLs in transcript to open`. |
+| `index` > URL count | System message `URL #<index> not found (transcript has <N>)`. |
+| `openUrl` rejects | `logger.debug` records the exception; system message `Failed to open URL #<index>: <url>`. |
+
+All error paths resolve the inner `Promise` — the TUI never crashes on a bad launch.
+
+### Help entry
+
+`getHelpEntries()` in `src/cli/tui/utils/helpEntries.ts` adds:
+
+```typescript
+{
+  key: 'Shift+1..9',
+  description: 'Open the Nth transcript URL in browser',
+  category: 'chat',
+  condition: null,
+}
+```
+
+Visible unconditionally in the help overlay (`?`, `Ctrl+/`, `leader+h`).
 
 ## Per-Task Model Selection API
 
