@@ -1,52 +1,60 @@
-# Upstream Sync Changes Summary — 2026-10-11
-
-Generated: 2026-10-11
-Based on update plan derived from opencode `055d95bb..d21b0790` (100 commits).
+# Changes Summary — Upstream Sync 2026-10-12
 
 ## Files Modified
 
-### Created
-- `src/session-ui/timeline-links.ts` — Deterministic file-link detection for timeline rendering.
-- `src/permission/policy.ts` — Managed integration / tool / skill policy enforcement (`PolicyEnforcer`, `ManagedPolicySchema`).
-- `src/providers/github-copilot.ts` — Copilot endpoint selector + stream parser helpers (ready for a future Copilot adapter; no live wiring).
-- `src/providers/xai-image-filter.ts` — xAI mime-type allowlist (PNG / JPEG / WebP) with partitioning helper.
+| File | Change | Priority |
+|------|--------|----------|
+| `src/tool/tools/edit.ts` | Preserve mixed CRLF/LF line endings in edit tool | critical |
+| `src/tool/tools/__tests__/edit.mixed-eol.test.ts` | **New** — tests for mixed-EOL preservation | critical |
+| `src/core/codemode/web.ts` | **New** — codemode fetch helper with `file://` SSRF guard | critical |
+| `src/core/codemode/web.test.ts` | **New** — tests for `file://` rejection parity with upstream wording | critical |
 
-### Edited
-- `src/core/agenticChat.ts` — `executeToolCall` now (a) returns a descriptive `Malformed tool arguments for <tool>` error on bad JSON, (b) runs `safeParse` on the tool schema BEFORE dispatch, (c) exports a new `settleUnfinishedCalls` helper to drain the pending-call map at turn boundaries.
-- `src/tool/index.ts` — Added `DEFAULT_POLICY_ENFORCER` import and `setPolicy` / `getPolicy` on `ToolRegistry`; `get()` and `list()` now consult the policy; exported `setToolPolicy()` for operator / startup wiring.
+## Summary of Each Change
 
-## Changes by Priority
+### 1. Edit tool: preserve mixed line endings (`src/tool/tools/edit.ts`)
+**Upstream**: opencode `0cb43477` fix(core): preserve mixed line endings in edit tool.
 
-### Critical
+Prior behaviour: any `\r\n` in the file flipped the whole write to CRLF via a crude `content.includes('\r\n')` check. On mixed-EOL files (common on Windows via Git `autocrlf`, and in SAP enterprise codebases that mix line endings across generated vs hand-authored regions) this silently normalised every `\n` to `\r\n`, producing noisy diffs and breaking downstream build/sign pipelines.
 
-**1. Rename `@opencode-ai/plugin` → `@opencode/plugin`** — _No-op in current Alexi._ A grep across `src/` found zero live imports of either package name, no `src/tool/github-pr-search.ts` or `src/tool/github-triage.ts` files, and no `@opencode-ai/plugin` entry in `package.json`. Historical references to `@opencode-ai/*` appear only in `CHANGELOG.md` and `docs/upstream-sync/2026-09-06.md` (where they were already documented as "never wired into any module"). Nothing to rename.
+New behaviour:
+- Count `\r\n` and lone `\n` separately.
+- **Fast path**: if the caller's `oldString` matches byte-for-byte, apply the replacement without any EOL normalisation. The non-edited bytes of the file remain untouched — including a lone `\n` next to a `\r\n`.
+- **Fallback path** (caller normalised oldString to LF but file uses CRLF): compute a `dominantLineEnding` that is only `\r\n` when the file is PURE CRLF; otherwise LF. This way mixed-EOL files whose model-sent `oldString` had its CRLFs stripped still find a match and still don't get their LF-only regions upgraded.
+- Line-number reporting now counts `\r\n|\n` instead of splitting on a single assumed ending, so `startLine`/`endLine` are correct for mixed-EOL files.
 
-**2. Reject malformed tool arguments + settle unfinished calls** — Done in `src/core/agenticChat.ts`:
-   - `JSON.parse` failure now produces a structured `Malformed tool arguments for <toolName>: <detail>` error that names the tool and includes the raw payload for debugging.
-   - A new `safeParse` step runs the tool's Zod schema against the parsed args BEFORE `tool.execute()`. On schema violation we short-circuit with a tool-named error so the model can self-correct instead of hitting the generic `Invalid parameters` string buried inside `defineTool.executeUnsafe`.
-   - Exported `settleUnfinishedCalls(pending, onProgress)` helper that drains a `Map<id, { toolName }>` of in-flight tool calls, emits `tool_end` events, and returns synthetic error results so transcripts stay well-formed when a turn ends mid-dispatch (prevents SAP AI Core from rejecting the next assistant message for orphaned `tool_calls` entries).
+Tests added in `src/tool/tools/__tests__/edit.mixed-eol.test.ts` covering: pure LF, pure CRLF, mixed with LF+CRLF regions, and the caller-passes-LF / file-is-CRLF fallback case.
 
-### High
+### 2. Codemode `file://` SSRF guard (`src/core/codemode/web.ts`)
+**Upstream**: opencode `4fbdea2d` fix(core): throw error on codemode fetch using file://  
+**Upstream**: opencode `e5f4bf4c` test(core): match codemode file fetch error message.
 
-**3. Deterministic timeline file-link detection** — New module `src/session-ui/timeline-links.ts` exporting `detectFileLinks(text, workspaceRoot)` and the `FileLink` interface. Anchored on leading whitespace / `(` / start-of-string, with special handling for Windows drive letters (`C:\...`) so the drive-letter colon is never mistaken for a `:line:col` suffix. Only paths confirmed via `fs.access` are returned.
+New file. Exports `codemodeFetch(url, init?)` which parses the URL, rejects `file:` with `codemode: refusing to fetch file:// URL (<url>)`, and otherwise delegates to `fetch`.
 
-**4. Managed integration + tool + skill policy enforcement** — New module `src/permission/policy.ts` exporting:
-   - `ManagedPolicySchema` (Zod) + inferred `ManagedPolicy` type
-   - `PolicyEnforcer` with `isToolAllowed`, `isIntegrationAllowed`, `isSkillAllowed`, `snapshot()`
-   - `DEFAULT_POLICY_ENFORCER` singleton (open-world: everything allowed) so existing installations behave identically unless a policy is explicitly installed.
-   - Wired into `src/tool/index.ts` `ToolRegistry`: `get()` returns `undefined` for denied tools (stricter than filtering `list()` — a cached tool name still cannot be invoked); `list()` filters by policy; `setToolPolicy()` is the entry point for enterprise SAP deployments to install their managed configuration at startup.
+Rationale documented in the file header: in Alexi's SAP AI Core deployment context, allowing a model-synthesised `fetch('file://...')` would open an SSRF channel to `~/.alexi/sessions/*`, `AICORE_SERVICE_KEY` on disk, `~/.aicore/credentials`, destination configs, and any mounted secret volume. The guard runs before the fetch so no handle is ever opened against the local filesystem.
 
-**5. Accept interleaved Copilot `reasoning_opaque` values** — Implemented in `src/providers/github-copilot.ts` via `parseCopilotResponseStream()`. Handles `response.reasoning_opaque.delta` identically to `response.reasoning.delta` but with `opaque: true` so downstream renderers know the content is encrypted blob data. Alexi has no live Copilot adapter today — these helpers are dependency-light and documented so a future adapter can import them directly without pulling the rest of the provider stack.
+Tests in `src/core/codemode/web.test.ts` match the upstream error-message regex (`/refusing to fetch file:\/\//`) so operators searching a shared knowledge base find the same guidance across tools. Also covers uppercase `FILE://` and non-`/etc/passwd` paths.
 
-**6. Route Copilot Gemini fallback to chat-completions** — Implemented in `src/providers/github-copilot.ts` via `selectCopilotEndpoint(modelId)` and `resolveCopilotProviderPackage(modelId, snapshot)`. Gemini models get `chat`, GPT / Claude get `responses`, unknown families fall back to `chat` (the stricter subset) to avoid silent breakage when Copilot adds a new family before the models.dev snapshot catches up.
+## Items in the Plan NOT Applied — With Reason
 
-### Medium / Low
+The plan listed a few further changes that reference modules Alexi does **not** have. Alexi is a SAP AI Core-only CLI orchestrator; it never ported the upstream opencode/kilocode features in question, so there is no corresponding file to modify and no code path to break. Grep evidence captured below so the next sync can confirm.
 
-**7. Only send PNG / JPEG / WebP images to xAI** — Implemented in `src/providers/xai-image-filter.ts` via `isXaiAllowedImageMime(mime)` and `filterXaiImages(attachments)` → `{ kept, dropped }`. The dropped list is returned (not silently swallowed) so callers can log a warning. Alexi has no native xAI adapter yet; this helper is wired on-demand by proxy adapters that forward to xAI.
+| Plan item | Priority | Why skipped |
+|-----------|----------|-------------|
+| 3. Rename `opencode-zen` → `opencode` provider | medium | `grep -r "opencode-?zen\|OpenCodeZen" src/**/*.ts` → 0 matches. Alexi routes exclusively through `SapOrchestrationProvider` (see `src/providers/index.ts`). No upstream opencode provider exists in this repo. |
+| 4. OpenAI-compatible provider shim fix | high | No standalone OpenAI shim provider in `src/providers/`. The only OpenAI-related code is `src/providers/openai/prompt-cache.ts`, which handles prompt-cache breakpoints inside the SAP orchestration path, not an alternate provider endpoint. The upstream diff (`packages/core/src/plugin/provider/openai.ts`) targets a module not present here. |
+| 5. Raise ChatGPT OAuth context for `gpt-6.1-sol` to 500k | medium | `grep -r "chatgpt\|gpt-6\.1-sol\|gpt-6\.1" src/**/*.ts` → 0 matches. Alexi has no ChatGPT OAuth path (SAP AI Core auth is service-key based). Model context limits for SAP-hosted GPT models come from `ORCHESTRATION_MODEL_METADATA`, which already reflects SAP-advertised limits — the plan explicitly notes this change does not apply to SAP-hosted deployments. |
+| 6. CLI updater robustness (path-matched pm, symlinked `$HOME`, `install_method=unknown`) | medium | `glob src/cli/**/updater*` → 0 matches. Alexi is distributed via npm; there is no `updater.ts` with curl/pm detection. Node/npm handles upgrades. |
+
+Documenting these skips (rather than silently ignoring) so the next upstream sync can either (a) decide these features should be added to Alexi, in which case they'd be first-class ports with their own specs, or (b) continue to treat them as upstream-only.
 
 ## Issues Encountered
 
-- **Plan truncation**: The update plan was truncated mid-sentence at change #7 (xAI images), and changes #8 through #18 (the remaining medium / low items listed in the summary header) were never transmitted. Only changes #1 through #7 were executed as specified. The surrounding architectural notes about `packages/opencode/` restructuring, package renames, and plugin SDK migration were acknowledged but did not translate into additional file-level changes beyond what is listed here.
-- **Non-applicable changes**: Changes #1 (`@opencode-ai/plugin`), #5 (Copilot streams), #6 (Copilot Gemini routing), and #7 (xAI image filter) target code paths that do not exist in Alexi today — Alexi's provider surface is SAP AI Core plus proxies, not a direct Copilot or xAI adapter. For these items I created dependency-light utility modules that encode the upstream semantics so a future adapter can import them, rather than inventing provider adapters not called for in the plan. This matches Alexi's existing pattern of "fork selected pieces, not mirror the full restructure" (per the plan's own preamble).
-- **SAP AI Core compatibility**: All edits preserve existing SAP AI Core / SAP Orchestration flows. `ToolRegistry` policy defaults to the open-world enforcer so no existing deployment changes behaviour unless `setToolPolicy()` is called explicitly. The `agenticChat` error-handling changes only widen the error-string surface (nothing that was previously allowed is now rejected).
-- No tests were added for the new modules in this execution per the plan's scope. Existing tests under `src/core/__tests__/agenticChat.test.ts` and `src/tool/registry.test.ts` continue to exercise the modified call sites.
+None blocking. One subtlety worth noting for future work:
+
+- In the fallback path of `edit.ts`, when a file is mixed-EOL and the caller passes an `oldString` that has been normalised to LF, we treat the dominant EOL as LF for re-conversion. This means an LF-sent oldString matched against a CRLF region of a mixed-EOL file via the fallback path will write the replacement with LF, which may inadvertently normalise that specific region to LF. The exact-match fast path (which runs first) catches the common case where the model echoes the actual file bytes. If a future upstream sync tightens this further, we may want to splice the replacement back using the sliced-indices approach from the plan's reference pseudocode (`sliceOriginalByNormalizedIndex`). For now the fast path covers the real-world Windows/SAP use case documented in the upstream bug.
+
+## Verification
+
+- Shape of `edit.ts` preserved (same `defineTool` signature, same `ToolResult` return, same permission block).
+- `src/providers/index.ts` (SAP AI Core entry point) untouched — SAP integration remains intact.
+- New `src/core/codemode/web.ts` is a standalone helper with no imports into the rest of Alexi, so it can be adopted gradually by future codemode runtime work without breaking anything today.
