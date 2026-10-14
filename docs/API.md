@@ -7932,3 +7932,85 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 
 Alexi routes multimodal requests through SAP AI Core by default — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
 
+## Managed-settings Policy Precedence API
+
+Introduced in the 2026-10-14 upstream sync (ports opencode fixes `#55267` and `#55297`) and tightened in commit `18774554 fix(ci): formatting, no-useless-escape, and experimental index signature [autohealing]`. Exported from `src/core/managed-policy.ts`. See [docs/ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts) for the composition story and [docs/API.md — Managed Policy API](#managed-policy-api) for the downstream enforcer.
+
+```typescript
+export type Policy = Readonly<Record<string, unknown>>;
+
+export interface ConfigDocument {
+  readonly path: string;
+  readonly info: {
+    readonly policies?: readonly Policy[];
+    readonly experimental?: {
+      readonly policies?: readonly Policy[];
+      readonly [key: string]: unknown;
+    };
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface TaggedConfigDocument extends ConfigDocument {
+  readonly managed?: boolean;
+}
+
+export function mergePolicies(documents: readonly ConfigDocument[]): readonly Policy[];
+
+export function applyManagedPrecedence(documents: readonly TaggedConfigDocument[]): {
+  readonly managedPolicies: readonly ConfigDocument[];
+  readonly userDocuments: readonly TaggedConfigDocument[];
+  readonly managedSettings: readonly ConfigDocument[];
+};
+
+export function resolvePoliciesWithPrecedence(
+  documents: readonly TaggedConfigDocument[]
+): readonly Policy[];
+```
+
+Semantics:
+
+| Helper | Input | Output | Purpose |
+|--------|-------|--------|---------|
+| `mergePolicies` | `readonly ConfigDocument[]` (caller-ordered) | `readonly Policy[]` | Reads `info.policies ?? info.experimental?.policies` from each document (new shape preferred when both are set) and concatenates in input order. Later-wins is caller-controlled via the input ordering. |
+| `applyManagedPrecedence` | `readonly TaggedConfigDocument[]` | `{ managedPolicies, userDocuments, managedSettings }` | Splits managed documents (`managed === true`) off, extracts their policy data into a FIRST-loaded `managedPolicies` list (reverse of their original managed order so the LAST-loaded managed source retains final authority under the policy evaluator's reverse-load-order evaluation), strips `policies` and `experimental.policies` from the LAST-loaded `managedSettings` list, and returns `userDocuments` in input order. |
+| `resolvePoliciesWithPrecedence` | `readonly TaggedConfigDocument[]` | `readonly Policy[]` | One-shot convenience: calls `applyManagedPrecedence` then `mergePolicies` on `[...managedPolicies, ...userDocuments, ...managedSettings]`. |
+
+Final load-order composition when both halves are needed (non-policy settings AND policies):
+
+```text
+[...managedPolicies, ...userDocuments, ...managedSettings]
+```
+
+- `managedPolicies` first — policy evaluator runs in reverse-load order, so FIRST-loaded = evaluated LAST = final authority.
+- `userDocuments` middle — normal later-wins ordering across user config and project overlay.
+- `managedSettings` last — non-policy fields get their later-wins win position.
+
+Example:
+
+```typescript
+import {
+  resolvePoliciesWithPrecedence,
+  type TaggedConfigDocument,
+} from './core/managed-policy.js';
+
+const documents: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/mdm.json', managed: true, info: { policies: [{ rule: 'org-deny-bash' }] } },
+  { path: '~/.alexi/config.json', info: { policies: [{ rule: 'user-allow-bash' }] } },
+  { path: '.alexi/project.json', info: { experimental: { policies: [{ rule: 'project-pin' }] } } },
+];
+
+const effective = resolvePoliciesWithPrecedence(documents);
+// => [{ rule: 'org-deny-bash' }, { rule: 'user-allow-bash' }, { rule: 'project-pin' }]
+//
+// Under reverse-load evaluation, 'org-deny-bash' is evaluated LAST (final authority)
+// even though the MDM document was listed first in the input.
+```
+
+Notes:
+
+- **No I/O.** The module is pure and schema-agnostic — it works on parsed `info` records. Side-effectful loading (file reads, env expansion, macOS MDM preferences) stays in the config loader.
+- **`experimental.policies` back-compat.** The reader prefers the new top-level `policies` when both are set on the same document; new tooling emits `policies` directly, but existing deployments shipping `experimental.policies` continue to work during the migration window.
+- **`experimental` index signature.** The nested `info.experimental` type carries a `readonly [key: string]: unknown;` index signature so forward-compatible knobs that sit alongside `experimental.policies` type-check through the managed-settings strip in `applyManagedPrecedence` without a cast. The index signature mirrors the one at the top level of `info` and closes the shape-parity gap between the two surfaces.
+- **Composition with the Managed Policy enforcer.** The resolved policy list from `resolvePoliciesWithPrecedence` is intended to feed into the `PolicyEnforcer` constructor exported by `src/permission/policy.ts` (see [Managed Policy API](#managed-policy-api)); the two modules split "which policies are in effect" from "is this tool / integration / skill allowed?".
+
