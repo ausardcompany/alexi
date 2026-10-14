@@ -14,7 +14,15 @@ export {
 } from './attribution.js';
 
 export type { ChangedFile } from './commitMessage.js';
-export { generateCommitMessage, buildHeuristicMessage } from './commitMessage.js';
+export {
+  generateCommitMessage,
+  buildHeuristicMessage,
+  buildRulesSection,
+  buildScopesSection,
+  loadCommitlintScopes,
+  COMMIT_RULES_PREAMBLE,
+  COMMIT_SCOPES_PREAMBLE,
+} from './commitMessage.js';
 
 export type { DirtyFilesResult } from './dirtyFiles.js';
 export { isGitRepo, getDirtyFiles, commitDirtyFiles } from './dirtyFiles.js';

@@ -25,10 +25,13 @@ vi.mock('../core/router.js', () => ({
 
 import {
   buildRulesSection,
+  buildScopesSection,
   COMMIT_RULES_PREAMBLE,
+  COMMIT_SCOPES_PREAMBLE,
   CommitMessageError,
   consumeLastCommitMessageError,
   generateCommitMessage,
+  loadCommitlintScopes,
 } from './commitMessage.js';
 import type { GitConfig } from './config.js';
 import { getProviderForModelWithFallback } from '../providers/index.js';
@@ -320,6 +323,157 @@ describe('generateCommitMessage provider-error preservation', () => {
       expect(consumeLastCommitMessageError()).toBeNull();
     } finally {
       fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Tests for commitlint `scope-enum` wiring. We write a throwaway
+ * `commitlint.config.cjs` into a temp workdir and verify that the allowed
+ * scopes are loaded, exposed via {@link buildScopesSection}, and injected
+ * into the system prompt handed to the provider.
+ */
+describe('commitlint scope-enum wiring', () => {
+  function makeWorkdirWithCommitlint(scopes: string[]): {
+    workdir: string;
+    cleanup: () => void;
+  } {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-scopes-'));
+    const configJs = `module.exports = { rules: { 'scope-enum': [2, 'always', ${JSON.stringify(scopes)}] } };\n`;
+    fs.writeFileSync(path.join(workdir, 'commitlint.config.cjs'), configJs, 'utf-8');
+    return {
+      workdir,
+      cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+    };
+  }
+
+  it('loadCommitlintScopes returns [] when no config exists', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-noconfig-'));
+    try {
+      expect(loadCommitlintScopes(empty)).toEqual([]);
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('loadCommitlintScopes returns [] when the config is malformed', () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-badconfig-'));
+    try {
+      fs.writeFileSync(
+        path.join(workdir, 'commitlint.config.cjs'),
+        'this is not valid javascript (((',
+        'utf-8'
+      );
+      expect(loadCommitlintScopes(workdir)).toEqual([]);
+    } finally {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it('loadCommitlintScopes extracts the allowed scopes', () => {
+    const fixture = makeWorkdirWithCommitlint(['cli', 'core', 'tests']);
+    try {
+      expect(loadCommitlintScopes(fixture.workdir)).toEqual(['cli', 'core', 'tests']);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('buildScopesSection formats scopes with the preamble', () => {
+    const fixture = makeWorkdirWithCommitlint(['cli', 'core']);
+    try {
+      const section = buildScopesSection(fixture.workdir);
+      expect(section).toContain(COMMIT_SCOPES_PREAMBLE);
+      expect(section).toContain('cli, core');
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('buildScopesSection returns empty string when no config exists', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-noscopes-'));
+    try {
+      expect(buildScopesSection(empty)).toBe('');
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('generateCommitMessage includes scope-enum in the system prompt', async () => {
+    vi.clearAllMocks();
+    const completeFn = vi.fn().mockResolvedValue({
+      text: 'feat(core): hook up scope list',
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: { complete: completeFn } as never,
+      effectiveModelId: 'gpt-4o-mini',
+      usedFallback: false,
+    });
+    const fixture = makeWorkdirWithCommitlint(['cli', 'core', 'tests']);
+    try {
+      await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        fixture.workdir
+      );
+      const [messages] = completeFn.mock.calls[0];
+      const systemMsg = messages.find(
+        (m: { role: string; content: string }) => m.role === 'system'
+      );
+      expect(systemMsg).toBeDefined();
+      expect(systemMsg.content).toContain(COMMIT_SCOPES_PREAMBLE);
+      expect(systemMsg.content).toContain('cli, core, tests');
+    } finally {
+      fixture.cleanup();
+      vi.resetAllMocks();
+    }
+  });
+
+  it('combines rules + scope-enum in the same system prompt', async () => {
+    vi.clearAllMocks();
+    const completeFn = vi.fn().mockResolvedValue({
+      text: 'feat(core): ship combined wiring',
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+    vi.mocked(getProviderForModelWithFallback).mockReturnValue({
+      provider: { complete: completeFn } as never,
+      effectiveModelId: 'gpt-4o-mini',
+      usedFallback: false,
+    });
+
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-combined-'));
+    try {
+      const rulesDir = path.join(workdir, '.alexi', 'rules');
+      fs.mkdirSync(rulesDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(rulesDir, 'commit-style.md'),
+        'Reference the related issue number when relevant.',
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(workdir, 'commitlint.config.cjs'),
+        `module.exports = { rules: { 'scope-enum': [2, 'always', ['cli', 'core']] } };\n`,
+        'utf-8'
+      );
+
+      await generateCommitMessage(
+        [{ filePath: 'src/foo.ts', toolName: 'write' }],
+        baseConfig,
+        workdir
+      );
+      const [messages] = completeFn.mock.calls[0];
+      const systemMsg = messages.find(
+        (m: { role: string; content: string }) => m.role === 'system'
+      );
+      expect(systemMsg.content).toContain(COMMIT_SCOPES_PREAMBLE);
+      expect(systemMsg.content).toContain('cli, core');
+      expect(systemMsg.content).toContain(COMMIT_RULES_PREAMBLE);
+      expect(systemMsg.content).toContain('<rule file="commit-style.md">');
+      expect(systemMsg.content).toContain('Reference the related issue number when relevant.');
+    } finally {
+      fs.rmSync(workdir, { recursive: true, force: true });
+      vi.resetAllMocks();
     }
   });
 });
