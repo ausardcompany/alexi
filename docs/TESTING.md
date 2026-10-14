@@ -21,6 +21,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
 - [Testing Routing](#testing-routing)
+- [Testing `/fork --from-message` (PR #15004)](#testing-fork---from-message-pr-15004)
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
@@ -5893,6 +5894,70 @@ Key testing patterns:
 2. **Task Store Cleanup**: Always call `getTaskStore().clear()` in `afterEach`
 3. **Generous Timeouts**: Use ~2x the expected duration for CI scheduling variability
 4. **Non-null Assertions**: Use `taskResult.data!.taskId` (correct precedence)
+
+## Testing `/fork --from-message` (PR #15004)
+
+The `/fork` slash command accepts an optional `--from-message <index>` flag that truncates the forked transcript at a 1-indexed, inclusive boundary. The test file is `tests/cli/interactive.fork.test.ts`; the implementation lives in `src/cli/interactive.ts:804-898`.
+
+### Pattern
+
+The suite builds a disposable `ReplState` around a `SessionManager` whose `sessionsDir` points at a fresh `fs.mkdtempSync` directory, spies on `console.log` to assert the user-visible confirmation / error messages, and drives the command through the real `handleCommand(input, state)` entry point so the parser, validator, and session-swap logic are all exercised end to end.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+
+import { handleCommand, type ReplState } from '../../src/cli/interactive.js';
+import { SessionManager } from '../../src/core/sessionManager.js';
+
+function buildReplState(sessionsDir: string): ReplState {
+  const sessionManager = new SessionManager({ sessionsDir });
+  sessionManager.createSession('test-model');
+  return {
+    sessionManager,
+    currentModel: 'test-model',
+    autoRoute: false,
+    preferCheap: false,
+    isStreaming: false,
+  };
+}
+
+describe('/fork copies session transcript', () => {
+  let tmpDir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-fork-test-'));
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+```
+
+### Cases that must stay pinned
+
+1. **Happy path — truncation at the boundary.** Seed 10 messages (`i % 2 === 1 ? 'user' : 'assistant'`, with `tokens: { input: i, output: i }`), run `/fork experiment --from-message 5`, and assert:
+   - `forked.messages.length === 5`
+   - `forked.messages[0].content === 'Message 1'`
+   - `forked.messages[4].content === 'Message 5'`
+   - `forked.metadata.messageCount === 5`
+   - `forked.metadata.totalTokens === 30` (sum of `input + output` for messages 1..5 = `2 * (1+2+3+4+5)`)
+   - The confirmation line contains `from message 5 of 10`.
+2. **No-flag fallback is a full copy.** A plain `/fork full-copy` on a 10-message session still produces a fork with `messages.length === 10` — the flag is strictly opt-in.
+3. **Out-of-range rejection.** `/fork too-far --from-message 10` on a 5-message session must leave the manager's active session on the original (`active.metadata.id === originalId`) and emit `Invalid message index`.
+4. **Non-integer rejection.** `/fork bad --from-message abc` triggers the `Number.isNaN` branch of the validator, leaves the active session unchanged, and emits `Invalid message index`.
+
+### Gotchas
+
+- `SessionManager.createSession` flips the manager's active session as a side effect. The implementation snapshots the source transcript BEFORE calling `createSession` to avoid reading from the already-swapped new session. Tests should mirror this by capturing `original.metadata.id` on the pre-fork session and asserting against it, never against `state.sessionManager.getCurrentSession()` immediately after the swap.
+- The confirmation message is written through `console.log`, not through a logger — asserting against the `logSpy.mock.calls.map((c) => String(c[0])).join('\n')` string is the only reliable way to pin the user-visible output. Checking that the error path does NOT produce a fork is done by re-reading `state.sessionManager.getCurrentSession()` and comparing `metadata.id` to the pre-command id.
+- Positional-argument order is interchangeable with the flag (`/fork name --from-message 5` and `/fork --from-message 5 name` both parse the same way). Keep at least one case per order so a future parser refactor cannot regress one direction silently.
 
 ## Testing Rewind Command
 
