@@ -11248,3 +11248,127 @@ it('ignores bare words in prose', async () => {
 1. **Temp workspace per test.** The detector only returns existing paths; a shared workspace risks cross-test contamination. `mkdtemp` + `afterEach(rm { recursive, force })` keeps every case hermetic.
 2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
 3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.
+
+## Testing the ripgrep argv shape (`src/core/kilocode/ripgrep-settlement.test.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream kilocode fixes #15003 and #15017). Settlement test that freezes the externally observable argv emitted by `assembleGlobArgs` in `src/core/ripgrep.ts`, so a future refactor cannot silently reintroduce the `--glob=<agent-pattern>` override bug that leaked `.gitignore`-ignored paths. See [docs/ARCHITECTURE.md — Ripgrep glob override hardening](ARCHITECTURE.md#ripgrep-glob-override-hardening-srccorekilocoderipgrep-globts) for the design.
+
+### Suite shape
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { assembleGlobArgs } from '../ripgrep.js';
+
+describe('ripgrep settlement: argv shape', () => {
+  it('applies the pattern after ignore rules via --pre-glob + --type-add', () => {
+    const passed = assembleGlobArgs({ pattern: '*.ts' });
+    expect(passed).toContain('--pre-glob=*.ts');
+    expect(passed).toContain('--type-add=kiloglob:*.ts');
+    // Critical regression guard: the agent pattern is NEVER a --glob= override.
+    expect(passed).not.toContain('--glob=*.ts');
+  });
+
+  it('still emits operator-supplied include globs as --glob=', () => {
+    const passed = assembleGlobArgs({
+      pattern: '**/*',
+      include: ['*.ts'],
+      exclude: ['node_modules/**'],
+    });
+    expect(passed).toContain('--glob=*.ts');
+    expect(passed).toContain('--glob=!node_modules/**');
+  });
+
+  it('does NOT emit the agent pattern as --glob= for a broad `**/*` search', () => {
+    const passed = assembleGlobArgs({ pattern: '**/*' });
+    expect(passed).not.toContain('--glob=**/*');
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **Pin the forbidden form, not just the required form.** Asserting `--pre-glob=*.ts` is present is not enough; the whole point of the fix is that `--glob=<agent-pattern>` is **absent**. The `not.toContain` assertion is the lock.
+2. **Operator-driven overrides stay legitimate.** The include/exclude test case is intentional — `--glob=*.ts` for an operator-supplied include is correct behaviour; the audit must NOT reject it. Mixing both forms in one test case documents the asymmetry.
+3. **Broad patterns are the dangerous case.** The `**/*` test case is the one that would re-expose the original bug — a `**/*` pattern as a `--glob=` override walks every ignored tree. Pin that case explicitly rather than relying on the `*.ts` case to generalise.
+
+### Matcher-level coverage
+
+The companion `src/core/kilocode/ripgrep-glob.test.ts` covers the `compile(pattern)` matcher and the `relative(line)` normaliser directly: bare filenames match at any depth, wildcard filenames match at any depth, slash-containing patterns anchor to the cwd (nested occurrences do NOT match), trailing `/` is folder-only, `**` is recursive, and the output-line normaliser strips `./` on POSIX and `.\` on Windows. The combined suite (matcher + settlement) prevents both a semantic regression (`compile` returning the wrong result) and a dispatch regression (`assembleGlobArgs` leaking an override).
+
+## Testing managed-policy precedence (`src/core/managed-policy.test.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream opencode PRs #55267 and #55297). Pins the two shape+precedence contracts of `src/core/managed-policy.ts`: `mergePolicies` must accept both the legacy `experimental.policies` and the new top-level `policies` on the same document (preferring the new field), and `applyManagedPrecedence` must split managed documents into a FIRST-loaded policy slot and a LAST-loaded settings slot. See [docs/ARCHITECTURE.md — Managed-configuration policy resolution](ARCHITECTURE.md#managed-configuration-policy-resolution-srccoremanaged-policyts).
+
+### Suite shape
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  applyManagedPrecedence,
+  mergePolicies,
+  type TaggedConfigDocument,
+} from './managed-policy.js';
+
+describe('mergePolicies', () => {
+  it('accepts the legacy experimental.policies shape', () => {
+    expect(
+      mergePolicies([{ path: 'a.json', info: { experimental: { policies: [{ rule: 'A' }] } } }])
+    ).toEqual([{ rule: 'A' }]);
+  });
+
+  it('prefers top-level policies when both are set on the same document', () => {
+    expect(
+      mergePolicies([
+        {
+          path: 'a.json',
+          info: {
+            policies: [{ rule: 'new' }],
+            experimental: { policies: [{ rule: 'old' }] },
+          },
+        },
+      ])
+    ).toEqual([{ rule: 'new' }]);
+  });
+
+  it('preserves input order across documents', () => {
+    expect(
+      mergePolicies([
+        { path: 'a.json', info: { policies: [{ rule: 'A' }] } },
+        { path: 'b.json', info: { experimental: { policies: [{ rule: 'B' }] } } },
+        { path: 'c.json', info: { policies: [{ rule: 'C' }] } },
+      ])
+    ).toEqual([{ rule: 'A' }, { rule: 'B' }, { rule: 'C' }]);
+  });
+});
+
+describe('applyManagedPrecedence', () => {
+  const managedDoc: TaggedConfigDocument = {
+    path: '/etc/alexi/managed.json',
+    managed: true,
+    info: { policies: [{ rule: 'managed-A' }], model: 'enterprise-model' },
+  };
+  const userDoc: TaggedConfigDocument = {
+    path: '~/.alexi/config.json',
+    managed: false,
+    info: { policies: [{ rule: 'user-A' }], model: 'user-model' },
+  };
+
+  it('splits managed docs into first-loaded policies + last-loaded settings', () => {
+    const { managedPolicies, userDocuments, managedSettings } = applyManagedPrecedence([
+      userDoc,
+      managedDoc,
+    ]);
+    expect(managedPolicies).toHaveLength(1);
+    expect(managedPolicies[0].info.policies).toEqual([{ rule: 'managed-A' }]);
+    expect(userDocuments).toEqual([userDoc]);
+    // Managed settings strip the policies field so they only contribute non-policy keys last.
+    expect(managedSettings[0].info).toEqual({ model: 'enterprise-model' });
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **Pin both migration shapes AND the preference rule.** The two paths (`policies` vs. `experimental.policies`) are the whole point of the migration test; the "prefer new when both are set" case is the fallthrough rule. All three cases must be independently covered — a single "accept any" test loses the semantics.
+2. **Assert the settings slot is stripped.** `applyManagedPrecedence` must drop `policies` AND `experimental.policies` from the `managedSettings` output; without this guard a managed document would contribute its policy data twice (once in `managedPolicies`, once again through the policy evaluator seeing it in `managedSettings`). The `expect(managedSettings[0].info).toEqual({ model: 'enterprise-model' })` is the lock on that invariant.
+3. **Reverse-of-reverse is a semantic property, not an implementation detail.** Among multiple managed documents, the LAST-loaded source should carry FINAL authority on policy. Pin that in a dedicated case with two managed docs — the test must assert the order AFTER reversal, not the order BEFORE, because that is the externally observable contract.

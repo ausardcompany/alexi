@@ -7715,6 +7715,130 @@ Example JSON policy:
 
 With that policy loaded, `getTool('bash')` returns `undefined`, `getAllToolNames()` omits `bash` / `shell` / `web_fetch`, and the orchestrator never surfaces them in the function-tool schema list it hands to SAP AI Core. The policy is read on each lookup, so swapping the enforcer with another `setToolPolicy(...)` call takes effect for the next tool invocation.
 
+## Managed Policy Precedence API
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports opencode PRs #55267 and #55297). Exported from `src/core/managed-policy.ts`. Pure, I/O-free resolver that handles the `experimental.policies` → `policies` migration and the "managed config has highest precedence" composition in a single schema-agnostic module. Complements the `ManagedPolicySchema` enforcer above — this module decides WHICH documents' policies to run, the enforcer decides what each policy MEANS.
+
+```typescript
+export type Policy = Readonly<Record<string, unknown>>;
+
+export interface ConfigDocument {
+  readonly path: string;
+  readonly info: {
+    readonly policies?: readonly Policy[];
+    readonly experimental?: { readonly policies?: readonly Policy[] };
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface TaggedConfigDocument extends ConfigDocument {
+  readonly managed?: boolean;
+}
+
+/** Reads policies/experimental.policies with top-level preferred; preserves input order. */
+export function mergePolicies(documents: readonly ConfigDocument[]): readonly Policy[];
+
+/** Splits managed docs into first-loaded policies and last-loaded settings. */
+export function applyManagedPrecedence(documents: readonly TaggedConfigDocument[]): {
+  readonly managedPolicies: readonly ConfigDocument[];
+  readonly userDocuments: readonly TaggedConfigDocument[];
+  readonly managedSettings: readonly ConfigDocument[];
+};
+
+/** Convenience: full composition in one call. */
+export function resolvePoliciesWithPrecedence(
+  documents: readonly TaggedConfigDocument[]
+): readonly Policy[];
+```
+
+Shape semantics for `mergePolicies`:
+
+| Document shape                                            | Returned entry  |
+| --------------------------------------------------------- | --------------- |
+| `{ policies: [p] }`                                       | `p`             |
+| `{ experimental: { policies: [p] } }`                     | `p`             |
+| `{ policies: [new], experimental: { policies: [old] } }`  | `new` (new wins) |
+| `{ somethingElse: 42 }`                                   | skipped         |
+
+Composition rule for `applyManagedPrecedence`: final load order is `[...managedPolicies, ...userDocuments, ...managedSettings]`. `managedSettings` has `policies` AND `experimental.policies` stripped so they contribute only non-policy keys; a now-empty `experimental` block is dropped from the output.
+
+Typical loader-side usage:
+
+```typescript
+import { resolvePoliciesWithPrecedence, type TaggedConfigDocument } from '../core/managed-policy.js';
+
+const docs: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/managed.json', managed: true, info: await readManaged() },
+  { path: '~/.alexi/config.json', info: await readUser() },
+  { path: './alexi.config.json', info: await readProject() },
+];
+const effectivePolicies = resolvePoliciesWithPrecedence(docs);
+```
+
+See [docs/ARCHITECTURE.md — Managed-configuration policy resolution](ARCHITECTURE.md#managed-configuration-policy-resolution-srccoremanaged-policyts) for the design and [docs/CONFIGURATION.md — Managed Policy Precedence](CONFIGURATION.md#managed-policy-precedence-srccoremanaged-policyts) for the operator-facing contract.
+
+## Ripgrep Argv Assembly API
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream kilocode fixes #15003 and #15017). Exported from `src/core/ripgrep.ts` (high-level helpers) and `src/core/kilocode/ripgrep-glob.ts` (matcher primitives). Replaces the historical `--glob=<agent-pattern>` dispatch (which turned the pattern into a ripgrep override that leaked `.gitignore`-ignored paths) with a two-phase matcher that keeps ripgrep's ignore rules in charge.
+
+```typescript
+// src/core/ripgrep.ts
+
+export interface GlobInput {
+  readonly pattern: string;
+  readonly noRequireGit?: boolean;
+  readonly include?: readonly string[];
+  readonly exclude?: readonly string[];
+  readonly filter?: (path: string) => boolean;
+}
+
+/** Build the ripgrep argv fragment — agent pattern is NEVER a --glob= override. */
+export function assembleGlobArgs(input: GlobInput): readonly string[];
+
+/** Decode one ripgrep output line and return the normalised path, or undefined. */
+export function filterGlobLine(input: GlobInput, line: string): string | undefined;
+```
+
+```typescript
+// src/core/kilocode/ripgrep-glob.ts
+
+export interface Walk {
+  readonly args: readonly string[];
+  readonly match: (file: string) => boolean;
+  readonly keep: (file: string | undefined) => boolean;
+}
+
+/** Compile a pattern into a (path, isFolder) => boolean predicate. */
+export function compile(pattern: string): (path: string, folder: boolean) => boolean;
+
+/** Normalise a ripgrep output line to a cwd-relative POSIX path. */
+export function relative(line: string): string;
+
+export function glob(input: { pattern: string; hidden?: boolean }): Walk;
+```
+
+Argv contract summary:
+
+| Input kind                        | Emitted argv                                       | Why                                               |
+| --------------------------------- | -------------------------------------------------- | ------------------------------------------------- |
+| Agent `pattern` (bare filename)   | `--pre-glob=<name> --type-add=kiloglob:<name> --type=kiloglob` | Applied AFTER ignore rules — safe prefilter       |
+| Agent `pattern` (brace expansion) | (no prefilter)                                     | `--type-add` cannot represent `{a,b}` — matcher-only |
+| Agent `pattern` (always)          | **never** `--glob=<pattern>`                       | Would be a ripgrep override; leaks ignored paths  |
+| Operator `include`                | `--glob=<pattern>`                                 | Intentional override — operator opt-in            |
+| Operator `exclude`                | `--glob=!<pattern>`                                | Intentional override — operator opt-in            |
+
+Compile-matcher semantics (ripgrep override semantics, implemented via `minimatch`):
+
+| Pattern form      | Example           | Compiled match                         |
+| ----------------- | ----------------- | -------------------------------------- |
+| No `/`            | `foo.ts`          | `**/foo.ts` — matches at any depth     |
+| Contains `/`      | `src/foo.ts`      | anchored to cwd (not nested matches)   |
+| Trailing `/`      | `build/`          | folder-only, no file descent           |
+| Leading `/`       | `/src/foo.ts`     | anchored to cwd exactly                |
+| `**` recursive    | `src/**`          | recursive descent                      |
+
+See [docs/ARCHITECTURE.md — Ripgrep glob override hardening](ARCHITECTURE.md#ripgrep-glob-override-hardening-srccorekilocoderipgrep-globts) for the two-phase dispatch design.
+
 ## Agentic Tool Dispatch
 
 Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70`). Lives in `src/core/agenticChat.ts`.

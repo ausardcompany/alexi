@@ -8280,3 +8280,112 @@ flowchart LR
 
 The helper is a building block for the session-UI timeline renderer and any CLI post-processor that wants to turn plain-text model output into actionable links. The I/O is `await fs.access` per match, so callers should not run it on hot streaming paths; the intended use is on committed timeline frames.
 
+## Ripgrep glob override hardening (`src/core/kilocode/ripgrep-glob.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream kilocode fixes #15003 and #15017 "glob override leaks ignored paths"). Lives in `src/core/kilocode/ripgrep-glob.ts` (the matcher primitives) and `src/core/ripgrep.ts` (the argv-assembly helpers that the grep/glob tools dispatch through).
+
+### The bug this fixes
+
+The pre-fix grep/glob dispatch emitted the agent-supplied pattern as `--glob=<pattern>` to ripgrep. In ripgrep's semantics `--glob=` is an **override** that wins over `.gitignore`, so a broad `**/*` search would walk `node_modules/`, `.git/`, `secret/`, `.env`, and anything else the user intentionally ignored — exposing secrets to the model and inflating latency on large trees. The fix is to never emit the agent pattern as `--glob=` at all, and instead re-apply it in-process after ripgrep has already filtered by its ignore rules.
+
+### Two-phase dispatch
+
+```mermaid
+flowchart LR
+    AgentPattern[Agent pattern e.g. **/*] --> AssembleArgs[assembleGlobArgs input]
+    AssembleArgs --> PreGlob[--pre-glob=name]
+    AssembleArgs --> TypeAdd[--type-add=kiloglob:name<br/>--type=kiloglob]
+    AssembleArgs -.NEVER emits.-> BadGlob[--glob=&lt;agent pattern&gt;]
+    PreGlob --> Ripgrep[rg execution]
+    TypeAdd --> Ripgrep
+    OperatorInclude[Operator include] --> AssembleArgs
+    OperatorExclude[Operator exclude] --> AssembleArgs
+    AssembleArgs --> IncludeGlob[--glob=&lt;include&gt;]
+    AssembleArgs --> ExcludeGlob[--glob=!&lt;exclude&gt;]
+    Ripgrep --> Lines[Candidate lines<br/>after ignore rules]
+    Lines --> FilterLine[filterGlobLine input, line]
+    FilterLine --> RelativePath[KiloGlob.relative line]
+    FilterLine --> Match{walker.keep file<br/>&amp; input.filter?}
+    Match -- yes --> Keep[emit cwd-relative POSIX path]
+    Match -- no --> Drop[drop]
+```
+
+Why `--pre-glob` + `--type-add` is safe where `--glob=` was not: ripgrep applies file-type filters AFTER its ignore rules, so a `--type-add=kiloglob:<name>` prefilter cannot leak ignored paths. Brace-expansion patterns like `*.{ts,tsx}` are skipped in the prefilter step (ripgrep's `--type-add` syntax cannot represent them) and fall through to a non-prefiltered walk; the in-process matcher still enforces the agent pattern.
+
+### Matcher semantics
+
+`compile(pattern)` returns a `(path, isFolder) => boolean` predicate implementing ripgrep override semantics via Node's `minimatch`:
+
+- Patterns without `/` match at ANY depth. `foo.ts` is compiled to `**/foo.ts`.
+- A trailing `/` means folder-only. `build/` matches a `build` directory but not `build/foo.ts`.
+- A leading `/` anchors the pattern to the cwd. `/src/foo.ts` matches only the top-level file.
+- `dot: true` so dotfiles participate; `nocomment: true` so `#` is not treated as a `minimatch` comment leader (we strip comment lines ourselves inside `resolveAllowlist`).
+
+`relative(line)` normalises ripgrep output lines (`./foo/bar.ts` on POSIX and `.\foo\bar.ts` on Windows) to a cwd-relative POSIX path by stripping the leading `./` or `.\` and swapping backslashes. Downstream helpers always see POSIX paths regardless of host OS.
+
+### Why this module is a port, not a full rewrite
+
+The implementation deviates from upstream kilocode in two mechanical ways while preserving the exact ignore-rule contract:
+
+- Alexi runs on Node >= 22.12, not Bun, so `Bun.Glob` is replaced with `minimatch` (already a transitive dependency via `overrides` in `package.json`).
+- Upstream's Effect runtime is replaced with plain predicates, so callers get a `{ args, match, keep }` record and can thread the helpers through whichever search primitive the grep/glob tools dispatch to without pulling Effect into Alexi's dependency graph.
+
+### Settlement contract
+
+`src/core/kilocode/ripgrep-settlement.test.ts` is the regression lock on the argv shape: it asserts `--glob=<agent-pattern>` is **never** present in the emitted argv, while operator-supplied `include`/`exclude` patterns still land as `--glob=<pattern>` and `--glob=!<pattern>` respectively. A future refactor cannot silently reintroduce the override bug without failing this test.
+
+### Composition with the glob allowlist
+
+The `experimental.glob_include_ignored` allowlist (see [docs/CONFIGURATION.md — Experimental Glob-Ignored Allowlist](CONFIGURATION.md#experimental-glob-ignored-allowlist-experimentalglob_include_ignored)) is now composed through the same `compile()` matcher so its include-pattern expansion rules (`foo` → `**/foo/**` + `**/foo`; `path/to/dir/` → `path/to/dir/**` + `path/to/dir`) stay semantically identical to a bare agent-pattern match. The allowlist's include patterns ARE legitimate `--glob=` overrides — that is the whole point of the feature — so `src/tool/glob-ignored.ts` plumbs them through `--glob=` while the agent pattern stays confined to the in-process matcher.
+
+## Managed-configuration policy resolution (`src/core/managed-policy.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream opencode PRs #55267 "managed config has highest precedence" and #55297 "promote experimental.policies to top-level policies"). Lives in `src/core/managed-policy.ts`. Pure, I/O-free, schema-agnostic module that routes policy resolution through one well-defined place regardless of which concrete config loader (user config, project overlay, macOS MDM preferences) emits the documents.
+
+### Two problems, one module
+
+```mermaid
+flowchart TD
+    subgraph Loaders
+        User[~/.alexi/config.json]
+        Project[./alexi.config.json]
+        Managed[(MDM / /etc/alexi/managed.json)]
+    end
+    User --> Tag[TaggedConfigDocument managed=false]
+    Project --> Tag
+    Managed --> ManagedTag[TaggedConfigDocument managed=true]
+    Tag --> Resolve[resolvePoliciesWithPrecedence]
+    ManagedTag --> Resolve
+    Resolve --> ApplyPre[applyManagedPrecedence]
+    ApplyPre --> Split{split by managed}
+    Split --> ManagedPolicies[managedPolicies<br/>reversed, policies only]
+    Split --> UserDocs[userDocuments<br/>input order]
+    Split --> ManagedSettings[managedSettings<br/>policies stripped]
+    ManagedPolicies --> Compose[Final order]
+    UserDocs --> Compose
+    ManagedSettings --> Compose
+    Compose --> Merge[mergePolicies]
+    Merge --> Reader[Policy evaluator<br/>reverse-load order]
+    Reader --> Enforce[Managed policy runs LAST,<br/>wins]
+```
+
+- **Policy source back-compat.** Upstream opencode promoted `experimental.policies` to a top-level `policies` field. Alexi must accept both shapes during the migration window: existing deployments still ship `experimental.policies` in their routing/config JSON, but new tooling emits `policies` directly. `mergePolicies(documents)` reads `doc.info.policies ?? doc.info.experimental?.policies` per document, preferring the new path when both are present on the same document, and preserves input order so the caller controls cross-document precedence.
+- **Managed-config precedence.** On managed Macs and SAP enterprise deployments where IT administrators push settings via MDM, the previous load order sat managed config at the LOWEST priority — meaning any user-config override could sidestep an administrator policy. `applyManagedPrecedence(documents)` re-orders a `TaggedConfigDocument[]` so managed documents (those with `managed: true`) load LAST (so their non-policy settings win on later-wins keys), while splitting their policies off into a separate FIRST-loaded list — because the policy evaluator processes policies in reverse-load order (later-loaded runs first), managed policies then retain FINAL authority.
+
+### Load-order composition
+
+`applyManagedPrecedence` returns three slots:
+
+- `managedPolicies` — one `ConfigDocument` per managed doc that had a non-empty policy list, carrying ONLY the policy data, with the managed documents reversed so the LAST-loaded managed source carries FINAL say (reverse-of-reverse = original intent).
+- `userDocuments` — the input documents that were NOT tagged `managed: true`, returned in input order.
+- `managedSettings` — the managed documents stripped of their `policies` AND `experimental.policies` (any now-empty `experimental` block is dropped entirely), so they only contribute non-policy settings when loaded last.
+
+The final composed order is `[...managedPolicies, ...userDocuments, ...managedSettings]`. The convenience helper `resolvePoliciesWithPrecedence(documents)` runs this composition and feeds the result through `mergePolicies` for callers that just want the final effective policy list.
+
+### Design notes
+
+- **Pure and schema-agnostic.** No I/O, no Effect runtime, no SAP AI Core credential handling. The module operates on minimal `ConfigDocument` records (`{ path, info }` with `info.policies` and `info.experimental.policies` as the only recognised fields). Everything else in `info` is passed through untouched by `mergePolicies` and preserved verbatim by `applyManagedPrecedence` for the `managedSettings` slot (minus the two policy keys).
+- **Opaque policy records.** `Policy = Readonly<Record<string, unknown>>`. The policy enforcer (`src/tool/index.ts`) owns interpretation; this module only orders them.
+- **Top-level wins on same doc.** When both `info.policies` and `info.experimental.policies` are present on the same document, the top-level `policies` wins. This is the migration path's single rule — callers that want the legacy value must drop the top-level field.
+- **Reverse-of-reverse for managed policies.** The reversed-then-prepended order is intentional. The policy evaluator processes policies in reverse-load order (later-loaded runs first), so making a managed policy run LAST means loading it FIRST. Among multiple managed sources, the LAST-loaded managed source should win — which under reverse-load means it should be the FIRST entry in `managedPolicies`. The `[...managed].reverse()` in the implementation is that intentional flip.
+
