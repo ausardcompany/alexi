@@ -159,6 +159,103 @@ describe('/fork copies session transcript', () => {
     expect(logged).toContain('switched');
   });
 
+  it('--from-message truncates the forked transcript at the given index', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+    for (let i = 1; i <= 10; i++) {
+      original.messages.push({
+        role: i % 2 === 1 ? 'user' : 'assistant',
+        content: `Message ${i}`,
+        timestamp: Date.now(),
+        tokens: { input: i, output: i },
+      });
+    }
+    original.metadata.messageCount = 10;
+
+    const handled = await handleCommand('/fork experiment --from-message 5', state);
+    expect(handled).toBe(true);
+
+    const forked = state.sessionManager.getCurrentSession();
+    if (!forked) {
+      throw new Error('expected a forked session');
+    }
+    expect(forked.metadata.title).toBe('experiment');
+    expect(forked.messages).toHaveLength(5);
+    expect(forked.messages[0].content).toBe('Message 1');
+    expect(forked.messages[4].content).toBe('Message 5');
+    expect(forked.metadata.messageCount).toBe(5);
+    // Tokens are summed as (input + output) for messages 1..5 => 2*(1+2+3+4+5) = 30
+    expect(forked.metadata.totalTokens).toBe(30);
+
+    const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('from message 5 of 10');
+  });
+
+  it('fork without --from-message still copies the entire transcript', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+    for (let i = 1; i <= 10; i++) {
+      original.messages.push({
+        role: i % 2 === 1 ? 'user' : 'assistant',
+        content: `Message ${i}`,
+        timestamp: Date.now(),
+      });
+    }
+
+    await handleCommand('/fork full-copy', state);
+    const forked = state.sessionManager.getCurrentSession();
+    expect(forked?.messages).toHaveLength(10);
+  });
+
+  it('rejects --from-message when the index is out of range', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+    for (let i = 1; i <= 5; i++) {
+      original.messages.push({
+        role: 'user',
+        content: `m${i}`,
+        timestamp: Date.now(),
+      });
+    }
+    const originalId = original.metadata.id;
+
+    const handled = await handleCommand('/fork too-far --from-message 10', state);
+    expect(handled).toBe(true);
+
+    // Current session must remain the original — no fork should have happened.
+    const active = state.sessionManager.getCurrentSession();
+    expect(active?.metadata.id).toBe(originalId);
+
+    const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('Invalid message index');
+  });
+
+  it('rejects --from-message when the value is not an integer', async () => {
+    const state = buildReplState(tmpDir);
+    const original = state.sessionManager.getCurrentSession();
+    if (!original) {
+      throw new Error('expected a starting session');
+    }
+    original.messages.push({ role: 'user', content: 'hi', timestamp: Date.now() });
+    const originalId = original.metadata.id;
+
+    await handleCommand('/fork bad --from-message abc', state);
+    const active = state.sessionManager.getCurrentSession();
+    expect(active?.metadata.id).toBe(originalId);
+
+    const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('Invalid message index');
+  });
+
   it('does not fork when there is no active session', async () => {
     const sessionManager = new SessionManager({ sessionsDir: tmpDir });
     const state: ReplState = {
