@@ -2151,6 +2151,44 @@ for the regression suite and
 [CHANGELOG.md — Wire `.alexi/rules/` into the auto-commit message generator (issue #1953)](../CHANGELOG.md#added)
 for the full behavioural contract.
 
+### Commitlint scope-enum injection into the auto-commit prompt
+
+Commit `40515f68` extends the same system-prompt composer to inject the project's commitlint `scope-enum` whitelist. The auto-commit generator now reads `<workdir>/commitlint.config.cjs` (falling back to `commitlint.config.js`) at message-generation time and prepends the resolved scope list to the system prompt handed to the cheap-model provider. This closes a reliability gap in the agent fleet: when the LLM invented a scope (`feat(deployment): ...`, `feat(workflow): ...`) that the husky `commit-msg` hook then rejected, the whole commit cycle had to be retried, burning agent retry budget on a problem that was knowable up front.
+
+**How the loader behaves.** `loadCommitlintScopes(workdir)` CJS-requires the config via a module-scoped `createRequire(import.meta.url)` so a `.cjs` file resolves cleanly from ESM. It reads `module.exports.rules['scope-enum'][2]` (the third element of the commitlint rule tuple, which carries the allowed scope list) and returns the filtered string entries. Any failure mode degrades to `[]`:
+
+- Missing `commitlint.config.cjs` AND missing `commitlint.config.js` → `[]`.
+- File present but not valid JavaScript (parse error at require time) → `[]`, logged at `debug` level.
+- `rules.scope-enum` missing or shaped as a non-array (e.g. `[2, 'always']` without the third element) → `[]`.
+- Non-string entries in the scope list are filtered out before return.
+
+A broken commitlint config MUST NEVER prevent commit-message generation — the heuristic fallback path (`buildHeuristicMessage`) must remain reachable even when every optional loader has thrown.
+
+**Prompt composition order.** `buildSystemPrompt(workdir, rulesPathOverride?)` now assembles the system prompt as `BASE_SYSTEM_PROMPT` → scopes section → rules section, joined with `\n\n`. The scopes block is placed BEFORE the rules block so a user rule that re-mentions a scope cannot shift the model's attention away from the authoritative list. When neither block is populated, the composer emits the base prompt verbatim.
+
+**Format of the injected block.** The scope list is rendered as:
+
+```
+Allowed Conventional Commits scopes for this project (use ONLY these in the (scope) field; omit the scope if none fit): cli, core, providers, config, server, agent, tools, ci, deps, tests.
+```
+
+The literal preamble is exported from `src/git/commitMessage.ts` as `COMMIT_SCOPES_PREAMBLE` so tests can assert against it without duplicating the string. The explicit "omit the scope if none fit" clause is a deliberate escape hatch — Conventional Commits spec treats the scope as optional, and the husky hook accepts a scopeless `feat: ...` message, so steering the model toward "omit when none fit" is strictly preferable to inventing a near-miss scope.
+
+**Caching contract.** The loader drops `localRequire.cache[localRequire.resolve(full)]` on every call so repeated invocations observe the on-disk file, not a stale closure. This matters for the end-to-end test suite under `tests/git/autoCommit.rules.test.ts`, which writes a fresh `commitlint.config.cjs` into a temp directory per case and expects each case to see the correct scope list.
+
+**No action required for existing projects.** A workdir with no `commitlint.config.cjs` and no `commitlint.config.js` (the typical case for lightweight scripts or forks that have not yet adopted the commitlint toolchain) sees `buildScopesSection` return `''` and the composer emits the base prompt plus any `.alexi/rules/` content verbatim — byte-identical to the pre-fix behaviour. Projects that adopt commitlint later pick up the behaviour automatically on the next auto-commit run.
+
+**Public surface added on `src/git/commitMessage.ts`** (also re-exported from `src/git/index.ts`):
+
+| Export | Signature | Purpose |
+|--------|-----------|---------|
+| `COMMIT_SCOPES_PREAMBLE` | `const string` | Preamble literal prepended to the scope list. |
+| `loadCommitlintScopes` | `(workdir: string) => string[]` | Load the scope whitelist from `commitlint.config.cjs`/`.js`. Returns `[]` on any failure. |
+| `buildScopesSection` | `(workdir: string) => string` | Format the preamble + scope list. Returns `''` when no scopes are declared. |
+| `buildRulesSection` | `(workdir: string, rulesPathOverride?: string \| string[]) => string` | Pre-existing helper, now re-exported for test ergonomics. |
+
+See [docs/TESTING.md — Testing commitlint `scope-enum` injection](TESTING.md#testing-commitlint-scope-enum-injection) for the regression suite and [docs/TESTING.md — End-to-end: `AutoCommitManager` honors rules AND scopes](TESTING.md#end-to-end-autocommitmanager-honors-rules-and-scopes) for the full-chain integration pattern.
+
 ### PR Description Template
 
 ```markdown
