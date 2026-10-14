@@ -41,7 +41,7 @@ describe('ripgrep settlement: argv shape', () => {
     expect(passed).toContain('--glob=!node_modules/**');
   });
 
-  it('does NOT emit the agent pattern as --glob= for a broad `**\/*` search', () => {
+  it('does NOT emit the agent pattern as --glob= for a broad `**/*` search', () => {
     const passed = assembleGlobArgs({ pattern: '**/*' });
     expect(passed).not.toContain('--glob=**/*');
   });

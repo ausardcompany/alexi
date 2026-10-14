@@ -51,6 +51,7 @@ export interface ConfigDocument {
     readonly policies?: readonly Policy[];
     readonly experimental?: {
       readonly policies?: readonly Policy[];
+      readonly [key: string]: unknown;
     };
     readonly [key: string]: unknown;
   };
