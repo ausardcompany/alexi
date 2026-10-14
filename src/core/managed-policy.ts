@@ -139,16 +139,18 @@ export function applyManagedPrecedence(documents: readonly TaggedConfigDocument[
   // Strip the policy data off the managed-settings documents so they only
   // contribute non-policy settings when loaded LAST.
   const managedSettings: ConfigDocument[] = managed.map((doc) => {
-    const { policies: _p1, experimental, ...rest } = doc.info as {
+    const {
+      policies: _p1,
+      experimental,
+      ...rest
+    } = doc.info as {
       policies?: readonly Policy[];
       experimental?: { policies?: readonly Policy[]; [key: string]: unknown };
       [key: string]: unknown;
     };
     const trimmedExperimental =
       experimental !== undefined
-        ? Object.fromEntries(
-            Object.entries(experimental).filter(([key]) => key !== 'policies')
-          )
+        ? Object.fromEntries(Object.entries(experimental).filter(([key]) => key !== 'policies'))
         : undefined;
     return {
       path: doc.path,

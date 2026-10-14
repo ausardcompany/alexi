@@ -92,10 +92,7 @@ export function relative(line: string): string {
 export function glob(input: Input): Walk {
   const matcher = compile(input.pattern);
   const pre = prefilter(input.pattern);
-  const args = [
-    ...pre.typeArgs,
-    ...(pre.preGlob ? [`--pre-glob=${pre.preGlob}`] : []),
-  ];
+  const args = [...pre.typeArgs, ...(pre.preGlob ? [`--pre-glob=${pre.preGlob}`] : [])];
   const match = (file: string): boolean => matcher(file, false);
   const keep = (file: string | undefined): boolean => {
     if (file === undefined) {

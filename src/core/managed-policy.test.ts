@@ -21,9 +21,7 @@ import {
 
 describe('mergePolicies', () => {
   it('accepts the legacy experimental.policies shape', () => {
-    const docs = [
-      { path: 'a.json', info: { experimental: { policies: [{ rule: 'A' }] } } },
-    ];
+    const docs = [{ path: 'a.json', info: { experimental: { policies: [{ rule: 'A' }] } } }];
     expect(mergePolicies(docs)).toEqual([{ rule: 'A' }]);
   });
 
