@@ -4,311 +4,258 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
+```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-13
+Generated: 2026-10-14
 Based on upstream commits analyzed:
-- **kilocode**: 3df806ae9..2a7edfedb (92 commits)
-- **opencode**: e41e7e90..1015cb67 (50 commits)
+- kilocode: 4ee8d1b3b, ff20ca72d, 17448f5c5, e48c9785c, f8ebadd8a, 62c4b88da, 09399e485, a4731fcd6, da2b05a4c, cd7c29ef6, 44856c1cd, f70f0da2d
+- opencode: 34d8ded, f576da5, 6dc4d4e, 6a7cedc, 7351718, a3f7f42, 55c863d, 23e3493, d8e31d8
 
 ## Summary
-- Total changes planned: 12
-- Critical: 1 | High: 5 | Medium: 4 | Low: 2
-
-Key themes from upstream:
-1. **New `glob_include_ignored` feature** (kilocode): opt-in allowlist for glob searches to include ignored/hidden paths
-2. **Provider request body encoding + compatibility.cacheFormat** (opencode): configurable Anthropic cache breakpoints and request encoding
-3. **Default chunk timeout raised to 15 min + Bun fetch idle timeout disabled** (opencode): fixes provider request hangs
-4. **System config discovery** (opencode): macOS MDM managed preferences + system config dirs
-5. **Provider-level compatibility settings** (opencode): per-provider compatibility settings
-6. **Promise tool error handling** (opencode): tool throws returned as tool failures
-7. **Ripgrep Windows extraction without PowerShell** (opencode)
-8. **Azure provider refactor** (opencode): stop listing Azure resources at startup
-
----
+- Total changes planned: 11
+- Critical: 2 | High: 4 | Medium: 3 | Low: 2
 
 ## Changes
 
-### 1. Add `glob_include_ignored` opt-in allowlist for ignored paths
-**File**: `src/tool/glob.ts` + new `src/tool/glob-ignored.ts`
-**Priority**: high
-**Type**: feature
-**Reason**: kilocode added an experimental allowlist allowing glob to traverse specific ignored/hidden directories (e.g., `build/`, `node_modules/some-pkg/`). Useful for SAP projects where some generated artifacts are gitignored but need to be searchable.
+### 1. Fix glob patterns bypassing .gitignore (ripgrep override issue)
+**File**: `src/core/kilocode/ripgrep-glob.ts` (NEW)
+**Priority**: critical
+**Type**: security | bugfix
+**Reason**: Upstream kilocode fix #15003/#15017 — passing agent-supplied patterns as `--glob=<pattern>` makes them ripgrep **overrides**, which win over `.gitignore`. This causes `**/*` globs to walk `node_modules`, `.git`, and other ignored directories, exposing secrets (`.env`, `secret/`) and dramatically slowing searches. Must be fixed to preserve ignore semantics.
 
-**New file**: `src/tool/glob-ignored.ts`
+**New file**:
 ```typescript
-// Mirrors packages/opencode/src/kilocode/tool/glob-ignored.ts
-// Resolves user-provided allowlist patterns into ripgrep --glob includes
-// Patterns without a slash match folders at any depth
-// Nested ignored folders inside listed folders stay skipped
+// Glob matching that keeps ripgrep's ignore rules in charge (#15003).
+//
+// Passing the agent's pattern as `--glob=<pattern>` makes it a ripgrep override, and overrides win
+// over `.gitignore`. Instead, let ripgrep list the files its ignore rules allow and apply the
+// pattern here with gitignore-style rules.
 
-export interface IgnoredAllowlist {
-  readonly include: readonly string[]
-  readonly noRequireGit: boolean
+export interface Input {
+  readonly pattern: string
+  readonly hidden?: boolean
+  readonly include?: readonly string[]
 }
 
-export function resolveAllowlist(
-  patterns: readonly string[] | undefined,
-  cwd: string,
-): IgnoredAllowlist {
-  if (!patterns || patterns.length === 0) {
-    return { include: [], noRequireGit: false }
+export interface Walk {
+  readonly args: readonly string[]
+  readonly match: (file: string) => boolean
+  readonly keep: (file: string | undefined) => boolean
+}
+
+/** Match a cwd-relative path the way ripgrep matches an override glob. */
+export function compile(pattern: string) {
+  const dir = pattern.endsWith("/")
+  const body = pattern.replace(/\/+$/, "")
+  const text = body.includes("/") ? body.replace(/^\//, "") : `**/${body}`
+  const glob = new Bun.Glob(text)
+  const folders = text.endsWith("/**") ? new Bun.Glob(`${text}/*`) : glob
+  return (path: string, folder: boolean) => {
+    if (folder) return folders.match(path)
+    return !dir && glob.match(path)
   }
-  const include: string[] = []
-  for (const raw of patterns) {
-    const pattern = raw.trim()
-    if (!pattern || pattern.startsWith("#")) continue
-    // Patterns without slash match folders at any depth
-    if (!pattern.includes("/")) {
-      include.push(`**/${pattern}/**`)
-      include.push(`**/${pattern}`)
-    } else {
-      include.push(pattern)
-      if (!pattern.endsWith("/**")) include.push(`${pattern}/**`)
-    }
+}
+
+/** Extract last path segment to use as a ripgrep file type for prefiltering. */
+function prefilter(pattern: string): { typeArgs: readonly string[]; preGlob?: string } {
+  const name = pattern.split("/").at(-1) ?? ""
+  if (!name || name.includes("{") || name.includes("}")) return { typeArgs: [] }
+  return {
+    typeArgs: [`--type-add=kiloglob:${name}`, "--type=kiloglob"],
+    preGlob: name,
   }
-  return { include, noRequireGit: true }
+}
+
+export function relative(line: string): string {
+  return line.replace(/^(?:\.[\\/])+/u, "").replace(/^[\\/]+/u, "").replaceAll("\\", "/")
+}
+
+export function glob(input: Input): Walk {
+  const matcher = compile(input.pattern)
+  const pre = prefilter(input.pattern)
+  const args = [
+    ...pre.typeArgs,
+    ...(pre.preGlob ? [`--pre-glob=${pre.preGlob}`] : []),
+  ]
+  const match = (file: string) => matcher(file, false)
+  const keep = (file: string | undefined) => {
+    if (file === undefined) return false
+    return match(file)
+  }
+  return { args, match, keep }
 }
 ```
 
-**Modify** `src/tool/glob.ts`:
+### 2. Update ripgrep.ts to apply pattern after ignore rules
+**File**: `src/core/ripgrep.ts`
+**Priority**: critical
+**Type**: bugfix
+**Reason**: Companion to change #1 — wires the new `KiloGlob` module into the glob invocation path, drops rejected paths after ripgrep applies ignore rules.
+
+**Current code**:
 ```typescript
-// Before: pass only pattern/exclude to ripgrep
-// After: thread includeIgnored through to ripgrep call
+export interface GlobInput {
+  readonly noRequireGit?: boolean
+  readonly include?: readonly string[]
+  readonly exclude?: readonly string[]
+}
 
-import { resolveAllowlist } from "./glob-ignored.js"
+// ... in glob command construction:
+`--glob=${input.pattern}`,
+...(input.include ?? []).map((glob) => `--glob=${glob}`),
+...(input.exclude ?? []).map((glob) => `--glob=!${glob}`),
 
-const allowlist = resolveAllowlist(
-  config.experimental?.glob_include_ignored,
-  ctx.cwd,
-)
+// parser:
+parse: (line) =>
+  Effect.succeed(
+    line.replace(/^(?:\.[\\/])+/u, "")
+        .replace(/^[\\/]+/u, "")
+        .replaceAll("\\", "/"),
+  ),
+```
 
-const result = await ripgrep.glob({
-  pattern: args.pattern,
-  cwd: ctx.cwd,
-  include: allowlist.include,          // NEW
-  noRequireGit: allowlist.noRequireGit, // NEW
-  exclude: args.exclude,
+**New code**:
+```typescript
+import * as KiloGlob from "./kilocode/ripgrep-glob"
+
+export interface GlobInput {
+  readonly noRequireGit?: boolean
+  readonly include?: readonly string[]
+  readonly exclude?: readonly string[]
+  readonly filter?: (path: string) => boolean  // drop paths before the result limit
+}
+
+// ... in glob command construction:
+...KiloGlob.glob(input).args,  // apply the pattern after ignore rules
+...(input.include ?? []).map((glob) => `--glob=${glob}`),
+...(input.exclude ?? []).map((glob) => `--glob=!${glob}`),
+
+// parser:
+parse: (line) => {
+  const file = KiloGlob.relative(line)
+  const walker = KiloGlob.glob(input)
+  const kept = walker.keep(file) && (!input.filter || input.filter(file))
+  return Effect.succeed(kept ? file : undefined)
+},
+```
+
+### 3. Add test coverage for ripgrep-glob
+**File**: `src/core/kilocode/ripgrep-glob.test.ts` (NEW)
+**Priority**: high
+**Type**: test
+**Reason**: The glob/gitignore interaction is subtle; without tests this regresses easily. Mirror upstream `ripgrep-glob.test.ts` (343 lines) covering `.gitignore`, `.env` exclusion, hidden files, `out/*` + `!out/keep.txt` style negations, and brace expansion edge cases.
+
+**New code** (test skeleton):
+```typescript
+import { describe, expect } from "bun:test"
+import { Effect } from "effect"
+import { Ripgrep } from "../ripgrep"
+
+const gitignore = ["build/", "node_modules/", "*.gen.ts", "out/*", "!out/keep.txt", ".cache/", ".env", "secret/"]
+
+describe("ripgrep-glob", () => {
+  it("respects .gitignore for **/* pattern", async () => {
+    // populate fixture tmpdir, run Ripgrep.glob({ pattern: "**/*" })
+    // assert node_modules/, build/, .env NOT present
+    // assert out/keep.txt present, out/drop.txt not present
+  })
+  it("prefilters with ripgrep file type when pattern has a filename segment", async () => {
+    // run with pattern "*.ts" and assert --type-add=kiloglob:*.ts in args
+  })
+  it("preserves hidden file semantics", async () => {
+    // hidden files match when pattern matches; hidden folders only when pattern matches folder
+  })
+  // ... port upstream cases
 })
 ```
 
----
-
-### 2. Extend ripgrep interface to accept `include` globs
-**File**: `src/core/ripgrep.ts` (or equivalent)
-**Priority**: high
-**Type**: feature
-**Reason**: Required by change #1. Mirrors `packages/core/src/ripgrep.ts` upstream change.
+### 4. Update ripgrep-settlement test for new glob args
+**File**: `src/core/kilocode/ripgrep-settlement.test.ts`
+**Priority**: medium
+**Type**: test
+**Reason**: Existing test asserts `--glob=*.ts` presence; new flow uses `--pre-glob` + `--type-add` instead.
 
 **Current code**:
 ```typescript
-export interface GlobInput {
-  readonly pattern: string
-  readonly cwd: string
-  readonly follow?: boolean
-  readonly signal?: AbortSignal
-  readonly noRequireGit?: boolean
-  readonly exclude?: readonly string[]
-}
+expect(passed).toContain("--glob=*.ts")
+```
 
-// in spawn:
-const args = [
-  ...(input.follow ? ["--follow"] : []),
-  ...(input.noRequireGit ? ["--no-require-git"] : []),
-  `--glob=${input.pattern}`,
-  ...(input.exclude ?? []).map((g) => `--glob=!${g}`),
-  "--glob=!**/.git/**",
-  ".",
+**New code**:
+```typescript
+// The include glob is applied after ignore rules: validated by ripgrep, prefiltered as a file type.
+expect(passed).toContain("--pre-glob=*.ts")
+expect(passed).toContain("--type-add=kiloglob:*.ts")
+expect(passed).not.toContain("--glob=*.ts")
+```
+
+### 5. Update glob-ignored tool to use new glob semantics
+**File**: `src/tool/glob-ignored.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: 14 lines changed upstream. Ensures the tool aligns with the new `ripgrep-glob` module and passes include/exclude through correctly.
+
+**Change**: Review upstream `packages/opencode/src/kilocode/tool/glob-ignored.ts` diff and apply the equivalent 14 add / 14 remove lines. The main behavioral delta is removal of raw `--glob=${pattern}` plumbing in favor of calling the new `KiloGlob` helpers.
+
+### 6. Stabilize top-level `policies` config
+**File**: `src/core/config.ts`, `src/core/config/normalize.ts`, `src/core/managed-policy.ts`
+**Priority**: high
+**Type**: feature
+**Reason**: opencode #55297 promotes `experimental.policies` to top-level `policies`. Alexi should accept both forms during migration (back-compat) but prefer the new path. Also required by downstream policy enforcement.
+
+**Current code** (`managed-policy.ts` statements fn):
+```typescript
+.flatMap((entry) => entry.info.experimental?.policies ?? [])
+```
+
+**New code**:
+```typescript
+.flatMap((entry) => entry.info.policies ?? entry.info.experimental?.policies ?? [])
+```
+
+**Also in** `config/normalize.ts`: split `normalizeExperimental` so a dedicated `normalizePolicies` function merges `experimental.policies`, top-level `policies`, and v1 provider lists into a single top-level `policies` array (later sources win within a document).
+
+### 7. Give managed configuration highest precedence
+**File**: `src/core/config.ts`
+**Priority**: high
+**Type**: security
+**Reason**: opencode #55267 — managed/MDM settings must override all user config. Previously MDM preferences and system directory sat at *lowest* priority. This is a security-impacting fix for enterprise deployments (relevant for SAP AI Core integration where IT administrators push policy via MDM).
+
+**Current code**:
+```typescript
+const systemSupplementary = [
+  ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
+  ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
 ]
 ```
 
 **New code**:
 ```typescript
-export interface GlobInput {
-  readonly pattern: string
-  readonly cwd: string
-  readonly follow?: boolean
-  readonly signal?: AbortSignal
-  readonly noRequireGit?: boolean
-  readonly include?: readonly string[]  // NEW: additional whitelist globs
-  readonly exclude?: readonly string[]
-}
-
-const args = [
-  ...(input.follow ? ["--follow"] : []),
-  ...(input.noRequireGit ? ["--no-require-git"] : []),
-  `--glob=${input.pattern}`,
-  ...(input.include ?? []).map((g) => `--glob=${g}`),  // NEW
-  ...(input.exclude ?? []).map((g) => `--glob=!${g}`),
-  "--glob=!**/.git/**",
-  ".",
+// Managed settings load LAST so they override everything.
+// Policies evaluate in reverse load order, so managed policies split off and
+// load FIRST to retain final file-based authority.
+const managed = [
+  ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
+  ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
 ]
-```
+const managedPolicies = managed
+  .flatMap((entry) =>
+    entry.type === "document" && entry.info.policies
+      ? [new Document({
+          type: "document",
+          path: entry.path,
+          info: new Info({ policies: entry.info.policies }),
+        })]
+      : [],
+  )
+  .toReversed()
+const managedSettings = managed.map((entry) =>
+  entry.type === "document" && entry.info.policies
+    ? new Document({ ...entry, info: new Info({
+{"prompt_tokens":22529,"completion_tokens":4096,"total_tokens":26625,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
----
-
-### 3. Add `glob_include_ignored` to config schema
-**File**: `src/core/config/schema.ts` (or wherever `Info` schema is defined)
-**Priority**: high
-**Type**: feature
-**Reason**: Mirrors `packages/core/src/v1/config/config.ts` upstream change. Required for change #1 to be user-configurable.
-
-**New code** (add to experimental block):
-```typescript
-glob_include_ignored: Schema.optional(
-  Schema.mutable(Schema.Array(Schema.String))
-).annotate({
-  description:
-    "Folders or files, as gitignore-style patterns relative to the workspace root, that the glob tool should search even when they are ignored (for example by .gitignore) or hidden. Patterns without a slash match folders at any depth; list a file inside an ignored folder by its path (for example build/report.json). Ignored or hidden folders nested inside a listed folder stay skipped.",
-}),
-```
-
----
-
-### 4. Raise default provider chunk timeout to 15 minutes
-**File**: `src/providers/http-transport.ts` (or wherever chunk timeout is set)
-**Priority**: critical
-**Type**: bugfix
-**Reason**: opencode PR #55032 — SAP AI Core long-running inference requests can exceed the previous timeout, causing spurious failures mid-stream. This is critical because SAP's enterprise models (gpt-5, claude-opus via SAP) often take >5 minutes for complex reasoning tasks.
-
-**Current code**:
-```typescript
-const DEFAULT_CHUNK_TIMEOUT = 300_000 // 5 minutes
-```
-
-**New code**:
-```typescript
-// Matches upstream default; critical for long-running SAP AI Core calls
-const DEFAULT_CHUNK_TIMEOUT = 900_000 // 15 minutes
-```
-
----
-
-### 5. Disable Bun's fetch idle timeout for provider requests
-**File**: `src/providers/http-transport.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: opencode PR #55007 — Bun's default fetch idle timeout silently cuts long-running streams. SAP AI Core streaming responses can idle during model reasoning, triggering ECONNRESET. This must be applied if Alexi runs on Bun.
-
-**New code**:
-```typescript
-// Only applies when running under Bun; harmless under Node
-const fetchOptions: RequestInit & { idleTimeout?: number } = {
-  ...baseOptions,
-  // 0 = disabled (Bun-specific option)
-  idleTimeout: 0,
-}
-const response = await fetch(url, fetchOptions)
-```
-
----
-
-### 6. Add `compatibility.cacheFormat` for Anthropic cache breakpoints
-**File**: `src/providers/anthropic.ts` + `src/core/config/schema.ts`
-**Priority**: high
-**Type**: feature
-**Reason**: opencode PR #54945 — Allows configuring Anthropic cache breakpoints per provider. Important for SAP's Claude integration where cache control may differ from direct Anthropic API.
-
-**Schema change** (`src/core/config/schema.ts`):
-```typescript
-compatibility: Schema.optional(Schema.Struct({
-  cacheFormat: Schema.optional(Schema.Union(
-    Schema.Literal("anthropic"),
-    Schema.Literal("none"),
-  )),
-  // keep existing fields
-})),
-```
-
-**Provider change** (`src/providers/anthropic.ts`):
-```typescript
-// Before: hardcoded cache breakpoint insertion
-// After: respect compatibility.cacheFormat setting
-
-const cacheFormat = provider.compatibility?.cacheFormat ?? "anthropic"
-if (cacheFormat === "anthropic") {
-  applyCacheBreakpoints(messages)
-}
-```
-
----
-
-### 7. Return promise tool throws as tool failures (not fatal errors)
-**File**: `src/tool/runner.ts` (or wherever tool execution happens)
-**Priority**: high
-**Type**: bugfix
-**Reason**: opencode PR #54913 — When a tool implementation throws asynchronously, it should surface as a tool-level failure (reported to the model) rather than crashing the session. Critical for stability.
-
-**Current code**:
-```typescript
-try {
-  const result = await tool.execute(args, ctx)
-  return { ok: true, result }
-} catch (err) {
-  throw err // propagates to session crash
-}
-```
-
-**New code**:
-```typescript
-try {
-  const result = await tool.execute(args, ctx)
-  return { ok: true, result }
-} catch (err) {
-  // Return as tool failure so the model can retry/recover
-  const message = err instanceof Error ? err.message : String(err)
-  return {
-    ok: false,
-    error: {
-      type: "tool_execution_error",
-      message,
-      stack: err instanceof Error ? err.stack : undefined,
-    },
-  }
-}
-```
-
----
-
-### 8. Add provider-level compatibility + migrate `setCacheKey`
-**File**: `src/providers/base.ts`, `src/core/config/migrate.ts`
-**Priority**: medium
-**Type**: refactor
-**Reason**: opencode PR #54911 — Supports provider-level compatibility settings and migrates legacy `setCacheKey` option. Needed for forward-compatibility with provider configs.
-
-**New code** (migration):
-```typescript
-// In config migration pass
-function migrateCacheKey(provider: ProviderConfig): ProviderConfig {
-  if (provider.setCacheKey !== undefined) {
-    provider.compatibility = {
-      ...provider.compatibility,
-      cacheKey: provider.setCacheKey,
-    }
-    delete (provider as any).setCacheKey
-  }
-  return provider
-}
-```
-
----
-
-### 9. Add request body encoding setting
-**File**: `src/providers/base.ts` + schema
-**Priority**: medium
-**Type**: feature
-**Reason**: opencode PR #54932 — Some providers (including possibly SAP AI Core) require specific body encoding. Lets users configure `json` vs `form` encoding per provider.
-
-**Schema**:
-```typescript
-body: Schema.optional(Schema.Struct({
-  encoding: Schema.optional(Schema.Union(
-    Schema.Literal("json"),
-    Schema
-{"prompt_tokens":41328,"completion_tokens":4096,"total_tokens":45424,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
-
-[Session: 2ec36087-1f69-4623-9b22-c57e4172e339]
-[Messages: 2, Tokens: 45424]
+[Session: 3d83e915-da82-4193-a854-8e448e521750]
+[Messages: 2, Tokens: 26625]
 
 ## Execution Instructions
 
