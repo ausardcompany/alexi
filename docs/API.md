@@ -1153,11 +1153,36 @@ Persistence semantics: `/model <id>` and the `/models` interactive picker record
 | `/rewind` | Rewind conversation to a specific turn or summarize up to a point |
 | `/context` | Show context usage |
 | `/status` | Show current status |
-| `/fork [name]` | Fork current session; the fork becomes the active session (subsequent messages land in the fork, matching `git checkout -b`). Optional `name` sets the fork title (defaults to `fork-<timestamp>`). |
+| `/fork [name] [--from-message <n>]` | Fork current session; the fork becomes the active session (subsequent messages land in the fork, matching `git checkout -b`). Optional `name` sets the fork title (defaults to `fork-<timestamp>`). Optional `--from-message <n>` truncates the forked transcript at the 1-indexed, inclusive message boundary (fork contains messages `1..n` from the source); the flag may appear before or after `[name]`. |
 | `/rename` | Rename current session |
 | `/clear-history` | Clear conversation history |
 | `/cost` | Show cost summary |
 | `/stats` | Show usage statistics |
+
+### Session Fork (`/fork`)
+
+The `/fork` slash command (`src/cli/interactive.ts:804-898`) creates a new session seeded from the current session's transcript and immediately switches the manager's active session to the fork — subsequent user messages land in the fork, matching the `git checkout -b` mental model.
+
+Usage:
+
+```text
+/fork                              # anonymous fork, copies full transcript, auto name `fork-<timestamp>`
+/fork my-branch                    # named fork, copies full transcript
+/fork --from-message 5             # anonymous fork, keeps messages 1..5 only
+/fork my-branch --from-message 5   # named fork, keeps messages 1..5 only
+/fork --from-message 5 my-branch   # flag order is interchangeable
+```
+
+Argument contract:
+
+- `[name]` — optional positional. Sets `metadata.title` on the fork. Defaults to `fork-<Date.now()>`. If omitted the title still uses the timestamp fallback — the flag does not need a name to work.
+- `--from-message <n>` — optional, 1-indexed, inclusive. The forked transcript is `session.messages.slice(0, n)`, so `--from-message 5` keeps messages 1 through 5 and drops everything after. Without the flag the full transcript is copied.
+
+Validation. The index is checked against four invariants before any session mutation: `Number.isNaN`, non-integer (rejects `3.5`), `< 1`, `> session.messages.length`. Any failure prints `Invalid message index: <raw>` plus a hint `Session has <N> message(s); use 1..<N>` and returns without creating a fork. A missing value for the flag (`--from-message` at the end of `args`) prints `--from-message requires a message index`. In every error path the current session is unchanged.
+
+Confirmation line. On success the command prints `Forked session: <name> (<short-id>) - now active`, with ` from message <n> of <total>` inserted before `- now active` when the flag was used, e.g. `Forked session: experiment (abcd1234) from message 5 of 10 - now active`.
+
+Metadata semantics. Token roll-up uses the sliced copy — `metadata.totalTokens` is the sum of `(input + output)` tokens on the kept messages only, and `metadata.messageCount` is the kept-message count. The source `metadata.workdir` is preserved on the fork so working-directory-sensitive tools (bash, read, write, edit) see the same filesystem view.
 
 ### Conversation Rewind
 
