@@ -802,6 +802,107 @@ expect(dbgSpy).toHaveBeenCalledWith(expect.stringContaining('transient'));
 throw and pollute the assertion, and the log-severity contract is
 about the final classified reason, not the retry chatter.
 
+### Testing the SAP AI Gateway URL resolver (`SAP_AI_GATEWAY_URL`)
+
+`tests/providers/sapOrchestration-gatewayUrl.test.ts` pins the
+contract added by commit `c294856c feat(providers): add
+SAP_AI_GATEWAY_URL env var override`. The suite exercises three
+surfaces:
+
+1. **`assertValidGatewayUrl(url)`** — accepts `http://` / `https://`,
+   rejects every other protocol (`ftp://`, `file://`, `ssh://`), rejects
+   bare hostnames with no scheme, and includes the offending value in
+   the error message.
+2. **`resolveSapAiGatewayUrl(serviceKey)`** — explicit env var wins over
+   the service key `AI_API_URL`; falls back to the service key when
+   unset; falls back to `DEFAULT_SAP_AI_GATEWAY_URL` when both are
+   absent; defends against non-object service keys (`null`, `undefined`,
+   strings); treats whitespace-only env values as unset (because the
+   `env()` helper trims); and throws for an invalid protocol.
+3. **`SapOrchestrationProvider.resolveApiBaseUrl` end-to-end
+   precedence** — exercised via the connectivity path with
+   `vi.doMock('../../src/providers/connectivity.js', ...)` capturing
+   the resolved URL. Asserts `SAP_PROXY_BASE_URL` wins over everything,
+   `SAP_AI_GATEWAY_URL` wins over the service key, the service key is
+   used when the override is unset, and an invalid gateway URL throws
+   before the connectivity probe fires (`checkedUrls` remains empty).
+
+Patterns worth internalising:
+
+- **Save and restore `process.env.SAP_AI_GATEWAY_URL` in `afterEach`.**
+  Env mutation leaks across files; the suite captures the original
+  value once and restores it so a parallel test that depends on the
+  variable's absence does not become order-dependent.
+- **Reset modules between provider cases.** The end-to-end `describe`
+  block uses `vi.resetModules()` in `beforeEach` and `afterEach` so
+  `vi.doMock('@sap-ai-sdk/orchestration', ...)` applies to the
+  freshly-loaded `src/providers/sapOrchestration.js`. Without the
+  reset, the module cache hands back the previously-loaded (unmocked)
+  copy and the connectivity assertions fire against a real SDK import.
+- **Capture resolved URLs via the connectivity mock.** The suite
+  pushes every `checkConnectivity(url)` call into a module-scoped
+  `checkedUrls: string[]` array. This is more robust than snapshotting
+  the private `resolveApiBaseUrl` return value: it asserts the URL
+  actually reached the probe, closing the gap where a precedence
+  regression could silently pick the wrong URL but still succeed.
+- **Mock the SAP orchestration client minimally.** The test's
+  `MockOrchestrationClient.chatCompletion()` returns the smallest shape
+  that satisfies downstream unwrapping (`getContent`, `getFinishReason`,
+  `getTokenUsage`, `getToolCalls`, `getAllMessages`) so the suite does
+  not drift when unrelated SDK surface area evolves.
+- **Keep the suite credential-free.** All three paths work without
+  `AICORE_SERVICE_KEY` set in the environment — the test seeds a
+  minimal `JSON.stringify({ serviceurls: { AI_API_URL: ... } })` only
+  where the service-key fallback is being exercised, and
+  `beforeEach` deletes the variable so prior-run state cannot bleed in.
+
+```typescript
+// tests/providers/sapOrchestration-gatewayUrl.test.ts (excerpt)
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+
+import {
+  DEFAULT_SAP_AI_GATEWAY_URL,
+  assertValidGatewayUrl,
+  resolveSapAiGatewayUrl,
+} from '../../src/providers/sapOrchestration.js';
+
+describe('assertValidGatewayUrl', () => {
+  it('rejects ftp:// URLs with an actionable error', () => {
+    expect(() => assertValidGatewayUrl('ftp://invalid.example.com')).toThrow(
+      /Invalid SAP_AI_GATEWAY_URL/
+    );
+  });
+});
+
+describe('resolveSapAiGatewayUrl', () => {
+  const originalEnv = process.env.SAP_AI_GATEWAY_URL;
+
+  afterEach(() => {
+    if (originalEnv !== undefined) {
+      process.env.SAP_AI_GATEWAY_URL = originalEnv;
+    } else {
+      delete process.env.SAP_AI_GATEWAY_URL;
+    }
+  });
+
+  it('uses SAP_AI_GATEWAY_URL when set, overriding the service key', () => {
+    process.env.SAP_AI_GATEWAY_URL = 'https://proxy.example.com';
+    const serviceKey = { serviceurls: { AI_API_URL: 'https://sap.example.com' } };
+    expect(resolveSapAiGatewayUrl(serviceKey)).toBe('https://proxy.example.com');
+  });
+
+  it('falls back to the hardcoded default when neither env var nor service key is set', () => {
+    delete process.env.SAP_AI_GATEWAY_URL;
+    expect(resolveSapAiGatewayUrl({})).toBe(DEFAULT_SAP_AI_GATEWAY_URL);
+    expect(DEFAULT_SAP_AI_GATEWAY_URL).toBe('https://api.ai.core.cloud.sap');
+  });
+});
+```
+
+See
+[docs/PROVIDERS.md — Gateway URL Override](./PROVIDERS.md#gateway-url-override)
+for the resolver contract and the precedence flow diagram.
+
 ### Testing reasoning-token accounting (`tests/providers/sapOrchestration-reasoningTokens.test.ts`)
 
 `extractReasoningTokens` and `normalizeTokenUsage` in `src/providers/sapOrchestration.ts` are pure classifiers — no SAP SDK, no network — so their tests are direct unit tests over synthetic payloads. The `SapOrchestrationProvider.complete()` / `.stream()` end-to-end assertions mock the SAP SDK at the module boundary so the reasoning-token plumbing can be exercised without live credentials.

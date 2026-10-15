@@ -102,7 +102,15 @@ AICORE_RESOURCE_GROUP=your-resource-group-id
 # Optional: Proxy configuration
 SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
 SAP_PROXY_API_KEY=your_secret_key
+
+# Optional: Explicit SAP AI Core gateway override
+# (corporate proxy, regional gateway, local development gateway).
+# Must start with http:// or https://. Overrides the AI_API_URL
+# embedded in AICORE_SERVICE_KEY without rewriting the service key JSON.
+SAP_AI_GATEWAY_URL=https://sap-proxy.corp.example.com
 ```
+
+See [docs/CONFIGURATION.md — `SAP_AI_GATEWAY_URL`](CONFIGURATION.md#sap_ai_gateway_url) for the precedence table (`SAP_PROXY_BASE_URL` → `SAP_AI_GATEWAY_URL` → service key `AI_API_URL` → `undefined`) and [docs/PROVIDERS.md — Gateway URL Override](PROVIDERS.md#gateway-url-override) for the exported helpers (`DEFAULT_SAP_AI_GATEWAY_URL`, `assertValidGatewayUrl`, `resolveSapAiGatewayUrl`) that corporate / regional deployments can call from doctor checks or custom probes.
 
 ## Development Workflow
 
