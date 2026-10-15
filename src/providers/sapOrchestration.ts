@@ -83,6 +83,61 @@ import {
 const SAP_AI_CORE_PROVIDER_ID = 'sap-ai-core';
 
 /**
+ * Default SAP AI Core base URL used when no explicit gateway override,
+ * proxy, or service-key URL is configured. Matches the public production
+ * endpoint documented in the SAP AI Core service key.
+ */
+export const DEFAULT_SAP_AI_GATEWAY_URL = 'https://api.ai.core.cloud.sap';
+
+/**
+ * Validate a `SAP_AI_GATEWAY_URL` override. Only `http://` and `https://`
+ * schemes are accepted; any other protocol throws with an actionable
+ * message pointing the operator at the env var they need to fix.
+ */
+export function assertValidGatewayUrl(url: string): void {
+  if (!url.startsWith('https://') && !url.startsWith('http://')) {
+    throw new Error(`Invalid SAP_AI_GATEWAY_URL: must start with http:// or https://, got: ${url}`);
+  }
+}
+
+/**
+ * Resolve the SAP AI Core base URL used by connectivity probes and
+ * telemetry. Exposed for testing and for callers (doctor, probes) that
+ * need the same precedence as `SapOrchestrationProvider.resolveApiBaseUrl`
+ * without constructing a provider instance.
+ *
+ * Resolution precedence:
+ *   1. `SAP_AI_GATEWAY_URL` env var (validated — must be http(s)://).
+ *   2. `serviceurls.AI_API_URL` from the parsed service key, if any.
+ *   3. `DEFAULT_SAP_AI_GATEWAY_URL` as a last-resort fallback.
+ *
+ * Note: `SAP_PROXY_BASE_URL` is intentionally NOT consulted here — the
+ * proxy mode is a distinct ingress (local OpenAI-compatible proxy),
+ * not a SAP AI Core gateway override. The provider's own
+ * `resolveApiBaseUrl` applies the proxy precedence before invoking this
+ * logic.
+ */
+export function resolveSapAiGatewayUrl(serviceKey: unknown): string {
+  const override = env('SAP_AI_GATEWAY_URL');
+  if (override) {
+    assertValidGatewayUrl(override);
+    return override;
+  }
+
+  if (typeof serviceKey === 'object' && serviceKey !== null && 'serviceurls' in serviceKey) {
+    const serviceurls = (serviceKey as { serviceurls: unknown }).serviceurls;
+    if (typeof serviceurls === 'object' && serviceurls !== null && 'AI_API_URL' in serviceurls) {
+      const raw = (serviceurls as { AI_API_URL: unknown }).AI_API_URL;
+      if (typeof raw === 'string' && raw.length > 0) {
+        return raw;
+      }
+    }
+  }
+
+  return DEFAULT_SAP_AI_GATEWAY_URL;
+}
+
+/**
  * Skew (ms) subtracted from `expiresAt` when checking whether a cached
  * token is still usable. Tokens that are already within this window of
  * expiring are treated as expired so the caller refreshes proactively
@@ -1423,11 +1478,24 @@ export class SapOrchestrationProvider {
   /**
    * Resolve the API base URL from environment configuration.
    * Returns undefined if no URL can be determined.
+   *
+   * Resolution precedence:
+   *   1. `SAP_PROXY_BASE_URL` — local OpenAI-compatible proxy mode.
+   *   2. `SAP_AI_GATEWAY_URL` — explicit SAP AI Core gateway override
+   *      (corporate proxy, regional endpoint, local dev gateway).
+   *   3. `serviceurls.AI_API_URL` inside the parsed `AICORE_SERVICE_KEY`.
+   *   4. `undefined` — SDK handles the error path when nothing is set.
    */
   private resolveApiBaseUrl(): string | undefined {
     const proxyUrl = env('SAP_PROXY_BASE_URL');
     if (proxyUrl) {
       return proxyUrl;
+    }
+
+    const gatewayOverride = env('SAP_AI_GATEWAY_URL');
+    if (gatewayOverride) {
+      assertValidGatewayUrl(gatewayOverride);
+      return gatewayOverride;
     }
 
     const serviceKeyJson = env('AICORE_SERVICE_KEY');

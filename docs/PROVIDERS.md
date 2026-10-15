@@ -1561,6 +1561,51 @@ The SAP AI Core service key contains:
 4. Copy the JSON credentials
 5. Set as AICORE_SERVICE_KEY environment variable
 
+### Gateway URL Override
+
+By default, Alexi reads the SAP AI Core API base URL from the
+`AICORE_SERVICE_KEY.serviceurls.AI_API_URL` field. For corporate proxy
+or regional gateway scenarios, set the `SAP_AI_GATEWAY_URL` environment
+variable to override this behavior without rewriting the service key JSON:
+
+```bash
+# Route through corporate proxy
+export SAP_AI_GATEWAY_URL=https://sap-proxy.corp.example.com
+
+# Use regional gateway
+export SAP_AI_GATEWAY_URL=https://api.ai.eu.cloud.sap
+
+# Local development gateway
+export SAP_AI_GATEWAY_URL=http://localhost:8080
+```
+
+Resolution precedence (highest to lowest), implemented in
+`SapOrchestrationProvider.resolveApiBaseUrl` in
+`src/providers/sapOrchestration.ts`:
+
+1. `SAP_PROXY_BASE_URL` — local OpenAI-compatible proxy ingress (distinct
+   mode, not a SAP AI Core gateway).
+2. `SAP_AI_GATEWAY_URL` — explicit SAP AI Core gateway override.
+3. `AICORE_SERVICE_KEY.serviceurls.AI_API_URL` — base URL embedded in the
+   service key JSON.
+4. The SDK's own default (surfaced as `https://api.ai.core.cloud.sap`
+   by `resolveSapAiGatewayUrl` for probes and telemetry).
+
+Validation rules for `SAP_AI_GATEWAY_URL`:
+
+- Must start with `http://` or `https://`. Any other protocol (`ftp://`,
+  `file://`, bare host, etc.) throws
+  `Invalid SAP_AI_GATEWAY_URL: must start with http:// or https://, got: ...`
+  from the first provider call.
+- Empty / unset / whitespace-only values are treated as "not set" and
+  fall through to the service key URL. This matches the
+  `env()` helper in `src/config/env.ts` which trims and returns
+  `undefined` for empty strings.
+- Reference: Kilocode PR
+  [#15030](https://github.com/Kilo-Org/kilocode/pull/15030) introduced
+  `KILO_AI_GATEWAY_URL` for the same corporate-proxy / regional-gateway
+  routing need.
+
 ### Resource Groups
 
 Resource groups organize AI Core resources:
