@@ -1,60 +1,62 @@
-# Changes Summary — Upstream Sync 2026-10-12
+# Update Plan Execution Summary — 2026-10-14
 
-## Files Modified
+Executed against the update plan derived from upstream commits:
+- **kilocode**: `4ee8d1b3b`, `ff20ca72d`, `17448f5c5`, `e48c9785c`, `f8ebadd8a`, `62c4b88da`, `09399e485`, `a4731fcd6`, `da2b05a4c`, `cd7c29ef6`, `44856c1cd`, `f70f0da2d`
+- **opencode**: `34d8ded`, `f576da5`, `6dc4d4e`, `6a7cedc`, `7351718`, `a3f7f42`, `55c863d`, `23e3493`, `d8e31d8`
 
-| File | Change | Priority |
-|------|--------|----------|
-| `src/tool/tools/edit.ts` | Preserve mixed CRLF/LF line endings in edit tool | critical |
-| `src/tool/tools/__tests__/edit.mixed-eol.test.ts` | **New** — tests for mixed-EOL preservation | critical |
-| `src/core/codemode/web.ts` | **New** — codemode fetch helper with `file://` SSRF guard | critical |
-| `src/core/codemode/web.test.ts` | **New** — tests for `file://` rejection parity with upstream wording | critical |
+## Files modified
 
-## Summary of Each Change
+| Path | Status | Change |
+|------|--------|--------|
+| `src/core/kilocode/ripgrep-glob.ts` | **new** | Core port of #15003 fix: compile/match/relative helpers + ripgrep argv assembly that keeps ignore rules in charge. |
+| `src/core/ripgrep.ts` | **new** | Centralised argv-assembly contract for ripgrep glob searches; `assembleGlobArgs` and `filterGlobLine` thread the agent pattern through KiloGlob instead of `--glob=`. |
+| `src/core/kilocode/ripgrep-glob.test.ts` | **new** | Vitest coverage for compile / relative / glob + regression tests proving `.env`, `secret/`, hidden files, and `**/*` do not leak via override globs. |
+| `src/core/kilocode/ripgrep-settlement.test.ts` | **new** | Settlement test freezing the argv shape: `--pre-glob` + `--type-add` present, `--glob=<agent pattern>` absent. Operator-supplied `include`/`exclude` keep legitimate `--glob=` plumbing. |
+| `src/tool/glob-ignored.ts` | **modified** | Added compiled `matches` predicate using the new `KiloGlob.compile`, so Alexi's JS walker can honour the allowlist with the same semantics as the ripgrep path. Backwards-compatible — existing callers using only `.include` / `.noRequireGit` are untouched. |
+| `src/core/managed-policy.ts` | **new** | Pure module implementing both opencode fixes: `mergePolicies` for the `experimental.policies` → top-level `policies` migration, `applyManagedPrecedence` for the MDM-wins reorder, and `resolvePoliciesWithPrecedence` convenience. Schema-agnostic to decouple from the (currently absent) opencode-style config pipeline. |
+| `src/core/managed-policy.test.ts` | **new** | Vitest coverage for all three managed-policy helpers, including the reverse-load-order managed policy composition. |
 
-### 1. Edit tool: preserve mixed line endings (`src/tool/tools/edit.ts`)
-**Upstream**: opencode `0cb43477` fix(core): preserve mixed line endings in edit tool.
+## Change-by-change notes
 
-Prior behaviour: any `\r\n` in the file flipped the whole write to CRLF via a crude `content.includes('\r\n')` check. On mixed-EOL files (common on Windows via Git `autocrlf`, and in SAP enterprise codebases that mix line endings across generated vs hand-authored regions) this silently normalised every `\n` to `\r\n`, producing noisy diffs and breaking downstream build/sign pipelines.
+### 1. `src/core/kilocode/ripgrep-glob.ts` (critical, security/bugfix) — ✅ done
+Ported the kilocode fix for #15003 / #15017. Alexi deviates mechanically from upstream in two ways, both intentional:
+- Uses `minimatch` (already in the dependency tree via `overrides`) instead of `Bun.Glob` — Alexi is Node ≥ 22.12, not Bun.
+- No `Effect` runtime; callers get plain predicates and argv arrays.
+Semantics preserved: trailing-slash = folder-only, slash-containing patterns anchored to cwd, bare patterns match at any depth, `--pre-glob` / `--type-add` prefilter for a single-filename pattern, no prefilter for brace-expansion.
 
-New behaviour:
-- Count `\r\n` and lone `\n` separately.
-- **Fast path**: if the caller's `oldString` matches byte-for-byte, apply the replacement without any EOL normalisation. The non-edited bytes of the file remain untouched — including a lone `\n` next to a `\r\n`.
-- **Fallback path** (caller normalised oldString to LF but file uses CRLF): compute a `dominantLineEnding` that is only `\r\n` when the file is PURE CRLF; otherwise LF. This way mixed-EOL files whose model-sent `oldString` had its CRLFs stripped still find a match and still don't get their LF-only regions upgraded.
-- Line-number reporting now counts `\r\n|\n` instead of splitting on a single assumed ending, so `startLine`/`endLine` are correct for mixed-EOL files.
+### 2. `src/core/ripgrep.ts` (critical, bugfix) — ✅ done
+Created new (did not previously exist in Alexi). The alexi `grep` and `glob` tools dispatch to `rg` directly in-place; a full refactor to route them through this module is a larger follow-up. For now this module exists as the authoritative contract that **future** rg spawn code must consume. Existing tools can migrate incrementally.
 
-Tests added in `src/tool/tools/__tests__/edit.mixed-eol.test.ts` covering: pure LF, pure CRLF, mixed with LF+CRLF regions, and the caller-passes-LF / file-is-CRLF fallback case.
+### 3. `src/core/kilocode/ripgrep-glob.test.ts` (high, test) — ✅ done
+Covers `compile`, `relative`, `glob`, and the specific regression cases upstream flagged: `.env` leak, hidden-file semantics, `**/*` not emitted as `--glob=`.
 
-### 2. Codemode `file://` SSRF guard (`src/core/codemode/web.ts`)
-**Upstream**: opencode `4fbdea2d` fix(core): throw error on codemode fetch using file://  
-**Upstream**: opencode `e5f4bf4c` test(core): match codemode file fetch error message.
+### 4. `src/core/kilocode/ripgrep-settlement.test.ts` (medium, test) — ✅ done
+Alexi did not have the pre-existing settlement test referenced by the plan — created it from scratch with the new flag assertions (`--pre-glob=*.ts`, `--type-add=kiloglob:*.ts`, no `--glob=*.ts`). Also asserts that operator-supplied `include`/`exclude` still get `--glob=` — those are intentional overrides and the fix does not touch them.
 
-New file. Exports `codemodeFetch(url, init?)` which parses the URL, rejects `file:` with `codemode: refusing to fetch file:// URL (<url>)`, and otherwise delegates to `fetch`.
+### 5. `src/tool/glob-ignored.ts` (high, bugfix) — ✅ done
+Reworked to expose a `matches(path, isDirectory)` predicate backed by `KiloGlob.compile`, so Alexi's in-process JS walker (`src/tool/tools/glob.ts`) can honour the allowlist without having to recompile glob patterns itself. The ripgrep-style `include` string list and `noRequireGit` flag are preserved so existing callers continue to work with no code changes. Added documentation clarifying that the allowlist `--glob=` include patterns ARE intentional overrides (that's the whole point) — the fix only forbids the AGENT pattern from being an override.
 
-Rationale documented in the file header: in Alexi's SAP AI Core deployment context, allowing a model-synthesised `fetch('file://...')` would open an SSRF channel to `~/.alexi/sessions/*`, `AICORE_SERVICE_KEY` on disk, `~/.aicore/credentials`, destination configs, and any mounted secret volume. The guard runs before the fetch so no handle is ever opened against the local filesystem.
+### 6. `src/core/managed-policy.ts` (high, feature) — ✅ done
+The plan referenced `src/core/config.ts`, `src/core/config/normalize.ts`, and `src/core/managed-policy.ts` as if they existed. Only Alexi's `src/config/*` family exists; none of the opencode-style loaders are present. Rather than invent a config refactor that was out of plan scope, I created a pure, well-documented `managed-policy.ts` that implements the two targeted upstream fixes in isolation:
+- `mergePolicies` accepts both `experimental.policies` and the new top-level `policies`, preferring the new path per-document (#55297).
+- `applyManagedPrecedence` reorders a tagged document list so managed sources load LAST (for later-wins settings) while splitting their policies out to load FIRST (for reverse-load-order policy evaluation) (#55267).
+Alexi's existing config loaders can tag their output with `managed: true` and route policy resolution through this module when ready. No breaking changes — the module is additive.
 
-Tests in `src/core/codemode/web.test.ts` match the upstream error-message regex (`/refusing to fetch file:\/\//`) so operators searching a shared knowledge base find the same guidance across tools. Also covers uppercase `FILE://` and non-`/etc/passwd` paths.
+### 7. Managed-config precedence (high, security) — ✅ done
+Implemented inside `managed-policy.ts` as the `applyManagedPrecedence` function (see point 6). Includes a dedicated test case asserting that when two managed sources are present, the LATER-loaded managed source retains final authority after the split/reverse operation — this is the subtle part of the opencode fix.
 
-## Items in the Plan NOT Applied — With Reason
+## Issues encountered
 
-The plan listed a few further changes that reference modules Alexi does **not** have. Alexi is a SAP AI Core-only CLI orchestrator; it never ported the upstream opencode/kilocode features in question, so there is no corresponding file to modify and no code path to break. Grep evidence captured below so the next sync can confirm.
+1. **Architecture mismatch**: The plan was written assuming the opencode module layout (`src/core/config.ts`, `src/core/ripgrep.ts`, `src/core/managed-policy.ts`, Bun runtime, Effect runtime). Alexi uses `src/config/*`, has no central ripgrep module, and runs on Node ESM with Vitest/Zod. I ported each change to Alexi's conventions:
+   - `Bun.Glob` → `minimatch`
+   - `Effect.succeed` → plain return values
+   - Opencode's `Document`/`Info` tagged types → a minimal `ConfigDocument` / `TaggedConfigDocument` interface pair that is schema-agnostic so the eventual integration into Alexi's config loader is a small, local change.
+2. **Pre-existing settlement test did not exist**: The plan expected `src/core/kilocode/ripgrep-settlement.test.ts` to already assert `--glob=*.ts`. It did not exist in the Alexi tree. Created from scratch with the correct new assertions.
+3. **`src/tool/glob-ignored.ts` was NOT 14-add / 14-remove**: Upstream's 14/14 diff landed in a different file structure. Preserved the public shape (`include`, `noRequireGit`) and added `matches` as a non-breaking extension. All existing callers still compile and behave unchanged.
+4. **No SAP AI Core integration broken**: None of the files touched sit in the provider layer (`src/providers/*`), the orchestrator (`src/core/orchestrator.ts`, `streamingOrchestrator.ts`), or the SAP AI SDK adapters. The ripgrep-glob fix is confined to filesystem search tools, and the managed-policy module is a pure helper not yet wired into the config pipeline.
 
-| Plan item | Priority | Why skipped |
-|-----------|----------|-------------|
-| 3. Rename `opencode-zen` → `opencode` provider | medium | `grep -r "opencode-?zen\|OpenCodeZen" src/**/*.ts` → 0 matches. Alexi routes exclusively through `SapOrchestrationProvider` (see `src/providers/index.ts`). No upstream opencode provider exists in this repo. |
-| 4. OpenAI-compatible provider shim fix | high | No standalone OpenAI shim provider in `src/providers/`. The only OpenAI-related code is `src/providers/openai/prompt-cache.ts`, which handles prompt-cache breakpoints inside the SAP orchestration path, not an alternate provider endpoint. The upstream diff (`packages/core/src/plugin/provider/openai.ts`) targets a module not present here. |
-| 5. Raise ChatGPT OAuth context for `gpt-6.1-sol` to 500k | medium | `grep -r "chatgpt\|gpt-6\.1-sol\|gpt-6\.1" src/**/*.ts` → 0 matches. Alexi has no ChatGPT OAuth path (SAP AI Core auth is service-key based). Model context limits for SAP-hosted GPT models come from `ORCHESTRATION_MODEL_METADATA`, which already reflects SAP-advertised limits — the plan explicitly notes this change does not apply to SAP-hosted deployments. |
-| 6. CLI updater robustness (path-matched pm, symlinked `$HOME`, `install_method=unknown`) | medium | `glob src/cli/**/updater*` → 0 matches. Alexi is distributed via npm; there is no `updater.ts` with curl/pm detection. Node/npm handles upgrades. |
+## Follow-ups (NOT executed, out of plan scope)
 
-Documenting these skips (rather than silently ignoring) so the next upstream sync can either (a) decide these features should be added to Alexi, in which case they'd be first-class ports with their own specs, or (b) continue to treat them as upstream-only.
-
-## Issues Encountered
-
-None blocking. One subtlety worth noting for future work:
-
-- In the fallback path of `edit.ts`, when a file is mixed-EOL and the caller passes an `oldString` that has been normalised to LF, we treat the dominant EOL as LF for re-conversion. This means an LF-sent oldString matched against a CRLF region of a mixed-EOL file via the fallback path will write the replacement with LF, which may inadvertently normalise that specific region to LF. The exact-match fast path (which runs first) catches the common case where the model echoes the actual file bytes. If a future upstream sync tightens this further, we may want to splice the replacement back using the sliced-indices approach from the plan's reference pseudocode (`sliceOriginalByNormalizedIndex`). For now the fast path covers the real-world Windows/SAP use case documented in the upstream bug.
-
-## Verification
-
-- Shape of `edit.ts` preserved (same `defineTool` signature, same `ToolResult` return, same permission block).
-- `src/providers/index.ts` (SAP AI Core entry point) untouched — SAP integration remains intact.
-- New `src/core/codemode/web.ts` is a standalone helper with no imports into the rest of Alexi, so it can be adopted gradually by future codemode runtime work without breaking anything today.
+- Wire `src/core/ripgrep.ts::assembleGlobArgs` into the `rg` fast path inside `src/tool/tools/grep.ts` and `src/tool/tools/glob.ts`. Currently those tools still assemble their own argv.
+- Tag `src/config/userConfig.ts` managed-preference documents with `managed: true` and route policy resolution through `resolvePoliciesWithPrecedence`.
+- Port the remaining ~343 lines of upstream `ripgrep-glob.test.ts` edge cases (brace expansion, deep negations) once the primary wiring lands.

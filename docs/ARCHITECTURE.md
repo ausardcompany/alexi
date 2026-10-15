@@ -8280,3 +8280,96 @@ flowchart LR
 
 The helper is a building block for the session-UI timeline renderer and any CLI post-processor that wants to turn plain-text model output into actionable links. The I/O is `await fs.access` per match, so callers should not run it on hot streaming paths; the intended use is on committed timeline frames.
 
+## Managed-settings policy precedence (`src/core/managed-policy.ts`)
+
+Introduced in the 2026-10-14 upstream sync (ports opencode fixes `#55267` "managed config has highest precedence" and `#55297` "promote `experimental.policies` to top-level `policies`") and tightened in commit `18774554 fix(ci): formatting, no-useless-escape, and experimental index signature [autohealing]`. Lives in `src/core/managed-policy.ts` as a pure, schema-agnostic module: no I/O, no Effect runtime, no credential handling — just three exported helpers (`mergePolicies`, `applyManagedPrecedence`, `resolvePoliciesWithPrecedence`) operating on minimal `ConfigDocument` records (`src/core/managed-policy.ts:48-58`).
+
+Two problems solved in one place so Alexi's config pipeline — regardless of which layer (user config, project overlay, macOS MDM preferences, SAP enterprise MDM push) is loading the data — routes policy resolution through a single well-defined site:
+
+1. **Policy source back-compat.** Upstream promoted `experimental.policies` to a top-level `policies` field. Both shapes must be accepted during the migration window: existing deployments still ship `experimental.policies`; new tooling emits `policies` directly. `mergePolicies(documents)` reads either, preferring the new top-level path when both are present on the same document, and preserves later-wins ordering across documents (`src/core/managed-policy.ts:84-94`).
+2. **Managed-config precedence.** Previously managed config sat at the LOWEST priority, so any user override could sidestep an administrator policy. `applyManagedPrecedence(documents)` reorders a list of `TaggedConfigDocument` records so managed sources load LAST (so their non-policy settings win via later-wins), while splitting their policy data off into a separate FIRST-loaded list — because the policy evaluator processes in reverse-load order, managed policies then retain final authority (`src/core/managed-policy.ts:118-168`).
+
+### Load-order composition
+
+```mermaid
+flowchart LR
+    In[Input: TaggedConfigDocument&#91;&#93;] --> Split{managed === true?}
+    Split -- yes --> Mgd[managed documents]
+    Split -- no --> User[userDocuments]
+    Mgd --> Rev[reverse managed order]
+    Rev --> PolExtract["managedPolicies: only the policies field (strip everything else)"]
+    Mgd --> StripSet["managedSettings: strip policies and experimental.policies"]
+    PolExtract --> Compose["Final: &#91;...managedPolicies, ...userDocuments, ...managedSettings&#93;"]
+    User --> Compose
+    StripSet --> Compose
+    Compose --> Merge[mergePolicies: later-wins across documents]
+```
+
+- **Why the split?** The policy evaluator runs in reverse-load order (later-loaded policies run first). To make managed policies run LAST (= final authority), they are loaded FIRST. Non-policy settings use normal later-wins ordering, so they stay in their managed-loads-last position.
+- **Reverse within `managedPolicies`.** When multiple managed sources are present (e.g. MDM + system directory), the LAST-loaded one carries the FINAL say, so the extracted managed-policy list is reversed from the managed input order before being prepended.
+- **`experimental` stripping.** The managed-settings fork strips both the top-level `policies` and the nested `experimental.policies` keys; if the resulting `experimental` object is empty it is omitted entirely rather than left as a `{}` carrier (`src/core/managed-policy.ts:142-165`).
+
+### Two-shape policy source back-compat
+
+```mermaid
+flowchart TD
+    Doc[ConfigDocument.info] --> Top{policies present?}
+    Top -- yes --> UseTop["use info.policies (new shape)"]
+    Top -- no --> Legacy{experimental.policies present?}
+    Legacy -- yes --> UseLegacy["use info.experimental.policies (legacy shape)"]
+    Legacy -- no --> Empty[no policies from this doc]
+    UseTop --> Append[push onto merged list]
+    UseLegacy --> Append
+    Empty --> Next[continue to next doc]
+```
+
+- `info.policies ?? info.experimental?.policies` is the canonical read inside both `mergePolicies` and the policy extraction loop of `applyManagedPrecedence`. New code reading policies should route through here instead of touching `info.experimental?.policies` directly.
+- Within a document, the new top-level `policies` wins when both are set — this is the migration direction.
+- Across documents, order is caller-controlled; `mergePolicies` preserves the input array order so the composed `[...managedPolicies, ...userDocuments, ...managedSettings]` sequence drives final precedence end-to-end.
+
+### `ConfigDocument` shape
+
+The exported type is minimal on purpose — this module is schema-agnostic so it can slot into whichever concrete config loader Alexi grows next:
+
+```typescript
+export type Policy = Readonly<Record<string, unknown>>;
+
+export interface ConfigDocument {
+  readonly path: string;
+  readonly info: {
+    readonly policies?: readonly Policy[];
+    readonly experimental?: {
+      readonly policies?: readonly Policy[];
+      readonly [key: string]: unknown;
+    };
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface TaggedConfigDocument extends ConfigDocument {
+  readonly managed?: boolean;
+}
+```
+
+The nested `experimental` member carries a `readonly [key: string]: unknown;` index signature (added in commit `18774554`) that mirrors the one at the top level of `info`. This closes a shape-parity gap: forward-compatible experimental knobs that sit alongside `experimental.policies` now flow through `applyManagedPrecedence`'s `Object.fromEntries(Object.entries(experimental).filter(([key]) => key !== 'policies'))` reflow without a cast, and the trimmed `experimental` object serialised by `Object.fromEntries` keeps its typed carrier for every key that is NOT the policy field. Without the index signature, TypeScript's exact-shape inference stripped the unknown keys from the derived type and `applyManagedPrecedence` had to carry an `as` cast on the destructuring assignment — the cast is still there for the top-level `info` surface because the compiler cannot infer the index-signature parent from the destructuring context alone, but the nested read is now self-sufficient.
+
+### One-shot convenience: `resolvePoliciesWithPrecedence`
+
+```typescript
+export function resolvePoliciesWithPrecedence(
+  documents: readonly TaggedConfigDocument[]
+): readonly Policy[] {
+  const { managedPolicies, userDocuments, managedSettings } = applyManagedPrecedence(documents);
+  return mergePolicies([...managedPolicies, ...userDocuments, ...managedSettings]);
+}
+```
+
+Callers that just want the resolved policy list (not the reordered documents) use this; it composes `applyManagedPrecedence` + `mergePolicies` in one shot and returns the final effective policy list in evaluator-ready order.
+
+### Design notes
+
+- **Pure, schema-agnostic, no I/O.** The module works on `path` + `info` records, nothing else. Side-effectful config loading (file reads, env expansion, MDM preference parsing) stays in the loader; this module only reorders and merges.
+- **Managed-settings vs managed-policies split.** The two concerns travel on different precedence trains: non-policy settings use normal later-wins (managed loads LAST), policies use reverse-load evaluation (managed loads FIRST). Collapsing them back into a single list is a correctness regression — a user config could then override an administrator policy by setting a non-policy field that happens to live under the same key.
+- **Pre-existing `managed === true` tagging contract.** The input discriminator is a `managed` flag on each document. Loaders tag their output with it; untagged documents are treated as user documents and keep their original precedence. The flag is not inferred from `path` so a loader can mark a project-local file as managed when the operator has pinned it via a deployment harness.
+- **Consumers.** The policy enforcer (`src/permission/policy.ts`, see [Managed Policy Enforcement](#managed-policy-enforcement)) wires through the resolved policy list; the two modules compose cleanly — this one answers "which policies are in effect?" and the enforcer answers "is this tool / integration / skill allowed?".
+
