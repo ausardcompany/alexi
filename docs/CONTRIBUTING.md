@@ -48,7 +48,7 @@ This document provides guidelines and instructions for contributing to the proje
    node dist/cli/program.js --help
    ```
 
-### Optional: tree-sitter grammars
+### Optional tree-sitter grammars
 
 The AST-based symbol extraction path used by `src/context/**` and the AST
 mode of the `definitions` tool relies on native tree-sitter grammars. These
@@ -59,6 +59,28 @@ install them so the tree-sitter test files run locally:
 ```bash
 npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
 ```
+
+Three code paths depend on `tree-sitter-bash` specifically:
+
+1. The shell permission masker in `src/tool/shell-pattern.ts` (used by the
+   shell / bash tool to compute its permission `resource`). Its colocated
+   suite `src/tool/shell-pattern.test.ts` splits grammar-dependent cases
+   into a `describeIfBash` block that is skipped when the grammar is
+   absent — see [docs/TESTING.md — Testing the shell permission pattern masker](TESTING.md#testing-the-shell-permission-pattern-masker).
+2. The bash tag extractor in `src/context/bashTags.ts` and its symbol-index
+   integration in `src/context/symbols.ts`. These surface `function`,
+   `for`, `while`, and `case` tags for `.sh` / `.bash` / `.zsh` files in
+   the repomap context block. Covered by
+   `src/context/__tests__/bashTags.test.ts` and the bash branch of
+   `src/context/__tests__/symbols.test.ts` — see
+   [docs/TESTING.md — Testing bash tree-sitter tag extraction](TESTING.md#testing-bash-tree-sitter-tag-extraction-srccontextbashtagsts-issue-2032).
+3. The `definitions` tool AST mode (regex fallback is used when the
+   grammar is absent).
+
+Both suites use an identical availability probe based on
+`createRequire(import.meta.url).resolve('tree-sitter')` and
+`...resolve('tree-sitter-bash')` so the grammar-gated blocks skip
+cleanly on a fresh clone without the optional packages.
 
 CI always has the grammars installed (they are currently declared as regular
 `dependencies` in `package.json`, with a planned migration to optional
@@ -80,7 +102,15 @@ AICORE_RESOURCE_GROUP=your-resource-group-id
 # Optional: Proxy configuration
 SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
 SAP_PROXY_API_KEY=your_secret_key
+
+# Optional: Explicit SAP AI Core gateway override
+# (corporate proxy, regional gateway, local development gateway).
+# Must start with http:// or https://. Overrides the AI_API_URL
+# embedded in AICORE_SERVICE_KEY without rewriting the service key JSON.
+SAP_AI_GATEWAY_URL=https://sap-proxy.corp.example.com
 ```
+
+See [docs/CONFIGURATION.md — `SAP_AI_GATEWAY_URL`](CONFIGURATION.md#sap_ai_gateway_url) for the precedence table (`SAP_PROXY_BASE_URL` → `SAP_AI_GATEWAY_URL` → service key `AI_API_URL` → `undefined`) and [docs/PROVIDERS.md — Gateway URL Override](PROVIDERS.md#gateway-url-override) for the exported helpers (`DEFAULT_SAP_AI_GATEWAY_URL`, `assertValidGatewayUrl`, `resolveSapAiGatewayUrl`) that corporate / regional deployments can call from doctor checks or custom probes.
 
 ## Development Workflow
 
@@ -2151,6 +2181,44 @@ for the regression suite and
 [CHANGELOG.md — Wire `.alexi/rules/` into the auto-commit message generator (issue #1953)](../CHANGELOG.md#added)
 for the full behavioural contract.
 
+### Commitlint scope-enum injection into the auto-commit prompt
+
+Commit `40515f68` extends the same system-prompt composer to inject the project's commitlint `scope-enum` whitelist. The auto-commit generator now reads `<workdir>/commitlint.config.cjs` (falling back to `commitlint.config.js`) at message-generation time and prepends the resolved scope list to the system prompt handed to the cheap-model provider. This closes a reliability gap in the agent fleet: when the LLM invented a scope (`feat(deployment): ...`, `feat(workflow): ...`) that the husky `commit-msg` hook then rejected, the whole commit cycle had to be retried, burning agent retry budget on a problem that was knowable up front.
+
+**How the loader behaves.** `loadCommitlintScopes(workdir)` CJS-requires the config via a module-scoped `createRequire(import.meta.url)` so a `.cjs` file resolves cleanly from ESM. It reads `module.exports.rules['scope-enum'][2]` (the third element of the commitlint rule tuple, which carries the allowed scope list) and returns the filtered string entries. Any failure mode degrades to `[]`:
+
+- Missing `commitlint.config.cjs` AND missing `commitlint.config.js` → `[]`.
+- File present but not valid JavaScript (parse error at require time) → `[]`, logged at `debug` level.
+- `rules.scope-enum` missing or shaped as a non-array (e.g. `[2, 'always']` without the third element) → `[]`.
+- Non-string entries in the scope list are filtered out before return.
+
+A broken commitlint config MUST NEVER prevent commit-message generation — the heuristic fallback path (`buildHeuristicMessage`) must remain reachable even when every optional loader has thrown.
+
+**Prompt composition order.** `buildSystemPrompt(workdir, rulesPathOverride?)` now assembles the system prompt as `BASE_SYSTEM_PROMPT` → scopes section → rules section, joined with `\n\n`. The scopes block is placed BEFORE the rules block so a user rule that re-mentions a scope cannot shift the model's attention away from the authoritative list. When neither block is populated, the composer emits the base prompt verbatim.
+
+**Format of the injected block.** The scope list is rendered as:
+
+```
+Allowed Conventional Commits scopes for this project (use ONLY these in the (scope) field; omit the scope if none fit): cli, core, providers, config, server, agent, tools, ci, deps, tests.
+```
+
+The literal preamble is exported from `src/git/commitMessage.ts` as `COMMIT_SCOPES_PREAMBLE` so tests can assert against it without duplicating the string. The explicit "omit the scope if none fit" clause is a deliberate escape hatch — Conventional Commits spec treats the scope as optional, and the husky hook accepts a scopeless `feat: ...` message, so steering the model toward "omit when none fit" is strictly preferable to inventing a near-miss scope.
+
+**Caching contract.** The loader drops `localRequire.cache[localRequire.resolve(full)]` on every call so repeated invocations observe the on-disk file, not a stale closure. This matters for the end-to-end test suite under `tests/git/autoCommit.rules.test.ts`, which writes a fresh `commitlint.config.cjs` into a temp directory per case and expects each case to see the correct scope list.
+
+**No action required for existing projects.** A workdir with no `commitlint.config.cjs` and no `commitlint.config.js` (the typical case for lightweight scripts or forks that have not yet adopted the commitlint toolchain) sees `buildScopesSection` return `''` and the composer emits the base prompt plus any `.alexi/rules/` content verbatim — byte-identical to the pre-fix behaviour. Projects that adopt commitlint later pick up the behaviour automatically on the next auto-commit run.
+
+**Public surface added on `src/git/commitMessage.ts`** (also re-exported from `src/git/index.ts`):
+
+| Export | Signature | Purpose |
+|--------|-----------|---------|
+| `COMMIT_SCOPES_PREAMBLE` | `const string` | Preamble literal prepended to the scope list. |
+| `loadCommitlintScopes` | `(workdir: string) => string[]` | Load the scope whitelist from `commitlint.config.cjs`/`.js`. Returns `[]` on any failure. |
+| `buildScopesSection` | `(workdir: string) => string` | Format the preamble + scope list. Returns `''` when no scopes are declared. |
+| `buildRulesSection` | `(workdir: string, rulesPathOverride?: string \| string[]) => string` | Pre-existing helper, now re-exported for test ergonomics. |
+
+See [docs/TESTING.md — Testing commitlint `scope-enum` injection](TESTING.md#testing-commitlint-scope-enum-injection) for the regression suite and [docs/TESTING.md — End-to-end: `AutoCommitManager` honors rules AND scopes](TESTING.md#end-to-end-autocommitmanager-honors-rules-and-scopes) for the full-chain integration pattern.
+
 ### PR Description Template
 
 ```markdown
@@ -3708,6 +3776,27 @@ Updated in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `3aa26f1` + `
 - **Gate `resources/list` / `prompts/list` on `getServerCapabilities()`.** The capability gate is strictly additive. Removing it reinstates the "every connect fires both probes blind" pattern that burns connect latency and spams `method not found` into operator logs.
 - **Defensive `getServerCapabilities` guard.** The code checks `typeof c.getServerCapabilities === 'function'` because the SDK method is optional for forward compatibility. A refactor that drops the guard is a regression — older SDK builds without the method would throw at connect time.
 - **Preserve the `Promise.all` wait.** Even when the probes are gated off, the aggregate is still awaited so a slow listing cannot leak timers past the connect call. Rewriting the sequence to fire-and-forget is a regression.
+## Managed-settings policy precedence (`src/core/managed-policy.ts`)
+
+Introduced in the 2026-10-14 upstream sync (ports opencode fixes `#55267` and `#55297`) and tightened in commit `18774554 fix(ci): formatting, no-useless-escape, and experimental index signature [autohealing]`. References: [ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts), [API.md — Managed-settings Policy Precedence API](API.md#managed-settings-policy-precedence-api), [TESTING.md — Testing managed-settings policy precedence](TESTING.md#testing-managed-settings-policy-precedence-srccoremanaged-policytestts).
+
+- **Keep the module pure and schema-agnostic.** No I/O, no Effect runtime, no SAP AI Core credential handling, no file reads. The three helpers (`mergePolicies`, `applyManagedPrecedence`, `resolvePoliciesWithPrecedence`) operate on minimal `{ path, info }` records so they can slot into whichever concrete config loader Alexi grows next. Side-effectful loading belongs in the loader, not here — adding a `readFileSync` or an `fs.promises` import is a regression.
+- **Prefer the top-level `policies` field but keep the legacy fallback.** The canonical read is `doc.info.policies ?? doc.info.experimental?.policies`. New code reading policies MUST route through this helper rather than touching `info.experimental?.policies` directly — the dual-shape back-compat is centralised on purpose so the migration from `experimental.policies` to the new top-level `policies` can be completed by swapping ONE site when the window closes.
+- **`managed === true` is the ONLY discriminator.** The reorder helper reads a `managed` flag off each `TaggedConfigDocument`; it does NOT infer from `path`, `info.$managed`, environment, or any other side channel. Loaders tag their output explicitly; untagged documents are user documents and keep their original precedence.
+- **Reverse within `managedPolicies`.** The LAST-loaded managed source must become the FIRST entry of the `managedPolicies` list — because the policy evaluator processes in reverse-load order (later-loaded policies run first), FIRST-loaded = evaluated LAST = final authority. Dropping the reverse step would silently flip which administrator wins when multiple MDM sources stack.
+- **Strip `policies` AND `experimental.policies` from `managedSettings`.** Both halves must be stripped from the LAST-loaded managed-settings fork; the resulting `experimental` object must be omitted entirely rather than left as `{}` when it held only policy data. Leaving policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
+- **Preserve the `experimental` index signature.** The nested `info.experimental` type carries `readonly [key: string]: unknown;` (added in commit `18774554`) so forward-compatible experimental knobs that sit alongside `experimental.policies` type-check through `applyManagedPrecedence`'s `Object.fromEntries(Object.entries(experimental).filter(([key]) => key !== 'policies'))` reflow without a cast. Removing the index signature re-opens the shape-parity gap with the top-level `info` surface and reintroduces the cast — the inner `as` on the top-level destructuring is only there because the compiler cannot infer the parent index signature from the destructuring context, NOT because the nested read needs one.
+- **Final load-order composition is `[...managedPolicies, ...userDocuments, ...managedSettings]`.** This single ordering carries BOTH the "managed policies win under reverse-load evaluation" invariant AND the "managed non-policy settings win under later-wins" invariant. Collapsing the two halves back into one list is a correctness regression — a user config could then override an administrator policy by setting a non-policy field that happens to share a key with the policy data.
+- **No implicit disk load.** The module does NOT auto-load managed documents from a well-known path. Config loaders are responsible for tagging their output; this module only reorders and merges. Adding a `/etc/alexi/managed.json` autoloader without an opt-out flag would surprise operators who rely on the open-world default from `DEFAULT_POLICY_ENFORCER` (see [Managed Policy Enforcement](#managed-policy-enforcement-srcpermissionpolicyts)).
+
+## Ripgrep argv settlement (`src/core/kilocode/ripgrep-settlement.test.ts`)
+
+Introduced in the kilocode ripgrep-glob port (ported in the 2026-09 window). References: [TESTING.md — Testing ripgrep argv settlement for agent-supplied globs](TESTING.md#testing-ripgrep-argv-settlement-for-agent-supplied-globs).
+
+- **Keep the three settlement cases as they are.** The suite is a SNAPSHOT of the externally observable argv shape produced by `assembleGlobArgs`, and the three cases pin three independent invariants (agent patterns go through `--pre-glob` / `--type-add`, operator-supplied `include` / `exclude` keep `--glob=` plumbing, broad `**/*` is still an agent pattern). Deleting or merging any of the three re-opens a regression surface — the file is the pinned-forever shape, the sibling `src/core/kilocode/ripgrep-glob.test.ts` is the behavioural regression driver.
+- **Assert the negative first.** The forbidden emission (`--glob=<agent-pattern>`) is the regression target. Every case includes a `.not.toContain('--glob=<agent-pattern>')` assertion — a positive-only test could pass while silently reintroducing the override bug.
+- **Write markdown-code span titles without backslash-escaped slashes.** `it('does NOT emit the agent pattern as --glob= for a broad `` `**/*` `` search', ...)` — not `` `**\/*` ``. ESLint `no-useless-escape` rejects the escaped form and the next CI autoheal pass will reflow it; writing the un-escaped form directly avoids the churn (reflow happened in commit `18774554`).
+- **Operator-supplied `include` / `exclude` are intentionally sign-asymmetric.** `include` → `--glob=<pattern>`; `exclude` → `--glob=!<pattern>`. The second case in the suite pins both signs; a refactor that collapses them into a single flag-emission helper must preserve the sign.
 
 ## License
 

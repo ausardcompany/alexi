@@ -84,6 +84,50 @@ Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
 export SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
 ```
 
+#### SAP_AI_GATEWAY_URL
+
+Explicit SAP AI Core base URL override. Use this to route traffic through
+corporate proxies, regional gateways, or a local development gateway
+without rewriting the `AICORE_SERVICE_KEY` JSON. Introduced in commit
+`c294856c feat(providers): add SAP_AI_GATEWAY_URL env var override`.
+
+```bash
+# Corporate proxy
+export SAP_AI_GATEWAY_URL=https://sap-proxy.corp.example.com
+
+# Regional gateway
+export SAP_AI_GATEWAY_URL=https://api.ai.eu.cloud.sap
+
+# Local development gateway
+export SAP_AI_GATEWAY_URL=http://localhost:8080
+```
+
+Validation:
+
+- The value must start with `http://` or `https://`. Any other protocol
+  (`ftp://`, `file://`, bare host, etc.) is rejected on the first
+  provider call with
+  `Invalid SAP_AI_GATEWAY_URL: must start with http:// or https://, got: <value>`.
+- Empty / unset / whitespace-only values fall through to the service
+  key URL (the `env()` helper in `src/config/env.ts` trims and treats
+  blank strings as unset).
+
+Precedence (highest to lowest), implemented by
+`SapOrchestrationProvider.resolveApiBaseUrl` in
+`src/providers/sapOrchestration.ts`:
+
+1. `SAP_PROXY_BASE_URL` — local OpenAI-compatible proxy ingress.
+2. `SAP_AI_GATEWAY_URL` — explicit SAP AI Core gateway override.
+3. `AICORE_SERVICE_KEY.serviceurls.AI_API_URL` — base URL embedded in
+   the service key JSON.
+4. `undefined` — SDK surfaces the "no URL configured" error path.
+
+See
+[docs/PROVIDERS.md — Gateway URL Override](./PROVIDERS.md#gateway-url-override)
+for the exported helper surface (`DEFAULT_SAP_AI_GATEWAY_URL`,
+`assertValidGatewayUrl`, `resolveSapAiGatewayUrl`) and the precedence
+flow diagram.
+
 #### SAP_PROXY_API_KEY
 
 API key for proxy endpoint authentication.
@@ -1719,7 +1763,8 @@ Example output (abridged):
     "AICORE_RESOURCE_GROUP": "production",
     "AICORE_SERVICE_KEY": "[REDACTED]",
     "AICORE_MODEL": "gpt-4o",
-    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1"
+    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1",
+    "SAP_AI_GATEWAY_URL": "https://sap-proxy.corp.example.com"
   }
 }
 ```
@@ -2575,6 +2620,60 @@ Operators who need to lock down a high-risk tool (shell, web_fetch, …) across 
 - **Read-only agents.** `tools.allowed = ["read", "glob", "grep", "task"]` blocks every file-write tool, every shell tool, and every network tool while keeping the exploration + delegation surface intact.
 - **No external network.** `tools.denied = ["web_fetch", "web_search"]` + `integrations.denied = ["github", "slack"]` keeps the agent fully local without disrupting file / shell work.
 - **Pilot scope.** `skills.allowed = ["kilo-config"]` restricts skill-based workflows to a single approved skill while leaving the baseline tool surface open.
+
+## Managed Policy Precedence (`src/core/managed-policy.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports opencode PR #55267 "managed config has highest precedence" and PR #55297 "promote `experimental.policies` to top-level `policies`"). Changes how documents emitted by MDM / `/etc/alexi/*` loaders interact with user and project config layers. **No new environment variable or user-facing config knob is added** — this is a loader-side resolver that any current or future concrete config loader can route policy data through. See [docs/ARCHITECTURE.md — Managed-configuration policy resolution](ARCHITECTURE.md#managed-configuration-policy-resolution-srccoremanaged-policyts) for the design.
+
+### Two shapes accepted during the `experimental.policies` → `policies` migration
+
+Both shapes are accepted on any document, and the new top-level `policies` wins when both are present on the same document:
+
+```json
+{
+  "policies": [{ "rule": "no_shell_in_prod" }]
+}
+```
+
+```json
+{
+  "experimental": {
+    "policies": [{ "rule": "no_shell_in_prod" }]
+  }
+}
+```
+
+Operators migrating from the legacy shape can leave `experimental.policies` in place; the resolver reads it. Writing tooling that emits config should prefer the top-level `policies` field so the operator-facing JSON tracks the current upstream contract.
+
+### Precedence contract
+
+Managed documents (those produced by an MDM / system-directory loader that tags its output with `managed: true`) now take **highest** precedence for both policies AND non-policy settings. The composition is intentionally asymmetric:
+
+| Slot                | Loads     | Wins on               | Reason                                                             |
+| ------------------- | --------- | --------------------- | ------------------------------------------------------------------ |
+| `managedPolicies`   | FIRST     | policy evaluation     | Policy evaluator processes in reverse-load order, so first=last    |
+| `userDocuments`     | middle    | nothing specific      | Normal user / project overlays, preserved in loader order          |
+| `managedSettings`   | LAST      | later-wins keys       | Managed non-policy settings override user settings                 |
+
+The split is why `applyManagedPrecedence` returns three slots instead of just reordering. A managed document contributes to BOTH `managedPolicies` (its policy data, prepended first) and `managedSettings` (everything else, appended last). The now-empty `experimental` block is dropped from `managedSettings` so a `{ experimental: { policies: [...] } }` managed document does not leave a trailing `{ experimental: {} }` in the settings slot.
+
+### Composing with the loader pipeline
+
+The resolver is pure and schema-agnostic. A concrete loader hands it an array of `TaggedConfigDocument`:
+
+```typescript
+import { resolvePoliciesWithPrecedence } from '../core/managed-policy.js';
+import type { TaggedConfigDocument } from '../core/managed-policy.js';
+
+const docs: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/managed.json', managed: true, info: await readManaged() },
+  { path: '~/.alexi/config.json', info: await readUser() },
+  { path: './alexi.config.json', info: await readProject() },
+];
+const effectivePolicies = resolvePoliciesWithPrecedence(docs);
+```
+
+Callers that want the reordered documents (not just the policy list) call `applyManagedPrecedence(docs)` directly and compose the final load order themselves: `[...managedPolicies, ...userDocuments, ...managedSettings]`.
 
 ## Experimental Glob-Ignored Allowlist (`experimental.glob_include_ignored`)
 

@@ -309,7 +309,8 @@ export function printHelp(): void {
   console.log(c('yellow', '  /git-config') + c('gray', '        - Show current git config'));
   console.log(c('yellow', '  /redo') + c('gray', '              - Redo last undone change'));
   console.log(
-    c('yellow', '  /fork [name]') + c('gray', '       - Fork current session with optional name')
+    c('yellow', '  /fork [name] [--from-message <n>]') +
+      c('gray', ' - Fork current session (optionally from message n, 1-indexed)')
   );
   console.log(c('yellow', '  /rename <name>') + c('gray', '     - Rename current session'));
   console.log();
@@ -806,11 +807,57 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
         console.log(c('yellow', '\n  No active session to fork\n'));
         return true;
       }
-      const forkName = args[0] || `fork-${Date.now()}`;
+      // Parse arguments: /fork [name] [--from-message <index>]
+      // The `--from-message <index>` flag lets users branch the conversation at
+      // a specific point (1-indexed, inclusive). Mirrors Kilocode PR #15004 so
+      // users can explore alternatives without carrying later messages.
+      let forkName = `fork-${Date.now()}`;
+      let fromMessageIndex: number | undefined;
+      let rawFromMessageArg: string | undefined;
+      let positionalConsumed = false;
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--from-message') {
+          const next = args[i + 1];
+          if (next === undefined) {
+            console.log(c('red', '\n  --from-message requires a message index\n'));
+            return true;
+          }
+          rawFromMessageArg = next;
+          fromMessageIndex = Number.parseInt(next, 10);
+          i++;
+        } else if (!positionalConsumed) {
+          forkName = arg;
+          positionalConsumed = true;
+        }
+      }
+
+      if (fromMessageIndex !== undefined) {
+        const totalMessages = session.messages.length;
+        if (
+          Number.isNaN(fromMessageIndex) ||
+          !Number.isInteger(fromMessageIndex) ||
+          fromMessageIndex < 1 ||
+          fromMessageIndex > totalMessages
+        ) {
+          console.log(
+            c('red', `\n  Invalid message index: ${rawFromMessageArg ?? fromMessageIndex}\n`)
+          );
+          console.log(
+            c('gray', `  Session has ${totalMessages} message(s); use 1..${totalMessages}\n`)
+          );
+          return true;
+        }
+      }
+
       // Snapshot the source transcript BEFORE creating a new session — creating
       // one flips the active session on the manager, so we must capture the
       // originals up front.
-      const sourceMessages = session.messages.map((m) => ({
+      const messagesToCopy =
+        fromMessageIndex !== undefined
+          ? session.messages.slice(0, fromMessageIndex)
+          : session.messages;
+      const sourceMessages = messagesToCopy.map((m) => ({
         ...m,
         tokens: m.tokens ? { ...m.tokens } : undefined,
       }));
@@ -819,6 +866,7 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
         (sum, m) => sum + (m.tokens?.input ?? 0) + (m.tokens?.output ?? 0),
         0
       );
+      const originalTotalMessages = session.messages.length;
       // Create a new session and copy the conversation state so users can
       // continue exploring alternate branches from the forked point.
       // `createSession` sets the new session as the manager's active session
@@ -835,10 +883,14 @@ export async function handleCommand(input: string, state: ReplState): Promise<bo
         if (sourceWorkdir !== undefined) {
           newSession.metadata.workdir = sourceWorkdir;
         }
+        const forkPointMsg =
+          fromMessageIndex !== undefined
+            ? ` from message ${fromMessageIndex} of ${originalTotalMessages}`
+            : '';
         console.log(
           c(
             'green',
-            `\n  Forked session: ${forkName} (${newSession.metadata.id.slice(0, 8)}) - now active\n`
+            `\n  Forked session: ${forkName} (${newSession.metadata.id.slice(0, 8)})${forkPointMsg} - now active\n`
           )
         );
       }

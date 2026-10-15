@@ -278,6 +278,63 @@ class Greeter {
       expect(sym.filePath).toBe('scripts/deploy.sh');
       expect(sym.references).toBe(0);
     });
+
+    it('extracts for / while / case tags alongside functions (issue #2032)', () => {
+      // Mirrors the example from issue #2032: a script with a function,
+      // a for loop, a while loop, and a case statement should surface
+      // every construct as a top-level symbol so repomap/context extraction
+      // has enough signal to navigate shell scripts.
+      const src = [
+        '#!/bin/bash',
+        'function greet() {',
+        '  echo "Hello"',
+        '}',
+        'for i in 1 2 3; do',
+        '  echo "$i"',
+        'done',
+        'while read line; do',
+        '  echo "$line"',
+        'done < input.txt',
+        'case "$1" in',
+        '  start) echo "Starting" ;;',
+        '  stop) echo "Stopping" ;;',
+        'esac',
+      ].join('\n');
+      const symbols = extractSymbols(src, 'mixed.sh');
+      const kinds = symbols.map((s) => s.kind);
+      expect(kinds).toContain('function');
+      expect(kinds).toContain('for');
+      expect(kinds).toContain('while');
+      expect(kinds).toContain('case');
+
+      const greet = symbols.find((s) => s.kind === 'function')!;
+      expect(greet.name).toBe('greet');
+      const forSym = symbols.find((s) => s.kind === 'for')!;
+      expect(forSym.name).toBe('i');
+      expect(forSym.signature?.startsWith('for')).toBe(true);
+      const whileSym = symbols.find((s) => s.kind === 'while')!;
+      // While loops have no natural identifier — the positional fallback
+      // keeps the symbol index stable across runs.
+      expect(whileSym.name).toMatch(/^while@L\d+$/);
+      const caseSym = symbols.find((s) => s.kind === 'case')!;
+      expect(caseSym.signature?.startsWith('case')).toBe(true);
+    });
+
+    it('skips loops and case statements nested inside bash functions', () => {
+      const src = [
+        'deploy() {',
+        '  for host in "$@"; do',
+        '    echo "$host"',
+        '  done',
+        '  case "$1" in a) ;; esac',
+        '}',
+      ].join('\n');
+      const symbols = extractSymbols(src, 'deploy.sh');
+      // Only the top-level deploy() function is surfaced; nested
+      // compound statements are dropped to keep the symbol index compact.
+      expect(symbols.map((s) => s.kind)).toEqual(['function']);
+      expect(symbols[0].name).toBe('deploy');
+    });
   });
 
   describeIfGrammars('multiple symbols', () => {
