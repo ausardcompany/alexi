@@ -2621,6 +2621,60 @@ Operators who need to lock down a high-risk tool (shell, web_fetch, …) across 
 - **No external network.** `tools.denied = ["web_fetch", "web_search"]` + `integrations.denied = ["github", "slack"]` keeps the agent fully local without disrupting file / shell work.
 - **Pilot scope.** `skills.allowed = ["kilo-config"]` restricts skill-based workflows to a single approved skill while leaving the baseline tool surface open.
 
+## Managed Policy Precedence (`src/core/managed-policy.ts`)
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports opencode PR #55267 "managed config has highest precedence" and PR #55297 "promote `experimental.policies` to top-level `policies`"). Changes how documents emitted by MDM / `/etc/alexi/*` loaders interact with user and project config layers. **No new environment variable or user-facing config knob is added** — this is a loader-side resolver that any current or future concrete config loader can route policy data through. See [docs/ARCHITECTURE.md — Managed-configuration policy resolution](ARCHITECTURE.md#managed-configuration-policy-resolution-srccoremanaged-policyts) for the design.
+
+### Two shapes accepted during the `experimental.policies` → `policies` migration
+
+Both shapes are accepted on any document, and the new top-level `policies` wins when both are present on the same document:
+
+```json
+{
+  "policies": [{ "rule": "no_shell_in_prod" }]
+}
+```
+
+```json
+{
+  "experimental": {
+    "policies": [{ "rule": "no_shell_in_prod" }]
+  }
+}
+```
+
+Operators migrating from the legacy shape can leave `experimental.policies` in place; the resolver reads it. Writing tooling that emits config should prefer the top-level `policies` field so the operator-facing JSON tracks the current upstream contract.
+
+### Precedence contract
+
+Managed documents (those produced by an MDM / system-directory loader that tags its output with `managed: true`) now take **highest** precedence for both policies AND non-policy settings. The composition is intentionally asymmetric:
+
+| Slot                | Loads     | Wins on               | Reason                                                             |
+| ------------------- | --------- | --------------------- | ------------------------------------------------------------------ |
+| `managedPolicies`   | FIRST     | policy evaluation     | Policy evaluator processes in reverse-load order, so first=last    |
+| `userDocuments`     | middle    | nothing specific      | Normal user / project overlays, preserved in loader order          |
+| `managedSettings`   | LAST      | later-wins keys       | Managed non-policy settings override user settings                 |
+
+The split is why `applyManagedPrecedence` returns three slots instead of just reordering. A managed document contributes to BOTH `managedPolicies` (its policy data, prepended first) and `managedSettings` (everything else, appended last). The now-empty `experimental` block is dropped from `managedSettings` so a `{ experimental: { policies: [...] } }` managed document does not leave a trailing `{ experimental: {} }` in the settings slot.
+
+### Composing with the loader pipeline
+
+The resolver is pure and schema-agnostic. A concrete loader hands it an array of `TaggedConfigDocument`:
+
+```typescript
+import { resolvePoliciesWithPrecedence } from '../core/managed-policy.js';
+import type { TaggedConfigDocument } from '../core/managed-policy.js';
+
+const docs: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/managed.json', managed: true, info: await readManaged() },
+  { path: '~/.alexi/config.json', info: await readUser() },
+  { path: './alexi.config.json', info: await readProject() },
+];
+const effectivePolicies = resolvePoliciesWithPrecedence(docs);
+```
+
+Callers that want the reordered documents (not just the policy list) call `applyManagedPrecedence(docs)` directly and compose the final load order themselves: `[...managedPolicies, ...userDocuments, ...managedSettings]`.
+
 ## Experimental Glob-Ignored Allowlist (`experimental.glob_include_ignored`)
 
 Introduced in the 2026-10-13 upstream sync (`1.22.46`, ports upstream kilocode `packages/opencode/src/kilocode/tool/glob-ignored.ts`). Adds a workspace-relative allowlist of folders (or exact files) that the `glob` and `grep` tools should search even when they are ignored by `.gitignore` or hidden. Nested ignored folders inside an allowlisted folder stay skipped — the allowlist opts specific paths back in without disabling ignore handling globally.

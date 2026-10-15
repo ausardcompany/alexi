@@ -1153,11 +1153,36 @@ Persistence semantics: `/model <id>` and the `/models` interactive picker record
 | `/rewind` | Rewind conversation to a specific turn or summarize up to a point |
 | `/context` | Show context usage |
 | `/status` | Show current status |
-| `/fork [name]` | Fork current session; the fork becomes the active session (subsequent messages land in the fork, matching `git checkout -b`). Optional `name` sets the fork title (defaults to `fork-<timestamp>`). |
+| `/fork [name] [--from-message <n>]` | Fork current session; the fork becomes the active session (subsequent messages land in the fork, matching `git checkout -b`). Optional `name` sets the fork title (defaults to `fork-<timestamp>`). Optional `--from-message <n>` truncates the forked transcript at the 1-indexed, inclusive message boundary (fork contains messages `1..n` from the source); the flag may appear before or after `[name]`. |
 | `/rename` | Rename current session |
 | `/clear-history` | Clear conversation history |
 | `/cost` | Show cost summary |
 | `/stats` | Show usage statistics |
+
+### Session Fork (`/fork`)
+
+The `/fork` slash command (`src/cli/interactive.ts:804-898`) creates a new session seeded from the current session's transcript and immediately switches the manager's active session to the fork — subsequent user messages land in the fork, matching the `git checkout -b` mental model.
+
+Usage:
+
+```text
+/fork                              # anonymous fork, copies full transcript, auto name `fork-<timestamp>`
+/fork my-branch                    # named fork, copies full transcript
+/fork --from-message 5             # anonymous fork, keeps messages 1..5 only
+/fork my-branch --from-message 5   # named fork, keeps messages 1..5 only
+/fork --from-message 5 my-branch   # flag order is interchangeable
+```
+
+Argument contract:
+
+- `[name]` — optional positional. Sets `metadata.title` on the fork. Defaults to `fork-<Date.now()>`. If omitted the title still uses the timestamp fallback — the flag does not need a name to work.
+- `--from-message <n>` — optional, 1-indexed, inclusive. The forked transcript is `session.messages.slice(0, n)`, so `--from-message 5` keeps messages 1 through 5 and drops everything after. Without the flag the full transcript is copied.
+
+Validation. The index is checked against four invariants before any session mutation: `Number.isNaN`, non-integer (rejects `3.5`), `< 1`, `> session.messages.length`. Any failure prints `Invalid message index: <raw>` plus a hint `Session has <N> message(s); use 1..<N>` and returns without creating a fork. A missing value for the flag (`--from-message` at the end of `args`) prints `--from-message requires a message index`. In every error path the current session is unchanged.
+
+Confirmation line. On success the command prints `Forked session: <name> (<short-id>) - now active`, with ` from message <n> of <total>` inserted before `- now active` when the flag was used, e.g. `Forked session: experiment (abcd1234) from message 5 of 10 - now active`.
+
+Metadata semantics. Token roll-up uses the sliced copy — `metadata.totalTokens` is the sum of `(input + output)` tokens on the kept messages only, and `metadata.messageCount` is the kept-message count. The source `metadata.workdir` is preserved on the fork so working-directory-sensitive tools (bash, read, write, edit) see the same filesystem view.
 
 ### Conversation Rewind
 
@@ -7715,6 +7740,130 @@ Example JSON policy:
 
 With that policy loaded, `getTool('bash')` returns `undefined`, `getAllToolNames()` omits `bash` / `shell` / `web_fetch`, and the orchestrator never surfaces them in the function-tool schema list it hands to SAP AI Core. The policy is read on each lookup, so swapping the enforcer with another `setToolPolicy(...)` call takes effect for the next tool invocation.
 
+## Managed Policy Precedence API
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports opencode PRs #55267 and #55297). Exported from `src/core/managed-policy.ts`. Pure, I/O-free resolver that handles the `experimental.policies` → `policies` migration and the "managed config has highest precedence" composition in a single schema-agnostic module. Complements the `ManagedPolicySchema` enforcer above — this module decides WHICH documents' policies to run, the enforcer decides what each policy MEANS.
+
+```typescript
+export type Policy = Readonly<Record<string, unknown>>;
+
+export interface ConfigDocument {
+  readonly path: string;
+  readonly info: {
+    readonly policies?: readonly Policy[];
+    readonly experimental?: { readonly policies?: readonly Policy[] };
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface TaggedConfigDocument extends ConfigDocument {
+  readonly managed?: boolean;
+}
+
+/** Reads policies/experimental.policies with top-level preferred; preserves input order. */
+export function mergePolicies(documents: readonly ConfigDocument[]): readonly Policy[];
+
+/** Splits managed docs into first-loaded policies and last-loaded settings. */
+export function applyManagedPrecedence(documents: readonly TaggedConfigDocument[]): {
+  readonly managedPolicies: readonly ConfigDocument[];
+  readonly userDocuments: readonly TaggedConfigDocument[];
+  readonly managedSettings: readonly ConfigDocument[];
+};
+
+/** Convenience: full composition in one call. */
+export function resolvePoliciesWithPrecedence(
+  documents: readonly TaggedConfigDocument[]
+): readonly Policy[];
+```
+
+Shape semantics for `mergePolicies`:
+
+| Document shape                                            | Returned entry  |
+| --------------------------------------------------------- | --------------- |
+| `{ policies: [p] }`                                       | `p`             |
+| `{ experimental: { policies: [p] } }`                     | `p`             |
+| `{ policies: [new], experimental: { policies: [old] } }`  | `new` (new wins) |
+| `{ somethingElse: 42 }`                                   | skipped         |
+
+Composition rule for `applyManagedPrecedence`: final load order is `[...managedPolicies, ...userDocuments, ...managedSettings]`. `managedSettings` has `policies` AND `experimental.policies` stripped so they contribute only non-policy keys; a now-empty `experimental` block is dropped from the output.
+
+Typical loader-side usage:
+
+```typescript
+import { resolvePoliciesWithPrecedence, type TaggedConfigDocument } from '../core/managed-policy.js';
+
+const docs: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/managed.json', managed: true, info: await readManaged() },
+  { path: '~/.alexi/config.json', info: await readUser() },
+  { path: './alexi.config.json', info: await readProject() },
+];
+const effectivePolicies = resolvePoliciesWithPrecedence(docs);
+```
+
+See [docs/ARCHITECTURE.md — Managed-configuration policy resolution](ARCHITECTURE.md#managed-configuration-policy-resolution-srccoremanaged-policyts) for the design and [docs/CONFIGURATION.md — Managed Policy Precedence](CONFIGURATION.md#managed-policy-precedence-srccoremanaged-policyts) for the operator-facing contract.
+
+## Ripgrep Argv Assembly API
+
+Introduced in commit `fb8c88f0` (2026-10-14 upstream sync; ports upstream kilocode fixes #15003 and #15017). Exported from `src/core/ripgrep.ts` (high-level helpers) and `src/core/kilocode/ripgrep-glob.ts` (matcher primitives). Replaces the historical `--glob=<agent-pattern>` dispatch (which turned the pattern into a ripgrep override that leaked `.gitignore`-ignored paths) with a two-phase matcher that keeps ripgrep's ignore rules in charge.
+
+```typescript
+// src/core/ripgrep.ts
+
+export interface GlobInput {
+  readonly pattern: string;
+  readonly noRequireGit?: boolean;
+  readonly include?: readonly string[];
+  readonly exclude?: readonly string[];
+  readonly filter?: (path: string) => boolean;
+}
+
+/** Build the ripgrep argv fragment — agent pattern is NEVER a --glob= override. */
+export function assembleGlobArgs(input: GlobInput): readonly string[];
+
+/** Decode one ripgrep output line and return the normalised path, or undefined. */
+export function filterGlobLine(input: GlobInput, line: string): string | undefined;
+```
+
+```typescript
+// src/core/kilocode/ripgrep-glob.ts
+
+export interface Walk {
+  readonly args: readonly string[];
+  readonly match: (file: string) => boolean;
+  readonly keep: (file: string | undefined) => boolean;
+}
+
+/** Compile a pattern into a (path, isFolder) => boolean predicate. */
+export function compile(pattern: string): (path: string, folder: boolean) => boolean;
+
+/** Normalise a ripgrep output line to a cwd-relative POSIX path. */
+export function relative(line: string): string;
+
+export function glob(input: { pattern: string; hidden?: boolean }): Walk;
+```
+
+Argv contract summary:
+
+| Input kind                        | Emitted argv                                       | Why                                               |
+| --------------------------------- | -------------------------------------------------- | ------------------------------------------------- |
+| Agent `pattern` (bare filename)   | `--pre-glob=<name> --type-add=kiloglob:<name> --type=kiloglob` | Applied AFTER ignore rules — safe prefilter       |
+| Agent `pattern` (brace expansion) | (no prefilter)                                     | `--type-add` cannot represent `{a,b}` — matcher-only |
+| Agent `pattern` (always)          | **never** `--glob=<pattern>`                       | Would be a ripgrep override; leaks ignored paths  |
+| Operator `include`                | `--glob=<pattern>`                                 | Intentional override — operator opt-in            |
+| Operator `exclude`                | `--glob=!<pattern>`                                | Intentional override — operator opt-in            |
+
+Compile-matcher semantics (ripgrep override semantics, implemented via `minimatch`):
+
+| Pattern form      | Example           | Compiled match                         |
+| ----------------- | ----------------- | -------------------------------------- |
+| No `/`            | `foo.ts`          | `**/foo.ts` — matches at any depth     |
+| Contains `/`      | `src/foo.ts`      | anchored to cwd (not nested matches)   |
+| Trailing `/`      | `build/`          | folder-only, no file descent           |
+| Leading `/`       | `/src/foo.ts`     | anchored to cwd exactly                |
+| `**` recursive    | `src/**`          | recursive descent                      |
+
+See [docs/ARCHITECTURE.md — Ripgrep glob override hardening](ARCHITECTURE.md#ripgrep-glob-override-hardening-srccorekilocoderipgrep-globts) for the two-phase dispatch design.
+
 ## Agentic Tool Dispatch
 
 Updated in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode `c9e1ed70`). Lives in `src/core/agenticChat.ts`.
@@ -7807,4 +7956,86 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 - `filterXaiImages(attachments)` — partitions a list into `kept` (safe to forward) and `dropped` (silently rejected by xAI). The dropped list is returned so callers can log a warning or surface a UX hint instead of swallowing content silently.
 
 Alexi routes multimodal requests through SAP AI Core by default — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
+
+## Managed-settings Policy Precedence API
+
+Introduced in the 2026-10-14 upstream sync (ports opencode fixes `#55267` and `#55297`) and tightened in commit `18774554 fix(ci): formatting, no-useless-escape, and experimental index signature [autohealing]`. Exported from `src/core/managed-policy.ts`. See [docs/ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts) for the composition story and [docs/API.md — Managed Policy API](#managed-policy-api) for the downstream enforcer.
+
+```typescript
+export type Policy = Readonly<Record<string, unknown>>;
+
+export interface ConfigDocument {
+  readonly path: string;
+  readonly info: {
+    readonly policies?: readonly Policy[];
+    readonly experimental?: {
+      readonly policies?: readonly Policy[];
+      readonly [key: string]: unknown;
+    };
+    readonly [key: string]: unknown;
+  };
+}
+
+export interface TaggedConfigDocument extends ConfigDocument {
+  readonly managed?: boolean;
+}
+
+export function mergePolicies(documents: readonly ConfigDocument[]): readonly Policy[];
+
+export function applyManagedPrecedence(documents: readonly TaggedConfigDocument[]): {
+  readonly managedPolicies: readonly ConfigDocument[];
+  readonly userDocuments: readonly TaggedConfigDocument[];
+  readonly managedSettings: readonly ConfigDocument[];
+};
+
+export function resolvePoliciesWithPrecedence(
+  documents: readonly TaggedConfigDocument[]
+): readonly Policy[];
+```
+
+Semantics:
+
+| Helper | Input | Output | Purpose |
+|--------|-------|--------|---------|
+| `mergePolicies` | `readonly ConfigDocument[]` (caller-ordered) | `readonly Policy[]` | Reads `info.policies ?? info.experimental?.policies` from each document (new shape preferred when both are set) and concatenates in input order. Later-wins is caller-controlled via the input ordering. |
+| `applyManagedPrecedence` | `readonly TaggedConfigDocument[]` | `{ managedPolicies, userDocuments, managedSettings }` | Splits managed documents (`managed === true`) off, extracts their policy data into a FIRST-loaded `managedPolicies` list (reverse of their original managed order so the LAST-loaded managed source retains final authority under the policy evaluator's reverse-load-order evaluation), strips `policies` and `experimental.policies` from the LAST-loaded `managedSettings` list, and returns `userDocuments` in input order. |
+| `resolvePoliciesWithPrecedence` | `readonly TaggedConfigDocument[]` | `readonly Policy[]` | One-shot convenience: calls `applyManagedPrecedence` then `mergePolicies` on `[...managedPolicies, ...userDocuments, ...managedSettings]`. |
+
+Final load-order composition when both halves are needed (non-policy settings AND policies):
+
+```text
+[...managedPolicies, ...userDocuments, ...managedSettings]
+```
+
+- `managedPolicies` first — policy evaluator runs in reverse-load order, so FIRST-loaded = evaluated LAST = final authority.
+- `userDocuments` middle — normal later-wins ordering across user config and project overlay.
+- `managedSettings` last — non-policy fields get their later-wins win position.
+
+Example:
+
+```typescript
+import {
+  resolvePoliciesWithPrecedence,
+  type TaggedConfigDocument,
+} from './core/managed-policy.js';
+
+const documents: TaggedConfigDocument[] = [
+  { path: '/etc/alexi/mdm.json', managed: true, info: { policies: [{ rule: 'org-deny-bash' }] } },
+  { path: '~/.alexi/config.json', info: { policies: [{ rule: 'user-allow-bash' }] } },
+  { path: '.alexi/project.json', info: { experimental: { policies: [{ rule: 'project-pin' }] } } },
+];
+
+const effective = resolvePoliciesWithPrecedence(documents);
+// => [{ rule: 'org-deny-bash' }, { rule: 'user-allow-bash' }, { rule: 'project-pin' }]
+//
+// Under reverse-load evaluation, 'org-deny-bash' is evaluated LAST (final authority)
+// even though the MDM document was listed first in the input.
+```
+
+Notes:
+
+- **No I/O.** The module is pure and schema-agnostic — it works on parsed `info` records. Side-effectful loading (file reads, env expansion, macOS MDM preferences) stays in the config loader.
+- **`experimental.policies` back-compat.** The reader prefers the new top-level `policies` when both are set on the same document; new tooling emits `policies` directly, but existing deployments shipping `experimental.policies` continue to work during the migration window.
+- **`experimental` index signature.** The nested `info.experimental` type carries a `readonly [key: string]: unknown;` index signature so forward-compatible knobs that sit alongside `experimental.policies` type-check through the managed-settings strip in `applyManagedPrecedence` without a cast. The index signature mirrors the one at the top level of `info` and closes the shape-parity gap between the two surfaces.
+- **Composition with the Managed Policy enforcer.** The resolved policy list from `resolvePoliciesWithPrecedence` is intended to feed into the `PolicyEnforcer` constructor exported by `src/permission/policy.ts` (see [Managed Policy API](#managed-policy-api)); the two modules split "which policies are in effect" from "is this tool / integration / skill allowed?".
 

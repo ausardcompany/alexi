@@ -17,15 +17,19 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing platform support diagnostics](#testing-platform-support-diagnostics-srccliutils__tests__platformsupporttestts)
 - [Testing retryable connection-reset classification](#testing-retryable-connection-reset-classification-srcsession__tests__networktestts)
 - [Testing C++20 module-interface detection](#testing-c20-module-interface-detection-srcclituutilsformattooloutputtestts)
+- [Testing bash tree-sitter tag extraction](#testing-bash-tree-sitter-tag-extraction-srccontextbashtagsts-issue-2032)
 - [Testing Compaction](#testing-compaction)
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
 - [Testing Routing](#testing-routing)
+- [Testing `/fork --from-message` (PR #15004)](#testing-fork---from-message-pr-15004)
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
 - [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
+  - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
+  - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -5995,6 +5999,70 @@ Key testing patterns:
 3. **Generous Timeouts**: Use ~2x the expected duration for CI scheduling variability
 4. **Non-null Assertions**: Use `taskResult.data!.taskId` (correct precedence)
 
+## Testing `/fork --from-message` (PR #15004)
+
+The `/fork` slash command accepts an optional `--from-message <index>` flag that truncates the forked transcript at a 1-indexed, inclusive boundary. The test file is `tests/cli/interactive.fork.test.ts`; the implementation lives in `src/cli/interactive.ts:804-898`.
+
+### Pattern
+
+The suite builds a disposable `ReplState` around a `SessionManager` whose `sessionsDir` points at a fresh `fs.mkdtempSync` directory, spies on `console.log` to assert the user-visible confirmation / error messages, and drives the command through the real `handleCommand(input, state)` entry point so the parser, validator, and session-swap logic are all exercised end to end.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+
+import { handleCommand, type ReplState } from '../../src/cli/interactive.js';
+import { SessionManager } from '../../src/core/sessionManager.js';
+
+function buildReplState(sessionsDir: string): ReplState {
+  const sessionManager = new SessionManager({ sessionsDir });
+  sessionManager.createSession('test-model');
+  return {
+    sessionManager,
+    currentModel: 'test-model',
+    autoRoute: false,
+    preferCheap: false,
+    isStreaming: false,
+  };
+}
+
+describe('/fork copies session transcript', () => {
+  let tmpDir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-fork-test-'));
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+```
+
+### Cases that must stay pinned
+
+1. **Happy path — truncation at the boundary.** Seed 10 messages (`i % 2 === 1 ? 'user' : 'assistant'`, with `tokens: { input: i, output: i }`), run `/fork experiment --from-message 5`, and assert:
+   - `forked.messages.length === 5`
+   - `forked.messages[0].content === 'Message 1'`
+   - `forked.messages[4].content === 'Message 5'`
+   - `forked.metadata.messageCount === 5`
+   - `forked.metadata.totalTokens === 30` (sum of `input + output` for messages 1..5 = `2 * (1+2+3+4+5)`)
+   - The confirmation line contains `from message 5 of 10`.
+2. **No-flag fallback is a full copy.** A plain `/fork full-copy` on a 10-message session still produces a fork with `messages.length === 10` — the flag is strictly opt-in.
+3. **Out-of-range rejection.** `/fork too-far --from-message 10` on a 5-message session must leave the manager's active session on the original (`active.metadata.id === originalId`) and emit `Invalid message index`.
+4. **Non-integer rejection.** `/fork bad --from-message abc` triggers the `Number.isNaN` branch of the validator, leaves the active session unchanged, and emits `Invalid message index`.
+
+### Gotchas
+
+- `SessionManager.createSession` flips the manager's active session as a side effect. The implementation snapshots the source transcript BEFORE calling `createSession` to avoid reading from the already-swapped new session. Tests should mirror this by capturing `original.metadata.id` on the pre-fork session and asserting against it, never against `state.sessionManager.getCurrentSession()` immediately after the swap.
+- The confirmation message is written through `console.log`, not through a logger — asserting against the `logSpy.mock.calls.map((c) => String(c[0])).join('\n')` string is the only reliable way to pin the user-visible output. Checking that the error path does NOT produce a fork is done by re-reading `state.sessionManager.getCurrentSession()` and comparing `metadata.id` to the pre-command id.
+- Positional-argument order is interchangeable with the flag (`/fork name --from-message 5` and `/fork --from-message 5 name` both parse the same way). Keep at least one case per order so a future parser refactor cannot regress one direction silently.
+
 ## Testing Rewind Command
 
 ### Test File
@@ -8899,6 +8967,64 @@ npm test -- src/tool/shell-pattern.test.ts -t "masking"
 
 The grammar is an optional peer dependency. When a CI job needs the grammar-gated coverage (e.g. a permission-regression check), install `tree-sitter-bash` in the job's setup step; when the intent is only to smoke-test the passthrough path, the grammar is not required and the suite will report the second `describe` as skipped.
 
+## Testing bash tree-sitter tag extraction (`src/context/bashTags.ts`, issue #2032)
+
+The bash tag extractor adds `function` / `for` / `while` / `case` tags to the repomap context for `.sh` / `.bash` / `.zsh` files. Two complementary suites cover it: `src/context/__tests__/bashTags.test.ts` (+230 lines, 14 cases) pins the low-level extractor, and `src/context/__tests__/symbols.test.ts` (+57 lines, 2 new cases) pins the symbol-index integration so the public `extractSymbols()` surface stays consistent.
+
+Grammar gating. Both suites use the same `describeIfBash` pattern established by the shell-pattern masker test (above): the grammar-dependent `describe` blocks switch to `describe.skip` when `tree-sitter` and `tree-sitter-bash` are not installed via `createRequire(import.meta.url).resolve()`. The non-grammar guard cases (`isBashSupported`, unsupported-extension short-circuit) always run — they do not depend on the parser.
+
+```typescript
+// src/context/__tests__/bashTags.test.ts
+import { createRequire } from 'module';
+import {
+  extractBashTags,
+  extractTopLevelBashTags,
+  extractBashTagsFromRoot,
+  isBashSupported,
+  bashTagName,
+  type BashTag,
+} from '../bashTags.js';
+import { parseSource } from '../treeSitter.js';
+
+const nodeRequire = createRequire(import.meta.url);
+function hasBashGrammar(): boolean {
+  for (const pkg of ['tree-sitter', 'tree-sitter-bash']) {
+    try {
+      nodeRequire.resolve(pkg);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+const describeIfBash = hasBashGrammar() ? describe : describe.skip;
+```
+
+Assertion patterns worth internalising:
+
+- **Four tag categories from a mixed script.** The canonical "issue #2032" fixture is a single `.sh` file containing one function, one `for` loop, one `while` loop (with a `done < input.txt` redirect so the `redirected_statement` unwrap path is exercised), and one `case` statement. Assert via `expect(kinds).toEqual(expect.arrayContaining(['function', 'for', 'while', 'case']))` — the explicit `arrayContaining` keeps the assertion stable if a future tag category is added.
+- **Source order is normative.** `collectTags` sorts by `line` then `column` before returning, so a mixed-order fixture (`for` on line 1, `function` on line 2, `while` on line 3, `case` on line 4) must produce `kinds(tags) === ['for', 'function', 'while', 'case']`. Testing this pins the sort guarantee against a future refactor that drops the sort step.
+- **Positional fallback for anonymous constructs.** A `while` loop has no natural identifier, so its `name` MUST match `/^while@L\d+$/`. The symbols.test.ts suite uses the regex form (`expect(whileSym.name).toMatch(/^while@L\d+$/)`) rather than a hard-coded line number so an unrelated edit to the fixture does not break the test.
+- **Nested vs. top-level.** Two cases cover the parent-type distinction: (1) `extractBashTags` on a function body with a `for` loop inside asserts `forTag.parentType !== 'program'`; (2) `extractTopLevelBashTags` on the same fixture asserts the nested `for` is dropped and only the outer constructs survive. The symbols-level counterpart asserts `extractSymbols(deployWithNestedFor, 'deploy.sh').map(s => s.kind) === ['function']` — compound statements nested inside a function MUST NOT appear in the compact symbol index.
+- **Grammar-less input returns `[]` without touching the parser.** Call `extractBashTags('const x = 1;', 'file.ts')` and assert the result is `[]`. The `isBashSupported` guard runs before `parseSource`, so this case passes even on a fresh clone without the optional grammar.
+- **`extractBashTagsFromRoot` matches `extractBashTags`.** Parse a fixture once with `parseSource`, call both entry points, and assert `toEqual` — this is the invariant that lets the `symbols.ts` pipeline reuse the already-parsed root without double-parsing.
+- **`bashTagName` fallbacks are independently testable.** Build a one-liner (`alpha() { echo a; }`), parse it, grab the first child, and assert `bashTagName('function', fn) === 'alpha'`. Repeat with `while true; do break; done` and assert the fallback name is `while@L1`. This isolates the name-derivation logic from the walker so a grammar upgrade that changes field names fails one targeted case, not the whole suite.
+
+Running the suites:
+
+```bash
+# Full bash-tags extractor suite (grammar-gated blocks skip when tree-sitter-bash is absent)
+npm test -- src/context/__tests__/bashTags.test.ts
+
+# Symbol-index integration for issue #2032
+npm test -- src/context/__tests__/symbols.test.ts -t "issue #2032"
+
+# All context tests (TypeScript/JavaScript + bash)
+npm test -- src/context/__tests__/
+```
+
+The grammar install step for local development is documented in [docs/CONTRIBUTING.md — Optional tree-sitter grammars](CONTRIBUTING.md#optional-tree-sitter-grammars). CI already installs the full grammar set, so these suites run their grammar-gated blocks on every PR.
+
 ## Testing the compaction trigger projection
 
 `shouldCompact` (`src/core/compaction.ts`) is unit-testable at two entry shapes: the legacy positional form (`shouldCompact(messages, max, thresholdNumber)`) and the options-bag form (`shouldCompact(messages, max, opts)`). Test coverage MUST exercise both because the runtime call sites still mix them. The projection path is only taken when `opts.reportedUsage` is a positive number — pass `0` or `undefined` to keep the pre-existing whole-transcript estimation path.
@@ -10632,6 +10758,130 @@ await generateCommitMessage(
 // systemMsg.content now contains '<rule file="override.md">' and 'Custom override rule.'
 ```
 
+### Testing commitlint `scope-enum` injection
+
+Commit `40515f68` extends the same system-prompt composer with a loader for the project's `commitlint.config.cjs` (falling back to `commitlint.config.js`). When the config exposes a `rules['scope-enum'][2]` whitelist, the generator prepends `COMMIT_SCOPES_PREAMBLE` + the comma-joined scope list to the system prompt. Pinning this contract requires exercising three independent surfaces: the pure loader (`loadCommitlintScopes`), the pure section builder (`buildScopesSection`), and the end-to-end `generateCommitMessage` path.
+
+Unit coverage lives in `src/git/commitMessage.test.ts` (`describe('commitlint scope-enum wiring', ...)`, six cases) and reuses the same temp-workdir pattern as the rules suite:
+
+```ts
+function makeWorkdirWithCommitlint(scopes: string[]): {
+  workdir: string;
+  cleanup: () => void;
+} {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-scopes-'));
+  const configJs = `module.exports = { rules: { 'scope-enum': [2, 'always', ${JSON.stringify(scopes)}] } };\n`;
+  fs.writeFileSync(path.join(workdir, 'commitlint.config.cjs'), configJs, 'utf-8');
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+The six-case shape pins each failure mode independently so a regression in any one path fails a named test:
+
+1. **No config → `[]`.** `loadCommitlintScopes(empty_dir)` returns `[]`. Pairs with `buildScopesSection(empty_dir)` returning `''` so the composer emits the base prompt verbatim.
+2. **Malformed JS → `[]`.** A file whose contents are not valid JavaScript (`'this is not valid javascript ((('`) is caught by the `try` / `catch` around `localRequire(full)` and returns `[]` without throwing. A regression that let the require throw would crash the auto-commit path on a broken commitlint config.
+3. **Happy path.** `loadCommitlintScopes(fixture)` returns `['cli', 'core', 'tests']` for `rules: { 'scope-enum': [2, 'always', ['cli', 'core', 'tests']] }`.
+4. **Section formatting.** `buildScopesSection(fixture)` contains both `COMMIT_SCOPES_PREAMBLE` and the comma-joined list `'cli, core'`.
+5. **No-config section.** `buildScopesSection(empty_dir)` returns `''` so the composer skips the block without inserting a stray `\n\n`.
+6. **End-to-end system-prompt plumbing.** `generateCommitMessage` with a mocked provider captures the first argument to `provider.complete(...)`, finds the `role: 'system'` entry, and asserts it contains both `COMMIT_SCOPES_PREAMBLE` and the actual scope list (`'cli, core, tests'`).
+
+A seventh case pins the combined-sections ordering invariant from `buildSystemPrompt`. The composer builds the prompt in the order `BASE_SYSTEM_PROMPT` → scopes → rules, so the system message must contain BOTH preambles AND the rule content when both surfaces are configured:
+
+```ts
+it('combines rules + scope-enum in the same system prompt', async () => {
+  // ... write .alexi/rules/commit-style.md and commitlint.config.cjs
+  await generateCommitMessage(
+    [{ filePath: 'src/foo.ts', toolName: 'write' }],
+    baseConfig,
+    workdir
+  );
+  const [messages] = completeFn.mock.calls[0];
+  const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+  expect(systemMsg.content).toContain(COMMIT_SCOPES_PREAMBLE);
+  expect(systemMsg.content).toContain('cli, core');
+  expect(systemMsg.content).toContain(COMMIT_RULES_PREAMBLE);
+  expect(systemMsg.content).toContain('<rule file="commit-style.md">');
+  expect(systemMsg.content).toContain('Reference the related issue number when relevant.');
+});
+```
+
+### End-to-end: `AutoCommitManager` honors rules AND scopes
+
+`tests/git/autoCommit.rules.test.ts` (204 lines, four cases) drives the full `AutoCommitManager → generateCommitMessage → provider.complete` chain with real `.alexi/rules/commit-style.md` and `commitlint.config.cjs` fixtures on disk. Only `simple-git` and `src/git/dirtyFiles.js` are mocked — every other link (rules discovery, scope loader, prompt assembly, provider resolution) runs through the real code paths. The suite exists so a regression that disconnected any single link fails the end-to-end suite instead of surfacing in production as a rejected husky `commit-msg` hook.
+
+Fixture pattern — a single helper writes BOTH a rule file AND a commitlint config to the same tempdir:
+
+```ts
+function makeFixture(ruleContent: string, scopes: string[]): Fixture {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-autocommit-rules-'));
+  const rulesDir = path.join(workdir, '.alexi', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  fs.writeFileSync(path.join(rulesDir, 'commit-style.md'), ruleContent, 'utf-8');
+  const configJs = `module.exports = { rules: { 'scope-enum': [2, 'always', ${JSON.stringify(scopes)}] } };\n`;
+  fs.writeFileSync(path.join(workdir, 'commitlint.config.cjs'), configJs, 'utf-8');
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+Mocking shape. The `simple-git` factory is mocked once at module level with a reusable `mockGit` object; the inner factory `vi.fn(() => mockGit)` MUST be preserved across cases, so the suite uses `vi.clearAllMocks()` (clears call history) and NOT `vi.resetAllMocks()` (which would wipe the factory's return value and break the second case):
+
+```ts
+vi.mock('simple-git', () => {
+  const mockGit = {
+    revparse: vi.fn().mockResolvedValue('.git'),
+    status: vi.fn().mockResolvedValue({ staged: ['foo.ts'] }),
+    add: vi.fn().mockResolvedValue(undefined),
+    commit: vi.fn().mockResolvedValue({ commit: 'deadbee' }),
+    reset: vi.fn().mockResolvedValue(undefined),
+    raw: vi.fn().mockResolvedValue(''),
+    log: vi.fn().mockResolvedValue({ all: [] }),
+    diff: vi.fn().mockResolvedValue(''),
+  };
+  return { simpleGit: vi.fn(() => mockGit) };
+});
+
+vi.mock('../../src/git/dirtyFiles.js', () => ({
+  isGitRepo: vi.fn().mockResolvedValue(true),
+  getDirtyFiles: vi.fn().mockResolvedValue([]),
+  commitDirtyFiles: vi.fn(),
+}));
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+}));
+
+vi.mock('../../src/core/router.js', () => ({
+  routePrompt: vi.fn(() => ({ modelId: 'gpt-4o-mini', reason: 'cheap', confidence: 0.9 })),
+}));
+```
+
+The four cases cover:
+
+1. **`.alexi/rules/commit-style.md` reaches the provider system prompt.** The captured `provider.complete` call's `role: 'system'` message contains `COMMIT_RULES_PREAMBLE`, `<rule file="commit-style.md">`, and the actual rule text. The commit is also asserted to resolve against `hash: 'deadbee'` (the mocked `simple-git.commit(...)` return) so a regression that short-circuited the pipeline before the real commit still fails this case.
+2. **`commitlint.config.cjs scope-enum` reaches the provider system prompt.** The captured system message contains `COMMIT_SCOPES_PREAMBLE` and the comma-joined scope list `'cli, core, providers, config, tests'`.
+3. **Conventional-commit shape.** The generated commit (returned by the mocked `complete()`) matches `/^(feat|fix|docs|style|refactor|perf|test|chore|ci|revert)\((cli|core|providers|config|server|agent|tools|ci|deps|tests)\): /`. Pins both the type set and the Alexi scope set.
+4. **Bare workdir with neither configured.** A fresh tempdir with no `.alexi/rules/` and no `commitlint.config.cjs` produces a system message that contains the base-prompt phrase (`'git commit message generator'`) but neither preamble. Catches a regression that always emitted the scopes block (potentially as an empty `${PREAMBLE} .`) on every run.
+
+Patterns worth internalising from this suite:
+
+1. **Mock `simple-git` and `dirtyFiles` once at module scope with factories that return reusable mocks**, and clear call history with `vi.clearAllMocks()` between cases. `vi.resetAllMocks()` would wipe the `simpleGit` factory's return value, breaking the second case silently with a cryptic null-pointer error inside `AutoCommitManager`.
+2. **Keep `rulesDiscovery`, `commitMessage`, and `providers/index` real.** The whole point of the end-to-end suite is to prove the links are connected. Mocking any of them turns it into a redundant unit test.
+3. **Assert on the captured `provider.complete` call, not the final commit message.** The commit message is produced by the mocked provider so it reveals nothing about the system prompt. The system prompt — captured as the first argument of the `complete` call — is the only place where a regression that broke the rules loader OR the scope loader is observable.
+4. **The bare-workdir case runs the base prompt in isolation.** Without it, a regression that always emitted `${COMMIT_SCOPES_PREAMBLE} .` (empty join) would pass every "contains the preamble when configured" case and silently corrupt every project that has NO commitlint config.
+
+### Running
+
+```bash
+npm test -- src/git/commitMessage.test.ts
+npm test -- tests/git/autoCommit.rules.test.ts
+```
+
 ## Testing MCP Auth-Failure Classification
 
 The MCP auth-failure classifier (`src/mcp/auth-failure.ts`, commit `b591e606`, ports kilocode `21ed2b9e` + `c9632e495`) is a pure function with no side effects, so the regression suite is a plain input / output table. See [ARCHITECTURE.md — MCP Auth-Failure Classification](ARCHITECTURE.md#mcp-auth-failure-classification-srcmcpauth-failurets).
@@ -11349,3 +11599,169 @@ it('ignores bare words in prose', async () => {
 1. **Temp workspace per test.** The detector only returns existing paths; a shared workspace risks cross-test contamination. `mkdtemp` + `afterEach(rm { recursive, force })` keeps every case hermetic.
 2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
 3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.
+
+## Testing ripgrep argv settlement for agent-supplied globs
+
+The settlement suite at `src/core/kilocode/ripgrep-settlement.test.ts` freezes the externally observable argv shape produced by `assembleGlobArgs` (exported from `src/core/ripgrep.ts`) so a future refactor cannot silently reintroduce the `--glob=<pattern>` override bug that previously made agent-supplied patterns surface `.gitignore`-ignored paths. The regression story is maintained alongside `src/core/kilocode/ripgrep-glob.test.ts`; this file is the SETTLEMENT snapshot (the pinned-forever argv shape), the sibling test is the BEHAVIOURAL regression driver.
+
+### What the three cases pin
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { assembleGlobArgs } from '../ripgrep.js';
+
+describe('ripgrep settlement: argv shape', () => {
+  it('applies the pattern after ignore rules via --pre-glob + --type-add', () => {
+    const passed = assembleGlobArgs({ pattern: '*.ts' });
+    expect(passed).toContain('--pre-glob=*.ts');
+    expect(passed).toContain('--type-add=kiloglob:*.ts');
+    expect(passed).not.toContain('--glob=*.ts');
+  });
+
+  it('still emits operator-supplied include globs as --glob=', () => {
+    const passed = assembleGlobArgs({
+      pattern: '**/*',
+      include: ['*.ts'],
+      exclude: ['node_modules/**'],
+    });
+    expect(passed).toContain('--glob=*.ts');
+    expect(passed).toContain('--glob=!node_modules/**');
+  });
+
+  it('does NOT emit the agent pattern as --glob= for a broad `**/*` search', () => {
+    const passed = assembleGlobArgs({ pattern: '**/*' });
+    expect(passed).not.toContain('--glob=**/*');
+  });
+});
+```
+
+Three independent invariants, one per case:
+
+1. **Agent patterns are prefiltered as a ripgrep file type, NOT emitted as an override.** The `--pre-glob` + `--type-add=kiloglob:<pattern>` pair makes ripgrep validate the pattern against its ignore rules first and then prefilter candidates by the glob — the critical property is the negative assertion that `--glob=<agent-pattern>` is NOT present. A `--glob=` entry would make the pattern a ripgrep override and surface `.gitignore`-ignored paths; the whole point of the kilocode-port glob tool is that an agent asking for `*.ts` must not accidentally pull `.gitignore`-ignored build artefacts (`dist/*.ts`, generated `.d.ts`).
+2. **Operator-supplied `include` / `exclude` DO keep the `--glob=` plumbing.** These are intentional overrides (operator config, not agent input) and must bypass `.gitignore`. The `exclude` form flips the sign to `--glob=!<pattern>`. This case guards against an over-aggressive refactor that strips `--glob=` emission entirely.
+3. **Broad `**/*` is still an agent pattern.** The naive `pattern === '**/*'` short-circuit would be tempting ("every file matches, skip the glob plumbing") but is wrong: the broad agent pattern is still an agent pattern and must still be routed through `--pre-glob` / `--type-add`, never through `--glob=`. The case description deliberately uses the markdown-code span `` `**/*` `` without a backslash escape (ESLint `no-useless-escape` rejects the escaped form — see commit `18774554`).
+
+### Patterns worth internalising (ripgrep argv settlement)
+
+1. **Pin the negative assertion first.** The forbidden emission (`--glob=<agent-pattern>`) is the regression target — assert it is NOT present before asserting any positive expectation. A refactor that passes the positive assertions but reintroduces `--glob=` is the exact failure class the suite exists to catch.
+2. **Keep the operator-override case alongside the agent case.** The two paths look superficially similar (both emit a glob into the argv) but have opposite semantics (operator overrides win over `.gitignore`; agent patterns must NOT). Deleting the operator case to "simplify" leaves the sign of the regression test ambiguous.
+3. **Keep title strings free of unnecessary escapes.** Markdown-code spans in `it(...)` descriptions use the literal `` `**/*` `` form, not `` `**\/*` ``. The escaped form is a prettier/eslint `no-useless-escape` violation and will be reflowed by CI autoheal on the next format pass — write the un-escaped form directly to avoid the reflow churn.
+
+## Testing managed-settings policy precedence (`src/core/managed-policy.test.ts`)
+
+The precedence module (`src/core/managed-policy.ts`) is deliberately pure — no I/O, no globals — so tests just build `TaggedConfigDocument` fixtures and assert on the returned shape or the merged policy array. See [docs/ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts) for the composition story.
+
+### Shape-coverage checklist
+
+The suite pins all four combinations across the two orthogonal axes (policy source × managed tagging):
+
+| Policy source | `managed === true` | Expected position in the composed load order |
+|---------------|--------------------|----------------------------------------------|
+| top-level `policies` | no | middle (`userDocuments`) |
+| top-level `policies` | yes | FIRST for policies, LAST for non-policy settings |
+| nested `experimental.policies` | no | middle (`userDocuments`), legacy-shape read |
+| nested `experimental.policies` | yes | FIRST for policies, LAST for non-policy settings; `experimental.policies` stripped from the LAST-loaded settings fork |
+
+### Example fixtures
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  mergePolicies,
+  applyManagedPrecedence,
+  resolvePoliciesWithPrecedence,
+  type TaggedConfigDocument,
+} from '../managed-policy.js';
+
+describe('mergePolicies — two-shape back-compat', () => {
+  it('prefers top-level policies when both are set on the same document', () => {
+    const docs = [
+      {
+        path: 'a.json',
+        info: {
+          policies: [{ rule: 'new' }],
+          experimental: { policies: [{ rule: 'legacy' }] },
+        },
+      },
+    ];
+    expect(mergePolicies(docs)).toEqual([{ rule: 'new' }]);
+  });
+
+  it('accepts the legacy experimental.policies shape', () => {
+    const docs = [{ path: 'a.json', info: { experimental: { policies: [{ rule: 'A' }] } } }];
+    expect(mergePolicies(docs)).toEqual([{ rule: 'A' }]);
+  });
+});
+
+describe('applyManagedPrecedence — load-order split', () => {
+  it('managed policies load FIRST (reversed), managed settings load LAST (policy-stripped)', () => {
+    const documents: TaggedConfigDocument[] = [
+      {
+        path: '/etc/alexi/mdm-1.json',
+        managed: true,
+        info: { policies: [{ rule: 'org-1' }], otherSetting: 'A' },
+      },
+      {
+        path: '/etc/alexi/mdm-2.json',
+        managed: true,
+        info: { policies: [{ rule: 'org-2' }], otherSetting: 'B' },
+      },
+      { path: '~/.alexi/user.json', info: { policies: [{ rule: 'user' }] } },
+    ];
+    const { managedPolicies, userDocuments, managedSettings } =
+      applyManagedPrecedence(documents);
+
+    // Managed policies are reversed so the LAST-loaded managed source
+    // (mdm-2) gets final authority under reverse-load evaluation.
+    expect(managedPolicies.map((d) => d.info.policies)).toEqual([
+      [{ rule: 'org-2' }],
+      [{ rule: 'org-1' }],
+    ]);
+
+    // User documents keep their input order.
+    expect(userDocuments.map((d) => d.path)).toEqual(['~/.alexi/user.json']);
+
+    // Managed settings keep their input order AND their policy fields
+    // are stripped — only non-policy settings remain.
+    expect(managedSettings.map((d) => d.info)).toEqual([
+      { otherSetting: 'A' },
+      { otherSetting: 'B' },
+    ]);
+  });
+
+  it('empty experimental after stripping is omitted entirely', () => {
+    const docs: TaggedConfigDocument[] = [
+      {
+        path: '/etc/alexi/mdm.json',
+        managed: true,
+        info: { experimental: { policies: [{ rule: 'X' }] } },
+      },
+    ];
+    const { managedSettings } = applyManagedPrecedence(docs);
+    // experimental held ONLY policies, so after stripping it is omitted
+    // rather than left behind as an empty { experimental: {} } carrier.
+    expect(managedSettings[0].info).toEqual({});
+  });
+});
+
+describe('resolvePoliciesWithPrecedence — one-shot composition', () => {
+  it('composes managedPolicies ++ userDocuments ++ managedSettings in order', () => {
+    const docs: TaggedConfigDocument[] = [
+      { path: '/etc/alexi/mdm.json', managed: true, info: { policies: [{ rule: 'org' }] } },
+      { path: '~/.alexi/user.json', info: { policies: [{ rule: 'user' }] } },
+    ];
+    expect(resolvePoliciesWithPrecedence(docs)).toEqual([
+      { rule: 'org' },
+      { rule: 'user' },
+    ]);
+  });
+});
+```
+
+### Patterns worth internalising (managed-settings precedence)
+
+1. **Pin BOTH shapes of the policy source.** The two-shape back-compat (`info.policies` vs `info.experimental?.policies`) is the migration contract. A regression that reads only the new shape is silently broken for every deployment still shipping the legacy field. One case per shape, every time.
+2. **Pin the reverse-load ordering of `managedPolicies`.** The LAST-loaded managed source must become the FIRST entry of `managedPolicies`. A refactor that keeps managed input order would quietly flip which administrator wins when multiple MDM sources are stacked.
+3. **Pin the policy strip on `managedSettings`.** Both `info.policies` AND `info.experimental.policies` are stripped from the LAST-loaded fork; an empty `experimental` must be omitted entirely rather than left as `{}`. Both halves are needed because the orchestration treats non-policy settings separately from policies — leaving the policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
+4. **Keep tests schema-agnostic.** The module is deliberately pure and takes minimal `{ path, info }` records — fixtures should match that shape. Pulling in the full project config schema binds the suite to an unrelated layer and makes refactors noisier.
+5. **No `fs`, no `os`, no `env`.** This module has no I/O surface. A test that reaches for `mkdtemp` is testing the wrong module — put file-loading tests on the config loader (`src/config/userConfig.test.ts`) and keep this suite synchronous and parallel-safe.

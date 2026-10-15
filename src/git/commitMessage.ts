@@ -3,6 +3,9 @@
  * Generates Conventional Commits messages via cheap LLM or heuristics
  */
 
+import * as fs from 'fs';
+import { createRequire } from 'module';
+import * as path from 'path';
 import matter from 'gray-matter';
 import {
   discoverRules,
@@ -13,6 +16,13 @@ import { routePrompt } from '../core/router.js';
 import { getProviderForModelWithFallback } from '../providers/index.js';
 import { logger } from '../utils/logger.js';
 import type { GitConfig } from './config.js';
+
+/**
+ * `createRequire` bound to this module's URL so we can CJS-require the
+ * project's `commitlint.config.cjs` from an ESM context. Reused across
+ * calls to amortize the lookup.
+ */
+const localRequire = createRequire(import.meta.url);
 
 export interface ChangedFile {
   filePath: string;
@@ -104,6 +114,65 @@ const BASE_SYSTEM_PROMPT =
 export const COMMIT_RULES_PREAMBLE = 'User rules (apply those relevant to commit messages):';
 
 /**
+ * Preamble prefixed to the project's commitlint scope-enum when a
+ * `commitlint.config.cjs` (or `.js`) is discovered in the workdir. Telling
+ * the model which scopes are allowed prevents it from inventing new ones
+ * (which would then be rejected by the `commit-msg` husky hook).
+ */
+export const COMMIT_SCOPES_PREAMBLE =
+  'Allowed Conventional Commits scopes for this project (use ONLY these in the (scope) field; omit the scope if none fit):';
+
+/**
+ * Load the `scope-enum` whitelist from a project's `commitlint.config.cjs`
+ * (falling back to `.js`). Returns `[]` when the config is missing,
+ * malformed, or declares no scope-enum. Degrades gracefully so a broken
+ * commitlint config never prevents commit-message generation.
+ */
+export function loadCommitlintScopes(workdir: string): string[] {
+  const candidates = ['commitlint.config.cjs', 'commitlint.config.js'];
+  for (const name of candidates) {
+    const full = path.join(workdir, name);
+    if (!fs.existsSync(full)) {
+      continue;
+    }
+    try {
+      // Drop any cached copy so repeated calls across tests observe the
+      // on-disk file, not a stale closure. Both `.cjs` and `.js` resolve
+      // through the CJS loader via `createRequire`.
+      delete localRequire.cache[localRequire.resolve(full)];
+      const mod = localRequire(full) as { rules?: Record<string, unknown> };
+      const rule = mod?.rules?.['scope-enum'];
+      if (!Array.isArray(rule) || rule.length < 3) {
+        return [];
+      }
+      const scopes = rule[2];
+      if (!Array.isArray(scopes)) {
+        return [];
+      }
+      return scopes.filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+    } catch (err) {
+      logger.debug(
+        `[commit-message] failed to load ${name}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Build the commitlint scope-enum section for the system prompt, or `''`
+ * when no scopes are declared.
+ */
+export function buildScopesSection(workdir: string): string {
+  const scopes = loadCommitlintScopes(workdir);
+  if (scopes.length === 0) {
+    return '';
+  }
+  return `${COMMIT_SCOPES_PREAMBLE} ${scopes.join(', ')}.`;
+}
+
+/**
  * Parse a rule file through gray-matter and return it unless the
  * frontmatter contains `disabled: true`. We treat any truthy coercion of
  * the `disabled` field as a disable signal so string `"true"` / `"yes"`
@@ -159,9 +228,15 @@ export function buildRulesSection(workdir: string, rulesPathOverride?: string | 
 /** Compose the base commit-message prompt with any user rules. */
 function buildSystemPrompt(workdir: string, rulesPathOverride?: string | string[]): string {
   const rulesSection = buildRulesSection(workdir, rulesPathOverride);
-  return rulesSection.length === 0
-    ? BASE_SYSTEM_PROMPT
-    : `${BASE_SYSTEM_PROMPT}\n\n${rulesSection}`;
+  const scopesSection = buildScopesSection(workdir);
+  const parts = [BASE_SYSTEM_PROMPT];
+  if (scopesSection.length > 0) {
+    parts.push(scopesSection);
+  }
+  if (rulesSection.length > 0) {
+    parts.push(rulesSection);
+  }
+  return parts.join('\n\n');
 }
 
 /**
