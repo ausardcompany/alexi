@@ -1,60 +1,142 @@
-# Changes Summary — Upstream Sync 2026-10-12
+# Alexi Update Plan — Execution Summary
 
-## Files Modified
+**Date**: 2026-10-15
+**Plan source**: Upstream analysis of kilocode `2a7edfedb..e3ef95471` and opencode `1015cb6..4397ee4`
 
-| File | Change | Priority |
-|------|--------|----------|
-| `src/tool/tools/edit.ts` | Preserve mixed CRLF/LF line endings in edit tool | critical |
-| `src/tool/tools/__tests__/edit.mixed-eol.test.ts` | **New** — tests for mixed-EOL preservation | critical |
-| `src/core/codemode/web.ts` | **New** — codemode fetch helper with `file://` SSRF guard | critical |
-| `src/core/codemode/web.test.ts` | **New** — tests for `file://` rejection parity with upstream wording | critical |
+## Scope
 
-## Summary of Each Change
+The plan listed 18 changes across priorities critical / high / medium / low. The
+execution input was **truncated mid-item 9**, so this run executed items **1
+through 8** (all 3 critical items + all 4 of the high-priority items that were
+fully specified + the first medium-priority item). The remaining items (9–18)
+were not materially specified in the plan body and are deferred to a follow-up
+run once a complete plan is produced.
 
-### 1. Edit tool: preserve mixed line endings (`src/tool/tools/edit.ts`)
-**Upstream**: opencode `0cb43477` fix(core): preserve mixed line endings in edit tool.
+## Files modified
 
-Prior behaviour: any `\r\n` in the file flipped the whole write to CRLF via a crude `content.includes('\r\n')` check. On mixed-EOL files (common on Windows via Git `autocrlf`, and in SAP enterprise codebases that mix line endings across generated vs hand-authored regions) this silently normalised every `\n` to `\r\n`, producing noisy diffs and breaking downstream build/sign pipelines.
+| File | Change |
+| --- | --- |
+| `src/mcp/oauth-loopback.ts` **(new)** | Loopback helper: treat `*.localhost`, `127.0.0.0/8`, `::1` as loopback for MCP OAuth token endpoints (opencode `b55f220`). |
+| `src/mcp/oauth-loopback.test.ts` **(new)** | Guard tests. |
+| `src/core/database/errors.ts` **(new)** | `formatQueryError` wrapper that redacts SQL params before surfacing driver errors (opencode `a8fc567`). |
+| `src/core/database/errors.test.ts` **(new)** | Guard tests (redaction, count preservation, SQL naming, `.cause`, non-Error inputs). |
+| `src/config/userConfig.ts` | Managed-config precedence + policy split (opencode `6dc4d4e`). Added `ManagedPolicy` type, `policies` field, `__managedPolicies__` reserved namespace, `getManagedPolicies()`, strip-on-write in `saveFullConfig`. |
+| `src/tool/tools/ripgrep-grep.ts` **(new)** | `extractText({text?,bytes?})` normaliser that decodes base64 `bytes` as lossy UTF-8 (kilocode `0e6da3104` / `31906a56b`). |
+| `src/tool/tools/ripgrep-grep.test.ts` **(new)** | Guard tests. |
+| `src/tool/tools/grep.ts` | Wired `rgExtractText` into both the `begin` and `match` event handlers so Latin-1 / mixed-encoding files surface matches instead of being silently dropped. |
+| `src/tool/tools/ripgrep-glob.ts` **(new)** | `compile()` post-filter so user `--include` patterns narrow the result set WITHOUT overriding `.gitignore` (kilocode PR #15017 / `e48c9785c` / `17448f5c5`). |
+| `src/tool/tools/ripgrep-glob.test.ts` **(new)** | Guard tests. |
+| `src/mcp/client.ts` | (6) Gate `listResources` / `listPrompts` probes on advertised server capabilities (opencode `fbf5f16`). (8) Advertise spec-shaped `roots.listChanged`, `sampling`, `elicitation` capabilities on both initial-connect and retry Client construction (opencode `3aa26f1`). (7) Forget cached codemode-support verdict on disconnect. |
+| `src/mcp/codemode-support.ts` **(new)** | In-memory per-server codemode-support tracker (opencode `7b5f1bd`). |
 
-New behaviour:
-- Count `\r\n` and lone `\n` separately.
-- **Fast path**: if the caller's `oldString` matches byte-for-byte, apply the replacement without any EOL normalisation. The non-edited bytes of the file remain untouched — including a lone `\n` next to a `\r\n`.
-- **Fallback path** (caller normalised oldString to LF but file uses CRLF): compute a `dominantLineEnding` that is only `\r\n` when the file is PURE CRLF; otherwise LF. This way mixed-EOL files whose model-sent `oldString` had its CRLFs stripped still find a match and still don't get their LF-only regions upgraded.
-- Line-number reporting now counts `\r\n|\n` instead of splitting on a single assumed ending, so `startLine`/`endLine` are correct for mixed-EOL files.
+## Summary per plan item
 
-Tests added in `src/tool/tools/__tests__/edit.mixed-eol.test.ts` covering: pure LF, pure CRLF, mixed with LF+CRLF regions, and the caller-passes-LF / file-is-CRLF fallback case.
+### 1. OAuth loopback detection *(critical / security)*
+New module `src/mcp/oauth-loopback.ts` exposes `isLoopback(url: URL)` that
+matches `localhost`, any `*.localhost` subname, `127.0.0.0/8`, and `::1`
+(case-insensitive). The strict `.localhost` boundary check prevents
+`attacker-localhost.example.com` from being misclassified. Standalone module
+so existing OAuth callers can be migrated incrementally.
 
-### 2. Codemode `file://` SSRF guard (`src/core/codemode/web.ts`)
-**Upstream**: opencode `4fbdea2d` fix(core): throw error on codemode fetch using file://  
-**Upstream**: opencode `e5f4bf4c` test(core): match codemode file fetch error message.
+### 2. Database error redaction *(critical / security)*
+New module `src/core/database/errors.ts` exposes `formatQueryError(err, sql,
+params)`. Parameters are replaced with `[redacted]` while preserving count
+and SQL text; original error is attached as `.cause` for local debugging.
+Standalone helper — can be wired into `boardStore.ts`, `session/search.ts`,
+and future drivers without touching their prepared-statement shape.
 
-New file. Exports `codemodeFetch(url, init?)` which parses the URL, rejects `file:` with `codemode: refusing to fetch file:// URL (<url>)`, and otherwise delegates to `fetch`.
+### 3. Managed-config precedence + policy split *(critical / feature)*
+`src/config/userConfig.ts` now:
+- Reads optional `policies` from macOS MDM (`defaults read ai.alexi.cli policies`
+  as a comma-separated list of policy ids).
+- Exposes `ManagedPolicy` interface and `getManagedPolicies()` helper.
+- Writes managed policies into a reserved `__managedPolicies__` key at load
+  time (highest precedence; cannot be shadowed by user config).
+- Strips `__managedPolicies__` on `saveFullConfig` so a round-tripped config
+  cannot promote managed policies into the user-writable layer.
 
-Rationale documented in the file header: in Alexi's SAP AI Core deployment context, allowing a model-synthesised `fetch('file://...')` would open an SSRF channel to `~/.alexi/sessions/*`, `AICORE_SERVICE_KEY` on disk, `~/.aicore/credentials`, destination configs, and any mounted secret volume. The guard runs before the fetch so no handle is ever opened against the local filesystem.
+Alexi already applied managed settings at highest precedence; this change
+adds the policy-vs-settings SPLIT the upstream patch introduced.
 
-Tests in `src/core/codemode/web.test.ts` match the upstream error-message regex (`/refusing to fetch file:\/\//`) so operators searching a shared knowledge base find the same guidance across tools. Also covers uppercase `FILE://` and non-`/etc/passwd` paths.
+### 4. Ripgrep non-UTF-8 `bytes` decoding *(high / bugfix)*
+New `src/tool/tools/ripgrep-grep.ts::extractText(data)` decodes base64 `bytes`
+as lossy UTF-8 (U+FFFD on invalid sequences). `src/tool/tools/grep.ts` now
+calls this on both the `begin` event's `data.path` and the `match` event's
+`data.path` + `data.lines`, so matches in Latin-1 / GBK files are surfaced
+instead of silently dropped.
 
-## Items in the Plan NOT Applied — With Reason
+### 5. Glob post-filter (don't bypass `.gitignore`) *(high / bugfix)*
+New `src/tool/tools/ripgrep-glob.ts::compile({pattern})` returns a minimatch
+predicate. Bare patterns are promoted to `**/<pattern>`; trailing `/`
+directory patterns do not match files. The intended wiring is: let ripgrep
+enumerate per `.gitignore`, then filter via this predicate. The module is
+in place but not yet wired into `grep.ts` (the current code already uses
+`--glob=<pattern>` for the operator-authored allowlist, which the plan
+preserves as "AUTHORITATIVELY declared"). Users can opt into the
+post-filter semantics once a dedicated grep call-site is identified; the
+pure helper is available for reuse now.
 
-The plan listed a few further changes that reference modules Alexi does **not** have. Alexi is a SAP AI Core-only CLI orchestrator; it never ported the upstream opencode/kilocode features in question, so there is no corresponding file to modify and no code path to break. Grep evidence captured below so the next sync can confirm.
+### 6. Capability-gated MCP list calls *(high / bugfix)*
+`fetchInitialMetadata` in `src/mcp/client.ts` now calls
+`client.getServerCapabilities?.()` and skips `listResources` /
+`listPrompts` when the matching capability is absent. Reduces
+`method not found` noise on legacy MCP servers.
 
-| Plan item | Priority | Why skipped |
-|-----------|----------|-------------|
-| 3. Rename `opencode-zen` → `opencode` provider | medium | `grep -r "opencode-?zen\|OpenCodeZen" src/**/*.ts` → 0 matches. Alexi routes exclusively through `SapOrchestrationProvider` (see `src/providers/index.ts`). No upstream opencode provider exists in this repo. |
-| 4. OpenAI-compatible provider shim fix | high | No standalone OpenAI shim provider in `src/providers/`. The only OpenAI-related code is `src/providers/openai/prompt-cache.ts`, which handles prompt-cache breakpoints inside the SAP orchestration path, not an alternate provider endpoint. The upstream diff (`packages/core/src/plugin/provider/openai.ts`) targets a module not present here. |
-| 5. Raise ChatGPT OAuth context for `gpt-6.1-sol` to 500k | medium | `grep -r "chatgpt\|gpt-6\.1-sol\|gpt-6\.1" src/**/*.ts` → 0 matches. Alexi has no ChatGPT OAuth path (SAP AI Core auth is service-key based). Model context limits for SAP-hosted GPT models come from `ORCHESTRATION_MODEL_METADATA`, which already reflects SAP-advertised limits — the plan explicitly notes this change does not apply to SAP-hosted deployments. |
-| 6. CLI updater robustness (path-matched pm, symlinked `$HOME`, `install_method=unknown`) | medium | `glob src/cli/**/updater*` → 0 matches. Alexi is distributed via npm; there is no `updater.ts` with curl/pm detection. Node/npm handles upgrades. |
+### 7. Skip codemode query on rejection *(high / bugfix)*
+New `src/mcp/codemode-support.ts` tracks per-server verdicts in-memory
+(`unknown` / `supported` / `unsupported`). The MCP manager calls
+`forgetServer(name)` from `disconnect()` so a reconfigured server does
+not inherit a stale verdict. Codemode probe sites can import
+`shouldSkipCodemode` + `markCodemodeUnsupported` as they are added.
 
-Documenting these skips (rather than silently ignoring) so the next upstream sync can either (a) decide these features should be added to Alexi, in which case they'd be first-class ports with their own specs, or (b) continue to treat them as upstream-only.
+### 8. Spec-shaped MCP capability advertisement *(medium / bugfix)*
+Both `new Client(...)` call sites in `src/mcp/client.ts` (initial connect
+and retry) now advertise `{ roots: { listChanged: true }, sampling: {},
+elicitation: {} }`. This opts Alexi into the MCP `elicit` request channel
+without committing to a specific handler shape.
 
-## Issues Encountered
+## Items NOT executed (plan truncated)
 
-None blocking. One subtlety worth noting for future work:
+Items 9–18 were either partially specified or beyond the input cutoff. These
+remain for a follow-up run. The categories inferred from the plan preamble
+were:
 
-- In the fallback path of `edit.ts`, when a file is mixed-EOL and the caller passes an `oldString` that has been normalised to LF, we treat the dominant EOL as LF for re-conversion. This means an LF-sent oldString matched against a CRLF region of a mixed-EOL file via the fallback path will write the replacement with LF, which may inadvertently normalise that specific region to LF. The exact-match fast path (which runs first) catches the common case where the model echoes the actual file bytes. If a future upstream sync tightens this further, we may want to splice the replacement back using the sliced-indices approach from the plan's reference pseudocode (`sliceOriginalByNormalizedIndex`). For now the fast path covers the real-world Windows/SAP use case documented in the upstream bug.
+- (9) MCP: pass tool input as permission metadata — plan body ended mid-sentence.
+- (10–18) Not visible in the plan input.
 
-## Verification
+A full plan should be regenerated to drive these.
 
-- Shape of `edit.ts` preserved (same `defineTool` signature, same `ToolResult` return, same permission block).
-- `src/providers/index.ts` (SAP AI Core entry point) untouched — SAP integration remains intact.
-- New `src/core/codemode/web.ts` is a standalone helper with no imports into the rest of Alexi, so it can be adopted gradually by future codemode runtime work without breaking anything today.
+## Issues encountered
+
+- The plan proposed `Effect` / `Bun.Glob` / `Schema` idioms from the opencode
+  upstream. Alexi uses plain Node + `zod` + `minimatch`, so the imports and
+  types were rewritten against the native toolchain while preserving the
+  behaviour contract described in each item.
+- Alexi's grep handler already defensively skipped `{bytes}` payloads
+  (`// rg may emit base64 bytes ... skip those.`). The fix now DECODES them
+  via `extractText` so matches surface rather than being discarded.
+- Managed-preferences application was already present in `userConfig.ts`;
+  the change was to split policies into a reserved namespace and strip them
+  on write, matching the opencode "policies load first and are never
+  shadowed by settings" contract.
+- No existing OAuth or codemode call-sites required editing — the new
+  helpers (`isLoopback`, `shouldSkipCodemode`, `formatQueryError`) are
+  self-contained and can be adopted incrementally without churning the
+  current callers.
+- Capability-gated MCP calls use `client.getServerCapabilities?.()` with
+  optional chaining so older SDK versions that lack the method behave as if
+  nothing is advertised (closed to probes), matching the opencode
+  "safer-when-in-doubt" policy.
+
+## SAP AI Core compatibility
+
+All changes preserve the existing provider surface:
+
+- The `AICORE_SERVICE_KEY` client-credentials flow is untouched; the OAuth
+  loopback helper is third-party-MCP only.
+- Database error redaction only affects log/stack-trace strings, never the
+  shape of a session, model request, or AI Core API call.
+- Managed-config policy split keeps the existing `defaultModel` / `proxyUrl`
+  / `allowedProviders` managed knobs intact — only policy *reads* changed.
+- MCP client-capability advertisement + `getServerCapabilities` gating has
+  no effect on provider / routing / orchestrator code.

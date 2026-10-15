@@ -6,309 +6,297 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-13
+Generated: 2026-10-15
 Based on upstream commits analyzed:
-- **kilocode**: 3df806ae9..2a7edfedb (92 commits)
-- **opencode**: e41e7e90..1015cb67 (50 commits)
+- **kilocode**: 2a7edfedb..e3ef95471 (90 commits) - highlights: ripgrep encoding/glob fixes, MCP OAuth hardening, Kilo AI gateway URL, conda telemetry, terminal routing restart ownership
+- **opencode**: 1015cb6..4397ee4 (78 commits) - highlights: MCP capability-gated calls, loopback OAuth tokens, policy consolidation, config normalization, compaction output limit, plugin permission assertions, MCP tool input metadata, codemode skip, DB query param redaction, continue after output limit
 
 ## Summary
-- Total changes planned: 12
-- Critical: 1 | High: 5 | Medium: 4 | Low: 2
-
-Key themes from upstream:
-1. **New `glob_include_ignored` feature** (kilocode): opt-in allowlist for glob searches to include ignored/hidden paths
-2. **Provider request body encoding + compatibility.cacheFormat** (opencode): configurable Anthropic cache breakpoints and request encoding
-3. **Default chunk timeout raised to 15 min + Bun fetch idle timeout disabled** (opencode): fixes provider request hangs
-4. **System config discovery** (opencode): macOS MDM managed preferences + system config dirs
-5. **Provider-level compatibility settings** (opencode): per-provider compatibility settings
-6. **Promise tool error handling** (opencode): tool throws returned as tool failures
-7. **Ripgrep Windows extraction without PowerShell** (opencode)
-8. **Azure provider refactor** (opencode): stop listing Azure resources at startup
+- Total changes planned: 18
+- **Critical**: 3 | **High**: 7 | **Medium**: 6 | **Low**: 2
 
 ---
 
 ## Changes
 
-### 1. Add `glob_include_ignored` opt-in allowlist for ignored paths
-**File**: `src/tool/glob.ts` + new `src/tool/glob-ignored.ts`
-**Priority**: high
-**Type**: feature
-**Reason**: kilocode added an experimental allowlist allowing glob to traverse specific ignored/hidden directories (e.g., `build/`, `node_modules/some-pkg/`). Useful for SAP projects where some generated artifacts are gitignored but need to be searchable.
+### 1. Treat `*.localhost` as loopback for MCP OAuth token endpoints
+**File**: `src/mcp/oauth-provider.ts` (and/or `src/mcp/auth.ts`)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream opencode commit `b55f220` fixes an OAuth security corner case where MCP token endpoints resolved to `*.localhost` were not treated as loopback, breaking local OAuth flows and risking header/credential leakage patterns. Alexi's MCP OAuth implementation needs the same loopback detection.
 
-**New file**: `src/tool/glob-ignored.ts`
+**Current code**:
 ```typescript
-// Mirrors packages/opencode/src/kilocode/tool/glob-ignored.ts
-// Resolves user-provided allowlist patterns into ripgrep --glob includes
-// Patterns without a slash match folders at any depth
-// Nested ignored folders inside listed folders stay skipped
-
-export interface IgnoredAllowlist {
-  readonly include: readonly string[]
-  readonly noRequireGit: boolean
-}
-
-export function resolveAllowlist(
-  patterns: readonly string[] | undefined,
-  cwd: string,
-): IgnoredAllowlist {
-  if (!patterns || patterns.length === 0) {
-    return { include: [], noRequireGit: false }
-  }
-  const include: string[] = []
-  for (const raw of patterns) {
-    const pattern = raw.trim()
-    if (!pattern || pattern.startsWith("#")) continue
-    // Patterns without slash match folders at any depth
-    if (!pattern.includes("/")) {
-      include.push(`**/${pattern}/**`)
-      include.push(`**/${pattern}`)
-    } else {
-      include.push(pattern)
-      if (!pattern.endsWith("/**")) include.push(`${pattern}/**`)
-    }
-  }
-  return { include, noRequireGit: true }
+function isLoopback(url: URL): boolean {
+  return (
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "::1"
+  )
 }
 ```
 
-**Modify** `src/tool/glob.ts`:
+**New code**:
 ```typescript
-// Before: pass only pattern/exclude to ripgrep
-// After: thread includeIgnored through to ripgrep call
+function isLoopback(url: URL): boolean {
+  const host = url.hostname.toLowerCase()
+  // RFC 6761: *.localhost names are reserved as loopback.
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.startsWith("127.")
+  )
+}
+```
 
-import { resolveAllowlist } from "./glob-ignored.js"
+---
 
-const allowlist = resolveAllowlist(
-  config.experimental?.glob_include_ignored,
-  ctx.cwd,
+### 2. Redact SQL parameters in database query error messages
+**File**: `src/database/errors.ts` (or wherever DB errors are formatted)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream opencode commit `a8fc567` scrubs params from database query errors to avoid leaking user data (API keys, session content) through stack traces/logs. Important for SAP AI Core deployments where logs may be shipped to central observability.
+
+**New code**:
+```typescript
+export function formatQueryError(err: unknown, sql: string, params: unknown[]): Error {
+  const message = err instanceof Error ? err.message : String(err)
+  const redactedParams = params.map(() => "[redacted]")
+  return new Error(
+    `Database query failed: ${message}\n` +
+    `  sql: ${sql}\n` +
+    `  params: ${JSON.stringify(redactedParams)}`,
+  )
+}
+```
+
+Wire into any `Drizzle` / `better-sqlite3` error wrapping.
+
+---
+
+### 3. Managed configuration gets highest precedence; split policies from settings
+**File**: `src/core/config.ts`
+**Priority**: critical
+**Type**: feature / security
+**Reason**: Upstream opencode commit `6dc4d4e` gives MDM/managed configuration (system directory + preferences) highest priority so enterprise admins (SAP context) can enforce policy. Policies are split off and loaded first so file-based policy authority is preserved while settings load last.
+
+**Current code**:
+```typescript
+const systemSupplementary = [
+  ...(sources.preferences ? yield* loadPreferences(sources.preferences) : []),
+  ...(sources.system?.present ? yield* loadDirectory(sources.system.path) : []),
+]
+```
+
+**New code**:
+```typescript
+// Managed settings load last (highest priority); MDM preferences outrank system dir.
+// Policies evaluate in reverse load order, so split and load managed policies first.
+const managed = [
+  ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
+  ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
+]
+const managedPolicies = managed
+  .flatMap((entry) =>
+    entry.type === "document" && entry.info.policies
+      ? [new Document({
+          type: "document",
+          path: entry.path,
+          info: new Info({ policies: entry.info.policies }),
+        })]
+      : [],
+  )
+  .toReversed()
+const managedSettings = managed.map((entry) =>
+  entry.type === "document" && entry.info.policies
+    ? new Document({ ...entry, info: new Info({ ...entry.info, policies: undefined }) })
+    : entry,
 )
+// ... assemble: [managedPolicies, ...direct, globalSupplementary, ...projectSupplementary, managedSettings]
+```
 
-const result = await ripgrep.glob({
-  pattern: args.pattern,
-  cwd: ctx.cwd,
-  include: allowlist.include,          // NEW
-  noRequireGit: allowlist.noRequireGit, // NEW
-  exclude: args.exclude,
+---
+
+### 4. Ripgrep: handle non-UTF-8 output via base64 `bytes` decoding
+**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-grep.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream kilocode commits `0e6da3104` / `31906a56b` fix crashes/incorrect text when grepping files with mixed/legacy encodings (Latin-1, etc.). Ripgrep emits `{bytes}` (base64) instead of `{text}` for non-UTF-8. Decode lossy-UTF-8 to show U+FFFD rather than failing schema validation.
+
+**New file** `src/core/ripgrep-grep.ts`:
+```typescript
+import { Schema, SchemaGetter } from "effect"
+
+/** ripgrep `arbitrary data` ({text} or {bytes}) normalized to {text}. */
+export const Data = Schema.Union([
+  Schema.Struct({ text: Schema.String }),
+  Schema.Struct({ bytes: Schema.String }),
+]).pipe(
+  Schema.decodeTo(Schema.Struct({ text: Schema.String }), {
+    decode: SchemaGetter.transform((data) =>
+      "text" in data
+        ? { text: data.text }
+        : { text: Buffer.from(data.bytes, "base64").toString("utf8") },
+    ),
+    encode: SchemaGetter.passthrough({ strict: false }),
+  }),
+)
+```
+
+**Modify** `src/core/ripgrep.ts`:
+```typescript
+import * as KiloGrep from "./ripgrep-grep"
+
+const RawMatch = Schema.Struct({
+  type: Schema.Literals(["match", "context"]),
+  data: Schema.Struct({
+    path: KiloGrep.Data,
+    lines: KiloGrep.Data,
+    line_number: PositiveInt,
+    absolute_offset: NonNegativeInt,
+    submatches: Schema.Array(
+      Schema.Struct({
+        match: KiloGrep.Data,
+        start: NonNegativeInt,
+        end: NonNegativeInt,
+      }),
+    ),
+  }),
 })
 ```
 
 ---
 
-### 2. Extend ripgrep interface to accept `include` globs
-**File**: `src/core/ripgrep.ts` (or equivalent)
+### 5. Apply glob/include patterns AFTER ripgrep ignore rules (respect .gitignore)
+**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-glob.ts`
 **Priority**: high
-**Type**: feature
-**Reason**: Required by change #1. Mirrors `packages/core/src/ripgrep.ts` upstream change.
+**Type**: bugfix
+**Reason**: Upstream kilocode PR #15017 (`e48c9785c`, `17448f5c5`) fixes glob patterns bypassing `.gitignore`. Passing `--glob=<pattern>` makes ripgrep treat it as an override that wins over ignore rules, causing `node_modules` to be walked. Instead, let ripgrep list files per ignore rules and apply the pattern locally.
 
-**Current code**:
+**New file** `src/core/ripgrep-glob.ts`:
 ```typescript
-export interface GlobInput {
+export interface Input {
   readonly pattern: string
-  readonly cwd: string
-  readonly follow?: boolean
-  readonly signal?: AbortSignal
-  readonly noRequireGit?: boolean
-  readonly exclude?: readonly string[]
+  readonly hidden?: boolean
+  readonly include?: readonly string[]
 }
 
-// in spawn:
-const args = [
-  ...(input.follow ? ["--follow"] : []),
-  ...(input.noRequireGit ? ["--no-require-git"] : []),
-  `--glob=${input.pattern}`,
-  ...(input.exclude ?? []).map((g) => `--glob=!${g}`),
-  "--glob=!**/.git/**",
-  ".",
-]
-```
-
-**New code**:
-```typescript
-export interface GlobInput {
-  readonly pattern: string
-  readonly cwd: string
-  readonly follow?: boolean
-  readonly signal?: AbortSignal
-  readonly noRequireGit?: boolean
-  readonly include?: readonly string[]  // NEW: additional whitelist globs
-  readonly exclude?: readonly string[]
+export interface Walk {
+  readonly args: readonly string[]
+  readonly match: (file: string) => boolean
 }
 
-const args = [
-  ...(input.follow ? ["--follow"] : []),
-  ...(input.noRequireGit ? ["--no-require-git"] : []),
-  `--glob=${input.pattern}`,
-  ...(input.include ?? []).map((g) => `--glob=${g}`),  // NEW
-  ...(input.exclude ?? []).map((g) => `--glob=!${g}`),
-  "--glob=!**/.git/**",
-  ".",
-]
-```
-
----
-
-### 3. Add `glob_include_ignored` to config schema
-**File**: `src/core/config/schema.ts` (or wherever `Info` schema is defined)
-**Priority**: high
-**Type**: feature
-**Reason**: Mirrors `packages/core/src/v1/config/config.ts` upstream change. Required for change #1 to be user-configurable.
-
-**New code** (add to experimental block):
-```typescript
-glob_include_ignored: Schema.optional(
-  Schema.mutable(Schema.Array(Schema.String))
-).annotate({
-  description:
-    "Folders or files, as gitignore-style patterns relative to the workspace root, that the glob tool should search even when they are ignored (for example by .gitignore) or hidden. Patterns without a slash match folders at any depth; list a file inside an ignored folder by its path (for example build/report.json). Ignored or hidden folders nested inside a listed folder stay skipped.",
-}),
-```
-
----
-
-### 4. Raise default provider chunk timeout to 15 minutes
-**File**: `src/providers/http-transport.ts` (or wherever chunk timeout is set)
-**Priority**: critical
-**Type**: bugfix
-**Reason**: opencode PR #55032 — SAP AI Core long-running inference requests can exceed the previous timeout, causing spurious failures mid-stream. This is critical because SAP's enterprise models (gpt-5, claude-opus via SAP) often take >5 minutes for complex reasoning tasks.
-
-**Current code**:
-```typescript
-const DEFAULT_CHUNK_TIMEOUT = 300_000 // 5 minutes
-```
-
-**New code**:
-```typescript
-// Matches upstream default; critical for long-running SAP AI Core calls
-const DEFAULT_CHUNK_TIMEOUT = 900_000 // 15 minutes
-```
-
----
-
-### 5. Disable Bun's fetch idle timeout for provider requests
-**File**: `src/providers/http-transport.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: opencode PR #55007 — Bun's default fetch idle timeout silently cuts long-running streams. SAP AI Core streaming responses can idle during model reasoning, triggering ECONNRESET. This must be applied if Alexi runs on Bun.
-
-**New code**:
-```typescript
-// Only applies when running under Bun; harmless under Node
-const fetchOptions: RequestInit & { idleTimeout?: number } = {
-  ...baseOptions,
-  // 0 = disabled (Bun-specific option)
-  idleTimeout: 0,
+export function compile(pattern: string) {
+  const dir = pattern.endsWith("/")
+  const body = pattern.replace(/\/+$/, "")
+  const text = body.includes("/") ? body.replace(/^\//, "") : `**/${body}`
+  const glob = new Bun.Glob(text)
+  const folders = text.endsWith("/**") ? new Bun.Glob(`${text}/*`) : glob
+  return (path: string, folder: boolean) => {
+    if (folder) return folders.match(path)
+    return !dir && glob.match(path)
+  }
 }
-const response = await fetch(url, fetchOptions)
-```
 
----
-
-### 6. Add `compatibility.cacheFormat` for Anthropic cache breakpoints
-**File**: `src/providers/anthropic.ts` + `src/core/config/schema.ts`
-**Priority**: high
-**Type**: feature
-**Reason**: opencode PR #54945 — Allows configuring Anthropic cache breakpoints per provider. Important for SAP's Claude integration where cache control may differ from direct Anthropic API.
-
-**Schema change** (`src/core/config/schema.ts`):
-```typescript
-compatibility: Schema.optional(Schema.Struct({
-  cacheFormat: Schema.optional(Schema.Union(
-    Schema.Literal("anthropic"),
-    Schema.Literal("none"),
-  )),
-  // keep existing fields
-})),
-```
-
-**Provider change** (`src/providers/anthropic.ts`):
-```typescript
-// Before: hardcoded cache breakpoint insertion
-// After: respect compatibility.cacheFormat setting
-
-const cacheFormat = provider.compatibility?.cacheFormat ?? "anthropic"
-if (cacheFormat === "anthropic") {
-  applyCacheBreakpoints(messages)
-}
-```
-
----
-
-### 7. Return promise tool throws as tool failures (not fatal errors)
-**File**: `src/tool/runner.ts` (or wherever tool execution happens)
-**Priority**: high
-**Type**: bugfix
-**Reason**: opencode PR #54913 — When a tool implementation throws asynchronously, it should surface as a tool-level failure (reported to the model) rather than crashing the session. Critical for stability.
-
-**Current code**:
-```typescript
-try {
-  const result = await tool.execute(args, ctx)
-  return { ok: true, result }
-} catch (err) {
-  throw err // propagates to session crash
-}
-```
-
-**New code**:
-```typescript
-try {
-  const result = await tool.execute(args, ctx)
-  return { ok: true, result }
-} catch (err) {
-  // Return as tool failure so the model can retry/recover
-  const message = err instanceof Error ? err.message : String(err)
+export function glob(input: Input): Walk {
+  // Prefilter via ripgrep type if last path segment is a simple name
+  const match = compile(input.pattern)
   return {
-    ok: false,
-    error: {
-      type: "tool_execution_error",
-      message,
-      stack: err instanceof Error ? err.stack : undefined,
-    },
+    args: [], // no --glob override; apply post-filter
+    match: (file) => match(file, false),
   }
+}
+```
+
+**Modify** `src/core/ripgrep.ts` `glob` call site:
+```typescript
+// before:
+//   `--glob=${input.pattern}`,
+// after:
+...KiloGlob.glob(input).args,
+```
+Add a post-filter step before applying the result `limit`:
+```typescript
+.pipe(
+  Stream.filter((entry) => KiloGlob.glob(input).match(entry.path) && (input.filter?.(entry.path) ?? true)),
+  Stream.take(input.limit ?? Infinity),
+)
+```
+
+---
+
+### 6. MCP: skip list/call for unadvertised capabilities
+**File**: `src/mcp/client.ts`
+**Priority**: high
+**Type**: bugfix / performance
+**Reason**: Upstream opencode commit `fbf5f16` avoids `method not found` errors from MCP servers that don't advertise prompts/resources. Reduces noisy telemetry and failed probes.
+
+**Current code**:
+```typescript
+const prompts = await client.listPrompts()
+const resources = await client.listResources()
+```
+
+**New code**:
+```typescript
+const caps = client.getServerCapabilities?.() ?? {}
+const prompts = caps.prompts ? await client.listPrompts().catch(() => ({ prompts: [] })) : { prompts: [] }
+const resources = caps.resources ? await client.listResources().catch(() => ({ resources: [] })) : { resources: [] }
+```
+
+---
+
+### 7. MCP: skip codemode query for servers that reject it
+**File**: `src/mcp/client.ts` (or wherever Alexi probes codemode)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream opencode commit `7b5f1bd` prevents repeated failures and keeps server registration successful even when codemode is unsupported.
+
+**New code**:
+```typescript
+const codemode = await Effect.tryPromise(() => client.callTool({ name: "codemode" })).pipe(
+  Effect.catchAll(() => Effect.succeed({ supported: false } as const)),
+)
+if (!("supported" in codemode) || codemode.supported !== false) {
+  // register codemode handler
 }
 ```
 
 ---
 
-### 8. Add provider-level compatibility + migrate `setCacheKey`
-**File**: `src/providers/base.ts`, `src/core/config/migrate.ts`
+### 8. MCP: advertise spec-shaped elicitation capability
+**File**: `src/mcp/client.ts`
 **Priority**: medium
-**Type**: refactor
-**Reason**: opencode PR #54911 — Supports provider-level compatibility settings and migrates legacy `setCacheKey` option. Needed for forward-compatibility with provider configs.
+**Type**: bugfix
+**Reason**: Upstream opencode commit `3aa26f1` aligns Alexi's client capability advertisement with the MCP spec so servers can send elicit requests.
 
-**New code** (migration):
+**Current code**:
 ```typescript
-// In config migration pass
-function migrateCacheKey(provider: ProviderConfig): ProviderConfig {
-  if (provider.setCacheKey !== undefined) {
-    provider.compatibility = {
-      ...provider.compatibility,
-      cacheKey: provider.setCacheKey,
-    }
-    delete (provider as any).setCacheKey
-  }
-  return provider
+capabilities: {
+  roots: { listChanged: true },
+  sampling: {},
+}
+```
+
+**New code**:
+```typescript
+capabilities: {
+  roots: { listChanged: true },
+  sampling: {},
+  elicitation: {}, // spec-shaped capability
 }
 ```
 
 ---
 
-### 9. Add request body encoding setting
-**File**: `src/providers/base.ts` + schema
-**Priority**: medium
-**Type**: feature
-**Reason**: opencode PR #54932 — Some providers (including possibly SAP AI Core) require specific body encoding. Lets users configure `json` vs `form` encoding per provider.
+### 9. MCP: pass tool input as permission metadata
+**File**: `src/
+{"prompt_tokens":36471,"completion_tokens":4096,"total_tokens":40567,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-**Schema**:
-```typescript
-body: Schema.optional(Schema.Struct({
-  encoding: Schema.optional(Schema.Union(
-    Schema.Literal("json"),
-    Schema
-{"prompt_tokens":41328,"completion_tokens":4096,"total_tokens":45424,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
-
-[Session: 2ec36087-1f69-4623-9b22-c57e4172e339]
-[Messages: 2, Tokens: 45424]
+[Session: 0829b9e3-e4d3-467a-9968-8ec7132b9115]
+[Messages: 2, Tokens: 40567]
 
 ## Execution Instructions
 
