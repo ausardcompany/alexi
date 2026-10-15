@@ -1606,6 +1606,87 @@ Validation rules for `SAP_AI_GATEWAY_URL`:
   `KILO_AI_GATEWAY_URL` for the same corporate-proxy / regional-gateway
   routing need.
 
+#### Exported helper surface
+
+`src/providers/sapOrchestration.ts` exports three symbols that make the
+gateway resolution available outside the provider class so doctor
+checks, connectivity probes, and telemetry callers can honor the same
+precedence without instantiating a `SapOrchestrationProvider`:
+
+```typescript
+// src/providers/sapOrchestration.ts
+
+/**
+ * Default SAP AI Core base URL used when no explicit gateway override,
+ * proxy, or service-key URL is configured. Matches the public production
+ * endpoint documented in the SAP AI Core service key.
+ */
+export const DEFAULT_SAP_AI_GATEWAY_URL = 'https://api.ai.core.cloud.sap';
+
+/**
+ * Validate a `SAP_AI_GATEWAY_URL` override. Only `http://` and `https://`
+ * schemes are accepted; any other protocol throws with an actionable
+ * message pointing the operator at the env var they need to fix.
+ */
+export function assertValidGatewayUrl(url: string): void;
+
+/**
+ * Resolve the SAP AI Core base URL used by connectivity probes and
+ * telemetry. Applies the gateway precedence (env override → service key
+ * `AI_API_URL` → `DEFAULT_SAP_AI_GATEWAY_URL`) but DOES NOT consult
+ * `SAP_PROXY_BASE_URL` — the proxy mode is a distinct ingress and is
+ * handled only inside `SapOrchestrationProvider.resolveApiBaseUrl`.
+ */
+export function resolveSapAiGatewayUrl(serviceKey: unknown): string;
+```
+
+Contract notes:
+
+- `resolveSapAiGatewayUrl` never returns `undefined`. When neither env
+  var nor service key supplies a URL it falls back to
+  `DEFAULT_SAP_AI_GATEWAY_URL` so probes always have a target.
+- The private `SapOrchestrationProvider.resolveApiBaseUrl()` instance
+  method is the authoritative resolver used for live provider calls:
+  it applies `SAP_PROXY_BASE_URL` first (proxy mode), then
+  `SAP_AI_GATEWAY_URL`, then the service-key URL, then returns
+  `undefined` so the SDK can surface the "no URL configured" error.
+- `assertValidGatewayUrl` is called twice: once by
+  `resolveSapAiGatewayUrl` and once by
+  `SapOrchestrationProvider.resolveApiBaseUrl`. Both call sites throw
+  the same `Invalid SAP_AI_GATEWAY_URL: ...` error so a bad value is
+  surfaced identically regardless of which resolver fires first.
+- Service key JSON is parsed defensively — a non-object, missing
+  `serviceurls`, or non-string `AI_API_URL` all fall through to the
+  default instead of throwing.
+
+#### Precedence flow
+
+```mermaid
+flowchart TD
+    Start[Resolve API base URL] --> Proxy{SAP_PROXY_BASE_URL set?}
+    Proxy -->|yes| UseProxy[Use proxy URL<br/>local OpenAI-compatible ingress]
+    Proxy -->|no| Gateway{SAP_AI_GATEWAY_URL set?}
+    Gateway -->|yes| Validate{Starts with<br/>http:// or https:// ?}
+    Validate -->|no| ThrowErr[Throw Invalid<br/>SAP_AI_GATEWAY_URL]
+    Validate -->|yes| UseGateway[Use gateway override]
+    Gateway -->|no| ServiceKey{AICORE_SERVICE_KEY<br/>has serviceurls.AI_API_URL?}
+    ServiceKey -->|yes| UseServiceKey[Use service key URL]
+    ServiceKey -->|no| Default[Fall back to<br/>DEFAULT_SAP_AI_GATEWAY_URL<br/>api.ai.core.cloud.sap]
+
+    style UseProxy fill:#E3F2FD
+    style UseGateway fill:#E8F5E9
+    style UseServiceKey fill:#FFF3E0
+    style Default fill:#FCE4EC
+    style ThrowErr fill:#FFEBEE
+```
+
+Test coverage for the resolver lives in
+`tests/providers/sapOrchestration-gatewayUrl.test.ts` and exercises the
+helpers (`assertValidGatewayUrl`, `resolveSapAiGatewayUrl`) plus the
+end-to-end `SapOrchestrationProvider.resolveApiBaseUrl` precedence via
+the connectivity path. See
+[docs/TESTING.md — Testing the SAP AI Gateway URL resolver](./TESTING.md#testing-the-sap-ai-gateway-url-resolver-sap_ai_gateway_url).
+
 ### Resource Groups
 
 Resource groups organize AI Core resources:

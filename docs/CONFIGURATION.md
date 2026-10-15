@@ -84,6 +84,50 @@ Base URL for OpenAI-compatible proxy endpoint (for proxy mode).
 export SAP_PROXY_BASE_URL=http://127.0.0.1:3001/v1
 ```
 
+#### SAP_AI_GATEWAY_URL
+
+Explicit SAP AI Core base URL override. Use this to route traffic through
+corporate proxies, regional gateways, or a local development gateway
+without rewriting the `AICORE_SERVICE_KEY` JSON. Introduced in commit
+`c294856c feat(providers): add SAP_AI_GATEWAY_URL env var override`.
+
+```bash
+# Corporate proxy
+export SAP_AI_GATEWAY_URL=https://sap-proxy.corp.example.com
+
+# Regional gateway
+export SAP_AI_GATEWAY_URL=https://api.ai.eu.cloud.sap
+
+# Local development gateway
+export SAP_AI_GATEWAY_URL=http://localhost:8080
+```
+
+Validation:
+
+- The value must start with `http://` or `https://`. Any other protocol
+  (`ftp://`, `file://`, bare host, etc.) is rejected on the first
+  provider call with
+  `Invalid SAP_AI_GATEWAY_URL: must start with http:// or https://, got: <value>`.
+- Empty / unset / whitespace-only values fall through to the service
+  key URL (the `env()` helper in `src/config/env.ts` trims and treats
+  blank strings as unset).
+
+Precedence (highest to lowest), implemented by
+`SapOrchestrationProvider.resolveApiBaseUrl` in
+`src/providers/sapOrchestration.ts`:
+
+1. `SAP_PROXY_BASE_URL` — local OpenAI-compatible proxy ingress.
+2. `SAP_AI_GATEWAY_URL` — explicit SAP AI Core gateway override.
+3. `AICORE_SERVICE_KEY.serviceurls.AI_API_URL` — base URL embedded in
+   the service key JSON.
+4. `undefined` — SDK surfaces the "no URL configured" error path.
+
+See
+[docs/PROVIDERS.md — Gateway URL Override](./PROVIDERS.md#gateway-url-override)
+for the exported helper surface (`DEFAULT_SAP_AI_GATEWAY_URL`,
+`assertValidGatewayUrl`, `resolveSapAiGatewayUrl`) and the precedence
+flow diagram.
+
 #### SAP_PROXY_API_KEY
 
 API key for proxy endpoint authentication.
@@ -1719,7 +1763,8 @@ Example output (abridged):
     "AICORE_RESOURCE_GROUP": "production",
     "AICORE_SERVICE_KEY": "[REDACTED]",
     "AICORE_MODEL": "gpt-4o",
-    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1"
+    "SAP_PROXY_BASE_URL": "http://127.0.0.1:3001/v1",
+    "SAP_AI_GATEWAY_URL": "https://sap-proxy.corp.example.com"
   }
 }
 ```
