@@ -28,6 +28,8 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
 - [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
 - [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
+  - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
+  - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -10653,6 +10655,130 @@ await generateCommitMessage(
   fixture.workdir
 );
 // systemMsg.content now contains '<rule file="override.md">' and 'Custom override rule.'
+```
+
+### Testing commitlint `scope-enum` injection
+
+Commit `40515f68` extends the same system-prompt composer with a loader for the project's `commitlint.config.cjs` (falling back to `commitlint.config.js`). When the config exposes a `rules['scope-enum'][2]` whitelist, the generator prepends `COMMIT_SCOPES_PREAMBLE` + the comma-joined scope list to the system prompt. Pinning this contract requires exercising three independent surfaces: the pure loader (`loadCommitlintScopes`), the pure section builder (`buildScopesSection`), and the end-to-end `generateCommitMessage` path.
+
+Unit coverage lives in `src/git/commitMessage.test.ts` (`describe('commitlint scope-enum wiring', ...)`, six cases) and reuses the same temp-workdir pattern as the rules suite:
+
+```ts
+function makeWorkdirWithCommitlint(scopes: string[]): {
+  workdir: string;
+  cleanup: () => void;
+} {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-commit-scopes-'));
+  const configJs = `module.exports = { rules: { 'scope-enum': [2, 'always', ${JSON.stringify(scopes)}] } };\n`;
+  fs.writeFileSync(path.join(workdir, 'commitlint.config.cjs'), configJs, 'utf-8');
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+The six-case shape pins each failure mode independently so a regression in any one path fails a named test:
+
+1. **No config → `[]`.** `loadCommitlintScopes(empty_dir)` returns `[]`. Pairs with `buildScopesSection(empty_dir)` returning `''` so the composer emits the base prompt verbatim.
+2. **Malformed JS → `[]`.** A file whose contents are not valid JavaScript (`'this is not valid javascript ((('`) is caught by the `try` / `catch` around `localRequire(full)` and returns `[]` without throwing. A regression that let the require throw would crash the auto-commit path on a broken commitlint config.
+3. **Happy path.** `loadCommitlintScopes(fixture)` returns `['cli', 'core', 'tests']` for `rules: { 'scope-enum': [2, 'always', ['cli', 'core', 'tests']] }`.
+4. **Section formatting.** `buildScopesSection(fixture)` contains both `COMMIT_SCOPES_PREAMBLE` and the comma-joined list `'cli, core'`.
+5. **No-config section.** `buildScopesSection(empty_dir)` returns `''` so the composer skips the block without inserting a stray `\n\n`.
+6. **End-to-end system-prompt plumbing.** `generateCommitMessage` with a mocked provider captures the first argument to `provider.complete(...)`, finds the `role: 'system'` entry, and asserts it contains both `COMMIT_SCOPES_PREAMBLE` and the actual scope list (`'cli, core, tests'`).
+
+A seventh case pins the combined-sections ordering invariant from `buildSystemPrompt`. The composer builds the prompt in the order `BASE_SYSTEM_PROMPT` → scopes → rules, so the system message must contain BOTH preambles AND the rule content when both surfaces are configured:
+
+```ts
+it('combines rules + scope-enum in the same system prompt', async () => {
+  // ... write .alexi/rules/commit-style.md and commitlint.config.cjs
+  await generateCommitMessage(
+    [{ filePath: 'src/foo.ts', toolName: 'write' }],
+    baseConfig,
+    workdir
+  );
+  const [messages] = completeFn.mock.calls[0];
+  const systemMsg = messages.find((m: { role: string; content: string }) => m.role === 'system');
+  expect(systemMsg.content).toContain(COMMIT_SCOPES_PREAMBLE);
+  expect(systemMsg.content).toContain('cli, core');
+  expect(systemMsg.content).toContain(COMMIT_RULES_PREAMBLE);
+  expect(systemMsg.content).toContain('<rule file="commit-style.md">');
+  expect(systemMsg.content).toContain('Reference the related issue number when relevant.');
+});
+```
+
+### End-to-end: `AutoCommitManager` honors rules AND scopes
+
+`tests/git/autoCommit.rules.test.ts` (204 lines, four cases) drives the full `AutoCommitManager → generateCommitMessage → provider.complete` chain with real `.alexi/rules/commit-style.md` and `commitlint.config.cjs` fixtures on disk. Only `simple-git` and `src/git/dirtyFiles.js` are mocked — every other link (rules discovery, scope loader, prompt assembly, provider resolution) runs through the real code paths. The suite exists so a regression that disconnected any single link fails the end-to-end suite instead of surfacing in production as a rejected husky `commit-msg` hook.
+
+Fixture pattern — a single helper writes BOTH a rule file AND a commitlint config to the same tempdir:
+
+```ts
+function makeFixture(ruleContent: string, scopes: string[]): Fixture {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-autocommit-rules-'));
+  const rulesDir = path.join(workdir, '.alexi', 'rules');
+  fs.mkdirSync(rulesDir, { recursive: true });
+  fs.writeFileSync(path.join(rulesDir, 'commit-style.md'), ruleContent, 'utf-8');
+  const configJs = `module.exports = { rules: { 'scope-enum': [2, 'always', ${JSON.stringify(scopes)}] } };\n`;
+  fs.writeFileSync(path.join(workdir, 'commitlint.config.cjs'), configJs, 'utf-8');
+  return {
+    workdir,
+    cleanup: () => fs.rmSync(workdir, { recursive: true, force: true }),
+  };
+}
+```
+
+Mocking shape. The `simple-git` factory is mocked once at module level with a reusable `mockGit` object; the inner factory `vi.fn(() => mockGit)` MUST be preserved across cases, so the suite uses `vi.clearAllMocks()` (clears call history) and NOT `vi.resetAllMocks()` (which would wipe the factory's return value and break the second case):
+
+```ts
+vi.mock('simple-git', () => {
+  const mockGit = {
+    revparse: vi.fn().mockResolvedValue('.git'),
+    status: vi.fn().mockResolvedValue({ staged: ['foo.ts'] }),
+    add: vi.fn().mockResolvedValue(undefined),
+    commit: vi.fn().mockResolvedValue({ commit: 'deadbee' }),
+    reset: vi.fn().mockResolvedValue(undefined),
+    raw: vi.fn().mockResolvedValue(''),
+    log: vi.fn().mockResolvedValue({ all: [] }),
+    diff: vi.fn().mockResolvedValue(''),
+  };
+  return { simpleGit: vi.fn(() => mockGit) };
+});
+
+vi.mock('../../src/git/dirtyFiles.js', () => ({
+  isGitRepo: vi.fn().mockResolvedValue(true),
+  getDirtyFiles: vi.fn().mockResolvedValue([]),
+  commitDirtyFiles: vi.fn(),
+}));
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+}));
+
+vi.mock('../../src/core/router.js', () => ({
+  routePrompt: vi.fn(() => ({ modelId: 'gpt-4o-mini', reason: 'cheap', confidence: 0.9 })),
+}));
+```
+
+The four cases cover:
+
+1. **`.alexi/rules/commit-style.md` reaches the provider system prompt.** The captured `provider.complete` call's `role: 'system'` message contains `COMMIT_RULES_PREAMBLE`, `<rule file="commit-style.md">`, and the actual rule text. The commit is also asserted to resolve against `hash: 'deadbee'` (the mocked `simple-git.commit(...)` return) so a regression that short-circuited the pipeline before the real commit still fails this case.
+2. **`commitlint.config.cjs scope-enum` reaches the provider system prompt.** The captured system message contains `COMMIT_SCOPES_PREAMBLE` and the comma-joined scope list `'cli, core, providers, config, tests'`.
+3. **Conventional-commit shape.** The generated commit (returned by the mocked `complete()`) matches `/^(feat|fix|docs|style|refactor|perf|test|chore|ci|revert)\((cli|core|providers|config|server|agent|tools|ci|deps|tests)\): /`. Pins both the type set and the Alexi scope set.
+4. **Bare workdir with neither configured.** A fresh tempdir with no `.alexi/rules/` and no `commitlint.config.cjs` produces a system message that contains the base-prompt phrase (`'git commit message generator'`) but neither preamble. Catches a regression that always emitted the scopes block (potentially as an empty `${PREAMBLE} .`) on every run.
+
+Patterns worth internalising from this suite:
+
+1. **Mock `simple-git` and `dirtyFiles` once at module scope with factories that return reusable mocks**, and clear call history with `vi.clearAllMocks()` between cases. `vi.resetAllMocks()` would wipe the `simpleGit` factory's return value, breaking the second case silently with a cryptic null-pointer error inside `AutoCommitManager`.
+2. **Keep `rulesDiscovery`, `commitMessage`, and `providers/index` real.** The whole point of the end-to-end suite is to prove the links are connected. Mocking any of them turns it into a redundant unit test.
+3. **Assert on the captured `provider.complete` call, not the final commit message.** The commit message is produced by the mocked provider so it reveals nothing about the system prompt. The system prompt — captured as the first argument of the `complete` call — is the only place where a regression that broke the rules loader OR the scope loader is observable.
+4. **The bare-workdir case runs the base prompt in isolation.** Without it, a regression that always emitted `${COMMIT_SCOPES_PREAMBLE} .` (empty join) would pass every "contains the preamble when configured" case and silently corrupt every project that has NO commitlint config.
+
+### Running
+
+```bash
+npm test -- src/git/commitMessage.test.ts
+npm test -- tests/git/autoCommit.rules.test.ts
 ```
 
 ## Testing MCP Auth-Failure Classification
