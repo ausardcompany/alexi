@@ -17,6 +17,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing platform support diagnostics](#testing-platform-support-diagnostics-srccliutils__tests__platformsupporttestts)
 - [Testing retryable connection-reset classification](#testing-retryable-connection-reset-classification-srcsession__tests__networktestts)
 - [Testing C++20 module-interface detection](#testing-c20-module-interface-detection-srcclituutilsformattooloutputtestts)
+- [Testing bash tree-sitter tag extraction](#testing-bash-tree-sitter-tag-extraction-srccontextbashtagsts-issue-2032)
 - [Testing Compaction](#testing-compaction)
 - [Testing TUI Commands](#testing-tui-commands)
 - [Testing Background Tasks](#testing-background-tasks)
@@ -8797,6 +8798,64 @@ npm test -- src/tool/shell-pattern.test.ts -t "masking"
 ```
 
 The grammar is an optional peer dependency. When a CI job needs the grammar-gated coverage (e.g. a permission-regression check), install `tree-sitter-bash` in the job's setup step; when the intent is only to smoke-test the passthrough path, the grammar is not required and the suite will report the second `describe` as skipped.
+
+## Testing bash tree-sitter tag extraction (`src/context/bashTags.ts`, issue #2032)
+
+The bash tag extractor adds `function` / `for` / `while` / `case` tags to the repomap context for `.sh` / `.bash` / `.zsh` files. Two complementary suites cover it: `src/context/__tests__/bashTags.test.ts` (+230 lines, 14 cases) pins the low-level extractor, and `src/context/__tests__/symbols.test.ts` (+57 lines, 2 new cases) pins the symbol-index integration so the public `extractSymbols()` surface stays consistent.
+
+Grammar gating. Both suites use the same `describeIfBash` pattern established by the shell-pattern masker test (above): the grammar-dependent `describe` blocks switch to `describe.skip` when `tree-sitter` and `tree-sitter-bash` are not installed via `createRequire(import.meta.url).resolve()`. The non-grammar guard cases (`isBashSupported`, unsupported-extension short-circuit) always run — they do not depend on the parser.
+
+```typescript
+// src/context/__tests__/bashTags.test.ts
+import { createRequire } from 'module';
+import {
+  extractBashTags,
+  extractTopLevelBashTags,
+  extractBashTagsFromRoot,
+  isBashSupported,
+  bashTagName,
+  type BashTag,
+} from '../bashTags.js';
+import { parseSource } from '../treeSitter.js';
+
+const nodeRequire = createRequire(import.meta.url);
+function hasBashGrammar(): boolean {
+  for (const pkg of ['tree-sitter', 'tree-sitter-bash']) {
+    try {
+      nodeRequire.resolve(pkg);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+const describeIfBash = hasBashGrammar() ? describe : describe.skip;
+```
+
+Assertion patterns worth internalising:
+
+- **Four tag categories from a mixed script.** The canonical "issue #2032" fixture is a single `.sh` file containing one function, one `for` loop, one `while` loop (with a `done < input.txt` redirect so the `redirected_statement` unwrap path is exercised), and one `case` statement. Assert via `expect(kinds).toEqual(expect.arrayContaining(['function', 'for', 'while', 'case']))` — the explicit `arrayContaining` keeps the assertion stable if a future tag category is added.
+- **Source order is normative.** `collectTags` sorts by `line` then `column` before returning, so a mixed-order fixture (`for` on line 1, `function` on line 2, `while` on line 3, `case` on line 4) must produce `kinds(tags) === ['for', 'function', 'while', 'case']`. Testing this pins the sort guarantee against a future refactor that drops the sort step.
+- **Positional fallback for anonymous constructs.** A `while` loop has no natural identifier, so its `name` MUST match `/^while@L\d+$/`. The symbols.test.ts suite uses the regex form (`expect(whileSym.name).toMatch(/^while@L\d+$/)`) rather than a hard-coded line number so an unrelated edit to the fixture does not break the test.
+- **Nested vs. top-level.** Two cases cover the parent-type distinction: (1) `extractBashTags` on a function body with a `for` loop inside asserts `forTag.parentType !== 'program'`; (2) `extractTopLevelBashTags` on the same fixture asserts the nested `for` is dropped and only the outer constructs survive. The symbols-level counterpart asserts `extractSymbols(deployWithNestedFor, 'deploy.sh').map(s => s.kind) === ['function']` — compound statements nested inside a function MUST NOT appear in the compact symbol index.
+- **Grammar-less input returns `[]` without touching the parser.** Call `extractBashTags('const x = 1;', 'file.ts')` and assert the result is `[]`. The `isBashSupported` guard runs before `parseSource`, so this case passes even on a fresh clone without the optional grammar.
+- **`extractBashTagsFromRoot` matches `extractBashTags`.** Parse a fixture once with `parseSource`, call both entry points, and assert `toEqual` — this is the invariant that lets the `symbols.ts` pipeline reuse the already-parsed root without double-parsing.
+- **`bashTagName` fallbacks are independently testable.** Build a one-liner (`alpha() { echo a; }`), parse it, grab the first child, and assert `bashTagName('function', fn) === 'alpha'`. Repeat with `while true; do break; done` and assert the fallback name is `while@L1`. This isolates the name-derivation logic from the walker so a grammar upgrade that changes field names fails one targeted case, not the whole suite.
+
+Running the suites:
+
+```bash
+# Full bash-tags extractor suite (grammar-gated blocks skip when tree-sitter-bash is absent)
+npm test -- src/context/__tests__/bashTags.test.ts
+
+# Symbol-index integration for issue #2032
+npm test -- src/context/__tests__/symbols.test.ts -t "issue #2032"
+
+# All context tests (TypeScript/JavaScript + bash)
+npm test -- src/context/__tests__/
+```
+
+The grammar install step for local development is documented in [docs/CONTRIBUTING.md — Optional tree-sitter grammars](CONTRIBUTING.md#optional-tree-sitter-grammars). CI already installs the full grammar set, so these suites run their grammar-gated blocks on every PR.
 
 ## Testing the compaction trigger projection
 

@@ -48,7 +48,7 @@ This document provides guidelines and instructions for contributing to the proje
    node dist/cli/program.js --help
    ```
 
-### Optional: tree-sitter grammars
+### Optional tree-sitter grammars
 
 The AST-based symbol extraction path used by `src/context/**` and the AST
 mode of the `definitions` tool relies on native tree-sitter grammars. These
@@ -59,6 +59,28 @@ install them so the tree-sitter test files run locally:
 ```bash
 npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
 ```
+
+Three code paths depend on `tree-sitter-bash` specifically:
+
+1. The shell permission masker in `src/tool/shell-pattern.ts` (used by the
+   shell / bash tool to compute its permission `resource`). Its colocated
+   suite `src/tool/shell-pattern.test.ts` splits grammar-dependent cases
+   into a `describeIfBash` block that is skipped when the grammar is
+   absent — see [docs/TESTING.md — Testing the shell permission pattern masker](TESTING.md#testing-the-shell-permission-pattern-masker).
+2. The bash tag extractor in `src/context/bashTags.ts` and its symbol-index
+   integration in `src/context/symbols.ts`. These surface `function`,
+   `for`, `while`, and `case` tags for `.sh` / `.bash` / `.zsh` files in
+   the repomap context block. Covered by
+   `src/context/__tests__/bashTags.test.ts` and the bash branch of
+   `src/context/__tests__/symbols.test.ts` — see
+   [docs/TESTING.md — Testing bash tree-sitter tag extraction](TESTING.md#testing-bash-tree-sitter-tag-extraction-srccontextbashtagsts-issue-2032).
+3. The `definitions` tool AST mode (regex fallback is used when the
+   grammar is absent).
+
+Both suites use an identical availability probe based on
+`createRequire(import.meta.url).resolve('tree-sitter')` and
+`...resolve('tree-sitter-bash')` so the grammar-gated blocks skip
+cleanly on a fresh clone without the optional packages.
 
 CI always has the grammars installed (they are currently declared as regular
 `dependencies` in `package.json`, with a planned migration to optional
