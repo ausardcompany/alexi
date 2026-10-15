@@ -1069,14 +1069,15 @@ export class McpClientManager {
     const c = client as unknown as {
       listResources?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
       listPrompts?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
-      getServerCapabilities?: () => {
-        prompts?: unknown;
-        resources?: unknown;
-      } | undefined;
+      getServerCapabilities?: () =>
+        | {
+            prompts?: unknown;
+            resources?: unknown;
+          }
+        | undefined;
     };
-    const caps = (typeof c.getServerCapabilities === 'function'
-      ? c.getServerCapabilities()
-      : undefined) ?? {};
+    const caps =
+      (typeof c.getServerCapabilities === 'function' ? c.getServerCapabilities() : undefined) ?? {};
     const listResources = c.listResources;
     if (typeof listResources === 'function' && caps.resources !== undefined) {
       optionalMetadata.push(
