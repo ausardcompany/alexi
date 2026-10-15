@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { compile } from './ripgrep-glob.js';
 
 describe('ripgrep-glob compile', () => {
-  it('matches bare patterns at any depth (promotes to **\/pattern)', () => {
+  it('matches bare patterns at any depth (promotes to **/pattern)', () => {
     const g = compile({ pattern: '*.ts' });
     expect(g.match('src/foo.ts')).toBe(true);
     expect(g.match('deeply/nested/dir/bar.ts')).toBe(true);

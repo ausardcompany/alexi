@@ -43,7 +43,7 @@ export interface RgArbitraryData {
  *   "ripgrep emitted a shape we do not understand" and skip the entry.
  */
 export function extractText(data: RgArbitraryData | undefined | null): string | undefined {
-  if (data == null || typeof data !== 'object') {
+  if (data === null || data === undefined || typeof data !== 'object') {
     return undefined;
   }
   if (typeof data.text === 'string') {
