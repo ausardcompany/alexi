@@ -48,7 +48,7 @@ This document provides guidelines and instructions for contributing to the proje
    node dist/cli/program.js --help
    ```
 
-### Optional: tree-sitter grammars
+### Optional tree-sitter grammars
 
 The AST-based symbol extraction path used by `src/context/**` and the AST
 mode of the `definitions` tool relies on native tree-sitter grammars. These
@@ -59,6 +59,28 @@ install them so the tree-sitter test files run locally:
 ```bash
 npm install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-bash
 ```
+
+Three code paths depend on `tree-sitter-bash` specifically:
+
+1. The shell permission masker in `src/tool/shell-pattern.ts` (used by the
+   shell / bash tool to compute its permission `resource`). Its colocated
+   suite `src/tool/shell-pattern.test.ts` splits grammar-dependent cases
+   into a `describeIfBash` block that is skipped when the grammar is
+   absent — see [docs/TESTING.md — Testing the shell permission pattern masker](TESTING.md#testing-the-shell-permission-pattern-masker).
+2. The bash tag extractor in `src/context/bashTags.ts` and its symbol-index
+   integration in `src/context/symbols.ts`. These surface `function`,
+   `for`, `while`, and `case` tags for `.sh` / `.bash` / `.zsh` files in
+   the repomap context block. Covered by
+   `src/context/__tests__/bashTags.test.ts` and the bash branch of
+   `src/context/__tests__/symbols.test.ts` — see
+   [docs/TESTING.md — Testing bash tree-sitter tag extraction](TESTING.md#testing-bash-tree-sitter-tag-extraction-srccontextbashtagsts-issue-2032).
+3. The `definitions` tool AST mode (regex fallback is used when the
+   grammar is absent).
+
+Both suites use an identical availability probe based on
+`createRequire(import.meta.url).resolve('tree-sitter')` and
+`...resolve('tree-sitter-bash')` so the grammar-gated blocks skip
+cleanly on a fresh clone without the optional packages.
 
 CI always has the grammars installed (they are currently declared as regular
 `dependencies` in `package.json`, with a planned migration to optional
@@ -3676,6 +3698,28 @@ Introduced in the 2026-10-13 upstream sync (ports opencode PR #54945 / #54911). 
 - **Legacy `setCacheKey` migrates on READ only.** `providers.<id>.setCacheKey` is folded into `compatibility.cacheKey` on read when the new key is absent. The reader does NOT persist the migration — writes always use the new shape via the setter path, so the config file converges on `compatibility` naturally. Writing from the reader would race with concurrent reads and risk clobbering a user edit.
 - **Keep the whitelist tight.** `cacheFormat` is restricted to the two literal values `'anthropic'` / `'none'`. `cacheKey` must be a boolean. `body.encoding` is restricted to `'json'` / `'form'`. Any other value is silently dropped so the stored config can carry forward-compatible fields without breaking current builds. Adding a `'default'` fallback value is a regression — the empty object is the correct "no override" signal.
 - **Defensive guards on `providers` / `providers.<id>`.** The reader defends against array / non-object / malformed entries at every level. A hand-edited corrupt config must never accidentally enable cache breakpoints. The defensive style here is more verbose than a plain `config.providers?.[id]?.compatibility` chain on purpose — the shape is persisted to disk and read from untrusted inputs.
+
+## Managed-settings policy precedence (`src/core/managed-policy.ts`)
+
+Introduced in the 2026-10-14 upstream sync (ports opencode fixes `#55267` and `#55297`) and tightened in commit `18774554 fix(ci): formatting, no-useless-escape, and experimental index signature [autohealing]`. References: [ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts), [API.md — Managed-settings Policy Precedence API](API.md#managed-settings-policy-precedence-api), [TESTING.md — Testing managed-settings policy precedence](TESTING.md#testing-managed-settings-policy-precedence-srccoremanaged-policytestts).
+
+- **Keep the module pure and schema-agnostic.** No I/O, no Effect runtime, no SAP AI Core credential handling, no file reads. The three helpers (`mergePolicies`, `applyManagedPrecedence`, `resolvePoliciesWithPrecedence`) operate on minimal `{ path, info }` records so they can slot into whichever concrete config loader Alexi grows next. Side-effectful loading belongs in the loader, not here — adding a `readFileSync` or an `fs.promises` import is a regression.
+- **Prefer the top-level `policies` field but keep the legacy fallback.** The canonical read is `doc.info.policies ?? doc.info.experimental?.policies`. New code reading policies MUST route through this helper rather than touching `info.experimental?.policies` directly — the dual-shape back-compat is centralised on purpose so the migration from `experimental.policies` to the new top-level `policies` can be completed by swapping ONE site when the window closes.
+- **`managed === true` is the ONLY discriminator.** The reorder helper reads a `managed` flag off each `TaggedConfigDocument`; it does NOT infer from `path`, `info.$managed`, environment, or any other side channel. Loaders tag their output explicitly; untagged documents are user documents and keep their original precedence.
+- **Reverse within `managedPolicies`.** The LAST-loaded managed source must become the FIRST entry of the `managedPolicies` list — because the policy evaluator processes in reverse-load order (later-loaded policies run first), FIRST-loaded = evaluated LAST = final authority. Dropping the reverse step would silently flip which administrator wins when multiple MDM sources stack.
+- **Strip `policies` AND `experimental.policies` from `managedSettings`.** Both halves must be stripped from the LAST-loaded managed-settings fork; the resulting `experimental` object must be omitted entirely rather than left as `{}` when it held only policy data. Leaving policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
+- **Preserve the `experimental` index signature.** The nested `info.experimental` type carries `readonly [key: string]: unknown;` (added in commit `18774554`) so forward-compatible experimental knobs that sit alongside `experimental.policies` type-check through `applyManagedPrecedence`'s `Object.fromEntries(Object.entries(experimental).filter(([key]) => key !== 'policies'))` reflow without a cast. Removing the index signature re-opens the shape-parity gap with the top-level `info` surface and reintroduces the cast — the inner `as` on the top-level destructuring is only there because the compiler cannot infer the parent index signature from the destructuring context, NOT because the nested read needs one.
+- **Final load-order composition is `[...managedPolicies, ...userDocuments, ...managedSettings]`.** This single ordering carries BOTH the "managed policies win under reverse-load evaluation" invariant AND the "managed non-policy settings win under later-wins" invariant. Collapsing the two halves back into one list is a correctness regression — a user config could then override an administrator policy by setting a non-policy field that happens to share a key with the policy data.
+- **No implicit disk load.** The module does NOT auto-load managed documents from a well-known path. Config loaders are responsible for tagging their output; this module only reorders and merges. Adding a `/etc/alexi/managed.json` autoloader without an opt-out flag would surprise operators who rely on the open-world default from `DEFAULT_POLICY_ENFORCER` (see [Managed Policy Enforcement](#managed-policy-enforcement-srcpermissionpolicyts)).
+
+## Ripgrep argv settlement (`src/core/kilocode/ripgrep-settlement.test.ts`)
+
+Introduced in the kilocode ripgrep-glob port (ported in the 2026-09 window). References: [TESTING.md — Testing ripgrep argv settlement for agent-supplied globs](TESTING.md#testing-ripgrep-argv-settlement-for-agent-supplied-globs).
+
+- **Keep the three settlement cases as they are.** The suite is a SNAPSHOT of the externally observable argv shape produced by `assembleGlobArgs`, and the three cases pin three independent invariants (agent patterns go through `--pre-glob` / `--type-add`, operator-supplied `include` / `exclude` keep `--glob=` plumbing, broad `**/*` is still an agent pattern). Deleting or merging any of the three re-opens a regression surface — the file is the pinned-forever shape, the sibling `src/core/kilocode/ripgrep-glob.test.ts` is the behavioural regression driver.
+- **Assert the negative first.** The forbidden emission (`--glob=<agent-pattern>`) is the regression target. Every case includes a `.not.toContain('--glob=<agent-pattern>')` assertion — a positive-only test could pass while silently reintroducing the override bug.
+- **Write markdown-code span titles without backslash-escaped slashes.** `it('does NOT emit the agent pattern as --glob= for a broad `` `**/*` `` search', ...)` — not `` `**\/*` ``. ESLint `no-useless-escape` rejects the escaped form and the next CI autoheal pass will reflow it; writing the un-escaped form directly avoids the churn (reflow happened in commit `18774554`).
+- **Operator-supplied `include` / `exclude` are intentionally sign-asymmetric.** `include` → `--glob=<pattern>`; `exclude` → `--glob=!<pattern>`. The second case in the suite pins both signs; a refactor that collapses them into a single flag-emission helper must preserve the sign.
 
 ## License
 
