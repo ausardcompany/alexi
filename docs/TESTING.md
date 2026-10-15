@@ -11307,3 +11307,169 @@ it('ignores bare words in prose', async () => {
 1. **Temp workspace per test.** The detector only returns existing paths; a shared workspace risks cross-test contamination. `mkdtemp` + `afterEach(rm { recursive, force })` keeps every case hermetic.
 2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
 3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.
+
+## Testing ripgrep argv settlement for agent-supplied globs
+
+The settlement suite at `src/core/kilocode/ripgrep-settlement.test.ts` freezes the externally observable argv shape produced by `assembleGlobArgs` (exported from `src/core/ripgrep.ts`) so a future refactor cannot silently reintroduce the `--glob=<pattern>` override bug that previously made agent-supplied patterns surface `.gitignore`-ignored paths. The regression story is maintained alongside `src/core/kilocode/ripgrep-glob.test.ts`; this file is the SETTLEMENT snapshot (the pinned-forever argv shape), the sibling test is the BEHAVIOURAL regression driver.
+
+### What the three cases pin
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { assembleGlobArgs } from '../ripgrep.js';
+
+describe('ripgrep settlement: argv shape', () => {
+  it('applies the pattern after ignore rules via --pre-glob + --type-add', () => {
+    const passed = assembleGlobArgs({ pattern: '*.ts' });
+    expect(passed).toContain('--pre-glob=*.ts');
+    expect(passed).toContain('--type-add=kiloglob:*.ts');
+    expect(passed).not.toContain('--glob=*.ts');
+  });
+
+  it('still emits operator-supplied include globs as --glob=', () => {
+    const passed = assembleGlobArgs({
+      pattern: '**/*',
+      include: ['*.ts'],
+      exclude: ['node_modules/**'],
+    });
+    expect(passed).toContain('--glob=*.ts');
+    expect(passed).toContain('--glob=!node_modules/**');
+  });
+
+  it('does NOT emit the agent pattern as --glob= for a broad `**/*` search', () => {
+    const passed = assembleGlobArgs({ pattern: '**/*' });
+    expect(passed).not.toContain('--glob=**/*');
+  });
+});
+```
+
+Three independent invariants, one per case:
+
+1. **Agent patterns are prefiltered as a ripgrep file type, NOT emitted as an override.** The `--pre-glob` + `--type-add=kiloglob:<pattern>` pair makes ripgrep validate the pattern against its ignore rules first and then prefilter candidates by the glob — the critical property is the negative assertion that `--glob=<agent-pattern>` is NOT present. A `--glob=` entry would make the pattern a ripgrep override and surface `.gitignore`-ignored paths; the whole point of the kilocode-port glob tool is that an agent asking for `*.ts` must not accidentally pull `.gitignore`-ignored build artefacts (`dist/*.ts`, generated `.d.ts`).
+2. **Operator-supplied `include` / `exclude` DO keep the `--glob=` plumbing.** These are intentional overrides (operator config, not agent input) and must bypass `.gitignore`. The `exclude` form flips the sign to `--glob=!<pattern>`. This case guards against an over-aggressive refactor that strips `--glob=` emission entirely.
+3. **Broad `**/*` is still an agent pattern.** The naive `pattern === '**/*'` short-circuit would be tempting ("every file matches, skip the glob plumbing") but is wrong: the broad agent pattern is still an agent pattern and must still be routed through `--pre-glob` / `--type-add`, never through `--glob=`. The case description deliberately uses the markdown-code span `` `**/*` `` without a backslash escape (ESLint `no-useless-escape` rejects the escaped form — see commit `18774554`).
+
+### Patterns worth internalising (ripgrep argv settlement)
+
+1. **Pin the negative assertion first.** The forbidden emission (`--glob=<agent-pattern>`) is the regression target — assert it is NOT present before asserting any positive expectation. A refactor that passes the positive assertions but reintroduces `--glob=` is the exact failure class the suite exists to catch.
+2. **Keep the operator-override case alongside the agent case.** The two paths look superficially similar (both emit a glob into the argv) but have opposite semantics (operator overrides win over `.gitignore`; agent patterns must NOT). Deleting the operator case to "simplify" leaves the sign of the regression test ambiguous.
+3. **Keep title strings free of unnecessary escapes.** Markdown-code spans in `it(...)` descriptions use the literal `` `**/*` `` form, not `` `**\/*` ``. The escaped form is a prettier/eslint `no-useless-escape` violation and will be reflowed by CI autoheal on the next format pass — write the un-escaped form directly to avoid the reflow churn.
+
+## Testing managed-settings policy precedence (`src/core/managed-policy.test.ts`)
+
+The precedence module (`src/core/managed-policy.ts`) is deliberately pure — no I/O, no globals — so tests just build `TaggedConfigDocument` fixtures and assert on the returned shape or the merged policy array. See [docs/ARCHITECTURE.md — Managed-settings policy precedence](ARCHITECTURE.md#managed-settings-policy-precedence-srccoremanaged-policyts) for the composition story.
+
+### Shape-coverage checklist
+
+The suite pins all four combinations across the two orthogonal axes (policy source × managed tagging):
+
+| Policy source | `managed === true` | Expected position in the composed load order |
+|---------------|--------------------|----------------------------------------------|
+| top-level `policies` | no | middle (`userDocuments`) |
+| top-level `policies` | yes | FIRST for policies, LAST for non-policy settings |
+| nested `experimental.policies` | no | middle (`userDocuments`), legacy-shape read |
+| nested `experimental.policies` | yes | FIRST for policies, LAST for non-policy settings; `experimental.policies` stripped from the LAST-loaded settings fork |
+
+### Example fixtures
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  mergePolicies,
+  applyManagedPrecedence,
+  resolvePoliciesWithPrecedence,
+  type TaggedConfigDocument,
+} from '../managed-policy.js';
+
+describe('mergePolicies — two-shape back-compat', () => {
+  it('prefers top-level policies when both are set on the same document', () => {
+    const docs = [
+      {
+        path: 'a.json',
+        info: {
+          policies: [{ rule: 'new' }],
+          experimental: { policies: [{ rule: 'legacy' }] },
+        },
+      },
+    ];
+    expect(mergePolicies(docs)).toEqual([{ rule: 'new' }]);
+  });
+
+  it('accepts the legacy experimental.policies shape', () => {
+    const docs = [{ path: 'a.json', info: { experimental: { policies: [{ rule: 'A' }] } } }];
+    expect(mergePolicies(docs)).toEqual([{ rule: 'A' }]);
+  });
+});
+
+describe('applyManagedPrecedence — load-order split', () => {
+  it('managed policies load FIRST (reversed), managed settings load LAST (policy-stripped)', () => {
+    const documents: TaggedConfigDocument[] = [
+      {
+        path: '/etc/alexi/mdm-1.json',
+        managed: true,
+        info: { policies: [{ rule: 'org-1' }], otherSetting: 'A' },
+      },
+      {
+        path: '/etc/alexi/mdm-2.json',
+        managed: true,
+        info: { policies: [{ rule: 'org-2' }], otherSetting: 'B' },
+      },
+      { path: '~/.alexi/user.json', info: { policies: [{ rule: 'user' }] } },
+    ];
+    const { managedPolicies, userDocuments, managedSettings } =
+      applyManagedPrecedence(documents);
+
+    // Managed policies are reversed so the LAST-loaded managed source
+    // (mdm-2) gets final authority under reverse-load evaluation.
+    expect(managedPolicies.map((d) => d.info.policies)).toEqual([
+      [{ rule: 'org-2' }],
+      [{ rule: 'org-1' }],
+    ]);
+
+    // User documents keep their input order.
+    expect(userDocuments.map((d) => d.path)).toEqual(['~/.alexi/user.json']);
+
+    // Managed settings keep their input order AND their policy fields
+    // are stripped — only non-policy settings remain.
+    expect(managedSettings.map((d) => d.info)).toEqual([
+      { otherSetting: 'A' },
+      { otherSetting: 'B' },
+    ]);
+  });
+
+  it('empty experimental after stripping is omitted entirely', () => {
+    const docs: TaggedConfigDocument[] = [
+      {
+        path: '/etc/alexi/mdm.json',
+        managed: true,
+        info: { experimental: { policies: [{ rule: 'X' }] } },
+      },
+    ];
+    const { managedSettings } = applyManagedPrecedence(docs);
+    // experimental held ONLY policies, so after stripping it is omitted
+    // rather than left behind as an empty { experimental: {} } carrier.
+    expect(managedSettings[0].info).toEqual({});
+  });
+});
+
+describe('resolvePoliciesWithPrecedence — one-shot composition', () => {
+  it('composes managedPolicies ++ userDocuments ++ managedSettings in order', () => {
+    const docs: TaggedConfigDocument[] = [
+      { path: '/etc/alexi/mdm.json', managed: true, info: { policies: [{ rule: 'org' }] } },
+      { path: '~/.alexi/user.json', info: { policies: [{ rule: 'user' }] } },
+    ];
+    expect(resolvePoliciesWithPrecedence(docs)).toEqual([
+      { rule: 'org' },
+      { rule: 'user' },
+    ]);
+  });
+});
+```
+
+### Patterns worth internalising (managed-settings precedence)
+
+1. **Pin BOTH shapes of the policy source.** The two-shape back-compat (`info.policies` vs `info.experimental?.policies`) is the migration contract. A regression that reads only the new shape is silently broken for every deployment still shipping the legacy field. One case per shape, every time.
+2. **Pin the reverse-load ordering of `managedPolicies`.** The LAST-loaded managed source must become the FIRST entry of `managedPolicies`. A refactor that keeps managed input order would quietly flip which administrator wins when multiple MDM sources are stacked.
+3. **Pin the policy strip on `managedSettings`.** Both `info.policies` AND `info.experimental.policies` are stripped from the LAST-loaded fork; an empty `experimental` must be omitted entirely rather than left as `{}`. Both halves are needed because the orchestration treats non-policy settings separately from policies — leaving the policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
+4. **Keep tests schema-agnostic.** The module is deliberately pure and takes minimal `{ path, info }` records — fixtures should match that shape. Pulling in the full project config schema binds the suite to an unrelated layer and makes refactors noisier.
+5. **No `fs`, no `os`, no `env`.** This module has no I/O surface. A test that reaches for `mkdtemp` is testing the wrong module — put file-loading tests on the config loader (`src/config/userConfig.test.ts`) and keep this suite synchronous and parallel-safe.
